@@ -17,7 +17,6 @@ use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::{File, FileSpaceStrategy};
-use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
@@ -49,14 +48,15 @@ pub fn assert_manager_metadata_bytes(path: &Path) -> u64 {
         offsets: reader.superblock().offset_size,
         lengths: reader.superblock().length_size,
     };
-    let base = reader.superblock().base_address;
     let header_bytes = 18 + u64::from(widths.offsets.get()) + 7 * u64::from(widths.lengths.get());
     let expected = report.as_ref().map_or(0, |report| {
         let expected = report
             .managers()
             .iter()
             .map(|manager| {
-                let address = usize::try_from(base.absolute(manager.address()).unwrap()).unwrap();
+                let address =
+                    usize::try_from(reader.resolve_address(manager.address()).unwrap().get())
+                        .unwrap();
                 let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
                 let allocated = if header.section_list_addr().is_undefined(widths.offsets) {
                     0
@@ -221,7 +221,6 @@ fn assert_manager_sections(file: &File, report: &PersistedFreeSections, bytes: &
         offsets: file.superblock().offset_size,
         lengths: file.superblock().length_size,
     };
-    let base = file.superblock().base_address;
     for manager in report.managers() {
         let expected_role = match info.strategy {
             FileSpaceStrategy::FsmAggr => FSM_AGGR_ROLES.get(manager.slot()),
@@ -231,7 +230,8 @@ fn assert_manager_sections(file: &File, report: &PersistedFreeSections, bytes: &
         .copied()
         .unwrap_or(FreeSpaceManagerRole::Unknown);
         assert_eq!(manager.role(), expected_role, "slot {}", manager.slot());
-        let address = usize::try_from(base.absolute(manager.address()).unwrap()).unwrap();
+        let address =
+            usize::try_from(file.resolve_address(manager.address()).unwrap().get()).unwrap();
         let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
         let sections = manager.free_sections();
         assert_eq!(
@@ -243,7 +243,12 @@ fn assert_manager_sections(file: &File, report: &PersistedFreeSections, bytes: &
             assert_eq!(sections.sections(), []);
             continue;
         }
-        let start = usize::try_from(base.absolute(header.section_list_addr()).unwrap()).unwrap();
+        let start = usize::try_from(
+            file.resolve_address(header.section_list_addr())
+                .unwrap()
+                .get(),
+        )
+        .unwrap();
         let used = usize::try_from(header.section_list_used()).unwrap();
         let encoded = format::parse_section_info(
             widths,

@@ -73,7 +73,7 @@ fn persistent_reuse_precedes_aggregates(
     };
     assert_eq!(
         address,
-        engine.addresses().absolute(expected.start()).unwrap()
+        engine.addresses().resolve(expected.start()).unwrap().get()
     );
     if !immediate {
         assert_eq!(engine.aggregation, Some(policy));

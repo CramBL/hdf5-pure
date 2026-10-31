@@ -25,6 +25,10 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::Layout;
 use hdf5_pure::MessageType;
+use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::BaseAddress;
+use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::FormatWidths;
@@ -135,7 +139,7 @@ pub fn assert_storage(file: &File, bytes: &[u8], fixture: Fixture) {
             let aa = storage::root_object_address(file, bytes, "aa");
             let bb = storage::root_object_address(file, bytes, "bb");
             assert_eq!(aa, bb);
-            let header = header(file, bytes, aa);
+            let header = header(file, bytes, aa.get());
             let references = header
                 .messages
                 .iter()
@@ -176,7 +180,7 @@ fn header(file: &File, bytes: &[u8], address: u64) -> ObjectHeader {
         AccessMode::ReadOnly,
         usize::try_from(address).unwrap(),
         widths(file),
-        file.superblock().base_address,
+        BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get()),
     )
     .unwrap()
 }

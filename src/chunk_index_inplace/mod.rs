@@ -442,7 +442,7 @@ impl IndexInitializationReference {
         allocation: &ConfirmedAllocation,
     ) -> Result<(), Error> {
         let allocation = file.allocation_publication().require(allocation)?;
-        let address = file.addresses().relative(allocation.start().get())?;
+        let address = file.addresses().relative(allocation.start())?;
         file.publish_checksummed(
             self.chunk.start().get(),
             self.chunk.end().get() - EA_CHECKSUM_SIZE,
@@ -979,7 +979,7 @@ impl Located {
             let publication = file.publish_allocations()?;
             let allocation = publication.confirm(new_addr)?;
             let range = file.allocation_publication().require(&allocation)?;
-            let new_addr = file.addresses().relative(range.start().get())?;
+            let new_addr = file.addresses().relative(range.start())?;
             match region.parent {
                 Parent::IndexDirect { .. } => {
                     self.publish_index_block(
@@ -1092,7 +1092,7 @@ impl Located {
         let publication = file.publish_allocations()?;
         let allocation = publication.confirm(allocation)?;
         let range = file.allocation_publication().require(&allocation)?;
-        let new_addr = file.addresses().relative(range.start().get())?;
+        let new_addr = file.addresses().relative(range.start())?;
 
         let slot_off = self.index_block_addr.get()
             + ib_prefix
@@ -2093,7 +2093,7 @@ impl ConfirmedChunk {
     fn record(&self, file: &impl Store) -> Result<ElemRecord, Error> {
         let range = file.allocation_publication().require(&self.allocation)?;
         Ok(ElemRecord {
-            addr: file.addresses().relative(range.start().get())?,
+            addr: file.addresses().relative(range.start())?,
             stored_size: range.length(),
             filter_mask: self.filter_mask,
         })

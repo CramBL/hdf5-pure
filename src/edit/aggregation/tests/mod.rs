@@ -112,11 +112,11 @@ fn aggregate_tail_release_preserves_committed_data(#[case] backing: MemoryStrate
     engine.finalize_persist().unwrap();
     assert_eq!(
         engine.image.len(),
-        engine.addresses().absolute(tail.start()).unwrap()
+        engine.addresses().resolve(tail.start()).unwrap().get()
     );
     assert_eq!(
         engine.context.superblock().eof_address,
-        engine.addresses().absolute(tail.start()).unwrap()
+        engine.addresses().resolve(tail.start()).unwrap().get()
     );
     assert!(engine.aggregation.unwrap().unused().next().is_none());
     let order = engine.image.issued_write_order();

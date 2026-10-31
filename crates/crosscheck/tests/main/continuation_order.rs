@@ -47,8 +47,9 @@ fn assert_root_refers_to_nested_continuation_blocks(path: &Path, file: &File) {
     let root_at = usize::try_from(
         superblock
             .base_address
-            .absolute(superblock.root_group_address)
-            .unwrap(),
+            .resolve(superblock.root_group_address)
+            .unwrap()
+            .get(),
     )
     .unwrap();
     let prefix = ObjectHeaderPrefix::parse(&bytes[root_at..]).unwrap();

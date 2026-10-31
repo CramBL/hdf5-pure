@@ -212,7 +212,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     );
     for &(extent, kind) in heap.allocations() {
         let span = (
-            session.addresses().absolute(extent.start()).unwrap(),
+            session.addresses().resolve(extent.start()).unwrap().get(),
             extent.len(),
             FreeClass::Page(kind.allocation_class().into()),
         );
@@ -535,8 +535,9 @@ pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
     let located = superblock::read(source).unwrap();
     let addresses = AddressContext::from_effective_base(located.superblock.base_address);
     let extension = addresses
-        .absolute(located.superblock.superblock_extension_address.unwrap())
-        .unwrap();
+        .resolve(located.superblock.superblock_extension_address.unwrap())
+        .unwrap()
+        .get();
     let region = WriteEngine::gather_oh_messages(source, extension, addresses).unwrap();
     let splice = region
         .splice_first(MessageType::FILE_SPACE_INFO)

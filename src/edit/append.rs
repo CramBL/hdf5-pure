@@ -522,7 +522,7 @@ impl WriteEngine {
             AllocationClass::Metadata,
             |address| {
                 initialization
-                    .encode_at(addresses.relative(address.get())?)
+                    .encode_at(addresses.relative(address)?)
                     .map_err(Error::Format)
             },
         )?;
@@ -831,7 +831,7 @@ impl EditStore<'_> {
             .engine
             .context
             .addresses()
-            .relative(self.engine.image.len())?;
+            .relative(PhysicalAddress::new(self.engine.image.len()))?;
         let transition = self.engine.space.plan_transition(eoa, PageType::Raw)?;
         let padding = match transition {
             Some(PageTransition::Pad { extent, .. }) => extent.len(),
@@ -1013,7 +1013,7 @@ impl Store for EditStore<'_> {
             .engine
             .context
             .addresses()
-            .relative(self.engine.image.len())
+            .relative(PhysicalAddress::new(self.engine.image.len()))
             .expect("the image includes its base address");
         self.engine.space.record_freed(eoa, extent, class);
         if self.engine.persist.is_some() {

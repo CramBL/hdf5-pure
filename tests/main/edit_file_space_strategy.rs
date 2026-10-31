@@ -129,8 +129,9 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
         (
             file.superblock()
                 .base_address
-                .absolute(file.superblock().superblock_extension_address.unwrap())
-                .unwrap(),
+                .resolve(file.superblock().superblock_extension_address.unwrap())
+                .unwrap()
+                .get(),
             file.file_space_info().unwrap().unwrap(),
             file.persisted_free_sections().unwrap().unwrap(),
         )
@@ -193,8 +194,9 @@ fn unreadable_file_space_strategy_is_rejected_before_mutation(#[case] strategy: 
         let superblock = file.superblock();
         superblock
             .base_address
-            .absolute(superblock.superblock_extension_address.unwrap())
+            .resolve(superblock.superblock_extension_address.unwrap())
             .unwrap()
+            .get()
     };
     file_space_info::replace_message(&path, extension, &[UNKNOWN_VERSION]);
     let original = std::fs::read(&path).unwrap();
@@ -216,8 +218,9 @@ fn editing_a_non_persisting_version_0_file_reuses_a_deleted_extent() {
         let superblock = file.superblock();
         superblock
             .base_address
-            .absolute(superblock.superblock_extension_address.unwrap())
+            .resolve(superblock.superblock_extension_address.unwrap())
             .unwrap()
+            .get()
     };
     file_space_info::replace_message(
         &path,
@@ -404,7 +407,11 @@ fn persisted_or_reused_sections(path: &Path, persist: bool) -> Vec<(u64, u64)> {
     if persist {
         let bytes = std::fs::read(path).unwrap();
         let file = File::open(path).unwrap();
-        sections.extend(storage::file_metadata_extents(&file, &bytes));
+        sections.extend(
+            storage::file_metadata_extents(&file, &bytes)
+                .into_iter()
+                .map(|range| (range.start().get(), range.length())),
+        );
     }
     sections
 }

@@ -19,7 +19,6 @@ use hdf5_pure::SyncPolicy;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
-use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
@@ -83,7 +82,6 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
     let bytes = std::fs::read(path).unwrap();
     let file = File::open(path).unwrap();
     let superblock = file.superblock();
-    let base = superblock.base_address;
     let info = file.file_space_info().unwrap().unwrap();
     let widths = FormatWidths {
         offsets: superblock.offset_size,
@@ -97,10 +95,10 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
             hdf5_pure::DecodedStoredAddress::Undefined => None,
         })
         .map(|(slot, stored)| {
-            let at = usize::try_from(base.absolute(stored).unwrap()).unwrap();
+            let at = usize::try_from(file.resolve_address(stored).unwrap().get()).unwrap();
             let header = FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap();
             let list_addr = header.section_list_addr();
-            let start = usize::try_from(base.absolute(list_addr).unwrap()).unwrap();
+            let start = usize::try_from(file.resolve_address(list_addr).unwrap().get()).unwrap();
             let used = usize::try_from(header.section_list_used()).unwrap();
             let list = &bytes[start..start + used];
             let sections = format::parse_section_info(widths, list, stored, &header).unwrap();

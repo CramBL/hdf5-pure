@@ -544,6 +544,9 @@ fn free_section_reports_preserve_public_address_types() {
         )
     }
 
+    let _: fn(&File, StoredAddress) -> Result<PhysicalAddress, FormatError> = File::resolve_address;
+    let _: fn(&File, PhysicalAddress) -> Result<StoredAddress, FormatError> =
+        File::relative_address;
     let _ = inspect::<PhysicalAddress>;
     let _ = inspect::<StoredAddress>;
     let _: fn(&FreeSection<StoredAddress>) -> AddressRange<StoredAddress> =

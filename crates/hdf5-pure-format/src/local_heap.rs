@@ -8,7 +8,6 @@
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -105,10 +104,7 @@ impl LocalHeapLocator {
             return Err(FormatError::UndefinedLocalHeapDataSegment);
         };
         Ok(LocalHeap {
-            data_segment: FileRange::new(
-                PhysicalAddress::new(base.absolute(data_segment_address)?),
-                data_segment_size,
-            )?,
+            data_segment: FileRange::new(base.resolve(data_segment_address)?, data_segment_size)?,
         })
     }
 
@@ -124,10 +120,7 @@ impl LocalHeapLocator {
             base,
             address,
         } = *self;
-        FileRange::new(
-            PhysicalAddress::new(base.absolute(address)?),
-            header_len(widths),
-        )
+        FileRange::new(base.resolve(address)?, header_len(widths))
     }
 }
 
@@ -220,6 +213,7 @@ const PREFIX_LEN: u64 = (SIGNATURE.len() + 1 + RESERVED_LEN) as u64;
 mod tests {
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::PhysicalAddress;
     use rstest::rstest;
     use test_util::local_heap;
     use test_util::local_heap::Segment;

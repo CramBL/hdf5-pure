@@ -7,6 +7,7 @@ use hdf5_pure::BaseAddress;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure::StoredAddress;
+use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{
@@ -41,7 +42,7 @@ impl<'a> Fixture<'a> {
                 bytes,
             )
             .unwrap(),
-            base: superblock.base_address,
+            base: BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get()),
             widths: FormatWidths {
                 offsets: superblock.offset_size,
                 lengths: superblock.length_size,
@@ -184,7 +185,7 @@ impl<'a> Fixture<'a> {
             !encoded.is_undefined(self.widths.offsets),
             "undefined fixture address"
         );
-        let physical = PhysicalAddress::new(self.base.absolute(encoded).unwrap());
+        let physical = self.base.resolve(encoded).unwrap();
         self.region
             .subregion(FileRange::new(physical, 1).unwrap())
             .unwrap();

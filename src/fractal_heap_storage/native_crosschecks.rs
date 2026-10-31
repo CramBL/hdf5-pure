@@ -4,6 +4,7 @@ use hdf5_pure_format::__private::{FormatWidths, FractalHeapHeader, FractalHeapId
 use hdf5_pure_space::__private::Extent;
 use test_util_hdf5::heap_allocations::{AllocationKind, Heap};
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
@@ -50,7 +51,11 @@ fn c_written_filtered_huge_objects_have_exact_storage_and_contents(#[case] direc
                 kind => panic!("unexpected heap allocation: {kind:?}"),
             };
             (
-                Extent::new(file.addresses().relative(at).unwrap(), length).unwrap(),
+                Extent::new(
+                    file.addresses().relative(PhysicalAddress::new(at)).unwrap(),
+                    length,
+                )
+                .unwrap(),
                 kind,
             )
         })

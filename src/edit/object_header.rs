@@ -368,7 +368,7 @@ fn read_oh_continuation<S: Source + ?Sized>(
     let len = continuation.length();
     // The block address is stored relative to the base address. Shift it to an
     // absolute file offset before reading.
-    let off = base.absolute(continuation.address())?;
+    let off = base.resolve(continuation.address())?.get();
     // An OCHK block is signature(4) + messages + checksum(4).
     let end = off
         .checked_add(len)

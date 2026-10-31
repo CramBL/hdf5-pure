@@ -6,6 +6,7 @@ use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
@@ -93,7 +94,13 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
     let raw = ["values", "added"]
         .iter()
         .flat_map(|name| file_space::raw_extents(&file, name))
-        .map(|extent| (extent.start, extent.end - extent.start))
+        .map(|extent| {
+            AddressRange::new(
+                PhysicalAddress::new(extent.start),
+                extent.end - extent.start,
+            )
+            .unwrap()
+        })
         .collect::<Vec<_>>();
     storage::assert_unavailable(&file, &raw);
     assert_eq!(
@@ -116,7 +123,13 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
     let raw = ["values", "added", "third"]
         .iter()
         .flat_map(|name| file_space::raw_extents(&file, name))
-        .map(|extent| (extent.start, extent.end - extent.start))
+        .map(|extent| {
+            AddressRange::new(
+                PhysicalAddress::new(extent.start),
+                extent.end - extent.start,
+            )
+            .unwrap()
+        })
         .collect::<Vec<_>>();
     storage::assert_unavailable(&file, &raw);
     file.close().unwrap();
@@ -523,7 +536,13 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
     storage::assert_unavailable(
         &file,
         &raw.iter()
-            .map(|extent| (extent.start, extent.end - extent.start))
+            .map(|extent| {
+                AddressRange::new(
+                    PhysicalAddress::new(extent.start),
+                    extent.end - extent.start,
+                )
+                .unwrap()
+            })
             .collect::<Vec<_>>(),
     );
     if strategy != PERSISTENT_FSM_AGGR {
@@ -703,7 +722,13 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
     let raw = ["replacement", "alias", "values"]
         .iter()
         .flat_map(|name| file_space::raw_extents(&file, name))
-        .map(|extent| (extent.start, extent.end - extent.start))
+        .map(|extent| {
+            AddressRange::new(
+                PhysicalAddress::new(extent.start),
+                extent.end - extent.start,
+            )
+            .unwrap()
+        })
         .collect::<Vec<_>>();
     storage::assert_unavailable(&file, &raw);
     file.close().unwrap();
@@ -923,12 +948,10 @@ fn assert_classic_fixture_partition(file: &File, bytes: &[u8], datasets: &[&str]
     let mut extents = storage::file_metadata_extents(file, bytes);
     for name in datasets {
         let address = storage::root_object_address(file, bytes, name);
-        extents.extend(storage::header_extents(file.superblock(), bytes, address));
-        extents.extend(
-            file_space::raw_extents(file, name)
-                .iter()
-                .map(|raw| (raw.start, raw.end - raw.start)),
-        );
+        extents.extend(storage::header_extents(file, bytes, address));
+        extents.extend(file_space::raw_extents(file, name).iter().map(|raw| {
+            AddressRange::new(PhysicalAddress::new(raw.start), raw.end - raw.start).unwrap()
+        }));
     }
     extents.extend(
         file.reusable_free_sections()
@@ -937,25 +960,34 @@ fn assert_classic_fixture_partition(file: &File, bytes: &[u8], datasets: &[&str]
             .iter()
             .map(|section| {
                 let _: PhysicalAddress = section.address();
-                (section.address().get(), section.length().get())
+                section.range()
             }),
     );
     let userblock = file.superblock().base_address.get();
     if userblock > 0 {
-        extents.push((0, userblock));
+        extents.push(AddressRange::new(PhysicalAddress::new(0), userblock).unwrap());
     }
     extents.sort_unstable();
-    let mut end = 0;
-    for &(start, len) in &extents {
-        assert!(len > 0, "empty fixture extent at {start}");
+    let mut end = PhysicalAddress::new(0);
+    for range in &extents {
+        assert!(
+            !range.is_empty(),
+            "empty fixture extent at {:?}",
+            range.start()
+        );
         assert_eq!(
-            start, end,
+            range.start(),
+            end,
             "fixture partition has a gap or overlap: {extents:?}"
         );
-        end = start.checked_add(len).unwrap();
+        end = range.end();
     }
     let physical = u64::try_from(bytes.len()).unwrap();
-    assert_eq!(end, physical, "fixture partition must cover every byte");
+    assert_eq!(
+        end.get(),
+        physical,
+        "fixture partition must cover every byte"
+    );
     assert_eq!(file.file_size(), physical);
 }
 

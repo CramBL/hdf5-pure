@@ -716,7 +716,7 @@ impl<S: ObjectSource> Plan<S> {
         spans.sort_unstable_by_key(|(span, _)| span.address);
         let mut working = None;
         for (span, part) in spans {
-            let start = BaseAddress::ZERO.absolute(span.address)?;
+            let start = BaseAddress::ZERO.resolve(span.address)?.get();
             let end = start
                 .checked_add(span.length)
                 .ok_or(FormatError::OffsetOverflow {

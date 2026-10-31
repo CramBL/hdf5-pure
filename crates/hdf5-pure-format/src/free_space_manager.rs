@@ -51,7 +51,6 @@ const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
 /// use hdf5_pure_core::{BaseAddress, StoredAddress};
 /// use hdf5_pure_core::__private::{BaseAddressExt, DecodedStoredAddress, FileRegion,
 ///     StoredAddressExt};
-/// use hdf5_pure_core::PhysicalAddress;
 /// use hdf5_pure_format::__private as format;
 /// use hdf5_pure_format::__private::FormatWidths;
 /// use hdf5_pure_format::__private::FreeSection;
@@ -65,18 +64,14 @@ const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
 /// #     header_addr, list_addr, format::SECTION_CLASS_SIMPLE,
 /// # )?;
 /// let base = BaseAddress::new(512);
-/// let header_ref = FreeSpaceManagerHeaderRef::new(
-///     widths, PhysicalAddress::new(base.absolute(header_addr)?),
-/// )?;
+/// let header_ref = FreeSpaceManagerHeaderRef::new(widths, base.resolve(header_addr)?)?;
 /// let header_region = FileRegion::new(header_ref.parse_range(), &header_bytes)?;
 /// let frame = header_ref.parse(header_region)?;
 /// let header = frame.file_header()?;
 /// let DecodedStoredAddress::Defined(list_addr) = frame.section_list_addr() else {
 ///     panic!("expected a defined section list address")
 /// };
-/// let list_ref = frame.section_list_ref(
-///     header_addr, PhysicalAddress::new(base.absolute(list_addr)?),
-/// )?;
+/// let list_ref = frame.section_list_ref(header_addr, base.resolve(list_addr)?)?;
 /// let list_region = FileRegion::new(list_ref.parse_range(), &list_bytes)?;
 /// let view = list_ref.parse(list_region)?;
 /// assert_eq!(header.total_sections(), 1);
@@ -356,7 +351,6 @@ impl FreeSpaceManagerHeaderFrame {
     /// use hdf5_pure_core::__private::BaseAddressExt;
     /// use hdf5_pure_core::__private::DecodedStoredAddress;
     /// use hdf5_pure_core::__private::FileRegion;
-    /// use hdf5_pure_core::PhysicalAddress;
     /// use hdf5_pure_core::__private::StoredAddressExt;
     /// use hdf5_pure_core::BaseAddress;
     /// use hdf5_pure_core::StoredAddress;
@@ -389,17 +383,13 @@ impl FreeSpaceManagerHeaderFrame {
     /// let widths = FormatWidths::from_sizes(8, 8)?;
     /// let base = BaseAddress::new(512);
     /// let header_addr = StoredAddress::new(32);
-    /// let header_ref = FreeSpaceManagerHeaderRef::new(
-    ///     widths, PhysicalAddress::new(base.absolute(header_addr)?),
-    /// )?;
+    /// let header_ref = FreeSpaceManagerHeaderRef::new(widths, base.resolve(header_addr)?)?;
     /// let frame = header_ref.parse(FileRegion::new(header_ref.parse_range(), &header_bytes)?)?;
     /// let manager = frame.fractal_heap_header(&heap)?;
     /// let DecodedStoredAddress::Defined(list_addr) = frame.section_list_addr() else {
     ///     return Ok(());
     /// };
-    /// let list_ref = manager.section_list_ref(
-    ///     header_addr, PhysicalAddress::new(base.absolute(list_addr)?),
-    /// )?;
+    /// let list_ref = manager.section_list_ref(header_addr, base.resolve(list_addr)?)?;
     /// let space = list_ref.parse(FileRegion::new(list_ref.parse_range(), &list_bytes)?)?;
     /// assert_eq!(space.sections().len(), 1);
     /// assert_eq!(space.total_sections(), 17);
@@ -1534,11 +1524,8 @@ mod tests {
 
         let base = BaseAddress::new(512);
         let header_addr = StoredAddress::new(header_at);
-        let header_ref = FreeSpaceManagerHeaderRef::new(
-            widths,
-            PhysicalAddress::new(base.absolute(header_addr).unwrap()),
-        )
-        .unwrap();
+        let header_ref =
+            FreeSpaceManagerHeaderRef::new(widths, base.resolve(header_addr).unwrap()).unwrap();
         assert_eq!(header_ref.range(), header_ref.parse_range());
         let frame = header_ref
             .parse(FileRegion::new(header_ref.parse_range(), &header_bytes).unwrap())
@@ -1577,10 +1564,7 @@ mod tests {
         assert_eq!(frame.section_list_used(), list_bytes.len() as u64);
         assert_eq!(frame.section_list_allocated(), list_bytes.len() as u64);
         let list_ref = frame
-            .section_list_ref(
-                header_addr,
-                PhysicalAddress::new(base.absolute(list_addr).unwrap()),
-            )
+            .section_list_ref(header_addr, base.resolve(list_addr).unwrap())
             .unwrap();
         let view = list_ref
             .parse(FileRegion::new(list_ref.parse_range(), &list_bytes).unwrap())

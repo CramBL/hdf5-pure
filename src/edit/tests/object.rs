@@ -517,7 +517,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                     panic!("expected one link at {addr}, got {children:?}");
                 };
                 assert_eq!((link_name.as_str(), *creation_order), ("g", None));
-                addr = base.absolute(*child).unwrap();
+                addr = base.resolve(*child).unwrap().get();
             }
             let leaf = WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
                 .unwrap();

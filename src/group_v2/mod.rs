@@ -63,7 +63,7 @@ pub(crate) fn resolve_read_path_any(
     addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let root = addresses.absolute(superblock.root_group_address)?;
+    let root = addresses.resolve(superblock.root_group_address)?.get();
     resolve_link_path(root, root, &ObjectPathBuf::root(), path, |address, name| {
         find_child_target(
             file_data,
@@ -90,7 +90,7 @@ pub(crate) fn resolve_read_path_any_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let root = addresses.absolute(superblock.root_group_address)?;
+    let root = addresses.resolve(superblock.root_group_address)?.get();
     resolve_link_path(root, root, &ObjectPathBuf::root(), path, |address, name| {
         find_child_target_from_source(
             source,
@@ -828,7 +828,7 @@ pub fn resolve_path_any(
     addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let mut current_addr = addresses.absolute(superblock.root_group_address)?;
+    let mut current_addr = addresses.resolve(superblock.root_group_address)?.get();
 
     for (walked, &name) in path.components().iter().enumerate() {
         match find_child_target(
@@ -915,7 +915,7 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     path: &ObjectPath<'_>,
 ) -> Result<u64, ResolveError> {
-    let mut current_addr = addresses.absolute(superblock.root_group_address)?;
+    let mut current_addr = addresses.resolve(superblock.root_group_address)?.get();
 
     for (walked, &name) in path.components().iter().enumerate() {
         match find_child_target_from_source(

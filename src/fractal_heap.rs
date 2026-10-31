@@ -116,7 +116,7 @@ pub(crate) fn read_header_range(
     range: FileRange,
 ) -> Result<MetadataBytes<'_>, FormatError> {
     source.read_metadata(
-        addresses.relative(range.start().get())?.get(),
+        addresses.relative(range.start())?.get(),
         range.length().to_usize()?,
     )
 }
@@ -517,7 +517,7 @@ impl<'h> HeapObjectReader<'h> {
                 source::bytes_in(
                     file_data,
                     FileRange::new(
-                        PhysicalAddress::new(addresses.relative(range.start().get())?.get()),
+                        PhysicalAddress::new(addresses.relative(range.start())?.get()),
                         range.length(),
                     )?,
                 )

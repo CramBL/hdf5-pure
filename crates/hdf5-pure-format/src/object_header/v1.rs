@@ -103,7 +103,8 @@ impl ObjectHeader {
             {
                 let offset = context
                     .base_address
-                    .absolute(continuation.address)?
+                    .resolve(continuation.address)?
+                    .get()
                     .to_usize()?;
 
                 let cont_msgs = Self::parse_v1_continuation(
@@ -176,7 +177,8 @@ impl ObjectHeader {
             {
                 let offset = context
                     .base_address
-                    .absolute(continuation.address)?
+                    .resolve(continuation.address)?
+                    .get()
                     .to_usize()?;
 
                 let cont_msgs = Self::parse_v1_continuation(
@@ -297,7 +299,7 @@ impl ObjectHeader {
             }
 
             if let Some(continuation) = continuation {
-                let address = context.base_address.absolute(continuation.address)?;
+                let address = context.base_address.resolve(continuation.address)?.get();
 
                 Self::parse_v1_chunk_from_source(
                     source,

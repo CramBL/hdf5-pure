@@ -294,8 +294,9 @@ mod tests {
                 .oh_chunk_spans(
                     engine
                         .addresses()
-                        .absolute(published.superblock.root_group_address)
-                        .unwrap(),
+                        .resolve(published.superblock.root_group_address)
+                        .unwrap()
+                        .get(),
                 )
                 .unwrap(),
         );

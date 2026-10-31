@@ -63,7 +63,8 @@ impl WriteEngine {
         self.collections_reachable_from([self
             .context
             .addresses()
-            .absolute(self.context.superblock().root_group_address)?])
+            .resolve(self.context.superblock().root_group_address)?
+            .get()])
     }
 
     /// Returns the global heap collections that the objects reachable from the object headers in
@@ -119,7 +120,8 @@ impl WriteEngine {
                     child(
                         self.context
                             .addresses()
-                            .absolute(entry.object_header_address)?,
+                            .resolve(entry.object_header_address)?
+                            .get(),
                     );
                 }
             }
@@ -284,7 +286,7 @@ impl WriteEngine {
         slots: &ReferenceSlots,
         referenced: &mut BTreeSet<u64>,
     ) -> Result<(), FormatError> {
-        let start = self.context.addresses().absolute(address)?;
+        let start = self.context.addresses().resolve(address)?.get();
         let element_size = NonZeroU64::from(slots.element_size);
         let batch_len = element_size.saturating_mul(ELEMENT_BATCH);
         for first in (0..len).step_by(batch_len.get().to_usize()?) {

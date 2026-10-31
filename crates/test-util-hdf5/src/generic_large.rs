@@ -40,6 +40,7 @@ use hdf5::H5Type;
 use hdf5::dataset::Layout as NativeLayout;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::datatype::ByteOrder as NativeByteOrder;
+use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
@@ -50,6 +51,11 @@ use hdf5_pure::FloatingPointType;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure::MessageType;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::BaseAddress;
+use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeMessage;
 use hdf5_pure_format::__private::FormatWidths;
@@ -75,7 +81,7 @@ pub enum State {
 /// Equality compares every encoded byte, including attribute records and padding,
 /// as well as each chunk's address.
 #[derive(Debug, PartialEq)]
-pub struct HeaderImage(Vec<(u64, Vec<u8>)>);
+pub struct HeaderImage(Vec<(PhysicalAddress, Vec<u8>)>);
 
 impl HeaderImage {
     /// Reads every header chunk of `d` for an exact preservation comparison.
@@ -89,10 +95,10 @@ impl HeaderImage {
         Self(
             spans(&file, &image)
                 .into_iter()
-                .map(|(address, length)| {
-                    let start = usize::try_from(address).unwrap();
-                    let end = usize::try_from(address + length).unwrap();
-                    (address, image[start..end].to_vec())
+                .map(|range| {
+                    let start = usize::try_from(range.start().get()).unwrap();
+                    let end = usize::try_from(range.end().get()).unwrap();
+                    (range.start(), image[start..end].to_vec())
                 })
                 .collect(),
         )
@@ -170,21 +176,19 @@ pub fn assert_contents(file: &File, order: DatatypeByteOrder, state: State) {
 pub fn assert_storage(file: &File, image: &[u8]) {
     let spans = spans(file, image);
     assert!(spans.len() > 1);
-    assert!(
-        spans
-            .iter()
-            .any(|(address, size)| { address % PAGE == 0 && *size > PAGE && size % PAGE != 0 })
-    );
+    assert!(spans.iter().any(|range| {
+        range.start().get() % PAGE == 0 && range.length() > PAGE && range.length() % PAGE != 0
+    }));
     let superblock = file.superblock();
     let header = ObjectHeader::parse_with_base_and_widths(
         image,
         AccessMode::ReadOnly,
-        usize::try_from(storage::root_object_address(file, image, "d")).unwrap(),
+        usize::try_from(storage::root_object_address(file, image, "d").get()).unwrap(),
         FormatWidths {
             offsets: superblock.offset_size,
             lengths: superblock.length_size,
         },
-        superblock.base_address,
+        BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get()),
     )
     .unwrap();
     let attributes = header
@@ -218,7 +222,13 @@ pub fn assert_storage(file: &File, image: &[u8]) {
 ///
 /// Panics if the header cannot be read, or its extents differ.
 pub fn assert_independent_spans(file: &File, image: &[u8]) {
-    assert_eq!(spans(file, image), [(512, 268), (1_536, 4_158)]);
+    assert_eq!(
+        spans(file, image),
+        [
+            AddressRange::new(PhysicalAddress::new(512), 268).unwrap(),
+            AddressRange::new(PhysicalAddress::new(1_536), 4_158).unwrap(),
+        ]
+    );
 }
 
 /// Checks the root probe and unchanged dataset contents through the reference library.
@@ -273,12 +283,8 @@ pub fn assert_native_after_probe(path: &Path, order: NumericOrder) {
     file.close().unwrap();
 }
 
-fn spans(file: &File, image: &[u8]) -> Vec<(u64, u64)> {
-    storage::header_extents(
-        file.superblock(),
-        image,
-        storage::root_object_address(file, image, "d"),
-    )
+fn spans(file: &File, image: &[u8]) -> Vec<AddressRange<PhysicalAddress>> {
+    storage::header_extents(file, image, storage::root_object_address(file, image, "d"))
 }
 
 const PAGE: u64 = 512;

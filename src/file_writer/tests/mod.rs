@@ -756,8 +756,9 @@ fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
         bytes,
         AccessMode::ReadOnly,
         AddressContext::from_effective_base(sb.base_address)
-            .absolute(sb.root_group_address)
+            .resolve(sb.root_group_address)
             .unwrap()
+            .get()
             .to_usize()
             .unwrap(),
         FormatWidths {
@@ -1181,8 +1182,9 @@ fn dense_attrs_root_group_self_roundtrip() {
         &bytes,
         AccessMode::ReadOnly,
         AddressContext::from_effective_base(sb.base_address)
-            .absolute(sb.root_group_address)
+            .resolve(sb.root_group_address)
             .unwrap()
+            .get()
             .to_usize()
             .unwrap(),
         FormatWidths {

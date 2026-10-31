@@ -10,6 +10,7 @@ use test_util::temp;
 use test_util::widths::Widths;
 
 use super::*;
+use crate::PhysicalAddress;
 use crate::address::DecodedStoredAddress;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 use crate::dataspace::DataspaceType;
@@ -413,7 +414,9 @@ fn sync_completes_pending_page_publication_and_refreshes_handles(
         &file.inner,
         file.inner.revisions(),
         file.addresses()
-            .relative(retained_dataset.header_address().unwrap())
+            .relative(PhysicalAddress::new(
+                retained_dataset.header_address().unwrap(),
+            ))
             .unwrap()
             .get(),
     )
@@ -425,7 +428,9 @@ fn sync_completes_pending_page_publication_and_refreshes_handles(
         &file.inner,
         file.inner.revisions(),
         file.addresses()
-            .relative(retained_group.header_address().unwrap())
+            .relative(PhysicalAddress::new(
+                retained_group.header_address().unwrap(),
+            ))
             .unwrap()
             .get(),
     )
@@ -722,8 +727,9 @@ fn version_zero_file_space_eoa_is_invariant_under_relocation(
     let canonical = File::from_bytes(original.clone()).unwrap();
     let extension_at = canonical
         .addresses()
-        .absolute(canonical.superblock().superblock_extension_address.unwrap())
-        .unwrap();
+        .resolve(canonical.superblock().superblock_extension_address.unwrap())
+        .unwrap()
+        .get();
     let body = file_space_info::version_0(
         Widths::EIGHT,
         file_space_info::ALL_PERSIST,
@@ -1612,7 +1618,7 @@ fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
     assert_eq!(sb.base_address, BaseAddress::ZERO);
     let addresses = AddressContext::from_effective_base(sb.base_address);
     sb.root_group_address = addresses
-        .relative(
+        .relative(PhysicalAddress::new(
             group_v2::resolve_read_path_any(
                 &bytes,
                 AccessMode::ReadOnly,
@@ -1625,7 +1631,7 @@ fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
                 &ObjectPath::parse("plain"),
             )
             .unwrap(),
-        )
+        ))
         .unwrap();
     let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
     bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);

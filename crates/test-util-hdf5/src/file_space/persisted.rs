@@ -117,12 +117,13 @@ impl PersistedImage {
         };
         let original_info = format::serialize_file_space_info_v1(widths, &info).unwrap();
         let chunks = storage::header_extents(
-            file.superblock(),
+            &file,
             &bytes,
-            superblock.superblock_extension_address.unwrap().get(),
+            file.resolve_address(superblock.superblock_extension_address.unwrap())
+                .unwrap(),
         );
         assert_eq!(chunks.len(), 1);
-        let (at, length) = chunks[0];
+        let range = chunks[0];
         drop(file);
         info.manager_addrs.fill(DecodedStoredAddress::Undefined);
         superblock.eof_address = EOF;
@@ -133,8 +134,8 @@ impl PersistedImage {
             original_info,
             superblock,
             extension: (
-                usize::try_from(at).unwrap(),
-                usize::try_from(length).unwrap(),
+                usize::try_from(range.start().get()).unwrap(),
+                usize::try_from(range.length()).unwrap(),
             ),
         }
     }

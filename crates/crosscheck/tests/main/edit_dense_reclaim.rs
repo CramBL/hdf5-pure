@@ -11,6 +11,7 @@ use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
 use hdf5::{IndexType, IterationOrder};
+use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
@@ -18,6 +19,7 @@ use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use hdf5_pure::MessageType;
 use hdf5_pure::StoredAddress;
+use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeInfoMessage;
@@ -834,12 +836,16 @@ fn released_regions(path: &Path) -> Vec<(u64, u64)> {
     released.extend(free_space_manager_blocks(path));
     let raw = std::fs::read(path).unwrap();
     let file = File::open(path).unwrap();
-    let base = file.superblock().base_address.get();
     let extension = file.superblock().superblock_extension_address.unwrap();
     released.extend(
-        storage::header_extents(file.superblock(), &raw, base + extension.get())
+        storage::header_extents(&file, &raw, file.resolve_address(extension).unwrap())
             .into_iter()
-            .map(|(at, len)| (at - base, len)),
+            .map(|range| {
+                (
+                    file.relative_address(range.start()).unwrap().get(),
+                    range.length(),
+                )
+            }),
     );
     released.push((file_len, u64::MAX - file_len));
     released
@@ -970,10 +976,15 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
 
     let bytes = std::fs::read(&path).unwrap();
     let session = File::open_rw(&path).unwrap();
-    let base = session.superblock().base_address.get();
     let mut live = allocations
         .iter()
-        .map(|&(at, len, _)| (base.checked_add(at).unwrap(), len))
+        .map(|&(at, len, _)| {
+            AddressRange::new(
+                session.resolve_address(StoredAddress::new(at)).unwrap(),
+                len,
+            )
+            .unwrap()
+        })
         .collect::<Vec<_>>();
     live.extend(storage::file_metadata_extents(&session, &bytes));
     storage::assert_unavailable(&session, &live);
@@ -1309,12 +1320,17 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
     assert_eq!(names, filtered_link_names(links));
 
     let session = File::open_rw(&path).unwrap();
-    let base = session.superblock().base_address.get();
     storage::assert_unavailable(
         &session,
         &allocations
             .iter()
-            .map(|&(at, len, _)| (base.checked_add(at).unwrap(), len))
+            .map(|&(at, len, _)| {
+                AddressRange::new(
+                    session.resolve_address(StoredAddress::new(at)).unwrap(),
+                    len,
+                )
+                .unwrap()
+            })
             .collect::<Vec<_>>(),
     );
     session.root().delete("g").unwrap();

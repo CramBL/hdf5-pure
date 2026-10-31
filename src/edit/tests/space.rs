@@ -136,7 +136,15 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
     actual.sort_unstable();
     let expected: Vec<_> = expected
         .into_iter()
-        .map(|(at, len)| (engine.addresses().relative(at).unwrap(), len))
+        .map(|(at, len)| {
+            (
+                engine
+                    .addresses()
+                    .relative(PhysicalAddress::new(at))
+                    .unwrap(),
+                len,
+            )
+        })
         .collect();
     assert_eq!(actual, expected);
     drop(engine);
@@ -256,7 +264,7 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
             .start()
             .get()
     };
-    assert_eq!(at, engine.addresses().absolute(raw.start()).unwrap());
+    assert_eq!(at, engine.addresses().resolve(raw.start()).unwrap().get());
     let after = engine.space.paged_sections().unwrap();
     assert_eq!(after.metadata(), before.metadata());
     assert_eq!(
@@ -460,7 +468,7 @@ fn reclamation_retains_storage_after_heap_validation_fails(
         assert!(
             !reusable_overlaps(
                 &session,
-                session.addresses().absolute(extent.start()).unwrap(),
+                session.addresses().resolve(extent.start()).unwrap().get(),
                 extent.len()
             ),
             "the rejected heap allocation {extent:?} must stay allocated"
@@ -644,7 +652,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
         assert!(
             reusable_covers(
                 &session,
-                session.addresses().absolute(extent.start()).unwrap(),
+                session.addresses().resolve(extent.start()).unwrap().get(),
                 extent.len()
             ),
             "{extent:?}"
@@ -1768,15 +1776,19 @@ fn attribute_heap_address(session: &WriteEngine, addr: u64) -> u64 {
         .2;
     session
         .addresses()
-        .absolute(
+        .resolve(
             info.fractal_heap_address
                 .expect("the heap address is defined"),
         )
         .unwrap()
+        .get()
 }
 
 fn reusable_covers(session: &WriteEngine, addr: u64, len: u64) -> bool {
-    let start = session.addresses().relative(addr).unwrap();
+    let start = session
+        .addresses()
+        .relative(PhysicalAddress::new(addr))
+        .unwrap();
     let required = AddressRange::new(start, len).unwrap();
     session
         .space
@@ -1785,7 +1797,10 @@ fn reusable_covers(session: &WriteEngine, addr: u64, len: u64) -> bool {
 }
 
 fn reusable_overlaps(session: &WriteEngine, addr: u64, len: u64) -> bool {
-    let start = session.addresses().relative(addr).unwrap();
+    let start = session
+        .addresses()
+        .relative(PhysicalAddress::new(addr))
+        .unwrap();
     let required = AddressRange::new(start, len).unwrap();
     session
         .space

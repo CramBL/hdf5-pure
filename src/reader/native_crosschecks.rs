@@ -95,7 +95,7 @@ fn native_persisted_sections_preserve_stored_and_physical_coordinates(
         let stored = StoredAddress::new(address);
         let physical: PhysicalAddress = section.address();
         let end: PhysicalAddress = section.end_address();
-        assert_eq!(physical, session.inner.addresses().resolve(stored).unwrap());
+        assert_eq!(physical, session.resolve_address(stored).unwrap());
         assert_eq!(
             physical.get(),
             u64::try_from(encoded_base)
@@ -151,8 +151,8 @@ fn native_persisted_sections_preserve_stored_and_physical_coordinates(
         let end: StoredAddress = section.end_address();
         assert_eq!(stored.get(), address);
         assert_eq!(end.get(), address.checked_add(length).unwrap());
-        let physical = reader.inner.addresses().resolve(stored).unwrap();
-        let physical_end = reader.inner.addresses().resolve(end).unwrap();
+        let physical = reader.resolve_address(stored).unwrap();
+        let physical_end = reader.resolve_address(end).unwrap();
         assert_eq!(
             physical.get(),
             u64::try_from(signature)
@@ -161,6 +161,8 @@ fn native_persisted_sections_preserve_stored_and_physical_coordinates(
                 .unwrap()
         );
         assert_eq!(physical.checked_add(length).unwrap(), physical_end);
+        assert_eq!(reader.relative_address(physical).unwrap(), stored);
+        assert_eq!(reader.relative_address(physical_end).unwrap(), end);
         assert_eq!(section.length().get(), length);
         assert!(physical_end.get() <= u64::try_from(relocated.len()).unwrap());
     }

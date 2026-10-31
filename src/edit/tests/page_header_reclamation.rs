@@ -122,7 +122,7 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
         .iter()
         .map(|extent| {
             (
-                engine.addresses().absolute(extent.start()).unwrap(),
+                engine.addresses().resolve(extent.start()).unwrap().get(),
                 extent.len(),
             )
         })

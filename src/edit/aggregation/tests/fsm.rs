@@ -81,7 +81,7 @@ fn reusable_sections_precede_retained_aggregate_windows(
     };
     assert_eq!(
         address,
-        engine.addresses().absolute(expected.start()).unwrap()
+        engine.addresses().resolve(expected.start()).unwrap().get()
     );
     assert_eq!(engine.aggregation, Some(state));
     assert_eq!(engine.image.len(), physical);
@@ -135,13 +135,13 @@ fn abandoned_spare_uses_the_session_threshold(
     if tracked {
         assert_eq!(
             reservation.address(),
-            engine.addresses().absolute(expected.start()).unwrap()
+            engine.addresses().resolve(expected.start()).unwrap().get()
         );
         assert_eq!(engine.aggregation, Some(policy));
     } else {
         assert_ne!(
             reservation.address(),
-            engine.addresses().absolute(expected.start()).unwrap()
+            engine.addresses().resolve(expected.start()).unwrap().get()
         );
         assert_ne!(engine.aggregation, Some(policy));
     }
@@ -299,7 +299,7 @@ fn teardown_preserves_retained_interior_spare(
     let reservation = engine.reserve(64, AllocationClass::Metadata).unwrap();
     assert_eq!(
         reservation.address(),
-        engine.addresses().absolute(interior.start()).unwrap()
+        engine.addresses().resolve(interior.start()).unwrap().get()
     );
     engine.place(reservation, &[29; 64]).unwrap();
 }

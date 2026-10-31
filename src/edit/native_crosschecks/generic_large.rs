@@ -9,6 +9,7 @@ use test_util_hdf5::numeric::ByteOrder;
 
 use crate::FileLocking;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::edit;
 use crate::edit::WriteEngine;
 use crate::object_path::ObjectPathBuf;
@@ -48,12 +49,18 @@ fn native_generic_large_reclamation_keeps_partial_tails_unavailable() {
     let tail_end = start + length;
     assert!(tail_start < tail_end);
     let tail = Extent::new(
-        engine.addresses().relative(tail_start).unwrap(),
+        engine
+            .addresses()
+            .relative(PhysicalAddress::new(tail_start))
+            .unwrap(),
         tail_end - tail_start,
     )
     .unwrap();
     let padding = Extent::new(
-        engine.addresses().relative(tail_end).unwrap(),
+        engine
+            .addresses()
+            .relative(PhysicalAddress::new(tail_end))
+            .unwrap(),
         page - tail_end % page,
     )
     .unwrap();
@@ -82,8 +89,8 @@ impl WriteEngine {
             assert_eq!(
                 test_util::range::covered_len(
                     &owned.unclassified_space,
-                    &(self.addresses().absolute(extent.start()).unwrap()
-                        ..self.addresses().absolute(extent.end()).unwrap())
+                    &(self.addresses().resolve(extent.start()).unwrap().get()
+                        ..self.addresses().resolve(extent.end()).unwrap().get())
                 ),
                 extent.len()
             );

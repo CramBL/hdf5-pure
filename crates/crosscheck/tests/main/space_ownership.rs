@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
+use hdf5_pure::AddressRange;
 use hdf5_pure::File;
+use hdf5_pure::PhysicalAddress;
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::fractal_heap;
@@ -40,7 +42,10 @@ fn native_filtered_heap_storage_stays_unavailable_during_an_unrelated_edit() {
     assert_eq!(heaps.len(), 1);
     let allocations = heap_allocations::allocations(&bytes, u64::try_from(heaps[0]).unwrap())
         .into_iter()
-        .map(|allocation| allocation.extent())
+        .map(|allocation| {
+            let (address, length) = allocation.extent();
+            AddressRange::new(PhysicalAddress::new(address), length).unwrap()
+        })
         .collect::<Vec<_>>();
     let file = File::open_rw(&path).unwrap();
     storage::assert_unavailable(&file, &allocations);
@@ -94,7 +99,13 @@ fn assert_shared_storage_survives_edit(path: &Path, storage: SharedStorage, dens
         &file,
         &collections
             .iter()
-            .map(|extent| (extent.start, extent.end - extent.start))
+            .map(|extent| {
+                AddressRange::new(
+                    PhysicalAddress::new(extent.start),
+                    extent.end - extent.start,
+                )
+                .unwrap()
+            })
             .collect::<Vec<_>>(),
     );
     file.close().unwrap();

@@ -8,7 +8,6 @@ use alloc::sync::Arc;
 
 use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
 use hdf5_pure_core::BaseAddress;
-use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::btree_v2::{
@@ -52,7 +51,7 @@ impl FractalHeapHugeObjectLayout {
     ) -> Result<Self, FormatError> {
         let records = HugeObjectRecordContext::new(header, widths)?;
         let tracker_range = FileRange::new(
-            PhysicalAddress::new(base.absolute(header.btree_huge_objects_address)?),
+            base.resolve(header.btree_huge_objects_address)?,
             btree_v2::btree_v2_header_size(widths.offsets, widths.lengths) as u64,
         )?;
         Ok(Self {
@@ -444,10 +443,7 @@ impl FractalHeapHugeObjectLayout {
         }
         Ok(FractalHeapHugeObjectRef {
             context: Arc::clone(&self.context),
-            range: FileRange::new(
-                PhysicalAddress::new(self.context.base.absolute(address)?),
-                length,
-            )?,
+            range: FileRange::new(self.context.base.resolve(address)?, length)?,
             payload,
         })
     }

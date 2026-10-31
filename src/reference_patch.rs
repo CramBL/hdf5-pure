@@ -71,6 +71,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 #[cfg(test)]
 use crate::address::BaseAddress;
@@ -313,7 +314,7 @@ fn walk(
     let base = addresses;
 
     let mut visited: BTreeSet<u64> = BTreeSet::new();
-    let mut stack: Vec<u64> = vec![addresses.absolute(superblock.root_group_address)?];
+    let mut stack: Vec<u64> = vec![addresses.resolve(superblock.root_group_address)?.get()];
     let mut budget = budget;
     let mut saw_reference = false;
     let mut complete = true;
@@ -389,7 +390,10 @@ fn walk(
             continue;
         };
         for e in entries {
-            if let Ok(child) = base.absolute(e.object_header_address) {
+            if let Ok(child) = base
+                .resolve(e.object_header_address)
+                .map(PhysicalAddress::get)
+            {
                 stack.push(child);
             }
         }
@@ -477,7 +481,10 @@ fn scan_parsed_header<S: Source + ?Sized>(
     else {
         return holds;
     };
-    let (Ok(at), Ok(want)) = (base.absolute(a), usize::try_from(size)) else {
+    let (Ok(at), Ok(want)) = (
+        base.resolve(a).map(PhysicalAddress::get),
+        usize::try_from(size),
+    ) else {
         return holds;
     };
     let Ok(raw) = src.read_exact_at(at, want) else {
@@ -710,7 +717,7 @@ fn scan_object<S: Source + ?Sized>(
         } => {
             // A contiguous data block sits outside the header and carries no
             // checksum, so its elements are patched with nothing else to fix.
-            let Ok(at) = base.absolute(a) else {
+            let Ok(at) = base.resolve(a).map(PhysicalAddress::get) else {
                 return Ok(out);
             };
             let Ok(want) = usize::try_from(size) else {
@@ -844,13 +851,16 @@ fn collect_slots(
         if stored == 0 || stored == u64::MAX {
             continue;
         }
-        let Ok(abs) = base.absolute(StoredAddress::new(stored)) else {
+        let Ok(abs) = base
+            .resolve(StoredAddress::new(stored))
+            .map(PhysicalAddress::get)
+        else {
             continue;
         };
         let Some(&new) = relocations.get(&abs) else {
             continue;
         };
-        let Ok(value) = base.relative(new) else {
+        let Ok(value) = base.relative(PhysicalAddress::new(new)) else {
             continue;
         };
         out.push((raw_at + offset as u64, value));
@@ -1238,7 +1248,7 @@ mod tests {
             let mut shared = message_record(
                 MessageType::DATATYPE,
                 &crate::shared_message::encode_committed_ref(
-                    base.relative(TYPE_AT).unwrap(),
+                    base.relative(PhysicalAddress::new(TYPE_AT)).unwrap(),
                     crate::file_writer::OFFSET_WIDTH,
                 ),
             );
@@ -1303,8 +1313,9 @@ mod tests {
         let file = crate::File::open(&path).unwrap();
         let superblock = file.superblock().clone();
         let root = AddressContext::from_effective_base(superblock.base_address)
-            .absolute(superblock.root_group_address)
-            .unwrap();
+            .resolve(superblock.root_group_address)
+            .unwrap()
+            .get();
         // What `refs` stores, which is `d`'s header address. The file has no
         // userblock, so the stored base-relative address is the absolute one.
         let stored = u64::from_le_bytes(

@@ -799,12 +799,12 @@ impl Observation {
             let DecodedStoredAddress::Defined(address) = address else {
                 continue;
             };
-            let at = usize::try_from(addresses.absolute(*address).unwrap()).unwrap();
+            let at = usize::try_from(addresses.resolve(*address).unwrap().get()).unwrap();
             let length = usize::try_from(format::free_space_manager_header_len(widths)).unwrap();
             let header =
                 format::FreeSpaceManagerHeader::parse(widths, &bytes[at..at + length]).unwrap();
             if !header.section_list_addr().is_undefined(widths.offsets) {
-                let list_at = addresses.absolute(header.section_list_addr()).unwrap();
+                let list_at = addresses.resolve(header.section_list_addr()).unwrap().get();
                 let allocation = live
                     .iter_mut()
                     .find(|fact| fact.range.start() == list_at)
@@ -820,8 +820,9 @@ impl Observation {
                 .map(|chunk| Fact::new(AllocationKind::Manager, chunk.span.0, chunk.span.1)),
         );
         let root = addresses
-            .absolute(context.superblock().root_group_address)
-            .unwrap();
+            .resolve(context.superblock().root_group_address)
+            .unwrap()
+            .get();
         let root_header = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -843,7 +844,7 @@ impl Observation {
                     match link.link_target {
                         format::LinkTarget::Hard {
                             object_header_address,
-                        } => Some(addresses.absolute(object_header_address).unwrap()),
+                        } => Some(addresses.resolve(object_header_address).unwrap().get()),
                         _ => None,
                     }
                 }),
@@ -889,7 +890,7 @@ impl Observation {
                         size,
                     } => live.push(Fact::new(
                         AllocationKind::Payload,
-                        addresses.absolute(address).unwrap(),
+                        addresses.resolve(address).unwrap().get(),
                         size,
                     )),
                     DataLayout::Chunked {

@@ -13,6 +13,7 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5::types::{FixedUnicode, TypeDescriptor};
+use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
@@ -69,14 +70,72 @@ use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
+use test_util_hdf5::file_space::persisted::PersistedStrategy;
 use test_util_hdf5::file_space_oracle::{self, FreeSpaceOracleCheckpoint};
 use test_util_hdf5::page_publication;
 use test_util_hdf5::paged;
+use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
 use test_util_hdf5::userblock;
 
 use crate::test_util::file_space as oracle_test_util;
+
+#[rstest]
+#[case::zero(0, 0)]
+#[case::userblock(4096, 4096)]
+#[case::forward(4096, 8192)]
+#[case::backward(4096, 0)]
+#[case::inserted_userblock(0, 4096)]
+fn relocated_native_sections_use_file_context_conversions(
+    #[case] encoded_base: usize,
+    #[case] signature: usize,
+    #[values(PersistedStrategy::FsmAggr, PersistedStrategy::Page)] strategy: PersistedStrategy,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let original_path = directory.path().join("original.h5");
+    let path = directory.path().join("relocated.h5");
+    let expected = file_space::write_native_persisted_sections(
+        &original_path,
+        strategy,
+        UserblockSize::try_from(u64::try_from(encoded_base).unwrap()).unwrap(),
+    );
+    let original = std::fs::read(&original_path).unwrap();
+    let mut bytes = vec![0; signature];
+    bytes.extend_from_slice(&original[encoded_base..]);
+    std::fs::write(&path, &bytes).unwrap();
+    let file = backend.open(&path).unwrap();
+    assert_eq!(
+        file.superblock().base_address.get(),
+        u64::try_from(encoded_base).unwrap()
+    );
+    let report = file.persisted_free_sections().unwrap().unwrap();
+    assert_eq!(report.free_sections().section_count(), expected.len());
+    for (section, (address, length)) in report.free_sections().sections().iter().zip(expected) {
+        assert_eq!(section.address().get(), address);
+        assert_eq!(section.length().get(), length);
+        let physical = file.resolve_address(section.address()).unwrap();
+        assert_eq!(
+            physical,
+            PhysicalAddress::new(u64::try_from(signature).unwrap() + address)
+        );
+        assert_eq!(file.relative_address(physical).unwrap(), section.address());
+        assert_eq!(
+            file.resolve_address(section.end_address()).unwrap(),
+            physical.checked_add(length).unwrap()
+        );
+    }
+    let metadata = storage::file_metadata_extents(&file, &bytes);
+    storage::assert_unavailable(&file, &metadata);
+    assert_eq!(
+        metadata[0].start(),
+        file.resolve_address(report.managers()[0].address())
+            .unwrap()
+    );
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
 
 #[rstest]
 #[case::large_threshold(4_096, false, false, false)]
@@ -479,15 +538,17 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         let mut allocated = storage::file_metadata_extents(&file, &bytes);
         for name in ["keep", "ceiling", "added"] {
             allocated.extend(storage::header_extents(
-                file.superblock(),
+                &file,
                 &bytes,
                 storage::root_object_address(&file, &bytes, name),
             ));
-            allocated.extend(
-                file_space::raw_extents(&file, name)
-                    .iter()
-                    .map(|extent| (extent.start, extent.end - extent.start)),
-            );
+            allocated.extend(file_space::raw_extents(&file, name).iter().map(|extent| {
+                AddressRange::new(
+                    PhysicalAddress::new(extent.start),
+                    extent.end - extent.start,
+                )
+                .unwrap()
+            }));
         }
         storage::assert_unavailable(&file, &allocated);
     }
@@ -594,16 +655,17 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
         _ => "target",
     };
     let address = storage::root_object_address(&file, &original, owner);
-    let continuations = storage::header_extents(file.superblock(), &original, address)
+    let continuations = storage::header_extents(&file, &original, address)
         .into_iter()
-        .filter(|&(at, len)| {
-            len >= page
-                && original[usize::try_from(at).unwrap()..]
+        .filter(|range| {
+            range.length() >= page
+                && original[usize::try_from(range.start().get()).unwrap()..]
                     .starts_with(header_bytes::CONTINUATION_SIGNATURE)
         })
         .collect::<Vec<_>>();
     assert_eq!(continuations.len(), 1, "{continuations:?}");
-    let (address, length) = continuations[0];
+    let address = continuations[0].start().get();
+    let length = continuations[0].length();
     assert_eq!((address - userblock) % page, 0);
     assert_ne!(length % page, 0);
     if userblock == 512 && page == 4_096 {
@@ -2307,6 +2369,32 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     let free_c = hdf5::File::open(&path).unwrap().free_space();
 
     let free = assert_supported_free_sections(&path);
+    let reader = File::open(&path).unwrap();
+    let width = reader.superblock().offset_size;
+    let undefined = StoredAddress::undefined(width);
+    let expected = FormatError::DefinedAddressIsUndefined {
+        address: undefined.get(),
+        offset_size: width.get(),
+    };
+    assert_eq!(reader.resolve_address(undefined).unwrap_err(), expected);
+    assert_eq!(
+        reader
+            .relative_address(PhysicalAddress::new(undefined.get()))
+            .unwrap_err(),
+        expected
+    );
+    let stored = reader.superblock().root_group_address;
+    assert_eq!(
+        reader.resolve_address(stored).unwrap(),
+        PhysicalAddress::new(stored.get())
+    );
+    assert_eq!(
+        reader
+            .relative_address(PhysicalAddress::new(stored.get()))
+            .unwrap(),
+        stored
+    );
+    reader.close().unwrap();
 
     assert!(
         free.free_sections()
@@ -2621,7 +2709,7 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (PersistedFreeSect
             hdf5_pure::DecodedStoredAddress::Undefined => None,
         })
         .map(|stored| {
-            let at = usize::try_from(base.absolute(stored).unwrap()).unwrap();
+            let at = usize::try_from(base.resolve(stored).unwrap().get()).unwrap();
             (
                 at,
                 FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap(),
@@ -2631,9 +2719,11 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (PersistedFreeSect
         .unwrap();
     drop(file);
     let used = usize::try_from(header.section_list_used()).unwrap();
-    let list_at = usize::try_from(base.absolute(header.section_list_addr()).unwrap()).unwrap();
+    let list_at = usize::try_from(base.resolve(header.section_list_addr()).unwrap().get()).unwrap();
     let list = bytes[list_at..list_at + used].to_vec();
-    let new_addr = base.relative(u64::try_from(bytes.len()).unwrap()).unwrap();
+    let new_addr = base
+        .relative(PhysicalAddress::new(u64::try_from(bytes.len()).unwrap()))
+        .unwrap();
     bytes.extend_from_slice(&list);
     bytes.extend_from_slice(&[0xA5; 16]);
     let allocated = header.section_list_used() + 16;
@@ -2663,7 +2753,7 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (PersistedFreeSect
         (header.section_list_used(), header.section_list_allocated()),
         (u64::try_from(list.len()).unwrap(), allocated)
     );
-    let start = base.absolute(new_addr).unwrap();
+    let start = base.resolve(new_addr).unwrap().get();
     (free, start..start + allocated)
 }
 
@@ -3759,8 +3849,9 @@ fn extension_addr(path: &Path) -> u64 {
     let superblock = file.superblock();
     superblock
         .base_address
-        .absolute(superblock.superblock_extension_address.unwrap())
+        .resolve(superblock.superblock_extension_address.unwrap())
         .unwrap()
+        .get()
 }
 
 /// Returns the fields of version 1 that a version 0 message maps to.
@@ -4750,13 +4841,13 @@ fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: boo
     assert_eq!(
         storage::manager_extents(&ours, &bytes)
             .iter()
-            .map(|(_, length)| length)
+            .map(|range| range.length())
             .sum::<u64>(),
         manager_bytes,
     );
     let live = Coverage::new(
         live.into_iter()
-            .map(|(address, length)| Interval::new(address, length).unwrap()),
+            .map(|range| Interval::new(range.start().get(), range.length()).unwrap()),
     );
     let report = ours.persisted_free_sections().unwrap().unwrap();
     let free =
@@ -4847,18 +4938,21 @@ fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: boo
 ///
 /// Includes unused section-list capacity. The `log2` dataset must use an Extensible Array index
 /// without secondary blocks.
-fn append_reuse_live_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
+fn append_reuse_live_extents(file: &File, bytes: &[u8]) -> Vec<AddressRange<PhysicalAddress>> {
     let mut extents = storage::file_metadata_extents(file, bytes);
     for dataset in ["keep", "ceiling", "log2"] {
         extents.extend(storage::header_extents(
-            file.superblock(),
+            file,
             bytes,
             storage::root_object_address(file, bytes, dataset),
         ));
         extents.extend(
             file_space::raw_extents(file, dataset)
                 .into_iter()
-                .map(|range| (range.start, range.end - range.start)),
+                .map(|range| {
+                    AddressRange::new(PhysicalAddress::new(range.start), range.end - range.start)
+                        .unwrap()
+                }),
         );
     }
     let widths = FormatWidths {
@@ -4868,7 +4962,7 @@ fn append_reuse_live_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
     let header = ObjectHeader::parse_with_base_and_widths(
         bytes,
         AccessMode::ReadOnly,
-        usize::try_from(storage::root_object_address(file, bytes, "log2")).unwrap(),
+        usize::try_from(storage::root_object_address(file, bytes, "log2").get()).unwrap(),
         widths,
         file.superblock().base_address,
     )
@@ -4902,16 +4996,16 @@ fn append_reuse_live_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
     let array = locator
         .parse(region(locator.parse_range().unwrap()))
         .unwrap();
-    extents.push((array.range().start().get(), array.range().length()));
+    extents.push(array.range().range());
     let index = array.index_block().unwrap();
-    extents.push((index.range().start().get(), index.range().length()));
+    extents.push(index.range().range());
     let index = index.parse(region(index.parse_range())).unwrap();
     assert_eq!(index.super_blocks().count(), 0);
     for block in index.data_blocks() {
         let block = block.unwrap();
         let range = block.range();
         block.parse(region(block.parse_range())).unwrap();
-        extents.push((range.start().get(), range.length()));
+        extents.push(range.range());
     }
     extents
 }
@@ -5548,8 +5642,9 @@ fn header_extent(path: &Path, file: &File, link_name: &str) -> Range<u64> {
         usize::try_from(
             superblock
                 .base_address
-                .absolute(superblock.root_group_address)
-                .unwrap(),
+                .resolve(superblock.root_group_address)
+                .unwrap()
+                .get(),
         )
         .unwrap(),
         FormatWidths {

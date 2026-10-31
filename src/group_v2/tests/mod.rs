@@ -3,6 +3,7 @@ use test_util::btree_v2;
 use test_util::widths::Widths;
 
 use super::*;
+use crate::PhysicalAddress;
 use crate::SuperblockVersion;
 use crate::data_layout::DataLayout;
 use crate::data_read;

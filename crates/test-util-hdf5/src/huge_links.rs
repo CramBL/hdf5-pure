@@ -108,7 +108,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
     let header = ObjectHeader::parse_with_widths(
         image,
         AccessMode::ReadOnly,
-        usize::try_from(address).unwrap(),
+        usize::try_from(address.get()).unwrap(),
         widths,
     )
     .unwrap();

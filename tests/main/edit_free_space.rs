@@ -705,8 +705,9 @@ fn open_rw_rejects_a_paged_file_whose_page_size_is_out_of_range() {
         let superblock = file.superblock();
         superblock
             .base_address
-            .absolute(superblock.superblock_extension_address.unwrap())
+            .resolve(superblock.superblock_extension_address.unwrap())
             .unwrap()
+            .get()
     };
     file_space_info::replace_message(
         &path,
@@ -735,8 +736,9 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
         (
             f.superblock()
                 .base_address
-                .absolute(f.superblock().superblock_extension_address.unwrap())
-                .unwrap(),
+                .resolve(f.superblock().superblock_extension_address.unwrap())
+                .unwrap()
+                .get(),
             f.file_space_info().unwrap().unwrap(),
             f.persisted_free_sections().unwrap().unwrap(),
         )
@@ -1515,7 +1517,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             let file = File::open_rw(&path).unwrap();
             let capacity: u64 = storage::manager_extents(&file, &bytes)
                 .iter()
-                .map(|&(_, len)| len)
+                .map(|range| range.length())
                 .sum();
             (file.reusable_free_sections().unwrap(), capacity)
         };
@@ -1528,7 +1530,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         let f = File::open_rw(&path).unwrap();
         let after_capacity: u64 = storage::manager_extents(&f, &bytes)
             .iter()
-            .map(|&(_, len)| len)
+            .map(|range| range.length())
             .sum();
         let managers: Vec<u64> = f
             .file_space_info()
@@ -1691,7 +1693,7 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
             let reader = File::open(&path).unwrap();
             let manager_bytes: u64 = storage::manager_extents(&reader, &bytes)
                 .iter()
-                .map(|&(_, len)| len)
+                .map(|range| range.length())
                 .sum();
             reader.close().unwrap();
             assert!(
@@ -2919,7 +2921,7 @@ fn occupied_storage(path: &std::path::Path) -> (File, u64) {
     let stats = file.reusable_space_stats().unwrap();
     let managers: u64 = storage::manager_extents(&file, &bytes)
         .iter()
-        .map(|&(_, len)| len)
+        .map(|range| range.length())
         .sum();
     let occupied = stats.logical_size() - stats.reusable_free_bytes() - managers;
     (file, occupied)

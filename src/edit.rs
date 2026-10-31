@@ -1101,7 +1101,8 @@ impl PersistedRecovery {
         info: &FileSpaceInfo,
     ) -> Result<Self, Error> {
         let addresses = context.addresses();
-        let stored_eof = addresses.relative(context.superblock().eof_address)?;
+        let stored_eof =
+            addresses.relative(PhysicalAddress::new(context.superblock().eof_address))?;
         let managers = PersistedManagerSet::read(
             &source.manager_source(),
             context.widths(),
@@ -1620,7 +1621,7 @@ impl WriteEngine {
             && info.strategy == FileSpaceStrategy::Page
             && !info.persist
         {
-            let stored_eoa = addresses.relative(superblock.eof_address)?;
+            let stored_eoa = addresses.relative(PhysicalAddress::new(superblock.eof_address))?;
             let superblock_len =
                 hdf5_pure_format::__private::serialize_superblock(superblock)?.len() as u64;
             let superblock_end =
@@ -2072,7 +2073,13 @@ impl WriteEngine {
     /// Returns `None` if `at` lies below the base address, or if the extent is empty or ends past
     /// [`u64::MAX`].
     fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
-        FreeExtent::new(self.context.addresses().relative(at).ok()?, len)
+        FreeExtent::new(
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(at))
+                .ok()?,
+            len,
+        )
     }
 
     /// Returns the first stored page boundary at or beyond both extents.
@@ -2090,7 +2097,10 @@ impl WriteEngine {
         physical_len: u64,
         page_size: FileSpacePageSize,
     ) -> Result<StoredAddress, FormatError> {
-        let start = addresses.relative(physical_len)?.get().max(eoa.get());
+        let start = addresses
+            .relative(PhysicalAddress::new(physical_len))?
+            .get()
+            .max(eoa.get());
         let boundary =
             start
                 .checked_next_multiple_of(page_size.get())
@@ -2109,7 +2119,9 @@ impl WriteEngine {
     ///
     /// Returns [`FormatError::AddressBelowBase`] if the image ends below the base address.
     fn end_of_allocation(&self) -> Result<StoredAddress, FormatError> {
-        self.context.addresses().relative(self.image.len())
+        self.context
+            .addresses()
+            .relative(PhysicalAddress::new(self.image.len()))
     }
 
     /// Reads the File Space Info message from the superblock extension.
@@ -2142,7 +2154,7 @@ impl WriteEngine {
         // The header is read at the extension's absolute file offset, which is the stored
         // address on a file without a userblock. The caller reads the strategy of a file with a
         // userblock as well, so the address is resolved here for both.
-        let ext_addr = base.absolute(ext_rel)?;
+        let ext_addr = base.resolve(ext_rel)?.get();
         let oh = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(source),
             AccessMode::ReadWrite,
@@ -2318,7 +2330,7 @@ impl WriteEngine {
         // once the extension is readable and *says* the file shares messages,
         // failing to read the table is an error, because the screen below is
         // then the difference between a refusal and a corrupted index.
-        let Ok(abs) = base.absolute(rel) else {
+        let Ok(abs) = base.resolve(rel).map(PhysicalAddress::get) else {
             return Ok(None);
         };
         let Ok(header) = ObjectHeader::parse_from_source_with_widths(
@@ -2956,7 +2968,11 @@ impl WriteEngine {
         build: impl FnOnce(StoredAddress) -> Result<(Vec<u8>, T), Error>,
     ) -> Result<(u64, T), Error> {
         let at = self.reserve(len, class)?;
-        let (bytes, extra) = build(self.context.addresses().relative(at.address())?)?;
+        let (bytes, extra) = build(
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(at.address()))?,
+        )?;
         let addr = self.place(at, &bytes)?;
         Ok((addr, extra))
     }
@@ -2976,7 +2992,11 @@ impl WriteEngine {
             .iter()
             .map(|collection| {
                 let addr = self.alloc_or_append_typed(collection, AllocationClass::Raw)?;
-                Ok(self.context.addresses().relative(addr)?.get())
+                Ok(self
+                    .context
+                    .addresses()
+                    .relative(PhysicalAddress::new(addr))?
+                    .get())
             })
             .collect()
     }

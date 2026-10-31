@@ -712,7 +712,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
         &header,
         OffsetWidth::Eight,
         LengthWidth::Eight,
-        base.relative(header_at).unwrap(),
+        base.relative(PhysicalAddress::new(header_at)).unwrap(),
     )
     .unwrap();
     let mut pending = heap.root().unwrap().into_iter().collect::<Vec<_>>();
@@ -723,11 +723,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
         match block {
             FractalHeapBlock::Direct(block) => {
                 assert!(visited.insert(block.address()), "duplicate managed block");
-                let reference = block
-                    .at(PhysicalAddress::new(
-                        base.absolute(block.address()).unwrap(),
-                    ))
-                    .unwrap();
+                let reference = block.at(base.resolve(block.address()).unwrap()).unwrap();
                 let region = image.subregion(reference.parse_range()).unwrap();
                 let view = reference.parse(region).unwrap();
                 assert_eq!(view.bytes().len() as u64, block.decoded_size());
@@ -739,11 +735,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
             }
             FractalHeapBlock::Indirect(block) => {
                 assert!(visited.insert(block.address()), "duplicate managed block");
-                let reference = block
-                    .at(PhysicalAddress::new(
-                        base.absolute(block.address()).unwrap(),
-                    ))
-                    .unwrap();
+                let reference = block.at(base.resolve(block.address()).unwrap()).unwrap();
                 let view = reference
                     .parse(image.subregion(reference.parse_range()).unwrap())
                     .unwrap();
@@ -828,7 +820,9 @@ fn edits_reject_corrupt_checksummed_direct_blocks() {
         &header,
         OffsetWidth::Eight,
         LengthWidth::Eight,
-        BaseAddress::ZERO.relative(at as u64).unwrap(),
+        BaseAddress::ZERO
+            .relative(PhysicalAddress::new(at as u64))
+            .unwrap(),
     )
     .unwrap();
     let Some(FractalHeapBlock::Direct(block)) = heap.root().unwrap() else {
