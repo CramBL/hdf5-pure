@@ -93,10 +93,9 @@ impl WriteEngine {
     ) -> Option<(FreeList, Option<StoredAddress>, u64, StoredAddress)> {
         let (post, mut eoa) = self.flat_post_free(eoa, to_free, old_blocks);
         let managers = ManagerSections::flat(post.extents().iter().copied());
-        let len = extension_len.checked_add(free_space_manager::manager_blocks_len(
-            &managers,
-            self.context.widths(),
-        ))?;
+        let len = extension_len.checked_add(
+            free_space_manager::manager_blocks_len(&managers, self.context.widths()).ok()?,
+        )?;
         if len > target.len() {
             return None;
         }

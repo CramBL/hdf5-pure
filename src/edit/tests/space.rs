@@ -4,6 +4,7 @@ use core::num::NonZeroU64;
 
 use std::path::Path;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private as format;
 #[cfg(feature = "deflate")]
 use hdf5_pure_format::__private::BTreeV2Layout;
@@ -112,10 +113,10 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
     .into_iter()
     .map(|chunk| chunk.span)
     .collect();
-    expected.extend([
+    expected.extend(physical_ranges(&[
         (address.get(), u64::try_from(header_length).unwrap()),
         (list_at, capacity),
-    ]);
+    ]));
     expected.sort_unstable();
     let engine = WriteEngine::open_rw_with_strategy(
         &path,
@@ -136,13 +137,10 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
     actual.sort_unstable();
     let expected: Vec<_> = expected
         .into_iter()
-        .map(|(at, len)| {
+        .map(|range| {
             (
-                engine
-                    .addresses()
-                    .relative(PhysicalAddress::new(at))
-                    .unwrap(),
-                len,
+                engine.addresses().relative(range.start()).unwrap(),
+                range.length(),
             )
         })
         .collect();
@@ -276,7 +274,10 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
 #[rstest]
 #[case::managed_objects(0)]
 #[case::huge_objects(2)]
-fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(#[case] huge_attrs: usize) {
+fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(
+    #[case] huge_attrs: usize,
+    #[values(0, 512)] userblock: u64,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_attribute_reclaim.h5");
     write_dense_attribute_owner(&path, huge_attrs, FileSpaceStrategy::Page);
@@ -284,25 +285,26 @@ fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(#[case] huge_a
         test_util::fractal_heap::huge_object_count(&std::fs::read(&path).unwrap()),
         u64::try_from(huge_attrs).unwrap()
     );
+    prepend_userblock(&path, userblock);
 
     let object = ObjectPathBuf::parse("/g");
     let storage = {
         let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let DenseAttributeOwner { addr, storage, .. } = dense_attribute_owner(&session, &object);
         assert_eq!(
-            storage.first().map(|&(storage_addr, _, _)| storage_addr),
-            Some(attribute_heap_address(&session, addr))
+            storage.first().map(|&(range, _)| range.start()),
+            Some(PhysicalAddress::new(attribute_heap_address(&session, addr)))
         );
         assert!(
             storage
                 .windows(2)
-                .all(|pair| pair[0].0 + pair[0].1 == pair[1].0),
+                .all(|pair| pair[0].0.end() == pair[1].0.start()),
             "{storage:?}"
         );
         assert!(
             storage
                 .iter()
-                .all(|&(_, _, class)| class == FreeClass::Page(PageType::Meta)),
+                .all(|&(_, class)| class == FreeClass::Page(PageType::Meta)),
             "{storage:?}"
         );
 
@@ -325,9 +327,11 @@ fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(#[case] huge_a
         .space
         .paged_sections()
         .expect("the PAGE strategy installs per-type free lists");
-    for &(addr, len, _) in &storage {
+    for &(range, _) in &storage {
+        let addr = range.start().get();
+        let len = range.length();
         assert!(
-            freed_as_metadata(&sections, addr, len),
+            freed_as_metadata(&sections, stored_range(&reopened, range)),
             "dense attribute storage ({addr}, {len}) must persist as metadata free space"
         );
     }
@@ -370,7 +374,10 @@ fn dense_attribute_storage_is_classified_by_its_stored_pages(#[values(0, 512)] u
             (2434, 71_294, meta),
             (18 * DENSE_ATTRIBUTE_PAGE_SIZE, 70_027, FreeClass::Dead),
         ]
-        .map(|(addr, len, class)| (addr + userblock, len, class))
+        .map(|(addr, len, class)| (
+            FileRange::new(PhysicalAddress::new(addr + userblock), len).unwrap(),
+            class
+        ))
     );
 }
 
@@ -389,16 +396,20 @@ fn rebuilding_dense_group_attributes_reclaims_the_old_storage_in_flat_space() {
         session
             .set_group_attr(&object, "a0", AttrValue::I64(99))
             .unwrap();
-        for &(addr, len, _) in &storage {
+        for &(range, _) in &storage {
+            let addr = range.start().get();
+            let len = range.length();
             assert!(
-                !reusable_overlaps(&session, addr, len),
+                !reusable_overlaps(&session, range),
                 "the old dense storage ({addr}, {len}) stays live until the replacement commits"
             );
         }
         session.commit().unwrap();
-        for &(addr, len, _) in &storage {
+        for &(range, _) in &storage {
+            let addr = range.start().get();
+            let len = range.length();
             assert!(
-                reusable_covers(&session, addr, len),
+                reusable_covers(&session, range),
                 "the replaced dense storage ({addr}, {len}) must be reusable"
             );
         }
@@ -438,28 +449,32 @@ fn reclamation_retains_storage_after_heap_validation_fails(
     session.delete(&object).unwrap();
     session.commit().unwrap();
 
-    for &(addr, len) in &header_spans {
+    for &range in &header_spans {
+        let addr = range.start().get();
+        let len = range.length();
         if reclaim_other {
             assert!(
-                reusable_covers(&session, addr, len),
+                reusable_covers(&session, range),
                 "header ({addr}, {len}) is reusable"
             );
         } else {
             assert!(
-                !reusable_overlaps(&session, addr, len),
+                !reusable_overlaps(&session, range),
                 "header ({addr}, {len}) stays unavailable"
             );
         }
     }
-    for &(addr, len, _) in &index {
+    for &(range, _) in &index {
+        let addr = range.start().get();
+        let len = range.length();
         if reclaim_other {
             assert!(
-                reusable_covers(&session, addr, len),
+                reusable_covers(&session, range),
                 "index ({addr}, {len}) is reusable"
             );
         } else {
             assert!(
-                !reusable_overlaps(&session, addr, len),
+                !reusable_overlaps(&session, range),
                 "index ({addr}, {len}) stays unavailable"
             );
         }
@@ -468,8 +483,11 @@ fn reclamation_retains_storage_after_heap_validation_fails(
         assert!(
             !reusable_overlaps(
                 &session,
-                session.addresses().resolve(extent.start()).unwrap().get(),
-                extent.len()
+                FileRange::new(
+                    session.addresses().resolve(extent.start()).unwrap(),
+                    extent.len()
+                )
+                .unwrap()
             ),
             "the rejected heap allocation {extent:?} must stay allocated"
         );
@@ -514,7 +532,10 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
     } = dense_attribute_owner(&session, &object);
     for &(addr, len) in &heap {
         assert!(
-            storage.contains(&(addr, len, FreeClass::Page(PageType::Meta))),
+            storage.contains(&(
+                FileRange::new(PhysicalAddress::new(addr), len).unwrap(),
+                FreeClass::Page(PageType::Meta)
+            )),
             "the filtered heap allocation ({addr}, {len}) is in {storage:?}"
         );
     }
@@ -523,12 +544,14 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
     session.commit().unwrap();
     assert!(session.space_ownership().unwrap().analysis_complete);
 
-    for (addr, len) in header_spans
+    for range in header_spans
         .into_iter()
-        .chain(storage.into_iter().map(|(addr, len, _)| (addr, len)))
+        .chain(storage.into_iter().map(|(range, _)| range))
     {
+        let addr = range.start().get();
+        let len = range.length();
         assert!(
-            reusable_covers(&session, addr, len),
+            reusable_covers(&session, range),
             "({addr}, {len}) of the deleted object is reusable"
         );
     }
@@ -652,8 +675,11 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
         assert!(
             reusable_covers(
                 &session,
-                session.addresses().resolve(extent.start()).unwrap().get(),
-                extent.len()
+                FileRange::new(
+                    session.addresses().resolve(extent.start()).unwrap(),
+                    extent.len()
+                )
+                .unwrap()
             ),
             "{extent:?}"
         );
@@ -707,31 +733,22 @@ fn a_v2_btree_chunk_index_is_metadata_when_reclaimed() {
 
 #[test]
 fn a_chunk_index_is_placed_by_the_chunk_data_that_abuts_it() {
-    assert!(reclaim::index_abuts_chunk_data(&[(100, 60)], &[(160, 40)]));
-    assert!(reclaim::index_abuts_chunk_data(&[(200, 60)], &[(160, 40)]));
-    assert!(reclaim::index_abuts_chunk_data(
-        &[(100, 60), (900, 60)],
-        &[(160, 40)]
-    ));
-    assert!(reclaim::index_abuts_chunk_data(
-        &[(100, 60)],
-        &[(180, 20), (160, 20)]
-    ));
-    assert!(!reclaim::index_abuts_chunk_data(
-        &[(9000, 60)],
-        &[(160, 40)]
-    ));
-    assert!(!reclaim::index_abuts_chunk_data(&[(100, 59)], &[(160, 40)]));
-    assert!(!reclaim::index_abuts_chunk_data(&[], &[(160, 40)]));
-    assert!(reclaim::index_abuts_chunk_data(&[], &[]));
-    assert!(!reclaim::index_abuts_chunk_data(&[(160, 0)], &[(160, 40)]));
+    assert!(index_abuts_ranges(&[(100, 60)], &[(160, 40)]));
+    assert!(index_abuts_ranges(&[(200, 60)], &[(160, 40)]));
+    assert!(index_abuts_ranges(&[(100, 60), (900, 60)], &[(160, 40)]));
+    assert!(index_abuts_ranges(&[(100, 60)], &[(180, 20), (160, 20)]));
+    assert!(!index_abuts_ranges(&[(9000, 60)], &[(160, 40)]));
+    assert!(!index_abuts_ranges(&[(100, 59)], &[(160, 40)]));
+    assert!(!index_abuts_ranges(&[], &[(160, 40)]));
+    assert!(index_abuts_ranges(&[], &[]));
+    assert!(!index_abuts_ranges(&[(160, 0)], &[(160, 40)]));
 }
 
 #[test]
 fn page_zero_detection_checks_each_index_span() {
     const PAGE: FileSpacePageSize = FileSpacePageSize::MIN;
     let c_written = [(48u64, 80u64), (512, 512)];
-    assert!(reclaim::index_abuts_chunk_data(&[(1024, 512)], &c_written));
+    assert!(index_abuts_ranges(&[(1024, 512)], &c_written));
     assert!(reclaim::touches_page_zero(
         PAGE,
         c_written
@@ -773,8 +790,14 @@ fn page_zero_classification_is_relative_to_the_base_address(#[values(0, 512)] us
     let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
     let data = [(userblock + 1024, 512)];
-    assert!(!s.index_is_provably_raw(&data, &[(userblock + 48, 80), (userblock + 512, 512)]));
-    assert!(s.index_is_provably_raw(&data, &[(userblock + 512, 512)]));
+    assert!(!s.index_is_provably_raw(
+        &physical_ranges(&data),
+        &physical_ranges(&[(userblock + 48, 80), (userblock + 512, 512)])
+    ));
+    assert!(s.index_is_provably_raw(
+        &physical_ranges(&data),
+        &physical_ranges(&[(userblock + 512, 512)])
+    ));
 }
 
 #[rstest]
@@ -1150,18 +1173,20 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         );
         let free_before = free_total(&s);
         let eoa = s.end_of_allocation().unwrap().get();
-        let (post, at, tail_len, _) = s.flat_tail_layout(
-            StoredAddress::new(eoa),
-            &[],
-            &[],
-            EXT_LEN,
-            widths,
-            None,
-            PublicationPurpose::Commit,
-        );
+        let (post, at, tail_len, _) = s
+            .flat_tail_layout(
+                StoredAddress::new(eoa),
+                &[],
+                &[],
+                EXT_LEN,
+                widths,
+                None,
+                PublicationPurpose::Commit,
+            )
+            .unwrap();
         let free_after = free_total(&s);
         let managers = ManagerSections::flat(post.extents().iter().copied());
-        let written = EXT_LEN + free_space_manager::manager_blocks_len(&managers, widths);
+        let written = EXT_LEN + free_space_manager::manager_blocks_len(&managers, widths).unwrap();
         match at {
             Some(at) => {
                 placed += 1;
@@ -1657,7 +1682,10 @@ fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
     let spans = engine
         .chunked_storage_spans(addr)
         .expect("a chunked dataset has reclaimable spans");
-    let fresh = spans.iter().filter(|&&(a, _, _)| a >= before).count();
+    let fresh = spans
+        .iter()
+        .filter(|&&(range, _)| range.start().get() >= before)
+        .count();
     assert!(
         fresh > 0,
         "the append allocated nothing above {before}, so the assertion above proves nothing"
@@ -1665,7 +1693,7 @@ fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
     assert!(
         spans
             .iter()
-            .all(|&(_, _, class)| class == FreeClass::Page(PageType::Raw)),
+            .all(|&(_, class)| class == FreeClass::Page(PageType::Raw)),
         "the reclaim tags every chunked span raw; a metadata or dead tag here would \
          need the placement rule above to change with it"
     );
@@ -1701,10 +1729,7 @@ fn gather_page_size_matches_file_space_properties() {
     );
 }
 
-fn section_covers(sections: &[FreeExtent], addr: u64, len: u64) -> bool {
-    let Ok(required) = AddressRange::new(StoredAddress::new(addr), len) else {
-        return false;
-    };
+fn section_covers(sections: &[FreeExtent], required: AddressRange<StoredAddress>) -> bool {
     sections
         .iter()
         .any(|extent| extent.range().contains(required))
@@ -1739,8 +1764,8 @@ fn write_dense_attribute_owner(path: &Path, huge_attrs: usize, strategy: FileSpa
 
 struct DenseAttributeOwner {
     addr: u64,
-    header_spans: Vec<(u64, u64)>,
-    storage: Vec<(u64, u64, FreeClass)>,
+    header_spans: Vec<FileRange>,
+    storage: Vec<(FileRange, FreeClass)>,
 }
 
 fn dense_attribute_owner(session: &WriteEngine, object: &ObjectPathBuf) -> DenseAttributeOwner {
@@ -1757,7 +1782,7 @@ fn dense_attribute_owner(session: &WriteEngine, object: &ObjectPathBuf) -> Dense
     let mut storage = session
         .dense_attribute_storage_spans(&header_region(session, addr), &header_spans)
         .expect("the dense attribute storage is structurally complete");
-    storage.sort_unstable_by_key(|&(storage_addr, _, _)| storage_addr);
+    storage.sort_unstable_by_key(|&(range, _)| range.start());
     DenseAttributeOwner {
         addr,
         header_spans,
@@ -1784,40 +1809,46 @@ fn attribute_heap_address(session: &WriteEngine, addr: u64) -> u64 {
         .get()
 }
 
-fn reusable_covers(session: &WriteEngine, addr: u64, len: u64) -> bool {
-    let start = session
-        .addresses()
-        .relative(PhysicalAddress::new(addr))
-        .unwrap();
-    let required = AddressRange::new(start, len).unwrap();
+fn reusable_covers(session: &WriteEngine, range: FileRange) -> bool {
+    let required = stored_range(session, range);
     session
         .space
         .reusable_sections()
         .any(|extent| extent.range().contains(required))
 }
 
-fn reusable_overlaps(session: &WriteEngine, addr: u64, len: u64) -> bool {
-    let start = session
-        .addresses()
-        .relative(PhysicalAddress::new(addr))
-        .unwrap();
-    let required = AddressRange::new(start, len).unwrap();
+fn reusable_overlaps(session: &WriteEngine, range: FileRange) -> bool {
+    let required = stored_range(session, range);
     session
         .space
         .reusable_sections()
         .any(|extent| extent.range().overlaps(required))
 }
 
+fn stored_range(session: &WriteEngine, range: FileRange) -> AddressRange<StoredAddress> {
+    AddressRange::new(
+        session.addresses().relative(range.start()).unwrap(),
+        range.length(),
+    )
+    .unwrap()
+}
+
 /// Returns whether each page intersection is free metadata or part of a whole free raw page.
-fn freed_as_metadata(sections: &PagedSections, addr: u64, len: u64) -> bool {
+fn freed_as_metadata(sections: &PagedSections, required: AddressRange<StoredAddress>) -> bool {
+    if required.is_empty() {
+        return true;
+    }
     let page_size = DENSE_ATTRIBUTE_PAGE_SIZE;
-    let end = addr + len;
-    (addr / page_size..=(end - 1) / page_size).all(|page| {
-        let page_start = page * page_size;
-        let start = addr.max(page_start);
-        let stop = end.min(page_start + page_size);
-        section_covers(sections.metadata(), start, stop - start)
-            || section_covers(sections.raw(), page_start, page_size)
+    let first = required.start().get() / page_size;
+    let last = required.end().checked_sub(1).unwrap().get() / page_size;
+    (first..=last).all(|index| {
+        let page = AddressRange::new(
+            StoredAddress::new(index.checked_mul(page_size).unwrap()),
+            page_size,
+        )
+        .unwrap();
+        let intersection = required.intersection(page).unwrap();
+        section_covers(sections.metadata(), intersection) || section_covers(sections.raw(), page)
     })
 }
 
@@ -1851,8 +1882,8 @@ enum HeapDamage {
 }
 
 struct RejectedHeapOwner {
-    header_spans: Vec<(u64, u64)>,
-    index: Vec<(u64, u64, FreeClass)>,
+    header_spans: Vec<FileRange>,
+    index: Vec<(FileRange, FreeClass)>,
     heap: FractalHeapStorage,
 }
 
@@ -1934,15 +1965,19 @@ fn write_rejected_heap_owner(
     assert!(rejections.contains(&err), "{err:?}");
     std::fs::write(path, bytes).unwrap();
 
-    let index: Vec<(u64, u64, FreeClass)> = storage
+    let session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
+    let index: Vec<(FileRange, FreeClass)> = storage
         .into_iter()
-        .filter(|&(addr, len, _)| {
+        .filter(|&(range, _)| {
             heap.allocations().iter().all(|(extent, _)| {
-                (extent.start(), extent.len()) != (StoredAddress::new(addr), len)
+                (extent.start(), extent.len())
+                    != (
+                        session.addresses().relative(range.start()).unwrap(),
+                        range.length(),
+                    )
             })
         })
         .collect();
-    let session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     assert_eq!(
         session.dense_attribute_storage_spans(&header_region(&session, addr), &header_spans),
         Some(index.clone())
@@ -2018,3 +2053,14 @@ fn filter_attribute_heap(
 }
 
 const UNENCODED_BLOCK_LEN: usize = 64;
+
+fn index_abuts_ranges(data: &[(u64, u64)], index: &[(u64, u64)]) -> bool {
+    reclaim::index_abuts_chunk_data(&physical_ranges(data), &physical_ranges(index))
+}
+
+fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {
+    bounds
+        .iter()
+        .map(|&(start, length)| FileRange::new(PhysicalAddress::new(start), length).unwrap())
+        .collect()
+}

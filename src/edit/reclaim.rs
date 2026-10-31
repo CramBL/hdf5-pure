@@ -8,13 +8,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_read;
@@ -40,13 +42,12 @@ use super::GlobalHeapLiveness;
 use super::copy::ObjModel;
 use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
 
-/// The spans `(address, length)` of the global heap collections that the objects a commit deletes
-/// refer to, as [`WriteEngine::deleted_collections`] returns them.
-pub(super) struct DeletedCollections(Vec<(u64, u64)>);
+/// Physical ranges of the global heap collections referenced by deleted objects.
+pub(super) struct DeletedCollections(Vec<FileRange>);
 
 struct ChunkedStorageParts {
-    data: Vec<(u64, u64)>,
-    index: Vec<(u64, u64)>,
+    data: Vec<FileRange>,
+    index: Vec<FileRange>,
     index_layout: ChunkIndexLayout,
 }
 
@@ -95,15 +96,17 @@ impl WriteEngine {
         for collection in referenced_collections {
             live_raw_space.push(self.collection_span(collection)?);
         }
-        let userblock_space = Vec::from_iter(
-            (self.context.signature().get() > 0).then_some((0, self.context.signature().get())),
-        );
+        let userblock_space: Vec<FileRange> = (self.context.signature().get() > 0)
+            .then(|| FileRange::new(PhysicalAddress::new(0), self.context.signature().get()))
+            .transpose()?
+            .into_iter()
+            .collect();
 
         let superblock_len = u64::try_from(
             hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?.len(),
         )
         .map_err(|_err| FormatError::Internal("superblock length does not fit u64".into()))?;
-        live_metadata_space.push((self.context.signature().get(), superblock_len));
+        live_metadata_space.push(FileRange::new(self.context.signature(), superblock_len)?);
 
         if let Some(extension) = self.context.superblock().superblock_extension_address
             && !extension.is_undefined(self.widths().offsets)
@@ -147,7 +150,7 @@ impl WriteEngine {
             .reusable_ranges()
             .map(|range| {
                 let range = range?;
-                Ok((range.start().get(), range.length()))
+                FileRange::new(range.start(), range.length())
             })
             .collect::<Result<Vec<_>, FormatError>>()?;
         if self.aggregation.is_some() && !self.space.is_enabled() {
@@ -161,48 +164,50 @@ impl WriteEngine {
             .chain(&reusable_free_space)
             .copied()
             .collect::<Vec<_>>();
-        claimed.sort_unstable_by_key(|&(addr, _)| addr);
-        let mut previous_end = 0;
-        for &(address, length) in &claimed {
-            let end = address
-                .checked_add(length)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: address,
-                    length,
-                })?;
-            if address < previous_end || end > logical_size {
+        claimed.sort_unstable_by_key(|range| range.start());
+        let mut previous_end = PhysicalAddress::new(0);
+        for range in &claimed {
+            if range.start() < previous_end || range.end() > PhysicalAddress::new(logical_size) {
                 return Err(Error::InvalidSpaceOwnershipExtent {
-                    address,
-                    length,
-                    previous_end,
+                    address: range.start().get(),
+                    length: range.length(),
+                    previous_end: previous_end.get(),
                     logical_size,
                 });
             }
-            previous_end = end;
+            previous_end = range.end();
         }
-
-        let unclassified_space = complement_spans(logical_size, &claimed);
-        let trailing_slack_space = (physical_size > logical_size)
-            .then_some((logical_size, physical_size - logical_size))
-            .into_iter()
-            .collect();
+        let unclassified_space = complement_spans(logical_size, &claimed)?;
+        let trailing_slack_space = if physical_size > logical_size {
+            vec![FileRange::new(
+                PhysicalAddress::new(logical_size),
+                physical_size - logical_size,
+            )?]
+        } else {
+            Vec::new()
+        };
+        let report_extents = |ranges: Vec<FileRange>| {
+            ranges
+                .into_iter()
+                .map(|range| (range.start().get(), range.length()))
+                .collect()
+        };
 
         Ok(SpaceOwnership {
             physical_size,
             logical_size,
-            userblock_space,
-            live_raw_space,
-            live_metadata_space,
-            free_space_manager_space,
-            reusable_free_space,
-            unclassified_space,
+            userblock_space: report_extents(userblock_space),
+            live_raw_space: report_extents(live_raw_space),
+            live_metadata_space: report_extents(live_metadata_space),
+            free_space_manager_space: report_extents(free_space_manager_space),
+            reusable_free_space: report_extents(reusable_free_space),
+            unclassified_space: report_extents(unclassified_space),
             analysis_complete,
-            trailing_slack_space,
+            trailing_slack_space: report_extents(trailing_slack_space),
         })
     }
 
-    /// Returns the span `(address, length)` of the global heap collection at the absolute file
-    /// offset `address`.
+    /// Returns the complete physical range of the global heap collection at `address`.
     ///
     /// The walk parses every object header of the collection, so a collection that is malformed
     /// past its header is an error.
@@ -210,17 +215,16 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the errors of [`global_heap::walk_collection`].
-    fn collection_span(&self, address: u64) -> Result<(u64, u64), FormatError> {
-        let range = global_heap::walk_collection(
+    fn collection_span(&self, address: u64) -> Result<FileRange, FormatError> {
+        global_heap::walk_collection(
             self.image(),
             self.widths().lengths,
             PhysicalAddress::new(address),
             |_| {},
-        )?;
-        Ok((range.start().get(), range.length()))
+        )
     }
 
-    /// Returns every chunk's full on-disk span as `(absolute address, length)`.
+    /// Returns the complete physical ranges of an object's header chunks.
     ///
     /// The spans include the prefix, continuation signatures, and trailing checksums. The caller
     /// uses them to reclaim storage only after the complete traversal succeeds.
@@ -229,7 +233,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
     /// parsing and source-read errors from [`super::object_header::read_oh_chunks`].
-    pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<(u64, u64)>, Error> {
+    pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<FileRange>, Error> {
         Ok(
             super::object_header::read_oh_chunks(&self.image(), addr, self.context.addresses())?
                 .into_iter()
@@ -253,8 +257,8 @@ impl WriteEngine {
     pub(super) fn dense_attribute_storage_spans(
         &self,
         region: &OhRegion,
-        header_spans: &[(u64, u64)],
-    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+        header_spans: &[FileRange],
+    ) -> Option<Vec<(FileRange, FreeClass)>> {
         let mut attr_info = None;
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
@@ -303,10 +307,10 @@ impl WriteEngine {
     /// Returns `None`, and leaves the whole set allocated, if the indexes cannot be accounted for.
     pub(super) fn dense_group_storage_spans(
         &self,
-        header_spans: &[(u64, u64)],
-        attribute_storage: Option<&[(u64, u64, FreeClass)]>,
+        header_spans: &[FileRange],
+        attribute_storage: Option<&[(FileRange, FreeClass)]>,
         link_info: &LinkInfoMessage,
-    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+    ) -> Option<Vec<(FileRange, FreeClass)>> {
         let Some(heap_address) = link_info.fractal_heap_address else {
             return Some(Vec::new());
         };
@@ -319,14 +323,14 @@ impl WriteEngine {
             self.widths(),
         )
         .ok()?;
-        let owned: Vec<(u64, u64)> = header_spans
+        let owned: Vec<FileRange> = header_spans
             .iter()
             .copied()
             .chain(
                 attribute_storage
                     .into_iter()
                     .flatten()
-                    .map(|&(addr, len, _)| (addr, len)),
+                    .map(|&(range, _)| range),
             )
             .collect();
         self.dense_storage_spans(&owned, heap_address, &index)
@@ -342,15 +346,15 @@ impl WriteEngine {
     /// span in `owned`.
     fn dense_storage_spans(
         &self,
-        owned: &[(u64, u64)],
+        owned: &[FileRange],
         heap_address: StoredAddress,
         index: &[Extent],
-    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+    ) -> Option<Vec<(FileRange, FreeClass)>> {
         let base = self.context.addresses();
         let eof = self.image.len();
         let index_spans = index
             .iter()
-            .map(|extent| Some((base.resolve(extent.start()).ok()?.get(), extent.len())))
+            .map(|extent| FileRange::new(base.resolve(extent.start()).ok()?, extent.len()).ok())
             .collect::<Option<Vec<_>>>()?;
         let mut proven = owned.to_vec();
         proven.extend(index_spans.iter().copied());
@@ -358,9 +362,9 @@ impl WriteEngine {
             return None;
         }
 
-        let mut storage: Vec<(u64, u64, FreeClass)> = meta_spans(index_spans).collect();
+        let mut storage: Vec<(FileRange, FreeClass)> = meta_spans(index_spans).collect();
         if let Some(heap_spans) = self.fractal_heap_spans(heap_address) {
-            proven.extend(heap_spans.iter().map(|&(addr, len, _)| (addr, len)));
+            proven.extend(heap_spans.iter().map(|&(range, _)| range));
             if super::spans_disjoint_in_bounds(&mut proven, eof) {
                 storage.extend(heap_spans);
             }
@@ -380,7 +384,7 @@ impl WriteEngine {
     fn fractal_heap_spans(
         &self,
         heap_address: StoredAddress,
-    ) -> Option<Vec<(u64, u64, FreeClass)>> {
+    ) -> Option<Vec<(FileRange, FreeClass)>> {
         let base = self.context.addresses();
         let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &BaseOffsetSource {
@@ -399,7 +403,9 @@ impl WriteEngine {
             .collect();
         fractal_heap_free_spans(self.space.page_size(), &allocations)
             .into_iter()
-            .map(|(addr, len, class)| Some((base.resolve(addr).ok()?.get(), len, class)))
+            .map(|(addr, len, class)| {
+                Some((FileRange::new(base.resolve(addr).ok()?, len).ok()?, class))
+            })
             .collect()
     }
 
@@ -500,7 +506,7 @@ impl WriteEngine {
         addr: u64,
         depth: u32,
         incoming: &HashMap<u64, u32>,
-        out: &mut Vec<(u64, u64, FreeClass)>,
+        out: &mut Vec<(FileRange, FreeClass)>,
     ) {
         // `addr` is an absolute file offset (the caller resolves it from the live
         // file, and the group recursion below re-absolutizes each child). `incoming`
@@ -568,10 +574,12 @@ impl WriteEngine {
                 // An empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
                 if !data_addr.is_undefined(self.widths().offsets) && data_size > 0 {
-                    if let Ok(abs) = base.resolve(data_addr).map(PhysicalAddress::get) {
-                        if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
-                            // A contiguous data block is raw data.
-                            out.push((abs, data_size, FreeClass::Page(PageType::Raw)));
+                    if let Ok(range) = base
+                        .resolve(data_addr)
+                        .and_then(|address| FileRange::new(address, data_size))
+                    {
+                        if range.end() <= PhysicalAddress::new(file_len) {
+                            out.push((range, FreeClass::Page(PageType::Raw)));
                         }
                     }
                 }
@@ -625,11 +633,11 @@ impl WriteEngine {
         &self,
         depth: u32,
         incoming: &HashMap<u64, u32>,
-        header_spans: &[(u64, u64)],
-        attribute_storage: Option<&[(u64, u64, FreeClass)]>,
-        link_storage: Option<&[(u64, u64, FreeClass)]>,
+        header_spans: &[FileRange],
+        attribute_storage: Option<&[(FileRange, FreeClass)]>,
+        link_storage: Option<&[(FileRange, FreeClass)]>,
         children: impl IntoIterator<Item = StoredAddress>,
-        out: &mut Vec<(u64, u64, FreeClass)>,
+        out: &mut Vec<(FileRange, FreeClass)>,
     ) {
         self.append_object_metadata_spans(out, header_spans, attribute_storage);
         out.extend(link_storage.into_iter().flatten().copied());
@@ -649,9 +657,9 @@ impl WriteEngine {
     /// retain their supplied free classes.
     fn append_object_metadata_spans(
         &self,
-        out: &mut Vec<(u64, u64, FreeClass)>,
-        header_spans: &[(u64, u64)],
-        attribute_storage: Option<&[(u64, u64, FreeClass)]>,
+        out: &mut Vec<(FileRange, FreeClass)>,
+        header_spans: &[FileRange],
+        attribute_storage: Option<&[(FileRange, FreeClass)]>,
     ) {
         if let Ok(headers) = self.object_header_free_spans(header_spans) {
             out.extend(headers);
@@ -670,19 +678,15 @@ impl WriteEngine {
     /// Returns [`FormatError::AddressBelowBase`] if a chunk starts below the effective base.
     pub(super) fn object_header_free_spans(
         &self,
-        spans: &[(u64, u64)],
-    ) -> Result<Vec<(u64, u64, FreeClass)>, FormatError> {
+        spans: &[FileRange],
+    ) -> Result<Vec<(FileRange, FreeClass)>, FormatError> {
         spans
             .iter()
-            .map(|&(address, length)| {
-                let stored = self
-                    .context
-                    .addresses()
-                    .relative(PhysicalAddress::new(address))?;
+            .map(|&range| {
+                let stored = self.context.addresses().relative(range.start())?;
                 Ok((
-                    address,
-                    length,
-                    self.space.object_header_free_class(stored, length),
+                    range,
+                    self.space.object_header_free_class(stored, range.length()),
                 ))
             })
             .collect()
@@ -771,7 +775,7 @@ impl WriteEngine {
         &self,
         root: u64,
         DeletedCollections(collections): DeletedCollections,
-    ) -> Vec<(u64, u64, FreeClass)> {
+    ) -> Vec<(FileRange, FreeClass)> {
         if collections.is_empty() {
             return Vec::new();
         }
@@ -784,17 +788,12 @@ impl WriteEngine {
         };
         collections
             .into_iter()
-            .filter(|(address, _)| !referenced_collections.contains(address))
-            .filter_map(|(address, len)| {
-                let stored = self
-                    .context
-                    .addresses()
-                    .relative(PhysicalAddress::new(address))
-                    .ok()?;
+            .filter(|range| !referenced_collections.contains(&range.start().get()))
+            .filter_map(|range| {
+                let stored = self.context.addresses().relative(range.start()).ok()?;
                 Some((
-                    address,
-                    len,
-                    collection_free_class(self.space.page_size(), stored, len),
+                    range,
+                    collection_free_class(self.space.page_size(), stored, range.length()),
                 ))
             })
             .collect()
@@ -824,18 +823,18 @@ impl WriteEngine {
     /// This method only locates the layout and dataspace messages and validates
     /// the result. The global heap collections that the chunks refer to are
     /// excluded, as in [`collect_free_spans`](Self::collect_free_spans).
-    pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(u64, u64, FreeClass)>> {
+    pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(FileRange, FreeClass)>> {
         let split = self.chunked_storage_parts(addr)?;
         let index_class = chunk_index_free_class(
             split.index_layout,
             self.index_is_provably_raw(&split.data, &split.index),
         );
-        let mut spans: Vec<(u64, u64, FreeClass)> = split
+        let mut spans: Vec<_> = split
             .data
             .iter()
-            .map(|&(a, l)| (a, l, FreeClass::Page(PageType::Raw)))
+            .map(|&range| (range, FreeClass::Page(PageType::Raw)))
             .collect();
-        spans.extend(split.index.into_iter().map(|(a, l)| (a, l, index_class)));
+        spans.extend(split.index.into_iter().map(|range| (range, index_class)));
         Some(spans)
     }
 
@@ -878,11 +877,9 @@ impl WriteEngine {
         // would panic on the double-free). On any error or violation, leave the
         // whole dataset unreclaimed because freeing a region still in use is unsafe.
         //
-        // The layout's stored addresses are relative to the userblock base, so the
-        // enumeration runs on a base-relative view of the file and each returned
-        // span address is shifted back to an absolute file offset by adding `base`
-        // (a no-op on a base-0 file). The free list and the bounds check below both
-        // work in absolute file offsets.
+        // Enumerate stored-coordinate ranges through a view framed at the effective base.
+        // Resolve each range for physical ownership checks before converting it to an allocator
+        // extent during reclamation.
         let base = self.context.addresses();
         let split = crate::chunked_read::collect_chunked_storage_spans(
             &BaseOffsetSource {
@@ -898,18 +895,21 @@ impl WriteEngine {
         // B-tree is metadata by the format's allocation taxonomy. Other index structures are raw
         // only where this crate provably placed them beside their chunk data. An index with an
         // unproven PAGE type is recorded as dead.
-        let mut data: Vec<(u64, u64)> = Vec::with_capacity(split.data.len());
-        for (addr, len) in split.data {
-            data.push((base.resolve(StoredAddress::new(addr)).ok()?.get(), len));
-        }
-        let mut index: Vec<(u64, u64)> = Vec::with_capacity(split.index.len());
-        for (addr, len) in split.index {
-            index.push((base.resolve(StoredAddress::new(addr)).ok()?.get(), len));
-        }
-        // Validate both halves together. They must be disjoint from each other and internally
-        // before either is trusted, including by the proof.
-        let mut plain: Vec<(u64, u64)> = data.iter().chain(index.iter()).copied().collect();
-        if !super::spans_disjoint_in_bounds(&mut plain, self.image.len()) {
+        let physical = |range: AddressRange<StoredAddress>| {
+            FileRange::new(base.resolve(range.start()).ok()?, range.length()).ok()
+        };
+        let data = split
+            .data
+            .into_iter()
+            .map(physical)
+            .collect::<Option<Vec<_>>>()?;
+        let index = split
+            .index
+            .into_iter()
+            .map(physical)
+            .collect::<Option<Vec<_>>>()?;
+        let mut plain: Vec<_> = data.iter().chain(&index).copied().collect();
+        if !physical_ranges_disjoint_in_bounds(&mut plain, self.image.len()) {
             return None;
         }
         let index_layout = match layout {
@@ -992,16 +992,18 @@ impl WriteEngine {
     ///
     /// A non-paged file has no page types to keep apart, so everything is
     /// reclaimable there. The tag is ignored by its commit tail entirely.
-    pub(super) fn index_is_provably_raw(&self, data: &[(u64, u64)], index: &[(u64, u64)]) -> bool {
+    pub(super) fn index_is_provably_raw(&self, data: &[FileRange], index: &[FileRange]) -> bool {
         match self.space.page_size() {
             None => true,
             Some(page_size) => {
                 index_abuts_chunk_data(data, index)
-                    && index.iter().all(|&(at, len)| {
+                    && index.iter().all(|range| {
                         self.context
                             .addresses()
-                            .relative(PhysicalAddress::new(at))
-                            .is_ok_and(|stored| !touches_page_zero(page_size, [(stored, len)]))
+                            .relative(range.start())
+                            .is_ok_and(|stored| {
+                                !touches_page_zero(page_size, [(stored, range.length())])
+                            })
                     })
             }
         }
@@ -1020,7 +1022,7 @@ impl WriteEngine {
     /// kept chunk data is never freed. Base-aware and validated
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
     /// violation.
-    pub(super) fn chunked_index_spans(&self, addr: u64) -> Option<Vec<(u64, u64)>> {
+    pub(super) fn chunked_index_spans(&self, addr: u64) -> Option<Vec<FileRange>> {
         let region =
             Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
@@ -1043,7 +1045,7 @@ impl WriteEngine {
             return None;
         }
         let base = self.context.addresses();
-        let mut spans = chunked_read::chunk_index_spans_from_source(
+        let stored = chunked_read::chunk_index_spans_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: base.effective_base(),
@@ -1052,10 +1054,11 @@ impl WriteEngine {
             self.widths(),
         )
         .ok()?;
-        for (a, _) in &mut spans {
-            *a = base.resolve(StoredAddress::new(*a)).ok()?.get();
-        }
-        if !super::spans_disjoint_in_bounds(&mut spans, self.image.len()) {
+        let mut spans = stored
+            .into_iter()
+            .map(|range| FileRange::new(base.resolve(range.start()).ok()?, range.length()).ok())
+            .collect::<Option<Vec<_>>>()?;
+        if !physical_ranges_disjoint_in_bounds(&mut spans, self.image.len()) {
             return None;
         }
         Some(spans)
@@ -1073,8 +1076,8 @@ impl WriteEngine {
     fn collect_owned_spans(
         &self,
         root: u64,
-        raw: &mut Vec<(u64, u64)>,
-        metadata: &mut Vec<(u64, u64)>,
+        raw: &mut Vec<FileRange>,
+        metadata: &mut Vec<FileRange>,
     ) -> Result<bool, Error> {
         self.walk_reachable_objects([root], |addr, header, child| {
             if header.version != OWNED_HEADER_VERSION {
@@ -1138,8 +1141,8 @@ impl WriteEngine {
     fn collect_object_owned_spans(
         &self,
         header: &ObjectHeader,
-        raw: &mut Vec<(u64, u64)>,
-        metadata: &mut Vec<(u64, u64)>,
+        raw: &mut Vec<FileRange>,
+        metadata: &mut Vec<FileRange>,
         mut child: impl FnMut(u64),
     ) -> Result<bool, Error> {
         let mut complete = true;
@@ -1208,8 +1211,8 @@ impl WriteEngine {
         &self,
         messages: &[HeaderMessage],
         data: &[u8],
-        raw: &mut Vec<(u64, u64)>,
-        metadata: &mut Vec<(u64, u64)>,
+        raw: &mut Vec<FileRange>,
+        metadata: &mut Vec<FileRange>,
     ) -> Result<bool, Error> {
         let mut complete = true;
         let layout = DataLayout::parse_with_widths(data, self.widths())?;
@@ -1219,7 +1222,10 @@ impl WriteEngine {
                 if let Some(address) = address
                     && *size > 0
                 {
-                    raw.push((self.context.addresses().resolve(*address)?.get(), *size));
+                    raw.push(FileRange::new(
+                        self.context.addresses().resolve(*address)?,
+                        *size,
+                    )?);
                 }
             }
             DataLayout::Chunked { .. } => {
@@ -1246,7 +1252,7 @@ impl WriteEngine {
                         storage
                             .data
                             .into_iter()
-                            .map(|(addr, len)| (StoredAddress::new(addr), len)),
+                            .map(|range| (range.start(), range.length())),
                     )?,
                 );
                 metadata.extend(
@@ -1254,7 +1260,7 @@ impl WriteEngine {
                         storage
                             .index
                             .into_iter()
-                            .map(|(addr, len)| (StoredAddress::new(addr), len)),
+                            .map(|range| (range.start(), range.length())),
                     )?,
                 );
             }
@@ -1275,7 +1281,7 @@ impl WriteEngine {
     fn collect_group_owned_spans(
         &self,
         data: &[u8],
-        metadata: &mut Vec<(u64, u64)>,
+        metadata: &mut Vec<FileRange>,
         mut child: impl FnMut(u64),
     ) -> Result<bool, Error> {
         let info = LinkInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
@@ -1330,7 +1336,7 @@ impl WriteEngine {
     fn collect_attribute_owned_spans(
         &self,
         data: &[u8],
-        metadata: &mut Vec<(u64, u64)>,
+        metadata: &mut Vec<FileRange>,
     ) -> Result<bool, Error> {
         let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         let Some(heap) = info.fractal_heap_address else {
@@ -1372,10 +1378,15 @@ impl WriteEngine {
     fn absolute_owned_spans(
         &self,
         spans: impl IntoIterator<Item = (StoredAddress, u64)>,
-    ) -> Result<Vec<(u64, u64)>, Error> {
+    ) -> Result<Vec<FileRange>, Error> {
         spans
             .into_iter()
-            .map(|(addr, len)| Ok((self.context.addresses().resolve(addr)?.get(), len)))
+            .map(|(addr, len)| {
+                Ok(FileRange::new(
+                    self.context.addresses().resolve(addr)?,
+                    len,
+                )?)
+            })
             .collect()
     }
 
@@ -1391,7 +1402,7 @@ impl WriteEngine {
     fn collect_owned_heap(
         &self,
         heap: StoredAddress,
-        metadata: &mut Vec<(u64, u64)>,
+        metadata: &mut Vec<FileRange>,
     ) -> Result<bool, Error> {
         let storage = match fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &BaseOffsetSource {
@@ -1412,10 +1423,10 @@ impl WriteEngine {
             }
         };
         for &(extent, _) in storage.allocations() {
-            metadata.push((
-                self.context.addresses().resolve(extent.start())?.get(),
+            metadata.push(FileRange::new(
+                self.context.addresses().resolve(extent.start())?,
                 extent.len(),
-            ));
+            )?);
         }
         Ok(true)
     }
@@ -1440,23 +1451,34 @@ pub(super) fn chunk_index_free_class(index: ChunkIndexLayout, provably_raw: bool
 /// expressible against spans alone.
 ///
 /// An empty index is vacuously placed: there is nothing to file.
-pub(super) fn index_abuts_chunk_data(data: &[(u64, u64)], index: &[(u64, u64)]) -> bool {
+pub(super) fn index_abuts_chunk_data(data: &[FileRange], index: &[FileRange]) -> bool {
     if index.is_empty() {
         return true;
     }
     // The index as a whole: this crate writes its blocks as one run beside the
     // chunk data, so a data span abutting either end places all of them.
     let (Some(index_start), Some(index_end)) = (
-        index.iter().map(|&(a, _)| a).min(),
-        index.iter().filter_map(|&(a, l)| a.checked_add(l)).max(),
+        index.iter().map(|range| range.start()).min(),
+        index.iter().map(|range| range.end()).max(),
     ) else {
         return false;
     };
     // A zero-length span touches an address without occupying a byte beside it,
     // so it places nothing.
-    data.iter().any(|&(addr, len)| {
-        len > 0 && (addr.checked_add(len) == Some(index_start) || addr == index_end)
+    data.iter().any(|range| {
+        range.length() > 0 && (range.end() == index_start || range.start() == index_end)
     })
+}
+
+fn physical_ranges_disjoint_in_bounds(ranges: &mut [FileRange], length: u64) -> bool {
+    if ranges
+        .iter()
+        .any(|range| range.length() == 0 || range.end() > PhysicalAddress::new(length))
+    {
+        return false;
+    }
+    ranges.sort_unstable_by_key(|range| range.start());
+    ranges.windows(2).all(|pair| pair[0].precedes(pair[1]))
 }
 
 /// Returns the PAGE free-space class of a global heap collection of `len` bytes at the stored
@@ -1586,26 +1608,40 @@ fn huge_object_free_class(
 }
 
 /// Returns the gaps in `0..limit` left by sorted, disjoint `claimed` spans.
-fn complement_spans(limit: u64, claimed: &[(u64, u64)]) -> Vec<(u64, u64)> {
+///
+/// The caller passes physical ranges contained in `0..limit`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if a computed gap has reversed endpoints, or
+/// [`FormatError::OffsetOverflow`] if its exclusive end exceeds [`u64::MAX`].
+fn complement_spans(limit: u64, claimed: &[FileRange]) -> Result<Vec<FileRange>, FormatError> {
     let mut out = Vec::new();
-    let mut cursor = 0u64;
-    for &(addr, len) in claimed {
-        if cursor < addr {
-            out.push((cursor, addr - cursor));
+    let mut cursor = PhysicalAddress::new(0);
+    for &range in claimed {
+        if cursor < range.start() {
+            let length = range.start().checked_distance_from(cursor).ok_or_else(|| {
+                FormatError::Internal("a claimed range precedes the gap cursor".into())
+            })?;
+            out.push(FileRange::new(cursor, length)?);
         }
-        cursor = addr + len;
+        cursor = range.end();
     }
+    let limit = PhysicalAddress::new(limit);
     if cursor < limit {
-        out.push((cursor, limit - cursor));
+        let length = limit.checked_distance_from(cursor).ok_or_else(|| {
+            FormatError::Internal("the ownership limit precedes the gap cursor".into())
+        })?;
+        out.push(FileRange::new(cursor, length)?);
     }
-    out
+    Ok(out)
 }
 
 /// Tags each span as metadata for reclamation.
-pub(super) fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u64, FreeClass)> {
+pub(super) fn meta_spans(spans: Vec<FileRange>) -> impl Iterator<Item = (FileRange, FreeClass)> {
     spans
         .into_iter()
-        .map(|(a, l)| (a, l, FreeClass::Page(PageType::Meta)))
+        .map(|range| (range, FreeClass::Page(PageType::Meta)))
 }
 
 const OWNED_HEADER_VERSION: u8 = 2;

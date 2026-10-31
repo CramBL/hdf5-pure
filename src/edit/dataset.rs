@@ -6,6 +6,8 @@
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
@@ -335,7 +337,7 @@ impl WriteEngine {
                 }
 
                 let old_extent = if !data_addr.is_undefined(OFFSET_WIDTH) && data_size > 0 {
-                    Some((base.resolve(data_addr)?.get(), data_size))
+                    Some(FileRange::new(base.resolve(data_addr)?, data_size)?)
                 } else {
                     None
                 };
@@ -849,8 +851,15 @@ impl WriteEngine {
         // On PAGE files, adjacency to chunk data proves that an index occupies raw pages.
         // Use one reusable region when it fits both. Otherwise place chunks separately and retain
         // unproven index bytes as dead storage during reclamation.
-        let chunk_total: u64 = new_chunks.iter().map(PreparedChunk::stored_size).sum();
-        let placed_chunks = |blob_stored: StoredAddress| -> Vec<ChunkRecord> {
+        let chunk_total = new_chunks.iter().try_fold(0_u64, |offset, chunk| {
+            offset
+                .checked_add(chunk.stored_size())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset,
+                    length: chunk.stored_size(),
+                })
+        })?;
+        let placed_chunks = |blob_stored: StoredAddress| -> Result<Vec<ChunkRecord>, FormatError> {
             let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
             let mut next = blob_stored;
             for chunk in new_chunks {
@@ -859,11 +868,11 @@ impl WriteEngine {
                     stored_size: chunk.stored_size(),
                     filter_mask: chunk.filter_mask(),
                 });
-                next = next.offset(chunk.stored_size());
+                next = next.checked_add(chunk.stored_size())?;
             }
-            combined
+            Ok(combined)
         };
-        let sizing = placed_chunks(StoredAddress::new(0));
+        let sizing = placed_chunks(StoredAddress::new(0))?;
         let ea_len = hdf5_pure_format::__private::extensible_array_len(
             &IndexSlots::dense(&sizing),
             chunk_bytes,
@@ -882,8 +891,14 @@ impl WriteEngine {
             )
             .map_err(Error::Format)
         };
+        let blob_length = chunk_total
+            .checked_add(ea_len)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: chunk_total,
+                length: ea_len,
+            })?;
         let blob = if self.space.is_paged() {
-            self.alloc_free(chunk_total + ea_len, AllocationClass::Raw)
+            self.alloc_free(blob_length, AllocationClass::Raw)
         } else {
             None
         };
@@ -891,29 +906,28 @@ impl WriteEngine {
             Some(blob_stored) => {
                 // Return the reservation on any failure before placement completes.
                 let placed = (|| -> Result<StoredAddress, Error> {
-                    let combined = placed_chunks(blob_stored);
-                    let mut buf =
-                        Vec::with_capacity(usize::try_from(chunk_total + ea_len).unwrap_or(0));
+                    let combined = placed_chunks(blob_stored)?;
+                    let mut buf = Vec::with_capacity(usize::try_from(blob_length).unwrap_or(0));
                     for chunk in new_chunks {
                         buf.extend_from_slice(chunk.bytes());
                     }
                     buf.extend_from_slice(&ea(
                         &IndexSlots::dense(&combined),
-                        blob_stored.offset(chunk_total),
+                        blob_stored.checked_add(chunk_total)?,
                     )?);
                     self.place(
                         Placement::Reused {
                             addr: base.resolve(blob_stored)?.get(),
-                            len: chunk_total + ea_len,
+                            len: blob_length,
                         },
                         &buf,
                     )?;
-                    Ok(blob_stored.offset(chunk_total))
+                    Ok(blob_stored.checked_add(chunk_total)?)
                 })();
                 match placed {
                     Ok(ea_stored) => ea_stored,
                     Err(e) => {
-                        self.release_raw_alloc(blob_stored, chunk_total + ea_len);
+                        self.release_raw_alloc(blob_stored, blob_length);
                         return Err(e);
                     }
                 }
@@ -1243,7 +1257,7 @@ impl WriteEngine {
         let placed = addrs
             .iter()
             .zip(&staging.collections)
-            .map(|(&a, c)| Ok((base.resolve(StoredAddress::new(a))?.get(), c.len() as u64)))
+            .map(|(&a, c)| FileRange::new(base.resolve(StoredAddress::new(a))?, c.len() as u64))
             .collect::<Result<Vec<_>, FormatError>>()?;
         self.vl_overwrite_heaps.insert(vlen.path, placed);
         self.superseded_heaps.extend(superseded);
@@ -1363,7 +1377,7 @@ pub(super) enum MovingWrite {
         addr_off: usize,
         /// The replacement payload consumed during application.
         bytes: OverwriteId,
-        old_extent: Option<(u64, u64)>,
+        old_extent: Option<FileRange>,
     },
 }
 
@@ -1760,7 +1774,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
         return None;
     }
     let mut writes = Vec::with_capacity(new_chunks.len() + 1);
-    let mut spans: Vec<(u64, u64)> = Vec::with_capacity(new_chunks.len() + 1);
+    let mut spans = Vec::with_capacity(new_chunks.len() + 1);
     let mut any_shrunk = false;
     for (ci, chunk) in grid.grid_order.iter().zip(new_chunks) {
         if ci.filter_mask != chunk.filter_mask() {
@@ -1774,22 +1788,27 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
         if new_len < slot {
             any_shrunk = true;
         }
-        ci.address
-            .get()
-            .checked_add(new_len)
-            .filter(|&e| e <= src.len())?;
+        let range = AddressRange::new(ci.address, new_len).ok()?;
+        if range.end().get() > src.len() {
+            return None;
+        }
         writes.push((ci.address.get(), chunk.bytes().to_vec()));
-        spans.push((ci.address.get(), new_len));
+        spans.push(range);
     }
 
     if any_shrunk {
         let (index_addr, index_bytes) =
             try_rebuild_index_in_place(src, layout, ds, geometry, &grid.grid_order, new_chunks)?;
-        spans.push((index_addr, index_bytes.len() as u64));
-        writes.push((index_addr, index_bytes));
+        spans.push(AddressRange::new(index_addr, index_bytes.len() as u64).ok()?);
+        writes.push((index_addr.get(), index_bytes));
     }
 
-    if !super::spans_disjoint_in_bounds(&mut spans, src.len()) {
+    spans.sort_unstable_by_key(|range| range.start());
+    if spans
+        .iter()
+        .any(|range| range.is_empty() || range.end().get() > src.len())
+        || spans.windows(2).any(|pair| !pair[0].precedes(pair[1]))
+    {
         return None;
     }
     Some(writes)
@@ -1809,7 +1828,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     geometry: &ChunkGeometry,
     grid_order: &[crate::chunked_read::ChunkInfo],
     new_chunks: &[PreparedChunk],
-) -> Option<(u64, Vec<u8>)> {
+) -> Option<(StoredAddress, Vec<u8>)> {
     let ChunkGeometry {
         spatial, raw_size, ..
     } = geometry;
@@ -1872,25 +1891,25 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     if spans.is_empty() {
         return None;
     }
-    spans.sort_unstable_by_key(|&(a, _)| a);
-    if spans[0].0 != index_addr.get() {
+    spans.sort_unstable_by_key(|range| range.start());
+    if spans[0].start() != index_addr {
         return None;
     }
-    let mut end = index_addr.get();
-    for &(a, l) in &spans {
-        if a != end {
+    let mut end = index_addr;
+    for range in &spans {
+        if range.start() != end {
             return None; // a gap means the index is not contiguous
         }
-        end = a.checked_add(l)?;
+        end = range.end();
     }
-    if new_index.len() as u64 != end - index_addr.get() {
+    if Some(new_index.len() as u64) != end.checked_distance_from(index_addr) {
         return None;
     }
     index_addr
         .get()
         .checked_add(new_index.len() as u64)
         .filter(|&e| e <= src.len())?;
-    Some((index_addr.get(), new_index))
+    Some((index_addr, new_index))
 }
 
 /// Provides encoded chunk bytes from a relocating overwrite in dense row-major order.

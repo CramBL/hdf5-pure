@@ -1,5 +1,6 @@
 use std::fs;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
@@ -9,6 +10,7 @@ use test_util_hdf5::userblock;
 use crate::FileSpacePageSize;
 #[cfg(test)]
 use crate::FileSpaceSettings;
+use crate::PhysicalAddress;
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::WriteEngine;
 use crate::error::FormatError;
@@ -24,15 +26,15 @@ fn deleting_a_generic_large_continuation_keeps_its_partial_tail_out_of_small_fre
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
         engine.oh_chunk_spans(512).unwrap(),
-        [(512, 268), (1_536, 4_158)]
+        [range(512, 268), range(1_536, 4_158)]
     );
     assert_eq!(
         engine
-            .object_header_free_spans(&[(512, 268), (1_536, 4_158)])
+            .object_header_free_spans(&[range(512, 268), range(1_536, 4_158)])
             .unwrap(),
         [
-            (512, 268, FreeClass::Page(PageType::Meta)),
-            (1_536, 4_158, FreeClass::Dead)
+            (range(512, 268), FreeClass::Page(PageType::Meta)),
+            (range(1_536, 4_158), FreeClass::Dead)
         ],
     );
     engine.delete(&ObjectPathBuf::parse("/d")).unwrap();
@@ -66,11 +68,13 @@ fn header_classification_uses_stored_alignment_and_preserves_physical_extents(
     assert_eq!(engine.context.addresses().effective_base().get(), 512);
     let physical = stored + 512;
     let spans = engine
-        .object_header_free_spans(&[(physical, length)])
+        .object_header_free_spans(&[range(physical, length)])
         .unwrap();
-    assert_eq!(spans, [(physical, length, expected)]);
+    assert_eq!(spans, [(range(physical, length), expected)]);
     assert_eq!(engine.stored_spans(spans).unwrap()[0].0.get(), stored);
-    let error = engine.object_header_free_spans(&[(511, 10)]).unwrap_err();
+    let error = engine
+        .object_header_free_spans(&[range(511, 10)])
+        .unwrap_err();
     assert!(
         matches!(
             error,
@@ -111,7 +115,7 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let spans = engine.oh_chunk_spans(address).unwrap();
     assert_eq!(spans.len(), 1);
-    assert!(spans[0].1 < page);
+    assert!(spans[0].length() < page);
     engine.delete(&ObjectPathBuf::parse("/victim")).unwrap();
     engine.commit().unwrap();
     let metadata: Vec<_> = engine
@@ -128,8 +132,8 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
         })
         .collect();
     assert_eq!(
-        test_util::range::covered_len(&metadata, &(address..address + spans[0].1)),
-        spans[0].1
+        test_util::range::covered_len(&metadata, &(address..address + spans[0].length())),
+        spans[0].length()
     );
     drop(engine);
     let file = File::open(&path).unwrap();
@@ -171,4 +175,8 @@ fn assert_large_header_tail(engine: &WriteEngine) {
             .any(|extent| extent.start() <= StoredAddress::new(1_536)
                 && extent.end() >= StoredAddress::new(5_632))
     );
+}
+
+fn range(start: u64, length: u64) -> FileRange {
+    FileRange::new(PhysicalAddress::new(start), length).unwrap()
 }

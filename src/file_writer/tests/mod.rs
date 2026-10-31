@@ -439,7 +439,7 @@ fn paged_metadata_capacity_keeps_known_sections(
     assert_eq!(
         layout::paged_metadata_section_allocation(
             FileSpacePageSize::try_from(512).unwrap(),
-            end,
+            StoredAddress::new(end),
             [other],
             &sections
         )
@@ -461,7 +461,7 @@ fn paged_metadata_capacity_rejects_overflow(
     assert_eq!(
         layout::paged_metadata_section_allocation(
             FileSpacePageSize::try_from(512).unwrap(),
-            end,
+            StoredAddress::new(end),
             [other],
             &[]
         )
@@ -1522,7 +1522,7 @@ fn an_indexed_dense_set_emits_a_creation_order_btree() {
 
     let (at, record_size, root, nrec) = btree_header(&built.blob, 9);
     assert_eq!(
-        heap_address.offset(at as u64),
+        heap_address.checked_add(at as u64).unwrap(),
         corder_addr,
         "the Attribute Info message names a different address than the tree sits at"
     );

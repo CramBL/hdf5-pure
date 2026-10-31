@@ -15,6 +15,7 @@ use core::num::{NonZeroU64, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::MetadataFrame;
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::PhysicalAddress;
 #[cfg(test)]
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
@@ -29,6 +30,7 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid;
@@ -403,10 +405,10 @@ fn collect_chunk_info_inner(
 /// chunk B-tree is only a few levels deep, so this is far beyond any valid tree.
 const MAX_CHUNK_BTREE_DEPTH: u32 = 64;
 
-/// Enumerate the on-disk byte spans of every node in a version 1 B-tree of
+/// Returns the stored-coordinate ranges of every node in a version 1 B-tree of
 /// type 1 (the raw-data chunk index), so a deleted chunked dataset's index can
-/// be reclaimed. Returns one `(addr, len)` per `TREE` node (internal and leaf);
-/// the chunk *data* blocks the leaves point at are enumerated separately by
+/// be reclaimed. Returns one range per `TREE` node (internal and leaf).
+/// The chunk data blocks the leaves point at are enumerated separately by
 /// [`collect_chunk_info`].
 ///
 /// Each node's length is sized from `entries_used` — the region the reader
@@ -416,15 +418,19 @@ const MAX_CHUNK_BTREE_DEPTH: u32 = 64;
 /// guessed at, honoring the editor's "under-reclaim, never over-reclaim" rule.
 ///
 /// `ndims` is the number of offset dimensions in each key (rank + 1), the same
-/// value [`collect_chunk_info`] takes. Errors (a malformed node, an out-of-bounds
-/// child, or a tree deeper than [`MAX_CHUNK_BTREE_DEPTH`]) propagate so the
-/// caller can leave the whole index unreclaimed.
+/// value [`collect_chunk_info`] takes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the traversal depth exceeds
+/// [`MAX_CHUNK_BTREE_DEPTH`], or [`FormatError::OffsetOverflow`] if a node's exclusive end exceeds
+/// [`u64::MAX`]. Propagates node-reading and parsing errors.
 pub(crate) fn collect_chunk_btree_node_spans<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
     offset_width: OffsetWidth,
-) -> Result<Vec<(u64, u64)>, FormatError> {
+) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
     let mut out = Vec::new();
     collect_chunk_btree_node_spans_inner(source, btree_address, ndims, offset_width, 0, &mut out)?;
     Ok(out)
@@ -436,7 +442,7 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     ndims: usize,
     offset_width: OffsetWidth,
     depth: u32,
-    out: &mut Vec<(u64, u64)>,
+    out: &mut Vec<AddressRange<StoredAddress>>,
 ) -> Result<(), FormatError> {
     if depth > MAX_CHUNK_BTREE_DEPTH {
         return Err(FormatError::ChunkedReadError(
@@ -453,7 +459,10 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
         ndims,
     )?;
     let node = bytes.node();
-    out.push((btree_address.get(), node.stored_len().to_u64()));
+    out.push(AddressRange::new(
+        btree_address,
+        node.stored_len().to_u64(),
+    )?);
 
     // Internal nodes (level > 0) hold child node addresses, not chunk records;
     // recurse so their nodes are reclaimed too.
@@ -560,7 +569,7 @@ fn generate_implicit_chunks(
                 "implicit chunk slot resolves past the addressable data block".into(),
             )
         })?;
-        let address = data_address.get().checked_add(byte_offset).ok_or_else(|| {
+        let address = data_address.checked_add(byte_offset).map_err(|_error| {
             FormatError::ChunkedReadError(
                 "implicit chunk address resolves past the addressable file".into(),
             )
@@ -569,7 +578,7 @@ fn generate_implicit_chunks(
             chunk_size: StoredChunkSize::v4(chunk_byte_size),
             filter_mask: 0,
             offsets,
-            address: StoredAddress::new(address),
+            address,
         });
     }
     Ok(chunks)
@@ -1663,13 +1672,8 @@ fn collect_btree_v2_chunks_from_source<S: Source + ?Sized>(
     for raw in records {
         let record = context.decode(&raw)?;
         let offsets = chunk_grid::offsets_from_scaled(chunk_dims, &record.scaled_offsets)?;
-        let end = record.address.get().checked_add(record.stored_size).ok_or(
-            FormatError::OffsetOverflow {
-                offset: record.address.get(),
-                length: record.stored_size,
-            },
-        )?;
-        if end > source.len() {
+        let end = record.address.checked_add(record.stored_size)?;
+        if end.get() > source.len() {
             return Err(FormatError::ChunkedReadError(format!(
                 "version 2 B-tree chunk at {} with size {} extends past the source length {}",
                 record.address.get(),
@@ -1942,24 +1946,23 @@ pub(crate) fn plan_dense_grid(
     Some(DenseChunkGrid { grid_order })
 }
 
-/// Every on-disk byte span `(addr, len)` a chunked dataset owns: each allocated
-/// chunk data block plus the chunk index's own structure blocks. This is the
-/// single place that maps a chunked layout to the regions it occupies on disk.
-/// The in-place editor uses it to reclaim that space on delete (issue #77).
+/// Returns the stored-coordinate ranges of a chunked dataset's allocated chunks and index blocks.
 ///
-/// `layout` must be a [`DataLayout::Chunked`] (anything else is an error).
-/// Returns both halves empty when the index address is undefined (an empty or
-/// never-written dataset owns no storage). Errors propagated from the index walkers mean the
-/// layout's complete storage footprint could not be proven. For example, a structure may be
-/// malformed. The caller then leaves the dataset's bytes in place because it cannot prove the
-/// full region is free. The spans are
-/// not pre-checked for mutual overlap or file bounds. The editor validates that before handing
-/// them to the free list.
+/// The in-place editor uses these ranges to reclaim the dataset's storage on delete.
+///
+/// Returns both halves empty when the index address is undefined. The caller checks mutual
+/// overlap and file bounds before reclaiming these ranges.
 ///
 /// Chunk data spans come from the same index walkers the reader uses
 /// ([`collect_chunks_for_layout_from_source`]); index-structure spans come from
 /// [`collect_chunk_index_spans`]. `widths` are the address and length widths from the
 /// superblock.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if `layout` is not chunked or its chunk dimensions
+/// are invalid, or [`FormatError::OffsetOverflow`] if a chunk's exclusive end exceeds
+/// [`u64::MAX`]. Propagates index walker errors.
 #[cfg(feature = "std")]
 pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     source: &S,
@@ -1996,7 +1999,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         ));
     }
 
-    let mut data: Vec<(u64, u64)> = Vec::new();
+    let mut data: Vec<AddressRange<StoredAddress>> = Vec::new();
 
     // Chunk data blocks (the walkers omit unallocated chunks). Build checked extents before the
     // caller can admit any of them to returned-space state.
@@ -2016,7 +2019,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
                 offset: ci.address.get(),
                 length: ci.chunk_size.get(),
             })?;
-        data.push((extent.start().get(), extent.len()));
+        data.push(extent.range());
     }
 
     // The chunk index's own structure blocks.
@@ -2034,11 +2037,11 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
 /// these spans assigns the page type appropriate to the index kind and its proven placement.
 #[cfg(feature = "std")]
 pub(crate) struct ChunkedStorageSpans {
-    pub(crate) data: Vec<(u64, u64)>,
-    pub(crate) index: Vec<(u64, u64)>,
+    pub(crate) data: Vec<AddressRange<StoredAddress>>,
+    pub(crate) index: Vec<AddressRange<StoredAddress>>,
 }
 
-/// On-disk byte spans `(addr, len)` of a chunked dataset's index *structure*
+/// Returns the stored-coordinate ranges of a chunked dataset's index *structure*
 /// (not its chunk data): the B-tree v1 nodes, fixed-array header and data block,
 /// or extensible-array header, index, super, and data blocks, by index type.
 /// Single-chunk and implicit indexes have no separate structure (their footprint is the chunk
@@ -2048,13 +2051,17 @@ pub(crate) struct ChunkedStorageSpans {
 /// `ndims` is `chunk_dimensions.len()` (rank + 1), as [`collect_chunk_info`]
 /// takes. Shared by [`collect_chunked_storage_spans`]; kept separate so the
 /// per-type dispatch lives next to the chunk-data dispatch it mirrors.
+///
+/// # Errors
+///
+/// Propagates errors from the selected index walker.
 #[cfg(feature = "std")]
 fn collect_chunk_index_spans<S: Source + ?Sized>(
     source: &S,
     index: ChunkIndexLayout,
     ndims: usize,
     widths: FormatWidths,
-) -> Result<Vec<(u64, u64)>, FormatError> {
+) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
     // An undefined index address means the index structure was never written.
     let Some(index_addr) = index.address() else {
         return Ok(Vec::new());
@@ -2069,30 +2076,29 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
         ChunkIndexLayout::ExtensibleArray { .. } => {
             extensible_array::index_spans(source, widths, index_addr)
         }
-        ChunkIndexLayout::BTreeV2 { .. } => crate::btree_v2::collect_btree_v2_storage_extents(
-            source, index_addr, widths,
-        )
-        .map(|extents| {
-            extents
-                .into_iter()
-                .map(|extent| (extent.start().get(), extent.len()))
-                .collect()
-        }),
+        ChunkIndexLayout::BTreeV2 { .. } => {
+            crate::btree_v2::collect_btree_v2_storage_extents(source, index_addr, widths)
+                .map(|extents| extents.into_iter().map(Extent::range).collect())
+        }
     }
 }
 
-/// The on-disk byte spans of a chunked dataset's index *structure* (not its chunk
-/// data), from an in-memory file image and a parsed [`DataLayout::Chunked`]. A
-/// buffered convenience wrapper over [`collect_chunk_index_spans`], used by the
-/// in-place editor to test whether a chunked dataset's index occupies a single
-/// contiguous region it can rebuild in place. Returns an empty vector for an
-/// undefined index address or a single-chunk / implicit index (no separate structure).
+/// Returns the stored-coordinate ranges of the index blocks described by `layout`.
+///
+/// The editor uses these ranges to determine whether it can rebuild the index in one contiguous
+/// region. Returns an empty vector for an undefined index address, a single-chunk index, or an
+/// implicit index.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if `layout` is not chunked. Propagates errors from
+/// [`collect_chunk_index_spans`].
 #[cfg(feature = "std")]
 pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     source: &S,
     layout: &DataLayout,
     widths: FormatWidths,
-) -> Result<Vec<(u64, u64)>, FormatError> {
+) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
     let DataLayout::Chunked {
         chunk_dimensions,
         index,
@@ -4321,17 +4327,28 @@ mod tests {
 
         assert_eq!(
             spans.index,
-            vec![
+            stored_ranges(vec![
                 (0, u64::try_from(header.len()).unwrap()),
                 (u64::try_from(leaf0_at).unwrap(), 512),
                 (u64::try_from(leaf1_at).unwrap(), 512),
                 (u64::try_from(root_at).unwrap(), 512),
-            ]
+            ])
         );
         assert_eq!(spans.data.len(), 27);
-        assert_eq!(spans.data[0], (0x1000, fixed_chunk_size));
-        assert_eq!(spans.data[26], (0x1340, fixed_chunk_size));
-        assert!(spans.data.iter().all(|&(_, len)| len == fixed_chunk_size));
+        assert_eq!(
+            spans.data[0],
+            AddressRange::new(StoredAddress::new(0x1000), fixed_chunk_size).unwrap()
+        );
+        assert_eq!(
+            spans.data[26],
+            AddressRange::new(StoredAddress::new(0x1340), fixed_chunk_size).unwrap()
+        );
+        assert!(
+            spans
+                .data
+                .iter()
+                .all(|range| range.length() == fixed_chunk_size)
+        );
     }
 
     #[test]
@@ -4487,13 +4504,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(spans.data, vec![(0x500, 9), (0x520, 13)]);
+        assert_eq!(spans.data, stored_ranges(vec![(0x500, 9), (0x520, 13)]));
         assert_eq!(
             spans.index,
-            vec![
+            stored_ranges(vec![
                 (0, u64::try_from(header.len()).unwrap()),
                 (u64::try_from(root_at).unwrap(), 512),
-            ]
+            ])
         );
     }
 
@@ -4708,7 +4725,7 @@ mod tests {
             OffsetWidth::try_from(os).unwrap(),
         )
         .unwrap();
-        assert_eq!(spans, vec![(at as u64, leaf.len() as u64)]);
+        assert_eq!(spans, stored_ranges(vec![(at as u64, leaf.len() as u64)]));
     }
 
     #[test]
@@ -4743,11 +4760,11 @@ mod tests {
         spans.sort_unstable();
         assert_eq!(
             spans,
-            vec![
+            stored_ranges(vec![
                 (l0 as u64, leaf0.len() as u64),
                 (l1 as u64, leaf1.len() as u64),
                 (root as u64, internal.len() as u64),
-            ]
+            ])
         );
     }
 
@@ -4836,7 +4853,11 @@ mod tests {
             .unwrap(),
             nodes
                 .iter()
-                .map(|(address, bytes)| (address.to_u64(), bytes.len().to_u64()))
+                .map(|(address, bytes)| AddressRange::new(
+                    StoredAddress::new(address.to_u64()),
+                    bytes.len().to_u64()
+                )
+                .unwrap())
                 .collect::<Vec<_>>()
         );
         let stats = source.metadata_cache_stats();
@@ -6975,4 +6996,12 @@ mod tests {
     // of a raw data chunk key, with one bit per pipeline entry, starting at bit zero.
     const FIRST_FILTER_MASK: u32 = 1;
     const WIDTHS: Widths = Widths::EIGHT;
+    fn stored_ranges(
+        bounds: impl IntoIterator<Item = (u64, u64)>,
+    ) -> Vec<AddressRange<StoredAddress>> {
+        bounds
+            .into_iter()
+            .map(|(start, length)| AddressRange::new(StoredAddress::new(start), length).unwrap())
+            .collect()
+    }
 }

@@ -7,9 +7,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::btree_v2::BTreeV2NodeInfo;
 use crate::bytes;
+use crate::error::FormatError;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -197,23 +199,61 @@ impl BTreeV2Plan {
     /// tree planned with [`Self::new_with_undefined_empty_root`], the root address is undefined and
     /// `nodes_address` is unused.
     ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the nodes' exclusive end exceeds [`u64::MAX`],
+    /// or [`FormatError::Internal`] if the record buffer length differs from the planned length.
+    ///
     /// # Panics
     ///
-    /// Panics if `records` is not `record_count * record_size` bytes long, if the address of a node
-    /// does not fit `offset_width`, or if `record_count` does not fit `length_width`.
+    /// Panics if the address of a node does not fit `offset_width`, or if `record_count` does not
+    /// fit `length_width`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FormatError, LengthWidth, OffsetWidth, StoredAddress};
+    /// use hdf5_pure_format::__private::{
+    ///     BTreeV2Plan, BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_NODE_SIZE,
+    /// };
+    ///
+    /// let plan = BTreeV2Plan::new(
+    ///     BTREE_V2_ATTRIBUTE_NAME, 2, 17, BTREE_V2_NODE_SIZE, OffsetWidth::Eight,
+    /// ).unwrap();
+    /// let records = [0; 34];
+    /// let image = plan.serialize(
+    ///     &records, StoredAddress::new(96), OffsetWidth::Eight, LengthWidth::Eight,
+    /// )?;
+    /// assert_eq!(image.nodes.len(), usize::try_from(BTREE_V2_NODE_SIZE).unwrap());
+    /// let error = plan.serialize(
+    ///     &records, StoredAddress::new(u64::MAX), OffsetWidth::Eight, LengthWidth::Eight,
+    /// ).err().unwrap();
+    /// assert_eq!(error, FormatError::OffsetOverflow {
+    ///     offset: u64::MAX,
+    ///     length: u64::from(BTREE_V2_NODE_SIZE),
+    /// });
+    /// # Ok::<(), FormatError>(())
+    /// ```
     pub fn serialize(
         &self,
         records: &[u8],
         nodes_address: StoredAddress,
         offset_width: OffsetWidth,
         length_width: LengthWidth,
-    ) -> BTreeV2Image {
+    ) -> Result<BTreeV2Image, FormatError> {
+        nodes_address.checked_add(self.checked_nodes_size().ok_or(
+            FormatError::OffsetOverflow {
+                offset: nodes_address.get(),
+                length: u64::MAX,
+            },
+        )?)?;
         let rs = self.record_size as usize;
-        assert_eq!(
-            records.len() as u64,
-            self.total_records * rs as u64,
-            "record buffer must hold exactly the records the plan placed"
-        );
+        if records.len() as u64 != self.total_records * rs as u64 {
+            return Err(FormatError::Internal(
+                "record buffer length differs from the planned records".into(),
+            ));
+        }
 
         // The records in the subtree of each node, which a child pointer above depth 1 holds.
         // Each child is before its parent, so one pass in order computes every count.
@@ -223,7 +263,8 @@ impl BTreeV2Plan {
             subtree_total[i] = node.records.len() as u64 + below;
         }
 
-        let address_of = |index: usize| nodes_address.offset(index as u64 * self.node_size as u64);
+        let address_of =
+            |index: usize| nodes_address.checked_add(index as u64 * self.node_size as u64);
 
         let mut nodes = Vec::with_capacity(self.nodes.len() * self.node_size as usize);
         for (i, node) in self.nodes.iter().enumerate() {
@@ -238,7 +279,7 @@ impl BTreeV2Plan {
                 let nrec_width = self.info.max_nrec_size();
                 let total_width = self.info.total_nrec_size(node.depth);
                 for &child in &node.children {
-                    bytes::write_offset(&mut nodes, address_of(child).get(), offset_width);
+                    bytes::write_offset(&mut nodes, address_of(child)?.get(), offset_width);
                     write_uint(
                         &mut nodes,
                         self.nodes[child].records.len() as u64,
@@ -254,7 +295,7 @@ impl BTreeV2Plan {
                 "a planned node overflows its node size"
             );
             nodes.resize(start + self.node_size as usize, 0);
-            debug_assert_eq!(address_of(i).get() - nodes_address.get(), start as u64);
+            debug_assert_eq!(address_of(i)?.get() - nodes_address.get(), start as u64);
         }
 
         let root = self.nodes.last();
@@ -272,9 +313,10 @@ impl BTreeV2Plan {
         header.push(MERGE_PERCENT);
         bytes::write_offset(
             &mut header,
-            root.map_or(StoredAddress::undefined(offset_width), |_| {
-                address_of(self.nodes.len() - 1)
-            })
+            match root {
+                Some(_) => address_of(self.nodes.len() - 1)?,
+                None => StoredAddress::undefined(offset_width),
+            }
             .get(),
             offset_width,
         );
@@ -291,7 +333,7 @@ impl BTreeV2Plan {
             crate::btree_v2::btree_v2_header_size(offset_width, length_width)
         );
 
-        BTreeV2Image { header, nodes }
+        Ok(BTreeV2Image { header, nodes })
     }
 }
 
@@ -386,6 +428,8 @@ fn write_uint(buf: &mut Vec<u8>, value: u64, width: usize) {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::btree_v2;
     use crate::btree_v2::BTreeV2Header;
@@ -413,13 +457,17 @@ mod tests {
             OFFSET_WIDTH,
         )
         .unwrap();
-        let legacy = legacy.serialize(&[], StoredAddress::new(1024), OFFSET_WIDTH, LENGTH_WIDTH);
-        let canonical = canonical.serialize(
-            &[],
-            StoredAddress::undefined(OFFSET_WIDTH),
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
-        );
+        let legacy = legacy
+            .serialize(&[], StoredAddress::new(1024), OFFSET_WIDTH, LENGTH_WIDTH)
+            .unwrap();
+        let canonical = canonical
+            .serialize(
+                &[],
+                StoredAddress::undefined(OFFSET_WIDTH),
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
+            )
+            .unwrap();
         let legacy_header = BTreeV2Header::parse(&legacy.header, 0, 8, 8).unwrap();
         let canonical_header = BTreeV2Header::parse(&canonical.header, 0, 8, 8).unwrap();
         assert_eq!(legacy_header.root_node_address, StoredAddress::new(1024));
@@ -452,7 +500,9 @@ mod tests {
         let records = vec![0; 100_000 * usize::from(NAME_RECORD_LEN)];
         let nodes_address =
             StoredAddress::new(btree_v2::btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH) as u64);
-        let image = plan.serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH);
+        let image = plan
+            .serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH)
+            .unwrap();
         let bytes = [image.header, image.nodes].concat();
         let header = BTreeV2Header::parse(&bytes, 0, 8, 8).unwrap();
         let layout = btree_v2::BTreeV2Layout::new(&header, OFFSET_WIDTH).unwrap();
@@ -505,12 +555,14 @@ mod tests {
     fn nodes_are_all_one_node_size_long() {
         let plan =
             BTreeV2Plan::new(8, 5_000, 17, BTREE_V2_NODE_SIZE, OFFSET_WIDTH).expect("plannable");
-        let image = plan.serialize(
-            &vec![0; 5_000 * 17],
-            StoredAddress::new(4_096),
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
-        );
+        let image = plan
+            .serialize(
+                &vec![0; 5_000 * 17],
+                StoredAddress::new(4_096),
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
+            )
+            .unwrap();
         assert_eq!(image.nodes.len() as u64, plan.nodes_size());
         assert_eq!(image.nodes.len() % BTREE_V2_NODE_SIZE as usize, 0);
     }
@@ -530,10 +582,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "record buffer must hold exactly the records the plan placed")]
-    fn serializing_a_record_buffer_of_another_length_panics() {
+    fn serialization_rejects_a_record_buffer_of_another_length() {
         let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OFFSET_WIDTH).expect("plannable");
-        plan.serialize(&[0; 35], StoredAddress::new(0), OFFSET_WIDTH, LENGTH_WIDTH);
+        assert_eq!(
+            plan.serialize(&[0; 35], StoredAddress::new(0), OFFSET_WIDTH, LENGTH_WIDTH)
+                .map(|_| ())
+                .unwrap_err(),
+            FormatError::Internal("record buffer length differs from the planned records".into())
+        );
     }
 
     #[test]
@@ -544,7 +600,9 @@ mod tests {
             LENGTH_WIDTH,
         ) as u64);
         let plan = BTreeV2Plan::new(8, 2, 17, BTREE_V2_NODE_SIZE, OFFSET_WIDTH).unwrap();
-        let image = plan.serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH);
+        let image = plan
+            .serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH)
+            .unwrap();
 
         assert_eq!(
             BTreeV2Header::parse(&image.header, 0, 8, 8),
@@ -565,5 +623,45 @@ mod tests {
         assert_eq!(view.record_count(), 2);
         assert_eq!(view.record(0).unwrap(), &records[..17]);
         assert_eq!(view.record(1).unwrap(), &records[17..]);
+    }
+    #[rstest]
+    #[case::origin(0)]
+    #[case::maximum_end(u64::MAX - 512)]
+    fn serialization_preserves_representable_node_ranges(#[case] start: u64) {
+        let plan = BTreeV2Plan::new(8, 2, 17, 512, OFFSET_WIDTH).unwrap();
+        let image = plan
+            .serialize(
+                &[0; 34],
+                StoredAddress::new(start),
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
+            )
+            .unwrap();
+        let header = BTreeV2Header::parse(&image.header, 0, 8, 8).unwrap();
+        assert_eq!(header.root_node_address, StoredAddress::new(start));
+        assert_eq!(header.total_records, 2);
+        assert_eq!(image.nodes.len(), 512);
+    }
+
+    #[test]
+    fn serialization_rejects_an_overflowing_node_range() {
+        let plan = BTreeV2Plan::new(8, 2, 17, 512, OFFSET_WIDTH).unwrap();
+        let start = u64::MAX - 511;
+        let error = plan
+            .serialize(
+                &[0; 34],
+                StoredAddress::new(start),
+                OFFSET_WIDTH,
+                LENGTH_WIDTH,
+            )
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::OffsetOverflow {
+                offset: start,
+                length: 512
+            }
+        );
     }
 }

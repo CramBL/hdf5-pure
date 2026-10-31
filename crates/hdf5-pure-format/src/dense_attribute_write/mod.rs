@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use crate::__private as format_boundary;
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_message::AttributeMessage;
@@ -575,22 +576,30 @@ impl DenseAttrPlan {
     pub fn attr_info_message(&self, heap_address: StoredAddress) -> Result<Vec<u8>, FormatError> {
         self.extent(heap_address)?;
         Ok(self
-            .attribute_info(heap_address)
+            .attribute_info(heap_address)?
             .serialize(DENSE_ATTR_OFFSET_WIDTH))
     }
 
     /// Returns the creation metadata and placement addresses for the object header.
-    fn attribute_info(&self, heap_address: StoredAddress) -> AttributeInfoMessage {
-        AttributeInfoMessage {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if an index address exceeds [`u64::MAX`].
+    fn attribute_info(
+        &self,
+        heap_address: StoredAddress,
+    ) -> Result<AttributeInfoMessage, FormatError> {
+        Ok(AttributeInfoMessage {
             max_creation_index: self.geometry.next_index,
             indexes_creation_order: self.geometry.indexed,
             fractal_heap_address: Some(heap_address),
-            btree_name_index_address: Some(heap_address.offset(self.geometry.btree_off)),
+            btree_name_index_address: Some(heap_address.checked_add(self.geometry.btree_off)?),
             btree_creation_order_address: self
                 .geometry
                 .indexed
-                .then(|| heap_address.offset(self.geometry.corder_bthd_off)),
-        }
+                .then(|| heap_address.checked_add(self.geometry.corder_bthd_off))
+                .transpose()?,
+        })
     }
 
     /// Emits the blob for a heap placed at `heap_address`.
@@ -630,16 +639,16 @@ impl DenseAttrPlan {
         // The writer adds the heap base to offsets for its blocks, indexes, and huge objects.
         // Attribute references in payload bytes are resolved independently of this base.
         // The serialized length is independent of the chosen heap address.
-        let address_of = |offset: u64| heap_address.offset(offset);
+        let address_of = |offset: u64| heap_address.checked_add(offset);
         let frhp_addr = heap_address;
-        let managed_addr = address_of(geometry.managed_off);
-        let name_nodes_addr = address_of(geometry.name_nodes_off);
-        let corder_nodes_addr = address_of(geometry.corder_nodes_off);
+        let managed_addr = address_of(geometry.managed_off)?;
+        let name_nodes_addr = address_of(geometry.name_nodes_off)?;
+        let corder_nodes_addr = address_of(geometry.corder_nodes_off)?;
         let (huge_bthd_addr, huge_nodes_addr, huge_data_addr) = if huge_count > 0 {
             (
-                address_of(geometry.huge_bthd_off),
-                address_of(geometry.huge_nodes_off),
-                address_of(geometry.huge_data_off),
+                address_of(geometry.huge_bthd_off)?,
+                address_of(geometry.huge_nodes_off)?,
+                address_of(geometry.huge_data_off)?,
             )
         } else {
             (
@@ -714,7 +723,7 @@ impl DenseAttrPlan {
             match huge_id {
                 Some(id) => {
                     huge_records.push((*id, next_huge_addr, s.bytes.len() as u64));
-                    next_huge_addr = next_huge_addr.offset(s.bytes.len() as u64);
+                    next_huge_addr = next_huge_addr.checked_add(s.bytes.len() as u64)?;
                     heap_ids.push(header.encode_huge_id(
                         *id,
                         DENSE_ATTR_OFFSET_WIDTH,
@@ -751,7 +760,7 @@ impl DenseAttrPlan {
             name_nodes_addr,
             DENSE_ATTR_OFFSET_WIDTH,
             DENSE_ATTR_LENGTH_WIDTH,
-        );
+        )?;
 
         let mut blob = Vec::with_capacity(geometry.total_len.to_usize().unwrap_or(0));
         blob.extend_from_slice(&frhp);
@@ -777,7 +786,7 @@ impl DenseAttrPlan {
                 corder_nodes_addr,
                 DENSE_ATTR_OFFSET_WIDTH,
                 DENSE_ATTR_LENGTH_WIDTH,
-            );
+            )?;
             debug_assert_eq!(blob.len() as u64, geometry.corder_bthd_off);
             blob.extend_from_slice(&corder_tree.header);
             blob.extend_from_slice(&corder_tree.nodes);
@@ -805,7 +814,7 @@ impl DenseAttrPlan {
                 huge_nodes_addr,
                 DENSE_ATTR_OFFSET_WIDTH,
                 DENSE_ATTR_LENGTH_WIDTH,
-            );
+            )?;
 
             debug_assert_eq!(blob.len() as u64, geometry.huge_bthd_off);
             blob.extend_from_slice(&huge_tree.header);

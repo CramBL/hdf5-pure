@@ -71,7 +71,6 @@ use crate::file_space_info::FileSpaceInfo;
 #[cfg(test)]
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
-use crate::free_space_manager;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -1405,7 +1404,10 @@ impl FileWriter {
         let mut aggregate_collection_addresses = Vec::new();
         let mut collection_sections = layout::CollectionSections::default();
         let early_gcol_size = if let Some((page_size, _, _)) = paged {
-            let mut placements = layout::PagedCollections::new(SUPERBLOCK_SIZE as u64, page_size);
+            let mut placements = layout::PagedCollections::new(
+                StoredAddress::new(SUPERBLOCK_SIZE as u64),
+                page_size,
+            );
             let mut place = |collections: &[Vec<u8>]| -> Result<Vec<u64>, FormatError> {
                 collections.iter().try_fold(
                     Vec::with_capacity(collections.len()),
@@ -1455,7 +1457,12 @@ impl FileWriter {
                 }
             }
             collection_sections = placements.sections;
-            placements.end - SUPERBLOCK_SIZE as u64
+            placements
+                .end
+                .checked_distance_from(StoredAddress::new(SUPERBLOCK_SIZE as u64))
+                .ok_or_else(|| {
+                    FormatError::Internal("collection placement precedes the superblock".into())
+                })?
         } else {
             for i in 0..all_ds.len() {
                 if !is_chunked[i] || all_ds[i].storage.chunks().is_some() {
@@ -1478,7 +1485,12 @@ impl FileWriter {
                 all_ds[i].storage.restore_vl_string_staging(staging)?;
                 early_gcol.push(i);
             }
-            allocation.end().get() - SUPERBLOCK_SIZE as u64
+            allocation
+                .end()
+                .checked_distance_from(StoredAddress::new(SUPERBLOCK_SIZE as u64))
+                .ok_or_else(|| {
+                    FormatError::Internal("collection allocation precedes the superblock".into())
+                })?
         };
 
         #[cfg(feature = "provenance")]
@@ -1689,7 +1701,7 @@ impl FileWriter {
         // chunks have a zero placeholder until their target addresses are resolved and their
         // encoded sizes are known.
         let mut ds_data_lens: Vec<u64> = Vec::with_capacity(all_ds.len());
-        let mut dummy_cursor = 0u64;
+        let mut dummy_cursor = StoredAddress::ZERO;
         for (i, d) in all_ds.iter().enumerate() {
             let dense_plan = ds_dense_plans[i].as_ref();
             let dense_attr_info = dense_plan
@@ -1697,13 +1709,13 @@ impl FileWriter {
                 .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
                 .transpose()?;
             let measured = d.measure(
-                StoredAddress::new(dummy_cursor),
+                dummy_cursor,
                 chunk_sets[i].as_ref(),
                 dense_attr_info.as_deref(),
                 libver,
             )?;
             if is_chunked[i] {
-                dummy_cursor += measured.data_len;
+                dummy_cursor = dummy_cursor.checked_add(measured.data_len)?;
             }
             ds_data_lens.push(measured.data_len);
             actual_ds_oh_sizes.push(measured.header_len);
@@ -1714,14 +1726,12 @@ impl FileWriter {
         let ub = self.userblock_size.get().to_usize()?;
         // Under direct placement, reserve the root after the early collections and PAGE padding.
         // Under aggregation, reserve the root header through the metadata aggregate.
-        let advance = |cursor: &mut u64, len: u64| -> Result<StoredAddress, FormatError> {
-            let addr = *cursor;
-            *cursor = cursor.checked_add(len).ok_or(FormatError::OffsetOverflow {
-                offset: addr,
-                length: len,
-            })?;
-            Ok(StoredAddress::new(addr))
-        };
+        let advance =
+            |cursor: &mut StoredAddress, len: u64| -> Result<StoredAddress, FormatError> {
+                let addr = *cursor;
+                *cursor = cursor.checked_add(len)?;
+                Ok(addr)
+            };
         if paged.is_some() {
             allocation = FileAllocation::new(
                 StoredAddress::new(SUPERBLOCK_SIZE as u64 + early_gcol_size),
@@ -2058,7 +2068,7 @@ impl FileWriter {
             } = layout::PagedLayout::new(
                 page_size,
                 persist_paged,
-                allocation.end().get(),
+                allocation.end(),
                 ext_oh.as_ref().map_or(0, |bytes| bytes.len() as u64),
                 measurements,
                 collection_sections,
@@ -2089,9 +2099,14 @@ impl FileWriter {
                     }
                 },
             )?;
-            let ext_addr = extension_address.get();
-            let small_raw_total = small_raw_end - raw_start;
-            let eof_addr2 = base.resolve(StoredAddress::new(eoa_pre_fsm))?.get();
+            let ext_addr = extension_address;
+            let small_raw_total =
+                small_raw_end
+                    .checked_distance_from(raw_start)
+                    .ok_or_else(|| {
+                        FormatError::Internal("small raw regions end before their start".into())
+                    })?;
+            let eof_addr2 = base.resolve(eoa_pre_fsm)?.get();
 
             let ds_oh_bytes = build_ds_ohs(&all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
             debug_assert_eq!(
@@ -2141,7 +2156,7 @@ impl FileWriter {
                 indexed_storage_internal_node_k: None,
                 free_space_address: None,
                 driver_info_address: None,
-                superblock_extension_address: Some(StoredAddress::new(ext_addr)),
+                superblock_extension_address: Some(ext_addr),
                 checksum: None,
             }
             .build();
@@ -2241,7 +2256,7 @@ impl FileWriter {
                     sink.put(&dense.blob).map_err(EmissionError::Sink)?;
                 }
             }
-            debug_assert_eq!(sink.position(), base.get() + ext_addr);
+            debug_assert_eq!(sink.position(), base.resolve(ext_addr)?.get());
             sink.put(&real_ext_oh).map_err(EmissionError::Sink)?;
             // Free-space-manager blocks (SUPER, DRAW, generic-large), ascending.
             for manager in managers.iter().flatten() {
@@ -2249,12 +2264,19 @@ impl FileWriter {
                 sink.put(&manager.section_list)
                     .map_err(EmissionError::Sink)?;
             }
-            debug_assert_eq!(sink.position(), base.get() + meta_end);
+            debug_assert_eq!(sink.position(), base.resolve(meta_end)?.get());
 
             // Raw data region: metadata page tail, then small data, DRAW tail,
             // large runs (with their fragments), padded to the page-aligned EOA.
-            sink.put_zeros((raw_start - meta_end).to_usize()?)
-                .map_err(EmissionError::Sink)?;
+            sink.put_zeros(
+                raw_start
+                    .checked_distance_from(meta_end)
+                    .ok_or_else(|| {
+                        FormatError::Internal("raw data begins before metadata ends".into())
+                    })?
+                    .to_usize()?,
+            )
+            .map_err(EmissionError::Sink)?;
             for &i in &small_indices {
                 let at = base.resolve(ds_layouts[i].data_addr)?.get();
                 debug_assert_eq!(sink.position(), at);
@@ -2262,7 +2284,7 @@ impl FileWriter {
             }
             if small_raw_total > 0 {
                 sink.put_zeros(
-                    (free_space_manager::align_up(small_raw_end, page_size) - small_raw_end)
+                    ((page_size.get() - small_raw_end.get() % page_size.get()) % page_size.get())
                         .to_usize()?,
                 )
                 .map_err(EmissionError::Sink)?;
@@ -2274,7 +2296,7 @@ impl FileWriter {
                 ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
                 let end_rel = base.relative(PhysicalAddress::new(sink.position()))?.get();
                 sink.put_zeros(
-                    (free_space_manager::align_up(end_rel, page_size) - end_rel).to_usize()?,
+                    ((page_size.get() - end_rel % page_size.get()) % page_size.get()).to_usize()?,
                 )
                 .map_err(EmissionError::Sink)?;
             }
@@ -2329,7 +2351,7 @@ impl FileWriter {
                 .iter()
                 .any(|d| d.storage.vl_string_staging().is_some());
 
-        let gcol_start = allocation.end().get();
+        let gcol_start = allocation.end();
         if has_vl {
             for patch in &vl_root {
                 let addrs = place_collections(
@@ -2431,15 +2453,11 @@ impl FileWriter {
             ext_oh.as_ref().map(|bytes| bytes.len() as u64),
             nonpaged_persist.is_some(),
         )?;
-        let ext_addr = extension.map(|layout::Allocation { address, length: _ }| address.get());
+        let ext_addr = extension.map(|layout::Allocation { address, length: _ }| address);
 
         // eof_address is absolute file size (includes userblock + GCOLs + ext)
-        let eof_addr2 = (ub as u64)
-            .checked_add(cursor2)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: ub as u64,
-                length: cursor2,
-            })?;
+        let base = BaseAddress::new(ub as u64);
+        let eof_addr2 = base.resolve(cursor2)?.get();
 
         // Buffered sinks reserve the complete output capacity. Streaming sinks ignore the hint.
         sink.reserve(eof_addr2)?;
@@ -2454,7 +2472,7 @@ impl FileWriter {
             )?,
             offset_size: OFFSET_WIDTH,
             length_size: LENGTH_WIDTH,
-            base_address: BaseAddress::new(ub as u64),
+            base_address: base,
             eof_address: eof_addr2,
             root_group_address: root_group_addr,
             group_leaf_node_k: None,
@@ -2463,9 +2481,7 @@ impl FileWriter {
             free_space_address: None,
             driver_info_address: None,
             superblock_extension_address: Some(
-                ext_addr
-                    .map(StoredAddress::new)
-                    .unwrap_or(StoredAddress::undefined(OffsetWidth::Eight)),
+                ext_addr.unwrap_or(StoredAddress::undefined(OffsetWidth::Eight)),
             ),
             checksum: None,
         }
@@ -2481,7 +2497,6 @@ impl FileWriter {
         }
 
         // Use retained aggregate addresses or derive consecutive addresses in reservation order.
-        let base = BaseAddress::new(ub as u64);
         // Each early index is recorded after the dataset's VL staging is restored.
         let early_count = early_gcol
             .iter()
@@ -2508,25 +2523,28 @@ impl FileWriter {
                     .collections
                     .iter()
             })
-            .scan(SUPERBLOCK_SIZE as u64, |cursor, collection| {
-                Some(
-                    (if aggregated {
-                        early_addresses.next().copied().ok_or_else(|| {
-                            FormatError::Internal("global heap placement is absent".into())
+            .scan(
+                StoredAddress::new(SUPERBLOCK_SIZE as u64),
+                |cursor, collection| {
+                    Some(
+                        (if aggregated {
+                            early_addresses.next().copied().ok_or_else(|| {
+                                FormatError::Internal("global heap placement is absent".into())
+                            })
+                        } else {
+                            advance(cursor, collection.len() as u64)
                         })
-                    } else {
-                        advance(cursor, collection.len() as u64)
-                    })
-                    .and_then(|address| {
-                        Reservation::new(
-                            base,
-                            address,
-                            collection.len() as u64,
-                            FileData::Bytes(collection),
-                        )
-                    }),
-                )
-            });
+                        .and_then(|address| {
+                            Reservation::new(
+                                base,
+                                address,
+                                collection.len() as u64,
+                                FileData::Bytes(collection),
+                            )
+                        }),
+                    )
+                },
+            );
         let attribute_collections = vl_root
             .iter()
             .chain(grp_vl.iter().flatten())
@@ -2673,7 +2691,7 @@ impl FileWriter {
                         settings.strategy(),
                         settings.threshold(),
                         settings.page_size(),
-                        manager.header_address.get(),
+                        manager.header_address,
                         cursor2,
                     ),
                     None => file_space_info::persistent_empty(
@@ -2702,7 +2720,7 @@ impl FileWriter {
         let mut extension = match (real_ext_oh.as_ref(), ext_addr) {
             (Some(bytes), Some(address)) => Some(Reservation::new(
                 base,
-                StoredAddress::new(address),
+                address,
                 bytes.len() as u64,
                 FileData::Bytes(bytes),
             )),

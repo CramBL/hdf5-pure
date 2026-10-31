@@ -28,6 +28,7 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
@@ -765,7 +766,7 @@ pub fn fixed_array_len(
 /// # Errors
 ///
 /// Returns [`FormatError::Internal`] if the stored size of a chunk does not fit the chunk size
-/// field.
+/// field, or [`FormatError::OffsetOverflow`] if the array's exclusive end exceeds [`u64::MAX`].
 pub fn build_fixed_array_at(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
@@ -777,13 +778,14 @@ pub fn build_fixed_array_at(
     let num_elements = slots.len();
 
     let layout = fixed_array_layout(slots, chunk_bytes, offset_size, length_size, has_filters);
+    fa_address.checked_add(layout.total_len)?;
     let ChunkElementEncoding {
         chunk_size_bytes,
         elem_size,
         client_id,
     } = layout.encoding;
     let fahd_total_size = layout.fahd_size;
-    let fadb_address = fa_address.offset(fahd_total_size as u64);
+    let fadb_address = fa_address.checked_add(fahd_total_size as u64)?;
 
     // Build FAHD
     let mut fahd = Vec::with_capacity(fahd_total_size);
@@ -1527,6 +1529,44 @@ mod tests {
             for &n in &[1u64, 1_024, 1_025, 5_000] {
                 check(n, chunk_bytes, OffsetWidth::Eight, LengthWidth::Eight, true);
             }
+        }
+    }
+    #[rstest]
+    #[case::maximum_end(false)]
+    #[case::overflow(true)]
+    fn builder_checks_the_complete_exclusive_end(#[case] overflow: bool) {
+        let chunks = [ChunkRecord {
+            address: StoredAddress::new(16),
+            stored_size: 8,
+            filter_mask: 0,
+        }; 2];
+        let slots = IndexSlots::dense(&chunks);
+        let length = fixed_array_len(&slots, 8, OffsetWidth::Eight, LengthWidth::Eight, false);
+        let start = u64::MAX - length + u64::from(overflow);
+        let result = build_fixed_array_at(
+            &slots,
+            8,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            false,
+            StoredAddress::new(start),
+        );
+        if overflow {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::OffsetOverflow {
+                    offset: start,
+                    length
+                }
+            );
+        } else {
+            let bytes = result.unwrap();
+            assert_eq!(bytes.len() as u64, length);
+            assert_eq!(&bytes[..HEADER_SIGNATURE.len()], &HEADER_SIGNATURE);
+            assert_eq!(
+                StoredAddress::new(start).checked_add(length).unwrap(),
+                StoredAddress::new(u64::MAX)
+            );
         }
     }
 }

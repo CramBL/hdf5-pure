@@ -108,7 +108,7 @@ fn native_persisted_sections_preserve_stored_and_physical_coordinates(
             session
                 .inner
                 .addresses()
-                .resolve(stored.offset(length))
+                .resolve(stored.checked_add(length).unwrap())
                 .unwrap()
         );
         assert_eq!(section.length().get(), length);

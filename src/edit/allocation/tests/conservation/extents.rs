@@ -777,9 +777,9 @@ pub(super) fn replace_space_info(
         {
             if kind == MessageType::FILE_SPACE_INFO {
                 assert_eq!(encoded.len(), end - body);
-                let start = usize::try_from(chunk.span.0).unwrap();
+                let start = usize::try_from(chunk.span.start().get()).unwrap();
                 bytes[start + body..start + end].copy_from_slice(encoded);
-                checksum::restamp(bytes, start, usize::try_from(chunk.span.1).unwrap());
+                checksum::restamp(bytes, start, usize::try_from(chunk.span.length()).unwrap());
                 return;
             }
             position = end;

@@ -817,7 +817,13 @@ impl Observation {
             object_header::read_oh_chunks(&source, extension, addresses)
                 .unwrap()
                 .into_iter()
-                .map(|chunk| Fact::new(AllocationKind::Manager, chunk.span.0, chunk.span.1)),
+                .map(|chunk| {
+                    Fact::new(
+                        AllocationKind::Manager,
+                        chunk.span.start().get(),
+                        chunk.span.length(),
+                    )
+                }),
         );
         let root = addresses
             .resolve(context.superblock().root_group_address)
@@ -867,7 +873,13 @@ impl Observation {
                 object_header::read_oh_chunks(&source, header, addresses)
                     .unwrap()
                     .into_iter()
-                    .map(|chunk| Fact::new(AllocationKind::Index, chunk.span.0, chunk.span.1)),
+                    .map(|chunk| {
+                        Fact::new(
+                            AllocationKind::Index,
+                            chunk.span.start().get(),
+                            chunk.span.length(),
+                        )
+                    }),
             );
             let object = ObjectHeader::parse(
                 bytes,
@@ -913,8 +925,12 @@ impl Observation {
                             extensible_array::index_spans(&source, widths, address)
                                 .unwrap()
                                 .into_iter()
-                                .map(|(address, length)| {
-                                    Fact::new(AllocationKind::Index, address, length)
+                                .map(|range| {
+                                    Fact::new(
+                                        AllocationKind::Index,
+                                        range.start().get(),
+                                        range.length(),
+                                    )
                                 }),
                         );
                         for allocation in extents::IndexStorage::read(bytes).allocations {

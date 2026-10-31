@@ -71,6 +71,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use hdf5_pure_core::__private::FileRange;
+
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 #[cfg(test)]
@@ -111,21 +113,12 @@ pub(crate) struct Plan {
     /// the pre-commit address and the post-commit one, which is the state every
     /// such element was left in before this existed.
     data_writes: Vec<(u64, StoredAddress)>,
-    /// Edits that land *inside* a version 2 object header — an attribute's value,
-    /// or a compact dataset's inline elements — grouped by the header chunk
-    /// holding them: `(chunk address, full on-disk length including the trailing
-    /// four-byte checksum)` to `(offset within the chunk, value)`.
+    /// Edits within version 2 header chunks, grouped by complete physical range.
     ///
-    /// Grouped rather than listed because a chunk is republished as **one**
-    /// write, checksum included. Writing the eight bytes and then the checksum
-    /// covering them would be two writes with a crash point between, and a
-    /// header whose checksum does not match its own bytes is refused outright by
-    /// the reference library — turning a stale reference into an unreadable
-    /// object, which is the wrong direction for a fix. That is issue #307's rule
-    /// for every checksummed structure this crate patches in place, and
-    /// [`Plan::apply`] follows the shape `chunk_index_inplace`'s
-    /// `publish_checksummed` set for it.
-    header_writes: BTreeMap<(u64, u64), Vec<(usize, StoredAddress)>>,
+    /// Each `(offset, value)` uses a byte displacement from the chunk's start. [`Plan::apply`]
+    /// reads the complete chunk, recalculates its checksum, and writes the changed suffix and
+    /// checksum together.
+    header_writes: BTreeMap<FileRange, Vec<(usize, StoredAddress)>>,
     /// Whether the walk reached every object in the file and found none whose
     /// datatype holds an object address — the proof that no later commit on this
     /// session need walk it again, provided nothing is added meanwhile.
@@ -159,23 +152,24 @@ impl Plan {
         self.proved_free_of_references
     }
 
-    /// Write every repointed address.
+    /// Writes the planned object references and corresponding header checksums.
     ///
-    /// Each write is the same length as what it replaces, so nothing here moves,
-    /// grows, or reallocates: applying a plan changes a file's contents and
-    /// never its layout. See [`Plan::header_writes`] for why a header chunk is
-    /// republished whole rather than patched twice, and [`Plan::data_writes`]
-    /// for why the other half needs no such care.
+    /// Reads each complete header chunk before updating its elements and checksum, then writes
+    /// from the first edited byte through the checksum. Element updates in dataset data blocks
+    /// are separate eight-byte writes.
     ///
-    /// The *read* covers the whole chunk, because the checksum does; the write
-    /// starts at the first byte that changed, so repointing an attribute near
-    /// the end of a wide header does not rewrite the header. Both halves of that
-    /// are `publish_checksummed`'s, for the reasons recorded there.
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a header chunk is shorter than its checksum or an
+    /// edit extends outside its message bytes. Returns [`Error::Format`] if a chunk's length
+    /// exceeds [`usize::MAX`]. Propagates patch-target read and write errors.
     pub(crate) fn apply(&self, target: &mut impl PatchTarget) -> Result<(), Error> {
         for &(at, value) in &self.data_writes {
             target.write(at, &value.get().to_le_bytes())?;
         }
-        for (&(at, len), edits) in &self.header_writes {
+        for (&range, edits) in &self.header_writes {
+            let at = range.start().get();
+            let len = range.length();
             // `read_oh_chunks` produced this span from a header it had already
             // bounds-checked, and the length always covers the trailing
             // four-byte checksum.
@@ -214,10 +208,11 @@ impl Plan {
     /// The addresses this plan rewrites, for tests that pin *where* it acts.
     #[cfg(test)]
     pub(crate) fn sites(&self) -> Vec<u64> {
-        let headers = self
-            .header_writes
-            .iter()
-            .flat_map(|(&(at, _), edits)| edits.iter().map(move |&(o, _)| at + o as u64));
+        let headers = self.header_writes.iter().flat_map(|(&range, edits)| {
+            edits
+                .iter()
+                .map(move |&(o, _)| range.start().checked_add(o as u64).unwrap().get())
+        });
         self.data_writes
             .iter()
             .map(|&(at, _)| at)
@@ -596,7 +591,7 @@ fn scan_object<S: Source + ?Sized>(
             crate::edit::object_header::next_record(layout, region, p)?
         {
             // Absolute file offset of this message's body.
-            let body_at = chunk.span.0 + body as u64;
+            let body_at = chunk.span.start().get() + body as u64;
             // The flags byte is the 4th of the record header (type, size, flags).
             let shared = MessageFlags::new(region[p + 3]).is_shared();
             match msg_type {
@@ -749,11 +744,10 @@ fn scan_object<S: Source + ?Sized>(
             );
             // Compact elements are inline in the layout message, so they are
             // edited as part of the header chunk that message sits in.
-            if let Some(span) = chunks
-                .iter()
-                .map(|c| c.span)
-                .find(|&(a, l)| layout_at >= a && layout_at - a < l)
-            {
+            if let Some(span) = chunks.iter().map(|c| c.span).find(|range| {
+                range.start() <= PhysicalAddress::new(layout_at)
+                    && PhysicalAddress::new(layout_at) < range.end()
+            }) {
                 record_header_edits(plan, span, &edits);
             }
         }
@@ -764,17 +758,16 @@ fn scan_object<S: Source + ?Sized>(
     Ok(out)
 }
 
-/// File the absolute edits `edits` under the object-header chunk at `span`, as
-/// offsets within that chunk.
+/// Records physical edit positions as byte offsets within their header chunk.
 ///
-/// An edit *below* the chunk cannot be expressed as an offset into it and is
-/// dropped. One past its end is filed and refused by [`Plan::apply`], which
-/// bounds every offset against the chunk's message region before writing: two
-/// responses to one impossibility would only disagree, and `apply`'s is the
-/// tighter and the one that reports.
-fn record_header_edits(plan: &mut Plan, span: (u64, u64), edits: &[(u64, StoredAddress)]) {
+/// Skips edits below the chunk's start or whose displacement exceeds [`usize::MAX`].
+/// [`Plan::apply`] checks each recorded header edit against its message region.
+fn record_header_edits(plan: &mut Plan, span: FileRange, edits: &[(u64, StoredAddress)]) {
     for &(at, value) in edits {
-        let Some(offset) = at.checked_sub(span.0).and_then(|o| usize::try_from(o).ok()) else {
+        let Some(offset) = PhysicalAddress::new(at)
+            .checked_distance_from(span.start())
+            .and_then(|o| usize::try_from(o).ok())
+        else {
             continue;
         };
         plan.header_writes

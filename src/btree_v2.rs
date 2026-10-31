@@ -408,12 +408,14 @@ mod tests {
             OffsetWidth::Eight,
         )
         .unwrap();
-        let image = plan.serialize(
-            &numbered_records(count, 11),
-            StoredAddress::new(64),
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-        );
+        let image = plan
+            .serialize(
+                &numbered_records(count, 11),
+                StoredAddress::new(64),
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+            )
+            .unwrap();
         let mut bytes = image.header;
         bytes.resize(64, 0);
         bytes.extend_from_slice(&image.nodes);
@@ -1408,12 +1410,14 @@ mod tests {
             OffsetWidth::Eight,
             LengthWidth::Eight,
         ) as u64);
-        let image = plan.serialize(
-            &records,
-            nodes_address,
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-        );
+        let image = plan
+            .serialize(
+                &records,
+                nodes_address,
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+            )
+            .unwrap();
         let mut file = image.header.clone();
         file.extend_from_slice(&image.nodes);
 

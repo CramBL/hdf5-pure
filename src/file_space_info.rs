@@ -13,13 +13,12 @@ use hdf5_pure_space::__private::ManagerKind;
 
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::free_space_manager;
 use crate::width::OffsetWidth;
 
-/// A non-persisting message recording `strategy`, `threshold` and `page_size`.
-/// This is the form the writer emits (no free-space manager blocks). The
-/// end-of-allocation address is undefined, all ones at `offsets`.
+/// Returns a non-persisting message with an undefined end-of-allocation marker.
+///
+/// The message has no manager slots.
 pub(crate) fn non_persistent(
     _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
@@ -60,7 +59,7 @@ pub(crate) fn persistent_placeholder(
 /// Returns a persisting message with no free-space managers that records `eoa_pre_fsm` as the
 /// end of allocation.
 ///
-/// The persist flag is set and every manager address is undefined, all ones at `offsets`.
+/// The persist flag is set, and every manager address is undefined.
 /// [`FileBuilder`](crate::FileBuilder) writes this form for a new
 /// [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) file with no reusable free sections. The editor
 /// writes it for a persisting commit with no free space to record, using the EOA it publishes.
@@ -73,7 +72,7 @@ pub(crate) fn persistent_empty(
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
-    eoa_pre_fsm: u64,
+    eoa_pre_fsm: StoredAddress,
 ) -> FileSpaceInfo {
     FileSpaceInfoFields {
         strategy,
@@ -81,9 +80,7 @@ pub(crate) fn persistent_empty(
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(StoredAddress::new(
-            eoa_pre_fsm,
-        ))),
+        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(eoa_pre_fsm)),
         manager_addrs: vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
     }
     .build()
@@ -99,60 +96,49 @@ pub(crate) fn persistent_single_manager(
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
-    manager_addr: u64,
-    eoa_pre_fsm: u64,
+    manager_addr: StoredAddress,
+    eoa_pre_fsm: StoredAddress,
 ) -> FileSpaceInfo {
     let mut manager_addrs = vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS];
     manager_addrs[free_space_manager::manager_wire(ManagerKind::Flat).0] =
-        DecodedStoredAddress::Defined(StoredAddress::new(manager_addr));
+        DecodedStoredAddress::Defined(manager_addr);
     FileSpaceInfoFields {
         strategy,
         persist: true,
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(StoredAddress::new(
-            eoa_pre_fsm,
-        ))),
+        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(eoa_pre_fsm)),
         manager_addrs,
     }
     .build()
 }
 
-/// A persisting message for a paged file whose free space is tracked by
-/// per-page-type managers. `slots[k]` is the `FSHD` address of the manager for
+/// Returns a persisting message with per-page-type manager addresses.
+///
+/// `slots[k]` is the `FSHD` address of the manager for
 /// page type `k + 1` (or undefined when that page type tracks no free space).
 /// `eoa_pre_fsm` is the page-aligned end-of-allocation. This is the form the
 /// paged writer emits: metadata free space lives in the SUPER manager
 /// (`slots[0]`), small raw data in DRAW (`slots[2]`), and the trailing
 /// fragments of large multi-page allocations in the generic-large manager
 /// (`slots[6]`).
+/// Inactive slots use [`DecodedStoredAddress::Undefined`].
 pub(crate) fn persistent_managers(
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
-    slots: [u64; NUM_FILE_FSM_MANAGERS],
-    eoa_pre_fsm: u64,
+    slots: [DecodedStoredAddress; NUM_FILE_FSM_MANAGERS],
+    eoa_pre_fsm: StoredAddress,
 ) -> FileSpaceInfo {
-    let manager_addrs = slots
-        .into_iter()
-        .map(|addr| {
-            if addr == u64::MAX {
-                DecodedStoredAddress::Undefined
-            } else {
-                DecodedStoredAddress::Defined(StoredAddress::new(addr))
-            }
-        })
-        .collect();
+    let manager_addrs = slots.into_iter().collect();
     FileSpaceInfoFields {
         strategy,
         persist: true,
         threshold,
         page_size,
         page_end_meta_threshold: 0,
-        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(StoredAddress::new(
-            eoa_pre_fsm,
-        ))),
+        eoa_pre_fsm: Some(DecodedStoredAddress::Defined(eoa_pre_fsm)),
         manager_addrs,
     }
     .build()
@@ -217,8 +203,14 @@ mod tests {
             FileSpaceStrategy::Page,
             0,
             FileSpacePageSize::try_from(16384).unwrap(),
-            slots,
-            65536,
+            slots.map(|address| {
+                if address == u64::MAX {
+                    DecodedStoredAddress::Undefined
+                } else {
+                    DecodedStoredAddress::Defined(StoredAddress::new(address))
+                }
+            }),
+            StoredAddress::new(65536),
         );
         assert!(info.persist);
         assert_eq!(
@@ -258,8 +250,8 @@ mod tests {
             FileSpaceStrategy::FsmAggr,
             DEFAULT_THRESHOLD,
             FileSpacePageSize::DEFAULT,
-            0x0a48,
-            0x0a48,
+            StoredAddress::new(0x0a48),
+            StoredAddress::new(0x0a48),
         );
 
         assert_eq!(
@@ -285,7 +277,7 @@ mod tests {
             FileSpaceStrategy::FsmAggr,
             DEFAULT_THRESHOLD,
             FileSpacePageSize::DEFAULT,
-            0x0a48,
+            StoredAddress::new(0x0a48),
         );
 
         assert_eq!(

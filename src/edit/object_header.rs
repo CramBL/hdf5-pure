@@ -1,5 +1,7 @@
 //! Object-header traversal and reconstruction for staged edits.
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
@@ -239,9 +241,9 @@ pub(super) fn oh_region_at(
 ///
 /// The buffer excludes the trailing checksum. The extent includes it for storage reclamation.
 pub(crate) struct OhChunk {
-    /// Absolute file address and full on-disk length of the chunk.
-    pub(crate) span: (u64, u64),
-    /// The chunk's bytes, from `span.0` through the end of its message region.
+    /// The complete physical range, including the trailing checksum.
+    pub(crate) span: FileRange,
+    /// Bytes from the start of [`span`](Self::span) through the end of the message region.
     buf: Vec<u8>,
     /// Offset of the first message within [`buf`](Self::buf).
     messages_start: usize,
@@ -286,7 +288,7 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
     // has checked that the 4-byte checksum past `re` is present.
     let len = (re - addr).to_usize()?;
     Ok(OhChunk {
-        span: (addr, len as u64 + 4),
+        span: FileRange::new(PhysicalAddress::new(addr), len as u64 + 4)?,
         buf: src.read_metadata_at(addr, len)?,
         messages_start: (rs - addr).to_usize()?,
         props,
@@ -388,7 +390,7 @@ fn read_oh_continuation<S: Source + ?Sized>(
     // Trim the trailing checksum so the message walk stops at the last message.
     buf.truncate(messages.end);
     Ok(OhChunk {
-        span: (off, len),
+        span: FileRange::new(PhysicalAddress::new(off), len)?,
         buf,
         messages_start: messages.start,
         props,

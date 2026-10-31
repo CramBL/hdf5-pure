@@ -308,7 +308,7 @@ impl StoredAddress {
     }
 }
 
-/// The constructors and address arithmetic shared by the workspace crates.
+/// The constructors of a [`StoredAddress`] shared by the workspace crates.
 ///
 /// The trait's items are outside the supported API of [`StoredAddress`]. The workspace crates
 /// import the trait from the hidden `__private` module.
@@ -318,13 +318,6 @@ pub trait StoredAddressExt {
 
     /// Creates a stored address from an encoded base-relative value.
     fn new(stored: u64) -> Self;
-
-    /// Returns the address `delta` bytes past this one.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if the sum exceeds [`u64::MAX`].
-    fn offset(self, delta: u64) -> Self;
 }
 
 #[doc(hidden)]
@@ -333,10 +326,6 @@ impl StoredAddressExt for StoredAddress {
 
     fn new(stored: u64) -> Self {
         Self(stored)
-    }
-
-    fn offset(self, delta: u64) -> Self {
-        Self(self.0 + delta)
     }
 }
 

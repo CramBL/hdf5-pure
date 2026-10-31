@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::thread;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::AttributePhaseChange;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
@@ -15,6 +16,7 @@ use test_util::object_header::v2::HeaderFlags;
 use test_util::widths::Widths;
 
 use super::common;
+use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::VariableLengthType;
 use crate::access_mode::AccessMode;
@@ -143,7 +145,7 @@ fn a_hard_link_with_bytes_past_its_address_is_unsupported() {
 fn a_copied_compact_reference_dataset_is_screened(#[case] address: u64, #[case] rejected: bool) {
     let empty = BytesSource::new(Vec::new());
     let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
+        removed: physical_ranges(&[(248, 71)]),
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
@@ -166,7 +168,7 @@ fn a_copied_compact_reference_dataset_is_screened(#[case] address: u64, #[case] 
 fn a_copied_reference_dataset_without_layout_is_rejected() {
     let empty = BytesSource::new(Vec::new());
     let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
+        removed: physical_ranges(&[(248, 71)]),
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
@@ -198,7 +200,7 @@ fn a_copied_reference_dataset_without_layout_is_rejected() {
 fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
     let empty = BytesSource::new(Vec::new());
     let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
+        removed: physical_ranges(&[(248, 71)]),
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
@@ -249,7 +251,7 @@ fn unreadable_reference_slots_are_rejected(
         "the reference slots must be unreadable, not an empty slot list"
     );
     let invalidated = InvalidatedAddresses {
-        removed,
+        removed: physical_ranges(&removed),
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
@@ -268,7 +270,7 @@ fn a_variable_length_string_is_screened_without_object_references() {
     let datatype = crate::type_builders::make_vlen_string_type(CharacterSet::Utf8);
     let raw = vec![0u8; 32];
     let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
+        removed: physical_ranges(&[(248, 71)]),
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
@@ -342,8 +344,8 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
             &[],
             &[],
             &InvalidatedAddresses {
-                removed,
-                moved,
+                removed: physical_ranges(&removed),
+                moved: moved.into_iter().map(PhysicalAddress::new).collect(),
                 base: AddressContext::from_effective_base(BaseAddress::ZERO),
             },
             &engine.image(),
@@ -438,7 +440,7 @@ fn a_copied_reference_attribute_is_screened_in_both_storages(
 ) {
     let empty = BytesSource::new(Vec::new());
     let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
+        removed: physical_ranges(&[(248, 71)]),
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
@@ -475,7 +477,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
             assert!(tree.has_dense_attributes());
 
             let invalidated = InvalidatedAddresses {
-                removed: vec![(REMOVED_ADDRESS, 1)],
+                removed: physical_ranges(&[(REMOVED_ADDRESS, 1)]),
                 moved: Vec::new(),
                 base: AddressContext::from_effective_base(BaseAddress::ZERO),
             };
@@ -712,7 +714,7 @@ fn a_commit_that_strands_a_shared_message_record_is_rejected() {
     };
     let moved = InvalidatedAddresses {
         removed: Vec::new(),
-        moved: vec![0x400],
+        moved: vec![PhysicalAddress::new(0x400)],
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
     let err =
@@ -724,7 +726,7 @@ fn a_commit_that_strands_a_shared_message_record_is_rejected() {
 
     let elsewhere = InvalidatedAddresses {
         removed: Vec::new(),
-        moved: vec![0x800],
+        moved: vec![PhysicalAddress::new(0x800)],
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
     edit::screen_shared_message_records(std::slice::from_ref(&named), &elsewhere).unwrap();
@@ -741,7 +743,7 @@ fn a_heap_stored_shared_message_record_is_not_screened_for_addresses() {
     };
     let moved = InvalidatedAddresses {
         removed: Vec::new(),
-        moved: vec![0x400],
+        moved: vec![PhysicalAddress::new(0x400)],
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
     edit::screen_shared_message_records(&[heap], &moved).unwrap();
@@ -1807,6 +1809,13 @@ fn compact_layout_record(record_layout: MessageRecordLayout, inline: &[u8]) -> V
         4,
         &layout_bytes::compact(inline),
     )
+}
+
+fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {
+    bounds
+        .iter()
+        .map(|&(at, length)| FileRange::new(PhysicalAddress::new(at), length).unwrap())
+        .collect()
 }
 
 const UNKNOWN_MESSAGE_TYPE: MessageType = MessageType::from_u16(0x00C8);

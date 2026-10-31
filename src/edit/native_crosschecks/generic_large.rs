@@ -9,7 +9,6 @@ use test_util_hdf5::numeric::ByteOrder;
 
 use crate::FileLocking;
 use crate::PersistedFreeSpacePolicy;
-use crate::PhysicalAddress;
 use crate::edit;
 use crate::edit::WriteEngine;
 use crate::object_path::ObjectPathBuf;
@@ -39,34 +38,31 @@ fn native_generic_large_reclamation_keeps_partial_tails_unavailable() {
     let spans = engine.oh_chunk_spans(address).unwrap();
     let large = spans
         .iter()
-        .filter(|(_, length)| *length > page)
+        .filter(|range| range.length() > page)
         .copied()
         .collect::<Vec<_>>();
     assert_eq!(large.len(), 1);
-    let (start, length) = large[0];
-    assert_eq!(start % page, 0);
-    let tail_start = start + length / page * page;
-    let tail_end = start + length;
+    let range = large[0];
+    assert_eq!(range.start().get() % page, 0);
+    let tail_start = range
+        .start()
+        .checked_add(range.length() / page * page)
+        .unwrap();
+    let tail_end = range.end();
     assert!(tail_start < tail_end);
     let tail = Extent::new(
-        engine
-            .addresses()
-            .relative(PhysicalAddress::new(tail_start))
-            .unwrap(),
-        tail_end - tail_start,
+        engine.addresses().relative(tail_start).unwrap(),
+        tail_end.checked_distance_from(tail_start).unwrap(),
     )
     .unwrap();
     let padding = Extent::new(
-        engine
-            .addresses()
-            .relative(PhysicalAddress::new(tail_end))
-            .unwrap(),
-        page - tail_end % page,
+        engine.addresses().relative(tail_end).unwrap(),
+        page - tail_end.get() % page,
     )
     .unwrap();
     assert_eq!(
         engine.object_header_free_spans(&large).unwrap(),
-        [(start, length, FreeClass::Dead)]
+        [(range, FreeClass::Dead)]
     );
     engine.delete(&ObjectPathBuf::parse("/d")).unwrap();
     engine.commit().unwrap();

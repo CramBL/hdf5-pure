@@ -12,6 +12,8 @@ use core::iter::Peekable;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
+#[cfg(feature = "std")]
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArray;
 use hdf5_pure_format::__private::ExtensibleArrayDataBlock;
@@ -94,7 +96,7 @@ pub(crate) fn read_chunks(
     Ok(())
 }
 
-/// Returns the `(address, length)` spans of the header and of every allocated block of the
+/// Returns the stored-coordinate ranges of the header and every allocated block of the
 /// Extensible Array at `address`.
 ///
 /// The spans cover the index, without the chunks it points at, whatever the header's "Max Index
@@ -116,30 +118,32 @@ pub(crate) fn index_spans(
     file: &(impl RangeReader + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
-) -> Result<Vec<(u64, u64)>, FormatError> {
-    let span = |range: FileRange| (range.start().get(), range.length());
+) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
+    let span = |range: FileRange| {
+        AddressRange::new(BaseAddress::ZERO.relative(range.start())?, range.length())
+    };
     let header = read_header(file, widths, address)?;
-    let mut spans = vec![span(header.range())];
+    let mut spans = vec![span(header.range())?];
     let Some(index_block) = header.index_block() else {
         return Ok(spans);
     };
     let range = index_block.parse_range();
-    spans.push(span(range));
+    spans.push(span(range)?);
     let bytes = file.read_range(range)?;
     let index_block = index_block.parse(source::legacy_framed_region(range, &bytes)?)?;
     for block in index_block.data_blocks() {
-        spans.push(span(block?.range()));
+        spans.push(span(block?.range())?);
     }
     for super_block in index_block.super_blocks() {
         let super_block = super_block?;
         let range = super_block.parse_range();
-        spans.push(span(range));
+        spans.push(span(range)?);
         let bytes = file.read_range(range)?;
         for block in super_block
             .parse(source::legacy_framed_region(range, &bytes)?)?
             .data_blocks()
         {
-            spans.push(span(block?.range()));
+            spans.push(span(block?.range())?);
         }
     }
     Ok(spans)
@@ -544,7 +548,7 @@ mod tests {
         #[cfg(feature = "std")]
         assert_eq!(
             index_spans(&source.framed(), WIDTHS, StoredAddress::new(ARRAY_AT)).unwrap(),
-            vec![(ARRAY_AT, HEADER_LEN)]
+            stored_ranges(vec![(ARRAY_AT, HEADER_LEN)])
         );
     }
 
@@ -578,12 +582,11 @@ mod tests {
             2 + stats.nsuper_blks + stats.ndata_blks
         );
         spans.sort_unstable();
-        assert_eq!(spans[0].0, ARRAY_AT);
+        assert_eq!(spans[0].start(), StoredAddress::new(ARRAY_AT));
         for pair in spans.windows(2) {
-            assert_eq!(pair[0].0 + pair[0].1, pair[1].0);
+            assert_eq!(pair[0].end(), pair[1].start());
         }
-        let (last, len) = *spans.last().unwrap();
-        assert_eq!(last + len, end);
+        assert_eq!(spans.last().unwrap().end(), StoredAddress::new(end));
         assert_eq!(
             source.reads.into_inner().len().to_u64(),
             2 + stats.nsuper_blks
@@ -610,5 +613,13 @@ mod tests {
                 computed,
             }
         );
+    }
+    fn stored_ranges(
+        bounds: impl IntoIterator<Item = (u64, u64)>,
+    ) -> Vec<AddressRange<StoredAddress>> {
+        bounds
+            .into_iter()
+            .map(|(start, length)| AddressRange::new(StoredAddress::new(start), length).unwrap())
+            .collect()
     }
 }

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{AllocationClass, FreeClass, PageType};
 
@@ -262,7 +263,7 @@ impl WriteEngine {
         to_free.extend(
             self.superseded_heaps
                 .drain(..)
-                .map(|(address, len)| (address, len, FreeClass::Page(PageType::Raw))),
+                .map(|range| (range, FreeClass::Page(PageType::Raw))),
         );
         edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
@@ -283,10 +284,10 @@ impl WriteEngine {
     fn prepare_reclamation(
         &self,
         groups: &BTreeMap<ObjectPathBuf, Node>,
-        deleted_free: Vec<(u64, u64, FreeClass)>,
-    ) -> Result<Vec<(u64, u64, FreeClass)>, Error> {
+        deleted_free: Vec<(FileRange, FreeClass)>,
+    ) -> Result<Vec<(FileRange, FreeClass)>, Error> {
         let base = self.context.addresses();
-        let mut to_free: Vec<(u64, u64, FreeClass)> = deleted_free;
+        let mut to_free: Vec<(FileRange, FreeClass)> = deleted_free;
 
         for node in groups.values() {
             let Some(replaced) = &node.prepared.replaces else {
@@ -323,7 +324,7 @@ impl WriteEngine {
                     MovingWrite::Contiguous {
                         old_extent: Some(extent),
                         ..
-                    } => to_free.push((extent.0, extent.1, FreeClass::Page(PageType::Raw))),
+                    } => to_free.push((*extent, FreeClass::Page(PageType::Raw))),
                     MovingWrite::Chunked { old_addr, .. } => {
                         if let Some(spans) = self.chunked_storage_spans(*old_addr) {
                             to_free.extend(spans);
@@ -336,14 +337,16 @@ impl WriteEngine {
                         ..
                     } => {
                         if let Some(spans) = self.chunked_index_spans(*old_addr) {
-                            let data: Vec<(u64, u64)> = kept_chunks
+                            let data: Vec<FileRange> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {
-                                    Some((base.resolve(c.address).ok()?.get(), c.stored_size))
+                                    FileRange::new(base.resolve(c.address).ok()?, c.stored_size)
+                                        .ok()
                                 })
                                 .chain(old_tail_allocation.iter().map(|allocation| {
                                     let range = allocation.range();
-                                    (range.start().get(), range.length())
+                                    // Free-section construction checks these same endpoints.
+                                    FileRange::new(range.start(), range.length()).unwrap()
                                 }))
                                 .collect();
                             let class = if self.index_is_provably_raw(&data, &spans) {
@@ -351,7 +354,7 @@ impl WriteEngine {
                             } else {
                                 FreeClass::Dead
                             };
-                            to_free.extend(spans.into_iter().map(|(a, l)| (a, l, class)));
+                            to_free.extend(spans.into_iter().map(|range| (range, class)));
                         }
                     }
                     _ => {}

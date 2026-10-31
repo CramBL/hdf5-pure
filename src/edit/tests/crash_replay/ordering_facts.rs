@@ -18,8 +18,8 @@ use test_util::publication_order::EofChange;
 
 use crate::File;
 use crate::access_mode::AccessMode;
-use crate::address::AddressContext;
 use crate::address::DecodedStoredAddress;
+use crate::address::{AddressContext, BaseAddress, BaseAddressExt};
 use crate::data_layout::ChunkIndexLayout;
 use crate::data_layout::DataLayout;
 use crate::edit::object_header;
@@ -189,14 +189,11 @@ impl DatasetGeometry {
                     let pointer = pointer.unwrap();
                     let start = chunk
                         .span
-                        .0
+                        .start()
                         .checked_add(u64::try_from(body + pointer.start).unwrap())
                         .unwrap();
-                    let pointer = FileRange::new(
-                        PhysicalAddress::new(start),
-                        u64::try_from(pointer.len()).unwrap(),
-                    )
-                    .unwrap();
+                    let pointer =
+                        FileRange::new(start, u64::try_from(pointer.len()).unwrap()).unwrap();
                     let DataLayout::Chunked {
                         index: ChunkIndexLayout::ExtensibleArray { address, .. },
                         ..
@@ -214,7 +211,13 @@ impl DatasetGeometry {
             extensible_array::index_spans(&source, widths, address)
                 .unwrap()
                 .into_iter()
-                .map(|(start, length)| FileRange::new(PhysicalAddress::new(start), length).unwrap())
+                .map(|range| {
+                    FileRange::new(
+                        BaseAddress::ZERO.resolve(range.start()).unwrap(),
+                        range.length(),
+                    )
+                    .unwrap()
+                })
                 .collect()
         });
         let file = File::from_bytes(bytes.to_vec()).unwrap();
@@ -411,9 +414,7 @@ impl Ownership {
             object_header::read_oh_chunks(&source, extension, addresses)
                 .unwrap()
                 .into_iter()
-                .map(|chunk| {
-                    FileRange::new(PhysicalAddress::new(chunk.span.0), chunk.span.1).unwrap()
-                }),
+                .map(|chunk| chunk.span),
         );
         for address in &info.manager_addrs {
             let DecodedStoredAddress::Defined(address) = address else {

@@ -6,8 +6,8 @@ use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ManagerKind;
 
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
 use crate::file_allocation::FileManager;
@@ -135,7 +135,7 @@ pub(super) enum DataKind {
 /// The superblock extension, final allocation end, and optional manager for a classic strategy.
 pub(super) struct ClassicLayout {
     pub(super) extension: Option<Allocation>,
-    pub(super) end: u64,
+    pub(super) end: StoredAddress,
     pub(super) manager: Option<FileManager>,
 }
 
@@ -163,7 +163,7 @@ impl ClassicLayout {
         };
         Ok(Self {
             extension,
-            end: end.get(),
+            end,
             manager,
         })
     }
@@ -181,7 +181,7 @@ pub(super) struct CollectionSections {
 pub(super) struct PagedCollections {
     page: FileSpacePageSize,
     /// The first stored address available for following object metadata.
-    pub(super) end: u64,
+    pub(super) end: StoredAddress,
     pub(super) sections: CollectionSections,
 }
 
@@ -189,7 +189,7 @@ impl PagedCollections {
     /// Creates an empty collection layout with its cursor at `start`.
     ///
     /// The first reservation is aligned to `page`.
-    pub(super) fn new(start: u64, page: FileSpacePageSize) -> Self {
+    pub(super) fn new(start: StoredAddress, page: FileSpacePageSize) -> Self {
         Self {
             page,
             end: start,
@@ -218,17 +218,19 @@ impl PagedCollections {
         } = sections;
         let start = align(*cursor, *page)?;
         if start > *cursor {
+            // The comparison orders the endpoints of this padding.
             metadata.push(FreeSection {
-                addr: StoredAddress::new(*cursor),
-                size: start - *cursor,
+                addr: *cursor,
+                size: start.checked_distance_from(*cursor).unwrap(),
             });
         }
-        let end = checked_end(start, length)?;
+        let end = start.checked_add(length)?;
         *cursor = align(end, *page)?;
         if *cursor > end {
+            // Alignment advances the end, so the padding length is positive.
             let section = FreeSection {
-                addr: StoredAddress::new(end),
-                size: *cursor - end,
+                addr: end,
+                size: cursor.checked_distance_from(end).unwrap(),
             };
             if length >= page.get() {
                 large.push(section);
@@ -237,7 +239,7 @@ impl PagedCollections {
             }
         }
         Ok(Allocation {
-            address: StoredAddress::new(start),
+            address: start,
             length,
         })
     }
@@ -256,17 +258,17 @@ pub(super) struct PagedLayout<T> {
     /// Dataset indices with separate page-aligned runs.
     pub(super) large: Vec<usize>,
     /// Manager header addresses in File Space Info slot order, undefined for inactive slots.
-    pub(super) slots: [u64; NUM_FILE_FSM_MANAGERS],
+    pub(super) slots: [DecodedStoredAddress; NUM_FILE_FSM_MANAGERS],
     /// Metadata, small-raw, and generic-large managers in emission order.
     pub(super) managers: [Option<FileManager>; 3],
     /// The stored address after the extension and manager blocks, before page padding.
-    pub(super) metadata_end: u64,
+    pub(super) metadata_end: StoredAddress,
     /// The first stored address of the raw-data region.
-    pub(super) raw_start: u64,
+    pub(super) raw_start: StoredAddress,
     /// The stored address after the small raw regions, before page padding.
-    pub(super) small_end: u64,
+    pub(super) small_end: StoredAddress,
     /// The page-aligned end of allocation.
-    pub(super) end: u64,
+    pub(super) end: StoredAddress,
 }
 
 impl<T> PagedLayout<T> {
@@ -287,7 +289,7 @@ impl<T> PagedLayout<T> {
     pub(super) fn new(
         page: FileSpacePageSize,
         persist: bool,
-        metadata_end: u64,
+        metadata_end: StoredAddress,
         extension_length: u64,
         measurements: impl ExactSizeIterator<Item = DataMeasure> + Clone,
         sections: CollectionSections,
@@ -299,10 +301,10 @@ impl<T> PagedLayout<T> {
             large: mut large_sections,
         } = sections;
         let extension = Allocation {
-            address: StoredAddress::new(metadata_end),
+            address: metadata_end,
             length: extension_length,
         };
-        let mut cursor = checked_end(metadata_end, extension_length)?;
+        let mut cursor = metadata_end.checked_add(extension_length)?;
         let mut small = Vec::new();
         let mut large = Vec::new();
         let mut small_total = 0;
@@ -316,7 +318,14 @@ impl<T> PagedLayout<T> {
                 small_total = checked_end(small_total, measure.length)?;
             } else {
                 large.push(index);
-                let padding = align(measure.length, page)? - measure.length;
+                let padding = (page.get() - measure.length % page.get()) % page.get();
+                measure
+                    .length
+                    .checked_add(padding)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: measure.length,
+                        length: padding,
+                    })?;
                 if padding > 0 {
                     large_sizes.push(padding);
                 }
@@ -353,7 +362,7 @@ impl<T> PagedLayout<T> {
         } else {
             None
         };
-        let mut slots = [StoredAddress::undefined(WIDTHS.offsets).get(); NUM_FILE_FSM_MANAGERS];
+        let mut slots = [DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS];
         let mut locations = [None, None, None];
         if persist {
             for (target, kind, length) in [
@@ -373,15 +382,14 @@ impl<T> PagedLayout<T> {
                 ),
             ] {
                 if let Some(length) = length {
-                    let header = StoredAddress::new(cursor);
-                    cursor = checked_end(
-                        cursor,
+                    let header = cursor;
+                    cursor = cursor.checked_add(
                         hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
                     )?;
-                    let section_list = StoredAddress::new(cursor);
-                    cursor = checked_end(cursor, length)?;
+                    let section_list = cursor;
+                    cursor = cursor.checked_add(length)?;
                     let (slot, _) = free_space_manager::manager_wire(kind);
-                    slots[slot] = header.get();
+                    slots[slot] = DecodedStoredAddress::Defined(header);
                     locations[target] = Some(ManagerLocation {
                         header,
                         section_list,
@@ -394,18 +402,20 @@ impl<T> PagedLayout<T> {
         let metadata_end = cursor;
         let raw_start = align(cursor, page)?;
         if raw_start > cursor {
+            // The aligned start follows the metadata cursor.
             meta_sections.push(FreeSection {
-                addr: StoredAddress::new(cursor),
-                size: raw_start - cursor,
+                addr: cursor,
+                size: raw_start.checked_distance_from(cursor).unwrap(),
             });
         }
-        let small_end = checked_end(raw_start, small_total)?;
+        let small_end = raw_start.checked_add(small_total)?;
         let mut small_cursor = raw_start;
         cursor = align(small_end, page)?;
         if small_total > 0 && cursor > small_end {
+            // Alignment advances the nonempty raw region past its end.
             raw_sections.push(FreeSection {
-                addr: StoredAddress::new(small_end),
-                size: cursor - small_end,
+                addr: small_end,
+                size: cursor.checked_distance_from(small_end).unwrap(),
             });
         }
         let mut data = Vec::with_capacity(measurements.len());
@@ -413,24 +423,25 @@ impl<T> PagedLayout<T> {
             let placed = if measure.empty_contiguous() {
                 None
             } else if measure.length < page.get() {
-                let address = StoredAddress::new(small_cursor);
-                small_cursor = checked_end(small_cursor, measure.length)?;
+                let address = small_cursor;
+                small_cursor = small_cursor.checked_add(measure.length)?;
                 Some(Allocation {
                     address,
                     length: measure.length,
                 })
             } else {
                 let start = align(cursor, page)?;
-                let end = checked_end(start, measure.length)?;
+                let end = start.checked_add(measure.length)?;
                 cursor = align(end, page)?;
                 if cursor > end {
+                    // The aligned cursor follows this large allocation.
                     large_sections.push(FreeSection {
-                        addr: StoredAddress::new(end),
-                        size: cursor - end,
+                        addr: end,
+                        size: cursor.checked_distance_from(end).unwrap(),
                     });
                 }
                 Some(Allocation {
-                    address: StoredAddress::new(start),
+                    address: start,
                     length: measure.length,
                 })
             };
@@ -526,8 +537,8 @@ fn checked_end(offset: u64, length: u64) -> Result<u64, FormatError> {
         .ok_or(FormatError::OffsetOverflow { offset, length })
 }
 
-fn align(offset: u64, page: FileSpacePageSize) -> Result<u64, FormatError> {
-    checked_end(offset, (page.get() - offset % page.get()) % page.get())
+fn align(offset: StoredAddress, page: FileSpacePageSize) -> Result<StoredAddress, FormatError> {
+    offset.checked_add((page.get() - offset.get() % page.get()) % page.get())
 }
 
 /// Reserves section-list capacity for the final metadata page tail.
@@ -543,18 +554,14 @@ fn align(offset: u64, page: FileSpacePageSize) -> Result<u64, FormatError> {
 /// Returns [`FormatError::OffsetOverflow`] if a manager extent or its padding exceeds [`u64::MAX`].
 pub(super) fn paged_metadata_section_allocation(
     page: FileSpacePageSize,
-    metadata_end: u64,
+    metadata_end: StoredAddress,
     other_managers: impl IntoIterator<Item = u64>,
     sections: &[FreeSection],
 ) -> Result<Option<u64>, FormatError> {
     let end = other_managers
         .into_iter()
-        .try_fold(metadata_end, |offset, length| {
-            offset
-                .checked_add(length)
-                .ok_or(FormatError::OffsetOverflow { offset, length })
-        })?;
-    if sections.is_empty() && end % page.get() == 0 {
+        .try_fold(metadata_end, |offset, length| offset.checked_add(length))?;
+    if sections.is_empty() && end.get() % page.get() == 0 {
         return Ok(None);
     }
     let sizes: Vec<_> = sections
@@ -568,21 +575,19 @@ pub(super) fn paged_metadata_section_allocation(
         allocation,
     ]
     .into_iter()
-    .try_fold(end, |offset, length| {
-        offset
-            .checked_add(length)
-            .ok_or(FormatError::OffsetOverflow { offset, length })
-    })?;
-    Ok(Some(if sections.is_empty() && end % page.get() == 0 {
-        allocation
-            .checked_add(1)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: allocation,
-                length: 1,
-            })?
-    } else {
-        allocation
-    }))
+    .try_fold(end, |offset, length| offset.checked_add(length))?;
+    Ok(Some(
+        if sections.is_empty() && end.get() % page.get() == 0 {
+            allocation
+                .checked_add(1)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: allocation,
+                    length: 1,
+                })?
+        } else {
+            allocation
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -599,6 +604,7 @@ mod tests {
     use super::ObjectMeasure;
     use super::PagedCollections;
     use super::PagedLayout;
+    use crate::address::DecodedStoredAddress;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::error::FormatError;
@@ -664,7 +670,7 @@ mod tests {
         let plan = PagedLayout::new(
             FileSpacePageSize::try_from(page).unwrap(),
             false,
-            offset + 200,
+            StoredAddress::new(offset + 200),
             20,
             measurements.into_iter(),
             CollectionSections::default(),
@@ -684,10 +690,10 @@ mod tests {
             end,
         } = plan;
         assert_eq!(extension, span(offset + 200, 20));
-        assert_eq!(metadata_end, offset + 220);
-        assert_eq!(raw_start, offset + page);
-        assert_eq!(small_end, offset + page + 7);
-        assert_eq!(end, offset + 4 * page);
+        assert_eq!(metadata_end, StoredAddress::new(offset + 220));
+        assert_eq!(raw_start, StoredAddress::new(offset + page));
+        assert_eq!(small_end, StoredAddress::new(offset + page + 7));
+        assert_eq!(end, StoredAddress::new(offset + 4 * page));
         assert_eq!(small, [1, 2]);
         assert_eq!(large, [3]);
         assert_eq!(
@@ -699,7 +705,10 @@ mod tests {
                 Some(span(offset + 2 * page, page + 188))
             ]
         );
-        assert_eq!(slots, [u64::MAX; super::NUM_FILE_FSM_MANAGERS]);
+        assert_eq!(
+            slots,
+            [DecodedStoredAddress::Undefined; super::NUM_FILE_FSM_MANAGERS]
+        );
         assert_eq!(managers.map(|manager| manager.is_some()), [false; 3]);
     }
 
@@ -716,7 +725,7 @@ mod tests {
         let plan = PagedLayout::new(
             page,
             true,
-            200,
+            StoredAddress::new(200),
             20,
             [
                 DataMeasure::new(7, DataKind::Contiguous),
@@ -740,7 +749,10 @@ mod tests {
             large: _,
         } = plan;
         let manager = managers[manager_index].as_ref().unwrap();
-        assert_eq!(slots[slot], manager.header_address.get());
+        assert_eq!(
+            slots[slot],
+            DecodedStoredAddress::Defined(manager.header_address)
+        );
         let header = FreeSpaceManagerHeader::parse(WIDTHS, &manager.header).unwrap();
         let sections = format::parse_section_info(
             WIDTHS,
@@ -751,26 +763,29 @@ mod tests {
         .unwrap();
         let expected = match kind {
             PageTail::Metadata => FreeSection {
-                addr: StoredAddress::new(metadata_end),
-                size: raw_start - metadata_end,
+                addr: metadata_end,
+                size: raw_start.checked_distance_from(metadata_end).unwrap(),
             },
             PageTail::Raw => FreeSection {
-                addr: StoredAddress::new(small_end),
+                addr: small_end,
                 size: 505,
             },
             PageTail::Large => FreeSection {
-                addr: StoredAddress::new(data[1].unwrap().address.get() + 700),
+                addr: data[1].unwrap().address.checked_add(700).unwrap(),
                 size: 324,
             },
         };
         assert_eq!(sections, [expected]);
-        assert_eq!(end % page.get(), 0);
+        assert_eq!(end.get() % page.get(), 0);
     }
 
     #[test]
     fn paged_collections_keep_metadata_and_raw_page_tails_separate() {
-        let mut collections = PagedCollections::new(48, FileSpacePageSize::try_from(512).unwrap());
-        assert_eq!(collections.end, 48);
+        let mut collections = PagedCollections::new(
+            StoredAddress::new(48),
+            FileSpacePageSize::try_from(512).unwrap(),
+        );
+        assert_eq!(collections.end, StoredAddress::new(48));
         assert_eq!(collections.reserve(3).unwrap(), span(512, 3));
         assert_eq!(collections.reserve(700).unwrap(), span(1024, 700));
         assert_eq!(collections.reserve(512).unwrap(), span(2048, 512));
@@ -784,7 +799,7 @@ mod tests {
                 },
             page: _,
         } = collections;
-        assert_eq!(end, 2560);
+        assert_eq!(end, StoredAddress::new(2560));
         assert_eq!(
             metadata,
             [FreeSection {
@@ -822,7 +837,7 @@ mod tests {
         let error = PagedLayout::new(
             FileSpacePageSize::try_from(512).unwrap(),
             false,
-            metadata_end,
+            StoredAddress::new(metadata_end),
             extension,
             data_length
                 .into_iter()
@@ -859,7 +874,7 @@ mod tests {
             PagedLayout::new(
                 FileSpacePageSize::try_from(512).unwrap(),
                 false,
-                200,
+                StoredAddress::new(200),
                 20,
                 (0..count).map(|_| DataMeasure::new(16, DataKind::Contiguous)),
                 CollectionSections::default(),
@@ -890,7 +905,13 @@ mod tests {
         assert!(large.is_empty());
         for (index, (actual, allocation, bytes)) in data.iter().enumerate() {
             assert_eq!(*actual, index);
-            assert_eq!(*allocation, Some(span(raw_start + index as u64 * 16, 16)));
+            assert_eq!(
+                *allocation,
+                Some(Allocation {
+                    address: raw_start.checked_add(index as u64 * 16).unwrap(),
+                    length: 16
+                })
+            );
             assert_eq!(*bytes, [0xa5; 256]);
         }
         assert_eq!(measured.live_bytes, retained as u64, "{measured}");

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
@@ -15,6 +16,7 @@ use crate::FixedPointType;
 use crate::FloatingPointType;
 use crate::Layout;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -139,7 +141,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     let reader = crate::reader::File::open(path).unwrap();
     let link_names = reader.group("g").unwrap().datasets().unwrap();
     assert_eq!(link_names.len(), 12);
-    let data_blocks: Vec<(u64, u64, FreeClass)> = link_names
+    let data_blocks: Vec<(FileRange, FreeClass)> = link_names
         .iter()
         .map(|link_name| {
             let crate::Layout::Contiguous {
@@ -153,7 +155,10 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
             else {
                 panic!("the child {link_name:?} stores its data contiguously");
             };
-            (data_addr, size, FreeClass::Page(PageType::Raw))
+            (
+                FileRange::new(PhysicalAddress::new(data_addr), size).unwrap(),
+                FreeClass::Page(PageType::Raw),
+            )
         })
         .collect();
     drop(reader);
@@ -212,8 +217,11 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     );
     for &(extent, kind) in heap.allocations() {
         let span = (
-            session.addresses().resolve(extent.start()).unwrap().get(),
-            extent.len(),
+            FileRange::new(
+                session.addresses().resolve(extent.start()).unwrap(),
+                extent.len(),
+            )
+            .unwrap(),
             FreeClass::Page(kind.allocation_class().into()),
         );
         assert!(
@@ -222,7 +230,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         );
     }
 
-    let mut expected: Vec<(u64, u64, FreeClass)> = reclaim::meta_spans(header_spans)
+    let mut expected: Vec<(FileRange, FreeClass)> = reclaim::meta_spans(header_spans)
         .chain(link_storage)
         .chain(data_blocks)
         .chain(link_names.iter().flat_map(|link_name| {
@@ -230,11 +238,11 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
             reclaim::meta_spans(session.oh_chunk_spans(child).unwrap())
         }))
         .collect();
-    expected.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
+    expected.sort_unstable_by_key(|&(range, _)| range.start());
     let incoming = session.count_incoming_hard_links().unwrap();
     let mut planned = Vec::new();
     session.collect_free_spans(addr, 0, &incoming, &mut planned);
-    planned.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
+    planned.sort_unstable_by_key(|&(range, _)| range.start());
     assert_eq!(planned, expected);
 
     session.delete(&object).unwrap();
@@ -274,12 +282,14 @@ impl WriteEngine {
     /// every selected byte.
     pub(in crate::edit) fn assert_ownership_covers_storage(
         &self,
-        storage: &[(u64, u64, FreeClass)],
+        storage: &[(FileRange, FreeClass)],
         metadata: bool,
     ) {
         let owned = self.space_ownership().unwrap();
         assert!(owned.analysis_complete);
-        for &(at, len, _) in storage {
+        for &(range, _) in storage {
+            let at = range.start().get();
+            let len = range.length();
             let covered =
                 test_util::range::covered_len(&owned.live_metadata_space, &(at..at + len));
             let raw = if metadata {
@@ -490,8 +500,8 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByte
         .expect("the extensible-array index is enumerable");
     assert!(!index_spans.is_empty());
     let mut meta_pages: Vec<u64> = vec![s.context.superblock().base_address.get() / PAGE];
-    for (addr, len) in &index_spans {
-        for p in (addr / PAGE)..=((addr + len - 1) / PAGE) {
+    for range in &index_spans {
+        for p in (range.start().get() / PAGE)..=((range.end().get() - 1) / PAGE) {
             meta_pages.push(p);
         }
     }
