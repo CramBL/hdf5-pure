@@ -7,7 +7,7 @@ use crate::display::EscapedName;
 use crate::error::FormatError;
 use crate::file_writer::AttrValue;
 use crate::mat::class::MatClass;
-use crate::mat::de::mcos_reader::{self, Mcos, PropValue};
+use crate::mat::de::mcos_reader::{self, ClassId, Mcos, NameIndex, PropValue};
 use crate::mat::error::MatError;
 use crate::mat::string_object::MCOS_MAGIC_NUMBER;
 use crate::mat::utf16;
@@ -281,7 +281,7 @@ fn try_decode_enum_instance(
     // remains, i.e. a corrupt instance.
     let class_id = read_enum_scalar_u32(group, "ClassName")?;
     let class_name = mcos
-        .class_name(class_id)
+        .class_name(ClassId::new(class_id))
         .ok()
         .filter(|name| !name.is_empty())
         .or_else(|| enum_class_from_attr(group))
@@ -294,7 +294,7 @@ fn try_decode_enum_instance(
     // The member-name pool: each `ValueNames` entry is a 1-based name index.
     let pool: Vec<String> = read_enum_u32_vec(group, "ValueNames")?
         .iter()
-        .map(|&idx| mcos.name(idx))
+        .map(|&idx| mcos.name(NameIndex::new(idx)))
         .collect::<Result<_, _>>()?;
 
     // Map each element's pool index to its member name, row-major. An
