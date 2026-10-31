@@ -321,6 +321,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FixedPointType",
         "FixedPointTypeBuilder",
         "FloatingPointType",
+        "FloatingPointTypeBuilder",
         "FloatingPointField",
         "TimeType",
         "FilterMask",

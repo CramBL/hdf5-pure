@@ -7,7 +7,7 @@
 
 use core::num::{NonZeroU16, NonZeroU32};
 
-use self::builder::{BitFieldTypeBuilder, FixedPointTypeBuilder};
+use self::builder::{BitFieldTypeBuilder, FixedPointTypeBuilder, FloatingPointTypeBuilder};
 use super::byte_order::DatatypeByteOrder;
 use crate::FormatError;
 
@@ -271,6 +271,13 @@ pub struct FloatingPointType {
 }
 
 impl FloatingPointType {
+    /// Creates an incomplete floating-point description with zero padding.
+    ///
+    /// See [`FloatingPointTypeBuilder`] for the required properties and an example.
+    pub const fn builder() -> FloatingPointTypeBuilder {
+        FloatingPointTypeBuilder::new()
+    }
+
     /// Constructs a floating-point datatype from its element size and bit fields.
     ///
     /// `size` is in bytes. Bit locations count from the least significant bit of the element.

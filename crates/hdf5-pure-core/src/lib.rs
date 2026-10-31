@@ -57,6 +57,7 @@ pub use datatype::layout::MantissaNormalization;
 pub use datatype::layout::TimeType;
 pub use datatype::layout::builder::BitFieldTypeBuilder;
 pub use datatype::layout::builder::FixedPointTypeBuilder;
+pub use datatype::layout::builder::FloatingPointTypeBuilder;
 pub use datatype::layout::builder::NumericDatatypeProperty;
 pub use deflate_level::DeflateLevel;
 pub use error::FormatError;

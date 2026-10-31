@@ -344,6 +344,7 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("AddressRange", []),
         ("BitFieldTypeBuilder", []),
         ("FixedPointTypeBuilder", []),
+        ("FloatingPointTypeBuilder", []),
         ("NumericDatatypeProperty", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],
