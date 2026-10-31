@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Fixed `File::commit` reporting a format error for edits of groups with well-formed user-defined links ([#1216](https://github.com/CramBL/hdf5-pure/pull/1216)).
 - Fixed `OwnedLink` serialization discarding stored name-length widths and explicit default fields ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
+- Fixed `mat::from_file` and related deserialization failing on a MATLAB `string` stored after another object, such as a `duration` in the same file ([#1214](https://github.com/CramBL/hdf5-pure/pull/1214)).
 - Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
 
 ## [0.48.0] - 2026-11-11
