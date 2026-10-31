@@ -226,6 +226,20 @@ impl ClassId {
     }
 }
 
+/// A 1-based object id, the position of an entry in the object table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ObjectId(NonZeroU32);
+
+impl ObjectId {
+    /// Parses an object id that opaque metadata refers to. Id 0 is the
+    /// reserved leading entry, which no object refers to, and is an error.
+    pub(crate) fn parse(id: u32) -> Result<Self, MatError> {
+        NonZeroU32::new(id).map(Self).ok_or_else(|| {
+            MatError::Custom("opaque object id 0 is invalid (ids are 1-based)".into())
+        })
+    }
+}
+
 /// A 1-based property block id, the position of a block in its property
 /// table. Id 0 is the reserved leading block, and an object record holds it
 /// for a table the object has no block in.
@@ -309,16 +323,16 @@ impl Mcos {
         }
     }
 
-    /// The class name of a 1-based `object_id`, resolved through its object
-    /// record's `class_id`.
-    pub(crate) fn object_class_name(&self, object_id: u32) -> Result<String, MatError> {
+    /// The class name of an object, resolved through its object record's
+    /// `class_id`.
+    pub(crate) fn object_class_name(&self, object_id: ObjectId) -> Result<String, MatError> {
         self.class_name(self.object_record(object_id)?.class_id)
     }
 
-    /// Resolve every property of a 1-based `object_id` to its name and value
-    /// reference, in declaration order. Picks the type-1 (`saveobj`) or type-2
-    /// (`normal`) block as the object record dictates.
-    pub(crate) fn properties(&self, object_id: u32) -> Result<Vec<PropRef>, MatError> {
+    /// Resolve every property of an object to its name and value reference, in
+    /// declaration order. Picks the type-1 (`saveobj`) or type-2 (`normal`)
+    /// block as the object record dictates.
+    pub(crate) fn properties(&self, object_id: ObjectId) -> Result<Vec<PropRef>, MatError> {
         let record = self.object_record(object_id)?;
         let (blocks, PropertyBlockId(block_id)) = match record.properties {
             Some(PropertyBlockRef::Normal(block_id)) => (&self.wrapper.normal_blocks, block_id),
@@ -327,7 +341,8 @@ impl Mcos {
         };
         let block = blocks.get(block_id.get().to_usize()?).ok_or_else(|| {
             MatError::Custom(format!(
-                "MCOS object {object_id} references property block {block_id} out of range"
+                "MCOS object {} references property block {block_id} out of range",
+                object_id.0
             ))
         })?;
 
@@ -362,16 +377,11 @@ impl Mcos {
         })
     }
 
-    /// The object record for a 1-based `object_id`.
-    fn object_record(&self, object_id: u32) -> Result<&ObjectRecord, MatError> {
-        if object_id == 0 {
-            return Err(MatError::Custom(
-                "opaque object id 0 is invalid (ids are 1-based)".into(),
-            ));
-        }
+    /// The object record for an object id.
+    fn object_record(&self, ObjectId(object_id): ObjectId) -> Result<&ObjectRecord, MatError> {
         self.wrapper
             .objects
-            .get(object_id.to_usize()?)
+            .get(object_id.get().to_usize()?)
             .ok_or_else(|| {
                 MatError::Custom(format!(
                     "MCOS object id {object_id} out of range ({} objects)",
@@ -407,7 +417,7 @@ impl Mcos {
         // several objects; collect every decoded value.
         let mut values: Vec<String> = Vec::new();
         for object_id in object_ids {
-            let payload = self.saveobj_payload(object_id)?;
+            let payload = self.saveobj_payload(ObjectId::parse(object_id)?)?;
             values.extend(decode_string_saveobj(&payload)?);
         }
 
@@ -419,18 +429,13 @@ impl Mcos {
         })
     }
 
-    /// Read the saveobj `uint64` payload for a 1-based object id.
+    /// Read the saveobj `uint64` payload for an object id.
     ///
     /// The string writer lays out one saveobj cell per object directly after the
     /// reserved prefix, so object id `k` maps to cell
     /// `MCOS_RESERVED_CELL_PREFIX + (k - 1)`.
-    fn saveobj_payload(&self, object_id: u32) -> Result<Vec<u64>, MatError> {
-        if object_id == 0 {
-            return Err(MatError::Custom(
-                "opaque object id 0 is invalid (ids are 1-based)".into(),
-            ));
-        }
-        let idx = MCOS_RESERVED_CELL_PREFIX + (object_id.to_usize()? - 1);
+    fn saveobj_payload(&self, ObjectId(object_id): ObjectId) -> Result<Vec<u64>, MatError> {
+        let idx = MCOS_RESERVED_CELL_PREFIX + (object_id.get() - 1).to_usize()?;
         let cell = self.cells.get(idx).ok_or_else(|| {
             MatError::Custom(format!(
                 "opaque object id {object_id} maps to MCOS cell {idx}, but the store has {} cells",
