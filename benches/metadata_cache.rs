@@ -25,7 +25,7 @@ mod address;
     unfulfilled_lint_expectations,
     reason = "the source module's public API lints do not apply inside a private benchmark module"
 )]
-#[path = "../src/source.rs"]
+#[path = "../src/source/mod.rs"]
 mod source;
 
 fn metadata_cache_hits(criterion: &mut Criterion) {
