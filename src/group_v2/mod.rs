@@ -287,7 +287,6 @@ fn resolve_compact_entries(
                 entries.push(GroupEntry {
                     name: link.name,
                     object_header_address,
-                    cache_type: 0,
                 });
             }
             // Listings include only hard links.
@@ -762,7 +761,6 @@ fn resolve_dense_entries(
             entries.push(GroupEntry {
                 name: link.name,
                 object_header_address,
-                cache_type: 0,
             });
         }
     }
@@ -1058,7 +1056,6 @@ pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
             entries.push(GroupEntry {
                 name: link.name,
                 object_header_address,
-                cache_type: 0,
             });
         }
     }
