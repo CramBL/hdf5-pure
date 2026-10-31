@@ -8,7 +8,7 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::MetadataFrame;
-use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::{AddressRange, PhysicalAddress, StoredAddress};
 
 #[cfg(test)]
 use crate::VariableLengthStringType;
@@ -33,7 +33,7 @@ use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
-use crate::source::Source;
+use crate::source::{RangeReader, Source};
 use crate::width::FormatWidths;
 #[cfg(test)]
 use crate::{FixedPointType, FloatingPointType};
@@ -60,14 +60,25 @@ pub fn read_raw_data(
 ) -> Result<Vec<u8>, FormatError> {
     read_raw_data_full(
         file_data,
+        &source::zero_base_source(&source::BytesSource::new(file_data)),
         RawReadSpec::parse(layout, dataspace, datatype, None, FillPattern::ZERO)?,
         TEST_WIDTHS,
     )
 }
 
-/// Read raw bytes with full parameters including filter pipeline and sizes.
+/// Reads raw dataset bytes using the supplied layout, filters, and field widths.
+///
+/// `file_data` begins at the opened image's effective base. The reader reads Fixed Array and
+/// Extensible Array indexes through `indexes`, constructed from the same opened image.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedVirtualLayout`] for a nonempty dataset with virtual storage,
+/// and errors from [`RawReadSpec::byte_len`], [`source::bytes_in`],
+/// [`crate::fill_value::FillPattern::buffer`], or [`chunked_read::read_chunked_data_cached`].
 pub fn read_raw_data_full(
     file_data: &[u8],
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
@@ -87,17 +98,21 @@ pub fn read_raw_data_full(
         )?
         .to_vec()),
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
-        RawReadStorage::Chunked { .. } => {
-            chunked_read::read_chunked_data_cached(file_data, spec, widths, &ChunkCache::new())
-        }
+        RawReadStorage::Chunked { .. } => chunked_read::read_chunked_data_cached(
+            file_data,
+            indexes,
+            spec,
+            widths,
+            &ChunkCache::new(),
+        ),
         RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
 }
 
 /// Reads raw bytes with index and decoded-chunk caching.
 ///
-/// The reader resolves metadata positions from the frame's origin and borrows payload bytes
-/// from its slice at local offsets.
+/// The reader borrows payload bytes from the frame's slice at stored offsets and reads array
+/// indexes through the stored-coordinate `indexes` reader.
 /// Compact and contiguous layouts use [`read_raw_data_full`].
 ///
 /// # Errors
@@ -106,22 +121,33 @@ pub fn read_raw_data_full(
 /// [`chunked_read::read_chunked_data_cached`].
 pub fn read_raw_data_cached(
     file_data: MetadataFrame<'_>,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
         RawReadStorage::Chunked { .. } => {
-            chunked_read::read_chunked_data_cached_framed(file_data, spec, widths, cache)
+            chunked_read::read_chunked_data_cached_framed(file_data, indexes, spec, widths, cache)
         }
-        _ => read_raw_data_full(file_data.bytes(), spec, widths),
+        _ => read_raw_data_full(file_data.bytes(), indexes, spec, widths),
     }
 }
 
-/// Read raw bytes for a dataset from a [`Source`] (streaming counterpart of
-/// [`read_raw_data_full`]).
+/// Reads raw dataset bytes from a source framed at the opened image's effective base.
+///
+/// Reads Fixed Array and Extensible Array indexes through `indexes`, a stored-coordinate reader
+/// constructed from the same opened image. This is the streaming counterpart of
+/// [`read_raw_data_full`].
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnsupportedVirtualLayout`] for a nonempty dataset with virtual storage,
+/// and errors from [`RawReadSpec::byte_len`], [`Source::read_exact_at`],
+/// [`crate::fill_value::FillPattern::buffer`], or [`chunked_read::read_chunked_data_from_source`].
 pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
@@ -139,7 +165,7 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
         }
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
         RawReadStorage::Chunked { .. } => {
-            chunked_read::read_chunked_data_from_source(source, spec, widths)
+            chunked_read::read_chunked_data_from_source(source, indexes, spec, widths)
         }
         RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
     }
@@ -148,15 +174,16 @@ pub fn read_raw_data_full_from_source<S: Source + ?Sized>(
 /// Streaming counterpart of [`read_raw_data_cached`].
 pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
         RawReadStorage::Chunked { .. } => {
-            chunked_read::read_chunked_data_cached_from_source(source, spec, widths, cache)
+            chunked_read::read_chunked_data_cached_from_source(source, indexes, spec, widths, cache)
         }
-        _ => read_raw_data_full_from_source(source, spec, widths),
+        _ => read_raw_data_full_from_source(source, indexes, spec, widths),
     }
 }
 

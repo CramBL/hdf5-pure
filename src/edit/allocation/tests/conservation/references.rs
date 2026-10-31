@@ -53,6 +53,7 @@ use crate::image::WriteBuffering;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
+use crate::source;
 use crate::source::BytesSource;
 use crate::source::MetadataCacheConfig;
 use crate::source::RangeReader;
@@ -577,7 +578,7 @@ impl Roles {
             .unwrap();
         let located = crate::superblock::read(workload.final_bytes.as_slice()).unwrap();
         let ea = extensible_array::read_header(
-            &BytesSource::new(&workload.final_bytes),
+            &source::zero_base_source(&BytesSource::new(&workload.final_bytes)),
             located.widths,
             StoredAddress::new(header.range.start()),
         )
@@ -1400,7 +1401,7 @@ fn assert_torn(image: &[u8], workload: &Workload, target: WriteTarget, range: In
                 panic!("the dataset has an EA index")
             };
             let ea = extensible_array::read_header(
-                &BytesSource::new(&workload.final_bytes),
+                &source::zero_base_source(&BytesSource::new(&workload.final_bytes)),
                 located.widths,
                 address,
             )
@@ -1489,7 +1490,8 @@ fn assert_malformed_pointer(
         assert_ne!(torn, address);
         let expected = stored.checked_add(pointer.length).unwrap();
         assert_eq!(
-            extensible_array::read_header(&source, located.widths, torn).unwrap_err(),
+            extensible_array::read_header(&source::zero_base_source(&source), located.widths, torn)
+                .unwrap_err(),
             FormatError::UnexpectedSourceEof {
                 expected,
                 available: u64::try_from(image.len()).unwrap()
@@ -1498,7 +1500,7 @@ fn assert_malformed_pointer(
         return;
     }
     let header = extensible_array::read_header(
-        &BytesSource::new(&workload.final_bytes),
+        &source::zero_base_source(&BytesSource::new(&workload.final_bytes)),
         located.widths,
         address,
     )

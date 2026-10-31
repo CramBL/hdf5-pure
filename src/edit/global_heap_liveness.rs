@@ -22,6 +22,7 @@ use crate::object_header::ObjectHeader;
 use crate::read_spec::RawReadSpec;
 use crate::read_spec::RawReadStorage;
 use crate::source::BaseOffsetSource;
+use crate::source::PhysicalSource;
 use crate::vl_data;
 use crate::vl_data::EmbeddedVlSlot;
 use crate::vl_data::VlElement;
@@ -325,6 +326,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: self.context.addresses().effective_base(),
             },
+            &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
             spec,
             self.widths(),
             |chunk| {

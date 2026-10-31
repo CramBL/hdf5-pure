@@ -15,6 +15,7 @@ use crate::address::DecodedStoredAddress;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 use crate::dataspace::DataspaceType;
 use crate::image::WriteBuffering;
+use crate::source;
 
 use crate::message_flags::MessageFlags;
 use crate::{DatatypeByteOrder, FileBuilder};
@@ -2083,6 +2084,7 @@ fn empty_region_reads_preserve_layout_errors(
     .unwrap();
     let result = read_region_framed(
         &BytesSource::new(&[]),
+        &source::zero_base_source(&BytesSource::new(&[])),
         &region,
         FormatWidths::from_sizes(8, 8).unwrap(),
         &ChunkCache::new(),
@@ -2115,6 +2117,7 @@ fn compact_regions_read_selected_columns() {
     assert_eq!(
         read_region_framed(
             &BytesSource::new(&[]),
+            &source::zero_base_source(&BytesSource::new(&[])),
             &region,
             FormatWidths::from_sizes(8, 8).unwrap(),
             &ChunkCache::new(),

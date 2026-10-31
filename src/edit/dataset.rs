@@ -51,7 +51,7 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::shared_message::DatatypeLocation;
-use crate::source::{BaseOffsetSource, Source};
+use crate::source::{BaseOffsetSource, PhysicalSource, RangeReader, Source};
 use crate::type_builders::{self, DatasetBuilder, VlStringStaging};
 use crate::width::FormatWidths;
 
@@ -409,6 +409,7 @@ impl WriteEngine {
                             inner: src,
                             base: base.effective_base(),
                         },
+                        &PhysicalSource::new(src).stored(base),
                         &dl,
                         &disk_ds,
                         &overwrite.geometry,
@@ -604,10 +605,14 @@ impl WriteEngine {
             base: base.effective_base(),
         };
 
+        let indexes = PhysicalSource::new(src).stored(base);
         // Retained records must use the same element format as the replacement index.
         if let Some(idx_addr) = *address {
-            let array =
-                crate::extensible_array::read_header(&view, crate::file_writer::WIDTHS, idx_addr)?;
+            let array = crate::extensible_array::read_header(
+                &indexes,
+                crate::file_writer::WIDTHS,
+                idx_addr,
+            )?;
             if array.is_filtered() != has_filters {
                 return Err(Error::AppendUnsupported(
                     "dataset filter metadata is inconsistent (chunk-index client id \
@@ -618,6 +623,7 @@ impl WriteEngine {
 
         let infos = chunked_read::enumerate_chunks_from_source(
             &view,
+            &indexes,
             &dl,
             &disk_ds,
             crate::file_writer::WIDTHS,
@@ -1761,14 +1767,20 @@ impl ChunkGeometry {
 /// spans.
 fn try_inplace_chunk_writes<S: Source + ?Sized>(
     src: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     layout: &DataLayout,
     ds: &Dataspace,
     geometry: &ChunkGeometry,
     new_chunks: &[PreparedChunk],
 ) -> Option<Vec<(u64, Vec<u8>)>> {
-    let infos =
-        chunked_read::enumerate_chunks_from_source(src, layout, ds, crate::file_writer::WIDTHS)
-            .ok()?;
+    let infos = chunked_read::enumerate_chunks_from_source(
+        src,
+        indexes,
+        layout,
+        ds,
+        crate::file_writer::WIDTHS,
+    )
+    .ok()?;
     let grid = chunked_read::plan_dense_grid(infos, &geometry.shape, &geometry.spatial)?;
     if grid.grid_order.len() != new_chunks.len() {
         return None;
@@ -1797,8 +1809,15 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
     }
 
     if any_shrunk {
-        let (index_addr, index_bytes) =
-            try_rebuild_index_in_place(src, layout, ds, geometry, &grid.grid_order, new_chunks)?;
+        let (index_addr, index_bytes) = try_rebuild_index_in_place(
+            src,
+            indexes,
+            layout,
+            ds,
+            geometry,
+            &grid.grid_order,
+            new_chunks,
+        )?;
         spans.push(AddressRange::new(index_addr, index_bytes.len() as u64).ok()?);
         writes.push((index_addr.get(), index_bytes));
     }
@@ -1823,6 +1842,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
 /// An in-place index rewrite can tear on a failed write or crash.
 fn try_rebuild_index_in_place<S: Source + ?Sized>(
     src: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     layout: &DataLayout,
     ds: &Dataspace,
     geometry: &ChunkGeometry,
@@ -1885,9 +1905,13 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     };
 
     // Require the original index allocation to be contiguous and exactly the rebuilt length.
-    let mut spans =
-        crate::chunked_read::chunk_index_spans_from_source(src, layout, crate::file_writer::WIDTHS)
-            .ok()?;
+    let mut spans = crate::chunked_read::chunk_index_spans_from_source(
+        src,
+        indexes,
+        layout,
+        crate::file_writer::WIDTHS,
+    )
+    .ok()?;
     if spans.is_empty() {
         return None;
     }

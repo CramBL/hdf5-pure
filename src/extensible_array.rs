@@ -1,4 +1,4 @@
-//! The Extensible Array reads over a byte slice or a [`Source`](crate::source::Source).
+//! Extensible Array traversal through checked stored-coordinate range reads.
 //!
 //! [`read_chunks`] reads the header and the index block, then each super block and each data block
 //! that holds a slot below the header's "Max Index Set". Of a paged data block it reads the prefix
@@ -12,7 +12,6 @@ use core::iter::Peekable;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-#[cfg(feature = "std")]
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArray;
@@ -35,6 +34,9 @@ use crate::width::FormatWidths;
 /// Reads the Extensible Array at `address` and calls `visit` with the slot and the record of each
 /// element that stores a chunk address.
 ///
+/// The caller supplies a stored-coordinate view of the opened image. Returned metadata retains
+/// the source's physical ranges and ownership while the parsers use base-relative positions.
+///
 /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size. An array whose header
 /// stores the undefined index block address has no chunks, and this function reads only its
 /// header. Of the other blocks and pages, it reads the allocated blocks and the initialized pages
@@ -42,6 +44,7 @@ use crate::width::FormatWidths;
 ///
 /// # Errors
 ///
+/// Returns [`FormatError::OffsetOverflow`] if resolving a stored position exceeds [`u64::MAX`].
 /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside a block or a page,
 /// [`FormatError::ValueTooLargeForPlatform`] if a block does not fit a `usize`, and the error of a
 /// failed read of a [`Source`](crate::source::Source). Returns the errors
@@ -51,7 +54,7 @@ use crate::width::FormatWidths;
 /// [`ExtensibleArrayDataBlockRef::parse`], and [`ExtensibleArrayPageRef::parse`] return, and the
 /// error `visit` returns.
 pub(crate) fn read_chunks(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
     chunk_byte_size: u64,
@@ -67,7 +70,7 @@ pub(crate) fn read_chunks(
         })
     };
     let range = index_block.parse_range();
-    let bytes = file.read_range(range)?;
+    let bytes = file.read_range(source::legacy_stored_range(range)?)?;
     let index_block = index_block.parse(source::legacy_framed_region(range, &bytes)?)?;
     visit_elements(index_block.elements())?;
     for block in index_block.data_blocks() {
@@ -82,7 +85,7 @@ pub(crate) fn read_chunks(
             continue;
         }
         let range = super_block.parse_range();
-        let bytes = file.read_range(range)?;
+        let bytes = file.read_range(source::legacy_stored_range(range)?)?;
         for block in super_block
             .parse(source::legacy_framed_region(range, &bytes)?)?
             .data_blocks()
@@ -105,8 +108,9 @@ pub(crate) fn read_chunks(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the index block, or
-/// a super block, [`FormatError::ValueTooLargeForPlatform`] if the index block or a super block
+/// Returns [`FormatError::OffsetOverflow`] if resolving a stored position exceeds [`u64::MAX`].
+/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the index block,
+/// or a super block, [`FormatError::ValueTooLargeForPlatform`] if the index block or a super block
 /// does not fit a `usize`, and the error of a failed read of a
 /// [`Source`](crate::source::Source). Returns the errors [`ExtensibleArrayHeaderLocator::parse`],
 /// [`ExtensibleArrayIndexBlockRef::parse`](hdf5_pure_format::__private::ExtensibleArrayIndexBlockRef::parse),
@@ -115,35 +119,32 @@ pub(crate) fn read_chunks(
 /// return.
 #[cfg(feature = "std")]
 pub(crate) fn index_spans(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
-    let span = |range: FileRange| {
-        AddressRange::new(BaseAddress::ZERO.relative(range.start())?, range.length())
-    };
     let header = read_header(file, widths, address)?;
-    let mut spans = vec![span(header.range())?];
+    let mut spans = vec![source::legacy_stored_range(header.range())?];
     let Some(index_block) = header.index_block() else {
         return Ok(spans);
     };
     let range = index_block.parse_range();
-    spans.push(span(range)?);
-    let bytes = file.read_range(range)?;
+    spans.push(source::legacy_stored_range(range)?);
+    let bytes = file.read_range(source::legacy_stored_range(range)?)?;
     let index_block = index_block.parse(source::legacy_framed_region(range, &bytes)?)?;
     for block in index_block.data_blocks() {
-        spans.push(span(block?.range())?);
+        spans.push(source::legacy_stored_range(block?.range())?);
     }
     for super_block in index_block.super_blocks() {
         let super_block = super_block?;
         let range = super_block.parse_range();
-        spans.push(span(range)?);
-        let bytes = file.read_range(range)?;
+        spans.push(source::legacy_stored_range(range)?);
+        let bytes = file.read_range(source::legacy_stored_range(range)?)?;
         for block in super_block
             .parse(source::legacy_framed_region(range, &bytes)?)?
             .data_blocks()
         {
-            spans.push(span(block?.range())?);
+            spans.push(source::legacy_stored_range(block?.range())?);
         }
     }
     Ok(spans)
@@ -153,11 +154,12 @@ pub(crate) fn index_spans(
 ///
 /// # Errors
 ///
+/// Returns [`FormatError::OffsetOverflow`] if resolving a stored position exceeds [`u64::MAX`].
 /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the error of a
 /// failed read of a [`Source`](crate::source::Source), and the errors
 /// [`ExtensibleArrayHeaderLocator::parse`] returns.
 pub(crate) fn read_header(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<ExtensibleArray, FormatError> {
@@ -165,7 +167,7 @@ pub(crate) fn read_header(
     let range = locator.parse_range()?;
     locator.parse(source::legacy_framed_region(
         range,
-        &file.read_range(range)?,
+        &file.read_range(source::legacy_stored_range(range)?)?,
     )?)
 }
 
@@ -173,7 +175,7 @@ pub(crate) fn read_header(
 // each later run of adjacent initialized pages, with one read each, while the length of a read
 // fits a `usize`. No uninitialized page is read.
 fn read_data_block(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     block: ExtensibleArrayDataBlockRef<'_>,
     visit_elements: &mut impl FnMut(ExtensibleArrayElements<'_>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
@@ -185,7 +187,7 @@ fn read_data_block(
             .flat_map(ExtensibleArrayPages::pages)
             .peekable(),
     );
-    let bytes = file.read_range(range)?;
+    let bytes = file.read_range(source::legacy_stored_range(range)?)?;
     let region = source::legacy_framed_region(range, &bytes)?;
     let pages = match block.parse(region)? {
         ExtensibleArrayDataBlock::Elements(elements) => return visit_elements(elements),
@@ -199,7 +201,7 @@ fn read_data_block(
             return Ok(());
         };
         let (range, len) = extend_run(first.parse_range(), &mut pending);
-        let bytes = file.read_range(range)?;
+        let bytes = file.read_range(source::legacy_stored_range(range)?)?;
         visit_pages(
             source::legacy_framed_region(range, &bytes)?,
             run.take(len + 1),
@@ -259,6 +261,7 @@ mod tests {
     use test_util::checksum;
 
     use super::*;
+    use crate::address::AddressContext;
     use crate::address::StoredAddressExt;
     use crate::array_test;
     use crate::placed_source::PlacedSource;
@@ -317,7 +320,8 @@ mod tests {
     fn buffered_records(image: &[u8], base: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
         read_chunks(
-            &source::framed_metadata(image, BaseAddress::new(base))?,
+            &source::PhysicalSource::new(&source::BytesSource::new(image))
+                .stored(AddressContext::from_effective_base(BaseAddress::new(base))),
             WIDTHS,
             StoredAddress::new(ARRAY_AT),
             8,
@@ -607,7 +611,12 @@ mod tests {
         let stored = u32::from_le_bytes(bytes[end - 4..end].try_into().unwrap());
         let computed = hdf5_pure_format::__private::jenkins_lookup3(&bytes[start..end - 4]);
         assert_eq!(
-            index_spans(bytes.as_slice(), WIDTHS, StoredAddress::new(ARRAY_AT)).unwrap_err(),
+            index_spans(
+                &source::zero_base_source(&source::BytesSource::new(bytes.as_slice())),
+                WIDTHS,
+                StoredAddress::new(ARRAY_AT)
+            )
+            .unwrap_err(),
             FormatError::ChecksumMismatch {
                 expected: stored,
                 computed,

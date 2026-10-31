@@ -1,4 +1,8 @@
 //! Chunked dataset index traversal, chunk decoding, and dense-output assembly.
+//!
+//! Fixed Array and Extensible Array indexes are read through a checked stored-coordinate range
+//! reader. Callers frame payload buffers and other index sources at the opened image's effective
+//! base and use the same image's [`AddressContext`](crate::address::AddressContext) for array reads.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -58,6 +62,7 @@ use crate::parsed_chunk_index::SelectionCoverage;
 use crate::read_region::{ReadRegion, RowRegion};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
+use crate::source::RangeReader;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::{FormatWidths, OffsetWidth};
@@ -660,6 +665,7 @@ pub(crate) fn bounded_chunk_len(
 /// [`FormatError::OffsetOverflow`] if output size or placement arithmetic overflows.
 pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
@@ -676,7 +682,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         chunk_dims_u64,
         elem_size,
         chunks,
-    }) = ChunkedPlan::new(source, spec, widths)?
+    }) = ChunkedPlan::new(source, indexes, spec, widths)?
     else {
         return spec.unallocated_buffer();
     };
@@ -728,6 +734,7 @@ impl<'a> ChunkedPlan<'a> {
     /// chunk index.
     fn new(
         source: &(impl Source + ?Sized),
+        indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
         spec: RawReadSpec<'a>,
         widths: FormatWidths,
     ) -> Result<Option<Self>, FormatError> {
@@ -749,6 +756,7 @@ impl<'a> ChunkedPlan<'a> {
         bounded_chunk_len(chunk_dims, elem_size)?;
         let chunks = collect_chunks_for_layout_from_source(
             source,
+            indexes,
             index,
             chunk_dimensions,
             spec.dataspace(),
@@ -819,6 +827,7 @@ fn plan_chunk_spans<'a>(
 #[cfg(test)]
 pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
@@ -830,7 +839,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         return Ok(None);
     }
     let region = ReadRegion::rows(spec, row_start, num_rows)?;
-    read_chunked_region_from_source(source, &region, widths, cache, pass).map(Some)
+    read_chunked_region_from_source(source, indexes, &region, widths, cache, pass).map(Some)
 }
 
 /// Reads intersecting chunks into the region's packed row-major result.
@@ -853,20 +862,21 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 /// unreadable, and errors from reading the chunk index, filters, or payloads.
 pub(crate) fn read_chunked_region_from_source(
     source: &(impl Source + ?Sized),
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     region: &ReadRegion<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
     pass: CachePass,
 ) -> Result<Vec<u8>, FormatError> {
-    ChunkRead::new(region.spec(), widths, cache, pass).read_region(source, region)
+    ChunkRead::new(region.spec(), widths, cache, pass).read_region(source, indexes, region)
 }
 
 /// A chunked dataset reader with one parsed index shared across its row windows.
 ///
 /// Loads the index on the first nonempty read of allocated storage and retains it until this
 /// reader is dropped. The index remains in [`ChunkCache`] after this reader is dropped only
-/// when index caching is enabled. The caller must use the same source, framed at the file's
-/// effective base address, for every read.
+/// when index caching is enabled. For every read, the caller uses the same base-relative payload
+/// source and a stored-coordinate array reader constructed from the same opened image.
 pub(crate) struct ChunkRead<'spec, 'cache> {
     spec: RawReadSpec<'spec>,
     widths: FormatWidths,
@@ -903,11 +913,12 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
     pub(crate) fn read_rows(
         &mut self,
         source: &(impl Source + ?Sized),
+        indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
         start: u64,
         count: u64,
     ) -> Result<Vec<u8>, FormatError> {
         let region = ReadRegion::rows(self.spec, start, count)?;
-        self.read_region(source, &region)
+        self.read_region(source, indexes, &region)
     }
 
     /// Reads a region using this reader's parsed chunk index.
@@ -925,6 +936,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
     fn read_region(
         &mut self,
         source: &(impl Source + ?Sized),
+        indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
         region: &ReadRegion<'_>,
     ) -> Result<Vec<u8>, FormatError> {
         let Self {
@@ -972,6 +984,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
                 ParsedChunkIndex::new(
                     collect_chunks_for_layout_from_source(
                         source,
+                        indexes,
                         index,
                         chunk_dimensions,
                         dataspace,
@@ -1413,6 +1426,7 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
 /// [`FormatError::OffsetOverflow`] if output size or placement arithmetic overflows.
 pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
@@ -1451,6 +1465,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         ParsedChunkIndex::new(
             collect_chunks_for_layout_from_source(
                 source,
+                indexes,
                 index,
                 chunk_dimensions,
                 dataspace,
@@ -1529,6 +1544,8 @@ fn index_grid(
 
 /// Walks `index` and reports one [`ChunkInfo`] per chunk the file holds.
 ///
+/// Reads Fixed Array and Extensible Array indexes through the stored-coordinate `indexes`
+/// reader, and other indexes from `source`, framed at the same opened image's effective base.
 /// Returns an empty vector for an index with no address, which is a dataset
 /// whose storage was never allocated.
 ///
@@ -1538,6 +1555,7 @@ fn index_grid(
 /// index walkers report for malformed structures.
 pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     index: ChunkIndexLayout,
     chunk_dimensions: &[u64],
     dataspace: &Dataspace,
@@ -1580,7 +1598,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             let grid = index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
             fixed_array::read_chunks(
-                source,
+                indexes,
                 widths,
                 addr,
                 grid.chunk_byte_size(elem_size)?,
@@ -1595,7 +1613,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             let grid = index_grid(dataspace, spatial_dims, GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
             extensible_array::read_chunks(
-                source,
+                indexes,
                 widths,
                 addr,
                 grid.chunk_byte_size(elem_size)?,
@@ -1698,19 +1716,22 @@ fn collect_btree_v2_chunks_from_source<S: Source + ?Sized>(
     Ok(chunks)
 }
 
-/// Enumerate every allocated chunk of a chunked dataset from an in-memory file
-/// image, one [`ChunkInfo`] per chunk (file address, on-disk stored size, filter
-/// mask, logical offsets). A buffered convenience wrapper over
-/// [`collect_chunks_for_layout_from_source`] for callers that hold the whole
-/// file as a byte slice (the in-place editor): it accepts a parsed
-/// [`DataLayout::Chunked`] and the dataset's [`Dataspace`] and reads through a
-/// [`BytesSource`](crate::source::BytesSource).
+/// Reports each allocated chunk's stored address, size, filter mask, and logical offsets.
 ///
-/// Returns an empty vector when the index address is undefined (a chunked dataset with no storage
-/// allocated yet).
+/// Reads the index described by `layout` using [`collect_chunks_for_layout_from_source`]. Reads
+/// array indexes through `indexes`, a stored-coordinate view of the opened image, and other
+/// indexes from `source`, framed at the image's effective base.
+///
+/// Returns an empty vector when the index address is undefined.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if `layout` is not chunked, its chunk dimensions are
+/// empty, or its element size is zero, and errors from [`collect_chunks_for_layout_from_source`].
 #[cfg(feature = "std")]
 pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     layout: &DataLayout,
     dataspace: &Dataspace,
     widths: FormatWidths,
@@ -1738,6 +1759,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
     }
     collect_chunks_for_layout_from_source(
         source,
+        indexes,
         *index,
         chunk_dimensions,
         dataspace,
@@ -1759,6 +1781,7 @@ pub(crate) fn enumerate_chunks_from_source<S: Source + ?Sized>(
 #[cfg(feature = "std")]
 pub(crate) fn visit_decoded_chunks_from_source(
     source: &(impl Source + ?Sized),
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     mut visit: impl FnMut(Result<&[u8], &FormatError>) -> Result<(), FormatError>,
@@ -1768,7 +1791,7 @@ pub(crate) fn visit_decoded_chunks_from_source(
         chunk_dims_u64,
         mut chunks,
         ..
-    }) = ChunkedPlan::new(source, spec, widths)?
+    }) = ChunkedPlan::new(source, indexes, spec, widths)?
     else {
         return Ok(());
     };
@@ -1966,6 +1989,7 @@ pub(crate) fn plan_dense_grid(
 #[cfg(feature = "std")]
 pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     layout: &DataLayout,
     dataspace: &Dataspace,
     widths: FormatWidths,
@@ -2005,6 +2029,7 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     // caller can admit any of them to returned-space state.
     for ci in collect_chunks_for_layout_from_source(
         source,
+        indexes,
         *chunk_index,
         chunk_dimensions,
         dataspace,
@@ -2023,7 +2048,13 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
     }
 
     // The chunk index's own structure blocks.
-    let index = collect_chunk_index_spans(source, *chunk_index, chunk_dimensions.len(), widths)?;
+    let index = collect_chunk_index_spans(
+        source,
+        indexes,
+        *chunk_index,
+        chunk_dimensions.len(),
+        widths,
+    )?;
     Ok(ChunkedStorageSpans { data, index })
 }
 
@@ -2058,6 +2089,7 @@ pub(crate) struct ChunkedStorageSpans {
 #[cfg(feature = "std")]
 fn collect_chunk_index_spans<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     index: ChunkIndexLayout,
     ndims: usize,
     widths: FormatWidths,
@@ -2072,9 +2104,11 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
         }
         // Single chunk and implicit indexes have no separate index structure.
         ChunkIndexLayout::SingleChunk { .. } | ChunkIndexLayout::Implicit { .. } => Ok(Vec::new()),
-        ChunkIndexLayout::FixedArray { .. } => fixed_array::index_spans(source, widths, index_addr),
+        ChunkIndexLayout::FixedArray { .. } => {
+            fixed_array::index_spans(indexes, widths, index_addr)
+        }
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            extensible_array::index_spans(source, widths, index_addr)
+            extensible_array::index_spans(indexes, widths, index_addr)
         }
         ChunkIndexLayout::BTreeV2 { .. } => {
             crate::btree_v2::collect_btree_v2_storage_extents(source, index_addr, widths)
@@ -2096,6 +2130,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
 #[cfg(feature = "std")]
 pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     source: &S,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     layout: &DataLayout,
     widths: FormatWidths,
 ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
@@ -2109,7 +2144,7 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
             "chunk_index_spans_from_source called on a non-chunked layout".into(),
         ));
     };
-    collect_chunk_index_spans(source, *index, chunk_dimensions.len(), widths)
+    collect_chunk_index_spans(source, indexes, *index, chunk_dimensions.len(), widths)
 }
 
 /// Reads a whole chunked dataset from a file buffer with index and decoded-chunk caching.
@@ -2128,12 +2163,14 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
 /// [`FormatError::OffsetOverflow`] if output size or placement arithmetic overflows.
 pub fn read_chunked_data_cached(
     file_data: &[u8],
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     read_chunked_data_cached_framed(
         MetadataFrame::new(PhysicalAddress::new(0), file_data)?,
+        indexes,
         spec,
         widths,
         cache,
@@ -2142,14 +2179,15 @@ pub fn read_chunked_data_cached(
 
 /// Reads a whole chunked dataset while borrowing resident payloads.
 ///
-/// The reader resolves metadata positions from the frame's origin and borrows chunk payloads
-/// from its slice at local offsets.
+/// The reader borrows chunk payloads from the frame's slice at stored offsets and reads array
+/// indexes through the stored-coordinate `indexes` reader.
 ///
 /// # Errors
 ///
 /// Returns the errors of [`read_chunked_data_cached`].
 pub(crate) fn read_chunked_data_cached_framed(
     frame: MetadataFrame<'_>,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
@@ -2191,6 +2229,7 @@ pub(crate) fn read_chunked_data_cached_framed(
         ParsedChunkIndex::new(
             collect_chunks_for_layout(
                 frame,
+                indexes,
                 index,
                 chunk_dimensions,
                 dataspace,
@@ -2263,6 +2302,7 @@ pub(crate) fn read_chunked_data_cached_framed(
 /// is invalid, and the errors of reading a malformed index.
 fn collect_chunks_for_layout(
     file_data: MetadataFrame<'_>,
+    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     index: ChunkIndexLayout,
     chunk_dimensions: &[u64],
     dataspace: &Dataspace,
@@ -2303,7 +2343,7 @@ fn collect_chunks_for_layout(
             let grid = index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
             fixed_array::read_chunks(
-                &file_data,
+                indexes,
                 widths,
                 addr,
                 grid.chunk_byte_size(elem_size)?,
@@ -2318,7 +2358,7 @@ fn collect_chunks_for_layout(
             let grid = index_grid(dataspace, spatial_dims, GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
             extensible_array::read_chunks(
-                &file_data,
+                indexes,
                 widths,
                 addr,
                 grid.chunk_byte_size(elem_size)?,
@@ -2891,10 +2931,14 @@ mod tests {
     #[cfg(not(feature = "std"))]
     use alloc::boxed::Box;
 
+    #[cfg(feature = "std")]
+    use core::cell::RefCell;
     use core::ops::Range;
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
+    #[cfg(feature = "std")]
+    use hdf5_pure_core::MetadataBytes;
     #[cfg(feature = "std")]
     use hdf5_pure_format::__private::FilteredSingleChunk;
     use rstest::rstest;
@@ -2906,7 +2950,7 @@ mod tests {
     use super::*;
     use crate::FillTime;
     #[cfg(feature = "std")]
-    use crate::address::{BaseAddress, BaseAddressExt};
+    use crate::address::{BaseAddress, BaseAddressExt, OpenedImageContext};
     use crate::chunked_write::ChunkArrayKind;
     use crate::convert;
     use crate::dataspace::MaxExtent;
@@ -3016,21 +3060,40 @@ mod tests {
             actual: stored_len,
         };
         assert_eq!(
-            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap_err(),
+            read_chunked_data_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS
+            )
+            .unwrap_err(),
             expected
         );
         let cache = ChunkCache::new();
         assert_eq!(
-            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &cache).unwrap_err(),
+            read_chunked_data_cached_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS,
+                &cache
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(cache.stats().cached_chunks(), 0);
         let mut visits = 0;
-        visit_decoded_chunks_from_source(&source, spec, FORMAT_WIDTHS, |decoded| {
-            assert_eq!(decoded.unwrap_err(), &expected);
-            visits += 1;
-            Ok(())
-        })
+        visit_decoded_chunks_from_source(
+            &source,
+            &source::zero_base_source(&source),
+            spec,
+            FORMAT_WIDTHS,
+            |decoded| {
+                assert_eq!(decoded.unwrap_err(), &expected);
+                visits += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(visits, 1);
     }
@@ -3239,6 +3302,7 @@ mod tests {
         let read = || {
             read_chunked_region_from_source(
                 source.as_ref(),
+                &source::zero_base_source(source.as_ref()),
                 &region,
                 FORMAT_WIDTHS,
                 &cache,
@@ -3291,21 +3355,30 @@ mod tests {
             cache: &ChunkCache,
         ) -> Result<Vec<u8>, FormatError> {
             match self {
-                Self::CachedBytes => read_chunked_data_cached(bytes, spec, FORMAT_WIDTHS, cache),
+                Self::CachedBytes => read_chunked_data_cached(
+                    bytes,
+                    &source::zero_base_source(&source::BytesSource::new(bytes)),
+                    spec,
+                    FORMAT_WIDTHS,
+                    cache,
+                ),
                 Self::CachedSeekSource => read_chunked_data_cached_from_source(
                     &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                    &source::zero_base_source(&ReadSeekSource::new(Cursor::new(bytes)).unwrap()),
                     spec,
                     FORMAT_WIDTHS,
                     cache,
                 ),
                 Self::CachedSource => read_chunked_data_cached_from_source(
                     &BytesSource::new(bytes),
+                    &source::zero_base_source(&BytesSource::new(bytes)),
                     spec,
                     FORMAT_WIDTHS,
                     cache,
                 ),
                 Self::SeekSource => read_chunked_data_from_source(
                     &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                    &source::zero_base_source(&ReadSeekSource::new(Cursor::new(bytes)).unwrap()),
                     spec,
                     FORMAT_WIDTHS,
                 ),
@@ -3313,6 +3386,9 @@ mod tests {
                     let region = ReadRegion::rows(spec, 1, 2)?;
                     read_chunked_region_from_source(
                         &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                        &source::zero_base_source(
+                            &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                        ),
                         &region,
                         FORMAT_WIDTHS,
                         cache,
@@ -3323,15 +3399,19 @@ mod tests {
                     let region = ReadRegion::rows(spec, 1, 2)?;
                     read_chunked_region_from_source(
                         &BytesSource::new(bytes),
+                        &source::zero_base_source(&BytesSource::new(bytes)),
                         &region,
                         FORMAT_WIDTHS,
                         cache,
                         CachePass::LRU,
                     )
                 }
-                Self::Source => {
-                    read_chunked_data_from_source(&BytesSource::new(bytes), spec, FORMAT_WIDTHS)
-                }
+                Self::Source => read_chunked_data_from_source(
+                    &BytesSource::new(bytes),
+                    &source::zero_base_source(&BytesSource::new(bytes)),
+                    spec,
+                    FORMAT_WIDTHS,
+                ),
             }
         }
     }
@@ -3697,6 +3777,7 @@ mod tests {
         assert_eq!(
             read_chunked_region_from_source(
                 &BytesSource::new(&[]),
+                &source::zero_base_source(&BytesSource::new(&[])),
                 &region,
                 FORMAT_WIDTHS,
                 &ChunkCache::new(),
@@ -3999,6 +4080,7 @@ mod tests {
         let fill_bytes = fill.to_le_bytes();
         let out = read_chunked_data_from_source(
             &BytesSource::new(&file_data),
+            &source::zero_base_source(&BytesSource::new(&file_data)),
             RawReadSpec::parse(
                 &layout,
                 &dataspace,
@@ -4071,19 +4153,29 @@ mod tests {
         ] {
             let ds = simple(dims.clone());
             let spec = RawReadSpec::parse(&layout, &ds, &datatype, None, fill).unwrap();
-            let from_source =
-                read_chunked_data_from_source(&BytesSource::new(&file_data), spec, FORMAT_WIDTHS)
-                    .unwrap();
+            let from_source = read_chunked_data_from_source(
+                &BytesSource::new(&file_data),
+                &source::zero_base_source(&BytesSource::new(&file_data)),
+                spec,
+                FORMAT_WIDTHS,
+            )
+            .unwrap();
             let cached_from_source = read_chunked_data_cached_from_source(
                 &BytesSource::new(&file_data),
+                &source::zero_base_source(&BytesSource::new(&file_data)),
                 spec,
                 FORMAT_WIDTHS,
                 &ChunkCache::new(),
             )
             .unwrap();
-            let cached =
-                read_chunked_data_cached(&file_data, spec, FORMAT_WIDTHS, &ChunkCache::new())
-                    .unwrap();
+            let cached = read_chunked_data_cached(
+                &file_data,
+                &source::zero_base_source(&source::BytesSource::new(&file_data)),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new(),
+            )
+            .unwrap();
             assert_eq!(from_source, expected, "dims {dims:?}");
             assert_eq!(cached_from_source, expected, "dims {dims:?}");
             assert_eq!(cached, expected, "dims {dims:?}");
@@ -4221,6 +4313,7 @@ mod tests {
         let length_size = u8::try_from(widths.length).unwrap();
         let memory = collect_chunks_for_layout_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             index,
             &chunk_dimensions,
             &dataspace,
@@ -4229,7 +4322,8 @@ mod tests {
         )
         .unwrap();
         let bounded = collect_chunks_for_layout_from_source(
-            &ReadSeekSource::new(Cursor::new(file)).unwrap(),
+            &ReadSeekSource::new(Cursor::new(&file)).unwrap(),
+            &source::zero_base_source(&ReadSeekSource::new(Cursor::new(&file)).unwrap()),
             index,
             &chunk_dimensions,
             &dataspace,
@@ -4315,6 +4409,7 @@ mod tests {
 
         let spans = collect_chunked_storage_spans(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             &layout,
             &btree_v2_dataspace(&[16, 16]),
             FormatWidths::from_sizes(
@@ -4377,6 +4472,7 @@ mod tests {
 
         let Err(err) = collect_chunked_storage_spans(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             &layout,
             &btree_v2_dataspace(&[2, 2]),
             FormatWidths::from_sizes(
@@ -4434,6 +4530,7 @@ mod tests {
 
         let chunks = collect_chunks_for_layout_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             ChunkIndexLayout::BTreeV2 {
                 address: Some(StoredAddress::new(0)),
             },
@@ -4498,6 +4595,7 @@ mod tests {
 
         let spans = collect_chunked_storage_spans(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             &layout,
             &btree_v2_dataspace(&[6, 4]),
             FORMAT_WIDTHS,
@@ -4534,6 +4632,7 @@ mod tests {
         assert_eq!(
             collect_chunks_for_layout_from_source(
                 &BytesSource::new(&file),
+                &source::zero_base_source(&BytesSource::new(&file)),
                 index,
                 &[2, 2, 4],
                 &dataspace,
@@ -4551,6 +4650,7 @@ mod tests {
         assert_eq!(
             collect_chunks_for_layout_from_source(
                 &BytesSource::new(&file),
+                &source::zero_base_source(&BytesSource::new(&file)),
                 index,
                 &[2, 2, 4],
                 &dataspace,
@@ -4585,6 +4685,7 @@ mod tests {
 
         let err = collect_chunks_for_layout_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             ChunkIndexLayout::BTreeV2 {
                 address: Some(StoredAddress::new(0)),
             },
@@ -4623,6 +4724,7 @@ mod tests {
         assert_eq!(
             collect_chunks_for_layout_from_source(
                 &BytesSource::new(&file),
+                &source::zero_base_source(&BytesSource::new(&file)),
                 ChunkIndexLayout::BTreeV2 {
                     address: Some(StoredAddress::new(0)),
                 },
@@ -5210,6 +5312,7 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -5233,6 +5336,7 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -5259,13 +5363,26 @@ mod tests {
         use crate::source::ReadSeekSource;
         let spec =
             RawReadSpec::parse(layout, dataspace, datatype, pipeline, FillPattern::ZERO).unwrap();
-        let buffered =
-            read_chunked_data_cached(file_data, spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap();
-        let from_mem =
-            read_chunked_data_from_source(&BytesSource::new(file_data), spec, FORMAT_WIDTHS)
-                .unwrap();
+        let buffered = read_chunked_data_cached(
+            file_data,
+            &source::zero_base_source(&source::BytesSource::new(file_data)),
+            spec,
+            FORMAT_WIDTHS,
+            &ChunkCache::new(),
+        )
+        .unwrap();
+        let from_mem = read_chunked_data_from_source(
+            &BytesSource::new(file_data),
+            &source::zero_base_source(&BytesSource::new(file_data)),
+            spec,
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
         let from_seek = read_chunked_data_from_source(
             &ReadSeekSource::new(std::io::Cursor::new(file_data.to_vec())).unwrap(),
+            &source::zero_base_source(
+                &ReadSeekSource::new(std::io::Cursor::new(file_data.to_vec())).unwrap(),
+            ),
             spec,
             FORMAT_WIDTHS,
         )
@@ -5379,6 +5496,143 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "std")]
+    #[derive(Clone, Copy)]
+    enum ArrayMetadataBackend {
+        Borrowed,
+        CachedOwned,
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::zero_base(0, 0)]
+    #[case::userblock(512, 512)]
+    #[case::forward_relocated(0, 512)]
+    #[case::backward_relocated(512, 0)]
+    fn array_dispatch_uses_stored_metadata_and_preserves_physical_owners(
+        #[case] encoded_base: u64,
+        #[case] effective_base: u64,
+        #[values(ChunkArrayKind::FixedArray, ChunkArrayKind::ExtensibleArray)] kind: ChunkArrayKind,
+        #[values(ArrayMetadataBackend::Borrowed, ArrayMetadataBackend::CachedOwned)]
+        backend: ArrayMetadataBackend,
+    ) {
+        struct Observed<'a, R: ?Sized> {
+            inner: &'a R,
+            requests: RefCell<Vec<(AddressRange<StoredAddress>, FileRange, bool)>>,
+        }
+        impl<R: RangeReader<AddressRange<StoredAddress>> + ?Sized>
+            RangeReader<AddressRange<StoredAddress>> for Observed<'_, R>
+        {
+            fn read_range(
+                &self,
+                range: AddressRange<StoredAddress>,
+            ) -> Result<MetadataBytes<'_>, FormatError> {
+                let bytes = self.inner.read_range(range)?;
+                self.requests
+                    .borrow_mut()
+                    .push((range, bytes.range(), bytes.shared().is_none()));
+                Ok(bytes)
+            }
+        }
+        let records = [indexed_chunk(1024), indexed_chunk(1032)];
+        let (index, array) = array_index(kind, &records, &[0, 1], 2, 8);
+        let mut image = vec![0; usize::try_from(effective_base).unwrap()];
+        image.extend_from_slice(&array);
+        let borrowed = MetadataFrame::new(PhysicalAddress::new(1 << 40), &image).unwrap();
+        let owned = ReadSeekSource::new(Cursor::new(&image)).unwrap();
+        let (physical, origin): (&dyn Source, u64) = match backend {
+            ArrayMetadataBackend::Borrowed => (&borrowed, 1 << 40),
+            ArrayMetadataBackend::CachedOwned => (&owned, 0),
+        };
+        let cache = MetadataCachingSource::new(physical, MetadataCacheConfig::new(4096));
+        let context = OpenedImageContext::reconcile(
+            BaseAddress::new(encoded_base),
+            encoded_base + array.len().to_u64(),
+            effective_base,
+        )
+        .unwrap();
+        let stored = source::PhysicalSource::new(&cache).stored(context.addresses());
+        let observed = Observed {
+            inner: &stored,
+            requests: RefCell::new(Vec::new()),
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![2],
+            max_dimensions: Some(vec![match kind {
+                ChunkArrayKind::FixedArray => MaxExtent::Fixed(2),
+                ChunkArrayKind::ExtensibleArray => MaxExtent::Unlimited,
+            }]),
+        };
+        let expected = records
+            .iter()
+            .enumerate()
+            .map(|(offset, record)| ChunkInfo {
+                chunk_size: StoredChunkSize::v4(8),
+                filter_mask: 0,
+                offsets: vec![offset.to_u64()],
+                address: record.address,
+            })
+            .collect::<Vec<_>>();
+        let payload = BytesSource::new([]);
+        assert_eq!(
+            collect_chunks_for_layout_from_source(
+                &payload,
+                &observed,
+                index,
+                &[1, 8],
+                &dataspace,
+                8,
+                FORMAT_WIDTHS,
+            )
+            .unwrap(),
+            expected,
+        );
+        let first = cache.metadata_cache_stats().unwrap();
+        assert_eq!(
+            collect_chunks_for_layout_from_source(
+                &payload,
+                &observed,
+                index,
+                &[1, 8],
+                &dataspace,
+                8,
+                FORMAT_WIDTHS,
+            )
+            .unwrap(),
+            expected,
+        );
+        let requests = observed.requests.into_inner();
+        assert_eq!(requests.first().unwrap().0.start(), StoredAddress::ZERO);
+        let expected_requests = requests
+            .iter()
+            .map(|(range, _, _)| {
+                (
+                    *range,
+                    FileRange::new(
+                        PhysicalAddress::new(origin + effective_base + range.start().get()),
+                        range.length(),
+                    )
+                    .unwrap(),
+                    matches!(backend, ArrayMetadataBackend::Borrowed),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests, expected_requests);
+        let second = cache.metadata_cache_stats().unwrap();
+        match backend {
+            ArrayMetadataBackend::Borrowed => {
+                assert_eq!((second.entries(), second.bytes(), second.hits()), (0, 0, 0));
+                assert!(second.misses() > first.misses());
+            }
+            ArrayMetadataBackend::CachedOwned => {
+                assert_eq!(second.misses(), first.misses());
+                assert!(second.hits() > first.hits());
+            }
+        }
+    }
+
     // The Extensible Array case uses slot 2, between the dataset's chunks at grid slots 1 and 4,
     // since its walk stops at the highest slot set.
     #[rstest]
@@ -5431,6 +5685,7 @@ mod tests {
 
         let read = collect_chunks_for_layout_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             index,
             &chunk_dimensions,
             &dataspace,
@@ -5471,6 +5726,7 @@ mod tests {
 
         let err = collect_chunks_for_layout_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             index,
             &[2, 2, 4],
             &dataspace,
@@ -5557,6 +5813,7 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::parse(
                 &layout,
                 &dataspace,
@@ -5764,6 +6021,7 @@ mod tests {
 
         for chunk in collect_chunks_for_layout_from_source(
             &BytesSource::new(&file_data),
+            &source::zero_base_source(&BytesSource::new(&file_data)),
             index,
             &chunk_dimensions,
             &dataspace,
@@ -5822,13 +6080,27 @@ mod tests {
         };
 
         assert_eq!(
-            decoded(read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap()),
+            decoded(
+                read_chunked_data_from_source(
+                    &source,
+                    &source::zero_base_source(&source),
+                    spec,
+                    FORMAT_WIDTHS
+                )
+                .unwrap()
+            ),
             values
         );
         assert_eq!(
             decoded(
-                read_chunked_data_cached(&file_data, spec, FORMAT_WIDTHS, &ChunkCache::new())
-                    .unwrap()
+                read_chunked_data_cached(
+                    &file_data,
+                    &source::zero_base_source(&source::BytesSource::new(&file_data)),
+                    spec,
+                    FORMAT_WIDTHS,
+                    &ChunkCache::new()
+                )
+                .unwrap()
             ),
             values
         );
@@ -5836,6 +6108,7 @@ mod tests {
             decoded(
                 read_chunked_data_cached_from_source(
                     &source,
+                    &source::zero_base_source(&source),
                     spec,
                     FORMAT_WIDTHS,
                     &ChunkCache::new(),
@@ -5846,6 +6119,7 @@ mod tests {
         );
         let rows = read_chunked_rows_from_source(
             &source,
+            &source::zero_base_source(&source),
             spec,
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -5968,6 +6242,7 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -6116,6 +6391,7 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -6143,6 +6419,7 @@ mod tests {
         assert!(!cache.stats().index_loaded());
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &cache,
@@ -6166,6 +6443,7 @@ mod tests {
         // First read — populates index + decompressed cache
         let raw1 = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &cache,
@@ -6177,6 +6455,7 @@ mod tests {
         // Second read — should hit the decompressed cache
         let raw2 = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &cache,
@@ -6194,6 +6473,7 @@ mod tests {
 
         let raw = read_chunked_data_cached(
             &file_data,
+            &source::zero_base_source(&source::BytesSource::new(&file_data)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &cache,
@@ -6363,17 +6643,31 @@ mod tests {
         let window = grid_bytes(1..5, 1..4);
         let read = || {
             assert_eq!(
-                read_chunked_data_cached(&file, spec, FORMAT_WIDTHS, &buffered).unwrap(),
+                read_chunked_data_cached(
+                    &file,
+                    &source::zero_base_source(&source::BytesSource::new(&file)),
+                    spec,
+                    FORMAT_WIDTHS,
+                    &buffered
+                )
+                .unwrap(),
                 whole
             );
             assert_eq!(
-                read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &streaming)
-                    .unwrap(),
+                read_chunked_data_cached_from_source(
+                    &source,
+                    &source::zero_base_source(&source),
+                    spec,
+                    FORMAT_WIDTHS,
+                    &streaming
+                )
+                .unwrap(),
                 whole
             );
             assert_eq!(
                 read_chunked_region_from_source(
                     &source,
+                    &source::zero_base_source(&source),
                     &region,
                     FORMAT_WIDTHS,
                     &windowed,
@@ -6451,6 +6745,7 @@ mod tests {
 
         let buffered = collect_chunks_for_layout(
             MetadataFrame::new(PhysicalAddress::new(0), &file).unwrap(),
+            &source::zero_base_source(&MetadataFrame::new(PhysicalAddress::new(0), &file).unwrap()),
             *index,
             chunk_dimensions,
             &dataspace,
@@ -6460,6 +6755,7 @@ mod tests {
         .unwrap();
         let streamed = collect_chunks_for_layout_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             *index,
             chunk_dimensions,
             &dataspace,
@@ -6497,6 +6793,7 @@ mod tests {
 
         let read = read_chunked_region_from_source(
             &BytesSource::new(&file),
+            &source::zero_base_source(&BytesSource::new(&file)),
             &region,
             FORMAT_WIDTHS,
             &cache,
@@ -6546,6 +6843,7 @@ mod tests {
         let cache = ChunkCache::new();
         let out = read_chunked_rows_from_source(
             &BytesSource::new(b""),
+            &source::zero_base_source(&BytesSource::new(b"")),
             RawReadSpec::plain(&layout, &dataspace, &make_f64_type()),
             FORMAT_WIDTHS,
             &cache,
@@ -6579,6 +6877,7 @@ mod tests {
         let cache = ChunkCache::new();
         let err = read_chunked_rows_from_source(
             &BytesSource::new(b""),
+            &source::zero_base_source(&BytesSource::new(b"")),
             RawReadSpec::plain(&layout, &dataspace, &make_f64_type()),
             FORMAT_WIDTHS,
             &cache,
@@ -6616,6 +6915,7 @@ mod tests {
         let cache = ChunkCache::new();
         let err = read_chunked_rows_from_source(
             &BytesSource::new(b""),
+            &source::zero_base_source(&BytesSource::new(b"")),
             RawReadSpec::plain(&layout, &dataspace, &make_f64_type()),
             FORMAT_WIDTHS,
             &cache,
@@ -6655,6 +6955,7 @@ mod tests {
             let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
             let whole = read_chunked_data_cached_from_source(
                 &BytesSource::new(b""),
+                &source::zero_base_source(&BytesSource::new(b"")),
                 spec,
                 FORMAT_WIDTHS,
                 &cache,
@@ -6664,6 +6965,7 @@ mod tests {
 
             let window = read_chunked_rows_from_source(
                 &BytesSource::new(b""),
+                &source::zero_base_source(&BytesSource::new(b"")),
                 spec,
                 FORMAT_WIDTHS,
                 &cache,
@@ -6677,6 +6979,7 @@ mod tests {
 
             let empty = read_chunked_rows_from_source(
                 &BytesSource::new(b""),
+                &source::zero_base_source(&BytesSource::new(b"")),
                 spec,
                 FORMAT_WIDTHS,
                 &cache,
@@ -6717,6 +7020,7 @@ mod tests {
         let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
         let output = read_chunked_rows_from_source(
             &BytesSource::new(b""),
+            &source::zero_base_source(&BytesSource::new(b"")),
             spec,
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -6758,6 +7062,7 @@ mod tests {
         let datatype = make_f64_type();
         let result = read_chunked_rows_from_source(
             &BytesSource::new(&bytes),
+            &source::zero_base_source(&BytesSource::new(&bytes)),
             RawReadSpec::plain(&layout, &dataspace, &datatype),
             FORMAT_WIDTHS,
             &ChunkCache::new(),
@@ -6803,6 +7108,7 @@ mod tests {
         let cache = ChunkCache::new();
         let output = read_chunked_rows_from_source(
             &BytesSource::new(&bytes),
+            &source::zero_base_source(&BytesSource::new(&bytes)),
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap(),
             FORMAT_WIDTHS,
             &cache,
@@ -6845,16 +7151,35 @@ mod tests {
         let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
         let source = BytesSource::new(&bytes);
         assert_eq!(
-            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap(),
+            read_chunked_data_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS
+            )
+            .unwrap(),
             Vec::<u8>::new()
         );
         assert_eq!(
-            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new())
-                .unwrap(),
+            read_chunked_data_cached_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            )
+            .unwrap(),
             Vec::<u8>::new()
         );
         assert_eq!(
-            read_chunked_data_cached(&bytes, spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap(),
+            read_chunked_data_cached(
+                &bytes,
+                &source::zero_base_source(&source::BytesSource::new(&bytes)),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            )
+            .unwrap(),
             Vec::<u8>::new()
         );
     }
@@ -6891,15 +7216,32 @@ mod tests {
             Ok(Vec::new())
         };
         assert_eq!(
-            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS),
+            read_chunked_data_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS
+            ),
             expected
         );
         assert_eq!(
-            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new()),
+            read_chunked_data_cached_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            ),
             expected
         );
         assert_eq!(
-            read_chunked_data_cached(b"", spec, FORMAT_WIDTHS, &ChunkCache::new()),
+            read_chunked_data_cached(
+                b"",
+                &source::zero_base_source(&source::BytesSource::new(b"")),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            ),
             expected
         );
     }
@@ -6930,16 +7272,35 @@ mod tests {
             class: ARRAY_DATATYPE_CLASS,
         };
         assert_eq!(
-            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap_err(),
+            read_chunked_data_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new())
-                .unwrap_err(),
+            read_chunked_data_cached_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            read_chunked_data_cached(b"", spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap_err(),
+            read_chunked_data_cached(
+                b"",
+                &source::zero_base_source(&source::BytesSource::new(b"")),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            )
+            .unwrap_err(),
             expected
         );
     }
@@ -6969,16 +7330,35 @@ mod tests {
             target: "usize",
         };
         assert_eq!(
-            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap_err(),
+            read_chunked_data_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new())
-                .unwrap_err(),
+            read_chunked_data_cached_from_source(
+                &source,
+                &source::zero_base_source(&source),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(
-            read_chunked_data_cached(b"", spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap_err(),
+            read_chunked_data_cached(
+                b"",
+                &source::zero_base_source(&source::BytesSource::new(b"")),
+                spec,
+                FORMAT_WIDTHS,
+                &ChunkCache::new()
+            )
+            .unwrap_err(),
             expected
         );
     }

@@ -17,6 +17,7 @@ use crate::filters;
 use crate::reader::Dataset;
 #[cfg(feature = "std")]
 use crate::reader::Object;
+use crate::source;
 #[cfg(feature = "std")]
 use crate::type_builders::DatasetBuilder;
 
@@ -664,6 +665,7 @@ fn read_back(assembled: &ChunkedDataResult, shape: &[u64], fill: FillPattern<'_>
         .map(|message| FilterPipeline::parse(message).unwrap());
     chunked_read::read_chunked_data_cached(
         &file,
+        &source::zero_base_source(&source::BytesSource::new(&file)),
         RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill).unwrap(),
         crate::file_writer::WIDTHS,
         &ChunkCache::new(),

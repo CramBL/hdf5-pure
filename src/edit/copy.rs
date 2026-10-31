@@ -30,7 +30,7 @@ use crate::object_graph::ObjectTree;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::ObjectPathBuf;
 use crate::shared_message::SharedResolver;
-use crate::source::{BaseOffsetSource, BytesSource, Source};
+use crate::source::{BaseOffsetSource, BytesSource, PhysicalSource, Source};
 use crate::width::FormatWidths;
 
 use super::attributes::{self, DenseAttrSet};
@@ -945,6 +945,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
 
                 let infos = chunked_read::enumerate_chunks_from_source(
                     &dview,
+                    &PhysicalSource::new(src).stored(base),
                     &layout,
                     &ds,
                     crate::file_writer::WIDTHS,
