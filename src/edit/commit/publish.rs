@@ -241,13 +241,13 @@ impl WriteEngine {
         ) {
             // Adopt the proposed superblock after the publication write and barrier succeed.
             let mut new_sb = self.context.superblock().clone();
-            new_sb.root_group_address = base.relative(new_root.get())?;
+            new_sb.root_group_address = base.relative(new_root)?;
             new_sb.eof_address = new_eof.get();
             // Preserve this session's status flags, including an active crash mark.
             new_sb.set_consistency_flags(self.held_status_flags)?;
             self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
         } else {
-            let stored_root = base.relative(new_root.get())?;
+            let stored_root = base.relative(new_root)?;
             let mut superblock = self.context.superblock().clone();
             superblock.root_group_address = stored_root;
             superblock.eof_address = new_eof.get();
@@ -317,7 +317,15 @@ impl WriteEngine {
     ) -> Result<Vec<(StoredAddress, u64, FreeClass)>, FormatError> {
         spans
             .into_iter()
-            .map(|(at, len, class)| Ok((self.context.addresses().relative(at)?, len, class)))
+            .map(|(at, len, class)| {
+                Ok((
+                    self.context
+                        .addresses()
+                        .relative(PhysicalAddress::new(at))?,
+                    len,
+                    class,
+                ))
+            })
             .collect()
     }
 
@@ -432,15 +440,17 @@ impl WriteEngine {
         let base = self.context.addresses();
 
         // Resolve the stored extension address before reading its object header.
-        let old_ext_addr = base.absolute(
-            self.context
-                .superblock()
-                .superblock_extension_address
-                .filter(|a| !a.is_undefined(offset_width))
-                .ok_or(Error::EditUnsupported(
-                    "a persisting file has no superblock extension to update",
-                ))?,
-        )?;
+        let old_ext_addr = base
+            .resolve(
+                self.context
+                    .superblock()
+                    .superblock_extension_address
+                    .filter(|a| !a.is_undefined(offset_width))
+                    .ok_or(Error::EditUnsupported(
+                        "a persisting file has no superblock extension to update",
+                    ))?,
+            )?
+            .get();
 
         // File Space Info has a fixed size, so placeholder addresses give the extension's length.
         let placeholder = file_space_info::persistent_single_manager(
@@ -594,7 +604,7 @@ impl WriteEngine {
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.persistence_barrier(purpose)?;
         let mut new_sb = self.context.superblock().clone();
-        new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
+        new_sb.root_group_address = self.context.addresses().relative(new_root)?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(ext_addr);
         // Preserve any status flags held by this session.
@@ -783,15 +793,17 @@ impl WriteEngine {
         self.pad_to_page()?;
 
         // Resolve the stored extension address before reading its object header.
-        let old_ext_addr = base.absolute(
-            self.context
-                .superblock()
-                .superblock_extension_address
-                .filter(|a| !a.is_undefined(offset_width))
-                .ok_or(Error::EditUnsupported(
-                    "a persisting file has no superblock extension to update",
-                ))?,
-        )?;
+        let old_ext_addr = base
+            .resolve(
+                self.context
+                    .superblock()
+                    .superblock_extension_address
+                    .filter(|a| !a.is_undefined(offset_width))
+                    .ok_or(Error::EditUnsupported(
+                        "a persisting file has no superblock extension to update",
+                    ))?,
+            )?
+            .get();
 
         // Placeholder addresses give the extension's length before placement.
         let placeholder = file_space_info::persistent_managers(
@@ -895,7 +907,7 @@ impl WriteEngine {
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.persistence_barrier(purpose)?;
         let mut new_sb = self.context.superblock().clone();
-        new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
+        new_sb.root_group_address = self.context.addresses().relative(new_root)?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(ext_addr);
         // Preserve the crash mark throughout a page-buffered session.

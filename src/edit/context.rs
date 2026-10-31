@@ -202,10 +202,7 @@ mod tests {
         assert_eq!(context.superblock().base_address.get(), base);
         let physical = context.addresses().resolve(StoredAddress::new(96)).unwrap();
         assert_eq!(physical.get(), base + 96);
-        assert_eq!(
-            context.addresses().relative(physical.get()).unwrap().get(),
-            96
-        );
+        assert_eq!(context.addresses().relative(physical).unwrap().get(), 96);
     }
 
     #[rstest]
@@ -276,13 +273,17 @@ mod tests {
         assert_eq!(
             context
                 .addresses()
-                .absolute(context.superblock().root_group_address)
-                .unwrap(),
+                .resolve(context.superblock().root_group_address)
+                .unwrap()
+                .get(),
             640
         );
         assert_eq!(context.superblock().eof_address, 4096);
         assert_eq!(
-            context.addresses().relative(511).unwrap_err(),
+            context
+                .addresses()
+                .relative(PhysicalAddress::new(511))
+                .unwrap_err(),
             FormatError::AddressBelowBase {
                 address: 511,
                 base: 512
@@ -291,7 +292,8 @@ mod tests {
         assert_eq!(
             context
                 .addresses()
-                .absolute(StoredAddress::new(u64::MAX))
+                .resolve(StoredAddress::new(u64::MAX))
+                .map(PhysicalAddress::get)
                 .unwrap_err(),
             FormatError::OffsetOverflow {
                 offset: u64::MAX,
@@ -331,8 +333,9 @@ mod tests {
         assert_eq!(
             context
                 .addresses()
-                .absolute(proposed.root_group_address)
-                .unwrap(),
+                .resolve(proposed.root_group_address)
+                .unwrap()
+                .get(),
             704
         );
     }

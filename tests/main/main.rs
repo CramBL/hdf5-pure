@@ -3,6 +3,7 @@
 //! stay separate top-level binaries in `tests/` since each installs its own
 //! process-wide `#[global_allocator]`.
 
+mod address_conversions;
 mod append;
 mod append_by_reference;
 mod append_reclamation;

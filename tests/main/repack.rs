@@ -640,8 +640,9 @@ fn repack_reads_source_file_space_settings_only_without_an_override(
         let superblock = file.superblock();
         superblock
             .base_address
-            .absolute(superblock.superblock_extension_address.unwrap())
+            .resolve(superblock.superblock_extension_address.unwrap())
             .unwrap()
+            .get()
     };
     file_space_info::replace_message(
         &src,

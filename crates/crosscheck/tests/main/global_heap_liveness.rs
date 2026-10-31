@@ -11,8 +11,10 @@ use hdf5::plist::GroupCreate;
 use hdf5::plist::dataset_create::Layout;
 use hdf5::types::VarLenArray;
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::AddressRange;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::File;
+use hdf5_pure::PhysicalAddress;
 use ndarray::ArrayView2;
 use ndarray::s;
 use rstest::rstest;
@@ -426,7 +428,13 @@ fn assert_collections_survive_owner_deletion(path: &Path) {
             &file,
             &collections
                 .iter()
-                .map(|extent| (extent.start, extent.end - extent.start))
+                .map(|extent| {
+                    AddressRange::new(
+                        PhysicalAddress::new(extent.start),
+                        extent.end - extent.start,
+                    )
+                    .unwrap()
+                })
                 .collect::<Vec<_>>(),
         );
         file.close().unwrap();

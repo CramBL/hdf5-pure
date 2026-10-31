@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(current, ObjectPathBuf::parse(path));
         let stored = source
             .addresses()
-            .relative(object.id.header_address().get())
+            .relative(object.id.header_address())
             .unwrap();
         let Some(Placement::Kept(actual)) = objects.placement(stored).unwrap() else {
             panic!("expected a kept object at {path:?}");

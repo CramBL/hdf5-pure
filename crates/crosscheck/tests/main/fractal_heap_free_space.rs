@@ -85,11 +85,8 @@ fn parses_c_written_managed_free_space(
     let heap_ref = locator.parse(region).unwrap();
     let heap = heap_ref.parse(region).unwrap();
     let header_addr = heap.managed_block_free_space_manager_address;
-    let header_ref = FreeSpaceManagerHeaderRef::new(
-        widths,
-        PhysicalAddress::new(base.absolute(header_addr).unwrap()),
-    )
-    .unwrap();
+    let header_ref =
+        FreeSpaceManagerHeaderRef::new(widths, base.resolve(header_addr).unwrap()).unwrap();
     let frame = header_ref.parse(region).unwrap();
     assert_eq!(frame.client_id(), FRACTAL_HEAP_CLIENT_ID);
     let manager = frame.fractal_heap_header(&heap).unwrap();
@@ -97,10 +94,7 @@ fn parses_c_written_managed_free_space(
         panic!("expected a managed section list")
     };
     let reference = manager
-        .section_list_ref(
-            header_addr,
-            PhysicalAddress::new(base.absolute(list_addr).unwrap()),
-        )
+        .section_list_ref(header_addr, base.resolve(list_addr).unwrap())
         .unwrap();
     let parsed = reference
         .parse(region.subregion(reference.parse_range()).unwrap())

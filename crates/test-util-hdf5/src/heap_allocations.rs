@@ -2,8 +2,12 @@
 
 use std::ops::Range;
 
+use hdf5_pure::AddressRange;
 use hdf5_pure::File;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure::StoredAddress;
 use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     BTreeV2Header, BTreeV2Layout, BTreeV2Node, BTreeV2Record, FormatWidths, FractalHeapFiltering,
@@ -509,23 +513,25 @@ impl Allocation {
         )
     }
 
-    /// Returns the physical file offset and allocated length in `file`.
+    /// Returns the allocation's physical range using `file`'s effective address base.
     ///
     /// # Panics
     ///
-    /// Panics if adding the file base overflows or the allocation extends beyond `file`.
-    pub fn physical_extent(&self, file: &File) -> (u64, u64) {
+    /// Panics if an endpoint cannot be converted or the allocation extends beyond `file`.
+    pub fn physical_extent(&self, file: &File) -> AddressRange<PhysicalAddress> {
         let (address, length) = self.extent();
-        let base = file.superblock().base_address.get();
-        let start = base.checked_add(address).unwrap();
-        let end = start.checked_add(length).unwrap();
+        let range = AddressRange::new(
+            file.resolve_address(StoredAddress::new(address)).unwrap(),
+            length,
+        )
+        .unwrap();
         assert_eq!(
-            end,
-            base.checked_add(u64::try_from(self.range.end).unwrap())
+            range.end(),
+            file.resolve_address(StoredAddress::new(u64::try_from(self.range.end).unwrap()))
                 .unwrap()
         );
-        assert!(end <= file.file_size());
-        (start, length)
+        assert!(range.end().get() <= file.file_size());
+        range
     }
 
     /// Returns the page class for the allocated structure or payload.

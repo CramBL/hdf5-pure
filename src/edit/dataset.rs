@@ -15,6 +15,7 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::PageType;
 
 use crate::FillTime;
+use crate::PhysicalAddress;
 use crate::VariableLengthType;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
@@ -189,7 +190,9 @@ impl WriteEngine {
             let data_addr = if fd.storage.raw().is_empty() {
                 StoredAddress::new(UNDEF)
             } else {
-                base.relative(self.alloc_or_append_typed(fd.storage.raw(), AllocationClass::Raw)?)?
+                base.relative(PhysicalAddress::new(
+                    self.alloc_or_append_typed(fd.storage.raw(), AllocationClass::Raw)?,
+                ))?
             };
             let attr_info = self.place_dense_attrs_if_needed(fd)?;
             file_writer::build_dataset_oh(
@@ -321,7 +324,7 @@ impl WriteEngine {
                     && !data_addr.is_undefined(OFFSET_WIDTH)
                     && data_size == fd.raw().len() as u64
                 {
-                    if let Ok(start) = base.absolute(data_addr) {
+                    if let Ok(start) = base.resolve(data_addr).map(PhysicalAddress::get) {
                         if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
@@ -332,7 +335,7 @@ impl WriteEngine {
                 }
 
                 let old_extent = if !data_addr.is_undefined(OFFSET_WIDTH) && data_size > 0 {
-                    Some((base.absolute(data_addr)?, data_size))
+                    Some((base.resolve(data_addr)?.get(), data_size))
                 } else {
                     None
                 };
@@ -412,7 +415,7 @@ impl WriteEngine {
                 {
                     let writes = writes
                         .into_iter()
-                        .map(|(off, b)| Ok((base.absolute(StoredAddress::new(off))?, b)))
+                        .map(|(off, b)| Ok((base.resolve(StoredAddress::new(off))?.get(), b)))
                         .collect::<Result<Vec<_>, FormatError>>()?;
                     return Ok(WritePlan::InPlaceChunks { writes, source });
                 }
@@ -736,7 +739,7 @@ impl WriteEngine {
                 let raw = self.resolve_overwrite_bytes(overwrites.take(bytes))?;
                 let new_data_addr = self.alloc_or_append_typed(&raw, AllocationClass::Raw)?;
                 let mut region = region;
-                let relative = base.relative(new_data_addr)?.get();
+                let relative = base.relative(PhysicalAddress::new(new_data_addr))?.get();
                 region.bytes_mut()[addr_off..addr_off + 8].copy_from_slice(&relative.to_le_bytes());
                 let size_off = addr_off + 8;
                 let raw_len = raw.len() as u64;
@@ -920,16 +923,19 @@ impl WriteEngine {
                 for chunk in new_chunks {
                     let abs = self.alloc_or_append_typed(chunk.bytes(), AllocationClass::Raw)?;
                     combined.push(ChunkRecord {
-                        address: base.relative(abs)?,
+                        address: base.relative(PhysicalAddress::new(abs))?,
                         stored_size: chunk.stored_size(),
                         filter_mask: chunk.filter_mask(),
                     });
                 }
                 let at =
                     self.reserve_with_page_type(ea_len, AllocationClass::Metadata, PageType::Raw)?;
-                let bytes = ea(&IndexSlots::dense(&combined), base.relative(at.address())?)?;
+                let bytes = ea(
+                    &IndexSlots::dense(&combined),
+                    base.relative(PhysicalAddress::new(at.address()))?,
+                )?;
                 let ea_addr = self.place(at, &bytes)?;
-                base.relative(ea_addr)?
+                base.relative(PhysicalAddress::new(ea_addr))?
             }
         };
 
@@ -1237,7 +1243,7 @@ impl WriteEngine {
         let placed = addrs
             .iter()
             .zip(&staging.collections)
-            .map(|(&a, c)| Ok((base.absolute(StoredAddress::new(a))?, c.len() as u64)))
+            .map(|(&a, c)| Ok((base.resolve(StoredAddress::new(a))?.get(), c.len() as u64)))
             .collect::<Result<Vec<_>, FormatError>>()?;
         self.vl_overwrite_heaps.insert(vlen.path, placed);
         self.superseded_heaps.extend(superseded);

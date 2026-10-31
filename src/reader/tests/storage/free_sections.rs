@@ -617,12 +617,13 @@ fn corrupted_manager_checksums_return_the_decode_error(
         offsets: file.superblock().offset_size,
         lengths: file.superblock().length_size,
     };
-    let address = usize::try_from(base.absolute(report.managers()[0].address()).unwrap()).unwrap();
+    let address =
+        usize::try_from(base.resolve(report.managers()[0].address()).unwrap().get()).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
     let (at, length) = if section_list {
         (
-            usize::try_from(base.absolute(header.section_list_addr()).unwrap()).unwrap(),
+            usize::try_from(base.resolve(header.section_list_addr()).unwrap().get()).unwrap(),
             usize::try_from(header.section_list_used()).unwrap(),
         )
     } else {
@@ -723,7 +724,9 @@ fn relocated_sources_preserve_stored_section_coordinates(
             }
         );
         assert_eq!(
-            addresses.relative(effective_base - 1).unwrap_err(),
+            addresses
+                .relative(PhysicalAddress::new(effective_base - 1))
+                .unwrap_err(),
             FormatError::AddressBelowBase {
                 address: effective_base - 1,
                 base: effective_base
@@ -736,8 +739,8 @@ fn relocated_sources_preserve_stored_section_coordinates(
     for section in report.free_sections().sections() {
         let address: StoredAddress = section.address();
         let end: StoredAddress = section.end_address();
-        let physical = file.inner.addresses().resolve(address).unwrap();
-        let physical_end = file.inner.addresses().resolve(end).unwrap();
+        let physical = file.resolve_address(address).unwrap();
+        let physical_end = file.resolve_address(end).unwrap();
         assert_eq!(
             physical.get(),
             u64::try_from(signature)
@@ -749,14 +752,8 @@ fn relocated_sources_preserve_stored_section_coordinates(
             physical.checked_add(section.length().get()).unwrap(),
             physical_end
         );
-        assert_eq!(
-            file.inner.addresses().relative(physical.get()).unwrap(),
-            address
-        );
-        assert_eq!(
-            file.inner.addresses().relative(physical_end.get()).unwrap(),
-            end
-        );
+        assert_eq!(file.relative_address(physical).unwrap(), address);
+        assert_eq!(file.relative_address(physical_end).unwrap(), end);
         assert!(physical_end.get() <= u64::try_from(relocated.len()).unwrap());
     }
     assert_eq!(file.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);

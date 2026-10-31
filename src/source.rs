@@ -574,22 +574,23 @@ impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         self.inner
-            .read_at(self.base.absolute(StoredAddress::new(offset))?, buf)
+            .read_at(self.base.resolve(StoredAddress::new(offset))?.get(), buf)
     }
 
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
         self.inner
-            .read_metadata_at(self.base.absolute(StoredAddress::new(offset))?, len)
+            .read_metadata_at(self.base.resolve(StoredAddress::new(offset))?.get(), len)
     }
 
     fn metadata_origin(&self) -> Result<u64, FormatError> {
         self.base
-            .absolute(StoredAddress::new(self.inner.metadata_origin()?))
+            .resolve(StoredAddress::new(self.inner.metadata_origin()?))
+            .map(PhysicalAddress::get)
     }
 
     fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
         self.inner
-            .read_metadata(self.base.absolute(StoredAddress::new(offset))?, len)
+            .read_metadata(self.base.resolve(StoredAddress::new(offset))?.get(), len)
     }
 
     // The metadata reads above are the inner source's, so its cache is the one

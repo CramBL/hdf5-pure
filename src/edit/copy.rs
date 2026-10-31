@@ -380,7 +380,7 @@ impl WriteEngine {
                     hdf5_pure_format::__private::write_stored_address_at(
                         region.bytes_mut(),
                         *addr_off,
-                        base.relative(new_data_addr)?,
+                        base.relative(PhysicalAddress::new(new_data_addr))?,
                         OFFSET_WIDTH,
                     )?;
                 }
@@ -424,7 +424,11 @@ impl WriteEngine {
                             "a copied group links an object that is not yet written".into(),
                         )
                     })?;
-                    region.push_link(name, base.relative(child)?, *creation_order);
+                    region.push_link(
+                        name,
+                        base.relative(PhysicalAddress::new(child))?,
+                        *creation_order,
+                    );
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
@@ -903,7 +907,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
                 let data = if data_addr.is_undefined(OFFSET_WIDTH) {
                     None
                 } else {
-                    let start = base.absolute(data_addr)?;
+                    let start = base.resolve(data_addr)?.get();
                     start
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())

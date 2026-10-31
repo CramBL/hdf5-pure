@@ -8,10 +8,13 @@ use test_util_hdf5::soft_link::GroupFormat;
 use test_util_hdf5::soft_link::NativeLink;
 
 use super::*;
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
+use crate::address::OpenedImageContext;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::source::ReadSeekSource;
+use crate::superblock::{self, LocatedSuperblock};
 
 #[test]
 fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
@@ -52,14 +55,18 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
     );
 
     let bytes = std::fs::read(&path).unwrap();
-    let superblock = crate::superblock::read(bytes.as_slice())
-        .unwrap()
-        .superblock;
-    let widths = FormatWidths {
-        offsets: superblock.offset_size,
-        lengths: superblock.length_size,
-    };
-    let addresses = AddressContext::from_effective_base(superblock.base_address);
+    let LocatedSuperblock {
+        address,
+        superblock,
+        widths,
+    } = superblock::read(bytes.as_slice()).unwrap();
+    let addresses = OpenedImageContext::reconcile(
+        superblock.base_address,
+        superblock.eof_address,
+        address.get(),
+    )
+    .unwrap()
+    .addresses();
     let header = ObjectHeader::parse_with_widths(
         &bytes,
         AccessMode::ReadOnly,
@@ -91,7 +98,9 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
     assert_eq!(buffered, native);
     assert_eq!(streaming, native);
 
-    let value = addresses.relative(value_address).unwrap();
+    let value = addresses
+        .relative(PhysicalAddress::new(value_address))
+        .unwrap();
     let listed = |entries: Vec<GroupEntry>| -> Vec<(String, StoredAddress)> {
         entries
             .into_iter()
@@ -137,7 +146,7 @@ fn native_link(addresses: AddressContext, link: LinkRef<'_>) -> (String, NativeL
         String::from(link.name),
         match link.target {
             TargetRef::Hard(object_header_address) => NativeLink::Hard {
-                address: addresses.absolute(object_header_address).unwrap(),
+                address: addresses.resolve(object_header_address).unwrap().get(),
             },
             TargetRef::Soft(value) => NativeLink::Soft {
                 target: String::from(value.path().unwrap()),

@@ -5,6 +5,7 @@ use std::path::Path;
 use hdf5_pure_format::__private::GroupLinkStorage;
 
 use crate::File;
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::edit::WriteEngine;
@@ -60,7 +61,9 @@ pub(super) fn inspect_group_links(
     while let Some(record) = info.region.layout().next_message(&info.region, pos)? {
         if record.msg_type == MessageType::GROUP_INFO {
             return Ok(GroupLinkInspection {
-                object_header_address: engine.addresses().relative(address)?,
+                object_header_address: engine
+                    .addresses()
+                    .relative(PhysicalAddress::new(address))?,
                 links: info.links,
                 group_info: record.body.to_vec(),
             });

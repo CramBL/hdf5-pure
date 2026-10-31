@@ -44,20 +44,20 @@ use crate::width::OffsetWidth;
 /// # let image = FileRegion::new(FileRange::new(PhysicalAddress::new(768), 128)?, &bytes)?;
 /// let base = BaseAddress::new(512);
 /// let blocks = FractalHeapBlockLayout::new(
-///     &header, OffsetWidth::Eight, LengthWidth::Eight, base.relative(608)?,
+///     &header, OffsetWidth::Eight, LengthWidth::Eight, base.relative(PhysicalAddress::new(608))?,
 /// )?;
 /// let mut pending = blocks.root()?.into_iter().collect::<Vec<_>>();
 /// while let Some(block) = pending.pop() {
 ///     match block {
 ///         FractalHeapBlock::Direct(block) => {
-///             let physical = PhysicalAddress::new(base.absolute(block.address())?);
+///             let physical = base.resolve(block.address())?;
 ///             let reference = block.at(physical)?;
 ///             reference.parse_prefix(image.subregion(reference.prefix_range()?)?)?;
 ///             let view = reference.parse(image.subregion(reference.parse_range())?)?;
 ///             assert_eq!(view.data(), &[7; 113]);
 ///         }
 ///         FractalHeapBlock::Indirect(block) => {
-///             let physical = PhysicalAddress::new(base.absolute(block.address())?);
+///             let physical = base.resolve(block.address())?;
 ///             let reference = block.at(physical)?;
 ///             let view = reference.parse(image.subregion(reference.parse_range())?)?;
 ///             pending.extend(view.children().collect::<Result<Vec<_>, _>>()?);
@@ -458,9 +458,12 @@ impl FractalHeapDirectBlockRef<'_> {
     /// # let mut header = FractalHeapHeader::parse_bytes(&encoded, OffsetWidth::Eight, LengthWidth::Eight)?;
     /// # header.flags = FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
     /// # let base = BaseAddress::new(512);
-    /// # let blocks = FractalHeapBlockLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight, base.relative(608)?)?;
+    /// # let blocks = FractalHeapBlockLayout::new(
+    /// #     &header, OffsetWidth::Eight, LengthWidth::Eight,
+    /// #     base.relative(PhysicalAddress::new(608))?,
+    /// # )?;
     /// # let Some(FractalHeapBlock::Direct(block)) = blocks.root()? else { panic!("expected direct fixture root") };
-    /// # let reference = block.at(PhysicalAddress::new(base.absolute(block.address())?))?;
+    /// # let reference = block.at(base.resolve(block.address())?)?;
     /// # let mut bytes = fixture.direct_block(96, &[0; 113], Widths::EIGHT);
     /// # let checksum_at = usize::try_from(reference.prefix_range()?.length()).unwrap();
     /// # let checksum_width = 0u32.to_le_bytes().len();

@@ -145,7 +145,7 @@ impl<T> Reservation<T> {
         length: u64,
         value: T,
     ) -> Result<Self, FormatError> {
-        let start = PhysicalAddress::new(base.absolute(address)?);
+        let start = base.resolve(address)?;
         Ok(Self {
             range: FileRange::new(start, length)?,
             value,

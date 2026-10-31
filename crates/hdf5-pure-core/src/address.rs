@@ -108,6 +108,9 @@ impl BaseAddress {
 ///
 /// The trait's items are not part of the public API of [`BaseAddress`]. The workspace crates
 /// import the trait from the hidden `__private` module.
+///
+/// The caller classifies undefined markers at the field's [`OffsetWidth`] before converting a
+/// defined address.
 pub trait BaseAddressExt {
     /// The base address of a file with no userblock, where a stored address and an absolute file
     /// position are the same number.
@@ -125,15 +128,14 @@ pub trait BaseAddressExt {
     /// read passes the inner source along as it is.
     fn is_zero(&self) -> bool;
 
-    /// Returns the absolute file position of `stored`.
+    /// Resolves a stored address against this base.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds `u64`, which a malformed file
-    /// can arrange: the file supplies both operands.
-    fn absolute(self, stored: StoredAddress) -> Result<u64, FormatError>;
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    fn resolve(self, stored: StoredAddress) -> Result<PhysicalAddress, FormatError>;
 
-    /// Returns the stored form of the absolute file position `at`.
+    /// Returns the address of a physical position relative to this base.
     ///
     /// A writer stores this value in the metadata that refers to `at`.
     ///
@@ -141,7 +143,7 @@ pub trait BaseAddressExt {
     ///
     /// Returns [`FormatError::AddressBelowBase`] if `at` lies below the base, inside the
     /// userblock, where no HDF5 structure lives.
-    fn relative(self, at: u64) -> Result<StoredAddress, FormatError>;
+    fn relative(self, at: PhysicalAddress) -> Result<StoredAddress, FormatError>;
 }
 
 #[doc(hidden)]
@@ -156,21 +158,23 @@ impl BaseAddressExt for BaseAddress {
         self.0 == 0
     }
 
-    fn absolute(self, stored: StoredAddress) -> Result<u64, FormatError> {
+    fn resolve(self, stored: StoredAddress) -> Result<PhysicalAddress, FormatError> {
         stored
             .get()
             .checked_add(self.0)
+            .map(PhysicalAddress::new)
             .ok_or(FormatError::OffsetOverflow {
                 offset: stored.get(),
                 length: self.0,
             })
     }
 
-    fn relative(self, at: u64) -> Result<StoredAddress, FormatError> {
-        at.checked_sub(self.0)
+    fn relative(self, at: PhysicalAddress) -> Result<StoredAddress, FormatError> {
+        at.get()
+            .checked_sub(self.0)
             .map(StoredAddress::new)
             .ok_or(FormatError::AddressBelowBase {
-                address: at,
+                address: at.get(),
                 base: self.0,
             })
     }
@@ -434,14 +438,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_two_conversions_invert_each_other() {
-        for base in [BaseAddress::ZERO, BaseAddress::new(512)] {
-            for stored in [0u64, 1, 4096, u32::MAX as u64].map(StoredAddress::new) {
-                let at = base.absolute(stored).unwrap();
-                assert_eq!(base.relative(at).unwrap(), stored, "base {base:?}");
-            }
-        }
+    #[rstest]
+    #[case::plain(0)]
+    #[case::userblock(512)]
+    fn the_two_conversions_invert_each_other(
+        #[case] base: u64,
+        #[values(0, 1, 4096, u64::from(u32::MAX))] stored: u64,
+    ) {
+        let base = BaseAddress::new(base);
+        let stored = StoredAddress::new(stored);
+        let physical = base.resolve(stored).unwrap();
+        assert_eq!(physical, PhysicalAddress::new(base.get() + stored.get()));
+        assert_eq!(base.relative(physical).unwrap(), stored);
     }
 
     #[test]
@@ -449,26 +457,34 @@ mod tests {
         assert!(BaseAddress::ZERO.is_zero());
         assert_eq!(
             BaseAddress::ZERO
-                .absolute(StoredAddress::new(1234))
-                .unwrap(),
+                .resolve(StoredAddress::new(1234))
+                .unwrap()
+                .get(),
             1234
         );
-        assert_eq!(BaseAddress::ZERO.relative(1234).unwrap().get(), 1234);
+        assert_eq!(
+            BaseAddress::ZERO
+                .relative(PhysicalAddress::new(1234))
+                .unwrap()
+                .get(),
+            1234
+        );
     }
 
     #[test]
     fn a_userblock_shifts_by_its_size() {
         let base = BaseAddress::new(512);
         assert!(!base.is_zero());
-        assert_eq!(base.absolute(StoredAddress::new(96)).unwrap(), 608);
-        assert_eq!(base.relative(608).unwrap().get(), 96);
+        assert_eq!(base.resolve(StoredAddress::new(96)).unwrap().get(), 608);
+        assert_eq!(base.relative(PhysicalAddress::new(608)).unwrap().get(), 96);
     }
 
     #[test]
     fn an_overflowing_sum_is_reported_not_wrapped() {
         let base = BaseAddress::new(512);
         assert_eq!(
-            base.absolute(StoredAddress::new(u64::MAX)),
+            base.resolve(StoredAddress::new(u64::MAX))
+                .map(PhysicalAddress::get),
             Err(FormatError::OffsetOverflow {
                 offset: u64::MAX,
                 length: 512,
@@ -480,14 +496,14 @@ mod tests {
     fn an_address_below_the_base_returns_address_below_base() {
         let base = BaseAddress::new(512);
         assert_eq!(
-            base.relative(511),
+            base.relative(PhysicalAddress::new(511)),
             Err(FormatError::AddressBelowBase {
                 address: 511,
                 base: 512,
             })
         );
         // The base itself is the image's first byte, whose stored address is zero.
-        assert_eq!(base.relative(512).unwrap().get(), 0);
+        assert_eq!(base.relative(PhysicalAddress::new(512)).unwrap().get(), 0);
     }
 
     #[rstest]

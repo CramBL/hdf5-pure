@@ -97,25 +97,13 @@ impl AddressContext {
         Self { effective_base }
     }
 
-    /// Returns the physical position of a stored address in this image.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::OffsetOverflow`] if the sum of the stored address and effective base
-    /// exceeds [`u64::MAX`].
-    pub(crate) fn absolute(self, stored: StoredAddress) -> Result<u64, FormatError> {
-        Ok(self.resolve(stored)?.get())
-    }
-
     /// Resolves a stored address using the opened image's effective base.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
     pub(crate) fn resolve(self, stored: StoredAddress) -> Result<PhysicalAddress, FormatError> {
-        self.effective_base
-            .absolute(stored)
-            .map(PhysicalAddress::new)
+        self.effective_base.resolve(stored)
     }
 
     /// Returns the stored address corresponding to a physical position in this image.
@@ -124,7 +112,7 @@ impl AddressContext {
     ///
     /// Returns [`FormatError::AddressBelowBase`] if the physical position is below the effective
     /// base.
-    pub(crate) fn relative(self, absolute: u64) -> Result<StoredAddress, FormatError> {
+    pub(crate) fn relative(self, absolute: PhysicalAddress) -> Result<StoredAddress, FormatError> {
         self.effective_base.relative(absolute)
     }
 
@@ -163,7 +151,7 @@ mod tests {
                 .addresses();
         let physical = context.resolve(StoredAddress::new(stored)).unwrap();
         assert_eq!(physical.get(), expected);
-        assert_eq!(context.relative(physical.get()).unwrap().get(), stored);
+        assert_eq!(context.relative(physical).unwrap().get(), stored);
     }
 
     #[test]
@@ -221,7 +209,11 @@ mod tests {
         assert_eq!(opened.addresses().effective_base().get(), signature_offset);
         assert_eq!(opened.effective_eof, effective_eof);
         assert_eq!(
-            opened.addresses().absolute(StoredAddress::new(16)).unwrap(),
+            opened
+                .addresses()
+                .resolve(StoredAddress::new(16))
+                .unwrap()
+                .get(),
             signature_offset + 16
         );
     }

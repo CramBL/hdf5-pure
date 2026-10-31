@@ -55,7 +55,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
         }
     }
     let base = BaseAddress::ZERO;
-    let mut eoa = base.relative(file.size()).unwrap();
+    let mut eoa = base.relative(PhysicalAddress::new(file.size())).unwrap();
     let mut observations = Vec::new();
     for &step in workload.steps {
         let allocation = match step {
@@ -66,7 +66,8 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                     .unwrap();
                 Some(
                     Extent::new(
-                        base.relative(dataset.offset().unwrap()).unwrap(),
+                        base.relative(PhysicalAddress::new(dataset.offset().unwrap()))
+                            .unwrap(),
                         dataset.storage_size(),
                     )
                     .unwrap(),
@@ -84,7 +85,8 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                     .unwrap();
                 Some(
                     Extent::new(
-                        base.relative(dataset.offset().unwrap()).unwrap(),
+                        base.relative(PhysicalAddress::new(dataset.offset().unwrap()))
+                            .unwrap(),
                         dataset.storage_size(),
                     )
                     .unwrap(),
@@ -122,7 +124,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
             if let Step::Create(Object::Strings(_)) = step {
                 let address = aggregation::collection_address(
                     &bytes,
-                    base.absolute(expected.start()).unwrap(),
+                    base.resolve(expected.start()).unwrap().get(),
                 );
                 let locator = GlobalHeapCollectionLocator::new(
                     PhysicalAddress::new(address),
@@ -138,12 +140,15 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                         AllocationClass::Raw,
                     )
                     .unwrap();
-                assert_eq!(allocation.extent().start(), base.relative(address).unwrap());
+                assert_eq!(
+                    allocation.extent().start(),
+                    base.relative(PhysicalAddress::new(address)).unwrap()
+                );
                 assert_eq!(allocation.released(), None);
                 eoa = allocation.end_of_allocation();
             }
         }
-        assert_eq!(base.absolute(eoa).unwrap(), end, "{step:?}");
+        assert_eq!(base.resolve(eoa).unwrap().get(), end, "{step:?}");
         assert_eq!(
             aggregates
                 .unused(AllocationClass::Raw)
@@ -155,7 +160,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
     }
     let released = aggregates.reset(eoa).unwrap();
     assert_eq!(
-        base.absolute(released.end_of_allocation()).unwrap(),
+        base.resolve(released.end_of_allocation()).unwrap().get(),
         std::fs::metadata(&path).unwrap().len()
     );
     assert_eq!(released.released(AllocationClass::Raw), None);

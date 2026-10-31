@@ -13,7 +13,6 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -195,10 +194,7 @@ impl SymbolTableNodeLocator {
             address,
             group_leaf_node_k: _,
         } = *self;
-        FileRange::new(
-            PhysicalAddress::new(base.absolute(address)?),
-            NODE_PREFIX_LEN,
-        )
+        FileRange::new(base.resolve(address)?, NODE_PREFIX_LEN)
     }
 }
 

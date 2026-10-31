@@ -528,7 +528,8 @@ impl WriteEngine {
             Error::EditUnsupported("persistent allocation requires File Space Info"),
         )?;
         let addresses = self.context.addresses();
-        let eof = addresses.relative(self.context.superblock().eof_address)?;
+        let eof =
+            addresses.relative(PhysicalAddress::new(self.context.superblock().eof_address))?;
         let (report, mut allocations) = PersistedManagerSet::read(
             &self.image(),
             self.context.widths(),

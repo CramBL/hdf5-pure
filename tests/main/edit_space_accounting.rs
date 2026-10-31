@@ -3,6 +3,7 @@
 //! Checks immediate appends, staged and committed frees, persistence across sessions, and agreement
 //! between scalar totals and section lengths.
 
+use hdf5_pure::AddressRange;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::PhysicalAddress;
 use hdf5_pure::{File, FileBuilder};
@@ -224,12 +225,14 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let bytes = std::fs::read(&path).unwrap();
     let reader = File::open(&path).unwrap();
     let header = storage::root_object_address(&reader, &bytes, "d");
-    let mut original = storage::header_extents(reader.superblock(), &bytes, header);
-    original.extend(
-        file_space::raw_extents(&reader, "d")
-            .iter()
-            .map(|extent| (extent.start, extent.end - extent.start)),
-    );
+    let mut original = storage::header_extents(&reader, &bytes, header);
+    original.extend(file_space::raw_extents(&reader, "d").iter().map(|extent| {
+        AddressRange::new(
+            PhysicalAddress::new(extent.start),
+            extent.end - extent.start,
+        )
+        .unwrap()
+    }));
     reader.close().unwrap();
     let session = File::open_rw(&path).unwrap();
     let incompressible: Vec<i32> = (0..64)
@@ -247,13 +250,17 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let stats = session.reusable_space_stats().unwrap();
     let sections = session.reusable_free_sections().unwrap();
     test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
-    for (start, len) in original {
+    for range in original {
+        let reclaimed = sections
+            .sections()
+            .iter()
+            .filter_map(|section| section.range().intersection(range))
+            .map(|range| range.length())
+            .sum::<u64>();
         assert_eq!(
-            test_util_hdf5::covered_free_bytes!(&sections, &(start..start + len), PhysicalAddress),
-            len,
-            "old allocation {start}..{} is not fully reclaimed: {:?}",
-            start + len,
-            sections,
+            reclaimed,
+            range.length(),
+            "old allocation {range:?} is not fully reclaimed: {sections:?}"
         );
     }
     assert_eq!(

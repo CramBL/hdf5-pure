@@ -762,8 +762,9 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(superblock.base_address)
-                .absolute(superblock.root_group_address)
+                .resolve(superblock.root_group_address)
                 .unwrap()
+                .get()
                 .to_usize()
                 .unwrap(),
             widths,

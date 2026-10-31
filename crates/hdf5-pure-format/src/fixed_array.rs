@@ -113,7 +113,7 @@ impl FixedArrayHeaderLocator {
             DecodedStoredAddress::Defined(address) => Some(FixedArrayDataBlockRef::new(
                 base,
                 range.start(),
-                PhysicalAddress::new(base.absolute(address)?),
+                base.resolve(address)?,
                 geometry,
             )?),
             DecodedStoredAddress::Undefined => None,
@@ -133,10 +133,7 @@ impl FixedArrayHeaderLocator {
             base,
             address,
         } = *self;
-        FileRange::new(
-            PhysicalAddress::new(base.absolute(address)?),
-            header_len(widths),
-        )
+        FileRange::new(base.resolve(address)?, header_len(widths))
     }
 }
 
@@ -326,8 +323,7 @@ impl FixedArrayDataBlockRef {
                 actual: client_id,
             });
         }
-        let owner =
-            PhysicalAddress::new(base.absolute(fields.address(geometry.encoding.offsets())?)?);
+        let owner = base.resolve(fields.address(geometry.encoding.offsets())?)?;
         if owner != header {
             return Err(FormatError::InvalidFixedArrayBlockOwner {
                 expected: header.get(),

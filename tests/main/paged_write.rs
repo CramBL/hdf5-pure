@@ -107,10 +107,11 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
     let metadata = storage::file_metadata_extents(&reopened, &bytes);
     storage::assert_unavailable(&reopened, &metadata);
     if exact_fill && threshold == 1 {
-        assert!(metadata.iter().any(|&(at, len)| {
-            initial.sections().iter().any(|section| {
-                section.address().get() <= at && at + len <= section.end_address().get()
-            })
+        assert!(metadata.iter().any(|range| {
+            initial
+                .sections()
+                .iter()
+                .any(|section| section.range().contains(*range))
         }));
     }
     assert_eq!(reopened.reusable_free_sections().unwrap(), reusable);

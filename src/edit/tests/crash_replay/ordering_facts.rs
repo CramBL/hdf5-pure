@@ -371,7 +371,7 @@ impl Ownership {
         };
         let addresses = AddressContext::from_effective_base(superblock.base_address);
         let source = BytesSource::new(bytes);
-        let extension = addresses.absolute(extension).unwrap();
+        let extension = addresses.resolve(extension).unwrap().get();
         let object = ObjectHeader::parse(
             bytes,
             AccessMode::ReadOnly,
@@ -419,7 +419,7 @@ impl Ownership {
             let DecodedStoredAddress::Defined(address) = address else {
                 continue;
             };
-            let at = addresses.absolute(*address).unwrap();
+            let at = addresses.resolve(*address).unwrap().get();
             let header =
                 FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(at).unwrap()..])
                     .unwrap();

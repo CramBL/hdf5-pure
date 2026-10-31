@@ -1704,7 +1704,7 @@ impl FileInner {
         if rel.is_undefined(self.widths.offsets) {
             return Ok(None);
         }
-        let abs = self.addresses().absolute(rel)?;
+        let abs = self.addresses().resolve(rel)?.get();
         let header = self.parse_header(abs)?;
         let Some(msg) = header
             .messages
@@ -1728,7 +1728,7 @@ impl FileInner {
         if rel.is_undefined(self.widths.offsets) {
             return None;
         }
-        let abs = self.addresses().absolute(rel).ok()?;
+        let abs = self.addresses().resolve(rel).ok()?.get();
         let header = self.parse_header(abs).ok()?;
         let msg = header
             .messages
@@ -1933,10 +1933,12 @@ impl FileInner {
             let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             return core
                 .addresses()
-                .absolute(core.superblock().root_group_address);
+                .resolve(core.superblock().root_group_address)
+                .map(PhysicalAddress::get);
         }
         self.addresses()
-            .absolute(self.superblock.root_group_address)
+            .resolve(self.superblock.root_group_address)
+            .map(PhysicalAddress::get)
     }
 
     /// Returns the raw file bytes for an in-memory file, or an empty slice for a
@@ -2107,7 +2109,10 @@ impl FileInner {
         if rel_addr == u64::MAX || rel_addr == 0 {
             return Err(FormatError::InvalidObjectReference(rel_addr).into());
         }
-        let abs = file.addresses().absolute(StoredAddress::new(rel_addr))?;
+        let abs = file
+            .addresses()
+            .resolve(StoredAddress::new(rel_addr))?
+            .get();
         let at = revisions.at(abs);
         let hdr = file.parse_header(abs)?;
         if has_message(&hdr, MessageType::DATA_LAYOUT) {
@@ -2176,7 +2181,9 @@ impl FileInner {
     /// Returns [`FormatError::OffsetOverflow`] if the base address cannot be added to it, which a
     /// crafted entry naming `HADDR_UNDEF` in a file with a userblock arranges.
     fn entry_address(&self, entry: &GroupEntry) -> Result<u64, FormatError> {
-        self.addresses().absolute(entry.object_header_address)
+        self.addresses()
+            .resolve(entry.object_header_address)
+            .map(PhysicalAddress::get)
     }
 
     /// Returns the parsed target of the child named `name`.
@@ -3741,6 +3748,91 @@ impl File {
     /// For a relocated image, the effective base and EOF differ from the encoded values.
     pub fn superblock(&self) -> &Superblock {
         self.inner.superblock()
+    }
+
+    /// Resolves a stored address using this file's effective address base.
+    ///
+    /// For a relocated image, the effective base is the physical signature position. The encoded
+    /// [`Superblock::base_address`] may differ. The resolved position need not lie within the
+    /// file's current length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DefinedAddressIsUndefined`] if `stored` is the undefined marker at
+    /// this file's address width, or [`FormatError::OffsetOverflow`] if the sum exceeds
+    /// [`u64::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, UserblockSize};
+    ///
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.with_userblock(UserblockSize::try_from(512)?);
+    /// # let file = File::from_bytes(builder.finish()?)?;
+    /// let stored = file.superblock().root_group_address;
+    /// let physical = file.resolve_address(stored)?;
+    /// assert_eq!(physical.get(), 512 + stored.get());
+    /// assert_eq!(file.relative_address(physical)?, stored);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn resolve_address(&self, stored: StoredAddress) -> Result<PhysicalAddress, FormatError> {
+        if stored.is_undefined(self.superblock().offset_size) {
+            return Err(FormatError::DefinedAddressIsUndefined {
+                address: stored.get(),
+                offset_size: self.superblock().offset_size.get(),
+            });
+        }
+        self.addresses().resolve(stored)
+    }
+
+    /// Returns the stored address of a physical position using this file's effective address base.
+    ///
+    /// Uses the same effective base as [`resolve_address`](Self::resolve_address), including for
+    /// relocated images. The physical position need not lie within the file's current length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if `physical` lies below the effective base, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if the result is the undefined marker at this
+    /// file's address width.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, PhysicalAddress, UserblockSize};
+    ///
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.with_userblock(UserblockSize::try_from(512)?);
+    /// # let file = File::from_bytes(builder.finish()?)?;
+    /// let origin = PhysicalAddress::new(512);
+    /// let stored = file.relative_address(origin)?;
+    /// assert_eq!(stored.get(), 0);
+    /// assert_eq!(file.resolve_address(stored)?, origin);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    ///
+    /// A stored address cannot be passed as a physical position:
+    ///
+    /// ```compile_fail,E0308
+    /// use hdf5_pure::{File, StoredAddress};
+    ///
+    /// fn convert(file: &File, stored: StoredAddress) {
+    ///     let _ = file.relative_address(stored);
+    /// }
+    /// ```
+    pub fn relative_address(
+        &self,
+        physical: PhysicalAddress,
+    ) -> Result<StoredAddress, FormatError> {
+        let stored = self.addresses().relative(physical)?;
+        if stored.is_undefined(self.superblock().offset_size) {
+            return Err(FormatError::DefinedAddressIsUndefined {
+                address: stored.get(),
+                offset_size: self.superblock().offset_size.get(),
+            });
+        }
+        Ok(stored)
     }
 
     /// Returns the address and length widths validated when this file was opened.
@@ -6804,7 +6896,7 @@ the same commit to replace it",
                 Ok(Chunk::new(
                     Arc::clone(&filters),
                     c.offsets.into_iter().take(rank).collect(),
-                    addresses.absolute(c.address)?,
+                    addresses.resolve(c.address)?.get(),
                     c.chunk_size.get(),
                     c.filter_mask,
                     bypassed_raw,
@@ -6850,7 +6942,7 @@ the same commit to replace it",
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds `u64`.
     fn absolute_address(&self, address: Option<StoredAddress>) -> Result<Option<u64>, Error> {
         match address {
-            Some(stored) => Ok(Some(self.file.addresses().absolute(stored)?)),
+            Some(stored) => Ok(Some(self.file.addresses().resolve(stored)?.get())),
             None => Ok(None),
         }
     }

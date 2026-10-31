@@ -178,10 +178,7 @@ impl ExtensibleArrayHeaderLocator {
             base,
             address,
         } = *self;
-        FileRange::new(
-            PhysicalAddress::new(base.absolute(address)?),
-            header_len(widths),
-        )
+        FileRange::new(base.resolve(address)?, header_len(widths))
     }
 }
 
@@ -985,7 +982,7 @@ struct Owner {
 
 impl Owner {
     fn resolve(self, address: StoredAddress) -> Result<PhysicalAddress, FormatError> {
-        Ok(PhysicalAddress::new(self.base.absolute(address)?))
+        self.base.resolve(address)
     }
 
     fn addresses<'a>(

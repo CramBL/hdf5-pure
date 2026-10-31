@@ -36,10 +36,14 @@ use hdf5_pure::FixedPointType;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure::MessageType;
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::BaseAddress;
 use hdf5_pure_core::MaxExtent;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DataLayout;
@@ -103,9 +107,9 @@ pub fn assert_storage(file: &File, image: &[u8]) {
     let header = ObjectHeader::parse_with_base_and_widths(
         image,
         AccessMode::ReadOnly,
-        usize::try_from(address).unwrap(),
+        usize::try_from(address.get()).unwrap(),
         widths,
-        superblock.base_address,
+        BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get()),
     )
     .unwrap();
     let space = header
@@ -139,7 +143,11 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         image,
     )
     .unwrap();
-    let locator = ExtensibleArrayHeaderLocator::new(widths, superblock.base_address, address);
+    let locator = ExtensibleArrayHeaderLocator::new(
+        widths,
+        BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get()),
+        address,
+    );
     let array = locator.parse(region).unwrap();
     assert_eq!(array.header().client_id, CLIENT_UNFILTERED);
     assert_eq!(array.header().max_idx_set, 16);
@@ -191,7 +199,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
     );
     for ((_, record), chunk) in records.iter().zip(&chunks) {
         assert_eq!(
-            record.address.get() + superblock.base_address.get(),
+            file.resolve_address(record.address).unwrap().get(),
             chunk.address
         );
         assert_eq!(record.stored_size, 2048);

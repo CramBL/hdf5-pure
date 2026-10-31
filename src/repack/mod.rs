@@ -1297,7 +1297,7 @@ impl ChunkProvider for DatasetChunkProvider {
         let info = &self.grid_order[index];
         let source = self.file.source();
         let len = info.chunk_size.to_usize()?;
-        let at = self.file.addresses().absolute(info.address)?;
+        let at = self.file.addresses().resolve(info.address)?.get();
         // Bounds-check before growing the buffer, the way `Source::read_exact_at`
         // does and for its reason: `chunk_size` comes from the source's chunk
         // index, so a malformed file could name a 4 GiB chunk and have this zero

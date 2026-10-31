@@ -38,6 +38,9 @@ use hdf5_pure::StoredAddress;
 use hdf5_pure::StringPadding;
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::VariableLengthType;
+use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::BaseAddress;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeMessage;
 use hdf5_pure_format::__private::FormatWidths;
@@ -388,12 +391,17 @@ impl<'a> Observation<'a> {
         ObjectHeader::parse_with_base_and_widths(
             self.bytes,
             AccessMode::ReadOnly,
-            usize::try_from(superblock.base_address.get() + self.address(path).get()).unwrap(),
+            usize::try_from(self.file.resolve_address(self.address(path)).unwrap().get()).unwrap(),
             FormatWidths {
                 offsets: superblock.offset_size,
                 lengths: superblock.length_size,
             },
-            superblock.base_address,
+            BaseAddress::new(
+                self.file
+                    .resolve_address(StoredAddress::ZERO)
+                    .unwrap()
+                    .get(),
+            ),
         )
         .unwrap()
     }

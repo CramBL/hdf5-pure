@@ -83,7 +83,8 @@ impl WriteEngine {
         let root = self
             .context
             .addresses()
-            .absolute(self.context.superblock().root_group_address)?;
+            .resolve(self.context.superblock().root_group_address)?
+            .get();
         let mut analysis_complete =
             self.collect_owned_spans(root, &mut live_raw_space, &mut live_metadata_space)?;
         let GlobalHeapLiveness {
@@ -107,7 +108,7 @@ impl WriteEngine {
         if let Some(extension) = self.context.superblock().superblock_extension_address
             && !extension.is_undefined(self.widths().offsets)
         {
-            let extension = self.context.addresses().absolute(extension)?;
+            let extension = self.context.addresses().resolve(extension)?.get();
             let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
@@ -349,7 +350,7 @@ impl WriteEngine {
         let eof = self.image.len();
         let index_spans = index
             .iter()
-            .map(|extent| Some((base.absolute(extent.start()).ok()?, extent.len())))
+            .map(|extent| Some((base.resolve(extent.start()).ok()?.get(), extent.len())))
             .collect::<Option<Vec<_>>>()?;
         let mut proven = owned.to_vec();
         proven.extend(index_spans.iter().copied());
@@ -398,7 +399,7 @@ impl WriteEngine {
             .collect();
         fractal_heap_free_spans(self.space.page_size(), &allocations)
             .into_iter()
-            .map(|(addr, len, class)| Some((base.absolute(addr).ok()?, len, class)))
+            .map(|(addr, len, class)| Some((base.resolve(addr).ok()?.get(), len, class)))
             .collect()
     }
 
@@ -422,8 +423,9 @@ impl WriteEngine {
         let mut stack: Vec<u64> = vec![
             self.context
                 .addresses()
-                .absolute(self.context.superblock().root_group_address)
-                .ok()?,
+                .resolve(self.context.superblock().root_group_address)
+                .ok()?
+                .get(),
         ];
         let mut budget = MAX_LINK_GRAPH_NODES;
         while let Some(addr) = stack.pop() {
@@ -464,7 +466,7 @@ impl WriteEngine {
             )
             .ok()?;
             for e in entries {
-                let child = base.absolute(e.object_header_address).ok()?;
+                let child = base.resolve(e.object_header_address).ok()?.get();
                 *counts.entry(child).or_insert(0) += 1;
                 stack.push(child);
             }
@@ -566,7 +568,7 @@ impl WriteEngine {
                 // An empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
                 if !data_addr.is_undefined(self.widths().offsets) && data_size > 0 {
-                    if let Ok(abs) = base.absolute(data_addr) {
+                    if let Ok(abs) = base.resolve(data_addr).map(PhysicalAddress::get) {
                         if abs.checked_add(data_size).is_some_and(|e| e <= file_len) {
                             // A contiguous data block is raw data.
                             out.push((abs, data_size, FreeClass::Page(PageType::Raw)));
@@ -635,7 +637,7 @@ impl WriteEngine {
         // keys and `oh_chunk_spans`.
         let base = self.context.addresses();
         for child in children {
-            if let Ok(c) = base.absolute(child) {
+            if let Ok(c) = base.resolve(child).map(PhysicalAddress::get) {
                 self.collect_free_spans(c, depth + 1, incoming, out);
             }
         }
@@ -673,7 +675,10 @@ impl WriteEngine {
         spans
             .iter()
             .map(|&(address, length)| {
-                let stored = self.context.addresses().relative(address)?;
+                let stored = self
+                    .context
+                    .addresses()
+                    .relative(PhysicalAddress::new(address))?;
                 Ok((
                     address,
                     length,
@@ -781,7 +786,11 @@ impl WriteEngine {
             .into_iter()
             .filter(|(address, _)| !referenced_collections.contains(address))
             .filter_map(|(address, len)| {
-                let stored = self.context.addresses().relative(address).ok()?;
+                let stored = self
+                    .context
+                    .addresses()
+                    .relative(PhysicalAddress::new(address))
+                    .ok()?;
                 Some((
                     address,
                     len,
@@ -891,11 +900,11 @@ impl WriteEngine {
         // unproven PAGE type is recorded as dead.
         let mut data: Vec<(u64, u64)> = Vec::with_capacity(split.data.len());
         for (addr, len) in split.data {
-            data.push((base.absolute(StoredAddress::new(addr)).ok()?, len));
+            data.push((base.resolve(StoredAddress::new(addr)).ok()?.get(), len));
         }
         let mut index: Vec<(u64, u64)> = Vec::with_capacity(split.index.len());
         for (addr, len) in split.index {
-            index.push((base.absolute(StoredAddress::new(addr)).ok()?, len));
+            index.push((base.resolve(StoredAddress::new(addr)).ok()?.get(), len));
         }
         // Validate both halves together. They must be disjoint from each other and internally
         // before either is trusted, including by the proof.
@@ -991,7 +1000,7 @@ impl WriteEngine {
                     && index.iter().all(|&(at, len)| {
                         self.context
                             .addresses()
-                            .relative(at)
+                            .relative(PhysicalAddress::new(at))
                             .is_ok_and(|stored| !touches_page_zero(page_size, [(stored, len)]))
                     })
             }
@@ -1044,7 +1053,7 @@ impl WriteEngine {
         )
         .ok()?;
         for (a, _) in &mut spans {
-            *a = base.absolute(StoredAddress::new(*a)).ok()?;
+            *a = base.resolve(StoredAddress::new(*a)).ok()?.get();
         }
         if !super::spans_disjoint_in_bounds(&mut spans, self.image.len()) {
             return None;
@@ -1156,7 +1165,12 @@ impl WriteEngine {
                         object_header_address,
                     } = link.link_target
                     {
-                        child(self.context.addresses().absolute(object_header_address)?);
+                        child(
+                            self.context
+                                .addresses()
+                                .resolve(object_header_address)?
+                                .get(),
+                        );
                     }
                 }
                 MessageType::LINK_INFO => {
@@ -1205,7 +1219,7 @@ impl WriteEngine {
                 if let Some(address) = address
                     && *size > 0
                 {
-                    raw.push((self.context.addresses().absolute(*address)?, *size));
+                    raw.push((self.context.addresses().resolve(*address)?.get(), *size));
                 }
             }
             DataLayout::Chunked { .. } => {
@@ -1295,7 +1309,8 @@ impl WriteEngine {
                 child(
                     self.context
                         .addresses()
-                        .absolute(entry.object_header_address)?,
+                        .resolve(entry.object_header_address)?
+                        .get(),
                 );
             }
         }
@@ -1360,7 +1375,7 @@ impl WriteEngine {
     ) -> Result<Vec<(u64, u64)>, Error> {
         spans
             .into_iter()
-            .map(|(addr, len)| Ok((self.context.addresses().absolute(addr)?, len)))
+            .map(|(addr, len)| Ok((self.context.addresses().resolve(addr)?.get(), len)))
             .collect()
     }
 
@@ -1398,7 +1413,7 @@ impl WriteEngine {
         };
         for &(extent, _) in storage.allocations() {
             metadata.push((
-                self.context.addresses().absolute(extent.start())?,
+                self.context.addresses().resolve(extent.start())?.get(),
                 extent.len(),
             ));
         }

@@ -85,7 +85,11 @@ impl<'f> HeaderCollector<'f> {
             return Ok(None);
         };
         Ok(Some(ContinuationBlock {
-            address: self.context.base_address.absolute(continuation.address())?,
+            address: self
+                .context
+                .base_address
+                .resolve(continuation.address())?
+                .get(),
             length: continuation.length(),
             layout: self.prefix.prefix.layout,
         }))

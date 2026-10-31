@@ -1227,8 +1227,9 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(sb.base_address)
-                .absolute(sb.root_group_address)
+                .resolve(sb.root_group_address)
                 .unwrap()
+                .get()
                 .to_usize()
                 .unwrap(),
             FormatWidths {

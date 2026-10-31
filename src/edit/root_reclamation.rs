@@ -92,7 +92,7 @@ impl WriteEngine {
         };
         if !self.proved_free_of_references {
             let mut prospective = self.context.superblock().clone();
-            prospective.root_group_address = self.context.addresses().relative(new_root.get())?;
+            prospective.root_group_address = self.context.addresses().relative(new_root)?;
             if !crate::reference_patch::prove_free_of_references(
                 &self.image(),
                 &prospective,
@@ -122,7 +122,7 @@ impl WriteEngine {
         reclamation: RootReclamation,
     ) -> Result<(), Error> {
         let RootReclamation { target, source } = reclamation;
-        let source_addr = self.context.addresses().absolute(source.start())?;
+        let source_addr = self.context.addresses().resolve(source.start())?.get();
         let target_addr = self.context.addresses().resolve(target.start())?;
         let bytes = self
             .image

@@ -553,7 +553,7 @@ fn observe(bytes: &[u8]) -> OwnershipObservation {
         .unwrap();
     let eof = context
         .addresses()
-        .relative(context.superblock().eof_address)
+        .relative(PhysicalAddress::new(context.superblock().eof_address))
         .unwrap();
     let (report, metadata) = PersistedManagerSet::read(
         &source,

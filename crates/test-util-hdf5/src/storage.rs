@@ -5,17 +5,18 @@
 
 use std::collections::BTreeSet;
 
+use hdf5_pure::AddressRange;
 use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure::PhysicalAddress;
 use hdf5_pure::StoredAddress;
-use hdf5_pure::Superblock;
-use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
+use hdf5_pure_core::BaseAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
-use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
 use hdf5_pure_format::__private::LinkMessage;
 use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::ObjectHeader;
@@ -32,25 +33,28 @@ use test_util::checksum;
 ///
 /// Panics if an address is outside `bytes`, a structure cannot be parsed, or an allocation size
 /// cannot be represented.
-pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
+pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<AddressRange<PhysicalAddress>> {
     let sb = file.superblock();
     let mut extents = manager_extents(file, bytes);
-    extents.push((
-        sb.base_address.get(),
-        u64::try_from(format::serialize_superblock(sb).unwrap().len()).unwrap(),
-    ));
+    extents.push(
+        AddressRange::new(
+            file.resolve_address(StoredAddress::ZERO).unwrap(),
+            u64::try_from(format::serialize_superblock(sb).unwrap().len()).unwrap(),
+        )
+        .unwrap(),
+    );
     extents.extend(header_extents(
-        sb,
+        file,
         bytes,
-        sb.base_address.absolute(sb.root_group_address).unwrap(),
+        file.resolve_address(sb.root_group_address).unwrap(),
     ));
     if let Some(extension) = sb.superblock_extension_address
         && !extension.is_undefined(sb.offset_size)
     {
         extents.extend(header_extents(
-            sb,
+            file,
             bytes,
-            sb.base_address.absolute(extension).unwrap(),
+            file.resolve_address(extension).unwrap(),
         ));
     }
     extents
@@ -61,7 +65,7 @@ pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
 /// # Panics
 ///
 /// Panics if a manager header cannot be read from `bytes` or an address cannot be represented.
-pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
+pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<AddressRange<PhysicalAddress>> {
     let Some(info) = file.file_space_info().unwrap() else {
         return Vec::new();
     };
@@ -77,27 +81,31 @@ pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
             DecodedStoredAddress::Undefined => None,
         })
         .flat_map(|address| {
-            let at = superblock.base_address.absolute(address).unwrap();
-            let header =
-                FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(at).unwrap()..])
-                    .unwrap();
-            vec![
-                (at, format::free_space_manager_header_len(widths)),
-                (
-                    superblock
-                        .base_address
-                        .absolute(header.section_list_addr())
-                        .unwrap(),
-                    header.section_list_allocated(),
-                ),
-            ]
+            let at = file.resolve_address(address).unwrap();
+            let header = FreeSpaceManagerHeaderFrame::parse(
+                widths,
+                &bytes[usize::try_from(at.get()).unwrap()..],
+            )
+            .unwrap();
+            let mut extents =
+                vec![AddressRange::new(at, format::free_space_manager_header_len(widths)).unwrap()];
+            if let DecodedStoredAddress::Defined(address) = header.section_list_addr() {
+                extents.push(
+                    AddressRange::new(
+                        file.resolve_address(address).unwrap(),
+                        header.section_list_allocated(),
+                    )
+                    .unwrap(),
+                );
+            }
+            extents
         })
         .collect()
 }
 
 /// Returns the sorted allocations of a version 2 object header and its continuation blocks.
 ///
-/// Uses the widths and base address in `superblock`.
+/// Uses the widths and effective address base of `file`.
 ///
 /// The first allocation includes the checksum following chunk 0, as defined in "Version 2 Data
 /// Object Header Prefix" of the [format specification, version 4.0][spec].
@@ -108,18 +116,26 @@ pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
 /// or an address or size cannot be represented.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
-pub fn header_extents(superblock: &Superblock, bytes: &[u8], address: u64) -> Vec<(u64, u64)> {
+pub fn header_extents(
+    file: &File,
+    bytes: &[u8],
+    address: PhysicalAddress,
+) -> Vec<AddressRange<PhysicalAddress>> {
+    let superblock = file.superblock();
     let widths = format::FormatWidths {
         offsets: superblock.offset_size,
         lengths: superblock.length_size,
     };
-    let at = usize::try_from(address).unwrap();
+    let at = usize::try_from(address.get()).unwrap();
     let prefix = ObjectHeaderPrefix::parse(&bytes[at..]).unwrap();
     let chunk0_end = at + prefix.len + usize::try_from(prefix.chunk0_size).unwrap();
-    let mut extents = vec![(
-        address,
-        u64::try_from(chunk0_end + checksum::CHECKSUM - at).unwrap(),
-    )];
+    let mut extents = vec![
+        AddressRange::new(
+            address,
+            u64::try_from(chunk0_end + checksum::CHECKSUM - at).unwrap(),
+        )
+        .unwrap(),
+    ];
     let mut regions = std::iter::once(at + prefix.len..chunk0_end).collect::<Vec<_>>();
     let mut seen = BTreeSet::from([address]);
     while let Some(region) = regions.pop() {
@@ -132,17 +148,14 @@ pub fn header_extents(superblock: &Superblock, bytes: &[u8], address: u64) -> Ve
             }
             let continuation =
                 ObjectHeaderContinuation::parse_with_widths(record.body, widths).unwrap();
-            let at = superblock
-                .base_address
-                .absolute(continuation.address())
-                .unwrap();
-            assert!(seen.insert(at), "header continuation cycle at {at}");
+            let at = file.resolve_address(continuation.address()).unwrap();
+            assert!(seen.insert(at), "header continuation cycle at {at:?}");
             let len = continuation.length();
-            let start = usize::try_from(at).unwrap();
+            let start = usize::try_from(at.get()).unwrap();
             let end = start + usize::try_from(len).unwrap();
             let messages = format::continuation_block_messages(&bytes[start..end]).unwrap();
             regions.push(start + messages.start..start + messages.end);
-            extents.push((at, len));
+            extents.push(AddressRange::new(at, len).unwrap());
         }
     }
     extents.sort_unstable();
@@ -155,17 +168,17 @@ pub fn header_extents(superblock: &Superblock, bytes: &[u8], address: u64) -> Ve
 ///
 /// Panics if the root header or a link cannot be parsed, an address cannot be represented, or
 /// `link_name` does not identify a compact hard link.
-pub fn root_object_address(file: &File, bytes: &[u8], link_name: &str) -> u64 {
+pub fn root_object_address(file: &File, bytes: &[u8], link_name: &str) -> PhysicalAddress {
     let sb = file.superblock();
     let root = ObjectHeader::parse_with_base_and_widths(
         bytes,
         AccessMode::ReadOnly,
-        usize::try_from(sb.base_address.absolute(sb.root_group_address).unwrap()).unwrap(),
+        usize::try_from(file.resolve_address(sb.root_group_address).unwrap().get()).unwrap(),
         format::FormatWidths {
             offsets: sb.offset_size,
             lengths: sb.length_size,
         },
-        sb.base_address,
+        BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get()),
     )
     .unwrap();
     root.messages
@@ -176,7 +189,7 @@ pub fn root_object_address(file: &File, bytes: &[u8], link_name: &str) -> u64 {
             LinkTarget::Hard {
                 object_header_address,
             } if link.name == link_name => {
-                Some(sb.base_address.absolute(object_header_address).unwrap())
+                Some(file.resolve_address(object_header_address).unwrap())
             }
             _ => None,
         })
@@ -192,16 +205,13 @@ pub fn root_object_address(file: &File, bytes: &[u8], link_name: &str) -> u64 {
 ///
 /// Panics if free space cannot be read, an extent is empty or exceeds the physical file length,
 /// an extent overlaps the userblock or another extent, or an allocated byte is reusable.
-pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
-    let free: Vec<(u64, u64)> = match file.reusable_free_sections() {
+pub fn assert_unavailable(file: &File, extents: &[AddressRange<PhysicalAddress>]) {
+    let free = match file.reusable_free_sections() {
         Ok(sections) => sections
             .sections()
             .iter()
-            .map(|section| {
-                let _: PhysicalAddress = section.address();
-                (section.address().get(), section.length().get())
-            })
-            .collect(),
+            .map(|section| section.range())
+            .collect::<Vec<_>>(),
         Err(Error::ReadOnly) => file
             .persisted_free_sections()
             .unwrap()
@@ -212,34 +222,32 @@ pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
                     .sections()
                     .iter()
                     .map(|section| {
-                        let _: StoredAddress = section.address();
-                        (
-                            section.address().get() + file.superblock().base_address.get(),
+                        AddressRange::new(
+                            file.resolve_address(section.address()).unwrap(),
                             section.length().get(),
                         )
+                        .unwrap()
                     })
                     .collect()
             })
             .unwrap_or_default(),
         Err(error) => panic!("free-space inspection failed: {error:?}"),
     };
-    let base = file.superblock().base_address.get();
     let mut sorted = extents.to_vec();
     sorted.sort_unstable();
-    let mut end = base;
-    for (at, len) in sorted {
-        assert!(len > 0);
+    let mut end = file.resolve_address(StoredAddress::ZERO).unwrap();
+    for range in sorted {
+        assert!(!range.is_empty());
         assert!(
-            at >= end,
-            "allocated ranges overlap or enter the userblock at {at}, previous end {end}"
+            range.start() >= end,
+            "allocated ranges overlap or enter the userblock at {:?}, previous end {end:?}",
+            range.start()
         );
-        end = at.checked_add(len).unwrap();
-        assert!(end <= file.file_size());
+        end = range.end();
+        assert!(end.get() <= file.file_size());
         assert!(
-            free.iter()
-                .all(|&(free, size)| end <= free || free + size <= at),
-            "live range {at}..{end} overlaps free space {:?}",
-            free
+            free.iter().all(|free| !range.overlaps(*free)),
+            "live range {range:?} overlaps free space {free:?}"
         );
     }
 }

@@ -40,6 +40,7 @@ use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
 use crate::FillTime;
+use crate::PhysicalAddress;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
 #[cfg(test)]
@@ -2090,7 +2091,7 @@ impl FileWriter {
             )?;
             let ext_addr = extension_address.get();
             let small_raw_total = small_raw_end - raw_start;
-            let eof_addr2 = base.absolute(StoredAddress::new(eoa_pre_fsm))?;
+            let eof_addr2 = base.resolve(StoredAddress::new(eoa_pre_fsm))?.get();
 
             let ds_oh_bytes = build_ds_ohs(&all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
             debug_assert_eq!(
@@ -2160,12 +2161,12 @@ impl FileWriter {
                 }))
                 .flatten();
             for (address, collection) in paged_collection_addresses.iter().zip(collections) {
-                let physical = base.absolute(StoredAddress::new(*address))?;
+                let physical = base.resolve(StoredAddress::new(*address))?.get();
                 sink.put_zeros((physical - sink.position()).to_usize()?)
                     .map_err(EmissionError::Sink)?;
                 sink.put(collection).map_err(EmissionError::Sink)?;
             }
-            let root_physical = base.absolute(root_group_addr)?;
+            let root_physical = base.resolve(root_group_addr)?.get();
             sink.put_zeros((root_physical - sink.position()).to_usize()?)
                 .map_err(EmissionError::Sink)?;
 
@@ -2255,7 +2256,7 @@ impl FileWriter {
             sink.put_zeros((raw_start - meta_end).to_usize()?)
                 .map_err(EmissionError::Sink)?;
             for &i in &small_indices {
-                let at = base.absolute(ds_layouts[i].data_addr)?;
+                let at = base.resolve(ds_layouts[i].data_addr)?.get();
                 debug_assert_eq!(sink.position(), at);
                 ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
             }
@@ -2267,11 +2268,11 @@ impl FileWriter {
                 .map_err(EmissionError::Sink)?;
             }
             for &i in &large_indices {
-                let gap = base.absolute(ds_layouts[i].data_addr)? - sink.position();
+                let gap = base.resolve(ds_layouts[i].data_addr)?.get() - sink.position();
                 sink.put_zeros(gap.to_usize()?)
                     .map_err(EmissionError::Sink)?;
                 ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
-                let end_rel = base.relative(sink.position())?.get();
+                let end_rel = base.relative(PhysicalAddress::new(sink.position()))?.get();
                 sink.put_zeros(
                     (free_space_manager::align_up(end_rel, page_size) - end_rel).to_usize()?,
                 )

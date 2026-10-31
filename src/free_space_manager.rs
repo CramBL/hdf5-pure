@@ -52,7 +52,7 @@ fn read_persisted_sections(
         let DecodedStoredAddress::Defined(addr) = addr else {
             continue;
         };
-        let a = base.absolute(addr)?.to_usize()?;
+        let a = base.resolve(addr)?.get().to_usize()?;
         let header = FreeSpaceManagerHeader::parse(
             widths,
             data.get(a..).ok_or_else(|| {
@@ -65,7 +65,7 @@ fn read_persisted_sections(
         if header.section_list_addr().is_undefined(widths.offsets) {
             continue;
         }
-        let fa = base.absolute(header.section_list_addr())?.to_usize()?;
+        let fa = base.resolve(header.section_list_addr())?.get().to_usize()?;
         let used = header.section_list_used().to_usize()?;
         let allocated = header.section_list_allocated().to_usize()?;
         fa.checked_add(allocated)
@@ -124,14 +124,14 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let DecodedStoredAddress::Defined(addr) = addr else {
             continue;
         };
-        let a = base.absolute(addr)?;
+        let a = base.resolve(addr)?.get();
         let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
         let header = FreeSpaceManagerHeader::parse(widths, &fshd)?;
         blocks.push((a, hdr_len));
         if header.section_list_addr().is_undefined(widths.offsets) {
             continue;
         }
-        let fa = base.absolute(header.section_list_addr())?;
+        let fa = base.resolve(header.section_list_addr())?.get();
         let used = header.section_list_used();
         let allocated = header.section_list_allocated();
         let end = fa

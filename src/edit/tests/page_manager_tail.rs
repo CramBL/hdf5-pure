@@ -271,7 +271,7 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
         control
             .context
             .addresses()
-            .absolute(
+            .resolve(
                 control
                     .context
                     .superblock()
@@ -279,6 +279,7 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
                     .unwrap(),
             )
             .unwrap()
+            .get()
     };
     let index = writes
         .iter()

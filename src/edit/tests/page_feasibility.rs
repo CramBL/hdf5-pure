@@ -118,8 +118,9 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     let old_root = engine
         .context
         .addresses()
-        .absolute(engine.context.superblock().root_group_address)
-        .unwrap();
+        .resolve(engine.context.superblock().root_group_address)
+        .unwrap()
+        .get();
     let root_spans = engine.oh_chunk_spans(old_root).unwrap();
     disk_log::start();
     let (raw, header, root) = engine.place_dataset_and_root();
@@ -188,7 +189,10 @@ impl WriteEngine {
             &dataset.dt,
             &DatatypeLocation::Inline,
             &dataset.ds,
-            self.context.addresses().relative(raw).unwrap(),
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(raw))
+                .unwrap(),
             dataset.storage.raw().len() as u64,
             &dataset.attrs,
             None,
@@ -203,14 +207,18 @@ impl WriteEngine {
         let old_root = self
             .context
             .addresses()
-            .absolute(self.context.superblock().root_group_address)
-            .unwrap();
+            .resolve(self.context.superblock().root_group_address)
+            .unwrap()
+            .get();
         let mut region =
             WriteEngine::gather_oh_messages(&self.image(), old_root, self.context.addresses())
                 .unwrap();
         region.push_link(
             "added",
-            self.context.addresses().relative(header).unwrap(),
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(header))
+                .unwrap(),
             None,
         );
         let root = self
@@ -220,9 +228,21 @@ impl WriteEngine {
             )
             .unwrap();
         (
-            self.context.addresses().relative(raw).unwrap().get(),
-            self.context.addresses().relative(header).unwrap().get(),
-            self.context.addresses().relative(root).unwrap().get(),
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(raw))
+                .unwrap()
+                .get(),
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(header))
+                .unwrap()
+                .get(),
+            self.context
+                .addresses()
+                .relative(PhysicalAddress::new(root))
+                .unwrap()
+                .get(),
         )
     }
 }

@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use hdf5_pure_space::__private::FreeClass;
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
 use crate::dataset_request::ValueOverwrite;
@@ -1079,7 +1080,7 @@ impl WriteEngine {
         };
         let base = context.addresses();
         if let Some(&addr) = path_addr.get(path) {
-            return Ok(base.relative(addr)?);
+            return Ok(base.relative(PhysicalAddress::new(addr))?);
         }
         if nodes.contains_key(path)
             || add_targets.iter().any(|t| path.starts_with(t))
@@ -1108,7 +1109,7 @@ impl WriteEngine {
                 context.addresses(),
                 &path.as_path(),
             ) {
-                Ok(addr) => base.relative(addr)?,
+                Ok(addr) => base.relative(PhysicalAddress::new(addr))?,
                 Err(_) => StoredAddress::new(UNDEF),
             },
         )
@@ -1276,7 +1277,7 @@ impl InvalidatedAddresses {
         if stored.get() == 0 || stored.get() == UNDEF {
             return None;
         }
-        let abs = self.base.absolute(stored).ok()?;
+        let abs = self.base.resolve(stored).ok()?.get();
         if self
             .removed
             .iter()

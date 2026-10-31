@@ -154,7 +154,7 @@ fn immediate_phase_stops_keep_reservations_consumed(
         .read_element(&engine.store(), u64::try_from(end).unwrap() / 4)
         .unwrap()
         .unwrap();
-    let start = engine.addresses().absolute(record.addr).unwrap();
+    let start = engine.addresses().resolve(record.addr).unwrap().get();
     let length = if filtered {
         record.stored_size
     } else {

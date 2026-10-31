@@ -150,7 +150,11 @@ impl WriteEngine {
 
             for (leaf, tree) in copies {
                 let root = self.write_copy_subtree(&tree)?;
-                region.push_link(leaf.as_str(), base.relative(root)?, link_order.take()?);
+                region.push_link(
+                    leaf.as_str(),
+                    base.relative(PhysicalAddress::new(root))?,
+                    link_order.take()?,
+                );
             }
 
             let mut group_datasets: Vec<FlatDataset> =
@@ -169,13 +173,13 @@ impl WriteEngine {
                     {
                         let address = match target {
                             ReferenceTarget::Existing(address) => address,
-                            ReferenceTarget::Placed(path) => {
-                                base.relative(*path_addr.get(&path).ok_or_else(|| {
+                            ReferenceTarget::Placed(path) => base.relative(
+                                PhysicalAddress::new(*path_addr.get(&path).ok_or_else(|| {
                                     FormatError::Internal(
                                         "a prepared reference target has not been placed".into(),
                                     )
-                                })?)?
-                            }
+                                })?),
+                            )?,
                         };
                         type_builders::write_reference_address(
                             fd.storage.raw_mut()?,
@@ -187,7 +191,7 @@ impl WriteEngine {
                 let oh_addr = self.write_dataset(&mut fd)?;
                 region.push_link(
                     fd.name.as_str(),
-                    base.relative(oh_addr)?,
+                    base.relative(PhysicalAddress::new(oh_addr))?,
                     link_order.take()?,
                 );
                 path_addr.insert(dataset_path, oh_addr);
@@ -210,7 +214,11 @@ impl WriteEngine {
                 };
                 let new_header = self.write_moving(overwrites, write)?;
                 tail_allocations.extend(tail_allocation);
-                group::patch_link_target(&mut region, link.as_str(), base.relative(new_header)?)?;
+                group::patch_link_target(
+                    &mut region,
+                    link.as_str(),
+                    base.relative(PhysicalAddress::new(new_header))?,
+                )?;
                 relocations.insert(old_header, new_header);
             }
 
@@ -219,7 +227,7 @@ impl WriteEngine {
                     ChildLink::Insert { path, leaf } => {
                         region.push_link(
                             leaf.as_str(),
-                            base.relative(path_addr[&path])?,
+                            base.relative(PhysicalAddress::new(path_addr[&path]))?,
                             link_order.take()?,
                         );
                     }
@@ -227,7 +235,7 @@ impl WriteEngine {
                         group::patch_link_target(
                             &mut region,
                             leaf.as_str(),
-                            base.relative(path_addr[&path])?,
+                            base.relative(PhysicalAddress::new(path_addr[&path]))?,
                         )?;
                     }
                 }
@@ -331,7 +339,7 @@ impl WriteEngine {
                             let data: Vec<(u64, u64)> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {
-                                    Some((base.absolute(c.address).ok()?, c.stored_size))
+                                    Some((base.resolve(c.address).ok()?.get(), c.stored_size))
                                 })
                                 .chain(old_tail_allocation.iter().map(|allocation| {
                                     let range = allocation.range();

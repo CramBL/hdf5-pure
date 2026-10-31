@@ -49,7 +49,7 @@ fn collect_symbol_table_nodes_inner(
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = addresses.absolute(btree_address)?.to_usize()?;
+    let node_offset = addresses.resolve(btree_address)?.get().to_usize()?;
     let node = BTreeV1Node::parse_with_widths(file_data, node_offset, widths)?;
 
     if node.node_type != 0 {
@@ -104,7 +104,7 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = addresses.absolute(btree_address)?;
+    let node_offset = addresses.resolve(btree_address)?.get();
     let node =
         BTreeV1Node::parse_from_source_with_widths(&SourceMetadata(source), node_offset, widths)?;
 

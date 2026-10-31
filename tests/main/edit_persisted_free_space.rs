@@ -22,7 +22,6 @@ use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::free_space;
-use test_util::range;
 use test_util::temp;
 use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
@@ -483,8 +482,9 @@ fn strict_persisted_open_rejects_invalid_checksums_without_writes(
         reader
             .superblock()
             .base_address
-            .absolute(header_address)
-            .unwrap(),
+            .resolve(header_address)
+            .unwrap()
+            .get(),
     )
     .unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
@@ -495,8 +495,9 @@ fn strict_persisted_open_rejects_invalid_checksums_without_writes(
         reader
             .superblock()
             .base_address
-            .absolute(list_address)
-            .unwrap(),
+            .resolve(list_address)
+            .unwrap()
+            .get(),
     )
     .unwrap();
     drop(reader);
@@ -649,9 +650,16 @@ fn persisted_inspection_reports_overlapping_extents(
         offsets: superblock.offset_size,
         lengths: superblock.length_size,
     };
-    let header_at =
-        usize::try_from(superblock.base_address.absolute(header_address).unwrap()).unwrap();
-    let list_at = usize::try_from(superblock.base_address.absolute(list_address).unwrap()).unwrap();
+    let header_at = usize::try_from(
+        superblock
+            .base_address
+            .resolve(header_address)
+            .unwrap()
+            .get(),
+    )
+    .unwrap();
+    let list_at =
+        usize::try_from(superblock.base_address.resolve(list_address).unwrap().get()).unwrap();
     assert_eq!((widths.offsets.get(), widths.lengths.get()), (8, 8));
     let (header, list) = free_space::raw_manager_eight(
         header_address.get(),
@@ -746,9 +754,15 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     let second = File::open_rw(&path).unwrap();
     let available_or_reused = second.reusable_free_sections().unwrap();
     let metadata = storage::file_metadata_extents(&second, &bytes);
+    let requested =
+        AddressRange::new(PhysicalAddress::new(hole.start), hole.end - hole.start).unwrap();
     assert_eq!(
         test_util_hdf5::covered_free_bytes!(&available_or_reused, &hole, PhysicalAddress)
-            + range::covered_len(&metadata, &hole),
+            + metadata
+                .iter()
+                .filter_map(|range| range.intersection(requested))
+                .map(|range| range.length())
+                .sum::<u64>(),
         HOLE_BYTES
     );
     let expected = persisted
@@ -828,11 +842,17 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let mut allocated = storage::file_metadata_extents(&file, &bytes);
         for dataset in file.root().datasets().unwrap() {
             let address = storage::root_object_address(&file, &bytes, &dataset);
-            allocated.extend(storage::header_extents(file.superblock(), &bytes, address));
+            allocated.extend(storage::header_extents(&file, &bytes, address));
             allocated.extend(
                 file_space::raw_extents(&file, &dataset)
                     .iter()
-                    .map(|extent| (extent.start, extent.end - extent.start)),
+                    .map(|extent| {
+                        AddressRange::new(
+                            PhysicalAddress::new(extent.start),
+                            extent.end - extent.start,
+                        )
+                        .unwrap()
+                    }),
             );
         }
         storage::assert_unavailable(&file, &allocated);
@@ -886,7 +906,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         assert_eq!(
             free_space_manager_space
                 .iter()
-                .map(|&(at, _)| at)
+                .map(|range| range.start().get())
                 .filter(
                     |&at| bytes[usize::try_from(at).unwrap()..].starts_with(free_space::SIGNATURE)
                 )
@@ -1024,11 +1044,11 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
     let file = File::open(&path).unwrap();
     let mut new_metadata = storage::file_metadata_extents(&file, &bytes)
         .iter()
-        .map(|&(at, _)| at)
+        .map(|range| range.start().get())
         .collect::<BTreeSet<_>>();
     for name in ["g", "d"] {
         let at = storage::root_object_address(&file, &bytes, name);
-        new_metadata.insert(at);
+        new_metadata.insert(at.get());
     }
     assert!(
         new_metadata.contains(&pages.start),
