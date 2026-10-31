@@ -89,7 +89,7 @@ use crate::source::{
     self, BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats,
     MetadataCachingSource, ReadSeekSource, Source, ValidatedSource,
 };
-use crate::source::{PhysicalSource, StoredBytes, StoredRead};
+use crate::source::{PhysicalSource, StoredRead};
 use crate::superblock;
 use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
@@ -97,6 +97,10 @@ use crate::superblock::SuperblockSource;
 use crate::types::{self, AttrValue, DType};
 use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
+
+mod opened_source;
+
+pub(crate) use opened_source::OpenedSource;
 
 #[cfg(test)]
 pub(crate) mod test_util;
@@ -1580,14 +1584,10 @@ impl FileInner {
         }
     }
 
-    /// Run `f` with a random-access view of this file's bytes, taking the
-    /// write-engine lock when the backend requires one. Unlike
-    /// [`source`](Self::source) — which cannot lend a borrowed view out of a
-    /// lock and returns an empty view for the mirror and bounded backends —
-    /// this serves every backend, so it is the dispatch for read paths (heap
-    /// reads for variable-length data, chunk enumeration) that must also work
-    /// on a read-write file. `f` must not re-enter this file's backend (the
-    /// engine lock is held while it runs).
+    /// Calls `f` with the backend's original byte-offset interface.
+    ///
+    /// Holds the write-engine lock for editable backends during the callback. The callback uses
+    /// the supplied source for accesses to this backend.
     pub(crate) fn with_source<R>(&self, f: impl FnOnce(&dyn Source) -> R) -> R {
         match &self.backend {
             Backend::InMemory(v) => f(&BytesSource::new(v.as_slice())),
@@ -1597,6 +1597,14 @@ impl FileInner {
                 f(core.image())
             }
         }
+    }
+
+    /// Calls `f` with the original backend and the opened image's effective address context.
+    ///
+    /// Holds the write-engine lock for editable backends during the callback. The callback uses
+    /// the supplied source for accesses to this backend.
+    fn with_opened_source<R>(&self, f: impl FnOnce(&OpenedSource<'_>) -> R) -> R {
+        OpenedSource::with_file(self, f)
     }
 
     /// Run a read against a read-write session's file image, choosing the form
@@ -1971,12 +1979,18 @@ impl FileInner {
     /// What this file's metadata cache has done, or `None` where the backend
     /// holds none.
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
-        self.with_source(|source| source.metadata_cache_stats())
+        self.with_opened_source(|source| {
+            PhysicalSource::new(source).stored().metadata_cache_stats()
+        })
     }
 
     /// Zero those counters, keeping the cached entries.
     fn reset_metadata_cache_stats(&self) {
-        self.with_source(|source| source.reset_metadata_cache_stats());
+        self.with_opened_source(|source| {
+            PhysicalSource::new(source)
+                .stored()
+                .reset_metadata_cache_stats()
+        });
     }
 
     /// Returns a reference to the parsed superblock.
@@ -2441,41 +2455,20 @@ impl FileInner {
         spec: RawReadSpec<'_>,
         cache: &ChunkCache,
     ) -> Result<Vec<u8>, FormatError> {
-        let widths = self.widths;
-        let addresses = self.addresses();
-        match &self.backend {
-            Backend::InMemory(bytes) => data_read::read_raw_data_cached(
-                StoredBytes::new(bytes, addresses)?,
-                spec,
-                widths,
-                cache,
-            ),
-            Backend::Streaming(physical) => data_read::read_raw_data_cached_from_source(
-                &PhysicalSource::new(physical.as_ref()).stored(addresses),
-                spec,
-                widths,
-                cache,
-            ),
-            Backend::Edit(engine) => Self::with_engine(
-                engine,
-                |bytes| {
-                    data_read::read_raw_data_cached(
-                        StoredBytes::new(bytes, addresses)?,
-                        spec,
-                        widths,
-                        cache,
-                    )
-                },
-                |physical| {
-                    data_read::read_raw_data_cached_from_source(
-                        &PhysicalSource::new(physical).stored(addresses),
-                        spec,
-                        widths,
-                        cache,
-                    )
-                },
-            ),
-        }
+        self.with_opened_source(|source| {
+            let physical = PhysicalSource::new(source);
+            match physical.resident() {
+                Some(bytes) => {
+                    data_read::read_raw_data_cached(bytes.stored()?, spec, self.widths, cache)
+                }
+                None => data_read::read_raw_data_cached_from_source(
+                    &physical.stored(),
+                    spec,
+                    self.widths,
+                    cache,
+                ),
+            }
+        })
     }
 
     fn read_dataset_region(
@@ -2487,43 +2480,15 @@ impl FileInner {
         if region.is_whole() {
             return self.read_dataset_raw(region.spec(), cache);
         }
-        match &self.backend {
-            Backend::InMemory(bytes) => read_region_framed(
-                &PhysicalSource::new(&BytesSource::new(bytes)).stored(self.addresses()),
-                region,
-                self.widths,
-                cache,
-                pass,
-            ),
-            Backend::Streaming(source) => read_region_framed(
-                &PhysicalSource::new(source.as_ref()).stored(self.addresses()),
-                region,
-                self.widths,
-                cache,
-                pass,
-            ),
-            Backend::Edit(engine) => Self::with_engine(
-                engine,
-                |bytes| {
-                    read_region_framed(
-                        &PhysicalSource::new(&BytesSource::new(bytes)).stored(self.addresses()),
-                        region,
-                        self.widths,
-                        cache,
-                        pass,
-                    )
-                },
-                |source| {
-                    read_region_framed(
-                        &PhysicalSource::new(source).stored(self.addresses()),
-                        region,
-                        self.widths,
-                        cache,
-                        pass,
-                    )
-                },
-            ),
-        }
+        self.with_opened_source(|source| {
+            let physical = PhysicalSource::new(source);
+            match physical.resident() {
+                Some(bytes) => {
+                    read_region_framed(&bytes.stored()?, region, self.widths, cache, pass)
+                }
+                None => read_region_framed(&physical.stored(), region, self.widths, cache, pass),
+            }
+        })
     }
 }
 
@@ -4114,6 +4079,14 @@ impl File {
     /// A `Source` view over the backend, for the streaming-capable paths.
     pub(crate) fn source(&self) -> SourceView<'_> {
         self.inner.source()
+    }
+
+    /// Calls `f` with the original backend and the opened image's effective address context.
+    ///
+    /// Holds the write-engine lock for editable backends during the callback. The callback uses
+    /// the supplied source for accesses to this backend.
+    pub(crate) fn with_opened_source<R>(&self, f: impl FnOnce(&OpenedSource<'_>) -> R) -> R {
+        self.inner.with_opened_source(f)
     }
 
     /// The whole-file byte image when this file is buffered in memory; `None`
@@ -7114,8 +7087,8 @@ the same commit to replace it",
         // cache ends up holding what a whole read would have left it — the
         // chunks reached first. See [`CachePass`].
         let pass = self.chunk_cache.begin_pass();
-        self.file.with_source(|source| {
-            let indexes = PhysicalSource::new(source).stored(self.file.addresses());
+        self.file.with_opened_source(|source| {
+            let indexes = PhysicalSource::new(source).stored();
 
             let mut chunks = matches!(spec.storage(), RawReadStorage::Chunked { .. })
                 .then(|| ChunkRead::new(spec, self.file.widths, &self.chunk_cache, pass));
@@ -7649,8 +7622,8 @@ the same commit to replace it",
         // The chunk index stores base-relative addresses, in its root and in every internal
         // node, so the walk runs over a view of the file framed at the base. Every address it
         // reports stays in that frame.
-        self.file.with_source(|source| {
-            let indexes = PhysicalSource::new(source).stored(self.file.addresses());
+        self.file.with_opened_source(|source| {
+            let indexes = PhysicalSource::new(source).stored();
             Ok(crate::chunked_read::collect_chunks_for_layout_from_source(
                 &indexes,
                 index,

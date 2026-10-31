@@ -883,7 +883,7 @@ impl WriteEngine {
         // extent during reclamation.
         let base = self.context.addresses();
         let split = crate::chunked_read::collect_chunked_storage_spans(
-            &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
+            &PhysicalSource::new(&self.opened_source()).stored(),
             &layout,
             &dataspace,
             self.widths(),
@@ -1044,7 +1044,7 @@ impl WriteEngine {
         }
         let base = self.context.addresses();
         let stored = chunked_read::chunk_index_spans_from_source(
-            &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
+            &PhysicalSource::new(&self.opened_source()).stored(),
             &layout,
             self.widths(),
         )
@@ -1234,7 +1234,7 @@ impl WriteEngine {
                 let dataspace =
                     Dataspace::parse_with_length_width(&space.data, self.widths().lengths)?;
                 let storage = crate::chunked_read::collect_chunked_storage_spans(
-                    &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
+                    &PhysicalSource::new(&self.opened_source()).stored(),
                     &layout,
                     &dataspace,
                     self.widths(),

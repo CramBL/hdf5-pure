@@ -233,14 +233,9 @@ mod tests {
         .unwrap();
         let mut append = AppendBuilder::new();
         append.append_i32(&[3]);
-        let write = WriteEngine::prepare_append(
-            &engine.image(),
-            address,
-            &append,
-            engine.addresses(),
-            engine.widths(),
-        )
-        .unwrap();
+        let write =
+            WriteEngine::prepare_append(&engine.opened_source(), address, &append, engine.widths())
+                .unwrap();
         let MovingWrite::AppendedChunks {
             old_tail_allocation: Some(allocation),
             ..

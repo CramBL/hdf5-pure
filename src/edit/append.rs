@@ -31,6 +31,7 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
 use crate::primitive_bytes::PrimitiveBytes;
+use crate::reader::OpenedSource;
 use crate::type_builders;
 use crate::width::FormatWidths;
 
@@ -994,6 +995,10 @@ impl crate::source::Source for EditStore<'_> {
 }
 
 impl Store for EditStore<'_> {
+    fn opened_source(&self) -> OpenedSource<'_> {
+        self.engine.opened_source()
+    }
+
     fn widths(&self) -> FormatWidths {
         self.engine.context.widths()
     }

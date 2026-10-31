@@ -513,7 +513,7 @@ mod tests {
         #[case] effective_base: u64,
     ) {
         use crate::address::{AddressContext, BaseAddress, BaseAddressExt, OpenedImageContext};
-        use crate::source::{PhysicalSource, ReadSeekSource, StoredBytes};
+        use crate::source::{PhysicalSource, ReadSeekSource};
 
         let mut data = vec![0; effective_base as usize + 8];
         data[effective_base as usize..].copy_from_slice(&[9, 8, 7, 6, 5, 4, 3, 2]);
@@ -524,11 +524,15 @@ mod tests {
         )
         .unwrap();
         let addresses: AddressContext = context.addresses();
-        assert_span_bytes(&StoredBytes::new(&data, addresses).unwrap());
+        assert_span_bytes(
+            &crate::source::PhysicalBytes::for_test(&data, addresses)
+                .stored()
+                .unwrap(),
+        );
         let raw = BytesSource::new(&data);
-        assert_span_bytes(&PhysicalSource::new(&raw).stored(addresses));
+        assert_span_bytes(&PhysicalSource::for_test(&raw, addresses).stored());
         let raw = ReadSeekSource::new(std::io::Cursor::new(&data)).unwrap();
-        assert_span_bytes(&PhysicalSource::new(&raw).stored(addresses));
+        assert_span_bytes(&PhysicalSource::for_test(&raw, addresses).stored());
     }
 
     #[cfg(feature = "std")]

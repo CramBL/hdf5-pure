@@ -8,7 +8,7 @@ use hdf5_pure_core::{AddressRange, MetadataBytes, PhysicalAddress, StoredAddress
 use crate::address::AddressContext;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::source::{MetadataCacheStats, RangeReader, Source};
+use crate::source::{MetadataCacheStats, OriginalSource, RangeReader, Source};
 
 mod bytes;
 mod read;
@@ -18,26 +18,44 @@ pub(crate) use read::StoredRead;
 
 /// A borrowed source addressed by positions relative to the original source's start.
 ///
-/// Reads delegate to the original [`Source`]. Metadata retains that source's ownership and
-/// physical metadata ranges, including any [`Source::metadata_origin`].
+/// Construction requires an [`OriginalSource`] and captures its opened address context. Reads
+/// delegate to the original [`Source`]. Metadata retains that source's ownership and physical
+/// metadata ranges, including any [`Source::metadata_origin`].
 pub(crate) struct PhysicalSource<'a, S: Source + ?Sized> {
     inner: &'a S,
+    addresses: AddressContext,
+}
+
+impl<'a, S: OriginalSource + ?Sized> PhysicalSource<'a, S> {
+    /// Borrows an opened backend and captures its effective address context.
+    pub(crate) fn new(inner: &'a S) -> Self {
+        Self {
+            inner,
+            addresses: inner.addresses(),
+        }
+    }
+
+    /// Borrows the complete original image when the backend exposes resident bytes.
+    pub(crate) fn resident(&self) -> Option<PhysicalBytes<'a>> {
+        self.inner.resident_bytes().map(|bytes| PhysicalBytes {
+            bytes,
+            addresses: self.addresses,
+        })
+    }
 }
 
 impl<'a, S: Source + ?Sized> PhysicalSource<'a, S> {
-    /// Borrows an original source in its existing coordinate frame.
-    pub(crate) const fn new(inner: &'a S) -> Self {
-        Self { inner }
+    /// Associates a test source with the supplied effective address context.
+    #[cfg(test)]
+    pub(crate) fn for_test(inner: &'a S, addresses: AddressContext) -> Self {
+        Self { inner, addresses }
     }
 
-    /// Uses the opened image's effective address context to interpret stored positions.
+    /// Uses the captured effective address context for stored-coordinate reads.
     ///
-    /// The returned view borrows the same source and applies the effective base to each request.
-    pub(crate) const fn stored(self, addresses: AddressContext) -> StoredSource<'a, S> {
-        StoredSource {
-            physical: self,
-            addresses,
-        }
+    /// The reader adds the effective base to each stored position before reading the backend.
+    pub(crate) const fn stored(self) -> StoredSource<'a, S> {
+        StoredSource { physical: self }
     }
 
     /// Returns the original source's byte length.
@@ -102,6 +120,7 @@ impl<'a, S: Source + ?Sized> PhysicalSource<'a, S> {
     /// # Errors
     ///
     /// Returns errors from [`Source::metadata_origin`].
+    #[cfg(any(test, doc))]
     pub(crate) fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError> {
         self.inner.metadata_origin().map(PhysicalAddress::new)
     }
@@ -123,14 +142,42 @@ impl<S: Source + ?Sized> RangeReader for PhysicalSource<'_, S> {
     }
 }
 
+/// A complete resident image paired with its opened address context.
+///
+/// Readers obtain this view through [`PhysicalSource::resident`]. The borrowed image includes
+/// any userblock prefix, and conversion to [`StoredBytes`] uses the captured effective base.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PhysicalBytes<'a> {
+    bytes: &'a [u8],
+    addresses: AddressContext,
+}
+
+impl<'a> PhysicalBytes<'a> {
+    /// Associates a test image with the supplied effective address context.
+    #[cfg(test)]
+    pub(crate) fn for_test(bytes: &'a [u8], addresses: AddressContext) -> Self {
+        Self { bytes, addresses }
+    }
+
+    /// Borrows the suffix beginning at the opened image's effective base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the base exceeds the image's byte length,
+    /// and errors from [`StoredBytes::new`].
+    pub(crate) fn stored(self) -> Result<StoredBytes<'a>, FormatError> {
+        StoredBytes::new(self)
+    }
+}
+
 /// A borrowed source addressed relative to the opened image's effective base.
 ///
-/// Construction through [`PhysicalSource::stored`] requires the opened image's [`AddressContext`].
-/// Each request is resolved to a physical source position before reading. Metadata reads preserve
-/// the original source's borrowed or owned bytes, physical ranges, and cache behavior.
+/// Construction through [`PhysicalSource::stored`] uses the context captured from an
+/// [`OriginalSource`]. Each request is resolved to a physical source position before reading.
+/// Metadata reads preserve the original source's borrowed or owned bytes, physical ranges, and
+/// cache behavior.
 pub(crate) struct StoredSource<'a, S: Source + ?Sized> {
     physical: PhysicalSource<'a, S>,
-    addresses: AddressContext,
 }
 
 #[expect(
@@ -142,7 +189,7 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
     pub(crate) fn len(&self) -> u64 {
         self.physical
             .len()
-            .saturating_sub(self.addresses.effective_base().get())
+            .saturating_sub(self.physical.addresses.effective_base().get())
     }
 
     /// Resolves a stored position and reads into `buffer` through the original source.
@@ -157,7 +204,7 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
         buffer: &mut [u8],
     ) -> Result<(), FormatError> {
         self.physical
-            .read_at(self.addresses.resolve(address)?, buffer)
+            .read_at(self.physical.addresses.resolve(address)?, buffer)
     }
 
     /// Reads a stored-coordinate region into a new vector after checking its extent.
@@ -182,7 +229,7 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
             });
         }
         self.physical
-            .read_exact_at(self.addresses.resolve(address)?, length)
+            .read_exact_at(self.physical.addresses.resolve(address)?, length)
     }
 
     /// Resolves a stored position and reads metadata through the original source's vector adapter.
@@ -197,7 +244,7 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
         length: usize,
     ) -> Result<Vec<u8>, FormatError> {
         self.physical
-            .read_metadata_at(self.addresses.resolve(address)?, length)
+            .read_metadata_at(self.physical.addresses.resolve(address)?, length)
     }
 
     /// Resolves a stored position and reads metadata with its original ownership and physical range.
@@ -214,7 +261,7 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
         length: usize,
     ) -> Result<MetadataBytes<'a>, FormatError> {
         self.physical
-            .read_metadata(self.addresses.resolve(address)?, length)
+            .read_metadata(self.physical.addresses.resolve(address)?, length)
     }
 
     /// Returns the physical metadata origin corresponding to stored address zero.
@@ -223,10 +270,11 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the original source's metadata origin plus the
     /// effective base exceeds [`u64::MAX`], and errors from [`Source::metadata_origin`].
+    #[cfg(any(test, doc))]
     pub(crate) fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError> {
         self.physical
             .metadata_origin()?
-            .checked_add(self.addresses.effective_base().get())
+            .checked_add(self.physical.addresses.effective_base().get())
     }
 
     /// Returns the original source's metadata-cache statistics.

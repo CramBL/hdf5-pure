@@ -320,7 +320,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
-use crate::reader::{FileAccessProperties, PersistedFreeSpacePolicy};
+use crate::reader::{FileAccessProperties, OpenedSource, PersistedFreeSpacePolicy};
 use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, MetadataCacheConfig, Source};
 use crate::superblock;
@@ -2241,6 +2241,16 @@ impl WriteEngine {
     /// not — without the parsers knowing which (issue #198).
     pub(crate) fn image(&self) -> &dyn Source {
         self.image.as_ref()
+    }
+
+    /// Returns the session's file-image interface, including access to resident bytes.
+    pub(crate) fn file_image(&self) -> &dyn FileImage {
+        self.image.as_ref()
+    }
+
+    /// Borrows the session's original image with its effective address context.
+    pub(crate) fn opened_source(&self) -> OpenedSource<'_> {
+        OpenedSource::from_engine(self)
     }
 
     /// Reads issued bytes for the complete image length, leaving pending writes buffered.

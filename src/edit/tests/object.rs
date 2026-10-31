@@ -72,6 +72,7 @@ use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::OpenedSource;
 use crate::source::BytesSource;
 use crate::superblock::LocatedSuperblock;
 use crate::type_builders::AttrValue;
@@ -1707,9 +1708,9 @@ fn group_of_three_datasets() -> (Vec<u8>, u64) {
     (bytes, addr)
 }
 
-fn copy_reader<'a>(src: &'a BytesSource<&'a [u8]>) -> CopyReader<'a, BytesSource<&'a [u8]>> {
+fn copy_reader<'a>(src: &'a BytesSource<&'a [u8]>) -> CopyReader<'a> {
     CopyReader {
-        src,
+        src: OpenedSource::for_test(src, AddressContext::from_effective_base(BaseAddress::ZERO)),
         access_mode: AccessMode::ReadWrite,
         cross_file: true,
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
