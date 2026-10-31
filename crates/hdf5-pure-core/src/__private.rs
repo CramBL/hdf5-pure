@@ -25,6 +25,7 @@ use crate::Superblock;
 use crate::SuperblockStatus;
 use crate::SuperblockStatusFlags;
 
+pub use crate::address::Address;
 pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
 pub use crate::address::StoredAddressExt;

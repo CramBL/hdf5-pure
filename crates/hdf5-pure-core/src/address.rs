@@ -48,13 +48,32 @@ impl PhysicalAddress {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
     pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
-        self.0
-            .checked_add(length)
-            .map(Self)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: self.0,
-                length,
-            })
+        Address::checked_advance(self, length)
+    }
+
+    /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
+    pub fn checked_sub(self, length: u64) -> Option<Self> {
+        Address::checked_retreat(self, length)
+    }
+
+    /// Returns the byte distance from `earlier` to this position, or `None` if `earlier` is
+    /// greater.
+    ///
+    /// Equal positions have a distance of zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::PhysicalAddress;
+    ///
+    /// let start = PhysicalAddress::new(512);
+    /// let end = PhysicalAddress::new(608);
+    /// assert_eq!(end.checked_distance_from(start), Some(96));
+    /// assert_eq!(start.checked_distance_from(end), None);
+    /// assert_eq!(start.checked_distance_from(start), Some(0));
+    /// ```
+    pub fn checked_distance_from(self, earlier: Self) -> Option<u64> {
+        Address::distance_from(self, earlier)
     }
 }
 
@@ -215,6 +234,38 @@ impl StoredAddress {
         self.0
     }
 
+    /// Returns the encoded address `length` bytes after this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
+        Address::checked_advance(self, length)
+    }
+
+    /// Returns the encoded address `length` bytes before this one, or `None` if it would be below
+    /// zero.
+    pub fn checked_sub(self, length: u64) -> Option<Self> {
+        Address::checked_retreat(self, length)
+    }
+
+    /// Returns the byte distance from `earlier` to this address, or `None` if `earlier` is greater.
+    ///
+    /// Equal addresses have a distance of zero. Both addresses use stored coordinates.
+    ///
+    /// # Examples
+    ///
+    /// ```compile_fail,E0308
+    /// use hdf5_pure_core::{PhysicalAddress, StoredAddress};
+    ///
+    /// fn distance(end: StoredAddress, start: PhysicalAddress) -> Option<u64> {
+    ///     end.checked_distance_from(start)
+    /// }
+    /// ```
+    pub fn checked_distance_from(self, earlier: Self) -> Option<u64> {
+        Address::distance_from(self, earlier)
+    }
+
     /// Returns `true` if this is the undefined address of a file whose addresses are
     /// `offset_width` bytes wide.
     ///
@@ -285,38 +336,100 @@ impl StoredAddressExt for StoredAddress {
     }
 }
 
+/// Checked byte arithmetic within one address coordinate system.
+///
+/// Only [`StoredAddress`] and [`PhysicalAddress`] implement this trait. Workspace crates import it
+/// from the hidden `__private` module, outside the supported public API.
+pub trait Address: sealed::Sealed + Copy + Ord {
+    /// Returns the byte position in this address's coordinate system.
+    fn value(self) -> u64;
+
+    /// Creates an address from a byte position in its coordinate system.
+    fn from_u64(value: u64) -> Self;
+
+    /// Returns the position `length` bytes after this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    fn checked_advance(self, length: u64) -> Result<Self, FormatError> {
+        self.value()
+            .checked_add(length)
+            .map(Self::from_u64)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: self.value(),
+                length,
+            })
+    }
+
+    /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
+    fn checked_retreat(self, length: u64) -> Option<Self> {
+        self.value().checked_sub(length).map(Self::from_u64)
+    }
+
+    /// Returns the byte distance from `earlier` to this position, or `None` if `earlier` is
+    /// greater.
+    fn distance_from(self, earlier: Self) -> Option<u64> {
+        self.value().checked_sub(earlier.value())
+    }
+}
+
+impl Address for StoredAddress {
+    fn value(self) -> u64 {
+        self.get()
+    }
+
+    fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl Address for PhysicalAddress {
+    fn value(self) -> u64 {
+        self.get()
+    }
+
+    fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+mod sealed {
+    /// An address type supported by the shared arithmetic operations.
+    #[expect(
+        unnameable_types,
+        reason = "the private supertrait prevents implementations outside the supported address types"
+    )]
+    pub trait Sealed {}
+
+    impl Sealed for super::StoredAddress {}
+    impl Sealed for super::PhysicalAddress {}
+}
+
 #[cfg(test)]
 mod tests {
+    use core::fmt::Debug;
+
     use rstest::rstest;
 
     use super::*;
 
     #[rstest]
-    #[case::zero(0, 0, 0)]
-    #[case::ordinary(512, 96, 608)]
-    #[case::end(u64::MAX - 1, 1, u64::MAX)]
-    fn physical_address_addition_preserves_u64_positions(
-        #[case] address: u64,
-        #[case] length: u64,
-        #[case] expected: u64,
+    #[case::stored(StoredAddress::new)]
+    #[case::physical(PhysicalAddress::new)]
+    fn generic_address_arithmetic_preserves_coordinates<A: Address + Debug>(
+        #[case] address: fn(u64) -> A,
     ) {
+        assert_eq!(address(512).checked_advance(96).unwrap(), address(608));
+        assert_eq!(address(608).checked_retreat(96), Some(address(512)));
+        assert_eq!(address(608).distance_from(address(512)), Some(96));
+        assert_eq!(address(512).distance_from(address(608)), None);
+        assert_eq!(address(0).checked_retreat(1), None);
         assert_eq!(
-            PhysicalAddress::new(address).checked_add(length).unwrap(),
-            PhysicalAddress::new(expected)
-        );
-    }
-
-    #[rstest]
-    #[case::one(u64::MAX, 1)]
-    #[case::many(u64::MAX - 1, 512)]
-    fn physical_address_addition_rejects_overflow(#[case] address: u64, #[case] length: u64) {
-        assert_eq!(
-            PhysicalAddress::new(address)
-                .checked_add(length)
-                .unwrap_err(),
+            address(u64::MAX).checked_advance(1).unwrap_err(),
             FormatError::OffsetOverflow {
-                offset: address,
-                length
+                offset: u64::MAX,
+                length: 1,
             }
         );
     }
