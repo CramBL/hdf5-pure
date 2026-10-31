@@ -1,9 +1,10 @@
 //! The attributes of an object, read through its object header.
 //!
 //! In compact storage the object header stores one Attribute message per attribute, and in dense
-//! storage a fractal heap stores them, which the header's Attribute Info message addresses. The
-//! Attribute Info message is defined in "The Attribute Info Message" of the [format specification,
-//! version 4.0][spec]. A parsed message is an [`AttributeMessage`].
+//! storage the reader selects the object's attribute heap or the file's shared-message heap from
+//! each index record's flags. The version 0 Attribute Info message stores the object's heap address
+//! and is defined in "The Attribute Info Message" of the [format specification, version 4.0][spec].
+//! A parsed message is an [`AttributeMessage`].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
 
@@ -11,8 +12,10 @@
 use alloc::vec::Vec;
 
 pub use hdf5_pure_format::__private::AttributeMessage;
-use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_ATTRIBUTE_CREATION_ORDER, BTREE_V2_ATTRIBUTE_NAME};
+use hdf5_pure_format::__private::{
+    DenseAttributeRecord, DenseAttributeTarget, FractalHeapIdLayout,
+};
 use hdf5_pure_space::__private::Extent;
 
 use crate::access_mode::AccessMode;
@@ -25,6 +28,7 @@ use crate::btree_v2::BTreeV2Header;
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;
+#[cfg(test)]
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::HeapObjectReader;
 use crate::message_flags::MessageFlags;
@@ -33,7 +37,7 @@ use crate::object_header::ObjectHeader;
 use crate::shared_message::BufferedResolver;
 use crate::shared_message::SharedResolver;
 use crate::shared_message::SourceResolver;
-use crate::sohm::SohmTable;
+use crate::sohm::{self, SohmTable};
 use crate::source::Source;
 use crate::source::SourceMetadata;
 #[cfg(test)]
@@ -289,13 +293,17 @@ fn find_attribute_info(
     Ok(None)
 }
 
-/// Returns one attribute per record of the name index in `attr_info`, reading each message out
-/// of the fractal heap at `fh_addr`.
+/// Reads attributes through the name index, selecting each message's private or shared heap.
+///
+/// Private messages are read from `fh_addr`, and shared messages from the Attribute index in
+/// `sohm`. Datatype and dataspace references within either message are resolved afterward.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if `attr_info` contains no B-tree name index address,
-/// and the [`FormatError`] of the first structure that does not parse.
+/// [`FormatError::UnsupportedSohmReference`] if a shared record has no shared-message table,
+/// and [`FormatError::SohmIndexMissing`] if its Attribute index or heap is absent. Returns the
+/// parser error if a record, heap, or Attribute message is malformed.
 fn extract_dense_attributes(
     file_data: &[u8],
     access_mode: AccessMode,
@@ -324,12 +332,20 @@ fn extract_dense_attributes(
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     let mut attrs = Vec::new();
     for record in &records {
-        let Some(id_bytes) = record.attribute_heap_id(fh.heap_id_length) else {
-            continue;
+        let record =
+            DenseAttributeRecord::parse(&record.data, btree_hdr.tree_type, fh.heap_id_length)?;
+        let attr_data = match record.target(&layout)? {
+            DenseAttributeTarget::Private(id) => heap.read(file_data, id.id())?,
+            DenseAttributeTarget::Shared(id) => sohm::read_heap_message(
+                file_data,
+                access_mode,
+                addresses,
+                sohm.ok_or(FormatError::UnsupportedSohmReference)?,
+                MessageType::ATTRIBUTE,
+                id.bytes(),
+                widths,
+            )?,
         };
-
-        // Read the attribute message from the fractal heap (managed or huge object).
-        let attr_data = heap.read(file_data, layout.parse(id_bytes)?)?;
 
         // The data in the heap is a complete attribute message, and it names a
         // committed datatype the same way a compact one does.
@@ -364,6 +380,7 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
         attr_info,
         fh_addr,
         widths,
+        sohm,
         |_flags| true,
         |data, creation_index| {
             attrs.push(StoredAttribute {
@@ -386,15 +403,19 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
 /// in "Version 2 B-trees" of the [format specification, version 4.0][spec].
 ///
 /// Calls `select` with each record's message flags before reading its heap object. Calls
-/// `visit` with each selected message's bytes and optional creation index. The caller resolves
-/// shared messages when selecting them.
+/// `visit` with each selected message's bytes and optional creation index. Selected shared
+/// messages are read through `sohm`. The reader decodes IDs and reads heap objects only for
+/// selected records.
 ///
 /// `source` is framed at the effective base in `addresses`.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if the name index is missing or a record is truncated.
-/// Returns the parser error if the index or heap cannot be read, or the error from `visit`.
+/// Returns [`FormatError::UnsupportedSohmReference`] if a selected shared record has no
+/// shared-message table, and [`FormatError::SohmIndexMissing`] if its Attribute index or heap
+/// is absent. Returns the parser error if the index or heap cannot be read, or the error from
+/// `visit`.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub(crate) fn visit_dense_attribute_messages_from_source(
@@ -404,6 +425,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     attr_info: &AttributeInfoMessage,
     fh_addr: StoredAddress,
     widths: FormatWidths,
+    sohm: Option<&SohmTable>,
     mut select: impl FnMut(MessageFlags) -> bool,
     mut visit: impl FnMut(&[u8], Option<u16>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
@@ -426,47 +448,29 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     for record in &records {
-        let flags_at = usize::from(fh.heap_id_length);
-        let flags = record
-            .data
-            .get(flags_at)
-            .copied()
-            .ok_or(FormatError::UnexpectedEof {
-                expected: flags_at + 1,
-                available: record.data.len(),
-            })?;
-        if !select(MessageFlags::new(flags)) {
+        let record =
+            DenseAttributeRecord::parse(&record.data, btree_hdr.tree_type, fh.heap_id_length)?;
+        if !select(record.flags()) {
             continue;
         }
-        let id_bytes =
-            record
-                .attribute_heap_id(fh.heap_id_length)
-                .ok_or(FormatError::UnexpectedEof {
-                    expected: flags_at,
-                    available: record.data.len(),
-                })?;
-        let attr_data = heap.read_from_source(source, layout.parse(id_bytes)?)?;
-        visit(&attr_data, record_creation_index(record, &fh, attr_info))?;
+        let attr_data = match record.target(&layout)? {
+            DenseAttributeTarget::Private(id) => heap.read_from_source(source, id.id())?,
+            DenseAttributeTarget::Shared(id) => sohm::read_heap_message_from_source(
+                source,
+                access_mode,
+                addresses,
+                sohm.ok_or(FormatError::UnsupportedSohmReference)?,
+                MessageType::ATTRIBUTE,
+                id.bytes(),
+                widths,
+            )?,
+        };
+        let creation_index = attr_info
+            .max_creation_index
+            .and_then(|_| u16::try_from(record.creation_order()).ok());
+        visit(&attr_data, creation_index)?;
     }
     Ok(())
-}
-
-/// The creation index a name-index (type 8) record carries, for an object that
-/// tracks attribute creation order.
-///
-/// The field sits right after the heap ID and the message flags byte, and is 4
-/// bytes wide where the Attribute Info message's maximum is 2 — the reference C
-/// library writes the same value into both, so anything past `u16` is a record
-/// this crate did not write and cannot reproduce. An object that does not track
-/// the order stores something else there (this crate's whole-file writer stores
-/// the attribute's position), so the tracked flag gates the read.
-fn record_creation_index(
-    record: &crate::btree_v2::BTreeV2Record,
-    fh: &FractalHeapHeader,
-    attr_info: &AttributeInfoMessage,
-) -> Option<u16> {
-    attr_info.max_creation_index?;
-    u16::try_from(record.attribute_creation_order(fh.heap_id_length)?).ok()
 }
 
 #[cfg(test)]
@@ -474,9 +478,13 @@ mod tests {
     use core::cell::RefCell;
 
     use hdf5_pure_format::__private::AttributeRecord;
+    use rstest::rstest;
     use test_util::btree_v2;
+    use test_util::bytes as test_bytes;
+    use test_util::checksum as test_checksum;
     use test_util::dataspace;
     use test_util::datatype;
+    use test_util::fractal_heap as heap_fixture;
     use test_util::widths::Widths;
 
     use super::*;
@@ -486,9 +494,153 @@ mod tests {
     use crate::message_flags::MessageFlags;
     use crate::source::BytesSource;
 
+    // "Fractal Heap" of the format specification, version 4.0, defines tiny heap ID type 2
+    // in bits 4 and 5. Zero length bits encode a one-byte object.
+    const TINY_ID_TAG: u8 = 0x20;
+
     const WIDTHS: Widths = Widths::EIGHT;
     const NODE_SIZE: u64 = 512;
     const NAME_RECORD_SIZE: u16 = AttributeRecord::name_record_size(8);
+
+    fn shared_dense_record_fixture() -> (Vec<u8>, AttributeInfoMessage, FormatWidths) {
+        let mut header = heap_fixture::Header::new(0xFFFF).build(WIDTHS);
+        test_bytes::set_u16_at(&mut header, 5, 8);
+        let len = header.len();
+        test_checksum::restamp(&mut header, 0, len);
+        let mut image = vec![0; 0x500];
+        image[..header.len()].copy_from_slice(&header);
+        let record = btree_v2::attribute_name_record(
+            &[TINY_ID_TAG, b'a', 0, 0, 0, 0, 0, 0],
+            MessageFlags::SHARED.get(),
+            42,
+            9,
+        );
+        let index = btree_v2::Header::new(BTREE_V2_ATTRIBUTE_NAME, NAME_RECORD_SIZE, 0x300, 1)
+            .build(WIDTHS);
+        let leaf = btree_v2::leaf(BTREE_V2_ATTRIBUTE_NAME, &[record]);
+        image[0x200..0x200 + index.len()].copy_from_slice(&index);
+        image[0x300..0x300 + leaf.len()].copy_from_slice(&leaf);
+        let info = AttributeInfoMessage {
+            max_creation_index: Some(42),
+            indexes_creation_order: false,
+            fractal_heap_address: Some(StoredAddress::new(0)),
+            btree_name_index_address: Some(StoredAddress::new(0x200)),
+            btree_creation_order_address: None,
+        };
+        (image, info, FormatWidths::from_sizes(8, 8).unwrap())
+    }
+
+    #[rstest]
+    #[case::buffered_without_table(false, None)]
+    #[case::source_without_table(true, None)]
+    #[case::buffered_without_index(false, Some(SohmTable { indexes: vec![] }))]
+    #[case::source_without_index(true, Some(SohmTable { indexes: vec![] }))]
+    #[case::buffered_without_heap(false, Some(attribute_shared_table(None)))]
+    #[case::source_without_heap(true, Some(attribute_shared_table(None)))]
+    fn selected_shared_dense_records_report_shared_storage_errors(
+        #[case] streaming: bool,
+        #[case] table: Option<SohmTable>,
+    ) {
+        let (image, info, widths) = shared_dense_record_fixture();
+        let expected = if table.is_some() {
+            FormatError::SohmIndexMissing(MessageType::ATTRIBUTE.to_u16())
+        } else {
+            FormatError::UnsupportedSohmReference
+        };
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        let error = if streaming {
+            extract_dense_attributes_from_source(
+                &BytesSource::new(image),
+                addresses,
+                AccessMode::ReadOnly,
+                &info,
+                StoredAddress::new(0),
+                widths,
+                table.as_ref(),
+            )
+            .unwrap_err()
+        } else {
+            extract_dense_attributes(
+                &image,
+                AccessMode::ReadOnly,
+                addresses,
+                &info,
+                StoredAddress::new(0),
+                widths,
+                table.as_ref(),
+            )
+            .unwrap_err()
+        };
+        assert_eq!(error, expected);
+    }
+
+    #[test]
+    fn dense_attribute_selectors_skip_shared_records_before_heap_access() {
+        let (image, info, widths) = shared_dense_record_fixture();
+        let source = CountingSource::new(image);
+        let mut selected = Vec::new();
+        visit_dense_attribute_messages_from_source(
+            &source,
+            AccessMode::ReadWrite,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &info,
+            StoredAddress::new(0),
+            widths,
+            None,
+            |flags| {
+                selected.push(flags);
+                !flags.is_shared()
+            },
+            |_, _| panic!("a skipped record must not be visited"),
+        )
+        .unwrap();
+        assert_eq!(selected, [MessageFlags::SHARED]);
+        assert_eq!(*source.reads.borrow(), [0, 0, 0x200, 0x300]);
+    }
+
+    #[rstest]
+    #[case::tracked(Some(42), Some(42))]
+    #[case::untracked(None, None)]
+    fn shared_dense_messages_preserve_tracked_creation_order(
+        #[case] max_creation_index: Option<u16>,
+        #[case] expected: Option<u16>,
+    ) {
+        let (image, mut info, widths) = shared_dense_record_fixture();
+        info.max_creation_index = max_creation_index;
+        let table = attribute_shared_table(Some(StoredAddress::new(0)));
+        let mut observed = Vec::new();
+        visit_dense_attribute_messages_from_source(
+            &BytesSource::new(image),
+            AccessMode::ReadOnly,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &info,
+            StoredAddress::new(0),
+            widths,
+            Some(&table),
+            |_| true,
+            |data, order| {
+                observed.push((data.to_vec(), order));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, [(b"a".to_vec(), expected)]);
+    }
+
+    fn attribute_shared_table(heap_address: Option<StoredAddress>) -> SohmTable {
+        SohmTable {
+            indexes: vec![crate::sohm::SohmIndexHeader {
+                message_type_flags: 1 << MessageType::ATTRIBUTE.to_u16(),
+                min_message_size: 1,
+                list_max: 50,
+                btree_min: 40,
+                message_count: 1,
+                kind: hdf5_pure_format::__private::SohmIndexKind::List,
+                index_address: None,
+                heap_address,
+            }],
+        }
+    }
 
     fn place_attribute_name_index(
         file: &mut [u8],

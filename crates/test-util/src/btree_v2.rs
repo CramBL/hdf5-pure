@@ -207,6 +207,65 @@ pub fn root_records(bytes: &[u8]) -> Vec<(u32, u32)> {
     name_index_records(bytes, root + NODE_PREFIX, count)
 }
 
+/// The message flags, creation order, and hash from a type 8 attribute index record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttributeNameRecord {
+    pub flags: u8,
+    pub creation_order: u32,
+    pub name_hash: u32,
+}
+
+/// Reads the records of a file's sole type 8 index, independently of implementation parsers.
+///
+/// Requires eight-byte addresses and lengths, eight-byte heap IDs, and a leaf root.
+///
+/// # Panics
+///
+/// Panics if the index is absent, ambiguous, truncated, or has a different layout.
+pub fn attribute_name_root_records(bytes: &[u8]) -> Vec<AttributeNameRecord> {
+    let headers: Vec<_> = bytes
+        .windows(SIGNATURE.len())
+        .enumerate()
+        .filter_map(|(at, signature)| {
+            (signature == SIGNATURE && bytes::u8_at(bytes, at + 5) == ATTRIBUTE_NAME_TYPE)
+                .then_some(at)
+        })
+        .collect();
+    assert_eq!(headers.len(), 1, "expected one attribute name index");
+    let at = headers[0];
+    assert_eq!(bytes::u16_at(bytes, at + 10), ATTRIBUTE_NAME_RECORD_SIZE);
+    assert_eq!(bytes::u16_at(bytes, at + 12), 0, "expected a leaf root");
+    let root = usize::try_from(bytes::u64_at(bytes, at + 16)).unwrap();
+    assert_eq!(bytes::slice_at(bytes, root, 4), LEAF_SIGNATURE);
+    assert_eq!(bytes::u8_at(bytes, root + 5), ATTRIBUTE_NAME_TYPE);
+    let count = usize::from(bytes::u16_at(bytes, at + 24));
+    assert_eq!(bytes::u64_at(bytes, at + 26), u64::try_from(count).unwrap());
+    (0..count)
+        .map(|i| {
+            let at = root + NODE_PREFIX + i * usize::from(ATTRIBUTE_NAME_RECORD_SIZE);
+            AttributeNameRecord {
+                flags: bytes::u8_at(bytes, at + 8),
+                creation_order: bytes::u32_at(bytes, at + 9),
+                name_hash: bytes::u32_at(bytes, at + 13),
+            }
+        })
+        .collect()
+}
+
+/// Writes a type 8 record with the supplied heap ID, message flags, creation order, and hash.
+pub fn attribute_name_record(heap_id: &[u8], flags: u8, creation_order: u32, hash: u32) -> Vec<u8> {
+    let mut record = heap_id.to_vec();
+    record.push(flags);
+    record.extend_from_slice(&creation_order.to_le_bytes());
+    record.extend_from_slice(&hash.to_le_bytes());
+    record
+}
+
+// "Version 2 B-trees" of the format specification, version 4.0, defines type 8 and its
+// 17-byte record.
+const ATTRIBUTE_NAME_TYPE: u8 = 8;
+const ATTRIBUTE_NAME_RECORD_SIZE: u16 = 17;
+
 pub const SIGNATURE: &[u8; 4] = b"BTHD";
 
 pub const LEAF_SIGNATURE: &[u8; 4] = b"BTLF";

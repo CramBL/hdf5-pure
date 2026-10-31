@@ -15,6 +15,8 @@
 //! index is a **list** or a **version 2 B-tree** (forced by driving the message
 //! count past the list maximum), and how many objects share one message.
 
+#[cfg(target_endian = "little")]
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +28,8 @@ use rstest::rstest;
 use tempfile::TempDir;
 use test_util::btree_v2;
 use test_util::bytes;
+#[cfg(target_endian = "little")]
+use test_util_hdf5::reader::ReadBackend;
 
 // Section `subsubsec_fmt4_infra_btrees_v2`, version 4.0, assigns type 7 to shared-message indexes.
 const SHARED_MESSAGE_INDEX_TYPE: u8 = 7;
@@ -374,3 +378,110 @@ fn repack_rewrites_a_shared_message_file_without_sharing() {
     assert_reads_back(&dst, 4);
     hdf5::File::open(&dst).expect("the C library opens the repacked file");
 }
+
+#[cfg(target_endian = "little")]
+#[derive(Clone, Copy, Debug)]
+enum DenseSharing {
+    All,
+    Mixed,
+}
+
+#[rstest]
+#[case::all_shared(DenseSharing::All)]
+#[case::private_and_shared(DenseSharing::Mixed)]
+#[cfg(target_endian = "little")]
+fn dense_shared_attribute_records_read_from_the_shared_heap(
+    #[case] sharing: DenseSharing,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dense_shared_attrs.h5");
+    let expected: BTreeMap<_, _> = (0..9i64)
+        .map(|i| {
+            let name = if matches!(sharing, DenseSharing::Mixed) && i % 2 == 0 {
+                format!("a{i}_{}", "long".repeat(32))
+            } else {
+                format!("a{i}")
+            };
+            (name, AttrValue::I64(i))
+        })
+        .collect();
+    {
+        let file = match sharing {
+            DenseSharing::All => create_shared_file(&path, 50, 40),
+            DenseSharing::Mixed => hdf5::File::with_options()
+                .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
+                .with_fcpl(|p| {
+                    p.shared_mesg_phase_change(50, 40)
+                        .shared_mesg_indexes(&[SharedMessageIndex {
+                            message_types: SharedMessageType::ALL,
+                            min_message_size: 80,
+                        }])
+                })
+                .create(&path)
+                .unwrap(),
+        };
+        let group = file.create_group("g").unwrap();
+        for (name, value) in &expected {
+            let AttrValue::I64(value) = value else {
+                panic!("expected a scalar i64 attribute")
+            };
+            group
+                .new_attr::<i64>()
+                .shape(())
+                .create(name.as_str())
+                .unwrap()
+                .write_scalar(value)
+                .unwrap();
+        }
+        drop(group);
+        file.close().unwrap();
+    }
+    {
+        let file = hdf5::File::open(&path).unwrap();
+        let group = file.group("g").unwrap();
+        let observed: BTreeMap<_, _> = group
+            .attr_names()
+            .unwrap()
+            .into_iter()
+            .map(|name| {
+                let value = group.attr(&name).unwrap().read_scalar::<i64>().unwrap();
+                (name, AttrValue::I64(value))
+            })
+            .collect();
+        assert_eq!(observed, expected);
+        drop(group);
+        file.close().unwrap();
+    }
+    let image = fs::read(&path).unwrap();
+    let records = btree_v2::attribute_name_root_records(&image);
+    assert_eq!(records.len(), expected.len());
+    assert!(
+        records
+            .iter()
+            .any(|record| record.flags & SHARED_ATTRIBUTE_FLAG != 0)
+    );
+    if matches!(sharing, DenseSharing::Mixed) {
+        assert!(
+            records
+                .iter()
+                .any(|record| record.flags & SHARED_ATTRIBUTE_FLAG == 0)
+        );
+    }
+    let file = backend.open(&path).unwrap();
+    assert_eq!(
+        file.group("g")
+            .unwrap()
+            .attrs()
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        expected
+    );
+    file.close().unwrap();
+}
+
+// "Version 1 Data Object Header Prefix" of the format specification, version 4.0, defines bit 1
+// as the shared-message flag.
+#[cfg(target_endian = "little")]
+const SHARED_ATTRIBUTE_FLAG: u8 = 0x02;
