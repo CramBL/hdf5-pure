@@ -1,4 +1,4 @@
-//! Dataset read and PAGE publication recovery crosschecks against libhdf5.
+//! Dataset, free-space, and PAGE publication recovery crosschecks against libhdf5.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -7,21 +7,168 @@ use std::sync::Arc;
 use rstest::rstest;
 use test_util::publication as publication_bytes;
 use test_util::temp;
+use test_util_hdf5::file_space;
+use test_util_hdf5::file_space::persisted::PersistedStrategy;
 use test_util_hdf5::page_publication;
 use test_util_hdf5::page_publication::PublicationStrategy;
 use test_util_hdf5::paged;
+use test_util_hdf5::reader::ReadBackend;
 
 use crate::AttrValue;
 use crate::Error;
 use crate::File;
 use crate::FileAccessProperties;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
+use crate::PhysicalAddress;
+use crate::StoredAddress;
 use crate::SyncPolicy;
+use crate::UserblockSize;
+use crate::address::StoredAddressExt;
 use crate::chunk_cache::ChunkCacheConfig;
 use crate::message_type::MessageType;
 use crate::page_publication_failure::PagePublicationFailure;
 use crate::parsed_chunk_index::test_util as chunk_index_test_util;
+use crate::reader::test_util as reader_test_util;
+
+#[rstest]
+#[case::plain(0, 0)]
+#[case::userblock(4096, 4096)]
+#[case::inserted_userblock(0, 4096)]
+#[case::forward_relocation(4096, 8192)]
+#[case::removed_userblock(4096, 0)]
+fn native_persisted_sections_preserve_stored_and_physical_coordinates(
+    #[case] encoded_base: usize,
+    #[case] signature: usize,
+    #[values(PersistedStrategy::FsmAggr, PersistedStrategy::Page)] strategy: PersistedStrategy,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let original_path = directory.path().join("native-free-sections.h5");
+    let relocated_path = directory.path().join("relocated-native-free-sections.h5");
+    let expected = file_space::write_native_persisted_sections(
+        &original_path,
+        strategy,
+        UserblockSize::try_from(u64::try_from(encoded_base).unwrap()).unwrap(),
+    );
+    let bytes = std::fs::read(&original_path).unwrap();
+    let original = reader_test_util::open(&original_path, backend).unwrap();
+    assert_eq!(
+        original.file_space_settings().unwrap().unwrap(),
+        FileSpaceSettings::new(match strategy {
+            PersistedStrategy::FsmAggr => FileSpaceStrategy::FsmAggr,
+            PersistedStrategy::Page => FileSpaceStrategy::Page,
+        })
+        .with_persistence(true)
+    );
+    let persisted = original.persisted_free_sections().unwrap().unwrap();
+    assert_eq!(
+        persisted
+            .free_sections()
+            .sections()
+            .iter()
+            .map(|section| (section.address().get(), section.length().get()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        persisted.free_sections().free_bytes(),
+        expected.iter().map(|(_, length)| length).sum::<u64>()
+    );
+    original.close().unwrap();
+    let session = File::open_rw(&original_path).unwrap();
+    let reusable = session.reusable_free_sections().unwrap();
+    assert_eq!(reusable.section_count(), expected.len());
+    assert_eq!(
+        reusable.free_bytes(),
+        persisted.free_sections().free_bytes()
+    );
+    assert_eq!(
+        reusable.free_bytes(),
+        session
+            .reusable_space_stats()
+            .unwrap()
+            .reusable_free_bytes()
+    );
+    for (section, &(address, length)) in reusable.sections().iter().zip(&expected) {
+        let stored = StoredAddress::new(address);
+        let physical: PhysicalAddress = section.address();
+        let end: PhysicalAddress = section.end_address();
+        assert_eq!(physical, session.inner.addresses().resolve(stored).unwrap());
+        assert_eq!(
+            physical.get(),
+            u64::try_from(encoded_base)
+                .unwrap()
+                .checked_add(address)
+                .unwrap()
+        );
+        assert_eq!(
+            end,
+            session
+                .inner
+                .addresses()
+                .resolve(stored.offset(length))
+                .unwrap()
+        );
+        assert_eq!(section.length().get(), length);
+    }
+    session.close().unwrap();
+    let mut relocated = vec![0; signature];
+    relocated.extend_from_slice(&bytes[encoded_base..]);
+    std::fs::write(&relocated_path, &relocated).unwrap();
+    let reader = reader_test_util::open(&relocated_path, backend).unwrap();
+    let report = reader.persisted_free_sections().unwrap().unwrap();
+    assert_eq!(
+        reader.superblock().base_address.get(),
+        u64::try_from(encoded_base).unwrap()
+    );
+    assert_eq!(
+        reader.inner.addresses().effective_base().get(),
+        u64::try_from(signature).unwrap()
+    );
+    assert_eq!(report, persisted);
+    assert!(report.manager_metadata_bytes() > 0);
+    assert_eq!(report.free_sections().section_count(), expected.len());
+    assert_eq!(
+        report.free_sections().free_bytes(),
+        report
+            .managers()
+            .iter()
+            .map(|manager| manager.free_sections().free_bytes())
+            .sum::<u64>()
+    );
+    assert_eq!(
+        report.free_sections().section_count(),
+        report
+            .managers()
+            .iter()
+            .map(|manager| manager.free_sections().section_count())
+            .sum::<usize>()
+    );
+    for (section, &(address, length)) in report.free_sections().sections().iter().zip(&expected) {
+        let stored: StoredAddress = section.address();
+        let end: StoredAddress = section.end_address();
+        assert_eq!(stored.get(), address);
+        assert_eq!(end.get(), address.checked_add(length).unwrap());
+        let physical = reader.inner.addresses().resolve(stored).unwrap();
+        let physical_end = reader.inner.addresses().resolve(end).unwrap();
+        assert_eq!(
+            physical.get(),
+            u64::try_from(signature)
+                .unwrap()
+                .checked_add(address)
+                .unwrap()
+        );
+        assert_eq!(physical.checked_add(length).unwrap(), physical_end);
+        assert_eq!(section.length().get(), length);
+        assert!(physical_end.get() <= u64::try_from(relocated.len()).unwrap());
+    }
+    assert_eq!(reader.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);
+    assert_eq!(reader.dataset("c").unwrap().read_i32().unwrap(), [3; 100]);
+    reader.close().unwrap();
+    assert_eq!(std::fs::read(&relocated_path).unwrap(), relocated);
+}
 
 #[rstest]
 #[case::dense(false, false)]

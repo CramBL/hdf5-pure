@@ -16,6 +16,8 @@ use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::SyncPolicy;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
@@ -25,6 +27,9 @@ use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use crate::dataset::Unlimited;
 #[cfg(feature = "__hdf5-1.10")]
 use crate::file_space_oracle::OracleError;
+
+#[cfg(feature = "__hdf5-1.10")]
+use self::persisted::PersistedStrategy;
 
 pub mod persisted;
 pub mod publication;
@@ -281,6 +286,70 @@ pub fn libhdf5_free_sections(file: &Hdf5File) -> Result<Vec<(u64, u64)>, OracleE
             .map(|section| (section.addr, section.size))
             .collect())
     })
+}
+
+/// Writes a libhdf5 fixture and returns its persisted free sections.
+///
+/// Returns `(stored_address, length)` pairs sorted by address after closing and reopening
+/// the file. Uses `strategy`, `userblock`, persistence, and a one-byte threshold. Dataset `b`
+/// is deleted between the surviving datasets `a` and `c`.
+///
+/// # Panics
+///
+/// Panics if creating, writing, inspecting, or closing the file fails, the section list is empty,
+/// or its byte total differs from the native free-space total.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_native_persisted_sections(
+    path: &Path,
+    strategy: PersistedStrategy,
+    userblock: UserblockSize,
+) -> Vec<(u64, u64)> {
+    let native = Hdf5FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties.userblock(userblock.get()).file_space_strategy(
+                Hdf5FileSpaceStrategy::FreeSpaceManager {
+                    paged: matches!(strategy, PersistedStrategy::Page),
+                    persist: true,
+                    threshold: 1,
+                },
+            )
+        })
+        .create(path)
+        .unwrap();
+    native
+        .new_dataset::<i32>()
+        .shape([100])
+        .create("a")
+        .unwrap()
+        .write_raw(&[1; 100])
+        .unwrap();
+    native
+        .new_dataset::<i32>()
+        .shape([4096])
+        .create("b")
+        .unwrap()
+        .write_raw(&[2; 4096])
+        .unwrap();
+    native
+        .new_dataset::<i32>()
+        .shape([100])
+        .create("c")
+        .unwrap()
+        .write_raw(&[3; 100])
+        .unwrap();
+    native.unlink("b").unwrap();
+    native.close().unwrap();
+    let native = Hdf5File::open(path).unwrap();
+    let mut sections = libhdf5_free_sections(&native).unwrap();
+    sections.sort_unstable();
+    assert!(!sections.is_empty());
+    assert_eq!(
+        sections.iter().map(|(_, length)| length).sum::<u64>(),
+        native.free_space()
+    );
+    native.close().unwrap();
+    sections
 }
 
 /// Writes a persisting interior-hole fixture and deletes `big` in a committed edit.
