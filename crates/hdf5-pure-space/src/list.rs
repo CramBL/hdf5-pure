@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use core::cmp::Reverse;
+use core::fmt;
 
 use hdf5_pure_core::StoredAddress;
 
@@ -31,6 +32,66 @@ impl FreeList {
             regions: Vec::new(),
             total_bytes: 0,
         }
+    }
+
+    /// Constructs a free list from disjoint extents in ascending address order, coalescing
+    /// adjacent extents.
+    ///
+    /// Processes the input in one pass and caches the exact sum of its lengths. Empty input
+    /// produces an empty list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FreeListError::Unsorted`] if an extent starts before the preceding input extent,
+    /// or [`FreeListError::Overlap`] if their starts are ordered but their ranges overlap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_space::__private::{Extent, FreeList};
+    ///
+    /// let first = Extent::new(StoredAddress::new(100), 20).unwrap();
+    /// let second = Extent::new(first.end(), 30).unwrap();
+    /// let free = FreeList::from_sorted([first, second]).unwrap();
+    /// assert_eq!(free.extents(), [Extent::new(first.start(), 50).unwrap()]);
+    /// assert_eq!(free.total_bytes(), 50);
+    /// ```
+    pub fn from_sorted(extents: impl IntoIterator<Item = Extent>) -> Result<Self, FreeListError> {
+        let mut list = Self::new();
+        let mut previous: Option<Extent> = None;
+        for extent in extents {
+            if let Some(previous) = previous {
+                if extent.start() < previous.start() {
+                    return Err(FreeListError::Unsorted {
+                        previous,
+                        next: extent,
+                    });
+                }
+                if extent.start() < previous.end() {
+                    return Err(FreeListError::Overlap {
+                        previous,
+                        next: extent,
+                    });
+                }
+            }
+            // Sorted, disjoint extents have exclusive ends at most `u64::MAX`, so their total fits.
+            list.total_bytes = list
+                .total_bytes
+                .checked_add(extent.len())
+                .expect("disjoint extents fit in the address space");
+            match list.regions.last_mut() {
+                Some(last) if last.end() == extent.start() => {
+                    // The ordered endpoints enclose both nonempty, adjacent extents.
+                    *last = Extent::between(last.start(), extent.end())
+                        .expect("adjacent extents have a checked union");
+                }
+                _ => list.regions.push(extent),
+            }
+            previous = Some(extent);
+        }
+        Ok(list)
     }
 
     /// Records `extent` as free, merging it with any adjacent or overlapping regions so the list
@@ -298,6 +359,112 @@ impl FreeList {
         self.total_bytes = total_bytes;
     }
 
+    /// Removes the bytes covered by `ranges`, retaining the portions of each region outside them.
+    ///
+    /// Ranges may cover allocated bytes as well as free bytes. Runs in linear time in the combined
+    /// numbers of input and output extents.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_space::__private::{Extent, FreeList};
+    ///
+    /// let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
+    /// let mut free = FreeList::from_sorted([extent(100, 100)]).unwrap();
+    /// let removed = FreeList::from_sorted([extent(120, 10), extent(150, 20)]).unwrap();
+    /// free.take_ranges(&removed);
+    /// assert_eq!(free.extents(), [extent(100, 20), extent(130, 20), extent(170, 30)]);
+    /// assert_eq!(free.total_bytes(), 70);
+    /// ```
+    pub fn take_ranges(&mut self, ranges: &Self) {
+        if self.is_empty() || ranges.is_empty() {
+            return;
+        }
+        let mut removed = ranges.regions.iter().peekable();
+        let mut out = Vec::with_capacity(self.regions.len());
+        let mut total_bytes = self.total_bytes;
+        for region in self.regions.drain(..) {
+            let mut start = region.start();
+            while removed.peek().is_some_and(|range| range.end() <= start) {
+                removed.next();
+            }
+            while let Some(&&range) = removed.peek() {
+                if range.start() >= region.end() {
+                    break;
+                }
+                if let Some(head) = Extent::between(start, range.start()) {
+                    out.push(head);
+                }
+                let end = range.end().min(region.end());
+                // Each overlap is a nonempty part of this region, counted once in the total.
+                total_bytes = total_bytes
+                    .checked_sub(
+                        Extent::between(start.max(range.start()), end)
+                            .expect("the current removal intersects the current region")
+                            .len(),
+                    )
+                    .expect("removed bytes are included in the cached total");
+                start = end;
+                if range.end() >= region.end() {
+                    break;
+                }
+                removed.next();
+            }
+            if let Some(tail) = Extent::between(start, region.end()) {
+                out.push(tail);
+            }
+        }
+        self.regions = out;
+        self.total_bytes = total_bytes;
+    }
+
+    /// Returns the free bytes common to both lists, sorted by address and coalesced.
+    ///
+    /// Runs in linear time in the combined numbers of input and output extents.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_space::__private::{Extent, FreeList};
+    ///
+    /// let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
+    /// let left = FreeList::from_sorted([extent(100, 30), extent(150, 20)]).unwrap();
+    /// let right = FreeList::from_sorted([extent(120, 40)]).unwrap();
+    /// let common = left.intersection(&right);
+    /// assert_eq!(common.extents(), [extent(120, 10), extent(150, 10)]);
+    /// assert_eq!(common.total_bytes(), 20);
+    /// ```
+    pub fn intersection(&self, other: &Self) -> Self {
+        let mut right = other.regions.iter().peekable();
+        let mut intersections = Vec::new();
+        for &left in &self.regions {
+            while right
+                .peek()
+                .is_some_and(|range| range.end() <= left.start())
+            {
+                right.next();
+            }
+            while let Some(&&range) = right.peek() {
+                if range.start() >= left.end() {
+                    break;
+                }
+                if let Some(overlap) = left.intersection(range) {
+                    intersections.push(overlap);
+                }
+                if range.end() >= left.end() {
+                    break;
+                }
+                right.next();
+            }
+        }
+        // Intersections of two canonical lists are nonempty, sorted and disjoint.
+        Self::from_sorted(intersections).expect("canonical intersections are sorted and disjoint")
+    }
+
     /// Returns the free extents, sorted ascending by address and fully coalesced.
     pub fn extents(&self) -> &[Extent] {
         &self.regions
@@ -419,6 +586,46 @@ impl FreeList {
             .total_bytes
             .checked_sub(length)
             .expect("removed bytes are included in the cached total");
+    }
+}
+
+/// An error constructing a [`FreeList`] from sorted extents.
+///
+/// Each variant identifies the consecutive input extents that failed construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FreeListError {
+    /// The starts are ordered, but the extents overlap.
+    Overlap {
+        /// The preceding input extent.
+        previous: Extent,
+        /// The overlapping input extent.
+        next: Extent,
+    },
+    /// An extent starts before the preceding input extent.
+    Unsorted {
+        /// The preceding input extent.
+        previous: Extent,
+        /// The input extent with a lower start address.
+        next: Extent,
+    },
+}
+
+impl core::error::Error for FreeListError {}
+
+impl fmt::Display for FreeListError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, previous, next) = match self {
+            Self::Overlap { previous, next } => ("overlapping", previous, next),
+            Self::Unsorted { previous, next } => ("out-of-order", previous, next),
+        };
+        write!(
+            f,
+            "{kind} free extents [{}, {}) and [{}, {})",
+            previous.start().get(),
+            previous.end().get(),
+            next.start().get(),
+            next.end().get()
+        )
     }
 }
 
