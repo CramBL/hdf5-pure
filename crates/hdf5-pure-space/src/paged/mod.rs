@@ -540,36 +540,31 @@ impl PagedEdit {
         }
     }
 
+    /// Promotes complete aligned interiors of adjacent metadata, raw, and dead regions to raw space.
+    ///
+    /// Retains each partial edge's original class. Runs in linear time in the number of extents.
     fn promote_whole_free_pages(
         meta: &mut FreeList,
         raw: &mut FreeList,
         dead: &mut FreeList,
         page_size: FileSpacePageSize,
     ) {
-        let page_size = page_size.get();
-        let mut all = meta.extents().to_vec();
-        all.extend_from_slice(raw.extents());
-        all.extend_from_slice(dead.extents());
-        all.sort_unstable_by_key(|extent| extent.start());
-        let mut runs: Vec<Extent> = Vec::with_capacity(all.len());
-        for extent in all {
-            match runs.last_mut() {
-                Some(run) if run.end() >= extent.start() => {
-                    *run = Extent::between(run.start(), run.end().max(extent.end()))
-                        .expect("merged free extents stay non-empty and in bounds");
-                }
-                _ => runs.push(extent),
-            }
-        }
-        for extent in runs {
-            let Some(whole_pages) = extent.aligned_interior(page_size) else {
-                continue;
-            };
-            meta.take_range(whole_pages);
-            raw.take_range(whole_pages);
-            dead.take_range(whole_pages);
-            raw.free(whole_pages);
-        }
+        // The PAGE classes track disjoint bytes, and each list is canonical.
+        let runs = FreeList::from_lists([&*meta, &*raw, &*dead])
+            .expect("PAGE classes have disjoint free extents");
+        // Aligned interiors stay inside their sorted, disjoint containing runs.
+        let whole_pages = FreeList::from_sorted(
+            runs.extents()
+                .iter()
+                .filter_map(|extent| extent.aligned_interior(page_size.get())),
+        )
+        .expect("whole-page interiors are sorted and disjoint");
+        meta.take_ranges(&whole_pages);
+        raw.take_ranges(&whole_pages);
+        dead.take_ranges(&whole_pages);
+        // The subtraction removes every whole-page interior from the raw list before this merge.
+        *raw = FreeList::from_lists([&*raw, &whole_pages])
+            .expect("retained raw fragments are disjoint from promoted pages");
     }
 }
 
@@ -665,6 +660,9 @@ impl PagedPostFree {
         self.give_back(eoa, dropped)
     }
 
+    /// Returns candidate pages wholly covered by metadata, raw, and dead regions.
+    ///
+    /// Candidates come from the boundary pages of admitted fragments shorter than one page.
     fn pages_completed_by_merges(
         &self,
         extents: &[(Extent, FreeClass)],
@@ -672,33 +670,42 @@ impl PagedPostFree {
     ) -> BTreeSet<Extent> {
         let page_size = self.page_size.get();
         let dropped: BTreeSet<_> = dropped.iter().map(|&(extent, _)| extent).collect();
-        extents
+        let candidates: BTreeSet<_> = extents
             .iter()
             .map(|&(extent, _)| extent)
             .filter(|extent| (1..page_size).contains(&extent.len()) && !dropped.contains(extent))
             .flat_map(|extent| [extent.start().get(), extent.end().get() - 1])
             .map(|addr| StoredAddress::new(addr / page_size * page_size))
             .filter_map(|page| Extent::new(page, page_size))
-            .filter(|&page| {
-                [&self.meta, &self.raw, &self.dead]
-                    .into_iter()
-                    .map(|list| list.covered_len(page))
-                    .sum::<u64>()
-                    == page_size
+            .collect();
+        // The PAGE classes track disjoint bytes, and adjacent bytes form one canonical run.
+        let runs = FreeList::from_lists([&self.meta, &self.raw, &self.dead])
+            .expect("PAGE classes have disjoint free extents");
+        let mut runs = runs.extents().iter().peekable();
+        candidates
+            .into_iter()
+            .filter(|page| {
+                while runs.peek().is_some_and(|run| run.end() <= page.start()) {
+                    runs.next();
+                }
+                runs.peek()
+                    .is_some_and(|run| run.start() <= page.start() && run.end() >= page.end())
             })
             .collect()
     }
 
+    /// Applies whole-page threshold admission to each completed page after batch subtraction.
     fn release_pages(
         &mut self,
         threshold: u64,
         pages: BTreeSet<Extent>,
     ) -> Vec<(Extent, FreeClass)> {
         let pages: Vec<_> = pages.into_iter().collect();
-        for &page in &pages {
-            for list in [&mut self.meta, &mut self.raw, &mut self.dead] {
-                list.take_range(page);
-            }
+        // The set contains distinct whole pages in ascending address order.
+        let removed = FreeList::from_sorted(pages.iter().copied())
+            .expect("completed pages are sorted and disjoint");
+        for list in [&mut self.meta, &mut self.raw, &mut self.dead] {
+            list.take_ranges(&removed);
         }
         self.release_each(
             threshold,
@@ -774,6 +781,8 @@ mod tests {
     use super::*;
     use crate::admission::Release;
     use crate::persistence::ManagerSections;
+
+    mod normalization;
 
     const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
     const META: FreeClass = FreeClass::Page(PageType::Meta);

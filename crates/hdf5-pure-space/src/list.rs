@@ -94,6 +94,30 @@ impl FreeList {
         Ok(list)
     }
 
+    /// Merges disjoint free lists into one canonical list, coalescing adjacent regions.
+    ///
+    /// For a fixed number of lists, runs in linear time in the total number of extents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FreeListError::Overlap`] if extents from different lists overlap.
+    pub(crate) fn from_lists<const N: usize>(lists: [&Self; N]) -> Result<Self, FreeListError> {
+        let mut regions = lists.map(|list| list.regions.iter());
+        Self::from_sorted(core::iter::from_fn(|| {
+            let (index, _) = regions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, regions)| {
+                    regions
+                        .as_slice()
+                        .first()
+                        .map(|extent| (index, extent.start()))
+                })
+                .min_by_key(|&(_, start)| start)?;
+            regions[index].next().copied()
+        }))
+    }
+
     /// Records `extent` as free, merging it with any adjacent or overlapping regions so the list
     /// stays canonical.
     ///
@@ -681,6 +705,7 @@ mod tests {
 
     #[cfg(debug_assertions)]
     use alloc::string::String;
+    use alloc::vec;
     #[cfg(debug_assertions)]
     use std::panic::{self, AssertUnwindSafe};
 
@@ -689,6 +714,46 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::empty([vec![], vec![], vec![]], &[])]
+    #[case::interleaved(
+        [vec![(100, 20), (300, 20)], vec![(200, 20)], vec![(400, 20)]],
+        &[(100, 20), (200, 20), (300, 20), (400, 20)]
+    )]
+    #[case::adjacent([vec![(100, 20)], vec![(120, 20)], vec![(140, 20)]], &[(100, 60)])]
+    #[case::address_limit(
+        [vec![(0, u64::MAX - 20)], vec![], vec![(u64::MAX - 20, 20)]], &[(0, u64::MAX)]
+    )]
+    fn merging_lists_preserves_sorted_extents_and_totals(
+        #[case] inputs: [Vec<(u64, u64)>; 3],
+        #[case] expected: &[(u64, u64)],
+    ) {
+        let lists = inputs.map(|extents| {
+            FreeList::from_sorted(
+                extents
+                    .iter()
+                    .map(|&(start, len)| Extent::new(StoredAddress::new(start), len).unwrap()),
+            )
+            .unwrap()
+        });
+        let merged = FreeList::from_lists(lists.each_ref()).unwrap();
+        assert_eq!(regions(&merged), expected);
+    }
+
+    #[rstest]
+    #[case::overlap(110)]
+    #[case::duplicate(100)]
+    fn merging_lists_rejects_overlapping_classes(#[case] start: u64) {
+        let previous = Extent::new(StoredAddress::new(100), 20).unwrap();
+        let next = Extent::new(StoredAddress::new(start), 20).unwrap();
+        let first = FreeList::from_sorted([previous]).unwrap();
+        let second = FreeList::from_sorted([next]).unwrap();
+        assert_eq!(
+            FreeList::from_lists([&first, &second]).unwrap_err(),
+            FreeListError::Overlap { previous, next }
+        );
+    }
 
     #[test]
     fn free_into_empty_list() {
