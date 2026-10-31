@@ -129,6 +129,8 @@ mod tests {
     use crate::address::{StoredAddress, StoredAddressExt};
     use crate::reader::test_util as reader_test_util;
     use crate::reader::{File, FileAccessProperties};
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    use crate::source::{BytesSource, MetadataCacheConfig};
     use crate::source::{PhysicalSource, RangeReader};
     use crate::{FileBuilder, MemoryStrategy, UserblockSize};
 
@@ -187,6 +189,113 @@ mod tests {
         )
         .unwrap();
         file.with_opened_source(|source| assert_opened_views(source, base, expected, resident));
+        file.close().unwrap();
+    }
+
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::zero_base(0, 0)]
+    #[case::userblock(512, 512)]
+    #[case::forward_relocated(0, 512)]
+    #[case::backward_relocated(512, 0)]
+    fn opened_views_borrow_original_bytes_without_allocating(
+        #[case] encoded_base: usize,
+        #[case] effective_base: usize,
+        #[values(false, true)] source_backed: bool,
+    ) {
+        let mut builder = FileBuilder::new();
+        builder.with_userblock(UserblockSize::try_from(encoded_base as u64).unwrap());
+        builder
+            .create_dataset("values")
+            .with_u8_data(&vec![17; 1_048_576]);
+        let original = builder.finish().unwrap();
+        let mut relocated = vec![0; effective_base];
+        relocated.extend_from_slice(&original[encoded_base..]);
+        let expected = relocated[effective_base..].to_vec();
+        let pointer = relocated[effective_base..].as_ptr();
+        let file = if source_backed {
+            File::from_source_with_options(
+                BytesSource::new(relocated),
+                FileAccessProperties::new().with_metadata_cache(
+                    MetadataCacheConfig::new(expected.len()).with_max_entry_bytes(expected.len()),
+                ),
+            )
+        } else {
+            File::from_bytes(relocated)
+        }
+        .unwrap();
+        if source_backed {
+            let stats = file.metadata_cache_stats().unwrap();
+            assert!(stats.misses() > 0);
+            assert_eq!((stats.hits(), stats.entries(), stats.bytes()), (0, 0, 0));
+        } else {
+            assert_eq!(file.metadata_cache_stats(), None);
+        }
+        let region = format!("opened_view_{encoded_base}_{effective_base}_{source_backed}");
+        let copy_region = format!("{region}_copy");
+        let construction_region = format!("{region}_construction");
+        let reads_region = format!("{region}_reads");
+        let (copy, control) =
+            test_util::allocation::measure(&copy_region, || std::hint::black_box(expected.clone()));
+        assert_eq!(copy, expected);
+        assert!(control.blocks > 0, "{control}");
+        assert!(control.bytes >= expected.len() as u64, "{control}");
+        drop(copy);
+        let range = AddressRange::new(StoredAddress::new(0), expected.len() as u64).unwrap();
+        file.with_opened_source(|source| {
+            let ((stored, resident), construction) =
+                test_util::allocation::measure(&construction_region, || {
+                    let physical = PhysicalSource::new(source);
+                    let resident = physical.resident().map(|resident| resident.stored());
+                    (physical.stored(), resident)
+                });
+            assert_eq!(resident.is_none(), source_backed);
+            let resident = resident.transpose().unwrap();
+            let ((metadata, resident_reads), reads) =
+                test_util::allocation::measure(&reads_region, || {
+                    (
+                        stored.read_range(range),
+                        resident.as_ref().map(|resident| {
+                            (resident.borrow_range(range), resident.read_range(range))
+                        }),
+                    )
+                });
+            let metadata = metadata.unwrap();
+            assert_eq!(metadata.as_ref(), expected);
+            assert_eq!(metadata.as_ptr(), pointer);
+            assert_eq!(metadata.offset(), effective_base as u64);
+            assert!(metadata.shared().is_none());
+            if let Some((bytes, metadata)) = resident_reads {
+                let bytes = bytes.unwrap();
+                assert_eq!(bytes, expected);
+                assert_eq!(bytes.as_ptr(), pointer);
+                let metadata = metadata.unwrap();
+                assert_eq!(metadata.as_ref(), expected);
+                assert_eq!(metadata.as_ptr(), pointer);
+                assert_eq!(metadata.offset(), effective_base as u64);
+                assert!(metadata.shared().is_none());
+            }
+            assert_eq!(
+                (
+                    construction.blocks,
+                    construction.bytes,
+                    construction.peak_bytes,
+                    construction.live_bytes,
+                ),
+                (0, 0, 0, 0),
+                "{construction}",
+            );
+            assert_eq!(
+                (
+                    reads.blocks,
+                    reads.bytes,
+                    reads.peak_bytes,
+                    reads.live_bytes
+                ),
+                (0, 0, 0, 0),
+                "{reads}",
+            );
+        });
         file.close().unwrap();
     }
 

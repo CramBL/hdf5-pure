@@ -52,16 +52,22 @@
 //! two tests that provoke them directly.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hdf5::MajorErrorCode;
 use hdf5::MinorErrorCode;
 use hdf5::dataset::Layout as CLayout;
 use hdf5::file::LibraryVersion;
+use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
+use hdf5_pure::MetadataBytes;
+use hdf5_pure::MetadataCacheConfig;
+use hdf5_pure::Source;
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
@@ -160,6 +166,110 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
             .unwrap(),
         [4, 5, 6, 7]
     );
+}
+
+#[rstest]
+#[case::zero_base(0, 0)]
+#[case::userblock(512, 512)]
+#[case::forward_relocated(0, 512)]
+#[case::backward_relocated(512, 0)]
+fn custom_sources_borrow_native_array_metadata_after_relocation(
+    #[case] encoded_base: usize,
+    #[case] effective_base: usize,
+    #[values(false, true)] cache_enabled: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native-arrays.h5");
+    let fixed_values = [2, 3, 5, 7, 11, 13, 17, 19];
+    let extensible_values = [23, 29, 31, 37, 41, 43, 47, 53];
+    let native = hdf5::File::with_options()
+        .with_fcpl(|properties| properties.userblock(encoded_base as u64))
+        .with_fapl(|properties| properties.libver_v110())
+        .create(&path)
+        .unwrap();
+    {
+        let fixed = native
+            .new_dataset::<i32>()
+            .shape([fixed_values.len()])
+            .chunk([2])
+            .deflate(1)
+            .create("fixed")
+            .unwrap();
+        fixed.write(&fixed_values).unwrap();
+        assert_eq!(fixed.read_raw::<i32>().unwrap(), fixed_values);
+        let extensible = native
+            .new_dataset::<i32>()
+            .shape((0..,))
+            .chunk([2])
+            .deflate(1)
+            .create("extensible")
+            .unwrap();
+        extensible.resize([extensible_values.len()]).unwrap();
+        extensible.write(&extensible_values).unwrap();
+        assert_eq!(extensible.read_raw::<i32>().unwrap(), extensible_values);
+    }
+    native.close().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut relocated = vec![0; effective_base];
+    relocated.extend_from_slice(&original[encoded_base..]);
+    let metadata_reads = Arc::new(AtomicU64::new(0));
+    let source = BorrowedMetadataSource {
+        bytes: relocated,
+        metadata_reads: Arc::clone(&metadata_reads),
+    };
+    let file = if cache_enabled {
+        File::from_source_with_options(
+            source,
+            FileAccessProperties::new().with_metadata_cache(MetadataCacheConfig::new(1_048_576)),
+        )
+    } else {
+        File::from_source(source)
+    }
+    .unwrap();
+    assert_eq!(file.superblock().base_address.get(), encoded_base as u64);
+    let root = file.superblock().root_group_address;
+    assert_eq!(
+        file.resolve_address(root).unwrap().get(),
+        effective_base as u64 + root.get()
+    );
+    {
+        let fixed = file.dataset("fixed").unwrap();
+        assert_eq!(fixed.chunk_index().unwrap(), Some(ChunkIndex::FixedArray));
+        assert_eq!(fixed.read_i32().unwrap(), fixed_values);
+        assert_eq!(
+            fixed.read_i32_region(&[1], &[5]).unwrap(),
+            fixed_values[1..6]
+        );
+        let extensible = file.dataset("extensible").unwrap();
+        assert_eq!(
+            extensible.chunk_index().unwrap(),
+            Some(ChunkIndex::ExtensibleArray)
+        );
+        assert_eq!(extensible.read_i32().unwrap(), extensible_values);
+        assert_eq!(
+            extensible.read_i32_region(&[1], &[5]).unwrap(),
+            extensible_values[1..6]
+        );
+    }
+    let reads = metadata_reads.load(Ordering::Relaxed);
+    assert!(reads > 0);
+    if cache_enabled {
+        let stats = file.metadata_cache_stats().unwrap();
+        assert_eq!(stats.misses(), reads);
+        assert_eq!(
+            (
+                stats.hits(),
+                stats.entries(),
+                stats.bytes(),
+                stats.evictions(),
+                stats.invalidations()
+            ),
+            (0, 0, 0, 0, 0)
+        );
+    } else {
+        assert_eq!(file.metadata_cache_stats(), None);
+    }
+    file.close().unwrap();
 }
 
 #[rstest]
@@ -929,5 +1039,64 @@ fn every_c_written_shape_reads_under_a_userblock() {
             (0..32).collect::<Vec<i32>>(),
             "extensible-array index under userblock {ub}"
         );
+    }
+}
+
+struct BorrowedMetadataSource {
+    bytes: Vec<u8>,
+    metadata_reads: Arc<AtomicU64>,
+}
+
+impl BorrowedMetadataSource {
+    fn bytes_in(&self, offset: u64, length: usize) -> Result<&[u8], FormatError> {
+        let end = offset
+            .checked_add(length as u64)
+            .ok_or(FormatError::OffsetOverflow {
+                offset,
+                length: length as u64,
+            })?;
+        if end > self.len() {
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: self.len(),
+            });
+        }
+        let start =
+            usize::try_from(offset).map_err(|_error| FormatError::ValueTooLargeForPlatform {
+                value: offset,
+                target: "usize",
+            })?;
+        let end_index =
+            usize::try_from(end).map_err(|_error| FormatError::ValueTooLargeForPlatform {
+                value: end,
+                target: "usize",
+            })?;
+        self.bytes
+            .get(start..end_index)
+            .ok_or(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: self.bytes.len() as u64,
+            })
+    }
+}
+
+impl Source for BorrowedMetadataSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+        buffer.copy_from_slice(self.bytes_in(offset, buffer.len())?);
+        Ok(())
+    }
+
+    fn read_metadata_at(&self, _offset: u64, _length: usize) -> Result<Vec<u8>, FormatError> {
+        Err(FormatError::Source("unexpected owned metadata read".into()))
+    }
+
+    fn read_metadata(&self, offset: u64, length: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let metadata = MetadataBytes::from_slice(offset, self.bytes_in(offset, length)?)?;
+        self.metadata_reads.fetch_add(1, Ordering::Relaxed);
+        Ok(metadata)
     }
 }
