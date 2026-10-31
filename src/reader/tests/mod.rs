@@ -2083,7 +2083,6 @@ fn empty_region_reads_preserve_layout_errors(
     )
     .unwrap();
     let result = read_region_framed(
-        &BytesSource::new(&[]),
         &source::zero_base_source(&BytesSource::new(&[])),
         &region,
         FormatWidths::from_sizes(8, 8).unwrap(),
@@ -2116,7 +2115,6 @@ fn compact_regions_read_selected_columns() {
     .unwrap();
     assert_eq!(
         read_region_framed(
-            &BytesSource::new(&[]),
             &source::zero_base_source(&BytesSource::new(&[])),
             &region,
             FormatWidths::from_sizes(8, 8).unwrap(),

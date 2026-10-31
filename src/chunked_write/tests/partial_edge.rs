@@ -664,8 +664,7 @@ fn read_back(assembled: &ChunkedDataResult, shape: &[u64], fill: FillPattern<'_>
         .as_ref()
         .map(|message| FilterPipeline::parse(message).unwrap());
     chunked_read::read_chunked_data_cached(
-        &file,
-        &source::zero_base_source(&source::BytesSource::new(&file)),
+        source::zero_base_bytes(&file),
         RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill).unwrap(),
         crate::file_writer::WIDTHS,
         &ChunkCache::new(),

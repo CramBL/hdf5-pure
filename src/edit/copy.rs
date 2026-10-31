@@ -944,7 +944,6 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
                 };
 
                 let infos = chunked_read::enumerate_chunks_from_source(
-                    &dview,
                     &PhysicalSource::new(src).stored(base),
                     &layout,
                     &ds,

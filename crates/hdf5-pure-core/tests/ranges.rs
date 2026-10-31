@@ -1,6 +1,6 @@
 use core::fmt::Debug;
 
-use hdf5_pure_core::__private::{Address, StoredAddressExt};
+use hdf5_pure_core::__private::{Address, MetadataFrame, StoredAddressExt};
 use hdf5_pure_core::{AddressRange, FormatError, PhysicalAddress, StoredAddress};
 use rstest::rstest;
 
@@ -152,4 +152,20 @@ fn assert_intersection<A: Address + Debug>(
     assert_eq!(right.intersection(left), expected);
     assert_eq!(left.overlaps(right), expected.is_some());
     assert_eq!(right.overlaps(left), expected.is_some());
+}
+
+#[rstest]
+#[case::zero(0)]
+#[case::userblock(512)]
+#[case::maximum_end(u64::MAX - 3)]
+fn metadata_frame_range_bounds_the_last_byte(#[case] origin: u64) {
+    let frame = MetadataFrame::new(PhysicalAddress::new(origin), &[1, 2, 3]).unwrap();
+    let range = frame.range();
+    assert_eq!(range.start(), PhysicalAddress::new(origin));
+    assert_eq!(range.end(), PhysicalAddress::new(origin + 3));
+    let offset = range.end().checked_distance_from(frame.origin()).unwrap() - 1;
+    let last = frame.read_at(offset, 1).unwrap();
+    assert_eq!(last.as_ref(), &[3]);
+    assert_eq!(last.offset(), origin + 2);
+    assert_eq!(last.range().end(), range.end());
 }

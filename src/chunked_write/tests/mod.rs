@@ -776,8 +776,7 @@ fn roundtrip_chunked(
         .map(|pm| crate::filter_pipeline::FilterPipeline::parse(pm).unwrap());
 
     let output = chunked_read::read_chunked_data_cached(
-        &file_data,
-        &source::zero_base_source(&source::BytesSource::new(&file_data)),
+        source::zero_base_bytes(&file_data),
         RawReadSpec::parse(
             &layout,
             &dataspace,
@@ -1431,8 +1430,7 @@ fn roundtrip_ea(
     let datatype = make_f64_type();
 
     let output = chunked_read::read_chunked_data_cached(
-        &file_data,
-        &source::zero_base_source(&source::BytesSource::new(&file_data)),
+        source::zero_base_bytes(&file_data),
         RawReadSpec::plain(&layout, &dataspace, &datatype),
         crate::file_writer::WIDTHS,
         &ChunkCache::new(),

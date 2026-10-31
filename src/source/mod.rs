@@ -27,7 +27,7 @@ use crate::error::FormatError;
 
 mod view;
 
-pub(crate) use view::{PhysicalSource, StoredSource};
+pub(crate) use view::{PhysicalSource, StoredBytes, StoredRead, StoredSource};
 
 /// Default maximum size of one entry admitted to a streaming metadata cache.
 pub const DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES: usize = 64 * 1024;
@@ -636,6 +636,31 @@ impl<S: Source + ?Sized> MetadataSource for SourceMetadata<'_, S> {
     }
 }
 
+/// Adapts stored-coordinate reads to the format parsers' byte-offset interface.
+///
+/// The parser's offsets are interpreted as stored addresses. Metadata reads retain the view's
+/// ownership, physical ranges, and cache behavior.
+pub(crate) struct StoredMetadata<'a, R: StoredRead + ?Sized>(pub(crate) &'a R);
+
+impl<R: StoredRead + ?Sized> MetadataSource for StoredMetadata<'_, R> {
+    type Bytes<'a>
+        = MetadataBytes<'a>
+    where
+        Self: 'a;
+    fn read_metadata(&self, offset: u64, length: usize) -> Result<Self::Bytes<'_>, FormatError> {
+        self.0.read_metadata(StoredAddress::new(offset), length)
+    }
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+        self.0.read_at(StoredAddress::new(offset), buffer)
+    }
+    fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
+        self.0.read_metadata_at(StoredAddress::new(offset), length)
+    }
+}
+
 /// Metadata reads with requests in the coordinate system of `R`.
 ///
 /// Returned [`MetadataBytes`] retain their physical ranges. Implementations for byte slices
@@ -700,6 +725,16 @@ pub(crate) fn framed_metadata(
 #[cfg(test)]
 pub(crate) fn zero_base_source<S: Source + ?Sized>(source: &S) -> StoredSource<'_, S> {
     PhysicalSource::new(source).stored(AddressContext::from_effective_base(BaseAddress::ZERO))
+}
+
+/// Borrows a resident stored-coordinate view of an image whose effective base is zero.
+#[cfg(test)]
+pub(crate) fn zero_base_bytes(bytes: &[u8]) -> StoredBytes<'_> {
+    StoredBytes::new(
+        bytes,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+    )
+    .unwrap()
 }
 
 /// Interprets a legacy locator's base-relative endpoints as stored positions.

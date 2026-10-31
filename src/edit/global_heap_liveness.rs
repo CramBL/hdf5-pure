@@ -322,10 +322,6 @@ impl WriteEngine {
         let element_size = u64::from(slots.element_size.get());
         let mut complete = true;
         crate::chunked_read::visit_decoded_chunks_from_source(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            },
             &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
             spec,
             self.widths(),

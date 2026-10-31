@@ -84,7 +84,7 @@ use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 #[cfg(test)]
 use crate::source;
-use crate::source::Source;
+use crate::source::{PhysicalSource, Source};
 use crate::width::{FormatWidths, OffsetWidth};
 
 mod metadata;
@@ -749,8 +749,14 @@ impl Located {
             ))?;
         let chunk = self.chunk_info(rec);
         let allocation = ChunkAllocation::capture(file.addresses(), &chunk)?;
-        let live =
-            chunk.read_live_elements(file, scratch, self.flags, pipeline, ctx, self.current_dim)?;
+        let live = chunk.read_live_elements(
+            &PhysicalSource::new(file).stored(file.addresses()),
+            scratch,
+            self.flags,
+            pipeline,
+            ctx,
+            self.current_dim,
+        )?;
         Ok((
             live,
             CapturedChunkReference {
