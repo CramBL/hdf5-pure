@@ -33,6 +33,7 @@ pub mod __private;
 
 pub use address::BaseAddress;
 pub use address::DecodedStoredAddress;
+pub use address::PhysicalAddress;
 pub use address::StoredAddress;
 pub use dataspace::MaxExtent;
 pub use datatype::CharacterSet;

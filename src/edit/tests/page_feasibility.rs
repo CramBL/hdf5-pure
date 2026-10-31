@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;

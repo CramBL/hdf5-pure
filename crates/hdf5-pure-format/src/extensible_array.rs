@@ -26,7 +26,7 @@ use core::ops::Range;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;

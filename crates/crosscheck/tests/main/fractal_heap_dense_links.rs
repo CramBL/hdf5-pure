@@ -22,9 +22,8 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use hdf5_pure::Source;
-use hdf5_pure_core::__private::{
-    BaseAddressExt, FileRange, FileRegion, PhysicalAddress, StoredAddressExt,
-};
+use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, StoredAddressExt};
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
     BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, FractalHeapBlock,

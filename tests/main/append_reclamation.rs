@@ -165,8 +165,8 @@ fn page_buffered_replacements_survive_sync_and_reopen(
     for chunk in chunks {
         for section in sections.sections() {
             assert!(
-                chunk.address + chunk.storage_size <= section.address()
-                    || section.end_address() <= chunk.address
+                chunk.address + chunk.storage_size <= section.address().get()
+                    || section.end_address().get() <= chunk.address
             );
         }
     }
@@ -183,8 +183,8 @@ fn assert_retired_chunk_is_reusable(file: &File, predecessor: &Chunk) {
             .unwrap()
             .sections()
             .iter()
-            .any(|section| section.address() <= predecessor.address
-                && predecessor.address + predecessor.storage_size <= section.end_address()),
+            .any(|section| section.address().get() <= predecessor.address
+                && predecessor.address + predecessor.storage_size <= section.end_address().get()),
         "predecessor {}..{} is unavailable",
         predecessor.address,
         predecessor.address + predecessor.storage_size

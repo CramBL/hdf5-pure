@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use test_util::superblock;
 
 use super::super::*;
-use crate::FreeSectionCoordinates;
 use crate::chunked_write::{ChunkMeta, ChunkProvider};
 use crate::convert;
 use crate::data_layout::ChunkedLayoutFlags;
@@ -228,9 +227,7 @@ fn aggregated_creation_streams_final_addresses(
                 .sections()
                 .iter()
                 .all(|section| {
-                    section.coordinates() == FreeSectionCoordinates::Stored
-                        && section.length().get() >= 9
-                        && section.end_address() <= length - userblock
+                    section.length().get() >= 9 && section.end_address().get() <= length - userblock
                 })
         );
     } else {

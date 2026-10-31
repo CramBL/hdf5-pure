@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private as free_space;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;

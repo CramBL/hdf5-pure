@@ -25,7 +25,6 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::FreeSections;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
@@ -34,6 +33,7 @@ use hdf5_pure::MemoryStrategy;
 use hdf5_pure::MessageType;
 use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::PersistedFreeSpacePolicy;
+use hdf5_pure::PhysicalAddress;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -177,15 +177,15 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
             .iter()
             .zip(sections.sections())
         {
-            assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
-            assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
+            let _: StoredAddress = stored.address();
+            let _: PhysicalAddress = physical.address();
             assert_eq!(
-                physical.address(),
-                stored.address() + reopened.superblock().base_address.get()
+                physical.address().get(),
+                stored.address().get() + reopened.superblock().base_address.get()
             );
             assert_eq!(physical.length(), stored.length());
-            assert!(stored.address() >= previous_end);
-            previous_end = stored.end_address();
+            assert!(stored.address().get() >= previous_end);
+            previous_end = stored.end_address().get();
             assert!(
                 previous_end <= reopened.file_size() - reopened.superblock().base_address.get()
             );
@@ -522,11 +522,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
     added.write_raw(&[13u8; 100]).unwrap();
     let allocation = file_space::libhdf5_contiguous_extent(&added);
     assert_eq!(
-        test_util_hdf5::covered_free_bytes!(
-            &reusable,
-            &allocation,
-            FreeSectionCoordinates::Absolute
-        ),
+        test_util_hdf5::covered_free_bytes!(&reusable, &allocation, PhysicalAddress),
         100
     );
     drop(added);
@@ -626,9 +622,8 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
             .sections()
             .iter()
             .any(|section| {
-                section.coordinates() == FreeSectionCoordinates::Stored
-                    && section.address() + userblock == generic_fragment.start
-                    && section.end_address() + userblock == generic_fragment.end
+                section.address().get() + userblock == generic_fragment.start
+                    && section.end_address().get() + userblock == generic_fragment.end
             }),
         "continuations={continuations:?}, fragment={generic_fragment:?}, free={:?}",
         File::from_bytes(original.clone())
@@ -669,7 +664,7 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
             test_util_hdf5::covered_free_bytes!(
                 &file.reusable_free_sections().unwrap(),
                 &(address..address + length),
-                FreeSectionCoordinates::Absolute
+                PhysicalAddress
             ),
             0
         );
@@ -820,9 +815,10 @@ fn assert_header_reclamation_state(
     let free = file.reusable_free_sections().unwrap();
     assert_rust_header_survivors(file, action, 7);
     assert!(
-        free.sections()
-            .iter()
-            .all(|section| !range::overlaps(&(section.address()..section.end_address()), partial)),
+        free.sections().iter().all(|section| !range::overlaps(
+            &(section.address().get()..section.end_address().get()),
+            partial
+        )),
         "{free:?}"
     );
     assert_eq!(
@@ -835,15 +831,11 @@ fn assert_header_reclamation_state(
     );
     if !matches!(action, HeaderReclamation::UnlinkDataset) {
         assert_eq!(
-            test_util_hdf5::covered_free_bytes!(
-                &free,
-                generic_fragment,
-                FreeSectionCoordinates::Absolute
-            ),
+            test_util_hdf5::covered_free_bytes!(&free, generic_fragment, PhysicalAddress),
             0
         );
         assert_eq!(
-            test_util_hdf5::covered_free_bytes!(&free, partial, FreeSectionCoordinates::Absolute),
+            test_util_hdf5::covered_free_bytes!(&free, partial, PhysicalAddress),
             0
         );
     }
@@ -2213,11 +2205,7 @@ fn strict_persisted_open_recovers_libhdf5_managers(
     let reusable = strict.reusable_free_sections().unwrap();
     assert_eq!(reusable, tolerant.reusable_free_sections().unwrap());
     assert_eq!(
-        test_util_hdf5::covered_free_bytes!(
-            &reusable,
-            &(hole..hole + 1600),
-            FreeSectionCoordinates::Absolute
-        ),
+        test_util_hdf5::covered_free_bytes!(&reusable, &(hole..hole + 1600), PhysicalAddress),
         1600
     );
     strict
@@ -2324,7 +2312,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
         free.free_sections()
             .sections()
             .iter()
-            .any(|section| { section.address() == freed && section.length().get() == 1600 }),
+            .any(|section| { section.address().get() == freed && section.length().get() == 1600 }),
         "the deleted dataset's storage at {freed} is a free section, {free:?}"
     );
     assert_eq!(free.free_sections().free_bytes(), free_c);
@@ -2593,7 +2581,7 @@ fn an_editor_reclaims_the_complete_section_list_allocation_the_test_enlarges() {
     session.close().unwrap();
     let file_len = std::fs::metadata(&path).unwrap().len();
     assert_eq!(
-        test_util_hdf5::covered_free_bytes!(&free, &allocation, FreeSectionCoordinates::Absolute)
+        test_util_hdf5::covered_free_bytes!(&free, &allocation, PhysicalAddress)
             + range::covered_len(&[(file_len, u64::MAX - file_len)], &allocation),
         allocation.end - allocation.start
     );
@@ -2810,8 +2798,8 @@ fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_sectio
             !free
                 .sections()
                 .iter()
-                .any(|section| section.address() < pointed_to.end
-                    && pointed_to.start < section.end_address()),
+                .any(|section| section.address().get() < pointed_to.end
+                    && pointed_to.start < section.end_address().get()),
             "after commit {round}, the free regions {free:?} reach the {pointed_to:?} the header points to"
         );
     }
@@ -2872,7 +2860,8 @@ fn a_libhdf5_section_list_of_another_header_is_reported_and_neither_seeded_nor_r
         !free
             .sections()
             .iter()
-            .any(|section| section.address() < list_end && list_addr < section.end_address()),
+            .any(|section| section.address().get() < list_end
+                && list_addr < section.end_address().get()),
         "the free regions {free:?} reach the section list at {list:?}"
     );
     assert_eq!(std::fs::read(&path).unwrap()[list.clone()], bytes[list]);
@@ -2934,8 +2923,8 @@ fn reusable_free_space(path: &std::path::Path) -> Vec<(u64, u64)> {
         .sections()
         .iter()
         .map(|section| {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
-            (section.address(), section.length().get())
+            let _: PhysicalAddress = section.address();
+            (section.address().get(), section.length().get())
         })
         .collect()
 }
@@ -3227,7 +3216,7 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     let free = assert_supported_free_sections(&path);
     assert!(
         free.free_sections().sections().iter().any(|section| {
-            section.address() == freed - userblock && section.length().get() == 1600
+            section.address().get() == freed - userblock && section.length().get() == 1600
         }),
         "{free:?}"
     );
@@ -3380,9 +3369,7 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         .unwrap();
     assert!(
         persisted.free_sections().sections().iter().any(|section| {
-            section.coordinates() == FreeSectionCoordinates::Stored
-                && section.address() == freed - userblock
-                && section.length().get() == 1600
+            section.address().get() == freed - userblock && section.length().get() == 1600
         }),
         "{persisted:?}"
     );
@@ -3398,9 +3385,9 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         .iter()
         .zip(persisted.free_sections().sections())
     {
-        assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
-        assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(physical.address(), stored.address() + userblock);
+        let _: PhysicalAddress = physical.address();
+        let _: StoredAddress = stored.address();
+        assert_eq!(physical.address().get(), stored.address().get() + userblock);
         assert_eq!(physical.length(), stored.length());
     }
     session
@@ -3551,7 +3538,8 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
     );
     assert_eq!(
         persisted.free_sections().sections().iter().any(|section| {
-            section.address() == last_page_of_big.0 && section.length().get() == last_page_of_big.1
+            section.address().get() == last_page_of_big.0
+                && section.length().get() == last_page_of_big.1
         }),
         hdf5::library_version() < (1, 12, 0),
         "{persisted:?}"
@@ -3564,13 +3552,14 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
         .sections()
         .iter()
         .filter(|section| {
-            section.address() != last_page_of_big.0 || section.length().get() != last_page_of_big.1
+            section.address().get() != last_page_of_big.0
+                || section.length().get() != last_page_of_big.1
         });
     assert_eq!(reusable.section_count(), recovered.clone().count());
     for (physical, stored) in reusable.sections().iter().zip(recovered) {
-        assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
-        assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(physical.address(), stored.address() + userblock);
+        let _: PhysicalAddress = physical.address();
+        let _: StoredAddress = stored.address();
+        assert_eq!(physical.address().get(), stored.address().get() + userblock);
         assert_eq!(physical.length(), stored.length());
     }
     session
@@ -4628,8 +4617,8 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
         assert_eq!(ours.file_size(), len, "{label}: superblock EOF matches");
         let free_ours = ours.persisted_free_sections().unwrap().unwrap();
         for section in free_ours.free_sections().sections() {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-            let (addr, size) = (section.address(), section.length().get());
+            let _: StoredAddress = section.address();
+            let (addr, size) = (section.address().get(), section.length().get());
             assert!(
                 addr + size <= len,
                 "{label}: a persisted section [{addr}, {}) runs past the {len}-byte \
@@ -4736,12 +4725,9 @@ fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: boo
 
         make_log(&file, "log2");
         let before = file.reusable_free_sections().unwrap();
-        initial_free = Coverage::new(
-            before
-                .sections()
-                .iter()
-                .map(|section| Interval::new(section.address(), section.length().get()).unwrap()),
-        );
+        initial_free = Coverage::new(before.sections().iter().map(|section| {
+            Interval::new(section.address().get(), section.length().get()).unwrap()
+        }));
         assert!(!initial_free.is_empty());
         file.dataset("log2").unwrap().append(&payload).unwrap();
         file.close().unwrap();
@@ -4773,13 +4759,10 @@ fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: boo
             .map(|(address, length)| Interval::new(address, length).unwrap()),
     );
     let report = ours.persisted_free_sections().unwrap().unwrap();
-    let free = Coverage::new(
-        report
-            .free_sections()
-            .sections()
-            .iter()
-            .map(|section| Interval::new(section.address(), section.length().get()).unwrap()),
-    );
+    let free =
+        Coverage::new(report.free_sections().sections().iter().map(|section| {
+            Interval::new(section.address().get(), section.length().get()).unwrap()
+        }));
     assert!(initial_free.difference(&live).difference(&free).is_empty());
     if !paged {
         assert!(file_space::serialized_manager_padding(&path) > 0);
@@ -5032,7 +5015,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
         let tracked = test_util_hdf5::covered_free_bytes!(
             &file.reusable_free_sections().unwrap(),
             &extent,
-            FreeSectionCoordinates::Absolute
+            PhysicalAddress
         );
         (extent, tracked)
     };
@@ -5370,7 +5353,7 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
         let session = test_util_hdf5::covered_free_bytes!(
             &file.reusable_free_sections().unwrap(),
             &tail,
-            FreeSectionCoordinates::Absolute
+            PhysicalAddress
         );
         (tail, session)
     };
@@ -5498,7 +5481,7 @@ fn paged_tracked_after_deletions(
         test_util_hdf5::covered_free_bytes!(
             &file.reusable_free_sections().unwrap(),
             extent,
-            FreeSectionCoordinates::Absolute
+            PhysicalAddress
         )
     };
     {
@@ -5623,7 +5606,11 @@ fn c_create_n(file: &hdf5::File) {
         .unwrap();
 }
 
-fn assert_section_map(sections: &FreeSections, expected: &[(u64, u64)], boundary: u64) {
+fn assert_section_map(
+    sections: &FreeSections<StoredAddress>,
+    expected: &[(u64, u64)],
+    boundary: u64,
+) {
     let mut expected = expected.to_vec();
     expected.sort_unstable();
     assert_eq!(sections.section_count(), expected.len());
@@ -5637,22 +5624,23 @@ fn assert_section_map(sections: &FreeSections, expected: &[(u64, u64)], boundary
         assert!(address >= previous_end);
         previous_end = address.checked_add(length).unwrap();
         assert!(previous_end <= boundary);
-        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(section.address(), address);
+        let _: StoredAddress = section.address();
+        assert_eq!(section.address().get(), address);
         assert_eq!(section.length().get(), length);
     }
 }
 
-fn covered_free_bytes(sections: &FreeSections, extent: &Range<u64>) -> u64 {
+fn covered_free_bytes(sections: &FreeSections<StoredAddress>, extent: &Range<u64>) -> u64 {
     sections
         .sections()
         .iter()
         .map(|section| {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+            let _: StoredAddress = section.address();
             section
                 .end_address()
+                .get()
                 .min(extent.end)
-                .saturating_sub(section.address().max(extent.start))
+                .saturating_sub(section.address().get().max(extent.start))
         })
         .sum()
 }
@@ -5670,11 +5658,7 @@ fn assert_supported_free_sections(path: &Path) -> PersistedFreeSections {
         .unwrap();
     assert_eq!(buffered, streamed);
     let all = buffered.free_sections();
-    assert!(
-        all.sections()
-            .iter()
-            .all(|section| section.coordinates() == FreeSectionCoordinates::Stored)
-    );
+    let _: &FreeSections<StoredAddress> = all;
     assert_eq!(
         buffered
             .managers()

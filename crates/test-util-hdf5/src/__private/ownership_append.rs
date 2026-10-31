@@ -109,9 +109,9 @@ impl Fixture {
             assert!(report.managers().iter().any(|manager| {
                 manager.role() == FreeSpaceManagerRole::PageLargeGeneric
                     && manager.free_sections().sections().iter().any(|section| {
-                        !section.address().is_multiple_of(page)
-                            && section.address().next_multiple_of(page) <= hole.0
-                            && hole.0 + hole.1 <= section.end_address() / page * page
+                        !section.address().get().is_multiple_of(page)
+                            && section.address().get().next_multiple_of(page) <= hole.0
+                            && hole.0 + hole.1 <= section.end_address().get() / page * page
                     })
             }));
             assert!(array_index::libhdf5_chunks(path, 0)[0].size() > initial.len() as u64);
@@ -183,8 +183,8 @@ impl Fixture {
                     .sections()
                     .iter()
                     .all(
-                        |section| chunk.address() + chunk.size() <= section.address()
-                            || section.end_address() <= chunk.address()
+                        |section| chunk.address() + chunk.size() <= section.address().get()
+                            || section.end_address().get() <= chunk.address()
                     )
             );
         }

@@ -14,8 +14,8 @@ use crate::FileBuilder;
 use crate::FileCreateProperties;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
-use crate::FreeSectionCoordinates;
 use crate::MemoryStrategy;
+use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
 use crate::reader::test_util as reader_test_util;
@@ -67,9 +67,13 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     file.commit().unwrap();
     let extent = reader_test_util::contiguous_extent(&file, "added");
     if has_manager {
-        assert!(reusable.sections().iter().any(
-            |section| section.address() <= extent.start && extent.end <= section.end_address()
-        ));
+        assert!(
+            reusable
+                .sections()
+                .iter()
+                .any(|section| section.address().get() <= extent.start
+                    && extent.end <= section.end_address().get())
+        );
     }
     assert!(
         reader_test_util::ownership(&file)
@@ -264,7 +268,7 @@ fn staged_aggr_allocations_reuse_session_windows(
     test_util_hdf5::assert_free_sections!(
         &file.reusable_free_sections().unwrap(),
         &ownership.reusable_free_space,
-        FreeSectionCoordinates::Absolute
+        PhysicalAddress
     );
     if reopen {
         file.close().unwrap();

@@ -551,8 +551,8 @@ fn inspect_deferred_pair(path: &Path, header: usize) -> Result<bool, String> {
         .free_sections()
         .sections()
     {
-        if section.end_address() > header_range.start().get()
-            && range.end().get() > section.address()
+        if section.end_address().get() > header_range.start().get()
+            && range.end().get() > section.address().get()
         {
             return Err(format!(
                 "published pair {header_range:?}..{range:?} overlaps {section:?}"
@@ -1036,7 +1036,7 @@ fn persisted_free_space_holds_nothing_live(path: &Path) -> Verdict {
         for c in chunks {
             let (lo, hi) = (c.address, c.address + c.storage_size);
             for section in report.free_sections().sections() {
-                let (addr, end) = (section.address(), section.end_address());
+                let (addr, end) = (section.address().get(), section.end_address().get());
                 if addr < hi && lo < end {
                     return Err(std::format!(
                         "the managers advertise [{addr}, {}) as free, which overlaps a live \

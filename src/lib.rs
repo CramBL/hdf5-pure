@@ -569,6 +569,8 @@ pub use hdf5_pure_core::LengthWidth;
 #[doc(inline)]
 pub use hdf5_pure_core::OffsetWidth;
 #[doc(inline)]
+pub use hdf5_pure_core::PhysicalAddress;
+#[doc(inline)]
 pub use hdf5_pure_core::StoredAddress;
 
 #[doc(inline)]
@@ -645,8 +647,8 @@ pub use dataset_create_properties::DatasetCreateProperties;
 pub use file_create_properties::FileCreateProperties;
 pub use free_sections::ReusableSpaceStats;
 pub use free_sections::{
-    FreeSection, FreeSectionCoordinates, FreeSections, FreeSpaceManagerRole,
-    FreeSpaceManagerSections, PersistedFreeSections,
+    FreeSection, FreeSections, FreeSpaceManagerRole, FreeSpaceManagerSections,
+    PersistedFreeSections,
 };
 #[doc(inline)]
 pub use hdf5_pure_core::DeflateLevel;

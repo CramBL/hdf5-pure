@@ -9,7 +9,8 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure::StoredAddress;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::FormatWidths;
@@ -98,9 +99,10 @@ fn a_deletion_discards_its_extent_without_a_free_space_manager(
     let free = file.reusable_free_sections().unwrap();
     assert_eq!(free.section_count() > 0, has_aggregate);
     assert!(
-        free.sections()
-            .iter()
-            .all(|section| !range::overlaps(&deleted, &(section.address()..section.end_address()))),
+        free.sections().iter().all(|section| !range::overlaps(
+            &deleted,
+            &(section.address().get()..section.end_address().get())
+        )),
         "{deleted:?}, {free:?}"
     );
 }
@@ -306,11 +308,7 @@ fn a_deleted_extent_is_tracked_from_the_threshold_up(
     };
     assert_eq!(
         (
-            test_util_hdf5::covered_free_bytes!(
-                &session,
-                &deleted,
-                FreeSectionCoordinates::Absolute
-            ),
+            test_util_hdf5::covered_free_bytes!(&session, &deleted, PhysicalAddress),
             range::covered_len(&reopened, &deleted)
         ),
         (tracked, if persist { tracked } else { 0 })
@@ -377,7 +375,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
                 .map(|extent| test_util_hdf5::covered_free_bytes!(
                     &session,
                     extent,
-                    FreeSectionCoordinates::Absolute
+                    PhysicalAddress
                 ))
                 .sum::<u64>(),
             covered(&reopened)
@@ -397,8 +395,8 @@ fn persisted_or_reused_sections(path: &Path, persist: bool) -> Vec<(u64, u64)> {
                 .sections()
                 .iter()
                 .map(|section| {
-                    assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-                    (section.address(), section.length().get())
+                    let _: StoredAddress = section.address();
+                    (section.address().get(), section.length().get())
                 })
                 .collect::<Vec<_>>()
         })
@@ -438,9 +436,10 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
     let retained_end = sections
         .sections()
         .iter()
-        .find(|section| section.end_address() == stats.logical_size())
+        .find(|section| section.end_address().get() == stats.logical_size())
         .unwrap()
-        .address();
+        .address()
+        .get();
     for path in ["x", "y"] {
         file.root()
             .create_dataset(path, |b| {

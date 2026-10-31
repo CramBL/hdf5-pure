@@ -161,11 +161,9 @@ fn immediate_phase_stops_keep_reservations_consumed(
     };
     let finish = start + length;
     assert!(
-        reusable
-            .sections()
-            .iter()
-            .any(|section| section.address() <= start && finish <= section.end_address())
-            || (spare.start() <= start && finish <= spare.end())
+        reusable.sections().iter().any(
+            |section| section.address().get() <= start && finish <= section.end_address().get()
+        ) || (spare.start() <= start && finish <= spare.end())
             || consumed.eoa <= start
     );
     engine.located.insert(address, state);

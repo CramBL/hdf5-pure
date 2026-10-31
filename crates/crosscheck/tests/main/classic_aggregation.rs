@@ -14,10 +14,11 @@ use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
 
@@ -69,8 +70,8 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
             assert!(address >= previous_end);
             previous_end = address.checked_add(length).unwrap();
             assert!(previous_end <= file.size() - userblock);
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-            assert_eq!(section.address(), address);
+            let _: StoredAddress = section.address();
+            assert_eq!(section.address().get(), address);
             assert_eq!(section.length().get(), length);
         }
         let added = file.new_dataset::<i32>().shape(16).create("added").unwrap();
@@ -540,7 +541,7 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
     } else {
         assert!(placed.iter().any(|extent| {
             reusable.sections().iter().any(|section| {
-                section.address() < extent.end && extent.start < section.end_address()
+                section.address().get() < extent.end && extent.start < section.end_address().get()
             })
         }));
     }
@@ -640,10 +641,12 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
     let free = before
         .sections()
         .iter()
-        .find(|section| section.address() <= hole && hole + 4096 <= section.end_address())
+        .find(|section| {
+            section.address().get() <= hole && hole + 4096 <= section.end_address().get()
+        })
         .unwrap();
-    assert_eq!(free.coordinates(), FreeSectionCoordinates::Absolute);
-    let free_start = free.address();
+    let _: PhysicalAddress = free.address();
+    let free_start = free.address().get();
     let free_size = free.length().get();
     file.root()
         .create_dataset("replacement", |dataset| {
@@ -669,8 +672,8 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
         .sections()
         .iter()
         .map(|section| {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
-            section.address()..section.end_address()
+            let _: PhysicalAddress = section.address();
+            section.address().get()..section.end_address().get()
         })
         .collect::<Vec<_>>();
     file.dataset("values")
@@ -933,8 +936,8 @@ fn assert_classic_fixture_partition(file: &File, bytes: &[u8], datasets: &[&str]
             .sections()
             .iter()
             .map(|section| {
-                assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
-                (section.address(), section.length().get())
+                let _: PhysicalAddress = section.address();
+                (section.address().get(), section.length().get())
             }),
     );
     let userblock = file.superblock().base_address.get();

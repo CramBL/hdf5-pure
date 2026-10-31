@@ -382,9 +382,13 @@ inspection. Editing handles return
 [`Error::FreeSectionInspectionUnsupported`](crate::Error::FreeSectionInspectionUnsupported).
 Malformed free-space metadata returns [`Error::Format`](crate::Error::Format). A read-write
 session skips free regions from every persisted manager if any manager cannot be read or parsed.
-Section addresses use
-[`FreeSectionCoordinates::Stored`](crate::FreeSectionCoordinates::Stored), relative to the HDF5
-base address. [Reading data](crate::_guide::reading) is unaffected by the presence or absence of
-these managers.
+The report's sections use [`StoredAddress`](crate::StoredAddress) values relative to the opened
+image's effective base. Session-reusable sections use [`PhysicalAddress`](crate::PhysicalAddress)
+offsets from the beginning of the source, including any userblock prefix. Both
+[`FreeSection::address`](crate::FreeSection::address) and
+[`FreeSection::end_address`](crate::FreeSection::end_address) return the section's address type.
+For a relocated image, the effective base is the physical signature position and can differ from
+the encoded superblock base. [Reading data](crate::_guide::reading) is unaffected by the presence
+or absence of these managers.
 
 When free space is not persisted under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), an ordinary read-write session reuses freed space before aggregate reservations, with both kept in memory for that session alone. Under [`Aggr`](crate::FileSpaceStrategy::Aggr), staged edits and immediate appends use unused aggregate reservations within the session. Under `Aggr` and [`None`](crate::FileSpaceStrategy::None), freed extents are discarded. If churn has left a file with unused gaps and you want to reclaim them outright, [repacking](crate::_guide::repack) rewrites the file compactly.

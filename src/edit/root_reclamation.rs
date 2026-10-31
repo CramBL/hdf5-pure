@@ -1,6 +1,6 @@
 //! Reuse of a superseded root header after publication.
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;

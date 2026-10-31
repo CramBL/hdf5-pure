@@ -13,7 +13,8 @@ use crate::FileBuilder;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
-use crate::FreeSectionCoordinates;
+use crate::PhysicalAddress;
+use crate::StoredAddress;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
 use crate::reader::test_util as reader_test_util;
@@ -49,11 +50,11 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .sections()
         .iter()
         .filter(|section| {
-            section.address() + userblock >= hole.start
-                && section.end_address() + userblock <= hole.end
+            section.address().get() + userblock >= hole.start
+                && section.end_address().get() + userblock <= hole.end
                 && section.length().get() >= 1_200
         })
-        .map(|section| section.address() + userblock)
+        .map(|section| section.address().get() + userblock)
         .min()
         .unwrap();
     let reusable = second.reusable_free_sections().unwrap();
@@ -66,9 +67,9 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .iter()
         .zip(persisted.free_sections().sections())
     {
-        assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
-        assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(physical.address(), stored.address() + userblock);
+        let _: PhysicalAddress = physical.address();
+        let _: StoredAddress = stored.address();
+        assert_eq!(physical.address().get(), stored.address().get() + userblock);
         assert_eq!(physical.length(), stored.length());
     }
     second
@@ -151,19 +152,11 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             .iter()
             .zip(reusable.sections())
         {
+            let _: StoredAddress = section.address();
+            let _: PhysicalAddress = physical.address();
             assert_eq!(
-                section.coordinates(),
-                FreeSectionCoordinates::Stored,
-                "{step:?}"
-            );
-            assert_eq!(
-                physical.coordinates(),
-                FreeSectionCoordinates::Absolute,
-                "{step:?}"
-            );
-            assert_eq!(
-                section.address(),
-                physical.address() - userblock,
+                section.address().get(),
+                physical.address().get() - userblock,
                 "{step:?}"
             );
             assert_eq!(section.length(), physical.length(), "{step:?}");
@@ -235,9 +228,7 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
         .unwrap();
     assert!(
         persisted.free_sections().sections().iter().any(|section| {
-            section.coordinates() == FreeSectionCoordinates::Stored
-                && section.address() == pages.start - userblock
-                && section.length().get() == PAGE
+            section.address().get() == pages.start - userblock && section.length().get() == PAGE
         }),
         "{persisted:?}"
     );

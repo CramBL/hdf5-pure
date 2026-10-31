@@ -332,6 +332,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "MetadataBytes",
         "OffsetWidth",
         "StoredAddress",
+        "PhysicalAddress",
         "VariableLengthStringType",
         "VariableLengthType",
         "SuperblockVersion",

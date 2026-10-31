@@ -9,8 +9,9 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::FreeSections;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::PhysicalAddress;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
 use test_util::data_layout;
@@ -510,14 +511,9 @@ fn assert_reused_for_raw_data(file: &File, collection: &Range<u64>) -> Vec<u8> {
 #[track_caller]
 fn assert_reclaimed(file: &File, collection: &Range<u64>) {
     let sections = file.reusable_free_sections().unwrap();
-    assert!(
-        sections
-            .sections()
-            .iter()
-            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
-    );
+    let _: &FreeSections<PhysicalAddress> = &sections;
     let reusable = sections.sections().iter().any(|section| {
-        section.address() <= collection.start && collection.end <= section.end_address()
+        section.address().get() <= collection.start && collection.end <= section.end_address().get()
     });
     assert!(
         reusable || file.file_size() <= collection.start,
@@ -531,18 +527,13 @@ fn assert_reclaimed(file: &File, collection: &Range<u64>) {
 #[track_caller]
 fn assert_kept(file: &File, collection: &Range<u64>) {
     let sections = file.reusable_free_sections().unwrap();
+    let _: &FreeSections<PhysicalAddress> = &sections;
     assert!(
         sections
             .sections()
             .iter()
-            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
-    );
-    assert!(
-        sections
-            .sections()
-            .iter()
-            .all(|section| section.end_address() <= collection.start
-                || collection.end <= section.address()),
+            .all(|section| section.end_address().get() <= collection.start
+                || collection.end <= section.address().get()),
         "the collection at {collection:?} overlaps the reusable space {:?}",
         sections
     );

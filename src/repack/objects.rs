@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::ops::Range;
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use super::headers::HeaderCache;
 use crate::address::AddressContext;

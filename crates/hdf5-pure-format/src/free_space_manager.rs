@@ -19,7 +19,7 @@ use core::num::NonZeroU64;
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -50,7 +50,8 @@ const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
 /// ```
 /// use hdf5_pure_core::{BaseAddress, StoredAddress};
 /// use hdf5_pure_core::__private::{BaseAddressExt, DecodedStoredAddress, FileRegion,
-///     PhysicalAddress, StoredAddressExt};
+///     StoredAddressExt};
+/// use hdf5_pure_core::PhysicalAddress;
 /// use hdf5_pure_format::__private as format;
 /// use hdf5_pure_format::__private::FormatWidths;
 /// use hdf5_pure_format::__private::FreeSection;
@@ -355,7 +356,7 @@ impl FreeSpaceManagerHeaderFrame {
     /// use hdf5_pure_core::__private::BaseAddressExt;
     /// use hdf5_pure_core::__private::DecodedStoredAddress;
     /// use hdf5_pure_core::__private::FileRegion;
-    /// use hdf5_pure_core::__private::PhysicalAddress;
+    /// use hdf5_pure_core::PhysicalAddress;
     /// use hdf5_pure_core::__private::StoredAddressExt;
     /// use hdf5_pure_core::BaseAddress;
     /// use hdf5_pure_core::StoredAddress;

@@ -88,12 +88,13 @@ pub fn inspect_initialized_index(path: &Path, header: usize, parameters: [u8; 5]
     let free = pure.persisted_free_sections().unwrap().unwrap();
     for section in free.free_sections().sections() {
         assert!(
-            section.end_address() <= address.get() || section.address() >= range.end().get(),
+            section.end_address().get() <= address.get()
+                || section.address().get() >= range.end().get(),
             "allocated pair {}..{} overlaps free {}..{}",
             address.get(),
             range.end().get(),
-            section.address(),
-            section.end_address()
+            section.address().get(),
+            section.end_address().get()
         );
     }
     pure.close().unwrap();

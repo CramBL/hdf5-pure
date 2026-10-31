@@ -7,7 +7,8 @@ use hdf5_pure::BaseAddress;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure::StoredAddress;
-use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{
     AccessMode, BTreeV1Node, FormatWidths, LocalHeapDataSegment, LocalHeapLocator, ObjectHeader,
     SymbolTableMessage, SymbolTableNode, SymbolTableNodeLocator,

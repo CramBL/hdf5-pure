@@ -2,7 +2,7 @@
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use test_util::widths::Widths;
 
 use crate::width::FormatWidths;

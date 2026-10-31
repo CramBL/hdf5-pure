@@ -1,6 +1,6 @@
 //! Recycling of persistent extension and manager storage after publication.
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ManagerSections;
 
 use crate::address::StoredAddress;

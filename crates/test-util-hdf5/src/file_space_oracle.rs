@@ -12,10 +12,10 @@ use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::DecodedStoredAddress;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::FreeSections;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::PersistedFreeSections;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::{File, FileSpaceStrategy};
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
@@ -267,13 +267,13 @@ fn assert_manager_sections(file: &File, report: &PersistedFreeSections, bytes: &
 }
 
 /// Checks stored coordinates and returns address-length pairs for comparison.
-fn section_pairs(sections: &FreeSections) -> Vec<(u64, u64)> {
+fn section_pairs(sections: &FreeSections<StoredAddress>) -> Vec<(u64, u64)> {
     sections
         .sections()
         .iter()
         .map(|section| {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-            (section.address(), section.length().get())
+            let _: StoredAddress = section.address();
+            (section.address().get(), section.length().get())
         })
         .collect()
 }

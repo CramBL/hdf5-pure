@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;

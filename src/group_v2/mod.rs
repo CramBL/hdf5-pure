@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::num::NonZeroU16;
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::BTreeV2LinkNameIndex;
 use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};

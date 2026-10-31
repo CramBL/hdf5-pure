@@ -64,9 +64,13 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     file.commit().unwrap();
     let extent = file_space::contiguous_extent(&file, "added");
     if has_manager {
-        assert!(reusable.sections().iter().any(
-            |section| section.address() <= extent.start && extent.end <= section.end_address()
-        ));
+        assert!(
+            reusable
+                .sections()
+                .iter()
+                .any(|section| section.address().get() <= extent.start
+                    && extent.end <= section.end_address().get())
+        );
     }
     file.close().unwrap();
     let file = File::open_rw_with_options(&path, properties).unwrap();

@@ -6,8 +6,9 @@
 
 use alloc::sync::Arc;
 
-use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
 use hdf5_pure_core::BaseAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::btree_v2::{
@@ -90,8 +91,9 @@ impl FractalHeapHugeObjectLayout {
     /// ```
     /// # use hdf5_pure_core::BaseAddress;
     /// # use hdf5_pure_core::__private::{
-    /// #     BaseAddressExt, FileRange, FileRegion, PhysicalAddress, StoredAddressExt,
+    /// #     BaseAddressExt, FileRange, FileRegion, StoredAddressExt,
     /// # };
+    /// # use hdf5_pure_core::PhysicalAddress;
     /// # use hdf5_pure_format::FormatError;
     /// # use hdf5_pure_format::__private::{
     /// #     FormatWidths, FractalHeapHeader, FractalHeapHugeObjectId, FractalHeapHugeObjectLayout,

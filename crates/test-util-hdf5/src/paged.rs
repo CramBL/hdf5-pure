@@ -9,7 +9,6 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
@@ -75,7 +74,7 @@ pub fn write_small_large_i32(path: &Path, page_size: u64) {
 ///
 /// ```
 /// use hdf5_pure::File;
-/// use hdf5_pure::FreeSectionCoordinates;
+/// use hdf5_pure::StoredAddress;
 /// use test_util_hdf5::paged;
 ///
 /// # let dir = tempfile::tempdir()?;
@@ -86,8 +85,8 @@ pub fn write_small_large_i32(path: &Path, page_size: u64) {
 /// let report = file.persisted_free_sections()?.expect("persistence is configured");
 /// let sections = report.free_sections().sections();
 /// assert_eq!(sections.len(), 1);
-/// assert_eq!(sections[0].coordinates(), FreeSectionCoordinates::Stored);
-/// assert_eq!(sections[0].address(), 513);
+/// let start: StoredAddress = sections[0].address();
+/// assert_eq!(start.get(), 513);
 /// assert_eq!(sections[0].length().get(), 511);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -196,10 +195,16 @@ pub fn assert_consistent(path: &Path, page_size: u64) {
     let free = file.persisted_free_sections().unwrap().unwrap();
     let mut previous_end = 0u64;
     for section in free.free_sections().sections() {
-        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-        assert!(section.address() >= previous_end, "sections do not overlap");
-        assert!(section.end_address() <= eoa, "section within the file");
-        previous_end = section.end_address();
+        let _: StoredAddress = section.address();
+        assert!(
+            section.address().get() >= previous_end,
+            "sections do not overlap"
+        );
+        assert!(
+            section.end_address().get() <= eoa,
+            "section within the file"
+        );
+        previous_end = section.end_address().get();
     }
 }
 

@@ -11,7 +11,7 @@ use hdf5_pure::MaxExtent;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 #[test]
 fn file_region_failures_use_the_public_error() {

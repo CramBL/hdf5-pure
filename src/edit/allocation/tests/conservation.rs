@@ -755,7 +755,7 @@ impl Observation {
             .free_sections()
             .sections()
             .iter()
-            .map(|section| Interval::new(section.address(), section.length().get()).unwrap())
+            .map(|section| Interval::new(section.address().get(), section.length().get()).unwrap())
             .collect::<Vec<_>>();
         assert_disjoint(&mut raw_free, "raw free sections");
         let free = Coverage::new(raw_free);
@@ -772,7 +772,7 @@ impl Observation {
                 })
                 .flat_map(|manager| {
                     manager.free_sections().sections().iter().map(|section| {
-                        Interval::new(section.address(), section.length().get()).unwrap()
+                        Interval::new(section.address().get(), section.length().get()).unwrap()
                     })
                 }),
         );
@@ -786,7 +786,7 @@ impl Observation {
                 })
                 .flat_map(|manager| {
                     manager.free_sections().sections().iter().map(|section| {
-                        Interval::new(section.address(), section.length().get()).unwrap()
+                        Interval::new(section.address().get(), section.length().get()).unwrap()
                     })
                 }),
         );

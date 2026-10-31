@@ -4,7 +4,7 @@ use test_util_hdf5::paged;
 
 use crate::AttrValue;
 use crate::File;
-use crate::FreeSectionCoordinates;
+use crate::PhysicalAddress;
 use crate::reader::test_util as reader_test_util;
 
 #[rstest]
@@ -58,7 +58,7 @@ fn created_page_metadata_tail_is_owned(
         test_util_hdf5::assert_free_sections!(
             &initial,
             &[(base + page + 1, page - 1)],
-            FreeSectionCoordinates::Absolute
+            PhysicalAddress
         );
     }
     let unclassified = if raw_len == 513 {
@@ -91,10 +91,9 @@ fn created_page_metadata_tail_is_owned(
                 .live_metadata_space
                 .iter()
                 .any(|&(at, len)| {
-                    initial
-                        .sections()
-                        .iter()
-                        .any(|section| section.address() <= at && at + len <= section.end_address())
+                    initial.sections().iter().any(|section| {
+                        section.address().get() <= at && at + len <= section.end_address().get()
+                    })
                 })
         );
     }

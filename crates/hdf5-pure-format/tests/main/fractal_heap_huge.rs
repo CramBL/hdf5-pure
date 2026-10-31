@@ -1,6 +1,5 @@
-use hdf5_pure_core::__private::{
-    BaseAddressExt, FileRange, FileRegion, PhysicalAddress, StoredAddressExt,
-};
+use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, StoredAddressExt};
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_core::{BaseAddress, FormatError, StoredAddress};
 use hdf5_pure_format::__private::{
     FILTER_PIPELINE_VERSION_TWO as VERSION_TWO, FilterDescription, FilterPipeline, FormatWidths,

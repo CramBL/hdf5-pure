@@ -13,7 +13,7 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -86,7 +86,8 @@ impl SymbolTableMessage {
 ///
 /// ```
 /// # use core::num::NonZeroU16;
-/// # use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
+/// # use hdf5_pure_core::PhysicalAddress;
 /// # use hdf5_pure_core::__private::StoredAddressExt;
 /// # use hdf5_pure_core::{BaseAddress, StoredAddress};
 /// # use hdf5_pure_format::__private::{FormatWidths, SymbolTableNodeLocator};

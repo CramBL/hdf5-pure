@@ -17,9 +17,9 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure_core::__private::BaseAddressExt;
 
@@ -1550,7 +1550,8 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
                 before
                     .sections()
                     .iter()
-                    .any(|section| addr >= section.address() && addr < section.end_address()),
+                    .any(|section| addr >= section.address().get()
+                        && addr < section.end_address().get()),
                 "commit {i}: a manager block landed at {addr}, which was not free \
                  before the commit ({before:?}) — the tail appended instead of \
                  reusing"
@@ -1830,7 +1831,8 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
                     .free_sections()
                     .sections()
                     .iter()
-                    .any(|section| addr >= section.address() && addr < section.end_address()),
+                    .any(|section| addr >= section.address().get()
+                        && addr < section.end_address().get()),
                 "commit {i}: a manager block landed at {addr}, which was not free \
                  before the commit ({before:?}) — the tail appended instead of \
                  reusing"
@@ -2077,8 +2079,8 @@ fn assert_released_file_is_self_consistent(path: &std::path::Path) {
     let f = File::open(path).unwrap();
     let report = f.persisted_free_sections().unwrap().unwrap();
     for section in report.free_sections().sections() {
-        let (addr, size) = (section.address(), section.length().get());
-        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        let (addr, size) = (section.address().get(), section.length().get());
+        let _: StoredAddress = section.address();
         assert!(
             addr + size <= len,
             "a persisted free section [{addr}, {}) runs past the end of the \
@@ -2578,8 +2580,8 @@ fn assert_no_persisted_free_space_holds_live_chunks(path: &std::path::Path, data
         for chunk in file.dataset(name).unwrap().chunks().unwrap() {
             let (lo, hi) = (chunk.address, chunk.address + chunk.storage_size);
             for section in free.free_sections().sections() {
-                let (addr, len) = (section.address(), section.length().get());
-                assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+                let (addr, len) = (section.address().get(), section.length().get());
+                let _: StoredAddress = section.address();
                 assert!(
                     addr >= hi || lo >= addr + len,
                     "the managers advertise [{addr}, {}) as free, which overlaps a live \
@@ -2930,7 +2932,7 @@ fn whole_free_pages(f: &File) -> usize {
         .sections()
         .iter()
         .filter(|section| {
-            section.address() % RECLAIM_PAGE == 0 && section.length().get() >= RECLAIM_PAGE
+            section.address().get() % RECLAIM_PAGE == 0 && section.length().get() >= RECLAIM_PAGE
         })
         .count()
 }
@@ -3322,8 +3324,8 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         for chunk in chunks.into_iter().filter(|chunk| chunk.offset != [0]) {
             assert!(
                 reusable.sections().iter().any(|section| {
-                    section.address() <= chunk.address
-                        && chunk.address + chunk.storage_size <= section.end_address()
+                    section.address().get() <= chunk.address
+                        && chunk.address + chunk.storage_size <= section.end_address().get()
                 }),
                 "{name}: {chunk:?} lies outside {reusable:?}"
             );

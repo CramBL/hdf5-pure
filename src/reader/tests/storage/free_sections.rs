@@ -16,7 +16,6 @@ use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
-use crate::FreeSectionCoordinates;
 use crate::FreeSections;
 use crate::Layout;
 use crate::MaxExtent;
@@ -27,6 +26,7 @@ use crate::UserblockSize;
 use crate::address::BaseAddressExt;
 use crate::checksum;
 use crate::source::{BytesSource, Source};
+use crate::{PhysicalAddress, StoredAddress};
 
 #[rstest]
 #[case::default(None)]
@@ -192,9 +192,12 @@ fn stored_and_reusable_views_have_distinct_coordinates(
             typed.free_bytes(),
             file.reusable_space_stats().unwrap().reusable_free_bytes()
         );
-        assert!(typed.sections().iter().all(|s| s.coordinates()
-            == FreeSectionCoordinates::Absolute
-            && s.address() >= userblock));
+        assert!(
+            typed
+                .sections()
+                .iter()
+                .all(|s| s.address().get() >= userblock)
+        );
     }
     let before_inspection = std::fs::read(&path).unwrap();
     let buffered = File::open(&path).unwrap();
@@ -218,13 +221,7 @@ fn stored_and_reusable_views_have_distinct_coordinates(
             .sum::<u64>()
     );
     assert!(report.free_sections().section_count() > 0);
-    assert!(
-        report
-            .free_sections()
-            .sections()
-            .iter()
-            .all(|s| s.coordinates() == FreeSectionCoordinates::Stored)
-    );
+    let _: &FreeSections<StoredAddress> = report.free_sections();
     assert_eq!(
         report
             .managers()
@@ -273,13 +270,13 @@ fn reusable_sections_follow_commits_and_immediate_appends(
     };
     assert_eq!(size, 65_536);
     let scratch = start..start + size;
-    let intersections = |report: &FreeSections| {
+    let intersections = |report: &FreeSections<PhysicalAddress>| {
         report
             .sections()
             .iter()
             .filter_map(|section| {
-                let start = section.address().max(scratch.start);
-                let end = section.end_address().min(scratch.end);
+                let start = section.address().get().max(scratch.start);
+                let end = section.end_address().get().min(scratch.end);
                 (start < end).then_some(start..end)
             })
             .collect::<Vec<_>>()
@@ -695,10 +692,6 @@ fn assert_summary_and_sections(file: &File) -> ReusableSpaceStats {
     let summary = file.reusable_space_stats().unwrap();
     assert_eq!(summary.logical_size(), file.file_size());
     let sections = file.reusable_free_sections().unwrap();
-    test_util_hdf5::assert_free_sections_consistent!(
-        &summary,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&summary, &sections, PhysicalAddress);
     summary
 }

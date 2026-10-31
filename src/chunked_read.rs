@@ -15,7 +15,7 @@ use core::num::{NonZeroU64, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::MetadataFrame;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 #[cfg(test)]
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 

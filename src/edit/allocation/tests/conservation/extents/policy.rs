@@ -439,7 +439,7 @@ impl Space {
             .free_sections()
             .sections()
             .iter()
-            .map(|section| Interval::new(section.address(), section.length().get()).unwrap())
+            .map(|section| Interval::new(section.address().get(), section.length().get()).unwrap())
             .collect::<Vec<_>>();
         let roles = persisted
             .managers()

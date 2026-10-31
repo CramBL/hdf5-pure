@@ -12,7 +12,7 @@ use std::panic;
 use std::panic::AssertUnwindSafe;
 
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MaxExtent, ScaleOffset,
@@ -537,8 +537,8 @@ fn persisting_file_takes_both_inplace_and_staged_appends() {
     let size = reopened.file_size();
     let report = reopened.persisted_free_sections().unwrap().unwrap();
     for section in report.free_sections().sections() {
-        let (addr, len) = (section.address(), section.length().get());
-        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        let (addr, len) = (section.address().get(), section.length().get());
+        let _: StoredAddress = section.address();
         assert!(
             addr + len <= size,
             "free region {addr}+{len} runs past the {size}-byte file"

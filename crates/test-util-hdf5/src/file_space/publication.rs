@@ -76,8 +76,8 @@ pub fn session(path: &Path) -> File {
             .sections()
             .iter()
             .any(|section| {
-                section.address() <= hole.start
-                    && section.address() + section.length().get() >= hole.end
+                section.address().get() <= hole.start
+                    && section.address().get() + section.length().get() >= hole.end
             })
     );
     file

@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{self as format, FreeSpaceManagerHeader};
 use hdf5_pure_space::__private::AllocationClass;
 use rstest::rstest;
@@ -337,8 +338,8 @@ fn malformed_authoritative_managers_reject_allocation_before_mutation(
                 .sections()
                 .iter()
                 .find_map(|section| {
-                    let start = section.address().max(hole.0);
-                    let end = section.end_address().min(hole.1);
+                    let start = section.address().get().max(hole.0);
+                    let end = section.end_address().get().min(hole.1);
                     (start + 128 <= end).then_some((manager, start))
                 })
         })
@@ -567,7 +568,7 @@ fn observe(bytes: &[u8]) -> OwnershipObservation {
         .free_sections()
         .sections()
         .iter()
-        .map(|section| (section.address(), section.end_address()))
+        .map(|section| (section.address().get(), section.end_address().get()))
         .collect();
     let mut metadata: Vec<_> = metadata
         .iter()

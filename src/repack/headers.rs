@@ -140,7 +140,7 @@ const INITIAL_ENTRIES: usize = 16;
 mod tests {
     use core::mem;
 
-    use hdf5_pure_core::__private::PhysicalAddress;
+    use hdf5_pure_core::PhysicalAddress;
     use rstest::rstest;
     use test_util::allocation;
 

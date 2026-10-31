@@ -7,7 +7,8 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::__private::{FileRange, FileRegion};
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -1046,7 +1047,8 @@ impl FractalHeapFiltering {
 /// `bytes_in_range` borrows those bytes from an in-memory image.
 ///
 /// ```
-/// # use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_core::__private::{FileRange, FileRegion};
+/// # use hdf5_pure_core::PhysicalAddress;
 /// # use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetWidth};
 /// # use hdf5_pure_format::FormatError;
 /// # use test_util::fractal_heap;

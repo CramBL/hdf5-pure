@@ -10,7 +10,8 @@ use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::File;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::FreeSections;
+use hdf5_pure::PhysicalAddress;
 use tempfile::TempDir;
 use test_util::global_heap;
 use test_util::widths::Widths;
@@ -104,18 +105,14 @@ fn write_delete_and_read_back(path: &Path, low: LibraryVersion) {
     file.commit().unwrap();
 
     let free = file.reusable_free_sections().unwrap();
-    assert!(
-        free.sections()
-            .iter()
-            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
-    );
+    let _: &FreeSections<PhysicalAddress> = &free;
     for address in reclaimed {
         let range = &ranges[&address];
         assert!(
             free.sections()
                 .iter()
-                .any(|section| section.address() <= range.start
-                    && range.end <= section.end_address())
+                .any(|section| section.address().get() <= range.start
+                    && range.end <= section.end_address().get())
                 || file.file_size() <= range.start,
             "the collection at {range:?} is not reclaimed: {free:?}"
         );
@@ -124,7 +121,8 @@ fn write_delete_and_read_back(path: &Path, low: LibraryVersion) {
     assert!(
         free.sections()
             .iter()
-            .all(|section| section.end_address() <= range.start || range.end <= section.address()),
+            .all(|section| section.end_address().get() <= range.start
+                || range.end <= section.address().get()),
         "the collection at {range:?} that b refers to is reclaimed: {free:?}"
     );
     file.close().unwrap();

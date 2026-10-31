@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
 use hdf5_pure::File;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MessageType;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::Superblock;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
@@ -197,8 +198,8 @@ pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
             .sections()
             .iter()
             .map(|section| {
-                assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
-                (section.address(), section.length().get())
+                let _: PhysicalAddress = section.address();
+                (section.address().get(), section.length().get())
             })
             .collect(),
         Err(Error::ReadOnly) => file
@@ -211,9 +212,9 @@ pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
                     .sections()
                     .iter()
                     .map(|section| {
-                        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+                        let _: StoredAddress = section.address();
                         (
-                            section.address() + file.superblock().base_address.get(),
+                            section.address().get() + file.superblock().base_address.get(),
                             section.length().get(),
                         )
                     })
