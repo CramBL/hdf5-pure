@@ -592,7 +592,7 @@ fn properties_place_filters_in_canonical_order_with_lzf_optional() {
         .filter_pipeline()
         .unwrap()
         .into_iter()
-        .map(|filter| (filter.id, filter.is_optional))
+        .map(|filter| (filter.id(), filter.is_optional()))
         .collect();
     assert_eq!(
         pipeline,

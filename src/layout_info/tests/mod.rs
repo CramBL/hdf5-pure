@@ -68,23 +68,48 @@ fn interprets_parameters_without_losing_wire_metadata(
     #[case] values: Vec<u32>,
     #[case] parameters: FilterParameters,
     #[values(0x8000, 0x8001)] flags: u16,
+    #[values(None, Some("recorded filter name"))] name: Option<&str>,
 ) {
     let filter = Filter::from_description(FilterDescription {
         filter_id: id.get(),
-        name: Some("recorded filter name".into()),
+        name: name.map(String::from),
         flags,
         client_data: values.clone(),
     })
     .unwrap();
-    assert_eq!(filter.id, id);
-    assert_eq!(filter.parameters, parameters);
+    assert_eq!(filter.id(), id);
+    assert_eq!(filter.parameters(), &parameters);
     assert_eq!(filter.flags(), flags);
     assert_eq!(
-        filter.is_optional,
+        filter.is_optional(),
         flags & crate::filter_pipeline::H5Z_FLAG_OPTIONAL != 0
     );
-    assert_eq!(filter.name.as_deref(), Some("recorded filter name"));
+    assert_eq!(filter.name(), name);
     assert_eq!(filter.client_data(), values);
+}
+
+#[rstest]
+#[case::shuffle(FilterId::Shuffle)]
+#[case::deflate(FilterId::Deflate)]
+#[case::custom(FilterId::try_from(40000).unwrap())]
+fn pending_filters_preserve_configuration(
+    #[case] id: FilterId,
+    #[values(false, true)] optional: bool,
+) {
+    let filter = Filter::pending(id, optional);
+    assert_eq!(filter.id(), id);
+    assert_eq!(filter.name(), None);
+    assert_eq!(filter.parameters(), &FilterParameters::Pending);
+    assert!(filter.client_data().is_empty());
+    assert_eq!(filter.is_optional(), optional);
+    assert_eq!(
+        filter.flags(),
+        if optional {
+            crate::filter_pipeline::H5Z_FLAG_OPTIONAL
+        } else {
+            0
+        }
+    );
 }
 
 #[rstest]
@@ -100,7 +125,16 @@ fn rejects_malformed_known_parameters(
     #[case] values: Vec<u32>,
     #[case] expected: FormatError,
 ) {
-    assert_eq!(FilterParameters::parse(id, &values).unwrap_err(), expected);
+    assert_eq!(
+        Filter::from_description(FilterDescription {
+            filter_id: id.get(),
+            name: None,
+            flags: 0,
+            client_data: values,
+        })
+        .unwrap_err(),
+        expected
+    );
 }
 
 #[rstest]
@@ -109,7 +143,13 @@ fn rejects_malformed_known_parameters(
 #[case::field_limit(u32::MAX)]
 fn rejects_invalid_deflate_metadata(#[case] level: u32) {
     assert_eq!(
-        FilterParameters::parse(FilterId::Deflate, &[level]).unwrap_err(),
+        Filter::from_description(FilterDescription {
+            filter_id: FILTER_DEFLATE,
+            name: None,
+            flags: 0,
+            client_data: vec![level],
+        })
+        .unwrap_err(),
         FormatError::InvalidDeflateLevel { level }
     );
 }
@@ -164,8 +204,16 @@ fn distinguishes_supported_scale_offset_modes(
     values[1] = u32::from_ne_bytes((-2_i32).to_ne_bytes());
     values[3] = 1;
     values[5] = sign;
-    let parsed = FilterParameters::parse(FilterId::ScaleOffset, &values).unwrap();
-    match (parsed, expected) {
+    let filter = Filter::from_description(FilterDescription {
+        filter_id: FILTER_SCALEOFFSET,
+        name: None,
+        flags: 0,
+        client_data: values.clone(),
+    })
+    .unwrap();
+    assert_eq!(filter.id(), FilterId::ScaleOffset);
+    assert_eq!(filter.client_data(), values);
+    match (filter.parameters(), expected) {
         (FilterParameters::ScaleOffset(parameters), Some(mode)) => {
             assert_eq!(parameters.mode(), mode)
         }

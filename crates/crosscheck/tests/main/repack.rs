@@ -1079,7 +1079,7 @@ fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
             .filter_pipeline()
             .unwrap()
             .into_iter()
-            .find(|f| f.id == FilterId::ScaleOffset)
+            .find(|f| f.id() == FilterId::ScaleOffset)
             .expect("a scale-offset filter")
             .client_data()
             .to_vec()
@@ -2192,7 +2192,7 @@ fn pipeline_of(path: &std::path::Path, dataset: &str) -> Vec<(FilterId, bool)> {
         .filter_pipeline()
         .unwrap()
         .iter()
-        .map(|f| (f.id, f.is_optional))
+        .map(|f| (f.id(), f.is_optional()))
         .collect()
 }
 

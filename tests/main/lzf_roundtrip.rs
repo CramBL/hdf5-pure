@@ -99,13 +99,13 @@ fn lzf_records_h5py_cd_values() {
     let file = File::from_bytes(bytes).unwrap();
     let pipeline = file.dataset("v").unwrap().filter_pipeline().unwrap();
     assert_eq!(pipeline.len(), 1);
-    assert_eq!(pipeline[0].id, FilterId::Lzf);
-    assert_eq!(pipeline[0].name.as_deref(), Some("lzf"));
+    assert_eq!(pipeline[0].id(), FilterId::Lzf);
+    assert_eq!(pipeline[0].name(), Some("lzf"));
     assert_eq!(pipeline[0].client_data(), vec![4, 0x0105, 64 * 4]);
     // Optional, as h5py records it. LZF is the one filter this crate writes
     // whose compressor can decline a chunk; a later writer needs the flag to
     // store that chunk raw instead of failing the write outright.
-    assert!(pipeline[0].is_optional, "LZF must be written as optional");
+    assert!(pipeline[0].is_optional(), "LZF must be written as optional");
 }
 
 #[test]
@@ -201,8 +201,8 @@ fn reads_h5py_lzf_masked_chunk() {
     let chunks = ds.chunks().unwrap();
     assert_eq!(chunks.len(), 1);
     let (filter, disposition) = chunks[0].filters().filter(0).unwrap();
-    assert_eq!(filter.id, FilterId::Lzf);
-    assert!(filter.is_optional);
+    assert_eq!(filter.id(), FilterId::Lzf);
+    assert!(filter.is_optional());
     assert_eq!(disposition, FilterDisposition::Skipped);
     assert!(!chunks[0].filters().bypasses_pipeline());
 }

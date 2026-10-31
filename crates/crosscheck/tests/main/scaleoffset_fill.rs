@@ -52,10 +52,13 @@ fn the_c_library_records_a_defined_fill_value_even_without_one() {
             .filter_pipeline()
             .unwrap()
             .into_iter()
-            .find(|f| f.id == FilterId::ScaleOffset)
+            .find(|f| f.id() == FilterId::ScaleOffset)
             .expect("a scale-offset filter");
-        let FilterParameters::ScaleOffset(parameters) = &so.parameters else {
-            panic!("expected scale-offset parameters, got {:?}", so.parameters);
+        let FilterParameters::ScaleOffset(parameters) = so.parameters() else {
+            panic!(
+                "expected scale-offset parameters, got {:?}",
+                so.parameters()
+            );
         };
         assert_eq!(parameters.mode(), ScaleOffset::Integer(0));
         // cd_values[7] is FILAVAIL (1 = defined); cd_values[8..] carry the fill
@@ -80,7 +83,7 @@ fn filter_parms(path: &std::path::Path) -> Vec<u32> {
         .filter_pipeline()
         .unwrap()
         .into_iter()
-        .find(|f| f.id == FilterId::ScaleOffset)
+        .find(|f| f.id() == FilterId::ScaleOffset)
         .expect("a scale-offset filter")
         .client_data()
         .to_vec()

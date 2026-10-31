@@ -46,8 +46,8 @@ fn reads_c_deflate_values_and_level_metadata(
             .unwrap()
             .last()
             .unwrap()
-            .parameters,
-        FilterParameters::Deflate(level)
+            .parameters(),
+        &FilterParameters::Deflate(level)
     );
     assert_eq!(
         dataset
