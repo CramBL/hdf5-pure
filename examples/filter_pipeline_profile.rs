@@ -1,6 +1,10 @@
 //! Direct pipeline operations with independently retained outputs.
 //!
-//! The profiling recipe collects instruction references inside [`profile_batch`]. Input
+//! With no arguments, the program retains eight decoded 4 KiB chunks from cycling input through
+//! shuffle and Deflate, reusing scratch after two warmup calls. Pass six arguments to choose the
+//! pipeline, direction, input pattern, scratch policy, element count, and repetition count.
+//!
+//! The profiling recipe collects instruction references inside the batch routine. Input
 //! preparation, warmup, byte verification, and output destruction occur outside collection.
 //! Cold operations construct and drop scratch inside the collected function.
 
@@ -21,7 +25,20 @@ mod support;
     reason = "the profile checks measurement validity"
 )]
 fn main() -> Result<(), Box<dyn StdError>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        args.extend(
+            [
+                "shuffle_deflate",
+                "decode",
+                "cycling",
+                "reused",
+                "1024",
+                "8",
+            ]
+            .map(String::from),
+        );
+    }
     let [case, direction, pattern, mode, elements, rounds] = args.as_slice() else {
         return Err(
             "usage: filter_pipeline_profile CASE DIRECTION PATTERN SCRATCH ELEMENTS ROUNDS".into(),
