@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use hdf5_pure_core::{AddressRange, PhysicalAddress};
+use hdf5_pure_core::PhysicalAddress;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::MetadataBytes;
@@ -89,7 +89,7 @@ use crate::source::{
     self, BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats,
     MetadataCachingSource, ReadSeekSource, Source, ValidatedSource,
 };
-use crate::source::{PhysicalSource, RangeReader};
+use crate::source::{PhysicalSource, StoredBytes, StoredRead};
 use crate::superblock;
 use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
@@ -2442,52 +2442,36 @@ impl FileInner {
         cache: &ChunkCache,
     ) -> Result<Vec<u8>, FormatError> {
         let widths = self.widths;
-        // The reader reads payloads and B-tree indexes from base-relative buffers or sources.
-        // It reads array indexes through a typed stored-coordinate view of the original source,
-        // constructed from the same opened image's effective address context.
         let addresses = self.addresses();
-        let base = addresses.effective_base();
         match &self.backend {
-            Backend::InMemory(bytes) => {
-                let physical = BytesSource::new(bytes.as_slice());
-                let indexes = PhysicalSource::new(&physical).stored(addresses);
-                data_read::read_raw_data_cached(
-                    source::framed_metadata(bytes, base)?,
-                    &indexes,
-                    spec,
-                    widths,
-                    cache,
-                )
-            }
-            Backend::Streaming(physical) => {
-                let indexes = PhysicalSource::new(physical.as_ref()).stored(addresses);
-                let payload = BaseOffsetSource {
-                    inner: physical.as_ref(),
-                    base,
-                };
-                data_read::read_raw_data_cached_from_source(&payload, &indexes, spec, widths, cache)
-            }
+            Backend::InMemory(bytes) => data_read::read_raw_data_cached(
+                StoredBytes::new(bytes, addresses)?,
+                spec,
+                widths,
+                cache,
+            ),
+            Backend::Streaming(physical) => data_read::read_raw_data_cached_from_source(
+                &PhysicalSource::new(physical.as_ref()).stored(addresses),
+                spec,
+                widths,
+                cache,
+            ),
             Backend::Edit(engine) => Self::with_engine(
                 engine,
                 |bytes| {
-                    let physical = BytesSource::new(bytes);
-                    let indexes = PhysicalSource::new(&physical).stored(addresses);
                     data_read::read_raw_data_cached(
-                        source::framed_metadata(bytes, base)?,
-                        &indexes,
+                        StoredBytes::new(bytes, addresses)?,
                         spec,
                         widths,
                         cache,
                     )
                 },
                 |physical| {
-                    let indexes = PhysicalSource::new(physical).stored(addresses);
-                    let payload = BaseOffsetSource {
-                        inner: physical,
-                        base,
-                    };
                     data_read::read_raw_data_cached_from_source(
-                        &payload, &indexes, spec, widths, cache,
+                        &PhysicalSource::new(physical).stored(addresses),
+                        spec,
+                        widths,
+                        cache,
                     )
                 },
             ),
@@ -2503,13 +2487,8 @@ impl FileInner {
         if region.is_whole() {
             return self.read_dataset_raw(region.spec(), cache);
         }
-        let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(bytes) => read_region_framed(
-                &BaseOffsetSource {
-                    inner: &BytesSource::new(bytes),
-                    base,
-                },
                 &PhysicalSource::new(&BytesSource::new(bytes)).stored(self.addresses()),
                 region,
                 self.widths,
@@ -2517,10 +2496,6 @@ impl FileInner {
                 pass,
             ),
             Backend::Streaming(source) => read_region_framed(
-                &BaseOffsetSource {
-                    inner: source.as_ref(),
-                    base,
-                },
                 &PhysicalSource::new(source.as_ref()).stored(self.addresses()),
                 region,
                 self.widths,
@@ -2531,10 +2506,6 @@ impl FileInner {
                 engine,
                 |bytes| {
                     read_region_framed(
-                        &BaseOffsetSource {
-                            inner: &BytesSource::new(bytes),
-                            base,
-                        },
                         &PhysicalSource::new(&BytesSource::new(bytes)).stored(self.addresses()),
                         region,
                         self.widths,
@@ -2544,10 +2515,6 @@ impl FileInner {
                 },
                 |source| {
                     read_region_framed(
-                        &BaseOffsetSource {
-                            inner: source,
-                            base,
-                        },
                         &PhysicalSource::new(source).stored(self.addresses()),
                         region,
                         self.widths,
@@ -2560,10 +2527,7 @@ impl FileInner {
     }
 }
 
-/// Reads a checked region from a source framed at the file's effective base address.
-///
-/// The caller frames `source` at the opened image's effective base and constructs the
-/// stored-coordinate array reader `indexes` from the same image's address context.
+/// Reads a checked region through the opened image's stored-coordinate source view.
 ///
 /// # Errors
 ///
@@ -2572,8 +2536,7 @@ impl FileInner {
 /// Returns errors from reading or placing the selected bytes, applying filters, or reading fill
 /// values for unallocated storage.
 fn read_region_framed(
-    source: &(impl Source + ?Sized),
-    indexes: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    source: &(impl StoredRead + ?Sized),
     region: &ReadRegion<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
@@ -2588,7 +2551,7 @@ fn read_region_framed(
     }
     if let RawReadStorage::Chunked { .. } = spec.storage() {
         return crate::chunked_read::read_chunked_region_from_source(
-            source, indexes, region, widths, cache, pass,
+            source, region, widths, cache, pass,
         );
     }
     if matches!(spec.storage(), RawReadStorage::ContiguousUnallocated) {
@@ -2596,16 +2559,10 @@ fn read_region_framed(
     }
     if let RawReadStorage::Contiguous { address } = spec.storage() {
         let end = region.end_offset()?;
-        let end = address
-            .get()
-            .checked_add(end)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: address.get(),
-                length: end,
-            })?;
-        if end > source.len() {
+        let end = address.checked_add(end)?;
+        if end > StoredAddress::new(source.len()) {
             return Err(FormatError::UnexpectedSourceEof {
-                expected: end,
+                expected: end.get(),
                 available: source.len(),
             });
         }
@@ -2634,14 +2591,7 @@ fn read_region_framed(
                 output.extend_from_slice(bytes);
             }
             RawReadStorage::Contiguous { address } => {
-                let offset =
-                    address
-                        .get()
-                        .checked_add(offset)
-                        .ok_or(FormatError::OffsetOverflow {
-                            offset: address.get(),
-                            length: offset,
-                        })?;
+                let offset = address.checked_add(offset)?;
                 if output.is_empty() {
                     output = source.read_exact_at(offset, length)?;
                     output.reserve_exact(total - length);
@@ -7166,24 +7116,14 @@ the same commit to replace it",
         let pass = self.chunk_cache.begin_pass();
         self.file.with_source(|source| {
             let indexes = PhysicalSource::new(source).stored(self.file.addresses());
-            let source = BaseOffsetSource {
-                inner: source,
-                base: self.file.addresses().effective_base(),
-            };
+
             let mut chunks = matches!(spec.storage(), RawReadStorage::Chunked { .. })
                 .then(|| ChunkRead::new(spec, self.file.widths, &self.chunk_cache, pass));
             let mut read_rows = |start, count| match &mut chunks {
-                Some(chunks) => chunks.read_rows(&source, &indexes, start, count),
+                Some(chunks) => chunks.read_rows(&indexes, start, count),
                 None => {
                     let region = ReadRegion::rows(spec, start, count)?;
-                    read_region_framed(
-                        &source,
-                        &indexes,
-                        &region,
-                        self.file.widths,
-                        &self.chunk_cache,
-                        pass,
-                    )
+                    read_region_framed(&indexes, &region, self.file.widths, &self.chunk_cache, pass)
                 }
             };
             let decoder = {
@@ -7706,29 +7646,12 @@ the same commit to replace it",
         }
         let dataspace = self.dataspace()?;
         let elem_size = crate::datatype::element_size_usize(&self.datatype()?)?;
-        let base = self.file.addresses().effective_base();
         // The chunk index stores base-relative addresses, in its root and in every internal
         // node, so the walk runs over a view of the file framed at the base. Every address it
         // reports stays in that frame.
         self.file.with_source(|source| {
             let indexes = PhysicalSource::new(source).stored(self.file.addresses());
-            if base.is_zero() {
-                return Ok(crate::chunked_read::collect_chunks_for_layout_from_source(
-                    source,
-                    &indexes,
-                    index,
-                    &chunk_dimensions,
-                    &dataspace,
-                    elem_size.get() as u64,
-                    self.file.widths,
-                )?);
-            }
-            let framed = BaseOffsetSource {
-                inner: source,
-                base,
-            };
             Ok(crate::chunked_read::collect_chunks_for_layout_from_source(
-                &framed,
                 &indexes,
                 index,
                 &chunk_dimensions,

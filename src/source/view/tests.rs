@@ -360,3 +360,160 @@ fn unframed_sources_do_not_implement_stored_range_reads() {
     let _ = <BytesSource<[u8; 0]> as AmbiguousIfStoredReader<_>>::marker;
     let _ = <PhysicalSource<'_, BytesSource<[u8; 0]>> as AmbiguousIfStoredReader<_>>::marker;
 }
+
+#[rstest]
+#[case::zero_base(0, 0)]
+#[case::userblock(512, 512)]
+#[case::forward_relocated(0, 512)]
+#[case::backward_relocated(512, 0)]
+fn resident_views_apply_the_effective_base_and_borrow_the_original_bytes(
+    #[case] encoded: u64,
+    #[case] effective: u64,
+) {
+    let mut image = vec![0; usize::try_from(effective).unwrap()];
+    image.extend(0..32u8);
+    let context =
+        OpenedImageContext::reconcile(BaseAddress::new(encoded), encoded + 32, effective).unwrap();
+    let view = StoredBytes::new(&image, context.addresses()).unwrap();
+    let mut buffer = [0; 3];
+    view.read_at(StoredAddress::new(4), &mut buffer).unwrap();
+    assert_eq!(buffer, [4, 5, 6]);
+    assert_eq!(
+        view.read_exact_at(StoredAddress::new(4), 3).unwrap(),
+        [4, 5, 6]
+    );
+    assert_eq!(
+        view.read_metadata_at(StoredAddress::new(4), 3).unwrap(),
+        [4, 5, 6]
+    );
+    let range = AddressRange::new(StoredAddress::new(4), 3).unwrap();
+    let borrowed = view.borrow_range(range).unwrap();
+    let expected = &image[usize::try_from(effective + 4).unwrap()..];
+    assert_eq!(borrowed, &[4, 5, 6]);
+    assert_eq!(borrowed.as_ptr(), expected.as_ptr());
+    let metadata = view.read_range(range).unwrap();
+    assert_eq!(metadata.as_ref(), &[4, 5, 6]);
+    assert_eq!(metadata.offset(), effective + 4);
+    assert_eq!(metadata.as_ptr(), expected.as_ptr());
+    assert!(metadata.shared().is_none());
+    assert_eq!(view.len(), 32);
+}
+
+#[derive(Clone, Copy)]
+enum ResidentRead {
+    Buffer,
+    Exact,
+    Metadata,
+    MetadataVector,
+}
+
+#[rstest]
+#[case::past_end(
+    31,
+    2,
+    FormatError::UnexpectedSourceEof { expected: 545, available: 544 },
+    FormatError::UnexpectedSourceEof { expected: 33, available: 32 },
+)]
+#[case::start_overflow(
+    u64::MAX,
+    1,
+    FormatError::OffsetOverflow { offset: u64::MAX, length: 512 },
+    FormatError::OffsetOverflow { offset: u64::MAX, length: 1 },
+)]
+#[case::endpoint_overflow(
+    u64::MAX - 512,
+    513,
+    FormatError::OffsetOverflow { offset: u64::MAX, length: 513 },
+    FormatError::OffsetOverflow { offset: u64::MAX - 512, length: 513 },
+)]
+fn resident_read_errors_match_reads_of_the_original_source(
+    #[case] start: u64,
+    #[case] length: usize,
+    #[case] expected: FormatError,
+    #[case] exact_expected: FormatError,
+    #[values(
+        ResidentRead::Buffer,
+        ResidentRead::Exact,
+        ResidentRead::Metadata,
+        ResidentRead::MetadataVector
+    )]
+    operation: ResidentRead,
+) {
+    let image = [0; 544];
+    let context = AddressContext::from_effective_base(BaseAddress::new(512));
+    let resident = StoredBytes::new(&image, context).unwrap();
+    let physical = BytesSource::new(image);
+    let reference = PhysicalSource::new(&physical).stored(context);
+    let address = StoredAddress::new(start);
+    let read = |source: &dyn StoredRead| match operation {
+        ResidentRead::Buffer => source.read_at(address, &mut vec![0; length]),
+        ResidentRead::Exact => source.read_exact_at(address, length).map(drop),
+        ResidentRead::Metadata => source.read_metadata(address, length).map(drop),
+        ResidentRead::MetadataVector => source.read_metadata_at(address, length).map(drop),
+    };
+    let expected = match operation {
+        ResidentRead::Exact => exact_expected,
+        ResidentRead::Buffer | ResidentRead::Metadata | ResidentRead::MetadataVector => expected,
+    };
+    assert_eq!(read(&resident).unwrap_err(), expected);
+    assert_eq!(read(&reference).unwrap_err(), expected);
+}
+
+#[test]
+fn resident_view_rejects_a_base_beyond_its_source() {
+    let context = AddressContext::from_effective_base(BaseAddress::new(4));
+    assert_eq!(
+        StoredBytes::new(&[0; 3], context).unwrap_err(),
+        FormatError::UnexpectedSourceEof {
+            expected: 4,
+            available: 3,
+        }
+    );
+}
+
+#[test]
+fn only_stored_views_implement_typed_payload_reads() {
+    trait AmbiguousIfStoredRead<A> {
+        fn marker() {}
+    }
+    struct ImplementsStoredRead;
+    impl<T: ?Sized> AmbiguousIfStoredRead<()> for T {}
+    impl<T: StoredRead + ?Sized> AmbiguousIfStoredRead<ImplementsStoredRead> for T {}
+    let _ = <BytesSource<[u8; 0]> as AmbiguousIfStoredRead<_>>::marker;
+    let _ = <PhysicalSource<'_, BytesSource<[u8; 0]>> as AmbiguousIfStoredRead<_>>::marker;
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[test]
+fn resident_range_reads_borrow_without_allocating() {
+    let data = vec![17; 1_048_576 + 512];
+    let view = StoredBytes::new(
+        &data,
+        AddressContext::from_effective_base(BaseAddress::new(512)),
+    )
+    .unwrap();
+    let range = AddressRange::new(StoredAddress::new(0), 1_048_576).unwrap();
+    let expected = &data[512..];
+    let (copy, control) = test_util::allocation::measure("resident_range_copy", || {
+        std::hint::black_box(expected.to_vec())
+    });
+    assert_eq!(copy, expected);
+    assert!(control.blocks > 0, "{control}");
+    assert!(control.bytes >= range.length(), "{control}");
+    drop(copy);
+    let ((borrowed, metadata), measured) = test_util::allocation::measure("resident_range", || {
+        (
+            view.borrow_range(range).unwrap(),
+            view.read_range(range).unwrap(),
+        )
+    });
+    assert_eq!(borrowed, expected);
+    assert_eq!(metadata.as_ref(), expected);
+    assert_eq!(borrowed.as_ptr(), expected.as_ptr());
+    assert_eq!(metadata.as_ptr(), expected.as_ptr());
+    assert_eq!(metadata.offset(), 512);
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(measured.peak_bytes, 0, "{measured}");
+    assert_eq!(measured.live_bytes, 0, "{measured}");
+}

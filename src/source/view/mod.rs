@@ -10,6 +10,12 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::{MetadataCacheStats, RangeReader, Source};
 
+mod bytes;
+mod read;
+
+pub(crate) use bytes::StoredBytes;
+pub(crate) use read::StoredRead;
+
 /// A borrowed source addressed by positions relative to the original source's start.
 ///
 /// Reads delegate to the original [`Source`]. Metadata retains that source's ownership and
@@ -127,6 +133,10 @@ pub(crate) struct StoredSource<'a, S: Source + ?Sized> {
     addresses: AddressContext,
 }
 
+#[expect(
+    clippy::same_name_method,
+    reason = "StoredRead delegates to these methods, whose metadata borrows retain the original source lifetime"
+)]
 impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
     /// Returns the number of bytes after the effective base, or zero if the base exceeds the source.
     pub(crate) fn len(&self) -> u64 {

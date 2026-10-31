@@ -311,6 +311,11 @@ impl<'a> MetadataFrame<'a> {
         self.region.bytes()
     }
 
+    /// Returns the physical interval covered by the slice.
+    pub fn range(self) -> FileRange {
+        self.region.range()
+    }
+
     /// Returns the physical position of the slice's first byte.
     pub fn origin(self) -> PhysicalAddress {
         self.region.range().start()

@@ -21,14 +21,16 @@ pub use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::BTreeV2Layout;
 use hdf5_pure_format::__private::BTreeV2Node;
 pub use hdf5_pure_format::__private::BTreeV2Record;
+use hdf5_pure_format::__private::MetadataSource;
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::source::{RangeReader, Source};
+use crate::source::{RangeReader, Source, SourceMetadata};
 #[cfg(test)]
 use crate::width::LengthWidth;
 use crate::width::{FormatWidths, OffsetWidth};
@@ -87,6 +89,23 @@ pub(crate) fn search_btree_v2(
 ///
 /// Returns the structural error of the first B-tree header or node that does not parse.
 pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
+    source: &S,
+    header_address: StoredAddress,
+    widths: FormatWidths,
+) -> Result<Vec<Extent>, FormatError> {
+    collect_btree_v2_storage_extents_from_metadata(&SourceMetadata(source), header_address, widths)
+}
+
+/// Returns stored-coordinate allocations through a caller-framed metadata source.
+///
+/// Source offsets use the same base-relative frame as `header_address` and the stored node
+/// addresses. Returns the header allocation and each reachable full node allocation, ordered by
+/// stored start address.
+///
+/// # Errors
+///
+/// Returns errors from metadata reads, checked allocation bounds, and parsing the header or a node.
+pub(crate) fn collect_btree_v2_storage_extents_from_metadata<S: MetadataSource + ?Sized>(
     source: &S,
     header_address: StoredAddress,
     widths: FormatWidths,
@@ -164,7 +183,7 @@ fn storage_header_has_root(
 /// 0 is a leaf, so recursion stops there after validating the leaf layout.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn collect_storage_node<S: Source + ?Sized>(
+fn collect_storage_node<S: MetadataSource + ?Sized>(
     source: &S,
     node: BTreeV2Node<'_>,
     node_size: u32,
@@ -191,7 +210,7 @@ fn collect_storage_node<S: Source + ?Sized>(
 }
 
 /// Returns a checked extent after proving its complete byte range lies within `source`.
-fn extent_in_source<S: Source + ?Sized>(
+fn extent_in_source<S: MetadataSource + ?Sized>(
     source: &S,
     address: StoredAddress,
     length: u64,
@@ -201,7 +220,7 @@ fn extent_in_source<S: Source + ?Sized>(
         offset: address.get(),
         length,
     })?;
-    if extent.end().get() > source.len() {
+    if extent.end() > StoredAddress::new(source.len()) {
         return Err(FormatError::UnexpectedSourceEof {
             expected: extent.end().get(),
             available: source.len(),
@@ -267,7 +286,23 @@ fn collect_node_records(
 ///
 /// Returns the [`FormatError`] of the first B-tree node that does not parse, or the error `source`
 /// reports for a node it cannot read.
-pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
+pub(crate) fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
+    source: &S,
+    header: &BTreeV2Header,
+    offset_width: OffsetWidth,
+) -> Result<Vec<BTreeV2Record>, FormatError> {
+    collect_btree_v2_records_from_metadata(&SourceMetadata(source), header, offset_width)
+}
+
+/// Reads all records in tree order through a caller-framed metadata source.
+///
+/// Source offsets use the same base-relative frame as the node addresses in `header`. Uses the
+/// node parsing and empty-tree handling of [`collect_btree_v2_records`].
+///
+/// # Errors
+///
+/// Returns errors from metadata reads and B-tree parsing.
+pub fn collect_btree_v2_records_from_metadata<S: MetadataSource + ?Sized>(
     source: &S,
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
@@ -283,7 +318,7 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
     Ok(records)
 }
 
-fn collect_node_from_source<S: Source + ?Sized>(
+fn collect_node_from_source<S: MetadataSource + ?Sized>(
     source: &S,
     node: BTreeV2Node<'_>,
     node_size: u32,
@@ -293,11 +328,15 @@ fn collect_node_from_source<S: Source + ?Sized>(
     if !visited.insert(node.address()) {
         return Err(FormatError::InvalidBTreeV2Signature);
     }
-    let address = node.address().get();
+    let address = node.address();
     let node_len = u64::from(node_size)
-        .min(source.len().saturating_sub(address))
+        .min(
+            StoredAddress::new(source.len())
+                .checked_distance_from(address)
+                .unwrap_or(0),
+        )
         .to_usize()?;
-    let bytes = source.read_metadata(address, node_len)?;
+    let bytes = source.read_metadata(address.get(), node_len)?;
     let view = node.parse(&bytes)?;
     for index in 0..=view.record_count() {
         if let Some(child) = view.child(index)? {
