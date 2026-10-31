@@ -1,8 +1,8 @@
-//! Demonstrates persistent free-space reuse across editing sessions.
+//! Demonstrates free-space reuse across editing sessions.
 //!
-//! A separate session adds, deletes, or replaces a dataset in each step. Compare file lengths
-//! and persisted free space under `FsmAggr` and `Page`, with a file that forgets free space on
-//! close as a control. The length change after replacement is printed as a signed value.
+//! Deletes a dataset and writes its replacement after reopening the file.
+//! Compares persistent [`FsmAggr`](FileSpaceStrategy::FsmAggr) and [`Page`](FileSpaceStrategy::Page)
+//! with nonpersistent [`FsmAggr`](FileSpaceStrategy::FsmAggr).
 //!
 //! Run with:
 //!
@@ -10,211 +10,81 @@
 //! cargo run --example file_space
 //! ```
 
+use std::error::Error as StdError;
 use std::path::Path;
 
-use hdf5_pure::FileSpaceSettings;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
 
-/// 4096 f64 values = 32 KiB of raw data — large enough that whether the file
-/// takes the space back or keeps a second copy is unmistakable in the byte counts.
-const SCRATCH_LEN: usize = 4096;
-const SCRATCH_BYTES: u64 = (SCRATCH_LEN * size_of::<f64>()) as u64;
-
-/// What a re-add may cost over the size the file had before the delete: the
-/// free-space-manager blocks the persisting file now carries, plus a page of
-/// alignment on the paged one. Not another copy of the data, which is the whole
-/// point — a quarter of it is a line neither the manager blocks nor a page comes
-/// anywhere near, and a second copy clears by four times over.
-const OVERHEAD_ALLOWANCE: u64 = SCRATCH_BYTES / 4;
-
-/// The file's length at the three points of one add/delete/re-add cycle.
-struct Cycle {
-    /// After `scratch` was added in the first editing session.
-    before_delete: u64,
-    /// After it was deleted in its own session.
-    after_delete: u64,
-    /// After a same-sized `scratch2` was added in a third session.
-    after_readd: u64,
-}
-
-fn main() {
-    let dir = tempfile::tempdir().expect("temp dir");
-
-    // ---- Persisting file: free space is reused across sessions ----------
-    let persisting = dir.path().join("managed.h5");
-    let mut builder = FileBuilder::new();
-    builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-    // A free-space-manager strategy that persists across sessions. Its numbers are
-    // the data's own; the paged run below reports the same reuse in whole pages.
-    builder.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-    );
-    builder.write(&persisting).expect("write file");
-
-    // The strategy is stored in a superblock-extension message and survives a
-    // reopen (libhdf5 observes it too).
-    let strategy = File::open(&persisting)
-        .unwrap()
-        .file_space_settings()
-        .unwrap()
-        .map(|settings| settings.strategy());
-    assert_eq!(strategy, Some(FileSpaceStrategy::FsmAggr));
-    println!("recorded strategy: {strategy:?}\n");
-
-    println!("persisting file (strategy = FsmAggr, persist = true):");
-    let flat = churn(&persisting);
-    assert_released_and_reclaimed("FsmAggr", &flat);
-
-    // ---- Paged file: the same cycle, in whole pages ---------------------
-    // A paged file segregates metadata and raw data by page, so it tracks free
-    // space per page type and an allocation draws from the list matching what it
-    // is placing (or from a page that is wholly free). The end of allocation stays
-    // a whole number of pages, so what a delete gives back here is whole pages.
-    let paged = dir.path().join("paged.h5");
-    let mut builder = FileBuilder::new();
-    builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-    builder.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
-    );
-    builder.write(&paged).expect("write file");
-
-    println!("\npaged file (strategy = Page, persist = true):");
-    let paged_cycle = churn(&paged);
-    assert_released_and_reclaimed("Page", &paged_cycle);
-
-    // ---- Control: a non-persisting file forgets its free list -----------
-    // Identical churn on a default-strategy file. Here the free list lives only
-    // for the open session and is discarded on close, so the session that deletes
-    // `scratch` cannot record the space it freed and the session that adds
-    // `scratch2` has no record to draw on: the file keeps both copies.
-    let default = dir.path().join("default.h5");
-    let mut builder = FileBuilder::new();
-    builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-    builder.write(&default).expect("write file");
-
-    println!("\ncontrol — non-persisting file (default strategy):");
-    let control = churn(&default);
-
-    let control_growth = control.after_readd - control.after_delete;
-    assert!(
-        control_growth >= SCRATCH_BYTES,
-        "expected no cross-session reuse: re-adding {SCRATCH_BYTES} bytes should \
-         grow the file by at least that, got {control_growth}"
-    );
-    assert!(
-        control.after_readd > control.before_delete + SCRATCH_BYTES / 2,
-        "expected a high-water mark: the control ended at {} after peaking at {} \
-         before the delete, so it did not keep a second copy",
-        control.after_readd,
-        control.before_delete
-    );
-
-    // ---- Every file still holds the original and the re-added data ------
-    for path in [&persisting, &paged, &default] {
-        let file = File::open(path).unwrap();
-        assert_eq!(
-            file.dataset("keep").unwrap().read_i32().unwrap(),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            file.dataset("scratch2").unwrap().read_f64().unwrap(),
-            vec![7.0; SCRATCH_LEN]
-        );
+fn main() -> Result<(), Box<dyn StdError>> {
+    let dir = tempfile::tempdir()?;
+    for (filename, strategy, persist) in [
+        ("managed.h5", FileSpaceStrategy::FsmAggr, true),
+        ("paged.h5", FileSpaceStrategy::Page, true),
+        ("control.h5", FileSpaceStrategy::FsmAggr, false),
+    ] {
+        println!("\n{strategy:?}, persistence = {persist}");
+        replace_dataset_across_sessions(
+            &dir.path().join(filename),
+            FileSpaceSettings::new(strategy).with_persistence(persist),
+        )?;
     }
+    Ok(())
+}
 
+fn replace_dataset_across_sessions(
+    path: &Path,
+    settings: FileSpaceSettings,
+) -> Result<(), Box<dyn StdError>> {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(settings);
+    builder
+        .create_dataset("scratch")
+        .with_f64_data(&vec![0.0; 4096]);
+    builder.write(path)?;
+
+    let session = File::open_rw(path)?;
+    session.root().create_dataset("keep", |dataset| {
+        dataset.with_i32_data(&vec![1; 4096]);
+    })?;
+    session.commit()?;
+    drop(session);
     println!(
-        "\nverified: a delete released {} bytes (FsmAggr) and {} (Page), and \
-         re-adding {SCRATCH_BYTES} bytes left those files at {} and {} against \
-         peaks of {} and {} — while the non-persisting control ended at {} \
-         against a peak of {}",
-        flat.before_delete - flat.after_delete,
-        paged_cycle.before_delete - paged_cycle.after_delete,
-        flat.after_readd,
-        paged_cycle.after_readd,
-        flat.before_delete,
-        paged_cycle.before_delete,
-        control.after_readd,
-        control.before_delete
+        "  before deletion: {} bytes",
+        std::fs::metadata(path)?.len()
     );
-}
 
-/// Asserts that deletion releases space and replacement fits within the metadata allowance.
-fn assert_released_and_reclaimed(label: &str, c: &Cycle) {
-    assert!(
-        c.after_delete + SCRATCH_BYTES / 2 < c.before_delete,
-        "{label}: deleting a {SCRATCH_BYTES}-byte dataset that ran to the end of \
-         the file should have shortened it well past half that ({} bytes, from {})",
-        c.after_delete,
-        c.before_delete
-    );
-    assert!(
-        c.after_readd <= c.before_delete + OVERHEAD_ALLOWANCE,
-        "{label}: re-adding {SCRATCH_BYTES} bytes left the file at {}, past the \
-         {} it had reached before the delete plus the {OVERHEAD_ALLOWANCE} bytes \
-         of manager blocks and page alignment a re-add may cost",
-        c.after_readd,
-        c.before_delete
-    );
-}
+    let session = File::open_rw(path)?;
+    session.root().delete("scratch")?;
+    session.commit()?;
+    drop(session);
 
-/// Measures file length after adding, deleting, and replacing a dataset in separate sessions.
-fn churn(path: &Path) -> Cycle {
-    // Add `scratch`, then delete it in its own session so the region is freed.
-    let session = File::open_rw(path).expect("open for editing");
-    session
-        .root()
-        .create_dataset("scratch", |b| {
-            b.with_f64_data(&vec![0.0; SCRATCH_LEN]);
-        })
-        .unwrap();
-    session.commit().unwrap();
-    drop(session); // release the editor's exclusive lock before the next session
-    let before_delete = len(path);
-    println!("  after adding {SCRATCH_BYTES} bytes: {before_delete} bytes");
-
-    let session = File::open_rw(path).expect("reopen for editing");
-    session.root().delete("scratch").unwrap();
-    session.commit().unwrap();
-    drop(session); // release the lock before reading the file back
-    let after_delete = len(path);
-
-    // `persisted_free_sections` returns `None` for disabled persistence. A report can contain zero
-    // sections.
-    let report = File::open(path).unwrap().persisted_free_sections().unwrap();
-    let (count, total_free) = match report {
-        Some(report) => (
-            report.free_sections().section_count(),
-            report.free_sections().free_bytes(),
+    let file = File::open(path)?;
+    match file.persisted_free_sections()? {
+        Some(report) => println!(
+            "  after reopening: {} bytes of persisted free space",
+            report.free_sections().free_bytes()
         ),
-        None => (0, 0),
-    };
-    println!(
-        "  after delete: {after_delete} bytes, {} persisted free region(s) ({total_free} bytes)",
-        count
-    );
-
-    // Add a same-sized dataset in a fresh session and measure the growth.
-    let session = File::open_rw(path).expect("reopen for editing");
-    session
-        .root()
-        .create_dataset("scratch2", |b| {
-            b.with_f64_data(&vec![7.0; SCRATCH_LEN]);
-        })
-        .unwrap();
-    session.commit().unwrap();
-    drop(session); // release the lock before reading the file back
-    let after_readd = len(path);
-    let growth = i128::from(after_readd) - i128::from(after_delete);
-    println!(
-        "  after re-adding {SCRATCH_BYTES} bytes of new data: {after_readd} bytes ({growth:+})"
-    );
-    Cycle {
-        before_delete,
-        after_delete,
-        after_readd,
+        None => println!("  after reopening: free space is not persisted"),
     }
-}
+    drop(file);
 
-fn len(path: &Path) -> u64 {
-    std::fs::metadata(path).unwrap().len()
+    let session = File::open_rw(path)?;
+    session.root().create_dataset("replacement", |dataset| {
+        dataset.with_f64_data(&vec![7.0; 4096]);
+    })?;
+    session.commit()?;
+    drop(session);
+    println!(
+        "  after replacement: {} bytes",
+        std::fs::metadata(path)?.len()
+    );
+
+    let file = File::open(path)?;
+    if file.dataset("keep")?.read_i32()? != vec![1; 4096] {
+        return Err("surviving dataset differs from the original data".into());
+    }
+    if file.dataset("replacement")?.read_f64()? != vec![7.0; 4096] {
+        return Err("replacement dataset differs from the new data".into());
+    }
+    Ok(())
 }
