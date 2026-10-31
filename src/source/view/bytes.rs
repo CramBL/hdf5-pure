@@ -7,7 +7,7 @@ use hdf5_pure_core::__private::{FileRange, MetadataFrame};
 use hdf5_pure_core::{AddressRange, MetadataBytes, StoredAddress};
 
 use crate::address::{BaseAddress, BaseAddressExt};
-use crate::convert::Narrow;
+use crate::convert::{self, Narrow};
 use crate::error::FormatError;
 use crate::source::{self, RangeReader};
 
@@ -39,15 +39,12 @@ impl<'a> StoredBytes<'a> {
     ///
     /// # Errors
     ///
-    /// Returns errors from [`source::bytes_in`] if the interval is outside the view.
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the interval ends beyond the view.
     pub(crate) fn borrow_range(
         self,
         range: AddressRange<StoredAddress>,
     ) -> Result<&'a [u8], FormatError> {
-        source::bytes_in(
-            self.frame.bytes(),
-            FileRange::new(BaseAddress::ZERO.resolve(range.start())?, range.length())?,
-        )
+        bytes_in(self.frame.bytes(), range)
     }
 
     /// Returns the borrowed suffix with its physical origin for byte-oriented parsers.
@@ -128,4 +125,19 @@ impl RangeReader<AddressRange<StoredAddress>> for StoredBytes<'_> {
     ) -> Result<MetadataBytes<'_>, FormatError> {
         self.read_metadata(range.start(), range.length().to_usize()?)
     }
+}
+
+fn bytes_in(bytes: &[u8], range: AddressRange<StoredAddress>) -> Result<&[u8], FormatError> {
+    if range.end().get() > bytes.len().to_u64() {
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: range.end().get(),
+            available: bytes.len().to_u64(),
+        });
+    }
+    bytes
+        .get(convert::slice_range(range.start().get(), range.length())?)
+        .ok_or(FormatError::UnexpectedSourceEof {
+            expected: range.end().get(),
+            available: bytes.len().to_u64(),
+        })
 }
