@@ -82,8 +82,8 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 |---|:---:|---|
 | Dataset geometry | 🟡 | Rank-one, chunked, unlimited. Extensible Array indexes only. |
 | Staged append | ✅ | Allocated or unallocated indexes. |
-| In-place append | 🟡 | Allocated index required. |
-| Buffered append | 🟡 | Allocated index required. No SWMR. |
+| In-place append | ✅ | Allocated or unallocated indexes. |
+| Buffered append | 🟡 | No SWMR. |
 | Filtered append | ✅ | Re-encodable pipelines only. |
 | Non-chunk-aligned lossless filtered append | ✅ | |
 | Lossy filtered partial-chunk append | 🟡 | Opt-in with `LossyTailReencoding::Allow`. |
@@ -120,16 +120,16 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 
 | Chunk allocation | Repack | Detail |
 |---|:---:|---|
-| Fully allocated | ✅ | Verbatim chunk copy. |
+| Fully allocated | ✅ | Verbatim copy for types without VLEN or object references. |
 | Partially allocated | 🟡 | Lossless re-encoding only. |
-| Unallocated | ✅ | Filter metadata preserved. |
+| Unallocated | ✅ | Filter metadata preserved, even for unsupported filters. |
 
 ### Datatypes
 
 | Datatype class | Read | Write | Detail |
 |---|:---:|:---:|---|
-| Fixed-point | ✅ | ✅ | Element sizes up to 64 bits. |
-| Floating-point | ✅ | ✅ | IEEE 754 binary32 and binary64. |
+| Fixed-point | ✅ | ✅ | Numeric conversion: element sizes up to 64 bits. |
+| Floating-point | ✅ | ✅ | Numeric conversion: IEEE 754 binary32 and binary64 only. |
 | Time | ✅ | ✅ | |
 | Fixed-length string | ✅ | ✅ | |
 | Variable-length string | ✅ | ✅ | |
@@ -156,24 +156,24 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 
 #### Floating-point layouts
 
-| Feature | Read | Write |
-|---|:---:|:---:|
-| IEEE 754 binary32 | ✅ | ✅ |
-| IEEE 754 binary64 | ✅ | ✅ |
-| Little-endian byte order | ✅ | ✅ |
-| Big-endian byte order | ✅ | ✅ |
-| Arbitrary HDF5 floating-point layouts | ❌ | ❌ |
+| Feature | Read | Write | Detail |
+|---|:---:|:---:|---|
+| IEEE 754 binary32 | ✅ | ✅ | |
+| IEEE 754 binary64 | ✅ | ✅ | |
+| Little-endian byte order | ✅ | ✅ | |
+| Big-endian byte order | ✅ | ✅ | |
+| Arbitrary HDF5 floating-point layouts | 🟡 | 🟡 | Raw access only. No numeric conversion. |
 
 ### Compound datatypes
 
-| Feature | Read | Write | Detail |
-|---|:---:|:---:|---|
-| Explicit member offsets | ✅ | ✅ | |
-| Padding between members | ✅ | ✅ | |
-| Nested compound types | ✅ | ✅ | |
-| Array members | ✅ | ✅ | |
-| Variable-length members | ✅ | 🟡 | Repack supports writing. |
-| Object-reference members | ✅ | 🟡 | Repack supports writing. |
+| Feature | Read | Write | Repack | Detail |
+|---|:---:|:---:|:---:|---|
+| Explicit member offsets | ✅ | ✅ | ✅ | |
+| Padding between members | ✅ | ✅ | ✅ | |
+| Nested compound types | ✅ | ✅ | ✅ | |
+| Array members | ✅ | ✅ | ✅ | |
+| Variable-length members | ✅ | ❌ | 🟡 | Lossless, re-encodable filters. Object references impose additional restrictions. |
+| Object-reference members | ✅ | ❌ | 🟡 | For allocated storage, repack supports contiguous and compact layouts, and rejects chunked, filtered, and resizable layouts. |
 
 ### Strings
 
@@ -215,15 +215,15 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 
 ### Variable-length data
 
-| Feature | Read | Write | Detail |
-|---|:---:|:---:|---|
-| Variable-length UTF-8 string | ✅ | ✅ | |
-| Variable-length ASCII string | ✅ | ✅ | |
-| Chunked variable-length string | ✅ | ✅ | |
-| Filtered variable-length string | ✅ | ✅ | |
-| Resizable variable-length string | ✅ | ✅ | |
-| Variable-length sequence | ✅ | 🟡 | General sequence writing requires repack. |
-| Variable-length member in a compound type | ✅ | 🟡 | Repack supports writing. |
+| Feature | Read | Write | Repack | Detail |
+|---|:---:|:---:|:---:|---|
+| Variable-length UTF-8 string | ✅ | ✅ | ✅ | |
+| Variable-length ASCII string | ✅ | ✅ | ✅ | |
+| Chunked variable-length string | ✅ | ✅ | ✅ | |
+| Filtered variable-length string | ✅ | ✅ | ✅ | |
+| Resizable variable-length string | ✅ | ✅ | ✅ | |
+| Variable-length sequence | ✅ | ❌ | 🟡 | Lossless, re-encodable filters. No VLEN or reference base types. |
+| Variable-length member in a compound type | ✅ | ❌ | 🟡 | Lossless, re-encodable filters. Object references impose additional restrictions. |
 
 ### Datatype conversion
 
@@ -253,11 +253,11 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 
 | Feature | Read | Configure | Detail |
 |---|:---:|:---:|---|
-| `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | 🟡 | Aggregation is unavailable in SWMR sessions. |
+| `H5F_FSPACE_STRATEGY_FSM_AGGR` | ✅ | ✅ | Aggregation is unavailable in SWMR sessions. |
 | `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ | Without persistence: mirrored staged edits only, with supported attribute storage. Object references, page buffering, and space reuse are unsupported. |
 | `H5F_FSPACE_STRATEGY_AGGR` | ✅ | ✅ | Deleted object storage remains unavailable for reuse. |
-| `H5F_FSPACE_STRATEGY_NONE` | ✅ | 🟡 | Freed storage remains allocated. |
-| Aggregators | ✅ | 🟡 | Only `FsmAggr` and `Aggr` |
+| `H5F_FSPACE_STRATEGY_NONE` | ✅ | ✅ | Freed storage remains allocated. |
+| Aggregators | ✅ | 🟡 | `FsmAggr` and `Aggr` only. Disabled in SWMR under `FsmAggr`. |
 | Persistent free-space managers | ✅ | ✅ | |
 | Free-space threshold | ✅ | ✅ | Page tails are tracked regardless of threshold. |
 | File-space page size | ✅ | ✅ | Writing and editing require a size from 512 bytes to 1 GiB. |
