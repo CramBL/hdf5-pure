@@ -105,6 +105,17 @@ pub fn object_file(
     heap: &[(&str, Cell)],
     aux: &[(&str, Cell)],
 ) -> Vec<u8> {
+    objects_file(&[(var, class_name, metadata)], heap, aux)
+}
+
+/// A file holding several MATLAB objects, each a `(variable, class name, metadata)` triple, in
+/// one MCOS subsystem, as [`object_file`] holds one.
+#[track_caller]
+pub fn objects_file(
+    variables: &[(&str, &str, &[u32])],
+    heap: &[(&str, Cell)],
+    aux: &[(&str, Cell)],
+) -> Vec<u8> {
     let mut builder = FileBuilder::new();
 
     let mut refs = builder.create_group(REFS);
@@ -127,16 +138,18 @@ pub fn object_file(
     mcos_array.set_attr(OBJECT_DECODE, AttrValue::I32(OBJECT_DECODE_OPAQUE));
     builder.add_group(subsystem.finish());
 
-    let variable = builder.create_dataset(var);
-    variable
-        .with_u32_data(metadata)
-        .with_shape(&[1, metadata.len() as u64]);
-    variable.set_attr(CLASS, AttrValue::AsciiString(class_name.into()));
-    variable.set_attr(OBJECT_DECODE, AttrValue::I32(OBJECT_DECODE_OPAQUE));
+    for &(var, class_name, metadata) in variables {
+        let variable = builder.create_dataset(var);
+        variable
+            .with_u32_data(metadata)
+            .with_shape(&[1, metadata.len() as u64]);
+        variable.set_attr(CLASS, AttrValue::AsciiString(class_name.into()));
+        variable.set_attr(OBJECT_DECODE, AttrValue::I32(OBJECT_DECODE_OPAQUE));
+    }
 
     builder
         .finish()
-        .unwrap_or_else(|e| panic!("assemble a file holding {var:?}: {e}"))
+        .unwrap_or_else(|e| panic!("assemble a file holding {variables:?}: {e}"))
 }
 
 /// The contents of one MCOS cell, or of a further `#refs#` dataset a cell reaches.
@@ -152,6 +165,8 @@ pub enum Cell {
     /// A cell array of the objects at these `#refs#` paths.
     Refs(Vec<String>),
     U8(Vec<u8>),
+    /// A `uint64` array, such as the `saveobj` payload of a `string`.
+    U64(Vec<u64>),
 }
 
 impl Cell {
@@ -199,6 +214,12 @@ impl Cell {
                     .with_u8_data(values)
                     .with_shape(&[1, values.len() as u64]);
                 "uint8"
+            }
+            Self::U64(values) => {
+                dataset
+                    .with_u64_data(values)
+                    .with_shape(&[1, values.len() as u64]);
+                "uint64"
             }
         };
         dataset.set_attr(CLASS, AttrValue::AsciiString(class.into()));
