@@ -27,7 +27,26 @@ use crate::error::FormatError;
 
 mod view;
 
-pub(crate) use view::{PhysicalSource, StoredBytes, StoredRead, StoredSource};
+#[cfg(test)]
+pub(crate) use view::PhysicalBytes;
+#[cfg(any(feature = "std", test, doc))]
+pub(crate) use view::PhysicalSource;
+#[cfg(any(test, doc))]
+pub(crate) use view::StoredSource;
+pub(crate) use view::{StoredBytes, StoredRead};
+
+/// An opened backend in its original source coordinates, with its effective address context.
+///
+/// Implementations use offsets from the beginning of the original source and obtain the address
+/// context from the owning file or write engine. Resident bytes cover that same complete source,
+/// including any userblock prefix. Typed source-view construction requires this interface.
+pub(crate) trait OriginalSource: Source {
+    /// Returns the owning image's effective stored-to-physical mapping.
+    fn addresses(&self) -> AddressContext;
+
+    /// Borrows the complete original image when the backend exposes resident bytes.
+    fn resident_bytes(&self) -> Option<&[u8]>;
+}
 
 /// Default maximum size of one entry admitted to a streaming metadata cache.
 pub const DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES: usize = 64 * 1024;
@@ -566,44 +585,43 @@ pub(crate) fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatErro
         })
 }
 
-impl<'a, S: Source + ?Sized> BaseOffsetSource<'a, S> {
-    fn stored(&self) -> StoredSource<'a, S> {
-        PhysicalSource::new(self.inner).stored(AddressContext::from_effective_base(self.base))
-    }
-}
-
 impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
     fn len(&self) -> u64 {
-        self.stored().len()
+        self.inner.len().saturating_sub(self.base.get())
     }
-
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        self.stored().read_at(StoredAddress::new(offset), buf)
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+        self.inner
+            .read_at(self.base.resolve(StoredAddress::new(offset))?.get(), buffer)
     }
-
-    fn read_exact_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-        self.stored().read_exact_at(StoredAddress::new(offset), len)
+    fn read_exact_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
+        let range = AddressRange::new(StoredAddress::new(offset), length.to_u64())?;
+        if range.end().get() > self.len() {
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: range.end().get(),
+                available: self.len(),
+            });
+        }
+        self.inner
+            .read_exact_at(self.base.resolve(range.start())?.get(), length)
     }
-
-    fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-        self.stored()
-            .read_metadata_at(StoredAddress::new(offset), len)
+    fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
+        self.inner
+            .read_metadata_at(self.base.resolve(StoredAddress::new(offset))?.get(), length)
     }
-
     fn metadata_origin(&self) -> Result<u64, FormatError> {
-        self.stored().metadata_origin().map(PhysicalAddress::get)
+        Ok(PhysicalAddress::new(self.inner.metadata_origin()?)
+            .checked_add(self.base.get())?
+            .get())
     }
-
-    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
-        self.stored().read_metadata(StoredAddress::new(offset), len)
+    fn read_metadata(&self, offset: u64, length: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        self.inner
+            .read_metadata(self.base.resolve(StoredAddress::new(offset))?.get(), length)
     }
-
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
-        self.stored().metadata_cache_stats()
+        self.inner.metadata_cache_stats()
     }
-
     fn reset_metadata_cache_stats(&self) {
-        self.stored().reset_metadata_cache_stats();
+        self.inner.reset_metadata_cache_stats();
     }
 }
 
@@ -724,16 +742,21 @@ pub(crate) fn framed_metadata(
 /// Borrows a stored-coordinate view of a source whose effective base is zero.
 #[cfg(test)]
 pub(crate) fn zero_base_source<S: Source + ?Sized>(source: &S) -> StoredSource<'_, S> {
-    PhysicalSource::new(source).stored(AddressContext::from_effective_base(BaseAddress::ZERO))
+    PhysicalSource::for_test(
+        source,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+    )
+    .stored()
 }
 
 /// Borrows a resident stored-coordinate view of an image whose effective base is zero.
 #[cfg(test)]
 pub(crate) fn zero_base_bytes(bytes: &[u8]) -> StoredBytes<'_> {
-    StoredBytes::new(
+    PhysicalBytes::for_test(
         bytes,
         AddressContext::from_effective_base(BaseAddress::ZERO),
     )
+    .stored()
     .unwrap()
 }
 

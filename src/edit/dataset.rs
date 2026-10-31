@@ -19,7 +19,6 @@ use hdf5_pure_space::__private::PageType;
 use crate::FillTime;
 use crate::PhysicalAddress;
 use crate::VariableLengthType;
-use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute_request::PreparedAttributes;
@@ -50,8 +49,9 @@ use crate::message_type::MessageType;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
+use crate::reader::OpenedSource;
 use crate::shared_message::DatatypeLocation;
-use crate::source::{PhysicalSource, Source, StoredRead};
+use crate::source::{OriginalSource, PhysicalSource, Source, StoredRead};
 use crate::type_builders::{self, DatasetBuilder, VlStringStaging};
 use crate::width::FormatWidths;
 
@@ -405,7 +405,7 @@ impl WriteEngine {
 
                 if self.fresh_page_boundary.is_none()
                     && let Some(writes) = try_inplace_chunk_writes(
-                        &PhysicalSource::new(src).stored(base),
+                        &PhysicalSource::new(&self.opened_source()).stored(),
                         &dl,
                         &disk_ds,
                         &overwrite.geometry,
@@ -449,13 +449,13 @@ impl WriteEngine {
     /// filters, a sparse chunk grid, inconsistent filter metadata, or dimension overflow.
     /// Returns the same error for a partial tail stored under lossy filters unless the append
     /// permits re-encoding it. Propagates metadata, chunk-decoding, and encoding errors.
-    pub(super) fn prepare_append<S: Source + ?Sized>(
-        src: &S,
+    pub(super) fn prepare_append(
+        src: &OpenedSource<'_>,
         addr: u64,
         ab: &AppendBuilder,
-        base: AddressContext,
         widths: FormatWidths,
     ) -> Result<MovingWrite, Error> {
+        let base = src.addresses();
         if ab.dt_conflict() {
             return Err(Error::AppendUnsupported(
                 "append mixes element types in one builder; use one element type per \
@@ -596,7 +596,7 @@ impl WriteEngine {
                 "userblock base address past end-of-file",
             ));
         }
-        let indexes = PhysicalSource::new(src).stored(base);
+        let indexes = PhysicalSource::new(src).stored();
         // Retained records must use the same element format as the replacement index.
         if let Some(idx_addr) = *address {
             let array = crate::extensible_array::read_header(

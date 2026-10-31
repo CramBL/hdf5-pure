@@ -4866,9 +4866,11 @@ mod tests {
         } else {
             Box::new(BytesSource::new(image.build()))
         };
-        let framed = source::PhysicalSource::new(source.as_ref()).stored(
+        let framed = source::PhysicalSource::for_test(
+            source.as_ref(),
             AddressContext::from_effective_base(BaseAddress::new(base.to_u64())),
-        );
+        )
+        .stored();
         let metadata = StoredMetadata(&framed);
         let parent = BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0x100, 8, 2).unwrap();
         let node = parent.node();
@@ -5540,7 +5542,7 @@ mod tests {
             inner: &cache,
             requests: RefCell::new(Vec::new()),
         };
-        let stored = source::PhysicalSource::new(&observed).stored(context.addresses());
+        let stored = source::PhysicalSource::for_test(&observed, context.addresses()).stored();
         let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
             rank: 1,

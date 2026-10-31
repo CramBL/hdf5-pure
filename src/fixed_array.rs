@@ -284,8 +284,11 @@ mod tests {
     fn buffered_records(image: &[u8], base: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
         read_chunks(
-            &source::PhysicalSource::new(&source::BytesSource::new(image))
-                .stored(AddressContext::from_effective_base(BaseAddress::new(base))),
+            &source::PhysicalSource::for_test(
+                &source::BytesSource::new(image),
+                AddressContext::from_effective_base(BaseAddress::new(base)),
+            )
+            .stored(),
             WIDTHS,
             StoredAddress::new(ARRAY_AT),
             8,

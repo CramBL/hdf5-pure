@@ -82,6 +82,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
+use crate::reader::OpenedSource;
 #[cfg(test)]
 use crate::source;
 use crate::source::{PhysicalSource, Source};
@@ -128,6 +129,9 @@ impl ElemRecord {
 /// against its own image and exclusive lock, rather than opening a second one
 /// that would take a second lock and keep a divergent view.
 pub(crate) trait Store: Source {
+    /// Borrows the session's original image with its effective address context.
+    fn opened_source(&self) -> OpenedSource<'_>;
+
     /// This file's validated address and length field widths.
     fn widths(&self) -> FormatWidths;
 
@@ -750,7 +754,7 @@ impl Located {
         let chunk = self.chunk_info(rec);
         let allocation = ChunkAllocation::capture(file.addresses(), &chunk)?;
         let live = chunk.read_live_elements(
-            &PhysicalSource::new(file).stored(file.addresses()),
+            &PhysicalSource::new(&file.opened_source()).stored(),
             scratch,
             self.flags,
             pipeline,
@@ -3356,6 +3360,9 @@ mod tests {
     }
 
     impl Store for WindowProbeStore {
+        fn opened_source(&self) -> OpenedSource<'_> {
+            OpenedSource::for_test(self, self.addresses())
+        }
         fn widths(&self) -> FormatWidths {
             self.widths
         }

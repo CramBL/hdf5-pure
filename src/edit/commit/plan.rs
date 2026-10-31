@@ -402,7 +402,6 @@ impl WriteEngine {
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
     ) -> Result<(), Error> {
-        let base = self.context.addresses();
         for (full, ab) in staged.appends() {
             let Some((parent, leaf)) = full.split_leaf() else {
                 return Err(Error::AppendUnsupported("cannot append to the root group"));
@@ -423,7 +422,7 @@ impl WriteEngine {
                 self.context.addresses(),
                 &full.as_path(),
             )?;
-            let mw = Self::prepare_append(&self.image(), addr, ab, base, self.context.widths())?;
+            let mw = Self::prepare_append(&self.opened_source(), addr, ab, self.context.widths())?;
             let counts = edits
                 .incoming_links
                 .get_or_insert_with(|| self.count_incoming_hard_links())
@@ -528,7 +527,6 @@ impl WriteEngine {
         moving_writes: Vec<DatasetRelocation>,
         write_targets: &[ObjectPathBuf],
     ) -> Result<DirtyGroups, Error> {
-        let base = self.context.addresses();
         let mut nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
         nodes.entry(ObjectPathBuf::root()).or_default(); // root is always dirty
         let mut add_targets: Vec<ObjectPathBuf> = Vec::new();
@@ -580,11 +578,10 @@ impl WriteEngine {
                 &src.as_path(),
             )?;
             let tree = Self::read_copy_subtree(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 src_addr,
                 false,
-                base,
                 self.context.widths(),
             )?;
             copy_sources.push(src.clone());

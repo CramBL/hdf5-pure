@@ -6,12 +6,12 @@ use alloc::vec::Vec;
 use hdf5_pure_core::__private::{FileRange, MetadataFrame};
 use hdf5_pure_core::{AddressRange, MetadataBytes, StoredAddress};
 
-use crate::address::{AddressContext, BaseAddress, BaseAddressExt};
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::{self, RangeReader};
 
-use super::StoredRead;
+use super::{PhysicalBytes, StoredRead};
 
 /// A borrowed file image addressed relative to the opened image's effective base.
 ///
@@ -29,9 +29,9 @@ impl<'a> StoredBytes<'a> {
     ///
     /// Returns [`FormatError::UnexpectedSourceEof`] if the base exceeds the image's byte length,
     /// and errors from [`MetadataFrame::new`].
-    pub(crate) fn new(bytes: &'a [u8], addresses: AddressContext) -> Result<Self, FormatError> {
+    pub(super) fn new(physical: PhysicalBytes<'a>) -> Result<Self, FormatError> {
         Ok(Self {
-            frame: source::framed_metadata(bytes, addresses.effective_base())?,
+            frame: source::framed_metadata(physical.bytes, physical.addresses.effective_base())?,
         })
     }
 

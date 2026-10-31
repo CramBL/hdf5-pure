@@ -7,7 +7,7 @@ use rstest::rstest;
 
 use super::*;
 use crate::address::{BaseAddress, BaseAddressExt, OpenedImageContext, StoredAddressExt};
-use crate::source::BytesSource;
+use crate::source::{BaseOffsetSource, BytesSource};
 #[cfg(feature = "std")]
 use crate::source::{MetadataCacheConfig, MetadataCachingSource, ReadSeekSource};
 
@@ -25,7 +25,7 @@ fn stored_reads_apply_the_effective_base_once(
     let source = BytesSource::new(&data);
     let image = OpenedImageContext::reconcile(BaseAddress::new(encoded_base), 1024, effective_base)
         .unwrap();
-    let stored = PhysicalSource::new(&source).stored(image.addresses());
+    let stored = PhysicalSource::for_test(&source, image.addresses()).stored();
     assert_eq!(stored.len(), 1024 - effective_base);
     assert_eq!(
         stored.metadata_origin().unwrap(),
@@ -60,7 +60,7 @@ fn streaming_metadata_keeps_its_owner_and_cache(#[case] base: u64) {
         MetadataCacheConfig::new(128),
     );
     let context = OpenedImageContext::reconcile(BaseAddress::new(base), 1024, base).unwrap();
-    let stored = PhysicalSource::new(&source).stored(context.addresses());
+    let stored = PhysicalSource::for_test(&source, context.addresses()).stored();
     let first = stored.read_metadata(StoredAddress::new(4), 3).unwrap();
     let second = stored.read_metadata(StoredAddress::new(4), 3).unwrap();
     assert_eq!(first.offset(), base + 4);
@@ -124,7 +124,7 @@ fn metadata_retains_the_original_source_origin(
         last_read: Cell::new(None),
     };
     let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
-    let stored = PhysicalSource::new(&source).stored(addresses);
+    let stored = PhysicalSource::for_test(&source, addresses).stored();
     let metadata = stored.read_metadata(StoredAddress::new(offset), 3).unwrap();
     assert_eq!(metadata.as_ref(), &[42; 3]);
     assert_eq!(metadata.offset(), origin + base + offset);
@@ -151,7 +151,7 @@ fn exact_reads_check_the_stored_extent(
 ) {
     let source = BytesSource::new([0; 8]);
     let addresses = AddressContext::from_effective_base(BaseAddress::new(4));
-    let stored = PhysicalSource::new(&source).stored(addresses);
+    let stored = PhysicalSource::for_test(&source, addresses).stored();
     let result = stored.read_exact_at(StoredAddress::new(offset), length);
     if let Some(error) = error {
         assert_eq!(result.unwrap_err(), error);
@@ -177,7 +177,7 @@ fn metadata_reads_reject_coordinate_overflow(
         last_read: Cell::new(None),
     };
     let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
-    let stored = PhysicalSource::new(&source).stored(addresses);
+    let stored = PhysicalSource::for_test(&source, addresses).stored();
     let range = AddressRange::new(StoredAddress::new(offset), length).unwrap();
     assert_eq!(stored.read_range(range).unwrap_err(), error);
 }
@@ -185,7 +185,10 @@ fn metadata_reads_reject_coordinate_overflow(
 #[test]
 fn physical_reads_use_source_positions() {
     let source = BytesSource::new([1, 2, 3]);
-    let physical = PhysicalSource::new(&source);
+    let physical = PhysicalSource::for_test(
+        &source,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+    );
     let mut buffer = [0; 2];
     physical
         .read_at(PhysicalAddress::new(1), &mut buffer)
@@ -212,7 +215,7 @@ fn stored_metadata_borrows_without_copying_or_cache_admission() {
         MetadataCacheConfig::new(data.len()).with_max_entry_bytes(data.len()),
     );
     let addresses = AddressContext::from_effective_base(BaseAddress::new(512));
-    let stored = PhysicalSource::new(&source).stored(addresses);
+    let stored = PhysicalSource::for_test(&source, addresses).stored();
     assert_eq!(
         stored.metadata_cache_stats().unwrap(),
         MetadataCacheStats::default()
@@ -269,7 +272,7 @@ fn typed_views_do_not_implement_the_unframed_source_interface() {
 fn stored_reads_report_the_backends_physical_bounds(#[case] metadata: bool) {
     let source = BytesSource::new([0; 8]);
     let addresses = AddressContext::from_effective_base(BaseAddress::new(4));
-    let stored = PhysicalSource::new(&source).stored(addresses);
+    let stored = PhysicalSource::for_test(&source, addresses).stored();
     let error = if metadata {
         stored.read_metadata(StoredAddress::new(3), 2).unwrap_err()
     } else {
@@ -327,14 +330,15 @@ fn metadata_reads_preserve_backend_overflow_errors(
         MetadataOverflowSource::Frame => &frame,
     };
     let base = BaseAddress::new(512);
-    let stored = PhysicalSource::new(source).stored(AddressContext::from_effective_base(base));
+    let stored =
+        PhysicalSource::for_test(source, AddressContext::from_effective_base(base)).stored();
     assert_eq!(
         stored
             .read_metadata(StoredAddress::new(offset), length)
             .unwrap_err(),
         expected,
     );
-    let legacy = crate::source::BaseOffsetSource {
+    let legacy = BaseOffsetSource {
         inner: source,
         base,
     };
@@ -374,7 +378,9 @@ fn resident_views_apply_the_effective_base_and_borrow_the_original_bytes(
     image.extend(0..32u8);
     let context =
         OpenedImageContext::reconcile(BaseAddress::new(encoded), encoded + 32, effective).unwrap();
-    let view = StoredBytes::new(&image, context.addresses()).unwrap();
+    let view = PhysicalBytes::for_test(&image, context.addresses())
+        .stored()
+        .unwrap();
     let mut buffer = [0; 3];
     view.read_at(StoredAddress::new(4), &mut buffer).unwrap();
     assert_eq!(buffer, [4, 5, 6]);
@@ -441,9 +447,9 @@ fn resident_read_errors_match_reads_of_the_original_source(
 ) {
     let image = [0; 544];
     let context = AddressContext::from_effective_base(BaseAddress::new(512));
-    let resident = StoredBytes::new(&image, context).unwrap();
+    let resident = PhysicalBytes::for_test(&image, context).stored().unwrap();
     let physical = BytesSource::new(image);
-    let reference = PhysicalSource::new(&physical).stored(context);
+    let reference = PhysicalSource::for_test(&physical, context).stored();
     let address = StoredAddress::new(start);
     let read = |source: &dyn StoredRead| match operation {
         ResidentRead::Buffer => source.read_at(address, &mut vec![0; length]),
@@ -463,7 +469,9 @@ fn resident_read_errors_match_reads_of_the_original_source(
 fn resident_view_rejects_a_base_beyond_its_source() {
     let context = AddressContext::from_effective_base(BaseAddress::new(4));
     assert_eq!(
-        StoredBytes::new(&[0; 3], context).unwrap_err(),
+        PhysicalBytes::for_test(&[0; 3], context)
+            .stored()
+            .unwrap_err(),
         FormatError::UnexpectedSourceEof {
             expected: 4,
             available: 3,
@@ -487,10 +495,11 @@ fn only_stored_views_implement_typed_payload_reads() {
 #[test]
 fn resident_range_reads_borrow_without_allocating() {
     let data = vec![17; 1_048_576 + 512];
-    let view = StoredBytes::new(
+    let view = PhysicalBytes::for_test(
         &data,
         AddressContext::from_effective_base(BaseAddress::new(512)),
     )
+    .stored()
     .unwrap();
     let range = AddressRange::new(StoredAddress::new(0), 1_048_576).unwrap();
     let expected = &data[512..];
@@ -516,4 +525,22 @@ fn resident_range_reads_borrow_without_allocating() {
     assert_eq!(measured.bytes, 0, "{measured}");
     assert_eq!(measured.peak_bytes, 0, "{measured}");
     assert_eq!(measured.live_bytes, 0, "{measured}");
+}
+
+#[test]
+fn raw_and_framed_readers_do_not_provide_original_backend_coordinates() {
+    trait AmbiguousIfOriginalSource<A> {
+        fn marker() {}
+    }
+    struct ImplementsOriginalSource;
+    impl<T: ?Sized> AmbiguousIfOriginalSource<()> for T {}
+    impl<T: OriginalSource + ?Sized> AmbiguousIfOriginalSource<ImplementsOriginalSource> for T {}
+    let _ = <BytesSource<&[u8]> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <BaseOffsetSource<'_, BytesSource<&[u8]>> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <MetadataFrame<'_> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <StoredSource<'_, BytesSource<&[u8]>> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <StoredBytes<'_> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <PhysicalBytes<'_> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <PhysicalSource<'_, BytesSource<&[u8]>> as AmbiguousIfOriginalSource<_>>::marker;
+    let _ = <&[u8] as AmbiguousIfOriginalSource<_>>::marker;
 }

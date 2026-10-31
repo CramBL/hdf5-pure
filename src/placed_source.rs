@@ -32,9 +32,11 @@ impl PlacedSource {
 
     /// Borrows a stored-coordinate view with `start` as its effective base.
     pub(crate) fn framed(&self) -> StoredSource<'_, Self> {
-        PhysicalSource::new(self).stored(AddressContext::from_effective_base(BaseAddress::new(
-            self.start,
-        )))
+        PhysicalSource::for_test(
+            self,
+            AddressContext::from_effective_base(BaseAddress::new(self.start)),
+        )
+        .stored()
     }
 
     /// Returns the length of each metadata read, in the order of the reads.

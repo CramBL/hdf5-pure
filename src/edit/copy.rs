@@ -29,8 +29,9 @@ use crate::object_graph::ObjectId;
 use crate::object_graph::ObjectTree;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::OpenedSource;
 use crate::shared_message::SharedResolver;
-use crate::source::{BaseOffsetSource, BytesSource, PhysicalSource, Source};
+use crate::source::{BaseOffsetSource, OriginalSource, PhysicalSource, Source};
 use crate::width::FormatWidths;
 
 use super::attributes::{self, DenseAttrSet};
@@ -107,14 +108,15 @@ impl WriteEngine {
             &src.as_path(),
         )?;
         // The source has base address zero, so its stored addresses are absolute.
-        let tree = Self::read_copy_subtree(
-            &BytesSource::new(src_data),
-            source.access_mode(),
-            src_addr,
-            true,
-            source.addresses(),
-            source.widths(),
-        )?;
+        let tree = source.with_opened_source(|opened| {
+            Self::read_copy_subtree(
+                opened,
+                source.access_mode(),
+                src_addr,
+                true,
+                source.widths(),
+            )
+        })?;
         self.refuse_if_claimed(dst)?;
         self.staged
             .push(StagedOp::CopyObjectFrom(dst.clone(), tree));
@@ -309,19 +311,18 @@ impl WriteEngine {
     /// hard link or the editor cannot reproduce the source storage, and
     /// [`Error::TraversalLimitExceeded`] if the source holds more objects or hard links than a
     /// copy reads. Propagates metadata and payload read or parse errors.
-    pub(super) fn read_copy_subtree<S: Source + ?Sized>(
-        src: &S,
+    pub(super) fn read_copy_subtree(
+        src: &OpenedSource<'_>,
         access_mode: AccessMode,
         addr: u64,
         cross_file: bool,
-        base: AddressContext,
         widths: FormatWidths,
     ) -> Result<CopyTree, Error> {
         CopyReader {
-            src,
+            src: *src,
             access_mode,
             cross_file,
-            base,
+            base: src.addresses(),
             widths,
         }
         .read(COPY_BUDGET, addr)
@@ -757,8 +758,8 @@ pub(super) struct CopyLink<T> {
 }
 
 /// Reads a source subtree into the nodes of a [`CopyTree`].
-pub(super) struct CopyReader<'a, S: Source + ?Sized> {
-    pub(super) src: &'a S,
+pub(super) struct CopyReader<'a> {
+    pub(super) src: OpenedSource<'a>,
     pub(super) access_mode: AccessMode,
     /// Whether `src` is another file, whose references the reader rejects.
     pub(super) cross_file: bool,
@@ -767,7 +768,7 @@ pub(super) struct CopyReader<'a, S: Source + ?Sized> {
     pub(super) widths: FormatWidths,
 }
 
-impl<S: Source + ?Sized> CopyReader<'_, S> {
+impl CopyReader<'_> {
     /// Reads the object at `addr` and the objects it reaches into a [`CopyTree`].
     ///
     /// The reader discovers the headers of the objects within `budget` first, and reads the
@@ -838,7 +839,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
             ..
         } = *self;
         let (source, links) = CopySource::split(WriteEngine::read_object(
-            src,
+            &src,
             access_mode,
             id.header_address().get(),
             base,
@@ -939,12 +940,12 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
                 let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
 
                 let dview = BaseOffsetSource {
-                    inner: src,
+                    inner: &src,
                     base: base.effective_base(),
                 };
 
                 let infos = chunked_read::enumerate_chunks_from_source(
-                    &PhysicalSource::new(src).stored(base),
+                    &PhysicalSource::new(&src).stored(),
                     &layout,
                     &ds,
                     crate::file_writer::WIDTHS,
