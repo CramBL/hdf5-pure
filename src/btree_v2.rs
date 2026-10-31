@@ -740,12 +740,11 @@ mod tests {
     fn reads_depth_3_btree() {
         let tree = depth_3_tree();
         let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
-        let ids: Vec<u8> = collect_btree_v2_records(&tree.file, &header, OffsetWidth::Eight)
-            .unwrap()
-            .iter()
-            .map(|record| record.data[0])
-            .collect();
-        assert_eq!(ids, (0u8..15).collect::<Vec<_>>());
+        let expected: Vec<_> = (0..15).map(|id| BTreeV2Record { data: rec(id) }).collect();
+        assert_eq!(
+            collect_btree_v2_records(&tree.file, &header, OffsetWidth::Eight).unwrap(),
+            expected
+        );
 
         #[cfg(feature = "std")]
         {
@@ -759,13 +758,10 @@ mod tests {
                 LENGTH_SIZE,
             )
             .unwrap();
-            let ids: Vec<u8> =
-                collect_btree_v2_records_from_source(&source, &header, OffsetWidth::Eight)
-                    .unwrap()
-                    .iter()
-                    .map(|record| record.data[0])
-                    .collect();
-            assert_eq!(ids, (0u8..15).collect::<Vec<_>>());
+            assert_eq!(
+                collect_btree_v2_records_from_source(&source, &header, OffsetWidth::Eight).unwrap(),
+                expected
+            );
         }
     }
 

@@ -15,6 +15,7 @@
 //! index is a **list** or a **version 2 B-tree** (forced by driving the message
 //! count past the list maximum), and how many objects share one message.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use hdf5::file::LibraryVersion;
@@ -23,6 +24,11 @@ use hdf5_pure::FixedPointType;
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
 use rstest::rstest;
 use tempfile::TempDir;
+use test_util::btree_v2;
+use test_util::bytes;
+
+// Section `subsubsec_fmt4_infra_btrees_v2`, version 4.0, assigns type 7 to shared-message indexes.
+const SHARED_MESSAGE_INDEX_TYPE: u8 = 7;
 
 /// The attribute two or more objects carry identically, which is what puts it in
 /// the shared-message heap. Its value is the assertion: a reader that followed a
@@ -250,6 +256,16 @@ fn a_btree_indexed_shared_message_file_reads_back_whole() {
         .get_shared_mesg_phase_change()
         .unwrap();
     assert_eq!(phase.max_list, 2, "the list-to-B-tree threshold");
+
+    let image = fs::read(&fixture.path).unwrap();
+    let index = bytes::sole_signature(&image, btree_v2::SIGNATURE);
+    assert_eq!(
+        bytes::u8_at(
+            &image,
+            index + btree_v2::SIGNATURE.len() + core::mem::size_of::<u8>()
+        ),
+        SHARED_MESSAGE_INDEX_TYPE,
+    );
 
     assert_reads_back(&fixture.path, BTREE_FIXTURE_OBJECTS);
     let file = File::open(&fixture.path).unwrap();
