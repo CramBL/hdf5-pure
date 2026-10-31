@@ -4,9 +4,12 @@
 use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU16;
 
+use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::LocalHeap;
 use hdf5_pure_format::__private::LocalHeapDataSegment;
 use hdf5_pure_format::__private::LocalHeapLocator;
+use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_format::__private::SymbolTableEntry;
 use hdf5_pure_format::__private::SymbolTableNode;
 use hdf5_pure_format::__private::SymbolTableNodeLocator;
@@ -17,6 +20,7 @@ use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v1;
+use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 use crate::link_message::LinkTarget;
 use crate::object_path::LinkName;
@@ -26,6 +30,7 @@ use crate::source::Source;
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::FormatWidths;
+use crate::width::OffsetWidth;
 
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
@@ -70,8 +75,8 @@ pub fn resolve_v1_group_entries(
             entries.extend(link.into_group_entry()?);
             Ok(())
         },
-    )?;
-    Ok(entries)
+    )
+    .map(|()| entries)
 }
 
 /// Returns one entry per child from `source` using validated file widths.
@@ -98,8 +103,69 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
             entries.extend(link.into_group_entry()?);
             Ok(())
         },
-    )?;
-    Ok(entries)
+    )
+    .map(|()| entries)
+}
+
+/// Returns one link per entry of the version 1 group `sym_table_msg` describes, hard or soft.
+///
+/// Each link has the ASCII character set and no creation index. `group_leaf_node_k` is the value
+/// [`group_leaf_node_k`] returns for the file's superblock.
+///
+/// # Errors
+///
+/// Returns [`LinkStorageError::Format`] with the [`FormatError`] of the first group structure
+/// that does not parse, [`LinkStorageError::UndefinedAddress`] for a hard link to the undefined
+/// address, and the errors of [`OwnedLink::new`] for a name or a target it rejects.
+pub(crate) fn resolve_v1_group_links(
+    file_data: &[u8],
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
+) -> Result<Vec<OwnedLink>, LinkStorageError> {
+    let mut links = Vec::new();
+    visit_v1_group_links(
+        file_data,
+        sym_table_msg,
+        widths,
+        addresses,
+        group_leaf_node_k,
+        |link| {
+            links.push(link.into_owned_link(widths.offsets)?);
+            Ok(())
+        },
+    )
+    .map(|()| links)
+}
+
+/// Returns one link per entry of the version 1 group `sym_table_msg` describes, read from
+/// `source`.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_v1_group_links`], and the error `source` reports for a
+/// structure it cannot read.
+pub(crate) fn resolve_v1_group_links_from_source<S: Source + ?Sized>(
+    source: &S,
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
+) -> Result<Vec<OwnedLink>, LinkStorageError> {
+    let mut links = Vec::new();
+    visit_v1_group_links_from_source(
+        source,
+        sym_table_msg,
+        widths,
+        addresses,
+        group_leaf_node_k,
+        |link| {
+            links.push(link.into_owned_link(widths.offsets)?);
+            Ok(())
+        },
+    )
+    .map(|()| links)
 }
 
 /// Returns the target of the version 1 group link named `name`.
@@ -135,39 +201,8 @@ pub(crate) fn find_link(
             }
             Ok(())
         },
-    )?;
-    Ok(found)
-}
-
-/// Returns whether the version 1 group `sym_table_msg` describes holds a symbolic link
-/// ([`SYMBOLIC_LINK`]), which [`resolve_v1_group_entries_from_source`] passes over.
-///
-/// Only the name and the cache type of each entry are parsed.
-///
-/// # Errors
-///
-/// Returns the errors of [`resolve_v1_group_entries_from_source`] other than those of a symbolic
-/// link's value.
-pub(crate) fn v1_group_holds_symbolic_link_from_source<S: Source + ?Sized>(
-    source: &S,
-    sym_table_msg: &SymbolTableMessage,
-    widths: FormatWidths,
-    addresses: AddressContext,
-    group_leaf_node_k: Option<NonZeroU16>,
-) -> Result<bool, FormatError> {
-    let mut holds_symbolic_link = false;
-    visit_v1_group_links_from_source(
-        source,
-        sym_table_msg,
-        widths,
-        addresses,
-        group_leaf_node_k,
-        |link| {
-            holds_symbolic_link |= matches!(link.target, TargetRef::Soft(_));
-            Ok(())
-        },
-    )?;
-    Ok(holds_symbolic_link)
+    )
+    .map(|()| found)
 }
 
 /// Returns the "Group Leaf Node K" field of `superblock`, or `None` where the field is absent or 0.
@@ -183,14 +218,14 @@ pub(crate) fn group_leaf_node_k(superblock: &Superblock) -> Option<NonZeroU16> {
 /// # Errors
 ///
 /// Returns the errors of [`visit_links`] and of [`btree_v1::collect_symbol_table_nodes`].
-fn visit_v1_group_links(
+fn visit_v1_group_links<E: From<FormatError>>(
     file_data: &[u8],
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
-    visit: impl FnMut(LinkRef<'_>) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
+    visit: impl FnMut(LinkRef<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     visit_links(
         file_data,
         sym_table_msg,
@@ -216,14 +251,14 @@ fn visit_v1_group_links(
 ///
 /// Returns the errors of [`visit_links`] and of
 /// [`btree_v1::collect_symbol_table_nodes_from_source`].
-fn visit_v1_group_links_from_source<S: Source + ?Sized>(
+fn visit_v1_group_links_from_source<S: Source + ?Sized, E: From<FormatError>>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
-    visit: impl FnMut(LinkRef<'_>) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
+    visit: impl FnMut(LinkRef<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     visit_links(
         source,
         sym_table_msg,
@@ -253,15 +288,15 @@ fn visit_v1_group_links_from_source<S: Source + ?Sized>(
 ///
 /// Returns the [`FormatError`] of the first group structure that does not parse, the error
 /// `symbol_table_nodes` or `visit` returns, and the errors of [`RangeReader::read_range`].
-fn visit_links(
+fn visit_links<E: From<FormatError>>(
     file: &(impl RangeReader + ?Sized),
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
     symbol_table_nodes: impl FnOnce() -> Result<Vec<StoredAddress>, FormatError>,
-    mut visit: impl FnMut(LinkRef<'_>) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
+    mut visit: impl FnMut(LinkRef<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     let heap = read_local_heap(file, sym_table_msg, widths, addresses)?;
     let range = heap.data_segment_range();
     let bytes = file.read_range(range)?;
@@ -329,6 +364,22 @@ impl<'a> LinkRef<'a> {
                 None
             }
         })
+    }
+
+    // `H5G__ent_to_link` in `H5Gent.c` (HDF5 1.14.6 and 2.2.0) gives a symbol table entry's link
+    // the ASCII character set and no creation index.
+    fn into_owned_link(self, offset_width: OffsetWidth) -> Result<OwnedLink, LinkStorageError> {
+        let Self { name, target } = self;
+        let target = match target {
+            TargetRef::Hard(address) if address.is_undefined(offset_width) => {
+                return Err(LinkStorageError::UndefinedAddress);
+            }
+            TargetRef::Hard(object_header_address) => OwnedLinkTarget::Hard {
+                object_header_address,
+            },
+            TargetRef::Soft(value) => OwnedLinkTarget::soft(value.path()?.as_bytes().to_vec()),
+        };
+        OwnedLink::new(name.as_bytes().to_vec(), CharacterSet::Ascii, target, None)
     }
 }
 
@@ -513,6 +564,24 @@ mod tests {
             (String::from(self.name()), self.link_target())
         }
 
+        fn owned_link(self) -> OwnedLink {
+            let target = match self {
+                Self::Uncached(_, address) | Self::CachedGroup(_, address) => {
+                    OwnedLinkTarget::Hard {
+                        object_header_address: StoredAddress::new(address),
+                    }
+                }
+                Self::Soft(_, target) => OwnedLinkTarget::soft(target.as_bytes().to_vec()),
+            };
+            OwnedLink::new(
+                self.name().as_bytes().to_vec(),
+                CharacterSet::Ascii,
+                target,
+                None,
+            )
+            .unwrap()
+        }
+
         fn entry(
             self,
             widths: Widths,
@@ -560,8 +629,8 @@ mod tests {
 
         fn set_entry_field(&mut self, entry: usize, field_at: usize, value: u32) {
             let at = usize::try_from(self.nodes[0].0).unwrap()
-                + NODE_PREFIX_LEN
-                + entry * EIGHT_BYTE_ENTRY_LEN
+                + symbol_table::NODE_PREFIX
+                + entry * symbol_table::Entry::encoded_len(Widths::EIGHT)
                 + field_at;
             test_util::bytes::set_uint_at(&mut self.bytes, at, 4, value.into());
         }
@@ -591,14 +660,6 @@ mod tests {
             .collect()
         }
     }
-
-    const NODE_PREFIX_LEN: usize = 8;
-
-    const EIGHT_BYTE_ENTRY_LEN: usize = 40;
-
-    const CACHE_TYPE_AT: usize = 16;
-
-    const SCRATCH_PAD_AT: usize = 24;
 
     fn group(nodes: &[&[Child]], widths: Widths, data_segment: DataSegment) -> Group {
         let children: Vec<Child> = nodes
@@ -810,14 +871,36 @@ mod tests {
         ]
     }
 
-    fn holds_symbolic_link(group: &Group) -> Result<bool, FormatError> {
-        v1_group_holds_symbolic_link_from_source(
-            &PlacedSource::new(0, group.bytes.clone()),
-            &group.message,
-            format_widths(Widths::EIGHT),
-            addresses(0),
-            k(2),
-        )
+    fn owned_links_both(
+        group: &Group,
+        widths: Widths,
+        base: u64,
+    ) -> [Result<Vec<OwnedLink>, LinkStorageError>; 2] {
+        let widths = format_widths(widths);
+        [
+            resolve_v1_group_links(
+                &group.file(base),
+                &group.message,
+                widths,
+                addresses(base),
+                k(2),
+            ),
+            resolve_v1_group_links_from_source(
+                &PlacedSource::new(base, group.bytes.clone()),
+                &group.message,
+                widths,
+                addresses(base),
+                k(2),
+            ),
+        ]
+    }
+
+    fn owned_links(nodes: &[&[Child]]) -> Vec<OwnedLink> {
+        nodes
+            .iter()
+            .flat_map(|children| children.iter())
+            .map(|child| child.owned_link())
+            .collect()
     }
 
     #[track_caller]
@@ -837,6 +920,11 @@ mod tests {
         assert_eq!(
             look_up_both(group, Widths::EIGHT, 0, name),
             [Err(expected.clone()), Err(expected.clone())]
+        );
+        let expected = LinkStorageError::Format(expected.clone());
+        assert_eq!(
+            owned_links_both(group, Widths::EIGHT, 0),
+            [Err(expected.clone()), Err(expected)]
         );
     }
 
@@ -868,6 +956,33 @@ mod tests {
             read_both(&group, widths, base, k(2)),
             [Ok(expected.clone()), Ok(expected)]
         );
+        let expected = owned_links(nodes);
+        assert_eq!(
+            owned_links_both(&group, widths, base),
+            [Ok(expected.clone()), Ok(expected)]
+        );
+    }
+
+    #[rstest]
+    fn resolving_the_links_rejects_a_hard_link_to_the_undefined_address(
+        #[values(Widths::new(2, 2), Widths::FOUR, Widths::EIGHT)] widths: Widths,
+    ) {
+        let undefined = u64::MAX >> (64 - 8 * widths.offset);
+        let group = group(
+            &[&[
+                Child::Uncached("child", 0x100),
+                Child::Uncached("undefined", undefined),
+            ]],
+            widths,
+            DataSegment::FollowsHeader,
+        );
+        assert_eq!(
+            owned_links_both(&group, widths, 0),
+            [
+                Err(LinkStorageError::UndefinedAddress),
+                Err(LinkStorageError::UndefinedAddress)
+            ]
+        );
     }
 
     #[rstest]
@@ -882,15 +997,15 @@ mod tests {
             Widths::EIGHT,
             DataSegment::FollowsHeader,
         );
-        group.set_entry_field(1, CACHE_TYPE_AT, cache_type);
+        group.set_entry_field(
+            1,
+            symbol_table::Entry::cache_type_at(Widths::EIGHT),
+            cache_type,
+        );
         assert_the_listings_and_the_lookup_reject(
             &group,
             "child",
             &FormatError::InvalidSymbolTableCacheType(cache_type),
-        );
-        assert_eq!(
-            holds_symbolic_link(&group),
-            Err(FormatError::InvalidSymbolTableCacheType(cache_type))
         );
     }
 
@@ -910,7 +1025,11 @@ mod tests {
         );
         let data_segment_size = group.data_segment.1.to_u64();
         let offset = offset.unwrap_or(u32::try_from(data_segment_size).unwrap());
-        group.set_entry_field(1, SCRATCH_PAD_AT, offset);
+        group.set_entry_field(
+            1,
+            symbol_table::Entry::scratch_pad_at(Widths::EIGHT),
+            offset,
+        );
         assert_the_listings_and_the_lookup_reject(
             &group,
             "soft",
@@ -919,7 +1038,7 @@ mod tests {
                 data_segment_size,
             },
         );
-        assert_the_sibling_lookup_and_the_soft_link_check_succeed(&group);
+        assert_the_sibling_lookup_succeeds(&group);
     }
 
     #[test]
@@ -947,17 +1066,16 @@ mod tests {
                 source,
             },
         );
-        assert_the_sibling_lookup_and_the_soft_link_check_succeed(&group);
+        assert_the_sibling_lookup_succeeds(&group);
     }
 
     #[track_caller]
-    fn assert_the_sibling_lookup_and_the_soft_link_check_succeed(group: &Group) {
+    fn assert_the_sibling_lookup_succeeds(group: &Group) {
         let hard = Some(Child::Uncached("child", 0x100).link_target());
         assert_eq!(
             look_up_both(group, Widths::EIGHT, 0, "child"),
             [Ok(hard.clone()), Ok(hard)]
         );
-        assert_eq!(holds_symbolic_link(group), Ok(true));
     }
 
     const CHILDREN: &[Child] = &[
@@ -1166,14 +1284,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::soft_link(
-        &[Child::Uncached("data", 0x1000), Child::Soft("pointer", "data"), Child::CachedGroup("group", 0x2000)],
-        true
-    )]
-    #[case::hard_links_only(CHILDREN, false)]
-    fn the_listing_passes_over_the_symbolic_links_the_check_reports(
+    #[case::soft_link(&[
+        Child::Uncached("data", 0x1000),
+        Child::Soft("pointer", "data"),
+        Child::CachedGroup("group", 0x2000),
+    ])]
+    #[case::hard_links_only(CHILDREN)]
+    fn the_listing_passes_over_symbolic_links_and_resolving_the_links_includes_them(
         #[case] children: &[Child],
-        #[case] holds: bool,
     ) {
         let group = group(&[children], Widths::EIGHT, DataSegment::FollowsHeader);
         let expected = hard_children(&[children]);
@@ -1181,7 +1299,11 @@ mod tests {
             read_both(&group, Widths::EIGHT, 0, k(2)),
             [Ok(expected.clone()), Ok(expected)]
         );
-        assert_eq!(holds_symbolic_link(&group), Ok(holds));
+        let expected = owned_links(&[children]);
+        assert_eq!(
+            owned_links_both(&group, Widths::EIGHT, 0),
+            [Ok(expected.clone()), Ok(expected)]
+        );
     }
 
     // Helper to extract dataset components from an object header

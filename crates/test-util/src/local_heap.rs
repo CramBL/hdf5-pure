@@ -69,6 +69,9 @@ impl Segment {
 
 pub const SIGNATURE: &[u8; 4] = b"HEAP";
 
+/// The offset of the data segment size within the header.
+pub const DATA_SEGMENT_SIZE_AT: usize = PREFIX;
+
 /// signature(4) + version(1) + reserved(3), which the header begins with.
 const PREFIX: usize = 8;
 

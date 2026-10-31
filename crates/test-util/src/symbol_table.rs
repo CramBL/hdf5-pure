@@ -38,6 +38,21 @@ impl Entry {
         }
     }
 
+    /// Returns the offset of the cache type within an entry with `widths`.
+    pub fn cache_type_at(widths: Widths) -> usize {
+        widths.length + widths.offset
+    }
+
+    /// Returns the offset of the scratch pad within an entry with `widths`.
+    pub fn scratch_pad_at(widths: Widths) -> usize {
+        Self::cache_type_at(widths) + CACHE_TYPE_LEN + RESERVED_LEN
+    }
+
+    /// Returns the length of an entry with `widths`, scratch pad included.
+    pub fn encoded_len(widths: Widths) -> usize {
+        Self::scratch_pad_at(widths) + SCRATCH_PAD
+    }
+
     pub fn build(&self, widths: Widths) -> Vec<u8> {
         let mut entry = Vec::new();
         bytes::push_uint(&mut entry, self.link_name_offset, widths.length);
@@ -51,7 +66,20 @@ impl Entry {
 
 pub const SIGNATURE: &[u8; 4] = b"SNOD";
 
+/// signature(4) + version(1) + reserved(1) + symbol count(2), which a node's entries follow.
+pub const NODE_PREFIX: usize = 8;
+
+/// The offset of the symbol count within a node.
+pub const SYMBOL_COUNT_AT: usize = 6;
+
+/// The cache type of a soft link's entry.
+pub const SYMBOLIC_LINK: u32 = 2;
+
 /// The scratch pad an entry ends with.
 pub const SCRATCH_PAD: usize = 16;
 
 const VERSION: u8 = 1;
+
+const CACHE_TYPE_LEN: usize = 4;
+
+const RESERVED_LEN: usize = 4;

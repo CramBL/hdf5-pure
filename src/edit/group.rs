@@ -31,14 +31,16 @@ use super::object_header::{self, OhRegion};
 impl WriteEngine {
     /// Converts a symbol-table group to a compact-link version 2 message region.
     ///
-    /// Preserves the existing links and attribute bodies, re-encoding shared-message references.
-    /// Other messages, including the symbol table, are omitted.
+    /// Writes each symbol table entry, hard or soft, as a Link message and preserves the attribute
+    /// bodies, re-encoding shared-message references. Other messages, including the symbol table,
+    /// are omitted.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the object is a dataset, the group contains a soft
-    /// link, or an attribute is too large or has flags the conversion cannot preserve. Returns
-    /// parsing and source-read errors as reported by the group and object-header readers.
+    /// Returns [`Error::EditUnsupported`] if the object is a dataset, a link cannot be reproduced
+    /// as a Link message, or an attribute is too large or has flags the conversion cannot
+    /// preserve. Returns parsing and source-read errors as reported by the group and object-header
+    /// readers.
     pub(super) fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let base = self.context.addresses();
         let oh = ObjectHeader::parse_from_source_with_widths(
@@ -57,40 +59,33 @@ impl WriteEngine {
                 "a target path names a dataset, not a group",
             ));
         }
-        if let Some(message) = oh
+        let mut region = fresh_group_region();
+        match oh
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
         {
-            let symbol_table = SymbolTableMessage::parse_with_offset_width(
-                &message.data,
-                self.context.widths().offsets,
-            )?;
-            if group_v1::v1_group_holds_symbolic_link_from_source(
-                &self.image(),
-                &symbol_table,
-                self.context.widths(),
-                self.context.addresses(),
-                group_v1::group_leaf_node_k(self.context.superblock()),
-            )? {
-                return Err(Error::EditUnsupported(
-                    "a version 1 group holding a soft link cannot be converted in place",
-                ));
+            Some(message) => self.push_symbol_table_links(
+                &mut region,
+                &SymbolTableMessage::parse_with_offset_width(
+                    &message.data,
+                    self.context.widths().offsets,
+                )?,
+            )?,
+            None => {
+                let entries = group_v2::resolve_group_entries_from_source(
+                    &self.image(),
+                    AccessMode::ReadWrite,
+                    &oh,
+                    self.context.widths(),
+                    self.context.addresses(),
+                    group_v1::group_leaf_node_k(self.context.superblock()),
+                )?;
+                for e in &entries {
+                    // The new compact region does not track link creation order.
+                    region.push_link(&e.name, e.object_header_address, None);
+                }
             }
-        }
-        let entries = group_v2::resolve_group_entries_from_source(
-            &self.image(),
-            AccessMode::ReadWrite,
-            &oh,
-            self.context.widths(),
-            self.context.addresses(),
-            group_v1::group_leaf_node_k(self.context.superblock()),
-        )?;
-
-        let mut region = fresh_group_region();
-        for e in &entries {
-            // The new compact region does not track link creation order.
-            region.push_link(&e.name, e.object_header_address, None);
         }
         for m in &oh.messages {
             if m.msg_type == MessageType::ATTRIBUTE {
@@ -148,6 +143,41 @@ impl WriteEngine {
         )?;
         ensure_group_info(&mut region)?;
         Ok(GroupInfo { region, links })
+    }
+
+    fn push_symbol_table_links(
+        &self,
+        region: &mut OhRegion,
+        symbol_table: &SymbolTableMessage,
+    ) -> Result<(), Error> {
+        let widths = self.context.widths();
+        let addresses = self.context.addresses();
+        let k = group_v1::group_leaf_node_k(self.context.superblock());
+        let links = match self.image_slice() {
+            Some(bytes) => {
+                group_v1::resolve_v1_group_links(bytes, symbol_table, widths, addresses, k)
+            }
+            None => group_v1::resolve_v1_group_links_from_source(
+                self.image(),
+                symbol_table,
+                widths,
+                addresses,
+                k,
+            ),
+        }
+        .map_err(group_links::storage_error)?;
+        for link in links {
+            let body = link
+                .serialize(OFFSET_WIDTH)
+                .map_err(group_links::storage_error)?;
+            if body.len() > OBJECT_HEADER_MESSAGE_MAX {
+                return Err(Error::EditUnsupported(
+                    "a version 1 group's link is too large to convert in place",
+                ));
+            }
+            region.push(MessageType::LINK, &body);
+        }
+        Ok(())
     }
 }
 

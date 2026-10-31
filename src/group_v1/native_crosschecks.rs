@@ -86,13 +86,13 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
     let mut buffered = Vec::new();
     visit_v1_group_links(&bytes, &table, widths, addresses, k, |link| {
         buffered.push(native_link(addresses, link));
-        Ok(())
+        Ok::<_, FormatError>(())
     })
     .unwrap();
     let mut streaming = Vec::new();
     visit_v1_group_links_from_source(&source, &table, widths, addresses, k, |link| {
         streaming.push(native_link(addresses, link));
-        Ok(())
+        Ok::<_, FormatError>(())
     })
     .unwrap();
     assert_eq!(buffered, native);
