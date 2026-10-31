@@ -53,6 +53,7 @@
 //! surfaced losslessly as [`MatValue::Opaque`] (class name plus raw properties)
 //! rather than misread or refused outright.
 
+use core::num::NonZeroU32;
 use core::ops::Range;
 use std::collections::HashMap;
 
@@ -133,19 +134,18 @@ struct FileWrapper {
     normal_blocks: Vec<PropBlock>,
 }
 
-/// One class-table entry: a package/namespace name and the class name, each a
-/// 1-based name-heap index (`0` = none).
+/// One class-table entry: a package/namespace name and the class name.
 struct ClassEntry {
-    namespace_idx: u32,
-    name_idx: u32,
+    namespace: Option<NameIndex>,
+    name: Option<NameIndex>,
 }
 
-/// One object-table entry. Exactly one of `saveobj_id` / `normalobj_id` is
-/// non-zero; it selects the object's property block in R2 / R4 respectively.
+/// One object-table entry.
 struct ObjectRecord {
-    class_id: u32,
-    saveobj_id: u32,
-    normalobj_id: u32,
+    class_id: Option<ClassId>,
+    /// The block that holds the object's properties, `None` for an object
+    /// without any.
+    properties: Option<PropertyBlockRef>,
     #[expect(
         dead_code,
         reason = "dependency_id (R5 dynamic-property link) is parsed for completeness; \
@@ -161,10 +161,87 @@ struct PropBlock {
 
 /// One property triple: the property name and its typed value reference.
 struct Triple {
-    name_idx: u32,
-    field_type: u32,
-    value: u32,
+    name: Option<NameIndex>,
+    value: TripleValue,
 }
+
+/// A property block of one of the two property tables, the `saveobj_id` or
+/// the `normalobj_id` of an object record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PropertyBlockRef {
+    /// A block of the type-2 ("normal") table.
+    Normal(PropertyBlockId),
+    /// A block of the type-1 ("saveobj") table.
+    Saveobj(PropertyBlockId),
+}
+
+/// The value of a property triple, as its `field_type` selects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TripleValue {
+    /// `field_type` 1: an index into the property-value heap.
+    Heap(HeapIndex),
+    /// `field_type` 2: an integer or logical stored in the triple.
+    Inline(u32),
+    /// `field_type` 0: a name-heap string, such as an enumeration member.
+    Name(Option<NameIndex>),
+    /// A `field_type` this reader does not decode. Reading a property that has
+    /// it is an error.
+    Unknown { field_type: u32 },
+}
+
+impl TripleValue {
+    fn parse(field_type: u32, value: u32) -> Self {
+        match field_type {
+            FIELD_TYPE_NAME => Self::Name(NameIndex::new(value)),
+            FIELD_TYPE_HEAP => Self::Heap(HeapIndex(value)),
+            FIELD_TYPE_INLINE => Self::Inline(value),
+            field_type => Self::Unknown { field_type },
+        }
+    }
+}
+
+/// A 1-based index into the name heap.
+///
+/// MATLAB writes index 0 for an absent name, which [`NameIndex::new`] parses
+/// as `None`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NameIndex(NonZeroU32);
+
+impl NameIndex {
+    pub(crate) fn new(index: u32) -> Option<Self> {
+        NonZeroU32::new(index).map(Self)
+    }
+}
+
+/// A 1-based class id, the position of an entry in the class table.
+///
+/// Id 0 is the reserved leading entry, which [`ClassId::new`] parses as
+/// `None`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ClassId(NonZeroU32);
+
+impl ClassId {
+    pub(crate) fn new(id: u32) -> Option<Self> {
+        NonZeroU32::new(id).map(Self)
+    }
+}
+
+/// A 1-based property block id, the position of a block in its property
+/// table. Id 0 is the reserved leading block, and an object record holds it
+/// for a table the object has no block in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PropertyBlockId(NonZeroU32);
+
+impl PropertyBlockId {
+    fn new(id: u32) -> Option<Self> {
+        NonZeroU32::new(id).map(Self)
+    }
+}
+
+/// A 0-based index into the property-value heap, which starts after the
+/// reserved cells of the MCOS store. [`Mcos::heap_object`] resolves it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HeapIndex(u32);
 
 /// A property resolved to its name and a reference to its value.
 pub(crate) struct PropRef {
@@ -174,9 +251,8 @@ pub(crate) struct PropRef {
 
 /// How a resolved property's value is reached.
 pub(crate) enum PropValue {
-    /// A property-heap cell index (0-based into the heap; resolve via
-    /// [`Mcos::heap_object`]).
-    Heap(u32),
+    /// A property-heap value (resolve via [`Mcos::heap_object`]).
+    Heap(HeapIndex),
     /// An inline integer/logical literal.
     Inline(u32),
     /// A name-heap string (enumeration member / string property).
@@ -215,17 +291,19 @@ impl Mcos {
         Ok(Some(Self { cells, wrapper }))
     }
 
-    /// The full class name for a 1-based `class_id` (e.g. `"datetime"`,
-    /// `"containers.Map"`).
-    pub(crate) fn class_name(&self, class_id: u32) -> Result<String, MatError> {
+    /// The full class name for a class id (e.g. `"datetime"`,
+    /// `"containers.Map"`). `None`, class id 0, looks up the reserved leading
+    /// entry of the class table.
+    pub(crate) fn class_name(&self, class_id: Option<ClassId>) -> Result<String, MatError> {
+        let class_id = class_id.map_or(0, |ClassId(class_id)| class_id.get());
         let entry = self
             .wrapper
             .classes
             .get(class_id.to_usize()?)
             .ok_or_else(|| MatError::Custom(format!("MCOS class id {class_id} out of range")))?;
-        let name = self.name(entry.name_idx)?;
-        if entry.namespace_idx != 0 {
-            Ok(format!("{}.{name}", self.name(entry.namespace_idx)?))
+        let name = self.name(entry.name)?;
+        if entry.namespace.is_some() {
+            Ok(format!("{}.{name}", self.name(entry.namespace)?))
         } else {
             Ok(name)
         }
@@ -242,16 +320,12 @@ impl Mcos {
     /// (`normal`) block as the object record dictates.
     pub(crate) fn properties(&self, object_id: u32) -> Result<Vec<PropRef>, MatError> {
         let record = self.object_record(object_id)?;
-        let (blocks, block_id) = if record.saveobj_id != 0 {
-            (&self.wrapper.saveobj_blocks, record.saveobj_id)
-        } else {
-            (&self.wrapper.normal_blocks, record.normalobj_id)
+        let (blocks, PropertyBlockId(block_id)) = match record.properties {
+            Some(PropertyBlockRef::Normal(block_id)) => (&self.wrapper.normal_blocks, block_id),
+            Some(PropertyBlockRef::Saveobj(block_id)) => (&self.wrapper.saveobj_blocks, block_id),
+            None => return Ok(Vec::new()),
         };
-        // block_id 0 means the object has no properties in that segment.
-        if block_id == 0 {
-            return Ok(Vec::new());
-        }
-        let block = blocks.get(block_id.to_usize()?).ok_or_else(|| {
+        let block = blocks.get(block_id.get().to_usize()?).ok_or_else(|| {
             MatError::Custom(format!(
                 "MCOS object {object_id} references property block {block_id} out of range"
             ))
@@ -259,14 +333,14 @@ impl Mcos {
 
         let mut out = Vec::with_capacity(block.props.len());
         for triple in &block.props {
-            let name = self.name(triple.name_idx)?;
-            let value = match triple.field_type {
-                FIELD_TYPE_NAME => PropValue::Name(self.name(triple.value)?),
-                FIELD_TYPE_HEAP => PropValue::Heap(triple.value),
-                FIELD_TYPE_INLINE => PropValue::Inline(triple.value),
-                other => {
+            let name = self.name(triple.name)?;
+            let value = match triple.value {
+                TripleValue::Heap(index) => PropValue::Heap(index),
+                TripleValue::Inline(value) => PropValue::Inline(value),
+                TripleValue::Name(index) => PropValue::Name(self.name(index)?),
+                TripleValue::Unknown { field_type } => {
                     return Err(MatError::Custom(format!(
-                        "MCOS property {name:?} has unknown field_type {other}"
+                        "MCOS property {name:?} has unknown field_type {field_type}"
                     )));
                 }
             };
@@ -275,8 +349,8 @@ impl Mcos {
         Ok(out)
     }
 
-    /// The property-heap cell for a 0-based `field_type == 1` heap value.
-    pub(crate) fn heap_object(&self, value: u32) -> Result<&Object, MatError> {
+    /// The property-heap cell for a `field_type == 1` heap value.
+    pub(crate) fn heap_object(&self, HeapIndex(value): HeapIndex) -> Result<&Object, MatError> {
         let idx = MCOS_RESERVED_CELL_PREFIX
             .checked_add(value.to_usize()?)
             .ok_or_else(|| MatError::Custom("MCOS heap index overflow".into()))?;
@@ -306,17 +380,17 @@ impl Mcos {
             })
     }
 
-    /// Look up a 1-based name-heap index. Index 0 is MATLAB's "absent" sentinel
-    /// and resolves to the empty string.
-    pub(crate) fn name(&self, idx: u32) -> Result<String, MatError> {
-        if idx == 0 {
+    /// Look up a name-heap index. `None`, MATLAB's index 0 for an absent name,
+    /// resolves to the empty string.
+    pub(crate) fn name(&self, index: Option<NameIndex>) -> Result<String, MatError> {
+        let Some(NameIndex(index)) = index else {
             return Ok(String::new());
-        }
+        };
         self.wrapper
             .names
-            .get(idx.to_usize()? - 1)
+            .get((index.get() - 1).to_usize()?)
             .cloned()
-            .ok_or_else(|| MatError::Custom(format!("MCOS name index {idx} out of range")))
+            .ok_or_else(|| MatError::Custom(format!("MCOS name index {index} out of range")))
     }
 
     /// Decode a `MATLAB_class = "string"` opaque dataset.
@@ -492,9 +566,9 @@ fn parse_names(blob: &[u8], region: Range<usize>, num: usize) -> Result<Vec<Stri
 /// a 1-based `class_id` indexes directly.
 fn parse_class_table(blob: &[u8], region: Range<usize>) -> Result<Vec<ClassEntry>, MatError> {
     Ok(records::<CLASS_ENTRY_WORDS>(region_bytes(blob, region)?)
-        .map(|[namespace_idx, name_idx, _, _]| ClassEntry {
-            namespace_idx,
-            name_idx,
+        .map(|[namespace, name, _, _]| ClassEntry {
+            namespace: NameIndex::new(namespace),
+            name: NameIndex::new(name),
         })
         .collect())
 }
@@ -505,9 +579,12 @@ fn parse_object_table(blob: &[u8], region: Range<usize>) -> Result<Vec<ObjectRec
     Ok(records::<OBJECT_ENTRY_WORDS>(region_bytes(blob, region)?)
         .map(
             |[class_id, _, _, saveobj_id, normalobj_id, dependency_id]| ObjectRecord {
-                class_id,
-                saveobj_id,
-                normalobj_id,
+                class_id: ClassId::new(class_id),
+                // MATLAB sets one of the two block ids. The `saveobj` block
+                // takes precedence over a normal block.
+                properties: PropertyBlockId::new(saveobj_id)
+                    .map(PropertyBlockRef::Saveobj)
+                    .or_else(|| PropertyBlockId::new(normalobj_id).map(PropertyBlockRef::Normal)),
                 dependency_id,
             },
         )
@@ -535,10 +612,9 @@ fn parse_property_blocks(blob: &[u8], region: Range<usize>) -> Result<Vec<PropBl
             ));
         }
         let props = records::<PROP_TRIPLE_WORDS>(region_bytes(blob, pos..triples_end)?)
-            .map(|[name_idx, field_type, value]| Triple {
-                name_idx,
-                field_type,
-                value,
+            .map(|[name, field_type, value]| Triple {
+                name: NameIndex::new(name),
+                value: TripleValue::parse(field_type, value),
             })
             .collect();
         blocks.push(PropBlock { props });
@@ -1206,7 +1282,7 @@ fn scalar_to_f64(s: ScalarNum) -> f64 {
 /// Metadata parsed from an opaque parent dataset's `uint32` array.
 pub(crate) struct OpaqueMeta {
     pub(crate) object_ids: Vec<u32>,
-    pub(crate) class_id: u32,
+    pub(crate) class_id: Option<ClassId>,
 }
 
 /// Parse an opaque parent dataset's `uint32` metadata array:
@@ -1249,7 +1325,7 @@ pub(crate) fn parse_opaque_metadata(data: &[u32]) -> Result<OpaqueMeta, MatError
     }
     Ok(OpaqueMeta {
         object_ids: data[dims_end..ids_end].to_vec(),
-        class_id: data[ids_end],
+        class_id: ClassId::new(data[ids_end]),
     })
 }
 
@@ -1401,22 +1477,23 @@ mod tests {
 
         // One real class after the reserved leading entry: class 1 = "string".
         assert_eq!(fw.classes.len(), 2);
-        assert_eq!(fw.classes[1].namespace_idx, 0);
-        assert_eq!(fw.classes[1].name_idx, 2);
+        assert_eq!(fw.classes[1].namespace, None);
+        assert_eq!(fw.classes[1].name, NameIndex::new(2));
 
         // One real object after the reserved leading entry: class 1, stored in
         // the type-1 ("saveobj") segment.
         assert_eq!(fw.objects.len(), 2);
-        assert_eq!(fw.objects[1].class_id, 1);
-        assert_eq!(fw.objects[1].saveobj_id, 1);
-        assert_eq!(fw.objects[1].normalobj_id, 0);
+        assert_eq!(fw.objects[1].class_id, ClassId::new(1));
+        assert_eq!(
+            fw.objects[1].properties,
+            PropertyBlockId::new(1).map(PropertyBlockRef::Saveobj)
+        );
 
         // The saveobj property block points at heap value 0 (cell index 2).
         assert_eq!(fw.saveobj_blocks.len(), 2);
         let block = &fw.saveobj_blocks[1];
         assert_eq!(block.props.len(), 1);
-        assert_eq!(block.props[0].field_type, FIELD_TYPE_HEAP);
-        assert_eq!(block.props[0].value, 0);
+        assert_eq!(block.props[0].value, TripleValue::Heap(HeapIndex(0)));
     }
 
     // MATLAB R2022b writes the last two of the eight region offsets as zero
@@ -1436,15 +1513,19 @@ mod tests {
 
         assert_eq!(fw.names, vec!["any".to_owned(), "string".to_owned()]);
         assert_eq!(fw.classes.len(), 2);
-        assert_eq!(fw.classes[1].name_idx, 2);
+        assert_eq!(fw.classes[1].name, NameIndex::new(2));
         assert_eq!(fw.objects.len(), 2);
-        assert_eq!(fw.objects[1].class_id, 1);
-        assert_eq!(fw.objects[1].saveobj_id, 1);
-        assert_eq!(fw.objects[1].normalobj_id, 0);
+        assert_eq!(fw.objects[1].class_id, ClassId::new(1));
+        assert_eq!(
+            fw.objects[1].properties,
+            PropertyBlockId::new(1).map(PropertyBlockRef::Saveobj)
+        );
         assert_eq!(fw.saveobj_blocks.len(), 2);
         assert_eq!(fw.saveobj_blocks[1].props.len(), 1);
-        assert_eq!(fw.saveobj_blocks[1].props[0].field_type, FIELD_TYPE_HEAP);
-        assert_eq!(fw.saveobj_blocks[1].props[0].value, 0);
+        assert_eq!(
+            fw.saveobj_blocks[1].props[0].value,
+            TripleValue::Heap(HeapIndex(0))
+        );
     }
 
     #[test]
@@ -1454,14 +1535,17 @@ mod tests {
         // Three objects after the reserved entry, each in the saveobj segment.
         assert_eq!(fw.objects.len(), 4);
         for id in 1..=3u32 {
-            assert_eq!(fw.objects[id as usize].class_id, 1);
-            assert_eq!(fw.objects[id as usize].saveobj_id, id);
+            assert_eq!(fw.objects[id as usize].class_id, ClassId::new(1));
+            assert_eq!(
+                fw.objects[id as usize].properties,
+                PropertyBlockId::new(id).map(PropertyBlockRef::Saveobj)
+            );
         }
         // Each object's block points at heap value id-1 (cell id+1).
         assert_eq!(fw.saveobj_blocks.len(), 4);
         for id in 1..=3u32 {
             let block = &fw.saveobj_blocks[id as usize];
-            assert_eq!(block.props[0].value, id - 1);
+            assert_eq!(block.props[0].value, TripleValue::Heap(HeapIndex(id - 1)));
         }
     }
 
@@ -1479,6 +1563,26 @@ mod tests {
         );
     }
 
+    // An empty class table has no reserved entry, so class id 0 is out of
+    // range and the reader falls back to the dataset's `MATLAB_class`.
+    #[test]
+    fn class_id_zero_is_out_of_range_in_an_empty_class_table() {
+        let mcos = Mcos {
+            cells: Vec::new(),
+            wrapper: FileWrapper {
+                names: Vec::new(),
+                classes: Vec::new(),
+                objects: Vec::new(),
+                saveobj_blocks: Vec::new(),
+                normal_blocks: Vec::new(),
+            },
+        };
+        let Err(MatError::Custom(message)) = mcos.class_name(None) else {
+            panic!("expected class id 0 to be out of range");
+        };
+        assert_eq!(message, "MCOS class id 0 out of range");
+    }
+
     #[test]
     fn inline_logical_and_integer() {
         assert!(matches!(inline_to_scalar(0), ScalarNum::Bool(false)));
@@ -1492,7 +1596,7 @@ mod tests {
         let meta = [MCOS_MAGIC_NUMBER, 2, 1, 1, 4, 2];
         let parsed = parse_opaque_metadata(&meta).unwrap();
         assert_eq!(parsed.object_ids, vec![4]);
-        assert_eq!(parsed.class_id, 2);
+        assert_eq!(parsed.class_id, ClassId::new(2));
     }
 
     #[test]
