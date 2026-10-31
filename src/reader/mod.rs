@@ -3309,6 +3309,9 @@ impl File {
     /// data this crate does not read, and is refused with
     /// [`Error::EditUnsupported`]. Copying it would leave its elements behind.
     ///
+    /// Soft and external links are copied with their stored targets, so a relative soft link in
+    /// the copy is resolved from the copied group.
+    ///
     /// Requires a read-write file ([`File::open_rw`]).
     ///
     /// # Errors
@@ -3336,6 +3339,9 @@ impl File {
     /// is refused by this call. Refusals that concern the *destination* — `dst`
     /// already exists, or its parent group does not — still come from `commit`.
     /// Requires a read-write destination ([`File::open_rw`]).
+    ///
+    /// Soft and external links are copied with their stored targets, so an absolute soft link in
+    /// the copy is resolved from the root group of this file.
     ///
     /// # Errors
     ///

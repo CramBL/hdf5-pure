@@ -22,6 +22,7 @@ mod classic_aggregation;
 mod closure_reentrancy;
 mod complex_bulk_array;
 mod complex_integer;
+mod copy_symbolic_links;
 mod csr_multi_dataset;
 mod dataset_access_properties;
 mod dataset_create_properties;

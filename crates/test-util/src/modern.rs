@@ -14,7 +14,9 @@ use crate::datatype;
 use crate::datatype::Class;
 use crate::fractal_heap;
 use crate::image::Image;
+use crate::link_message::CharacterSet;
 use crate::link_message::HardLink;
+use crate::link_message::SymbolicLink;
 use crate::object_header::Message;
 use crate::object_header::MessageType;
 use crate::object_header::v2;
@@ -108,6 +110,65 @@ pub fn v2_many_links() -> Vec<u8> {
         &btree_v2::Header::new(LINK_NAME_INDEX, LINK_RECORD_SIZE, leaf, 20).build(Widths::EIGHT),
     ) as u64;
     let root = image.append(&group_header(Some((heap, index))).build()) as u64;
+    finish(image, root)
+}
+
+/// Builds a compact group `g` with hard, soft, and external links that track creation order.
+///
+/// In creation order, `g` links the dataset `d`, the group `σ` with the dataset `v`, the soft
+/// links `absolute` to `/target`, `relative` to `d`, and `dangling` to `missing`, the external
+/// link `external` to `/values` in `other.h5`, and the soft link `λ` to `σ/v`. The names `σ` and
+/// `λ` are UTF-8. The root group links `g` and the dataset `target`.
+pub fn v2_symbolic_links() -> Vec<u8> {
+    let mut image = Image::starting_with(&[0; SUPERBLOCK_SIZE]);
+    let target = dataset(&mut image, Values::I32(&[99]));
+    let data = dataset(&mut image, Values::I32(&[1, 2]));
+    let value = dataset(&mut image, Values::I32(&[5]));
+    let subgroup = compact_group(&mut image, &[("v", value)]);
+    let links = [
+        HardLink::new("d", data)
+            .creation_order(0)
+            .build(Widths::EIGHT),
+        HardLink::new("σ", subgroup)
+            .creation_order(1)
+            .character_set(CharacterSet::UTF8)
+            .build(Widths::EIGHT),
+        SymbolicLink::soft("absolute", "/target")
+            .creation_order(2)
+            .build(),
+        SymbolicLink::soft("relative", "d")
+            .creation_order(3)
+            .build(),
+        SymbolicLink::soft("dangling", "missing")
+            .creation_order(4)
+            .build(),
+        SymbolicLink::external("external", "other.h5", "/values")
+            .creation_order(5)
+            .build(),
+        SymbolicLink::soft("λ", "σ/v")
+            .creation_order(6)
+            .character_set(CharacterSet::UTF8)
+            .build(),
+    ];
+    let mut info = vec![LINK_INFO_VERSION, TRACKS_LINK_CREATION_ORDER];
+    // `H5G_obj_insert` (`H5Gobj.c`, HDF5 2.2.0) stores the next creation index as the maximum.
+    info.extend_from_slice(&7u64.to_le_bytes());
+    bytes::push_undefined_address(&mut info, Widths::EIGHT.offset);
+    bytes::push_undefined_address(&mut info, Widths::EIGHT.offset);
+    let group = image.append(
+        &v2::Header::new()
+            .messages([
+                Message::new(MessageType::LINK_INFO, &info),
+                Message::new(MessageType::GROUP_INFO, &[GROUP_INFO_VERSION, NO_FLAGS]),
+            ])
+            .messages(
+                links
+                    .iter()
+                    .map(|link| Message::new(MessageType::LINK, link)),
+            )
+            .build(),
+    ) as u64;
+    let root = compact_group(&mut image, &[("target", target), ("g", group)]);
     finish(image, root)
 }
 
@@ -319,6 +380,7 @@ const SUPERBLOCK_SIZE: usize = 48;
 // Section `subsubsec_fmt4_dataobject_hdr_msg_linkinfo`, version 4.0.
 const LINK_INFO_VERSION: u8 = 0;
 const NO_FLAGS: u8 = 0;
+const TRACKS_LINK_CREATION_ORDER: u8 = 0x01;
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_groupinfo`, version 4.0.
 const GROUP_INFO_VERSION: u8 = 0;

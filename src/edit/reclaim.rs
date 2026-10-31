@@ -487,8 +487,8 @@ impl WriteEngine {
     /// dataset's chunk index and chunks through
     /// [`chunked_storage_spans`](Self::chunked_storage_spans), a dense attribute set, and a group's
     /// links and subtree, compact or dense. An object it cannot account for in full, such as one
-    /// with a header that is not version 2, a chunk index that cannot be walked in full, or a
-    /// compact group with a soft or external link, contributes nothing and is not descended into,
+    /// with a header that is not version 2 or a chunk index that cannot be walked in full,
+    /// contributes nothing and is not descended into,
     /// so `out` never holds a region still in use. A dense set's indexes join `out` only once the
     /// whole index set is accounted for, and its fractal heap only once the heap's ownership is
     /// proven. A group's link storage and the objects its links reach are separate: either can be
@@ -584,14 +584,14 @@ impl WriteEngine {
                     }
                 }
             }
-            Ok(ObjModel::Group { children, .. }) => {
+            Ok(ObjModel::Group { links, .. }) => {
                 self.collect_group_spans(
                     depth,
                     incoming,
                     &spans,
                     attribute_storage.as_deref(),
                     None,
-                    children.into_iter().map(|(_, _, child)| child),
+                    links.into_iter().map(|link| link.target),
                     out,
                 );
             }
