@@ -1336,6 +1336,7 @@ impl WriteEngine {
             &info,
             heap,
             self.widths(),
+            None,
             |flags| {
                 shared_records |= flags.is_shared();
                 !flags.is_shared()

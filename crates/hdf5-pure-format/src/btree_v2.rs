@@ -30,8 +30,10 @@ use crate::convert::Narrow;
 use crate::data_layout::LayoutVersion;
 use crate::error::FormatError;
 use crate::fractal_heap::{FilteredHugeObjectLocation, FractalHeapFiltering, FractalHeapHeader};
+use crate::fractal_heap::{FractalHeapIdLayout, FractalHeapIdView};
 use crate::message_flags::MessageFlags;
 use crate::metadata_source::MetadataSource;
+use crate::shared_message::FHEAP_ID_LEN;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// A version 2 B-tree header, signature `BTHD`: the geometry every node of the tree shares, and
@@ -1385,7 +1387,8 @@ enum HugeObjectRecordEncoding {
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttributeRecord<'a> {
-    /// The heap ID of the Attribute message in the attribute heap of the object.
+    /// The heap ID of the Attribute message. The [`flags`](Self::flags) field specifies the
+    /// file's shared-message heap for a shared message, or the object's attribute heap otherwise.
     pub heap_id: &'a [u8],
     /// The object header message flags of the Attribute message.
     pub flags: MessageFlags,
@@ -1418,6 +1421,171 @@ impl AttributeRecord<'_> {
         buf.extend_from_slice(self.heap_id);
         buf.push(self.flags.get());
         buf.extend_from_slice(&self.creation_order.to_le_bytes());
+    }
+}
+
+/// The common fields of a dense attribute name or creation-order record.
+///
+/// Parsing reads the fields without interpreting the heap ID. Call [`target`](Self::target)
+/// for a selected record to parse its ID for the private or shared-message heap.
+///
+/// Types 8 and 9 are defined in "Version 2 B-trees" of the [format specification, version
+/// 4.0][spec]. libhdf5 selects the shared-message heap when the shared flag is set
+/// (`H5A__dense_btree2_name_compare` in `H5Abtree2.c`, HDF5 2.2.0).
+///
+/// # Examples
+///
+/// ```
+/// # use hdf5_pure_format::__private::{
+/// #     AttributeRecord, BTREE_V2_ATTRIBUTE_NAME, DenseAttributeRecord, DenseAttributeTarget,
+/// #     FractalHeapHeader, FractalHeapIdLayout, LengthWidth, MessageFlags, OffsetWidth,
+/// # };
+/// # use hdf5_pure_format::FormatError;
+/// # use test_util::{fractal_heap, widths::Widths};
+/// # let mut heap = FractalHeapHeader::parse_bytes(
+/// #     &fractal_heap::Header::new(256).build(Widths::EIGHT),
+/// #     OffsetWidth::Eight,
+/// #     LengthWidth::Eight,
+/// # )?;
+/// # heap.heap_id_length = 8;
+/// # let layout = FractalHeapIdLayout::new(&heap, OffsetWidth::Eight, LengthWidth::Eight);
+/// let mut bytes = Vec::new();
+/// AttributeRecord {
+///     heap_id: &[0xFF; 8],
+///     flags: MessageFlags::SHARED,
+///     creation_order: 42,
+/// }
+/// .encode_name_record(&mut bytes, 0);
+/// let record = DenseAttributeRecord::parse(&bytes, BTREE_V2_ATTRIBUTE_NAME, 8)?;
+/// assert_eq!(record.flags(), MessageFlags::SHARED);
+/// let DenseAttributeTarget::Shared(target) = record.target(&layout)? else {
+///     panic!("expected a shared target");
+/// };
+/// assert_eq!(target.bytes(), &[0xFF; 8]);
+/// # Ok::<(), FormatError>(())
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DenseAttributeRecord<'a> {
+    heap_id: &'a [u8],
+    flags: MessageFlags,
+    creation_order: u32,
+}
+
+impl<'a> DenseAttributeRecord<'a> {
+    /// Reads a type 8 or type 9 record with the owner's `heap_id_length`.
+    ///
+    /// A type 8 record includes a trailing name hash, which is checked for completeness and
+    /// omitted from the parsed fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeNodeType`] if `tree_type` is not 8 or 9, and
+    /// [`FormatError::UnexpectedEof`] if the record is truncated.
+    pub fn parse(data: &'a [u8], tree_type: u8, heap_id_length: u16) -> Result<Self, FormatError> {
+        let suffix = match tree_type {
+            BTREE_V2_ATTRIBUTE_NAME => usize::from(NAME_HASH_LEN),
+            BTREE_V2_ATTRIBUTE_CREATION_ORDER => 0,
+            other => return Err(FormatError::InvalidBTreeNodeType(other)),
+        };
+        let id_len = usize::from(heap_id_length);
+        let required = id_len
+            + usize::from(MESSAGE_FLAGS_LEN)
+            + usize::from(ATTRIBUTE_CREATION_ORDER_LEN)
+            + suffix;
+        bytes::ensure_len(data, 0, required)?;
+        let heap_id = data.get(..id_len).ok_or(FormatError::UnexpectedEof {
+            expected: id_len,
+            available: data.len(),
+        })?;
+        let mut fields = bytes::Fields::new(data, id_len);
+        Ok(Self {
+            heap_id,
+            flags: MessageFlags::new(fields.u8()?),
+            creation_order: fields.u32()?,
+        })
+    }
+
+    /// Returns the Attribute message flags used to select its heap.
+    pub const fn flags(self) -> MessageFlags {
+        self.flags
+    }
+
+    /// Returns the attribute creation order stored in the record.
+    pub const fn creation_order(self) -> u32 {
+        self.creation_order
+    }
+
+    /// Parses the heap ID for the heap selected by the message flags.
+    ///
+    /// Private IDs are parsed with `private_layout`. Shared IDs are copied into an array of
+    /// [`FHEAP_ID_LEN`] bytes for the shared-message heap reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapIdLength`] if a shared ID is not
+    /// [`FHEAP_ID_LEN`] bytes long, or the error from [`FractalHeapIdLayout::parse`] for an
+    /// invalid private ID.
+    pub fn target(
+        self,
+        private_layout: &FractalHeapIdLayout,
+    ) -> Result<DenseAttributeTarget<'a>, FormatError> {
+        Ok(if self.flags.is_shared() {
+            DenseAttributeTarget::Shared(SharedAttributeId {
+                bytes: self.heap_id.try_into().map_err(|_error| {
+                    FormatError::InvalidFractalHeapIdLength {
+                        expected: FHEAP_ID_LEN,
+                        actual: self.heap_id.len(),
+                    }
+                })?,
+            })
+        } else {
+            DenseAttributeTarget::Private(PrivateAttributeId {
+                id: private_layout.parse(self.heap_id)?,
+            })
+        })
+    }
+}
+
+/// The heap and parsed ID of a dense Attribute message.
+///
+/// [`DenseAttributeRecord::target`] constructs the payloads after parsing the ID for its heap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DenseAttributeTarget<'a> {
+    /// An Attribute message in the object's attribute heap.
+    Private(PrivateAttributeId<'a>),
+    /// An Attribute message in the file's shared-message heap.
+    Shared(SharedAttributeId),
+}
+
+/// An attribute ID parsed against the owner's [`FractalHeapIdLayout`].
+///
+/// Constructed by [`DenseAttributeRecord::target`] for a private record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrivateAttributeId<'a> {
+    id: FractalHeapIdView<'a>,
+}
+
+impl<'a> PrivateAttributeId<'a> {
+    /// Returns the parsed ID for the owner's heap reader.
+    pub const fn id(self) -> FractalHeapIdView<'a> {
+        self.id
+    }
+}
+
+/// An eight-byte attribute ID for the file's shared-message heap.
+///
+/// Constructed by [`DenseAttributeRecord::target`] for a shared record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SharedAttributeId {
+    bytes: [u8; FHEAP_ID_LEN],
+}
+
+impl SharedAttributeId {
+    /// Returns the raw heap ID for the shared-message heap reader.
+    pub const fn bytes(&self) -> &[u8; FHEAP_ID_LEN] {
+        &self.bytes
     }
 }
 
@@ -1727,7 +1895,132 @@ mod tests {
     use test_util::bytes as test_bytes;
     use test_util::widths::Widths;
 
+    use crate::fractal_heap::FractalHeapIdKind;
+
     use super::*;
+
+    // "Fractal Heap" of the format specification, version 4.0, defines tiny heap ID type 2
+    // in bits 4 and 5. Zero length bits encode a one-byte object.
+    const TINY_ID_TAG: u8 = 0x20;
+
+    fn attribute_id_layout() -> FractalHeapIdLayout {
+        let mut header = FractalHeapHeader::parse(
+            &test_util::fractal_heap::Header::new(256).build(Widths::EIGHT),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
+        header.heap_id_length = 8;
+        FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+    }
+
+    #[rstest]
+    #[case::name(BTREE_V2_ATTRIBUTE_NAME)]
+    #[case::creation_order(BTREE_V2_ATTRIBUTE_CREATION_ORDER)]
+    fn dense_attribute_targets_keep_shared_ids_out_of_the_private_parser(#[case] tree_type: u8) {
+        let id = [0xFF; FHEAP_ID_LEN];
+        let mut bytes = btree_v2::attribute_name_record(&id, MessageFlags::SHARED.get(), 42, 9);
+        if tree_type == BTREE_V2_ATTRIBUTE_CREATION_ORDER {
+            bytes.truncate(13);
+        }
+        let record = DenseAttributeRecord::parse(&bytes, tree_type, 8).unwrap();
+        assert_eq!(record.flags(), MessageFlags::SHARED);
+        assert_eq!(record.creation_order(), 42);
+        let DenseAttributeTarget::Shared(target) = record.target(&attribute_id_layout()).unwrap()
+        else {
+            panic!("expected a shared target")
+        };
+        assert_eq!(target.bytes(), &id);
+    }
+
+    #[rstest]
+    #[case::name(BTREE_V2_ATTRIBUTE_NAME)]
+    #[case::creation_order(BTREE_V2_ATTRIBUTE_CREATION_ORDER)]
+    fn dense_attribute_private_targets_contain_parsed_ids(#[case] tree_type: u8) {
+        let id = [TINY_ID_TAG, b'a', 0, 0, 0, 0, 0, 0];
+        let mut bytes = btree_v2::attribute_name_record(&id, 0, 42, 9);
+        if tree_type == BTREE_V2_ATTRIBUTE_CREATION_ORDER {
+            bytes.truncate(13);
+        }
+        let record = DenseAttributeRecord::parse(&bytes, tree_type, 8).unwrap();
+        let DenseAttributeTarget::Private(target) = record.target(&attribute_id_layout()).unwrap()
+        else {
+            panic!("expected a private target")
+        };
+        assert_eq!(target.id().kind(), FractalHeapIdKind::Tiny { bytes: b"a" });
+    }
+
+    #[rstest]
+    #[case::short_id(BTREE_V2_ATTRIBUTE_NAME, 7, 17)]
+    #[case::missing_flags(BTREE_V2_ATTRIBUTE_NAME, 8, 17)]
+    #[case::short_creation_order(BTREE_V2_ATTRIBUTE_CREATION_ORDER, 12, 13)]
+    #[case::short_name_hash(BTREE_V2_ATTRIBUTE_NAME, 16, 17)]
+    fn dense_attribute_record_fields_must_be_complete(
+        #[case] tree_type: u8,
+        #[case] len: usize,
+        #[case] required: usize,
+    ) {
+        let bytes = vec![0; len];
+        assert_eq!(
+            DenseAttributeRecord::parse(&bytes, tree_type, 8).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: required,
+                available: len
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::short(7)]
+    #[case::long(9)]
+    fn dense_shared_targets_require_eight_byte_ids(#[case] len: u16) {
+        let bytes = btree_v2::attribute_name_record(
+            &vec![0; usize::from(len)],
+            MessageFlags::SHARED.get(),
+            0,
+            0,
+        );
+        let record = DenseAttributeRecord::parse(&bytes, BTREE_V2_ATTRIBUTE_NAME, len).unwrap();
+        assert_eq!(
+            record.target(&attribute_id_layout()).unwrap_err(),
+            FormatError::InvalidFractalHeapIdLength {
+                expected: FHEAP_ID_LEN,
+                actual: usize::from(len)
+            }
+        );
+    }
+
+    #[test]
+    fn dense_private_targets_reject_an_unknown_heap_id_type() {
+        let bytes = btree_v2::attribute_name_record(&[0xFF; 8], 0, 0, 0);
+        let record = DenseAttributeRecord::parse(&bytes, BTREE_V2_ATTRIBUTE_NAME, 8).unwrap();
+        assert_eq!(
+            record.target(&attribute_id_layout()).unwrap_err(),
+            FormatError::InvalidHeapIdType(3)
+        );
+    }
+
+    #[test]
+    fn dense_attribute_records_reject_other_tree_types() {
+        assert_eq!(
+            DenseAttributeRecord::parse(&[0; 17], BTREE_V2_LINK_NAME, 8).unwrap_err(),
+            FormatError::InvalidBTreeNodeType(BTREE_V2_LINK_NAME)
+        );
+    }
+
+    #[test]
+    fn dense_private_targets_reject_ids_of_a_different_length_from_the_heap() {
+        let bytes = btree_v2::attribute_name_record(&[0; 7], 0, 0, 0);
+        let record = DenseAttributeRecord::parse(&bytes, BTREE_V2_ATTRIBUTE_NAME, 7).unwrap();
+        assert_eq!(
+            record.target(&attribute_id_layout()).unwrap_err(),
+            FormatError::InvalidFractalHeapIdLength {
+                expected: 8,
+                actual: 7
+            }
+        );
+    }
 
     #[rstest]
     #[case::two_byte_address(OffsetWidth::Two, 0x1_0000)]
