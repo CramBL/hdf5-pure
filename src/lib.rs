@@ -698,6 +698,7 @@ pub use hdf5_pure_core::FloatingPointField;
 #[doc(inline)]
 pub use hdf5_pure_core::FloatingPointLayout;
 pub use hdf5_pure_core::FloatingPointType;
+pub use hdf5_pure_core::FloatingPointTypeBuilder;
 pub use hdf5_pure_core::MantissaNormalization;
 #[doc(inline)]
 pub use hdf5_pure_core::MaxExtent;
