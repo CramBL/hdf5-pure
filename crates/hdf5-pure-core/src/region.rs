@@ -1,6 +1,7 @@
 //! Physical file ranges and borrowed bytes associated with them.
 
 use crate::address::PhysicalAddress;
+use crate::address_range::AddressRange;
 use crate::error::FormatError;
 use crate::metadata_bytes::MetadataBytes;
 
@@ -89,8 +90,7 @@ impl<'a> From<&'a MetadataBytes<'_>> for FileRegion<'a> {
 /// endpoints are represented as [`u64`] on every platform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileRange {
-    start: PhysicalAddress,
-    end: PhysicalAddress,
+    range: AddressRange<PhysicalAddress>,
 }
 
 impl FileRange {
@@ -101,39 +101,66 @@ impl FileRange {
     /// Returns [`FormatError::OffsetOverflow`] if the end exceeds [`u64::MAX`].
     pub fn new(start: PhysicalAddress, length: u64) -> Result<Self, FormatError> {
         Ok(Self {
-            start,
-            end: start.checked_add(length)?,
+            range: AddressRange::new(start, length)?,
         })
     }
 
     /// Returns the inclusive start position.
     pub const fn start(self) -> PhysicalAddress {
-        self.start
+        self.range.start()
     }
 
     /// Returns the number of bytes between the endpoints.
     pub const fn length(self) -> u64 {
-        let Self { start, end } = self;
-        end.get() - start.get()
+        self.range.end().get() - self.range.start().get()
     }
 
     /// Returns the exclusive end position.
     pub const fn end(self) -> PhysicalAddress {
-        self.end
+        self.range.end()
     }
 
     /// Returns `true` if both endpoints of `required` lie within this interval's endpoints.
     ///
     /// An empty range at either endpoint is contained.
-    pub fn contains(
-        self,
-        Self {
-            start: required_start,
-            end: required_end,
-        }: Self,
-    ) -> bool {
-        let Self { start, end } = self;
-        start <= required_start && required_end <= end
+    pub fn contains(self, required: Self) -> bool {
+        self.range.contains(required.range)
+    }
+
+    /// Returns `true` if the intervals have at least one byte in common.
+    ///
+    /// Empty and adjacent intervals do not overlap.
+    pub fn overlaps(self, other: Self) -> bool {
+        self.range.overlaps(other.range)
+    }
+
+    /// Returns the nonempty physical interval common to both ranges, or `None` if they do not
+    /// overlap.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        self.range
+            .intersection(other.range)
+            .map(|range| Self { range })
+    }
+
+    /// Returns `true` if either interval's end equals the other's start.
+    ///
+    /// An empty interval adjoins any interval with an endpoint at that position, including
+    /// another empty interval.
+    pub fn adjoins(self, other: Self) -> bool {
+        self.range.adjoins(other.range)
+    }
+
+    /// Returns `true` if this interval ends at or before `other` starts.
+    ///
+    /// Adjacent intervals satisfy this relation. Two empty intervals at the same position each
+    /// precede the other.
+    pub fn precedes(self, other: Self) -> bool {
+        self.range.precedes(other.range)
+    }
+
+    /// Returns the interval with the same physical endpoints.
+    pub const fn range(self) -> AddressRange<PhysicalAddress> {
+        self.range
     }
 }
 

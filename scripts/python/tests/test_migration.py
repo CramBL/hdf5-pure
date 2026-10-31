@@ -340,6 +340,7 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("DeflateLevel", []),
         ("VariableLengthType", []),
         ("PhysicalAddress", []),
+        ("AddressRange", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],
 )

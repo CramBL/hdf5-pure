@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::EditBacking;
 use hdf5_pure::Error;
@@ -854,13 +855,20 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             .iter()
             .zip(reusable.sections())
         {
-            let _: StoredAddress = section.address();
-            let _: PhysicalAddress = physical.address();
+            let stored_range: AddressRange<StoredAddress> = section.range();
+            let physical_range: AddressRange<PhysicalAddress> = physical.range();
             assert_eq!(
-                section.address().get(),
-                physical.address().get() - userblock,
+                stored_range.start().get(),
+                physical_range.start().get() - userblock,
                 "{step:?}"
             );
+            assert_eq!(
+                stored_range.end().get(),
+                physical_range.end().get() - userblock,
+                "{step:?}"
+            );
+            assert_eq!(stored_range.length(), section.length().get(), "{step:?}");
+            assert_eq!(physical_range.length(), physical.length().get(), "{step:?}");
             assert_eq!(section.length(), physical.length(), "{step:?}");
         }
         let headers = file
