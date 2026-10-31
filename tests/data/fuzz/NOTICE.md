@@ -1,9 +1,9 @@
-# Minimized malformed HDF5 regressions
+# Malformed HDF5 regression inputs
 
-These are minimized `cargo-fuzz` inputs used by ordinary tests. Retain the exact
-submitted bytes as frozen regressions. Their original producer, producer version,
-version of `cargo-fuzz`, pre-mutation files, and precise minimization commands are
-unrecorded. No fixture-specific license or attribution is recorded.
+The three inputs in the following tables are minimized `cargo-fuzz` inputs used by
+ordinary tests. Retain their exact imported bytes as regression fixtures. Their
+original producer, producer version, version of `cargo-fuzz`, pre-mutation files,
+and precise minimization commands are unrecorded. No fixture-specific license or attribution is recorded.
 
 ## Origins
 
@@ -37,8 +37,26 @@ an in-memory copy to the EOF address stored in the superblock, preserving the
 datatype and link metadata. It never rewrites the committed file. The SOHM input
 is read directly.
 
-These malformed ordinary regressions are separate from the frozen mutation
+## Object-header version error precedence
+
+`invalid_v1_version_without_padding.h5` is the exact 108-byte input retained from
+[CI run 41208310457, job 124557928723][ci]. The run tested revision
+`6e70fa70bbdc98ac76e78bc56266643cd0386f73` with `nightly-2026-08-13` and
+`libfuzzer-sys` 0.4.13. Its artifact name was
+`crash-7c17df84699b0065a107e88ffc70939cde74ca85`, and its SHA-1 is
+`7c17df84699b0065a107e88ffc70939cde74ca85`. No local minimization or byte
+transformation was applied. The producer, producer version, and license of the
+input before fuzz mutation are unknown.
+
+`tests/main/streaming_differential.rs` reads this input directly. Its root object
+header has version byte 2 at physical offset 96 and ends after twelve prefix
+bytes, before the alignment padding. Buffered and streaming attribute reads must
+both report `InvalidObjectHeaderVersion(2)` before a truncation error. Retain the
+exact input to preserve this error-precedence case independently of test builders.
+
+These malformed ordinary regressions are separate from the retained mutation
 starting points documented in [the corpus notice][corpus]. Regenerating a valid
 file through a producer would discard their malformed conditions.
 
 [corpus]: ../../../fuzz/corpus/README.md
+[ci]: https://github.com/CramBL/hdf5-pure/actions/runs/41208310457/job/124557928723

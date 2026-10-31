@@ -263,6 +263,37 @@ fn group_attribute_heap_range_rejections_preserve_backend_diagnostics(#[case] he
     );
 }
 
+#[test]
+fn invalid_object_header_version_precedes_missing_alignment_padding() {
+    let image = std::fs::read(test_util::data(
+        "fuzz/invalid_v1_version_without_padding.h5",
+    ))
+    .unwrap();
+    let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    std::fs::write(&path, &image).unwrap();
+    let buffered = File::open(&path).unwrap();
+    let streaming = File::open_streaming(&path).unwrap();
+    let left = buffered.root().attrs().unwrap_err();
+    let right = streaming.root().attrs().unwrap_err();
+    let Error::Format(left) = left else {
+        panic!("expected a format error, got {left:?}");
+    };
+    let Error::Format(right) = right else {
+        panic!("expected a format error, got {right:?}");
+    };
+    assert_eq!(left, FormatError::InvalidObjectHeaderVersion(2));
+    assert_eq!(right, FormatError::InvalidObjectHeaderVersion(2));
+    drop(streaming);
+    drop(buffered);
+    assert_eq!(
+        oracle::compare(&image),
+        Comparison::Opened {
+            groups: 1,
+            datasets: 0
+        }
+    );
+}
+
 #[rstest]
 #[case::owner_type_with_restamped_checksum(NodeCorruption::ClientType(ChecksumUpdate::Recompute))]
 #[case::owner_type_with_original_checksum(NodeCorruption::ClientType(ChecksumUpdate::Keep))]

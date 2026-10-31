@@ -447,6 +447,74 @@ mod tests {
         assert_message(&header.messages[1], MessageType::DATA_LAYOUT, &DATA_LAYOUT);
     }
 
+    #[rstest]
+    #[case::missing_padding(2, 12)]
+    #[case::partial_padding(0, 15)]
+    #[case::complete_padding(255, 16)]
+    fn invalid_version_1_header_versions_are_rejected_before_padding(
+        #[case] version: u8,
+        #[case] length: usize,
+        #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+    ) {
+        let mut data = v1_bytes::Header::new().build();
+        data[0] = version;
+        data.truncate(length);
+        assert_eq!(
+            driver.parse(&data, MessageFilter::All).unwrap_err(),
+            FormatError::InvalidObjectHeaderVersion(version)
+        );
+    }
+
+    #[rstest]
+    #[case::incomplete_prefix(11, 12)]
+    #[case::missing_padding(12, 16)]
+    #[case::partial_padding(15, 16)]
+    fn truncated_version_1_header_prefixes_preserve_source_diagnostics(
+        #[case] length: usize,
+        #[case] expected: usize,
+        #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+    ) {
+        let mut data = v1_bytes::Header::new().build();
+        data.truncate(length);
+        let error = match driver {
+            Driver::Buffered => FormatError::UnexpectedEof {
+                expected,
+                available: length,
+            },
+            Driver::Source => FormatError::UnexpectedSourceEof {
+                expected: expected as u64,
+                available: length as u64,
+            },
+        };
+        assert_eq!(driver.parse(&data, MessageFilter::All).unwrap_err(), error);
+    }
+
+    #[test]
+    fn version_1_header_padding_rejects_an_overflowing_source_address() {
+        let data = v1_bytes::Header::new().build();
+        let address = u64::MAX - 12;
+        let source = ShiftedSource {
+            bytes: &data[..12],
+            address,
+        };
+        let error = ObjectHeader::parse_from_source(
+            &source,
+            AccessMode::ReadOnly,
+            address,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+            BaseAddress::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::OffsetOverflow {
+                offset: address,
+                length: 16
+            }
+        );
+    }
+
     #[test]
     fn parse_v1_unknown_message_ok() {
         let data = v1_bytes::Header::new()
@@ -1339,6 +1407,36 @@ mod tests {
             LENGTH_SIZE,
             BaseAddress::ZERO,
         )
+    }
+
+    struct ShiftedSource<'a> {
+        bytes: &'a [u8],
+        address: u64,
+    }
+
+    impl MetadataSource for ShiftedSource<'_> {
+        type Bytes<'a>
+            = &'a [u8]
+        where
+            Self: 'a;
+
+        fn read_metadata(&self, offset: u64, len: usize) -> Result<Self::Bytes<'_>, FormatError> {
+            self.bytes
+                .read_metadata(offset.checked_sub(self.address).unwrap(), len)
+        }
+
+        fn len(&self) -> u64 {
+            self.address.checked_add(self.bytes.len() as u64).unwrap()
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+            buf.copy_from_slice(self.read_metadata(offset, buf.len())?);
+            Ok(())
+        }
+
+        fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+            Ok(self.read_metadata(offset, len)?.to_vec())
+        }
     }
 
     const WIDTHS: Widths = Widths::EIGHT;
