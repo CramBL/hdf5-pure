@@ -2,7 +2,8 @@
 //!
 //! [`BytesSource`] reads from a buffer that holds the whole file, and [`ReadSeekSource`] from a
 //! reader that seeks. [`MetadataCachingSource`] wraps either with a bounded cache of the metadata
-//! reads and passes a dataset's payload through to the inner source.
+//! reads and passes a dataset's payload through to the inner source. Internal readers use
+//! [`PhysicalSource`] and [`StoredSource`] for coordinate-specific reads.
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -15,12 +16,17 @@ use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::MetadataSource;
 
+use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+
+mod view;
+
+pub(crate) use view::{PhysicalSource, StoredSource};
 
 /// Default maximum size of one entry admitted to a streaming metadata cache.
 pub const DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES: usize = 64 * 1024;
@@ -523,19 +529,11 @@ impl<S: Source> Source for ValidatedSource<S> {
 // Base-relative view
 // ---------------------------------------------------------------------------
 
-/// A [`Source`] view shifted forward by a base address: every read at a
-/// base-relative `offset` is served from `inner` at `offset + base`.
+/// A base-relative adapter for readers using the [`Source`] interface.
 ///
-/// Used wherever on-disk addresses are stored relative to the superblock's base
-/// address rather than absolutely — the data layout's contiguous-data, chunk-index,
-/// and chunk addresses on a file with a userblock, and the fractal-heap address in
-/// an Attribute Info message. Presenting this shifted view lets those relative
-/// addresses index it directly, exactly as an in-memory path slices the buffer at
-/// `base`. For a plain (base-0) file it is the identity.
-///
-/// Reads use the inner source at `offset + base`, including metadata reads through its cache.
-/// Metadata owners retain the inner source's physical range. Payload reads use the default
-/// uncached [`Source::read_exact_at`].
+/// Read offsets are relative to `base` in the inner source. Metadata reads use its cache and
+/// retain its physical metadata ranges. Payload reads use [`Source::read_exact_at`] on the inner
+/// source after checking the base-relative extent.
 pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
     pub(crate) inner: &'a S,
     pub(crate) base: BaseAddress,
@@ -567,40 +565,44 @@ pub(crate) fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatErro
         })
 }
 
+impl<'a, S: Source + ?Sized> BaseOffsetSource<'a, S> {
+    fn stored(&self) -> StoredSource<'a, S> {
+        PhysicalSource::new(self.inner).stored(AddressContext::from_effective_base(self.base))
+    }
+}
+
 impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
     fn len(&self) -> u64 {
-        self.inner.len().saturating_sub(self.base.get())
+        self.stored().len()
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        self.inner
-            .read_at(self.base.resolve(StoredAddress::new(offset))?.get(), buf)
+        self.stored().read_at(StoredAddress::new(offset), buf)
+    }
+
+    fn read_exact_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+        self.stored().read_exact_at(StoredAddress::new(offset), len)
     }
 
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-        self.inner
-            .read_metadata_at(self.base.resolve(StoredAddress::new(offset))?.get(), len)
+        self.stored()
+            .read_metadata_at(StoredAddress::new(offset), len)
     }
 
     fn metadata_origin(&self) -> Result<u64, FormatError> {
-        self.base
-            .resolve(StoredAddress::new(self.inner.metadata_origin()?))
-            .map(PhysicalAddress::get)
+        self.stored().metadata_origin().map(PhysicalAddress::get)
     }
 
     fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
-        self.inner
-            .read_metadata(self.base.resolve(StoredAddress::new(offset))?.get(), len)
+        self.stored().read_metadata(StoredAddress::new(offset), len)
     }
 
-    // The metadata reads above are the inner source's, so its cache is the one
-    // to report on. A base-relative view holds none of its own.
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
-        self.inner.metadata_cache_stats()
+        self.stored().metadata_cache_stats()
     }
 
     fn reset_metadata_cache_stats(&self) {
-        self.inner.reset_metadata_cache_stats();
+        self.stored().reset_metadata_cache_stats();
     }
 }
 
@@ -633,19 +635,20 @@ impl<S: Source + ?Sized> MetadataSource for SourceMetadata<'_, S> {
     }
 }
 
-/// The metadata reads of a file, a byte slice that holds the whole file or a [`Source`].
+/// Metadata reads with requests in the coordinate system of `R`.
 ///
-/// A [`Source`] reads each range through [`Source::read_metadata`]. Requests use the reader's
-/// coordinate frame, and returned owners contain the resolved physical range.
-pub(crate) trait RangeReader {
+/// Returned [`MetadataBytes`] retain their physical ranges. Implementations for byte slices
+/// and [`Source`] use [`FileRange`]. A [`StoredSource`] requires a checked stored-coordinate range.
+pub(crate) trait RangeReader<R = FileRange> {
     /// Returns the bytes of `range`, borrowed from a byte slice or read from a [`Source`].
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside `range`,
-    /// [`FormatError::ValueTooLargeForPlatform`] if the range length exceeds [`usize::MAX`], and the
-    /// error of a failed read of a [`Source`].
-    fn read_range(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError>;
+    /// [`FormatError::ValueTooLargeForPlatform`] if the range length exceeds [`usize::MAX`],
+    /// [`FormatError::OffsetOverflow`] if resolving a stored start exceeds [`u64::MAX`], and
+    /// errors from reading a [`Source`].
+    fn read_range(&self, range: R) -> Result<MetadataBytes<'_>, FormatError>;
 }
 
 impl RangeReader for [u8] {

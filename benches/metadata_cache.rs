@@ -18,7 +18,15 @@ use source::{
     MetadataCacheConfig, MetadataCachingSource, MetadataReadCache, ReadSeekSource, Source,
 };
 
-#[path = "metadata_cache/address.rs"]
+#[expect(
+    dead_code,
+    reason = "the benchmark does not reconcile or inspect opened image addresses"
+)]
+#[allow(
+    unused_imports,
+    reason = "the shared address module also exports types used by the reader"
+)]
+#[path = "../src/address.rs"]
 mod address;
 #[expect(dead_code, reason = "the benchmark only reads the metadata cache")]
 #[allow(
