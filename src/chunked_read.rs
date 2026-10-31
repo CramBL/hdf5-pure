@@ -2011,13 +2011,12 @@ pub(crate) fn collect_chunked_storage_spans<S: Source + ?Sized>(
         if ci.chunk_size.is_zero() {
             continue;
         }
-        let extent = Extent::new(ci.address.get(), ci.chunk_size.get()).ok_or(
-            FormatError::OffsetOverflow {
+        let extent =
+            Extent::new(ci.address, ci.chunk_size.get()).ok_or(FormatError::OffsetOverflow {
                 offset: ci.address.get(),
                 length: ci.chunk_size.get(),
-            },
-        )?;
-        data.push((extent.start(), extent.len()));
+            })?;
+        data.push((extent.start().get(), extent.len()));
     }
 
     // The chunk index's own structure blocks.
@@ -2076,7 +2075,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
         .map(|extents| {
             extents
                 .into_iter()
-                .map(|extent| (extent.start(), extent.len()))
+                .map(|extent| (extent.start().get(), extent.len()))
                 .collect()
         }),
     }

@@ -13,13 +13,12 @@ use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::SessionSpace;
 
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
 
 /// Reserves stored-address ranges by direct append or through metadata and raw aggregates.
 pub(crate) struct FileAllocation {
-    end: u64,
+    end: StoredAddress,
     aggregates: Option<ClassicAggregators>,
     space: SessionSpace,
 }
@@ -29,7 +28,7 @@ impl FileAllocation {
     ///
     /// With `threshold` set, tracks abandoned aggregate spare of at least that size for reuse
     /// during construction. Active aggregate spare remains reserved.
-    pub(crate) fn new(end: u64, aggregated: bool, threshold: Option<u64>) -> Self {
+    pub(crate) fn new(end: StoredAddress, aggregated: bool, threshold: Option<u64>) -> Self {
         Self {
             end,
             aggregates: aggregated.then(ClassicAggregators::new),
@@ -58,10 +57,10 @@ impl FileAllocation {
         class: AllocationClass,
     ) -> Result<StoredAddress, FormatError> {
         let Some(length) = NonZeroU64::new(length) else {
-            return Ok(StoredAddress::new(self.end));
+            return Ok(self.end);
         };
         if let Some(extent) = self.space.allocate(length.get(), class) {
-            return Ok(StoredAddress::new(extent.start()));
+            return Ok(extent.start());
         }
         if let Some(aggregates) = &mut self.aggregates {
             let allocation = aggregates
@@ -78,17 +77,11 @@ impl FileAllocation {
             if let Some(end) = self.space.release_freed(self.end, allocation.released()) {
                 self.end = end;
             }
-            Ok(StoredAddress::new(allocation.extent().start()))
+            Ok(allocation.extent().start())
         } else {
             let address = self.end;
-            self.end = self
-                .end
-                .checked_add(length.get())
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: self.end,
-                    length: length.get(),
-                })?;
-            Ok(StoredAddress::new(address))
+            self.end = self.end.checked_add(length.get())?;
+            Ok(address)
         }
     }
 
@@ -101,7 +94,7 @@ impl FileAllocation {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if aggregate cleanup exceeds [`u64::MAX`], or
     /// [`FormatError::Internal`] if an active aggregate extends beyond the writer's EOA.
-    pub(crate) fn finish(mut self) -> Result<u64, FormatError> {
+    pub(crate) fn finish(mut self) -> Result<StoredAddress, FormatError> {
         self.settle(false)?;
         Ok(self.end)
     }
@@ -122,29 +115,22 @@ impl FileAllocation {
     pub(crate) fn finish_persisted(
         mut self,
         widths: FormatWidths,
-    ) -> Result<(u64, Option<FileManager>), FormatError> {
+    ) -> Result<(StoredAddress, Option<FileManager>), FormatError> {
         self.settle(true)?;
         let sections: Vec<_> = self
             .space
             .reusable_sections()
             .map(|extent| FreeSection {
-                addr: StoredAddress::new(extent.start()),
+                addr: extent.start(),
                 size: extent.len(),
             })
             .collect();
         if sections.is_empty() {
             return Ok((self.end, None));
         }
-        let header_address = StoredAddress::new(self.end);
+        let header_address = self.end;
         let length = hdf5_pure_format::__private::free_space_manager_header_len(widths);
-        let section_list_address = self
-            .end
-            .checked_add(length)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: self.end,
-                length,
-            })
-            .map(StoredAddress::new)?;
+        let section_list_address = self.end.checked_add(length)?;
         let (header, section_list) = hdf5_pure_format::__private::serialize_free_space_manager(
             widths,
             &sections,
@@ -152,13 +138,7 @@ impl FileAllocation {
             section_list_address,
             SECTION_CLASS_SIMPLE,
         )?;
-        self.end = section_list_address
-            .get()
-            .checked_add(section_list.len() as u64)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: section_list_address.get(),
-                length: section_list.len() as u64,
-            })?;
+        self.end = section_list_address.checked_add(section_list.len() as u64)?;
         Ok((
             self.end,
             Some(FileManager {
@@ -170,7 +150,7 @@ impl FileAllocation {
         ))
     }
 
-    pub(crate) fn end(&self) -> u64 {
+    pub(crate) fn end(&self) -> StoredAddress {
         self.end
     }
 
@@ -231,7 +211,7 @@ mod tests {
         #[values(2, 4, 8)] width: u8,
     ) {
         let widths = FormatWidths::from_sizes(width, width).unwrap();
-        let mut allocation = FileAllocation::new(48, true, Some(threshold));
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(threshold));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         allocation.reserve(32, AllocationClass::Raw).unwrap();
         assert_eq!(allocation.space.reusable_sections().count(), 0);
@@ -251,7 +231,10 @@ mod tests {
             );
             assert_eq!(
                 end,
-                manager.section_list_address.get() + header.section_list_allocated()
+                manager
+                    .section_list_address
+                    .checked_add(header.section_list_allocated())
+                    .unwrap()
             );
             let sections = hdf5_pure_format::__private::parse_section_info(
                 widths,
@@ -268,13 +251,13 @@ mod tests {
                 }]
             );
         } else {
-            assert_eq!(end, 2_128);
+            assert_eq!(end, StoredAddress::new(2_128));
         }
     }
 
     #[test]
     fn persistence_keeps_abandoned_and_settled_spare() {
-        let mut allocation = FileAllocation::new(48, true, Some(1));
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         allocation.reserve(64, AllocationClass::Raw).unwrap();
         allocation
@@ -313,12 +296,12 @@ mod tests {
 
     #[test]
     fn an_empty_free_list_emits_no_manager() {
-        let mut allocation = FileAllocation::new(48, true, Some(1));
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         let (end, manager) = allocation
             .finish_persisted(FormatWidths::from_sizes(8, 8).unwrap())
             .unwrap();
-        assert_eq!(end, 112);
+        assert_eq!(end, StoredAddress::new(112));
         assert!(manager.is_none());
     }
 
@@ -326,10 +309,10 @@ mod tests {
     #[case::header(u64::MAX, true)]
     #[case::section_list(u64::MAX - 100, false)]
     fn persistent_manager_placement_checks_its_end(#[case] offset: u64, #[case] header: bool) {
-        let mut allocation = FileAllocation::new(48, true, Some(1));
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         allocation.reserve(32, AllocationClass::Raw).unwrap();
-        allocation.end = offset;
+        allocation.end = StoredAddress::new(offset);
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let error = allocation.finish_persisted(widths).unwrap_err();
         assert_eq!(
@@ -362,13 +345,16 @@ mod tests {
             AllocationClass::Metadata => AllocationClass::Raw,
             AllocationClass::Raw => AllocationClass::Metadata,
         };
-        let mut allocation = FileAllocation::new(48, true, Some(threshold));
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(threshold));
         assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
         assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
         assert_eq!(allocation.reserve(2_000, class).unwrap().get(), 4_144);
         assert_eq!(allocation.reserve(32, class).unwrap().get(), expected);
-        assert_eq!(allocation.end(), 6_192);
-        assert_eq!(allocation.finish().unwrap(), expected.max(6_112) + 32);
+        assert_eq!(allocation.end(), StoredAddress::new(6_192));
+        assert_eq!(
+            allocation.finish().unwrap(),
+            StoredAddress::new(expected.max(6_112) + 32)
+        );
     }
 
     #[rstest]
@@ -378,7 +364,7 @@ mod tests {
         #[case] class: AllocationClass,
         #[case] other: AllocationClass,
     ) {
-        let mut allocation = FileAllocation::new(48, true, Some(1));
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
         assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
         assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
         assert_eq!(allocation.space.reusable_sections().count(), 0);
@@ -387,8 +373,8 @@ mod tests {
         assert_eq!(allocation.reserve(1_984, other).unwrap().get(), 2_160);
         assert_eq!(allocation.reserve(4_096, other).unwrap().get(), 6_192);
         assert_eq!(allocation.reserve(32, class).unwrap().get(), 6_144);
-        assert_eq!(allocation.end(), 10_288);
-        assert_eq!(allocation.finish().unwrap(), 10_288);
+        assert_eq!(allocation.end(), StoredAddress::new(10_288));
+        assert_eq!(allocation.finish().unwrap(), StoredAddress::new(10_288));
     }
 
     #[rstest]
@@ -399,13 +385,13 @@ mod tests {
         #[case] other: AllocationClass,
         #[values(None, Some(1))] threshold: Option<u64>,
     ) {
-        let mut allocation = FileAllocation::new(48, true, threshold);
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, threshold);
         assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
         assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
         assert_eq!(allocation.reserve(4_096, class).unwrap().get(), 4_144);
         assert_eq!(allocation.reserve(32, class).unwrap().get(), 112);
-        assert_eq!(allocation.end(), 8_240);
-        assert_eq!(allocation.finish().unwrap(), 8_240);
+        assert_eq!(allocation.end(), StoredAddress::new(8_240));
+        assert_eq!(allocation.finish().unwrap(), StoredAddress::new(8_240));
     }
 
     #[rstest]
@@ -418,7 +404,7 @@ mod tests {
         #[case] threshold: Option<u64>,
         #[case] expected_end: u64,
     ) {
-        let mut allocation = FileAllocation::new(48, aggregated, threshold);
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), aggregated, threshold);
         assert_eq!(
             allocation
                 .reserve(64, AllocationClass::Metadata)
@@ -430,7 +416,10 @@ mod tests {
             allocation.reserve(32, AllocationClass::Raw).unwrap().get(),
             expected_end
         );
-        assert_eq!(allocation.finish().unwrap(), expected_end + 32);
+        assert_eq!(
+            allocation.finish().unwrap(),
+            StoredAddress::new(expected_end + 32)
+        );
     }
 
     #[rstest]
@@ -442,7 +431,8 @@ mod tests {
         #[case] threshold: Option<u64>,
         #[case] length: u64,
     ) {
-        let mut allocation = FileAllocation::new(u64::MAX, aggregated, threshold);
+        let mut allocation =
+            FileAllocation::new(StoredAddress::new(u64::MAX), aggregated, threshold);
         assert_eq!(
             allocation.reserve(0, AllocationClass::Raw).unwrap().get(),
             u64::MAX
@@ -454,7 +444,7 @@ mod tests {
                 length
             }
         );
-        assert_eq!(allocation.end(), u64::MAX);
-        assert_eq!(allocation.finish().unwrap(), u64::MAX);
+        assert_eq!(allocation.end(), StoredAddress::new(u64::MAX));
+        assert_eq!(allocation.finish().unwrap(), StoredAddress::new(u64::MAX));
     }
 }

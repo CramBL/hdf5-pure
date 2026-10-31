@@ -94,7 +94,7 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
     // "Node Size" applies to BTIN and BTLF nodes. BTHD has its own layout and encoded length.
     let header_len =
         hdf5_pure_format::__private::btree_v2_header_size(widths.offsets, widths.lengths);
-    let header_extent = extent_in_source(source, header_address.get(), header_len.to_u64())?;
+    let header_extent = extent_in_source(source, header_address, header_len.to_u64())?;
     let header_bytes = source.read_metadata(header_address.get(), header_len)?;
     let header = BTreeV2Header::parse_with_widths(&header_bytes, 0, widths)?;
     // BTIN and BTLF both have a 6-byte signature/version/type prefix and a 4-byte checksum.
@@ -175,7 +175,7 @@ fn collect_storage_node<S: Source + ?Sized>(
     if !visited.insert(node.address()) {
         return Err(FormatError::InvalidBTreeV2Signature);
     }
-    let extent = extent_in_source(source, node.address().get(), u64::from(node_size))?;
+    let extent = extent_in_source(source, node.address(), u64::from(node_size))?;
     let bytes = source.read_metadata(node.address().get(), u64::from(node_size).to_usize()?)?;
     let view = node.parse(&bytes)?;
     extents.push(extent);
@@ -193,17 +193,17 @@ fn collect_storage_node<S: Source + ?Sized>(
 /// Returns a checked extent after proving its complete byte range lies within `source`.
 fn extent_in_source<S: Source + ?Sized>(
     source: &S,
-    address: u64,
+    address: StoredAddress,
     length: u64,
 ) -> Result<Extent, FormatError> {
     debug_assert!(length > 0, "storage extents are non-empty");
     let extent = Extent::new(address, length).ok_or(FormatError::OffsetOverflow {
-        offset: address,
+        offset: address.get(),
         length,
     })?;
-    if extent.end() > source.len() {
+    if extent.end().get() > source.len() {
         return Err(FormatError::UnexpectedSourceEof {
-            expected: extent.end(),
+            expected: extent.end().get(),
             available: source.len(),
         });
     }
@@ -801,8 +801,8 @@ mod tests {
         assert_eq!(
             extents,
             vec![
-                Extent::new(0, header_len).unwrap(),
-                Extent::new(root, u64::from(BTREE_V2_NODE_SIZE)).unwrap(),
+                Extent::new(StoredAddress::new(0), header_len).unwrap(),
+                Extent::new(StoredAddress::new(root), u64::from(BTREE_V2_NODE_SIZE)).unwrap(),
             ]
         );
     }
@@ -824,6 +824,9 @@ mod tests {
                 .map(|extent| extent.start())
                 .collect::<Vec<_>>(),
             expected_nodes
+                .into_iter()
+                .map(StoredAddress::new)
+                .collect::<Vec<_>>()
         );
         assert!(
             extents[1..]
@@ -845,7 +848,10 @@ mod tests {
         let extents =
             collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
                 .unwrap();
-        assert_eq!(extents, [Extent::new(0, header.len().to_u64()).unwrap()]);
+        assert_eq!(
+            extents,
+            [Extent::new(StoredAddress::new(0), header.len().to_u64()).unwrap()]
+        );
     }
 
     #[test]
@@ -1124,7 +1130,7 @@ mod tests {
                 extents,
                 [
                     Extent::new(
-                        0,
+                        StoredAddress::new(0),
                         hdf5_pure_format::__private::btree_v2_header_size(
                             offset_width,
                             length_width,
@@ -1132,7 +1138,7 @@ mod tests {
                         .to_u64(),
                     )
                     .unwrap(),
-                    Extent::new(root, u64::from(BTREE_V2_NODE_SIZE)).unwrap(),
+                    Extent::new(StoredAddress::new(root), u64::from(BTREE_V2_NODE_SIZE)).unwrap(),
                 ]
             );
         }

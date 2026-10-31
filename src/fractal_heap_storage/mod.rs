@@ -212,7 +212,7 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         FractalHeapBlockLayout::new(&header, widths.offsets, widths.lengths, heap_header_address)?;
 
     let mut allocations = vec![(
-        extent_in_source(source, heap_header_address.get(), header_range.length())?,
+        extent_in_source(source, heap_header_address, header_range.length())?,
         FractalHeapAllocation::Header,
     )];
 
@@ -312,7 +312,7 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
                 FractalHeapBlock::Direct(block) => {
                     let reference = block.at(self.addresses.resolve(address)?)?;
                     let extent =
-                        extent_in_source(self.source, address.get(), reference.range().length())?;
+                        extent_in_source(self.source, address, reference.range().length())?;
                     match block.filters() {
                         Some(filters) => self.check_filtered_direct(block, reference, filters)?,
                         None => self.check_direct(reference)?,
@@ -327,7 +327,7 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
                 FractalHeapBlock::Indirect(block) => {
                     let reference = block.at(self.addresses.resolve(address)?)?;
                     let range = reference.parse_range();
-                    let extent = extent_in_source(self.source, address.get(), range.length())?;
+                    let extent = extent_in_source(self.source, address, range.length())?;
                     let bytes =
                         crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
                     let view = reference.parse(FileRegion::new(range, &bytes)?)?;
@@ -423,7 +423,7 @@ fn collect_managed_fsm_storage(
         return Ok(());
     }
     let reference = FreeSpaceManagerHeaderRef::new(widths, addresses.resolve(address)?)?;
-    let extent = extent_in_source(source, address.get(), reference.range().length())?;
+    let extent = extent_in_source(source, address, reference.range().length())?;
     let range = reference.parse_range();
     let bytes = crate::fractal_heap::read_header_range(source, addresses, range)?;
     let frame = reference.parse_checked(FileRegion::new(range, &bytes)?)?;
@@ -439,7 +439,7 @@ fn collect_managed_fsm_storage(
         return Ok(());
     };
     let reference = manager.section_list_ref(address, addresses.resolve(list_address)?)?;
-    let extent = extent_in_source(source, list_address.get(), reference.range().length())?;
+    let extent = extent_in_source(source, list_address, reference.range().length())?;
     let range = reference.parse_range();
     let bytes = crate::fractal_heap::read_header_range(source, addresses, range)?;
     reference.parse_checked(FileRegion::new(range, &bytes)?)?;
@@ -483,7 +483,7 @@ fn collect_huge_storage<S: Source + ?Sized>(
     allocations.push((
         extent_in_source(
             source,
-            tree_address.get(),
+            tree_address,
             hdf5_pure_format::__private::btree_v2_header_size(widths.offsets, widths.lengths)
                 .to_u64(),
         )?,
@@ -539,8 +539,9 @@ impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
                 count,
             } = &mut self;
             let allocation =
-                extent_in_source(*source, node.address().get(), u64::from(header.node_size))?;
-            let bytes = source.read_metadata(allocation.start(), allocation.len().to_usize()?)?;
+                extent_in_source(*source, node.address(), u64::from(header.node_size))?;
+            let bytes =
+                source.read_metadata(allocation.start().get(), allocation.len().to_usize()?)?;
             let view = node.parse(&bytes)?;
             allocations.push((allocation, FractalHeapAllocation::HugeObjectIndex));
             *count = count
@@ -620,7 +621,7 @@ impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
             .checked_add(decoded_size)
             .ok_or(FractalHeapStorageError::InvalidStorage)?;
         allocations.push((
-            extent_in_source(*source, address.get(), encoded_size)?,
+            extent_in_source(*source, address, encoded_size)?,
             FractalHeapAllocation::HugeObject,
         ));
         Ok(())
@@ -630,16 +631,16 @@ impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
 /// Returns a checked non-empty extent after proving its whole range lies in `source`.
 fn extent_in_source<S: Source + ?Sized>(
     source: &S,
-    address: u64,
+    address: StoredAddress,
     length: u64,
 ) -> Result<Extent, FractalHeapStorageError> {
     let extent = Extent::new(address, length).ok_or(FormatError::OffsetOverflow {
-        offset: address,
+        offset: address.get(),
         length,
     })?;
-    if extent.end() > source.len() {
+    if extent.end().get() > source.len() {
         return Err(FormatError::UnexpectedSourceEof {
-            expected: extent.end(),
+            expected: extent.end().get(),
             available: source.len(),
         }
         .into());
@@ -774,7 +775,7 @@ mod tests {
         len: u64,
         kind: FractalHeapAllocation,
     ) -> (Extent, FractalHeapAllocation) {
-        (Extent::new(start, len).unwrap(), kind)
+        (Extent::new(StoredAddress::new(start), len).unwrap(), kind)
     }
 
     fn collect_storage(file: &[u8]) -> Result<FractalHeapStorage, FractalHeapStorageError> {

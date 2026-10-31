@@ -230,7 +230,7 @@ pub(crate) fn plan_managers(
             .sections()
             .iter()
             .map(|extent| FreeSection {
-                addr: StoredAddress::new(extent.start()),
+                addr: extent.start(),
                 size: extent.len(),
             })
             .collect();
@@ -656,15 +656,15 @@ mod tests {
         let mut space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, page_size);
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
-            Extent::new(100, 200).unwrap(),
+            Extent::new(StoredAddress::new(100), 200).unwrap(),
         );
         space.seed_persisted(
             Some(ManagerKind::PagedSmallRaw),
-            Extent::new(5000, 200).unwrap(),
+            Extent::new(StoredAddress::new(5000), 200).unwrap(),
         );
         space.seed_persisted(
             Some(ManagerKind::PagedLargeGeneric),
-            Extent::new(8192, page_size.get()).unwrap(),
+            Extent::new(StoredAddress::new(8192), page_size.get()).unwrap(),
         );
         let managers = ManagerSections::paged(
             &space.paged_sections().expect("the strategy is PAGE"),

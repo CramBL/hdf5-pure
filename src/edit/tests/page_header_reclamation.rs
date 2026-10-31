@@ -9,6 +9,7 @@ use test_util_hdf5::userblock;
 use crate::FileSpacePageSize;
 #[cfg(test)]
 use crate::FileSpaceSettings;
+use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::WriteEngine;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
@@ -119,7 +120,12 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
         .unwrap()
         .metadata()
         .iter()
-        .map(|extent| (extent.start(), extent.len()))
+        .map(|extent| {
+            (
+                engine.addresses().absolute(extent.start()).unwrap(),
+                extent.len(),
+            )
+        })
         .collect();
     assert_eq!(
         test_util::range::covered_len(&metadata, &(address..address + spans[0].1)),
@@ -146,19 +152,23 @@ fn assert_large_header_tail(engine: &WriteEngine) {
     assert!(
         sections
             .unclassified()
-            .contains(&Extent::new(5_694, 450).unwrap())
+            .contains(&Extent::new(StoredAddress::new(5_694), 450).unwrap())
     );
     assert!(
         sections
             .metadata()
             .iter()
             .chain(sections.raw())
-            .all(|extent| { extent.end() <= 5_632 || extent.start() >= 5_694 })
+            .all(|extent| {
+                extent.end() <= StoredAddress::new(5_632)
+                    || extent.start() >= StoredAddress::new(5_694)
+            })
     );
     assert!(
         sections
             .raw()
             .iter()
-            .any(|extent| extent.start() <= 1_536 && extent.end() >= 5_632)
+            .any(|extent| extent.start() <= StoredAddress::new(1_536)
+                && extent.end() >= StoredAddress::new(5_632))
     );
 }

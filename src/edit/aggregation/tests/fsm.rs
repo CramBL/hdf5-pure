@@ -23,6 +23,7 @@ use crate::UserblockSize;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::{StoredAddress, StoredAddressExt};
 use crate::chunk_index_inplace::Store;
 use crate::edit::AppendBuilder;
 use crate::edit::AppendTarget;
@@ -78,7 +79,10 @@ fn reusable_sections_precede_retained_aggregate_windows(
         let reservation = engine.reserve(64, class).unwrap();
         engine.place(reservation, &[19; 64]).unwrap()
     };
-    assert_eq!(address, expected.start() + userblock);
+    assert_eq!(
+        address,
+        engine.addresses().absolute(expected.start()).unwrap()
+    );
     assert_eq!(engine.aggregation, Some(state));
     assert_eq!(engine.image.len(), physical);
     assert_eq!(engine.image.read_exact_at(address, 64).unwrap(), [19; 64]);
@@ -121,7 +125,7 @@ fn abandoned_spare_uses_the_session_threshold(
         let reservation = engine.reserve(bytes.len() as u64, class).unwrap();
         engine.place(reservation, &bytes).unwrap();
     }
-    let expected = Extent::new(start + 2000, 48).unwrap();
+    let expected = Extent::new(StoredAddress::new(start + 2000), 48).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         if tracked { vec![expected] } else { vec![] }
@@ -129,10 +133,16 @@ fn abandoned_spare_uses_the_session_threshold(
     let policy = engine.aggregation.unwrap();
     let reservation = engine.reserve(48, class).unwrap();
     if tracked {
-        assert_eq!(reservation.address(), expected.start());
+        assert_eq!(
+            reservation.address(),
+            engine.addresses().absolute(expected.start()).unwrap()
+        );
         assert_eq!(engine.aggregation, Some(policy));
     } else {
-        assert_ne!(reservation.address(), expected.start());
+        assert_ne!(
+            reservation.address(),
+            engine.addresses().absolute(expected.start()).unwrap()
+        );
         assert_ne!(engine.aggregation, Some(policy));
     }
     engine.place(reservation, &[31; 48]).unwrap();
@@ -153,14 +163,14 @@ fn subthreshold_spare_merges_into_an_adjacent_tracked_section() {
     let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
     engine.place(reservation, &[23; 64]).unwrap();
     engine.space.return_allocation(
-        Extent::new(start + 1900, 100).unwrap(),
+        Extent::new(StoredAddress::new(start + 1900), 100).unwrap(),
         AllocationClass::Metadata,
     );
     let reservation = engine.reserve(149, AllocationClass::Metadata).unwrap();
     engine.place(reservation, &[29; 149]).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
-        [Extent::new(start + 1900, 148).unwrap()]
+        [Extent::new(StoredAddress::new(start + 1900), 148).unwrap()]
     );
     let state = engine.aggregation;
     let reservation = engine.reserve(148, AllocationClass::Raw).unwrap();
@@ -192,7 +202,7 @@ fn accounting_coalesces_spare_with_adjacent_reusable_bytes() {
     let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
     let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
     let address = engine.place(reservation, &[19; 64]).unwrap();
-    let extent = Extent::new(address, 64).unwrap();
+    let extent = Extent::new(StoredAddress::new(address), 64).unwrap();
     engine.space.return_allocation(extent, AllocationClass::Raw);
     test_util_hdf5::assert_free_sections!(
         &engine.reusable_free_sections().unwrap(),
@@ -287,13 +297,16 @@ fn teardown_preserves_retained_interior_spare(
         [interior]
     );
     let reservation = engine.reserve(64, AllocationClass::Metadata).unwrap();
-    assert_eq!(reservation.address(), interior.start() + userblock);
+    assert_eq!(
+        reservation.address(),
+        engine.addresses().absolute(interior.start()).unwrap()
+    );
     engine.place(reservation, &[29; 64]).unwrap();
 }
 
 #[test]
 fn stored_aggregate_positions_remain_u64() {
-    let mut aggregate = AggregateSpace::new(4_294_967_296);
+    let mut aggregate = AggregateSpace::new(StoredAddress::new(4_294_967_296));
     let mut space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::FsmAggr),
         1,
@@ -308,7 +321,7 @@ fn stored_aggregate_positions_remain_u64() {
         )
         .unwrap();
     assert_eq!(placement.address(), 4_294_967_296);
-    assert_eq!(aggregate.eoa(), 4_294_969_344);
+    assert_eq!(aggregate.eoa(), StoredAddress::new(4_294_969_344));
 }
 
 #[test]

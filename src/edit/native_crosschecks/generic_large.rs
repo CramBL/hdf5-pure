@@ -47,8 +47,16 @@ fn native_generic_large_reclamation_keeps_partial_tails_unavailable() {
     let tail_start = start + length / page * page;
     let tail_end = start + length;
     assert!(tail_start < tail_end);
-    let tail = Extent::new(tail_start, tail_end - tail_start).unwrap();
-    let padding = Extent::new(tail_end, page - tail_end % page).unwrap();
+    let tail = Extent::new(
+        engine.addresses().relative(tail_start).unwrap(),
+        tail_end - tail_start,
+    )
+    .unwrap();
+    let padding = Extent::new(
+        engine.addresses().relative(tail_end).unwrap(),
+        page - tail_end % page,
+    )
+    .unwrap();
     assert_eq!(
         engine.object_header_free_spans(&large).unwrap(),
         [(start, length, FreeClass::Dead)]
@@ -74,14 +82,15 @@ impl WriteEngine {
             assert_eq!(
                 test_util::range::covered_len(
                     &owned.unclassified_space,
-                    &(extent.start()..extent.end())
+                    &(self.addresses().absolute(extent.start()).unwrap()
+                        ..self.addresses().absolute(extent.end()).unwrap())
                 ),
                 extent.len()
             );
             assert!(
                 self.space
                     .reusable_sections()
-                    .all(|free| free.end() <= extent.start() || free.start() >= extent.end())
+                    .all(|free| !free.range().overlaps(extent.range()))
             );
         }
         assert!(

@@ -10,7 +10,6 @@ use hdf5_pure_space::__private::SessionSpace;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::edit::commit::PublicationState;
 use crate::error::Error;
@@ -26,7 +25,7 @@ use super::free_space;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct AggregateSpace {
     policy: ClassicAggregators,
-    eoa: u64,
+    eoa: StoredAddress,
     /// Whether abandoned aggregate spare requires a persistent manager rewrite.
     manager_dirty: bool,
     /// Whether the cached root and EOA are safe to republish at teardown.
@@ -59,7 +58,7 @@ impl AggregateSpace {
         Self::extend(image, end)
     }
 
-    pub(super) fn new(eoa: u64) -> Self {
+    pub(super) fn new(eoa: StoredAddress) -> Self {
         Self {
             policy: ClassicAggregators::new(),
             eoa,
@@ -98,11 +97,9 @@ impl AggregateSpace {
                     }
                 })?;
         next.eoa = allocation.end_of_allocation();
-        let physical_end = addresses.resolve(StoredAddress::new(next.eoa))?.get();
+        let physical_end = addresses.resolve(next.eoa)?.get();
         let placement = Placement::Aggregated {
-            addr: addresses
-                .resolve(StoredAddress::new(allocation.extent().start()))?
-                .get(),
+            addr: addresses.resolve(allocation.extent().start())?.get(),
             len,
             end: physical_end,
         };
@@ -132,7 +129,7 @@ impl AggregateSpace {
         &mut self,
         space: &mut SessionSpace,
         extents: impl IntoIterator<Item = Extent>,
-    ) -> Result<Option<u64>, FormatError> {
+    ) -> Result<Option<StoredAddress>, FormatError> {
         let Some((post, eoa)) = space.flat_post_free(self.eoa, extents) else {
             return Ok(None);
         };
@@ -193,7 +190,7 @@ impl AggregateSpace {
             .filter_map(move |class| self.policy.unused(class))
     }
 
-    pub(super) fn eoa(self) -> u64 {
+    pub(super) fn eoa(self) -> StoredAddress {
         self.eoa
     }
 
@@ -204,7 +201,7 @@ impl AggregateSpace {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if unused aggregate space extends beyond `eoa`.
-    pub(super) fn reconcile(mut self, eoa: u64) -> Result<Self, Error> {
+    pub(super) fn reconcile(mut self, eoa: StoredAddress) -> Result<Self, Error> {
         self.policy.reconcile_eoa(eoa).map_err(|error| {
             FormatError::Internal(format!("published EOA excludes aggregate spare: {error}"))
         })?;
@@ -259,13 +256,17 @@ impl WriteEngine {
         let Some(persist) = &self.persist else {
             return Ok(());
         };
-        let eoa = self.end_of_allocation()?.get();
+        let eoa = self.end_of_allocation()?;
         let (mut post, eoa) = self.flat_post_free(eoa, to_free, &persist.old_blocks);
         let retained_start = free_space::trailing_run_start([&post], eoa);
         let released_eoa = post.release_all(persist.threshold, eoa, spare.iter().copied());
         let released_start = free_space::trailing_run_start([&post], released_eoa);
         let spare_len = spare.iter().map(|extent| extent.len()).sum::<u64>();
-        if retained_start.saturating_sub(released_start) <= spare_len {
+        if retained_start
+            .checked_distance_from(released_start)
+            .unwrap_or(0)
+            <= spare_len
+        {
             return Ok(());
         }
         self.aggregation = Some(AggregateSpace {
@@ -273,13 +274,11 @@ impl WriteEngine {
             manager_dirty: true,
             ..aggregation
         });
-        to_free.extend(spare.into_iter().map(|extent| {
-            (
-                StoredAddress::new(extent.start()),
-                extent.len(),
-                FreeClass::Dead,
-            )
-        }));
+        to_free.extend(
+            spare
+                .into_iter()
+                .map(|extent| (extent.start(), extent.len(), FreeClass::Dead)),
+        );
         Ok(())
     }
 
@@ -320,13 +319,7 @@ impl WriteEngine {
             root,
             spare
                 .into_iter()
-                .map(|extent| {
-                    (
-                        StoredAddress::new(extent.start()),
-                        extent.len(),
-                        FreeClass::Dead,
-                    )
-                })
+                .map(|extent| (extent.start(), extent.len(), FreeClass::Dead))
                 .collect(),
         );
         if result.is_err() && !self.publication.attempted() {
@@ -347,7 +340,7 @@ impl WriteEngine {
     pub(super) fn synchronize_aggregates(&mut self) -> Result<(), Error> {
         let eoa = self.end_of_allocation()?;
         if let Some(aggregation) = &mut self.aggregation {
-            aggregation.eoa = aggregation.eoa.max(eoa.get());
+            aggregation.eoa = aggregation.eoa.max(eoa);
         }
         Ok(())
     }
@@ -414,10 +407,7 @@ impl WriteEngine {
             aggregation.eoa = post.take_trailing(eoa).unwrap_or(eoa);
             post
         });
-        let end = self
-            .context
-            .addresses()
-            .resolve(StoredAddress::new(aggregation.eoa))?;
+        let end = self.context.addresses().resolve(aggregation.eoa)?;
         if end.get() < self.image.len() {
             let root = self
                 .context

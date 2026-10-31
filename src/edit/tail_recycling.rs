@@ -4,7 +4,6 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ManagerSections;
 
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::error::Error;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::free_space_manager;
@@ -41,13 +40,11 @@ impl WriteEngine {
         if let Some(aggregation) = self.aggregation {
             self.aggregation = Some(aggregation.without_spare());
         }
-        to_free.extend(spare.into_iter().map(|extent| {
-            (
-                StoredAddress::new(extent.start()),
-                extent.len(),
-                FreeClass::Dead,
-            )
-        }));
+        to_free.extend(
+            spare
+                .into_iter()
+                .map(|extent| (extent.start(), extent.len(), FreeClass::Dead)),
+        );
         self.commit_persisting(root, to_free, TailPlacement::Recycle(target))
     }
 
@@ -77,7 +74,7 @@ impl WriteEngine {
         let end = blocks.iter().try_fold(start, |end, extent| {
             (extent.start() == end).then_some(extent.end())
         })?;
-        FreeExtent::new(start, end - start)
+        FreeExtent::between(start, end)
     }
 
     /// Computes the free sections, placement, length, and EOA for a reserved metadata allocation.
@@ -88,12 +85,12 @@ impl WriteEngine {
     /// allocation ends there.
     pub(super) fn recycled_tail_layout(
         &self,
-        eoa: u64,
+        eoa: StoredAddress,
         to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
         extension_len: u64,
         target: FreeExtent,
-    ) -> Option<(FreeList, Option<u64>, u64, u64)> {
+    ) -> Option<(FreeList, Option<StoredAddress>, u64, StoredAddress)> {
         let (post, mut eoa) = self.flat_post_free(eoa, to_free, old_blocks);
         let managers = ManagerSections::flat(post.extents().iter().copied());
         let len = extension_len.checked_add(free_space_manager::manager_blocks_len(
@@ -105,7 +102,7 @@ impl WriteEngine {
         }
         let len = if post.is_empty() { len } else { target.len() };
         if eoa == target.end() {
-            eoa = target.start() + len;
+            eoa = target.start().checked_add(len).ok()?;
         }
         Some((post, Some(target.start()), len, eoa))
     }

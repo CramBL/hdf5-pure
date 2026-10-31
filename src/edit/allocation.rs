@@ -374,7 +374,7 @@ impl WriteEngine {
             fsm_dirty: self.fsm_dirty,
         });
         if let Some(aggregation) = self.aggregation {
-            let eoa = self.end_of_allocation()?.get();
+            let eoa = self.end_of_allocation()?;
             for extent in aggregation.unused() {
                 self.space.record_freed(eoa, extent, FreeClass::Dead);
             }

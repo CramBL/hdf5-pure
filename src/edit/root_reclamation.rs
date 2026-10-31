@@ -3,7 +3,6 @@
 use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::error::Error;
 use crate::file_space_info::FileSpaceStrategy;
@@ -87,7 +86,7 @@ impl WriteEngine {
         };
         let Some(index) = to_free
             .iter()
-            .position(|&(addr, len, _)| addr.get() == target.start() && len == target.len())
+            .position(|&(addr, len, _)| addr == target.start() && len == target.len())
         else {
             return Ok(None);
         };
@@ -123,25 +122,15 @@ impl WriteEngine {
         reclamation: RootReclamation,
     ) -> Result<(), Error> {
         let RootReclamation { target, source } = reclamation;
-        let source_addr = self
-            .context
-            .addresses()
-            .absolute(StoredAddress::new(source.start()))?;
-        let target_addr = self
-            .context
-            .addresses()
-            .resolve(StoredAddress::new(target.start()))?;
+        let source_addr = self.context.addresses().absolute(source.start())?;
+        let target_addr = self.context.addresses().resolve(target.start())?;
         let bytes = self
             .image
             .read_exact_at(source_addr, source.len().to_usize()?)?;
         self.write_at(target_addr.get(), &bytes)?;
         self.commit_persisting_releasing_reserve(
             target_addr,
-            vec![(
-                StoredAddress::new(source.start()),
-                source.len(),
-                FreeClass::Dead,
-            )],
+            vec![(source.start(), source.len(), FreeClass::Dead)],
         )
     }
 }

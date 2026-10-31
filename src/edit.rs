@@ -279,6 +279,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_space::__private as free_space;
@@ -1854,7 +1855,7 @@ impl WriteEngine {
     ) -> Result<(), Error> {
         let Some((ext_addr, info)) = file_space_info else {
             if let Ok(eoa) = self.end_of_allocation() {
-                self.aggregation = Some(AggregateSpace::new(eoa.get()));
+                self.aggregation = Some(AggregateSpace::new(eoa));
             }
             return Ok(());
         };
@@ -1863,7 +1864,7 @@ impl WriteEngine {
         if (info.strategy == FileSpaceStrategy::Aggr || info.strategy == FileSpaceStrategy::FsmAggr)
             && let Ok(eoa) = self.end_of_allocation()
         {
-            self.aggregation = Some(AggregateSpace::new(eoa.get()));
+            self.aggregation = Some(AggregateSpace::new(eoa));
         }
         let paged = self.space.is_paged();
         if !info.persist || !self.space.is_enabled() {
@@ -1915,16 +1916,16 @@ impl WriteEngine {
                         continue;
                     };
                     for &section in sections {
-                        let Some(extent) = FreeExtent::new(section.addr.get(), section.size) else {
+                        let Some(extent) = FreeExtent::new(section.addr, section.size) else {
                             continue;
                         };
                         tagged.push((*kind, extent));
                     }
                 }
                 tagged.sort_unstable_by_key(|&(_, extent)| extent.start());
-                let mut prev_end = 0u64;
+                let mut prev_end = StoredAddress::ZERO;
                 for (kind, extent) in tagged {
-                    if extent.end() > eoa.get() || extent.start() < prev_end {
+                    if extent.end() > eoa || extent.start() < prev_end {
                         continue;
                     }
                     prev_end = extent.end();
@@ -1940,12 +1941,12 @@ impl WriteEngine {
             },
         ) {
             sections.sort_unstable_by_key(|section| section.addr);
-            let mut prev_end = 0u64;
+            let mut prev_end = StoredAddress::ZERO;
             for section in sections {
-                let Some(extent) = FreeExtent::new(section.addr.get(), section.size) else {
+                let Some(extent) = FreeExtent::new(section.addr, section.size) else {
                     continue;
                 };
-                if extent.end() > eoa.get() || extent.start() < prev_end {
+                if extent.end() > eoa || extent.start() < prev_end {
                     continue;
                 }
                 prev_end = extent.end();
@@ -2019,7 +2020,7 @@ impl WriteEngine {
             .iter()
             .flat_map(|manager| {
                 manager.free_sections().sections().iter().map(|section| {
-                    FreeExtent::new(section.address().get(), section.length().get())
+                    FreeExtent::new(section.address(), section.length().get())
                         .map(|extent| {
                             (
                                 free_space_manager::manager_kind(info.strategy, manager.slot()),
@@ -2063,7 +2064,7 @@ impl WriteEngine {
             .ok()?;
         FreeSpaceManagerHeader::parse(widths, &fshd)
             .ok()
-            .and_then(|_| FreeExtent::new(addr.get(), len))
+            .and_then(|_| FreeExtent::new(addr, len))
     }
 
     /// Returns the extent of `len` bytes at the file position `at`, in stored addresses.
@@ -2071,7 +2072,7 @@ impl WriteEngine {
     /// Returns `None` if `at` lies below the base address, or if the extent is empty or ends past
     /// [`u64::MAX`].
     fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
-        FreeExtent::new(self.context.addresses().relative(at).ok()?.get(), len)
+        FreeExtent::new(self.context.addresses().relative(at).ok()?, len)
     }
 
     /// Returns the first stored page boundary at or beyond both extents.
@@ -2573,9 +2574,7 @@ impl WriteEngine {
             )
             .map(|extent| {
                 FileRange::new(
-                    self.context
-                        .addresses()
-                        .resolve(StoredAddress::new(extent.start()))?,
+                    self.context.addresses().resolve(extent.start())?,
                     extent.len(),
                 )
             })
@@ -2679,7 +2678,7 @@ impl WriteEngine {
     fn pad_to_page(&mut self) -> Result<(), Error> {
         let eoa = self.end_of_allocation()?;
         if let Some(transition @ PageTransition::Pad { extent, .. }) =
-            self.space.page_padding(eoa.get())?
+            self.space.page_padding(eoa)?
         {
             self.append(&vec![0u8; extent.len().to_usize()?])?;
             self.space.record_page_padding(transition);
@@ -2704,16 +2703,17 @@ impl WriteEngine {
     /// the write's error if the write fails.
     fn write_tail_block(
         &mut self,
-        region: (u64, u64),
+        region: FreeExtent,
         addr: StoredAddress,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        let (start, len) = region;
-        let stored = addr.get();
-        if stored < start || stored + bytes.len() as u64 > start + len {
+        let block = AddressRange::new(addr, bytes.len() as u64)?;
+        if !region.range().contains(block) {
+            let stored = addr.get();
+            let start = region.start().get();
             return Err(Error::Format(FormatError::SerializationError(format!(
                 "a commit's tail reserved [{start}, {}) but placed {} bytes at {stored}",
-                start + len,
+                region.end().get(),
                 bytes.len()
             ))));
         }
@@ -2771,7 +2771,7 @@ impl WriteEngine {
     fn begin_page(&mut self, ty: PageType) -> Result<(), Error> {
         let eoa = self.end_of_allocation()?;
         let Self { image, space, .. } = self;
-        let Some(transition) = space.plan_transition(eoa.get(), ty)? else {
+        let Some(transition) = space.plan_transition(eoa, ty)? else {
             return Ok(());
         };
         if let PageTransition::Pad { extent, .. } = transition {
@@ -2846,11 +2846,7 @@ impl WriteEngine {
             && let Some(extent) = self.space.allocate_with_page_type(len, class, page_type)
         {
             return Ok(Placement::Reused {
-                addr: self
-                    .context
-                    .addresses()
-                    .resolve(StoredAddress::new(extent.start()))?
-                    .get(),
+                addr: self.context.addresses().resolve(extent.start())?.get(),
                 len,
             });
         }
@@ -2885,9 +2881,7 @@ impl WriteEngine {
         if self.fresh_page_boundary.is_some() {
             return None;
         }
-        self.space
-            .allocate(len, class)
-            .map(|extent| StoredAddress::new(extent.start()))
+        self.space.allocate(len, class).map(|extent| extent.start())
     }
 
     /// Hands the stored range `[addr, addr + len)`, drawn from [`alloc_free`](Self::alloc_free)
@@ -2904,7 +2898,7 @@ impl WriteEngine {
     /// promoted out of either list by
     /// whole-page promotion as usual.
     fn release_raw_alloc(&mut self, addr: StoredAddress, len: u64) {
-        let Some(extent) = FreeExtent::new(addr.get(), len) else {
+        let Some(extent) = FreeExtent::new(addr, len) else {
             return;
         };
         self.space.return_allocation(extent, AllocationClass::Raw);

@@ -67,7 +67,7 @@ pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
         .any(|pair| pair[0].end() > pair[1].start())
         || extents
             .iter()
-            .any(|extent| extent.start() <= heap_header.get() && heap_header.get() < extent.end())
+            .any(|extent| extent.start() <= heap_header && heap_header < extent.end())
     {
         return Err(FormatError::InvalidBTreeV2Signature);
     }
@@ -107,11 +107,15 @@ mod tests {
         file[root_at..root_at + leaf.len()].copy_from_slice(&leaf);
         vec![
             Extent::new(
-                u64::try_from(header_at).unwrap(),
+                StoredAddress::new(u64::try_from(header_at).unwrap()),
                 u64::try_from(header.len()).unwrap(),
             )
             .unwrap(),
-            Extent::new(u64::try_from(root_at).unwrap(), NODE_SIZE).unwrap(),
+            Extent::new(
+                StoredAddress::new(u64::try_from(root_at).unwrap()),
+                NODE_SIZE,
+            )
+            .unwrap(),
         ]
     }
 

@@ -536,8 +536,11 @@ impl<S: ObjectSource> Plan<S> {
         let aggregated = paged.is_none()
             && (threshold.is_some()
                 || settings.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Aggr));
-        let mut allocation =
-            FileAllocation::new(super::SUPERBLOCK_SIZE as u64, aggregated, threshold);
+        let mut allocation = FileAllocation::new(
+            StoredAddress::new(super::SUPERBLOCK_SIZE as u64),
+            aggregated,
+            threshold,
+        );
         let mut collections = paged.map(|settings| {
             layout::PagedCollections::new(super::SUPERBLOCK_SIZE as u64, settings.page_size())
         });
@@ -577,7 +580,7 @@ impl<S: ObjectSource> Plan<S> {
             .into());
         }
         if let Some(collections) = &collections {
-            allocation = FileAllocation::new(collections.end, false, None);
+            allocation = FileAllocation::new(StoredAddress::new(collections.end), false, None);
         }
         reserve_metadata(&source, &mut records, &references, &mut allocation)?;
         drop(references);
@@ -1199,7 +1202,7 @@ impl FileLayout {
             } = layout::PagedLayout::new(
                 settings.page_size(),
                 settings.persist(),
-                allocation.end(),
+                allocation.end().get(),
                 extension.as_ref().map_or(0, |bytes| bytes.len() as u64),
                 measures.iter().copied(),
                 collections.ok_or_else(inconsistent)?.sections,

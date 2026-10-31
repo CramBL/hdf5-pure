@@ -558,7 +558,8 @@ fn replaced_dense_metadata_is_reclaimed_after_publication(
             engine
                 .space
                 .reusable_sections()
-                .any(|extent| extent.start() <= start && extent.end() >= start + length),
+                .any(|extent| extent.start() <= StoredAddress::new(start)
+                    && extent.end() >= StoredAddress::new(start + length)),
             "missing span {start}..{}",
             start + length
         );

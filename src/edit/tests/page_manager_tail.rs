@@ -186,7 +186,7 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
         )
         .unwrap();
     engine.commit().unwrap();
-    let root = engine.context.superblock().root_group_address.get();
+    let root = engine.context.superblock().root_group_address;
     assert!((tail.start()..tail.end()).contains(&root));
     assert_manager_allocations_owned(&engine);
     drop(engine);
