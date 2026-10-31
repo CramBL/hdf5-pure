@@ -12,6 +12,7 @@ extern crate alloc;
 extern crate std;
 
 mod address;
+mod address_range;
 mod dataspace;
 mod datatype;
 mod deflate_level;
@@ -35,6 +36,7 @@ pub use address::BaseAddress;
 pub use address::DecodedStoredAddress;
 pub use address::PhysicalAddress;
 pub use address::StoredAddress;
+pub use address_range::AddressRange;
 pub use dataspace::MaxExtent;
 pub use datatype::CharacterSet;
 pub use datatype::CompoundMember;

@@ -4,7 +4,9 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-use hdf5_pure_core::__private::{FileRange, FileRegion};
+use hdf5_pure_core::__private::{Address, FileRange, FileRegion, NonEmptyRange};
+use hdf5_pure_core::AddressRange;
+#[cfg(any(test, doc))]
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{self as format, FreeSpaceManagerHeaderRef};
 use hdf5_pure_space::__private::ManagerKind;
@@ -241,7 +243,7 @@ impl PersistedManagerSet {
             let [(previous, _), (section, context)] = pair else {
                 continue;
             };
-            if section.address() < previous.end_address() {
+            if section.range().overlaps(previous.range()) {
                 return Err(S::contextual_error(
                     *context,
                     FreeSectionsError::Overlap {
@@ -294,7 +296,7 @@ impl PersistedManagerSet {
         }
         if let Some(previous) = allocations
             .iter()
-            .find(|previous| range.start() < previous.end() && previous.start() < range.end())
+            .find(|previous| range.overlaps(**previous))
         {
             return Err(FormatError::InvalidFreeSpaceManager(format!(
                 "the manager allocation at {address}, {length} bytes long, overlaps the manager allocation at {}, {} bytes long",
@@ -567,7 +569,7 @@ impl<A> FreeSections<A> {
     /// of section lengths exceeds [`u64::MAX`].
     pub(crate) fn new(mut sections: Vec<FreeSection<A>>) -> Result<Self, FreeSectionsError>
     where
-        A: SectionAddress,
+        A: Address,
     {
         sections.sort_unstable_by_key(FreeSection::address);
         let free_bytes = sections.iter().try_fold(0u64, |sum, section| {
@@ -579,11 +581,11 @@ impl<A> FreeSections<A> {
         })?;
         for pair in sections.windows(2) {
             let [previous, section] = pair else { continue };
-            if section.address() < previous.address().end(previous.length().get()) {
+            if section.range().overlaps(previous.range()) {
                 return Err(FreeSectionsError::Overlap {
-                    address: section.address().get(),
+                    address: section.address().value(),
                     length: section.length().get(),
-                    previous_address: previous.address().get(),
+                    previous_address: previous.address().value(),
                     previous_length: previous.length().get(),
                 });
             }
@@ -648,8 +650,7 @@ impl From<FormatError> for FreeSectionsError {
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FreeSection<A> {
-    address: A,
-    length: NonZeroU64,
+    range: NonEmptyRange<A>,
 }
 
 impl<A> FreeSection<A> {
@@ -661,19 +662,14 @@ impl<A> FreeSection<A> {
     /// [`FormatError::OffsetOverflow`] if the end address exceeds [`u64::MAX`].
     pub(crate) fn new(address: A, length: u64) -> Result<Self, FormatError>
     where
-        A: SectionAddress,
+        A: Address,
     {
         let length = NonZeroU64::new(length).ok_or_else(|| {
             FormatError::InvalidFreeSpaceManager("a free section has zero length".into())
         })?;
-        address
-            .get()
-            .checked_add(length.get())
-            .ok_or(FormatError::OffsetOverflow {
-                offset: address.get(),
-                length: length.get(),
-            })?;
-        Ok(Self { address, length })
+        Ok(Self {
+            range: NonEmptyRange::new(address, length)?,
+        })
     }
 
     /// Returns the start address in the section's coordinate system.
@@ -681,52 +677,30 @@ impl<A> FreeSection<A> {
     where
         A: Copy,
     {
-        self.address
+        self.range.start()
     }
 
     /// Returns the positive length in bytes.
     pub const fn length(&self) -> NonZeroU64 {
-        self.length
-    }
-}
-
-impl FreeSection<StoredAddress> {
-    /// Returns the exclusive end address relative to the opened image's effective base.
-    pub fn end_address(&self) -> StoredAddress {
-        self.address.offset(self.length.get())
-    }
-}
-
-impl FreeSection<PhysicalAddress> {
-    /// Returns the exclusive end offset from the beginning of the source.
-    pub const fn end_address(&self) -> PhysicalAddress {
-        PhysicalAddress::new(self.address.get() + self.length.get())
-    }
-}
-
-/// The address operations used to check section ends and ordering.
-pub(crate) trait SectionAddress: Copy + Ord {
-    fn get(self) -> u64;
-    fn end(self, length: u64) -> Self;
-}
-
-impl SectionAddress for StoredAddress {
-    fn get(self) -> u64 {
-        self.get()
+        self.range.length()
     }
 
-    fn end(self, length: u64) -> Self {
-        self.offset(length)
-    }
-}
-
-impl SectionAddress for PhysicalAddress {
-    fn get(self) -> u64 {
-        self.get()
+    /// Returns the exclusive end address in the section's coordinate system.
+    pub const fn end_address(&self) -> A
+    where
+        A: Copy,
+    {
+        self.range.end()
     }
 
-    fn end(self, length: u64) -> Self {
-        Self::new(self.get() + length)
+    /// Returns the checked interval in the section's coordinate system.
+    ///
+    /// The interval has the section's positive length and the same start and end addresses.
+    pub const fn range(&self) -> AddressRange<A>
+    where
+        A: Copy,
+    {
+        self.range.range()
     }
 }
 
@@ -757,9 +731,7 @@ mod tests {
     #[rstest]
     #[case::stored(StoredAddress::new)]
     #[case::physical(PhysicalAddress::new)]
-    fn section_lengths_and_ends_are_checked<A: SectionAddress + Debug>(
-        #[case] address: fn(u64) -> A,
-    ) {
+    fn section_lengths_and_ends_are_checked<A: Address + Debug>(#[case] address: fn(u64) -> A) {
         assert_eq!(
             FreeSection::new(address(10), 0).unwrap_err(),
             FormatError::InvalidFreeSpaceManager("a free section has zero length".into())
@@ -779,7 +751,7 @@ mod tests {
     #[rstest]
     #[case::stored(StoredAddress::new)]
     #[case::physical(PhysicalAddress::new)]
-    fn collection_totals_are_checked_before_overlaps<A: SectionAddress + Debug>(
+    fn collection_totals_are_checked_before_overlaps<A: Address + Debug>(
         #[case] address: fn(u64) -> A,
     ) {
         let sections = vec![
@@ -798,7 +770,7 @@ mod tests {
     #[rstest]
     #[case::stored(StoredAddress::new)]
     #[case::physical(PhysicalAddress::new)]
-    fn collections_sort_sections_and_permit_adjacency<A: SectionAddress + Debug>(
+    fn collections_sort_sections_and_permit_adjacency<A: Address + Debug>(
         #[case] address: fn(u64) -> A,
     ) {
         let first = FreeSection::new(address(10), 20).unwrap();
@@ -819,7 +791,7 @@ mod tests {
     #[case::stored_duplicate(StoredAddress::new, 10, 20)]
     #[case::physical_overlap(PhysicalAddress::new, 20, 5)]
     #[case::physical_duplicate(PhysicalAddress::new, 10, 20)]
-    fn collections_reject_overlaps<A: SectionAddress + Debug>(
+    fn collections_reject_overlaps<A: Address + Debug>(
         #[case] address: fn(u64) -> A,
         #[case] start: u64,
         #[case] length: u64,

@@ -19,6 +19,7 @@
 
 use core::num::NonZeroU64;
 
+use hdf5_pure::AddressRange;
 use hdf5_pure::CharacterSet;
 use hdf5_pure::Datatype;
 use hdf5_pure::FileSpaceSettings;
@@ -534,6 +535,21 @@ fn public_superblock_updates_reject_narrowing_without_changing_state(
 
 #[test]
 fn free_section_reports_preserve_public_address_types() {
+    const fn inspect<A: Copy>(section: &FreeSection<A>) -> (A, NonZeroU64, A, AddressRange<A>) {
+        (
+            section.address(),
+            section.length(),
+            section.end_address(),
+            section.range(),
+        )
+    }
+
+    let _ = inspect::<PhysicalAddress>;
+    let _ = inspect::<StoredAddress>;
+    let _: fn(&FreeSection<StoredAddress>) -> AddressRange<StoredAddress> =
+        FreeSection::<StoredAddress>::range;
+    let _: fn(&FreeSection<PhysicalAddress>) -> AddressRange<PhysicalAddress> =
+        FreeSection::<PhysicalAddress>::range;
     let _: fn(PhysicalAddress) -> u64 = hdf5_pure_core::PhysicalAddress::get;
     let _: fn(u64) -> PhysicalAddress = hdf5_pure_core::PhysicalAddress::new;
     let _: fn(PhysicalAddress, u64) -> Result<PhysicalAddress, FormatError> =

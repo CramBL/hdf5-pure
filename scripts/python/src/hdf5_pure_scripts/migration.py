@@ -314,6 +314,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     }
     # The core root items that 0.47.0 does not define.
     allowed_new_items = {
+        "AddressRange",
         "BitFieldType",
         "FixedPointType",
         "FloatingPointType",

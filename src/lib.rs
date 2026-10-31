@@ -559,6 +559,8 @@ pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 #[cfg(feature = "std")]
 pub use object_graph::TraversalLimit;
 
+#[doc(inline)]
+pub use hdf5_pure_core::AddressRange;
 #[cfg(feature = "std")]
 #[doc(inline)]
 pub use hdf5_pure_core::BaseAddress;
