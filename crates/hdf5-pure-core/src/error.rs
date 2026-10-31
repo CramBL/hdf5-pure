@@ -5,7 +5,10 @@ use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
-use crate::{DatatypeByteOrder, FileSpacePageSize, FloatingPointField, FloatingPointLayout};
+use crate::{
+    DatatypeByteOrder, FileSpacePageSize, FloatingPointField, FloatingPointLayout,
+    NumericDatatypeProperty,
+};
 
 /// Reports format, filter, and runtime failures through the `hdf5-pure` API.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -889,6 +892,13 @@ pub enum FormatError {
         /// The object's length in bytes.
         object_length: u64,
     },
+    /// A required property was omitted from a numeric datatype builder.
+    MissingNumericDatatypeProperty {
+        /// The datatype class code.
+        class: u8,
+        /// The required property that was omitted.
+        property: NumericDatatypeProperty,
+    },
     /// Maximum nesting/continuation depth exceeded (malformed data protection).
     NestingDepthExceeded,
     /// A numeric element in a file is wider than the 64-bit word the typed
@@ -1292,6 +1302,9 @@ impl fmt::Display for FormatError {
                 f,
                 "no allocated fractal heap block contains object at heap offset {heap_offset} with length {object_length}"
             ),
+            Self::MissingNumericDatatypeProperty { class, property } => {
+                write!(f, "datatype class {class} requires the {property} property")
+            }
             Self::UnexpectedSourceEof {
                 expected,
                 available,
