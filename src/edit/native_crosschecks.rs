@@ -5,6 +5,7 @@ mod edit_dense_links;
 mod edit_tracked_dense_links;
 mod extension_records;
 mod group_link_inspection;
+mod symbol_table_links;
 
 mod generic_large;
 mod huge_links;

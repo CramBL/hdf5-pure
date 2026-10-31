@@ -145,7 +145,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed `Dataset::chunks` and related reads buffering entire unpaged Fixed Array indexes ([#805](https://github.com/CramBL/hdf5-pure/pull/805)).
 - Fixed `File::commit` returning ambiguous tails of large PAGE object headers to small free lists ([#808](https://github.com/CramBL/hdf5-pure/pull/808)).
 - Fixed `mat::from_file` and related deserialization failing on unset MATLAB struct-array fields ([#774](https://github.com/CramBL/hdf5-pure/pull/774)).
-- Fixed `File::open_rw` corrupting soft links when converting version 1 groups ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
+- Fixed `File::open_rw` corrupting soft links when converting version 1 groups ([#771](https://github.com/CramBL/hdf5-pure/pull/771), [#1001](https://github.com/CramBL/hdf5-pure/pull/1001)).
 - Fixed `Dataset::chunks` and related reads accepting invalid Fixed Array metadata or rejecting empty indexes ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 - Fixed `Dataset::write_staged` rejecting equivalent one-byte integer datatypes with different byte-order metadata ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
 - Fixed `Dataset::read_string` and related reads misinterpreting 2- and 4-byte lengths or accepting malformed global-heap collections ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
