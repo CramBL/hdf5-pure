@@ -53,6 +53,7 @@
 //! surfaced losslessly as [`MatValue::Opaque`] (class name plus raw properties)
 //! rather than misread or refused outright.
 
+use core::ops::Range;
 use std::collections::HashMap;
 
 use crate::convert::Narrow;
@@ -73,9 +74,12 @@ use crate::types::DType;
 /// `MCOS_RESERVED_CELL_PREFIX + v`.
 const MCOS_RESERVED_CELL_PREFIX: usize = 2;
 
-/// Length of the fixed FileWrapper blob header (version, num_strings, eight
-/// region offsets) before the name heap begins.
-const FILEWRAPPER_HEADER_LEN: usize = 40;
+/// `u32` words of the fixed FileWrapper blob header before the name heap
+/// begins: `(version, num_strings, region offsets…)`.
+const FILEWRAPPER_HEADER_WORDS: usize = 2 + FILEWRAPPER_NUM_OFFSETS;
+
+/// Length of the fixed FileWrapper blob header in bytes.
+const FILEWRAPPER_HEADER_LEN: usize = FILEWRAPPER_HEADER_WORDS * 4;
 
 /// Number of `u32` region offsets in the FileWrapper header (bytes 8..40).
 const FILEWRAPPER_NUM_OFFSETS: usize = 8;
@@ -382,48 +386,24 @@ impl Mcos {
 impl FileWrapper {
     /// Parse the FileWrapper metadata blob (cell 0 of the MCOS store).
     fn parse(blob: &[u8]) -> Result<Self, MatError> {
-        if blob.len() < FILEWRAPPER_HEADER_LEN {
+        // The version is not gated: the region layout is self-describing via
+        // the offsets, so a 2..=4 version parses uniformly.
+        let Some([_version, num_strings, offsets @ ..]) =
+            records::<FILEWRAPPER_HEADER_WORDS>(blob).next()
+        else {
             return Err(MatError::Custom(format!(
                 "FileWrapper blob too short: {} bytes (need at least {FILEWRAPPER_HEADER_LEN})",
                 blob.len()
             )));
-        }
-        // version (blob[0..4]) is read but not gated: the region layout is
-        // self-describing via the offsets, so a 2..=4 version parses uniformly.
-        let num_strings = read_u32(blob, 4)?.to_usize()?;
+        };
+        let num_strings = num_strings.to_usize()?;
+        let regions = Regions::parse(blob.len(), offsets)?;
 
-        let mut offsets = [0usize; FILEWRAPPER_NUM_OFFSETS];
-        for (i, slot) in offsets.iter_mut().enumerate() {
-            let v = read_u32(blob, 8 + i * 4)?.to_usize()?;
-            if v > blob.len() {
-                return Err(MatError::Custom(format!(
-                    "FileWrapper region offset {i} = {v} exceeds blob length {}",
-                    blob.len()
-                )));
-            }
-            *slot = v;
-        }
-        // The five region offsets used here must be non-decreasing and start
-        // past the header so the name heap and tables carve cleanly.
-        // MATLAB R2022b writes the last two of the eight offsets as zero.
-        if offsets[0] < FILEWRAPPER_HEADER_LEN {
-            return Err(MatError::Custom(
-                "FileWrapper name-heap offset overlaps the header".into(),
-            ));
-        }
-        for w in offsets[..5].windows(2) {
-            if w[1] < w[0] {
-                return Err(MatError::Custom(
-                    "FileWrapper region offsets are not non-decreasing".into(),
-                ));
-            }
-        }
-
-        let names = parse_names(blob, FILEWRAPPER_HEADER_LEN, offsets[0], num_strings)?;
-        let classes = parse_class_table(blob, offsets[0], offsets[1])?;
-        let saveobj_blocks = parse_property_blocks(blob, offsets[1], offsets[2])?;
-        let objects = parse_object_table(blob, offsets[2], offsets[3])?;
-        let normal_blocks = parse_property_blocks(blob, offsets[3], offsets[4])?;
+        let names = parse_names(blob, regions.names, num_strings)?;
+        let classes = parse_class_table(blob, regions.classes)?;
+        let saveobj_blocks = parse_property_blocks(blob, regions.saveobj_properties)?;
+        let objects = parse_object_table(blob, regions.objects)?;
+        let normal_blocks = parse_property_blocks(blob, regions.normal_properties)?;
 
         Ok(Self {
             names,
@@ -435,10 +415,65 @@ impl FileWrapper {
     }
 }
 
-/// Parse `num` NUL-terminated names from `blob[start..end]`.
-fn parse_names(blob: &[u8], start: usize, end: usize, num: usize) -> Result<Vec<String>, MatError> {
+/// The byte ranges of the five regions this reader decodes, in the order they
+/// follow the FileWrapper header.
+///
+/// [`Regions::parse`] carves them from the header's region offsets. Every range
+/// lies inside the blob, the name heap starts after the header, and each region
+/// starts where the one before it ends. The dynamic-property table and the two
+/// regions after it are not decoded.
+struct Regions {
+    names: Range<usize>,
+    classes: Range<usize>,
+    saveobj_properties: Range<usize>,
+    objects: Range<usize>,
+    normal_properties: Range<usize>,
+}
+
+impl Regions {
+    /// Carves the regions from the eight region offsets of the header. Each
+    /// offset is the byte position, from the start of the blob, where a region
+    /// ends and the next one starts.
+    fn parse(blob_len: usize, offsets: [u32; FILEWRAPPER_NUM_OFFSETS]) -> Result<Self, MatError> {
+        let mut ends = [0usize; FILEWRAPPER_NUM_OFFSETS];
+        for (i, (end, offset)) in ends.iter_mut().zip(offsets).enumerate() {
+            let offset = offset.to_usize()?;
+            if offset > blob_len {
+                return Err(MatError::Custom(format!(
+                    "FileWrapper region offset {i} = {offset} exceeds blob length {blob_len}"
+                )));
+            }
+            *end = offset;
+        }
+        // The last three offsets close the dynamic-property table and the two
+        // regions after it, which this reader does not decode. MATLAB R2022b
+        // writes the last two as zero, so the order is checked for the decoded ones.
+        let [decoded @ .., _, _, _] = ends;
+        let [names_end, classes_end, saveobj_end, objects_end, normal_end] = decoded;
+        if names_end < FILEWRAPPER_HEADER_LEN {
+            return Err(MatError::Custom(
+                "FileWrapper name-heap offset overlaps the header".into(),
+            ));
+        }
+        if !decoded.is_sorted() {
+            return Err(MatError::Custom(
+                "FileWrapper region offsets are not non-decreasing".into(),
+            ));
+        }
+        Ok(Self {
+            names: FILEWRAPPER_HEADER_LEN..names_end,
+            classes: names_end..classes_end,
+            saveobj_properties: classes_end..saveobj_end,
+            objects: saveobj_end..objects_end,
+            normal_properties: objects_end..normal_end,
+        })
+    }
+}
+
+/// Parse `num` NUL-terminated names from the name-heap region.
+fn parse_names(blob: &[u8], region: Range<usize>, num: usize) -> Result<Vec<String>, MatError> {
     let region = blob
-        .get(start..end)
+        .get(region)
         .ok_or_else(|| MatError::Custom("FileWrapper name heap out of range".into()))?;
     let mut names = Vec::with_capacity(num);
     let mut iter = region.split(|&b| b == 0);
@@ -455,85 +490,76 @@ fn parse_names(blob: &[u8], start: usize, end: usize, num: usize) -> Result<Vec<
 
 /// Parse the class table. The leading reserved entry is kept as `classes[0]` so
 /// a 1-based `class_id` indexes directly.
-fn parse_class_table(blob: &[u8], start: usize, end: usize) -> Result<Vec<ClassEntry>, MatError> {
-    let stride = CLASS_ENTRY_WORDS * 4;
-    let mut classes = Vec::new();
-    let mut off = start;
-    while off + stride <= end {
-        classes.push(ClassEntry {
-            namespace_idx: read_u32(blob, off)?,
-            name_idx: read_u32(blob, off + 4)?,
-        });
-        off += stride;
-    }
-    Ok(classes)
+fn parse_class_table(blob: &[u8], region: Range<usize>) -> Result<Vec<ClassEntry>, MatError> {
+    Ok(records::<CLASS_ENTRY_WORDS>(region_bytes(blob, region)?)
+        .map(|[namespace_idx, name_idx, _, _]| ClassEntry {
+            namespace_idx,
+            name_idx,
+        })
+        .collect())
 }
 
 /// Parse the object table. The leading reserved entry is kept as `objects[0]` so
 /// a 1-based `object_id` indexes directly.
-fn parse_object_table(
-    blob: &[u8],
-    start: usize,
-    end: usize,
-) -> Result<Vec<ObjectRecord>, MatError> {
-    let stride = OBJECT_ENTRY_WORDS * 4;
-    let mut objects = Vec::new();
-    let mut off = start;
-    while off + stride <= end {
-        objects.push(ObjectRecord {
-            class_id: read_u32(blob, off)?,
-            // words at off+4, off+8 are reserved zeros
-            saveobj_id: read_u32(blob, off + 12)?,
-            normalobj_id: read_u32(blob, off + 16)?,
-            dependency_id: read_u32(blob, off + 20)?,
-        });
-        off += stride;
-    }
-    Ok(objects)
+fn parse_object_table(blob: &[u8], region: Range<usize>) -> Result<Vec<ObjectRecord>, MatError> {
+    Ok(records::<OBJECT_ENTRY_WORDS>(region_bytes(blob, region)?)
+        .map(
+            |[class_id, _, _, saveobj_id, normalobj_id, dependency_id]| ObjectRecord {
+                class_id,
+                saveobj_id,
+                normalobj_id,
+                dependency_id,
+            },
+        )
+        .collect())
 }
 
 /// Parse a property-table region into blocks. Each block is `[nprops,
 /// (name_idx, field_type, value)…]` padded to an 8-byte boundary; the region
 /// opens with a reserved empty block (kept as block 0).
-fn parse_property_blocks(
-    blob: &[u8],
-    start: usize,
-    end: usize,
-) -> Result<Vec<PropBlock>, MatError> {
-    let triple_stride = PROP_TRIPLE_WORDS * 4;
+fn parse_property_blocks(blob: &[u8], region: Range<usize>) -> Result<Vec<PropBlock>, MatError> {
     let mut blocks = Vec::new();
-    let mut pos = start;
-    while pos + 4 <= end {
+    let mut pos = region.start;
+    while pos + 4 <= region.end {
         let nprops = read_u32(blob, pos)?.to_usize()?;
         pos += 4;
         let triples_bytes = nprops
-            .checked_mul(triple_stride)
+            .checked_mul(PROP_TRIPLE_WORDS * 4)
             .ok_or_else(|| MatError::Custom("MCOS property block size overflow".into()))?;
         let triples_end = pos
             .checked_add(triples_bytes)
             .ok_or_else(|| MatError::Custom("MCOS property block size overflow".into()))?;
-        if triples_end > end {
+        if triples_end > region.end {
             return Err(MatError::Custom(
                 "MCOS property block overruns its region".into(),
             ));
         }
-        let mut props = Vec::with_capacity(nprops);
-        for _ in 0..nprops {
-            props.push(Triple {
-                name_idx: read_u32(blob, pos)?,
-                field_type: read_u32(blob, pos + 4)?,
-                value: read_u32(blob, pos + 8)?,
-            });
-            pos += triple_stride;
-        }
+        let props = records::<PROP_TRIPLE_WORDS>(region_bytes(blob, pos..triples_end)?)
+            .map(|[name_idx, field_type, value]| Triple {
+                name_idx,
+                field_type,
+                value,
+            })
+            .collect();
         blocks.push(PropBlock { props });
         // Pad to the next 8-byte boundary (absolute offset in the blob).
-        let rem = pos % 8;
-        if rem != 0 {
-            pos += 8 - rem;
-        }
+        pos = triples_end.next_multiple_of(8);
     }
     Ok(blocks)
+}
+
+/// The bytes of a region that [`Regions::parse`] placed inside the blob.
+fn region_bytes(blob: &[u8], region: Range<usize>) -> Result<&[u8], MatError> {
+    blob.get(region.clone())
+        .ok_or_else(|| MatError::Custom(format!("FileWrapper region {region:?} out of range")))
+}
+
+/// Split `bytes` into records of `N` little-endian `u32` words. A partial
+/// record at the end is left out.
+fn records<const N: usize>(bytes: &[u8]) -> impl Iterator<Item = [u32; N]> {
+    let (words, _) = bytes.as_chunks::<4>();
+    let (records, _) = words.as_chunks::<N>();
+    records.iter().map(|record| record.map(u32::from_le_bytes))
 }
 
 /// Read a little-endian `u32` at byte offset `off`, bounds-checked.
@@ -1398,9 +1424,14 @@ mod tests {
     #[test]
     fn parses_string_filewrapper_blob_with_zero_trailing_offsets() {
         let mut blob = string_object::build_string_filewrapper_metadata(1);
-        let end = read_u32(&blob, 8 + 5 * 4).unwrap().to_usize().unwrap();
-        blob.truncate(end);
-        blob[8 + 6 * 4..FILEWRAPPER_HEADER_LEN].fill(0);
+        let Some([.., dynamic_properties_end, _, _]) =
+            records::<FILEWRAPPER_HEADER_WORDS>(&blob).next()
+        else {
+            panic!("the production blob has a header");
+        };
+        blob.truncate(dynamic_properties_end.to_usize().unwrap());
+        // The last two region offsets are the last two `u32` words of the header.
+        blob[FILEWRAPPER_HEADER_LEN - 2 * 4..FILEWRAPPER_HEADER_LEN].fill(0);
         let fw = FileWrapper::parse(&blob).expect("R2022b blob must parse");
 
         assert_eq!(fw.names, vec!["any".to_owned(), "string".to_owned()]);
