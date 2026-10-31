@@ -123,10 +123,10 @@ struct FileWrapper {
     objects: Vec<ObjectRecord>,
     /// Type-1 ("saveobj") property blocks; block 0 is the reserved leading
     /// block, so a 1-based `saveobj_id` indexes directly.
-    seg1: Vec<PropBlock>,
+    saveobj_blocks: Vec<PropBlock>,
     /// Type-2 ("normal") property blocks; block 0 is the reserved leading
     /// block, so a 1-based `normalobj_id` indexes directly.
-    seg2: Vec<PropBlock>,
+    normal_blocks: Vec<PropBlock>,
 }
 
 /// One class-table entry: a package/namespace name and the class name, each a
@@ -239,9 +239,9 @@ impl Mcos {
     pub(crate) fn properties(&self, object_id: u32) -> Result<Vec<PropRef>, MatError> {
         let record = self.object_record(object_id)?;
         let (blocks, block_id) = if record.saveobj_id != 0 {
-            (&self.wrapper.seg1, record.saveobj_id)
+            (&self.wrapper.saveobj_blocks, record.saveobj_id)
         } else {
-            (&self.wrapper.seg2, record.normalobj_id)
+            (&self.wrapper.normal_blocks, record.normalobj_id)
         };
         // block_id 0 means the object has no properties in that segment.
         if block_id == 0 {
@@ -421,16 +421,16 @@ impl FileWrapper {
 
         let names = parse_names(blob, FILEWRAPPER_HEADER_LEN, offsets[0], num_strings)?;
         let classes = parse_class_table(blob, offsets[0], offsets[1])?;
-        let seg1 = parse_property_blocks(blob, offsets[1], offsets[2])?;
+        let saveobj_blocks = parse_property_blocks(blob, offsets[1], offsets[2])?;
         let objects = parse_object_table(blob, offsets[2], offsets[3])?;
-        let seg2 = parse_property_blocks(blob, offsets[3], offsets[4])?;
+        let normal_blocks = parse_property_blocks(blob, offsets[3], offsets[4])?;
 
         Ok(Self {
             names,
             classes,
             objects,
-            seg1,
-            seg2,
+            saveobj_blocks,
+            normal_blocks,
         })
     }
 }
@@ -1386,8 +1386,8 @@ mod tests {
         assert_eq!(fw.objects[1].normalobj_id, 0);
 
         // The saveobj property block points at heap value 0 (cell index 2).
-        assert_eq!(fw.seg1.len(), 2);
-        let block = &fw.seg1[1];
+        assert_eq!(fw.saveobj_blocks.len(), 2);
+        let block = &fw.saveobj_blocks[1];
         assert_eq!(block.props.len(), 1);
         assert_eq!(block.props[0].field_type, FIELD_TYPE_HEAP);
         assert_eq!(block.props[0].value, 0);
@@ -1410,10 +1410,10 @@ mod tests {
         assert_eq!(fw.objects[1].class_id, 1);
         assert_eq!(fw.objects[1].saveobj_id, 1);
         assert_eq!(fw.objects[1].normalobj_id, 0);
-        assert_eq!(fw.seg1.len(), 2);
-        assert_eq!(fw.seg1[1].props.len(), 1);
-        assert_eq!(fw.seg1[1].props[0].field_type, FIELD_TYPE_HEAP);
-        assert_eq!(fw.seg1[1].props[0].value, 0);
+        assert_eq!(fw.saveobj_blocks.len(), 2);
+        assert_eq!(fw.saveobj_blocks[1].props.len(), 1);
+        assert_eq!(fw.saveobj_blocks[1].props[0].field_type, FIELD_TYPE_HEAP);
+        assert_eq!(fw.saveobj_blocks[1].props[0].value, 0);
     }
 
     #[test]
@@ -1427,9 +1427,9 @@ mod tests {
             assert_eq!(fw.objects[id as usize].saveobj_id, id);
         }
         // Each object's block points at heap value id-1 (cell id+1).
-        assert_eq!(fw.seg1.len(), 4);
+        assert_eq!(fw.saveobj_blocks.len(), 4);
         for id in 1..=3u32 {
-            let block = &fw.seg1[id as usize];
+            let block = &fw.saveobj_blocks[id as usize];
             assert_eq!(block.props[0].value, id - 1);
         }
     }
