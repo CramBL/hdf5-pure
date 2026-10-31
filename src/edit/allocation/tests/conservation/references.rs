@@ -603,7 +603,7 @@ impl Roles {
                 if kind == MessageType::DATASPACE {
                     dataspace_body = Some(
                         Interval::new(
-                            chunk.span.0 + u64::try_from(body).unwrap(),
+                            chunk.span.start().get() + u64::try_from(body).unwrap(),
                             u64::try_from(end - body).unwrap(),
                         )
                         .unwrap(),
@@ -623,11 +623,12 @@ impl Roles {
                             ..
                         }
                     ));
-                    object_frame = Some(Interval::new(chunk.span.0, chunk.span.1).unwrap());
+                    object_frame =
+                        Some(Interval::new(chunk.span.start().get(), chunk.span.length()).unwrap());
                     let pointer = pointer.unwrap();
                     layout_field = Some(
                         Interval::new(
-                            chunk.span.0 + u64::try_from(body + pointer.start).unwrap(),
+                            chunk.span.start().get() + u64::try_from(body + pointer.start).unwrap(),
                             u64::try_from(pointer.len()).unwrap(),
                         )
                         .unwrap(),

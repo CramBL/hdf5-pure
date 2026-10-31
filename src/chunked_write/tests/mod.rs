@@ -1727,3 +1727,38 @@ impl ByteSink for FailingChunkSink {
         0
     }
 }
+
+#[rstest]
+#[case::chunk(u64::MAX, vec![1], 1)]
+#[case::index(u64::MAX - 16, vec![8, 8], 2)]
+fn verbatim_placement_rejects_address_overflow(
+    #[case] start: u64,
+    #[case] sizes: Vec<u64>,
+    #[case] elements: u64,
+) {
+    let meta: Vec<_> = sizes
+        .into_iter()
+        .map(|compressed_size| ChunkMeta {
+            compressed_size,
+            filter_mask: 0,
+        })
+        .collect();
+    let error = plan_chunked_data_verbatim(
+        &meta,
+        &[elements],
+        &[1],
+        convert::nz(8),
+        ChunkedLayoutFlags::NONE,
+        None,
+        StoredAddress::new(start),
+        None,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let (offset, length) = if elements == 1 {
+        (u64::MAX, 1)
+    } else {
+        (u64::MAX - 16, 78)
+    };
+    assert_eq!(error, FormatError::OffsetOverflow { offset, length });
+}

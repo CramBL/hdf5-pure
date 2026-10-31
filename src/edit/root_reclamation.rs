@@ -59,17 +59,17 @@ impl WriteEngine {
         let Ok(old_spans) = self.oh_chunk_spans(old_root.get()) else {
             return Ok(None);
         };
-        let [(target_addr, target_len)] = old_spans.as_slice() else {
+        let [target_range] = old_spans.as_slice() else {
             return Ok(None);
         };
-        if *target_len >= persist.threshold {
+        if target_range.length() >= persist.threshold {
             return Ok(None);
         }
         let new_spans = self.oh_chunk_spans(new_root.get())?;
-        let [(source_addr, source_len)] = new_spans.as_slice() else {
+        let [source_range] = new_spans.as_slice() else {
             return Ok(None);
         };
-        if source_len != target_len {
+        if source_range.length() != target_range.length() {
             return Ok(None);
         }
         let Some(incoming) = self.count_incoming_hard_links() else {
@@ -78,10 +78,10 @@ impl WriteEngine {
         if incoming.contains_key(&old_root.get()) {
             return Ok(None);
         }
-        let Some(target) = self.stored_extent(*target_addr, *target_len) else {
+        let Some(target) = self.stored_extent(*target_range) else {
             return Ok(None);
         };
-        let Some(source) = self.stored_extent(*source_addr, *source_len) else {
+        let Some(source) = self.stored_extent(*source_range) else {
             return Ok(None);
         };
         let Some(index) = to_free

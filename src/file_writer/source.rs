@@ -504,7 +504,7 @@ pub(crate) struct Plan<S> {
     libver: LibVer,
     extension: Option<(Allocation, Vec<u8>)>,
     managers: Vec<FileManager>,
-    end: u64,
+    end: StoredAddress,
 }
 
 impl<S: ObjectSource> Plan<S> {
@@ -542,7 +542,10 @@ impl<S: ObjectSource> Plan<S> {
             threshold,
         );
         let mut collections = paged.map(|settings| {
-            layout::PagedCollections::new(super::SUPERBLOCK_SIZE as u64, settings.page_size())
+            layout::PagedCollections::new(
+                StoredAddress::new(super::SUPERBLOCK_SIZE as u64),
+                settings.page_size(),
+            )
         });
         let mut records = Vec::with_capacity(source.len());
         let mut references = vec![1u32; source.len()];
@@ -580,7 +583,7 @@ impl<S: ObjectSource> Plan<S> {
             .into());
         }
         if let Some(collections) = &collections {
-            allocation = FileAllocation::new(StoredAddress::new(collections.end), false, None);
+            allocation = FileAllocation::new(collections.end, false, None);
         }
         reserve_metadata(&source, &mut records, &references, &mut allocation)?;
         drop(references);
@@ -654,7 +657,7 @@ impl<S: ObjectSource> Plan<S> {
             offset_size: super::OFFSET_WIDTH,
             length_size: super::LENGTH_WIDTH,
             base_address: BaseAddress::ZERO,
-            eof_address: *end,
+            eof_address: end.get(),
             root_group_address: records
                 .last()
                 .ok_or_else(inconsistent)?
@@ -778,7 +781,7 @@ impl<S: ObjectSource> Plan<S> {
                 return Err(inconsistent().into());
             }
         }
-        pad(&mut sink, *end)?;
+        pad(&mut sink, end.get())?;
         sink.into_inner().flush()?;
         Ok(())
     }
@@ -1008,26 +1011,15 @@ impl DenseLinks {
                 offset_size: super::OFFSET_WIDTH.get(),
             });
         }
-        address
-            .get()
-            .checked_add(length)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: address.get(),
-                length,
-            })?;
+        address.checked_add(length)?;
         if name_index_offset.get() >= length {
             return Err(inconsistent());
         }
-        let name_index = address.get().checked_add(name_index_offset.get()).ok_or(
-            FormatError::OffsetOverflow {
-                offset: address.get(),
-                length: name_index_offset.get(),
-            },
-        )?;
+        let name_index = address.checked_add(name_index_offset.get())?;
         Ok(LinkInfoMessage {
             max_creation_order: None,
             fractal_heap_address: Some(address),
-            btree_name_index_address: Some(StoredAddress::new(name_index)),
+            btree_name_index_address: Some(name_index),
             btree_creation_order_address: None,
         })
     }
@@ -1162,7 +1154,7 @@ fn reserve_metadata(
 /// The superblock extension, serialized managers, and stored end of allocation.
 struct FileLayout {
     extension: Option<(Allocation, Vec<u8>)>,
-    end: u64,
+    end: StoredAddress,
     managers: Vec<FileManager>,
 }
 
@@ -1202,7 +1194,7 @@ impl FileLayout {
             } = layout::PagedLayout::new(
                 settings.page_size(),
                 settings.persist(),
-                allocation.end().get(),
+                allocation.end(),
                 extension.as_ref().map_or(0, |bytes| bytes.len() as u64),
                 measures.iter().copied(),
                 collections.ok_or_else(inconsistent)?.sections,
@@ -1250,7 +1242,7 @@ impl FileLayout {
                             settings.strategy(),
                             settings.threshold(),
                             settings.page_size(),
-                            manager.header_address.get(),
+                            manager.header_address,
                             end,
                         ),
                         None => file_space_info::persistent_empty(

@@ -73,11 +73,12 @@ impl RootRetirement {
 
     /// Consumes predecessor ownership into the associated root's pending free spans.
     ///
-    /// Combines the chunk allocations with `spans`, excluding overlapping ranges and ranges beyond
-    /// `eof`. The publisher must preserve the prior ownership until root publication succeeds.
+    /// Combines the chunk allocations with `spans`, excluding empty or overlapping ranges and
+    /// ranges beyond `eof`. The publisher must preserve the prior ownership until root publication
+    /// succeeds.
     pub(super) fn into_pending_frees(
         self,
-        mut spans: Vec<(u64, u64, FreeClass)>,
+        mut spans: Vec<(FileRange, FreeClass)>,
         eof: u64,
     ) -> PendingRootFrees {
         let Self { root, chunks } = self;
@@ -86,7 +87,7 @@ impl RootRetirement {
                  range,
                  extent: _,
                  class,
-             }| { (range.start().get(), range.length(), class) },
+             }| { (range, class) },
         ));
         super::retain_disjoint_in_bounds(&mut spans, eof);
         PendingRootFrees { root, spans }
@@ -96,7 +97,7 @@ impl RootRetirement {
 /// A replacement root and the physical spans awaiting its publication.
 pub(super) struct PendingRootFrees {
     pub(super) root: PhysicalAddress,
-    pub(super) spans: Vec<(u64, u64, FreeClass)>,
+    pub(super) spans: Vec<(FileRange, FreeClass)>,
 }
 
 #[cfg(test)]
@@ -149,13 +150,11 @@ mod tests {
         assert_eq!(allocation.range().start().get(), base + 64);
         assert_eq!(allocation.range().length(), stored_size);
         let root = PhysicalAddress::new(base + 8);
+        let range = allocation.range();
         let retirement = RootRetirement::new(root, vec![allocation]);
         let pending = retirement.into_pending_frees(Vec::new(), base + 64 + stored_size);
         assert_eq!(pending.root, root);
-        assert_eq!(
-            pending.spans,
-            vec![(base + 64, stored_size, FreeClass::Page(PageType::Raw))]
-        );
+        assert_eq!(pending.spans, vec![(range, FreeClass::Page(PageType::Raw))]);
     }
 
     #[rstest]
@@ -280,13 +279,13 @@ mod tests {
             &ObjectPath::parse("d"),
         )
         .unwrap();
-        let mut protected = vec![(predecessor.start().get(), predecessor.length())];
+        let mut protected = vec![predecessor];
         protected.extend(
             engine
                 .chunked_storage_spans(published_dataset)
                 .unwrap()
                 .into_iter()
-                .map(|(address, len, _)| (address, len)),
+                .map(|(range, _)| range),
         );
         protected.extend(engine.oh_chunk_spans(published_dataset).unwrap());
         protected.extend(
@@ -302,8 +301,8 @@ mod tests {
         );
         for range in engine.reusable_ranges() {
             let range = range.unwrap();
-            for &(address, len) in &protected {
-                assert!(range.end().get() <= address || address + len <= range.start().get());
+            for &protected in &protected {
+                assert!(!range.overlaps(protected));
             }
         }
         drop(engine);

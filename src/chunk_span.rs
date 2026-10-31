@@ -15,6 +15,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_core::AddressRange;
+
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
@@ -28,24 +30,6 @@ use crate::source::Source;
 /// 4 KiB chunks written in one pass.
 pub(crate) const MAX_SPAN_BYTES: u64 = 256 * 1024;
 
-/// One contiguous byte range of the file, covering one or more chunks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Span {
-    start: u64,
-    /// Exclusive.
-    end: u64,
-}
-
-impl Span {
-    fn covers(&self, start: u64, end: u64) -> bool {
-        start >= self.start && end <= self.end
-    }
-
-    fn len(&self) -> u64 {
-        self.end - self.start
-    }
-}
-
 /// Serves a planned set of chunks out of coalesced reads.
 ///
 /// Build it with the chunks one read will fetch (see the module docs on why
@@ -55,9 +39,9 @@ impl Span {
 /// read first.
 pub(crate) struct ChunkSpanReader {
     /// Sorted by `start`, and non-overlapping by construction.
-    spans: Vec<Span>,
+    spans: Vec<AddressRange<StoredAddress>>,
     /// The span `buf` currently holds, or `None` when `buf` is stale.
-    held: Option<Span>,
+    held: Option<AddressRange<StoredAddress>>,
     buf: Vec<u8>,
     /// Holds a chunk that belongs to no span, so serving one does not evict the
     /// span its neighbours are being served from.
@@ -65,37 +49,26 @@ pub(crate) struct ChunkSpanReader {
 }
 
 impl ChunkSpanReader {
-    /// Plan spans over `chunks`, given as `(address, size)`, or `None` when
-    /// coalescing them would not pay.
+    /// Plans shared reads for adjacent or overlapping chunks in stored-address coordinates.
     ///
-    /// `None` means the caller should read each chunk directly, which is the
-    /// answer whenever no two chunks are adjacent: every span would be a single
-    /// chunk, and serving it through the buffer would only add a copy. A file
-    /// whose writer had its chunk cache disabled scatters its chunks that way
-    /// and pays nothing for this.
+    /// Returns `None` if no chunks can share a read or a chunk's exclusive end exceeds
+    /// [`u64::MAX`]. The caller reads each chunk directly in that case.
     pub(crate) fn new<I, N>(chunks: I) -> Option<Self>
     where
         I: IntoIterator<Item = (StoredAddress, N)>,
         N: Into<u64>,
     {
-        let mut ranges: Vec<Span> = chunks
+        let mut ranges: Vec<_> = chunks
             .into_iter()
-            .map(|(address, size)| {
-                let size = size.into();
-                Span {
-                    start: address.get(),
-                    // A crafted address near `u64::MAX` saturates here. The
-                    // read itself is bounds-checked by the source.
-                    end: address.get().saturating_add(size),
-                }
-            })
-            .collect();
+            .map(|(address, size)| AddressRange::new(address, size.into()))
+            .collect::<Result<_, _>>()
+            .ok()?;
         if ranges.len() < 2 {
             return None;
         }
-        ranges.sort_unstable_by_key(|s| s.start);
+        ranges.sort_unstable_by_key(|s| s.start());
 
-        let mut spans: Vec<Span> = Vec::new();
+        let mut spans: Vec<AddressRange<StoredAddress>> = Vec::new();
         for range in ranges.iter().copied() {
             match spans.last_mut() {
                 // Adjacent to the span being built (`start == last.end`), or
@@ -104,10 +77,19 @@ impl ChunkSpanReader {
                 // is exactly `last.end`: one byte more would bridge a
                 // single-byte gap, and fetch a byte belonging to no chunk.
                 Some(last)
-                    if range.start <= last.end
-                        && range.end.saturating_sub(last.start) <= MAX_SPAN_BYTES =>
+                    if range.start() <= last.end()
+                        && range
+                            .end()
+                            .checked_distance_from(last.start())
+                            .is_some_and(|length| length <= MAX_SPAN_BYTES) =>
                 {
-                    last.end = last.end.max(range.end);
+                    *last = AddressRange::new(
+                        last.start(),
+                        last.end()
+                            .max(range.end())
+                            .checked_distance_from(last.start())?,
+                    )
+                    .ok()?;
                 }
                 _ => spans.push(range),
             }
@@ -126,25 +108,28 @@ impl ChunkSpanReader {
         })
     }
 
-    /// The `len` bytes of the chunk at `address`, reading its span first if
-    /// that is not the span already held.
+    /// Returns a chunk's bytes, reading its containing span if it is not buffered.
     ///
-    /// `source` is framed at the file's base address, the frame the chunk index
-    /// stores its addresses in.
+    /// The caller frames `source` at the opened image's effective address base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the chunk's exclusive end exceeds [`u64::MAX`],
+    /// or [`FormatError::ValueTooLargeForPlatform`] if a span's length exceeds [`usize::MAX`].
+    /// Propagates source read errors.
     pub(crate) fn chunk_bytes<S: Source + ?Sized>(
         &mut self,
         source: &S,
         address: StoredAddress,
         len: usize,
     ) -> Result<&[u8], FormatError> {
-        let address = address.get();
-        let end = address.saturating_add(len as u64);
+        let required = AddressRange::new(address, len as u64)?;
 
-        if !matches!(self.held, Some(span) if span.covers(address, end)) {
-            let Some(span) = self.span_containing(address, end) else {
+        if !matches!(self.held, Some(span) if span.contains(required)) {
+            let Some(span) = self.span_containing(required) else {
                 // Not a chunk this reader was planned over. Serve it directly
                 // and leave the held span alone.
-                self.scratch = source.read_exact_at(address, len)?;
+                self.scratch = source.read_exact_at(address.get(), len)?;
                 return Ok(&self.scratch);
             };
             // Reuse the buffer rather than replacing it, so peak stays one span
@@ -152,13 +137,16 @@ impl ChunkSpanReader {
             // held span is cleared first: a failed read leaves `buf` holding
             // bytes that belong to no span, and nothing may serve out of it.
             self.held = None;
-            self.buf.resize(span.len().to_usize()?, 0);
-            source.read_at(span.start, &mut self.buf)?;
+            self.buf.resize(span.length().to_usize()?, 0);
+            source.read_at(span.start().get(), &mut self.buf)?;
             self.held = Some(span);
         }
 
         let span = self.held.expect("held above, or set just above");
-        let lo = (address - span.start).to_usize()?;
+        let lo = address
+            .checked_distance_from(span.start())
+            .ok_or_else(|| FormatError::Internal("a held chunk precedes its span".into()))?
+            .to_usize()?;
         lo.checked_add(len)
             .and_then(|hi| self.buf.get(lo..hi))
             .ok_or(FormatError::UnexpectedEof {
@@ -167,10 +155,14 @@ impl ChunkSpanReader {
             })
     }
 
-    /// The span covering `[start, end)`, if this reader was planned over a
-    /// chunk there.
-    fn span_containing(&self, start: u64, end: u64) -> Option<Span> {
-        let idx = match self.spans.binary_search_by_key(&start, |s| s.start) {
+    fn span_containing(
+        &self,
+        required: AddressRange<StoredAddress>,
+    ) -> Option<AddressRange<StoredAddress>> {
+        let idx = match self
+            .spans
+            .binary_search_by_key(&required.start(), |s| s.start())
+        {
             Ok(i) => i,
             Err(0) => return None,
             Err(i) => i - 1,
@@ -178,15 +170,18 @@ impl ChunkSpanReader {
         self.spans
             .get(idx)
             .copied()
-            .filter(|s| s.covers(start, end))
+            .filter(|s| s.contains(required))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
+    use rstest::rstest;
+
     use super::*;
     use crate::source::BytesSource;
-    use core::cell::Cell;
 
     /// A source that records every read it serves.
     struct CountingSource {
@@ -419,5 +414,42 @@ mod tests {
             .unwrap();
         assert_eq!(short, &[160u8, 161, 162, 163, 164, 165, 166, 167]);
         assert_eq!(source.bytes_read.get() - before, 16, "the short span's own");
+    }
+    #[rstest]
+    #[case::maximum_end(u64::MAX - 16, 8, true)]
+    #[case::overflow(u64::MAX - 15, 8, false)]
+    fn span_planning_requires_representable_ends(
+        #[case] start: u64,
+        #[case] size: u64,
+        #[case] expected: bool,
+    ) {
+        let chunks = [
+            (StoredAddress::new(start), size),
+            (StoredAddress::new(start + size), size),
+        ];
+        let reader = ChunkSpanReader::new(chunks);
+        assert_eq!(reader.is_some(), expected);
+        if let Some(reader) = reader {
+            assert_eq!(
+                reader.spans,
+                vec![AddressRange::new(StoredAddress::new(start), 16).unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_reads_reject_overflow_before_reading_the_source() {
+        let mut reader = ChunkSpanReader::new(run(0, 8, 2)).unwrap();
+        let source = CountingSource::new(16);
+        assert_eq!(
+            reader
+                .chunk_bytes(&source, StoredAddress::new(u64::MAX), 1)
+                .unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: 1
+            }
+        );
+        assert_eq!(source.reads.get(), 0);
     }
 }

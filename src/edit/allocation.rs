@@ -539,10 +539,7 @@ impl WriteEngine {
         )?
         .into_parts();
         for chunk in object_header::read_oh_chunks(&self.image(), extension, addresses)? {
-            allocations.push(FileRange::new(
-                PhysicalAddress::new(chunk.span.0),
-                chunk.span.1,
-            )?);
+            allocations.push(chunk.span);
         }
         for section in report.free_sections().sections() {
             let range = FileRange::new(

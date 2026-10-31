@@ -11,6 +11,7 @@ use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
 
+use crate::AddressRange;
 use crate::File;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -553,15 +554,15 @@ fn replaced_dense_metadata_is_reclaimed_after_publication(
     assert!(!storage.is_empty());
     engine.create_group(&ObjectPathBuf::parse("added")).unwrap();
     engine.commit().unwrap();
-    for &(start, length, _) in &storage {
+    for &(range, _) in &storage {
+        let stored = engine.addresses().relative(range.start()).unwrap();
+        let required = AddressRange::new(stored, range.length()).unwrap();
         assert!(
             engine
                 .space
                 .reusable_sections()
-                .any(|extent| extent.start() <= StoredAddress::new(start)
-                    && extent.end() >= StoredAddress::new(start + length)),
-            "missing span {start}..{}",
-            start + length
+                .any(|extent| extent.range().contains(required)),
+            "missing span {range:?}"
         );
     }
     let first_len = engine.image().len();

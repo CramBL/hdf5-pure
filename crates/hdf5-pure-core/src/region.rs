@@ -88,7 +88,10 @@ impl<'a> From<&'a MetadataBytes<'_>> for FileRegion<'a> {
 ///
 /// The interval includes its start and excludes its end. Its length may be zero, and both
 /// endpoints are represented as [`u64`] on every platform.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Ranges are ordered first by start and then by end. Use [`precedes`](Self::precedes) to compare
+/// the positions of disjoint ranges.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FileRange {
     range: AddressRange<PhysicalAddress>,
 }

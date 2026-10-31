@@ -12,6 +12,8 @@ use core::num::NonZeroUsize;
 
 #[cfg(feature = "checksum")]
 use hdf5_pure_core::__private::FileRange;
+#[cfg(feature = "std")]
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayDataBlock;
 use hdf5_pure_format::__private::FixedArrayElements;
@@ -90,7 +92,7 @@ pub(crate) fn read_chunks(
     }
 }
 
-/// Returns the `(address, length)` spans of the header and the data block of the Fixed Array at
+/// Returns the stored-coordinate ranges of the header and data block of the Fixed Array at
 /// `address`.
 ///
 /// The spans cover the index, without the chunks it points at, and this function reads only the
@@ -107,12 +109,12 @@ pub(crate) fn index_spans(
     file: &(impl RangeReader + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
-) -> Result<Vec<(u64, u64)>, FormatError> {
+) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
     let header = read_header(file, widths, address)?;
-    Ok(iter::once(header.range())
+    iter::once(header.range())
         .chain(header.data_block().map(|block| block.range()))
-        .map(|range| (range.start().get(), range.length()))
-        .collect())
+        .map(|range| AddressRange::new(BaseAddress::ZERO.relative(range.start())?, range.length()))
+        .collect()
 }
 
 /// Reads the trailing checksum and, with the `checksum` feature, verifies the prefix and entries.
@@ -137,7 +139,12 @@ fn verify_unpaged(
         let mut checksum = JenkinsLookup3::new(range.length());
         let mut start = range.start();
         while start < range.end() {
-            let length = (range.end().get() - start.get()).min(CHECKSUM_WINDOW_BYTES);
+            // The loop condition keeps the current window start before the range end.
+            let length = range
+                .end()
+                .checked_distance_from(start)
+                .expect("the checksum window starts within the range")
+                .min(CHECKSUM_WINDOW_BYTES);
             let window = FileRange::new(start, length)?;
             checksum.update(&file.read_range(window)?)?;
             start = window.end();
@@ -520,7 +527,7 @@ mod tests {
         #[cfg(feature = "std")]
         assert_eq!(
             index_spans(&source.framed(), WIDTHS, StoredAddress::new(ARRAY_AT)).unwrap(),
-            vec![(ARRAY_AT, HEADER_LEN)]
+            stored_ranges(vec![(ARRAY_AT, HEADER_LEN)])
         );
     }
 
@@ -537,14 +544,22 @@ mod tests {
         let spans = index_spans(&source.framed(), WIDTHS, StoredAddress::new(ARRAY_AT)).unwrap();
         assert_eq!(
             spans,
-            vec![
+            stored_ranges(vec![
                 (ARRAY_AT, HEADER_LEN),
                 (ARRAY_AT + HEADER_LEN, end - base - ARRAY_AT - HEADER_LEN)
-            ]
+            ])
         );
         assert_eq!(
             source.reads.into_inner(),
             vec![(base + ARRAY_AT, usize::try_from(HEADER_LEN).unwrap())]
         );
+    }
+    fn stored_ranges(
+        bounds: impl IntoIterator<Item = (u64, u64)>,
+    ) -> Vec<AddressRange<StoredAddress>> {
+        bounds
+            .into_iter()
+            .map(|(start, length)| AddressRange::new(StoredAddress::new(start), length).unwrap())
+            .collect()
     }
 }

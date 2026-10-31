@@ -293,10 +293,12 @@ impl DenseLinkPlan {
             } else {
                 self.address(base, index.nodes_offset)?
             };
-            let image =
-                index
-                    .plan
-                    .serialize(&index.records, nodes_address, *offset_width, *length_width);
+            let image = index.plan.serialize(
+                &index.records,
+                nodes_address,
+                *offset_width,
+                *length_width,
+            )?;
             Self::append(&mut bytes, index.offset, &image.header)?;
             Self::append(&mut bytes, index.nodes_offset, &image.nodes)?;
         }

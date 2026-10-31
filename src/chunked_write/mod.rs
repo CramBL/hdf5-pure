@@ -1734,9 +1734,10 @@ pub(crate) struct VerbatimLayout {
 ///
 /// Returns [`FormatError::ChunkedReadError`] if `meta` is empty, holds a number of chunks other
 /// than the grid over `shape`, or holds a chunk too large for the chunk size field of a filtered
-/// index, and [`FormatError::OffsetOverflow`] if the stored sizes of the chunks sum past
-/// [`u64::MAX`]. Returns the errors of [`plan_index_slots`] and [`IndexSlots::new`] for the
-/// index, and of [`DataLayout::encode_chunked`] for the layout message.
+/// index. Returns [`FormatError::OffsetOverflow`] if the complete region's length or stored
+/// exclusive end exceeds [`u64::MAX`]. The region includes the chunk bytes and their index.
+/// Returns the errors of [`plan_index_slots`] and [`IndexSlots::new`] for the index, and of
+/// [`DataLayout::encode_chunked`] for the layout message.
 pub(crate) fn plan_chunked_data_verbatim(
     meta: &[ChunkMeta],
     shape: &[u64],
@@ -1761,7 +1762,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     let mut written_chunks = Vec::with_capacity(num_chunks);
 
     for m in meta {
-        let address = data_address.offset(cursor);
+        let address = data_address.checked_add(cursor)?;
         let compressed_size = m.compressed_size;
         written_chunks.push(ChunkRecord {
             address,
@@ -1816,7 +1817,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     // the index's own layout rather than from a build of it, so this planner
     // touches no index bytes either — which is what lets `write_chunked_relocatable`
     // plan at a provisional address purely to size the region.
-    let index_address = data_address.offset(cursor);
+    let index_address = data_address.checked_add(cursor)?;
     let index = match kind.array_kind() {
         Some(array) => Some(VerbatimIndexPlan {
             kind: array,
@@ -1834,7 +1835,13 @@ pub(crate) fn plan_chunked_data_verbatim(
         }),
         None => None,
     };
-    cursor += index.as_ref().map_or(0, |i| i.len);
+    cursor = cursor
+        .checked_add(index.as_ref().map_or(0, |i| i.len))
+        .ok_or(FormatError::OffsetOverflow {
+            offset: cursor,
+            length: index.as_ref().map_or(0, |i| i.len),
+        })?;
+    data_address.checked_add(cursor)?;
 
     let layout_message = kind.layout_message(
         flags,

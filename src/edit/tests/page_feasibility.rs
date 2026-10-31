@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeClass;
@@ -133,8 +134,11 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     let freed = engine.stored_spans(
         root_spans
             .into_iter()
-            .map(|(addr, len)| (addr, len, FreeClass::Page(PageType::Meta)))
-            .chain([(old_raw, old_raw_len, FreeClass::Page(PageType::Raw))])
+            .map(|range| (range, FreeClass::Page(PageType::Meta)))
+            .chain([(
+                FileRange::new(PhysicalAddress::new(old_raw), old_raw_len).unwrap(),
+                FreeClass::Page(PageType::Raw),
+            )])
             .collect(),
     );
     assert_eq!(engine.release_freed(freed.unwrap()).unwrap(), None);
@@ -381,7 +385,9 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     let metadata_pages = owned
         .live_metadata_space
         .iter()
-        .filter(|span| !index_spans.contains(span))
+        .filter(|&&(at, len)| {
+            !index_spans.contains(&FileRange::new(PhysicalAddress::new(at), len).unwrap())
+        })
         .filter(|&&(at, _)| at >= original.len() as u64)
         .flat_map(|&(at, len)| {
             (at - userblock) / page_size..=(at + len - 1 - userblock) / page_size
@@ -391,7 +397,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     assert!(
         index_spans
             .iter()
-            .all(|&(at, _)| raw_pages.contains(&((at - userblock) / page_size)))
+            .all(|range| raw_pages.contains(&((range.start().get() - userblock) / page_size)))
     );
     assert!(
         raw_pages

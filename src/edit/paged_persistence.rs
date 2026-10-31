@@ -99,7 +99,7 @@ impl PagedPersistencePlan {
                 })?;
         }
         let managers = ManagerSections::paged(&tail.post.sections(), page);
-        let measured = free_space_manager::manager_blocks_len(&managers, widths);
+        let measured = free_space_manager::manager_blocks_len(&managers, widths)?;
         let used = extension_len
             .checked_add(measured)
             .ok_or(FormatError::OffsetOverflow {
@@ -112,7 +112,7 @@ impl PagedPersistencePlan {
             ));
         }
         let start = tail.allocation.start().checked_add(extension_len)?;
-        let plan = free_space_manager::plan_managers(&managers, start, widths);
+        let plan = free_space_manager::plan_managers(&managers, start, widths)?;
         let last = plan.blocks.len() - 1;
         let blocks = plan
             .blocks
@@ -186,7 +186,7 @@ mod tests {
                 .unwrap();
             let managers =
                 ManagerSections::paged(&tail.post.sections(), FileSpacePageSize::DEFAULT);
-            160 + free_space_manager::manager_blocks_len(&managers, widths)
+            160 + free_space_manager::manager_blocks_len(&managers, widths).unwrap()
         };
         assert_eq!((measure(286), measure(295)), (295, 286));
         let plan = PagedPersistencePlan::new(

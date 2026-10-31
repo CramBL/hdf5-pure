@@ -569,38 +569,20 @@ pub(crate) struct WriteEngine {
     /// [`commit`](Self::commit), since a commit can relocate a cached header or
     /// free the region it points into (see `commit`).
     located: HashMap<u64, LocatedState>,
-    /// Global heap collections **this session placed** for a variable-length
-    /// value overwrite, by the overwritten dataset's path, as absolute
-    /// `(address, length)` extents.
+    /// Physical ranges of global heap collections placed by this session for variable-length
+    /// overwrites, keyed by dataset path.
     ///
-    /// This is what lets the *next* overwrite of the same dataset reclaim the
-    /// strings the previous one left, instead of growing the file by its whole
-    /// payload on every commit forever (issue #321). Outside a delete, nothing
-    /// else in the editor reclaims a collection, and the reason is sound: a
-    /// collection can be shared between objects, and **nothing in the format
-    /// proves otherwise**.
-    /// The per-object reference count does not: an in-file
-    /// [`copy`](Self::copy) of a variable-length dataset re-emits its
-    /// element references verbatim, so two datasets name one collection with
-    /// every object's count still 1 — and files with that shape are already in
-    /// the wild.
-    ///
-    /// Provenance is therefore the whole proof: these collections were placed by
-    /// this session, for this dataset, and were named by nothing else at the
-    /// moment they were written. `invalidate_heap_provenance` is what keeps that
-    /// true afterwards — every entry is dropped as soon as this session does
-    /// anything that could name one of them a second time.
-    ///
-    /// The collections a dataset held when the session *opened* are never in
-    /// here, and an overwrite does not reclaim them: whatever wrote the file
-    /// placed them. `repack` is what recovers those.
-    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
+    /// A later overwrite can reclaim these collections while their ownership remains exclusive.
+    /// [`invalidate_heap_provenance`](Self::invalidate_heap_provenance) clears the recorded
+    /// ownership before an operation could share them. Collections present at open remain
+    /// allocated during overwrites.
+    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<FileRange>>,
     /// Heap collections superseded by a value overwrite this commit is applying,
     /// freed once the commit's superblock repoint has landed — never before, so
     /// a mid-commit crash leaves the prior root reaching bytes that are still
     /// there. Drained into the commit's `to_free` list; cleared at commit entry,
     /// so an attempt that fails partway frees nothing on the next one.
-    superseded_heaps: Vec<(u64, u64)>,
+    superseded_heaps: Vec<FileRange>,
     /// The bytes each same-length in-place overwrite of the commit in flight
     /// wrote over, so a commit that fails before its linearization point can put
     /// the dataset's values back (issue #344).
@@ -1083,7 +1065,7 @@ struct PersistState {
 /// Parsed persistent managers and extension allocation ranges for allocator installation.
 struct PersistedRecovery {
     managers: PersistedManagerSet,
-    extension: Vec<(u64, u64)>,
+    extension: Vec<FileRange>,
 }
 
 impl PersistedRecovery {
@@ -1960,16 +1942,14 @@ impl WriteEngine {
             old_blocks.extend(
                 spans
                     .into_iter()
-                    .filter_map(|(at, len)| self.stored_extent(at, len)),
+                    .filter_map(|range| self.stored_extent(range)),
             );
         }
         for (_, manager, read) in &managers {
             match read {
-                Ok((_, blocks)) => old_blocks.extend(
-                    blocks
-                        .iter()
-                        .filter_map(|&(at, len)| self.stored_extent(at, len)),
-                ),
+                Ok((_, blocks)) => {
+                    old_blocks.extend(blocks.iter().filter_map(|range| self.stored_extent(*range)))
+                }
                 Err(_) => old_blocks.extend(self.manager_header_block(widths, *manager)),
             }
         }
@@ -2003,13 +1983,9 @@ impl WriteEngine {
         let (report, allocations) = managers.into_parts();
         let old_blocks = extension
             .into_iter()
-            .chain(
-                allocations
-                    .into_iter()
-                    .map(|range| (range.start().get(), range.length())),
-            )
-            .map(|(at, length)| {
-                self.stored_extent(at, length).ok_or_else(|| {
+            .chain(allocations)
+            .map(|range| {
+                self.stored_extent(range).ok_or_else(|| {
                     FormatError::Internal(
                         "a checked metadata allocation has no stored extent".into(),
                     )
@@ -2068,17 +2044,13 @@ impl WriteEngine {
             .and_then(|_| FreeExtent::new(addr, len))
     }
 
-    /// Returns the extent of `len` bytes at the file position `at`, in stored addresses.
+    /// Converts a nonempty physical range to a stored-coordinate allocator extent.
     ///
-    /// Returns `None` if `at` lies below the base address, or if the extent is empty or ends past
-    /// [`u64::MAX`].
-    fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
+    /// Returns `None` if the range is empty or begins below the effective address base.
+    fn stored_extent(&self, range: FileRange) -> Option<FreeExtent> {
         FreeExtent::new(
-            self.context
-                .addresses()
-                .relative(PhysicalAddress::new(at))
-                .ok()?,
-            len,
+            self.context.addresses().relative(range.start()).ok()?,
+            range.length(),
         )
     }
 
@@ -3056,39 +3028,33 @@ impl WriteEngine {
     }
 }
 
-/// Validate that every reclaim span `(addr, len)` is non-empty, ends at or
-/// before `eof`, and that no two overlap; sorts `spans` by address as a side
-/// effect. Returns `false` on any violation so the caller can decline to
-/// reclaim the object rather than feed the free list an out-of-bounds or
-/// overlapping (double-free) region. Touching spans are allowed — the free list
-/// coalesces them.
-fn spans_disjoint_in_bounds(spans: &mut [(u64, u64)], eof: u64) -> bool {
-    for &(addr, len) in spans.iter() {
-        match addr.checked_add(len) {
-            Some(end) if len > 0 && end <= eof => {}
-            _ => return false,
-        }
+/// Returns whether the physical ranges are nonempty, disjoint, and end at or before `eof`.
+///
+/// Sorts by start address after checking the endpoints. Adjacent ranges are allowed.
+fn spans_disjoint_in_bounds(spans: &mut [FileRange], eof: u64) -> bool {
+    if spans
+        .iter()
+        .any(|range| range.length() == 0 || range.end() > PhysicalAddress::new(eof))
+    {
+        return false;
     }
-    spans.sort_unstable_by_key(|&(addr, _)| addr);
-    spans.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0)
+    spans.sort_unstable_by_key(|range| range.start());
+    spans.windows(2).all(|pair| pair[0].precedes(pair[1]))
 }
 
-/// Sanitize the accumulated free spans for a whole commit so the free list never
-/// sees an out-of-bounds or overlapping (double-free) region: drop empty or
-/// past-`eof` spans, sort by address, then drop any span overlapping one already
-/// kept. Dropping only leaks (the bytes stay allocated); it never frees a live
-/// region. With the last-hard-link guard in force nothing should be dropped for
-/// a well-formed file — this is a backstop, not the primary defense.
-fn retain_disjoint_in_bounds(spans: &mut Vec<(u64, u64, FreeClass)>, eof: u64) {
-    spans.retain(|&(addr, len, _)| len > 0 && addr.checked_add(len).is_some_and(|e| e <= eof));
-    spans.sort_unstable_by_key(|&(addr, _, _)| addr);
-    let mut kept_end = 0u64;
-    spans.retain(|&(addr, len, _)| {
-        if addr >= kept_end {
-            kept_end = addr + len;
+/// Retains nonempty, disjoint physical ranges ending at or before `eof`.
+///
+/// Sorts by start address and drops each range overlapping one already retained.
+fn retain_disjoint_in_bounds(spans: &mut Vec<(FileRange, FreeClass)>, eof: u64) {
+    spans.retain(|(range, _)| range.length() > 0 && range.end() <= PhysicalAddress::new(eof));
+    spans.sort_unstable_by_key(|(range, _)| range.start());
+    let mut previous: Option<FileRange> = None;
+    spans.retain(|&(range, _)| {
+        if previous.is_none_or(|previous| previous.precedes(range)) {
+            previous = Some(range);
             true
         } else {
-            false // overlaps a span already kept; leak it rather than double-free
+            false
         }
     });
 }

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
 
 use crate::PhysicalAddress;
@@ -184,7 +185,7 @@ pub(super) struct PreparedTree {
     pub(super) cross_copies: Vec<CopyDestination>,
     pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
-    pub(super) deleted_free: Vec<(u64, u64, FreeClass)>,
+    pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
     pub(super) deleted_collections: DeletedCollections,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
@@ -236,7 +237,7 @@ pub(super) enum ChildLink {
 
 /// Stores screened reference targets and storage affected by deletions.
 struct TreeReferences {
-    deleted_free: Vec<(u64, u64, FreeClass)>,
+    deleted_free: Vec<(FileRange, FreeClass)>,
     deleted_collections: DeletedCollections,
     references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
 }
@@ -290,7 +291,7 @@ impl WriteEngine {
         }
         let mut moved_headers = moving_writes
             .iter()
-            .map(|relocation| relocation.edit.old_header)
+            .map(|relocation| PhysicalAddress::new(relocation.edit.old_header))
             .collect::<Vec<_>>();
         let DirtyGroups {
             mut nodes,
@@ -299,7 +300,12 @@ impl WriteEngine {
             cross_copies,
         } = self.plan_dirty_groups(staged, moving_writes, &write_targets)?;
         let headers = self.prepare_group_headers(staged, &mut nodes, &mut incoming_links)?;
-        moved_headers.extend(headers.superseded_addrs.iter().map(|&(_, address)| address));
+        moved_headers.extend(
+            headers
+                .superseded_addrs
+                .iter()
+                .map(|&(_, address)| PhysicalAddress::new(address)),
+        );
         let TreeReferences {
             deleted_free,
             deleted_collections,
@@ -797,7 +803,7 @@ impl WriteEngine {
         write_targets: &[ObjectPathBuf],
         deleted_addrs: &mut Vec<u64>,
         headers: &GroupHeaders,
-        moved_headers: Vec<u64>,
+        moved_headers: Vec<PhysicalAddress>,
     ) -> Result<TreeReferences, Error> {
         let GroupHeaders {
             keys,
@@ -813,7 +819,7 @@ impl WriteEngine {
         self.check_group_additions(nodes, keys, children, &datasets_by_group)?;
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         let delete_targets = staged.deletes();
-        let mut deleted_free: Vec<(u64, u64, FreeClass)> = Vec::new();
+        let mut deleted_free: Vec<(FileRange, FreeClass)> = Vec::new();
         deleted_addrs.sort_unstable();
         deleted_addrs.dedup();
         if !deleted_addrs.is_empty() {
@@ -825,10 +831,7 @@ impl WriteEngine {
         }
         let deleted_collections = self.deleted_collections(deleted_addrs);
         let for_copied = InvalidatedAddresses {
-            removed: deleted_free
-                .iter()
-                .map(|&(off, len, _)| (off, len))
-                .collect(),
+            removed: deleted_free.iter().map(|&(range, _)| range).collect(),
             moved: Vec::new(),
             base: self.context.addresses(),
         };
@@ -1255,11 +1258,11 @@ pub(in crate::edit) struct OverwriteId {
 /// Removed spans are also used for storage reclamation. Moved entries identify old object-header
 /// addresses whose replacements are published by the commit.
 pub(in crate::edit) struct InvalidatedAddresses {
-    /// Absolute `(offset, length)` file spans this commit's deletions reclaim, as
+    /// Physical ranges this commit's deletions reclaim, as
     /// [`collect_free_spans`](WriteEngine::collect_free_spans) reports them.
-    pub(in crate::edit) removed: Vec<(u64, u64)>,
+    pub(in crate::edit) removed: Vec<FileRange>,
     /// Superseded object-header addresses from relocating dataset writes and rebuilt groups.
-    pub(in crate::edit) moved: Vec<u64>,
+    pub(in crate::edit) moved: Vec<PhysicalAddress>,
     /// The address context used to compare stored object references with physical positions.
     pub(in crate::edit) base: AddressContext,
 }
@@ -1277,11 +1280,11 @@ impl InvalidatedAddresses {
         if stored.get() == 0 || stored.get() == UNDEF {
             return None;
         }
-        let abs = self.base.resolve(stored).ok()?.get();
+        let abs = self.base.resolve(stored).ok()?;
         if self
             .removed
             .iter()
-            .any(|&(off, len)| abs >= off && abs - off < len)
+            .any(|range| range.start() <= abs && abs < range.end())
         {
             return Some(REFERENCE_INTO_RECLAIMED_SPACE);
         }

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::SessionSpaceSnapshot;
 
 use crate::edit::WriteEngine;
@@ -17,7 +18,7 @@ pub(in crate::edit) struct FreeSnapshot {
     /// Pending manager publication for previously confirmed immediate retirements.
     fsm_dirty: bool,
     /// Heap collections recorded for variable-length value replacements in this session.
-    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
+    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<FileRange>>,
 }
 
 impl WriteEngine {

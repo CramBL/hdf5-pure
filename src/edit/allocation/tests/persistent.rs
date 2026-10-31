@@ -388,7 +388,10 @@ fn malformed_authoritative_managers_reject_allocation_before_mutation(
                 ManagerDamage::FreeSectionCapacity => {
                     (list_address + capacity - 16, (list_address, capacity))
                 }
-                ManagerDamage::FreeExtension => (extension.0, extension),
+                ManagerDamage::FreeExtension => (
+                    extension.start().get(),
+                    (extension.start().get(), extension.length()),
+                ),
                 _ => panic!("checksum damage has no overlapping allocation"),
             };
             let (mut encoded_header, list) = format::serialize_free_space_manager(
@@ -578,7 +581,12 @@ fn observe(bytes: &[u8]) -> OwnershipObservation {
         object_header::read_oh_chunks(&source, extension, context.addresses())
             .unwrap()
             .into_iter()
-            .map(|chunk| (chunk.span.0, chunk.span.0 + chunk.span.1)),
+            .map(|chunk| {
+                (
+                    chunk.span.start().get(),
+                    chunk.span.start().get() + chunk.span.length(),
+                )
+            }),
     );
     OwnershipObservation {
         free: normalized(free),

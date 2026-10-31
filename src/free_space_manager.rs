@@ -8,6 +8,7 @@ use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
@@ -22,7 +23,6 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::width::FormatWidths;
@@ -94,9 +94,9 @@ fn read_persisted_sections(
     Ok(sections)
 }
 
-/// The recovered free sections and the complete physical `(addr, len)` allocations of their
-/// `FSHD` and `FSSE` blocks.
-pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<(u64, u64)>);
+/// Recovered free sections and checked physical ranges of their manager header and section-list
+/// allocations.
+pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<FileRange>);
 
 /// Recovers free sections and complete manager allocations through a random-access
 /// [`Source`](crate::Source).
@@ -124,34 +124,30 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
         let DecodedStoredAddress::Defined(addr) = addr else {
             continue;
         };
-        let a = base.resolve(addr)?.get();
-        let fshd = src.read_exact_at(a, hdr_len.to_usize()?)?;
+        let a = base.resolve(addr)?;
+        let fshd = src.read_exact_at(a.get(), hdr_len.to_usize()?)?;
         let header = FreeSpaceManagerHeader::parse(widths, &fshd)?;
-        blocks.push((a, hdr_len));
+        blocks.push(FileRange::new(a, hdr_len)?);
         if header.section_list_addr().is_undefined(widths.offsets) {
             continue;
         }
-        let fa = base.resolve(header.section_list_addr())?.get();
+        let fa = base.resolve(header.section_list_addr())?;
         let used = header.section_list_used();
         let allocated = header.section_list_allocated();
-        let end = fa
-            .checked_add(allocated)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: fa,
-                length: allocated,
-            })?;
-        if end > src.len() {
+        let range = FileRange::new(fa, allocated)?;
+        if range.end().get() > src.len() {
             return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the section list allocation at {fa}, {allocated} bytes long, runs past the end of \
+                "the section list allocation at {}, {allocated} bytes long, runs past the end of \
                  the file, {} bytes long",
+                fa.get(),
                 src.len()
             )));
         }
-        let block = src.read_exact_at(fa, used.to_usize()?)?;
+        let block = src.read_exact_at(fa.get(), used.to_usize()?)?;
         sections.extend(hdf5_pure_format::__private::parse_section_info(
             widths, &block, addr, &header,
         )?);
-        blocks.push((fa, allocated));
+        blocks.push(range);
     }
     Ok((sections, blocks))
 }
@@ -168,11 +164,6 @@ pub(crate) fn manager_kind(strategy: FileSpaceStrategy, slot: usize) -> Option<M
         },
         FileSpaceStrategy::Aggr | FileSpaceStrategy::None => None,
     }
-}
-
-/// Rounds `value` up to the next multiple of `page`.
-pub(crate) fn align_up(value: u64, page: FileSpacePageSize) -> u64 {
-    value.div_ceil(page.get()) * page.get()
 }
 
 /// Places one semantic manager in a persistent tail and records its wire representation.
@@ -197,14 +188,18 @@ pub(crate) struct ManagerPlan {
 
 /// Places `managers` contiguously from `start` using their HDF5 wire slots and section classes.
 ///
-/// The semantic manager set decides which extents belong together. This adapter alone translates
-/// those kinds to File Space Info slots, `FSSE` section classes, stored addresses, and encoded
-/// lengths.
+/// Uses each manager's kind to select its File Space Info slot and `FSSE` section class.
+/// The caller passes stored-coordinate extents, and the returned block addresses use the same
+/// coordinate system.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if a manager's exclusive end exceeds [`u64::MAX`].
 pub(crate) fn plan_managers(
     managers: &[ManagerSections],
     start: StoredAddress,
     widths: FormatWidths,
-) -> ManagerPlan {
+) -> Result<ManagerPlan, FormatError> {
     let mut managers: Vec<_> = managers
         .iter()
         .map(|manager| {
@@ -223,9 +218,9 @@ pub(crate) fn plan_managers(
     let mut cursor = start;
     for (slot, class, manager) in managers {
         let fshd_addr = cursor;
-        let fsse_addr = fshd_addr.offset(
+        let fsse_addr = fshd_addr.checked_add(
             hdf5_pure_format::__private::free_space_manager_header_len(widths),
-        );
+        )?;
         let sections: Vec<_> = manager
             .sections()
             .iter()
@@ -235,10 +230,10 @@ pub(crate) fn plan_managers(
             })
             .collect();
         let section_sizes: Vec<_> = sections.iter().map(|section| section.size).collect();
-        cursor = fsse_addr.offset(hdf5_pure_format::__private::section_info_len(
+        cursor = fsse_addr.checked_add(hdf5_pure_format::__private::section_info_len(
             widths,
             &section_sizes,
-        ));
+        ))?;
         slots[slot] = fshd_addr;
         blocks.push(ManagerBlock {
             kind: manager.kind(),
@@ -248,18 +243,25 @@ pub(crate) fn plan_managers(
             sections,
         });
     }
-    ManagerPlan {
+    Ok(ManagerPlan {
         slots,
         blocks,
         end_of_managers: cursor,
-    }
+    })
 }
 
 /// Returns the encoded length of `managers` without assigning them file positions.
-pub(crate) fn manager_blocks_len(managers: &[ManagerSections], widths: FormatWidths) -> u64 {
-    plan_managers(managers, StoredAddress::new(0), widths)
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the combined length exceeds [`u64::MAX`].
+pub(crate) fn manager_blocks_len(
+    managers: &[ManagerSections],
+    widths: FormatWidths,
+) -> Result<u64, FormatError> {
+    Ok(plan_managers(managers, StoredAddress::new(0), widths)?
         .end_of_managers
-        .get()
+        .get())
 }
 
 /// Returns the File Space Info slot and section class for `kind`.
@@ -286,10 +288,12 @@ const DRAW_MANAGER_SLOT: usize = 2;
 mod tests {
     use core::cell::RefCell;
 
+    use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_space::__private::{Extent, SessionSpace};
     use rstest::rstest;
     use test_util::free_space;
 
+    use crate::file_space_info::FileSpacePageSize;
     use crate::source::Source;
     use crate::width::OffsetWidth;
 
@@ -363,7 +367,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(sections, vec![section(2848, 1600)]);
-        assert_eq!(blocks, vec![(base + 619, 82), (base + 701, allocated)]);
+        assert_eq!(
+            blocks,
+            vec![
+                FileRange::new(PhysicalAddress::new(base + 619), 82).unwrap(),
+                FileRange::new(PhysicalAddress::new(base + 701), allocated).unwrap()
+            ]
+        );
         assert_eq!(
             *source.reads.borrow(),
             vec![(base + 619, 82), (base + 701, 35)]
@@ -440,7 +450,13 @@ mod tests {
                 BaseAddress::ZERO,
                 &managers,
             ),
-            Ok((expected, vec![(48, 82), (645, 197)])),
+            Ok((
+                expected,
+                vec![
+                    FileRange::new(PhysicalAddress::new(48), 82).unwrap(),
+                    FileRange::new(PhysicalAddress::new(645), 197).unwrap()
+                ]
+            )),
         );
     }
 
@@ -527,10 +543,13 @@ mod tests {
         assert!(sections.is_empty());
         assert_eq!(
             blocks,
-            vec![(
-                0,
-                hdf5_pure_format::__private::free_space_manager_header_len(widths(4, 8))
-            )],
+            vec![
+                FileRange::new(
+                    PhysicalAddress::new(0),
+                    hdf5_pure_format::__private::free_space_manager_header_len(widths(4, 8))
+                )
+                .unwrap()
+            ],
             "only the header block was read"
         );
     }
@@ -670,7 +689,7 @@ mod tests {
             &space.paged_sections().expect("the strategy is PAGE"),
             page_size,
         );
-        let plan = plan_managers(&managers, StoredAddress::new(1000), widths(8, 8));
+        let plan = plan_managers(&managers, StoredAddress::new(1000), widths(8, 8)).unwrap();
 
         assert_eq!(plan.blocks.len(), 3);
         assert_eq!(plan.slots[0], plan.blocks[0].fshd_addr);
@@ -707,11 +726,11 @@ mod tests {
             .unwrap();
             assert_eq!(
                 block.fsse_addr,
-                block.fshd_addr.offset(fshd.len() as u64),
+                block.fshd_addr.checked_add(fshd.len() as u64).unwrap(),
                 "FSSE follows its FSHD"
             );
             assert_eq!(
-                block.fsse_addr.offset(fsse.len() as u64),
+                block.fsse_addr.checked_add(fsse.len() as u64).unwrap(),
                 if block.kind == ManagerKind::PagedLargeGeneric {
                     plan.end_of_managers
                 } else {
@@ -745,15 +764,6 @@ mod tests {
             Some(ManagerKind::PagedLargeGeneric)
         );
         assert_eq!(manager_kind(FileSpaceStrategy::Page, 7), None);
-    }
-
-    #[rstest]
-    #[case::zero(0, 0)]
-    #[case::inside_the_first_page(1, 4096)]
-    #[case::on_a_boundary(8192, 8192)]
-    #[case::past_a_boundary(8193, 12_288)]
-    fn align_up_rounds_to_the_next_page_boundary(#[case] value: u64, #[case] expected: u64) {
-        assert_eq!(align_up(value, FileSpacePageSize::DEFAULT), expected);
     }
 
     struct ManagerSource {
@@ -801,5 +811,30 @@ mod tests {
             sections: free_space::single_section_info(),
             reads: RefCell::new(Vec::new()),
         }
+    }
+    #[rstest]
+    #[case::header(u64::MAX, 82, u64::MAX)]
+    #[case::section_list(u64::MAX - 82, 35, u64::MAX)]
+    fn manager_placement_rejects_overflow(
+        #[case] start: u64,
+        #[case] length: u64,
+        #[case] offset: u64,
+    ) {
+        let managers = ManagerSections::flat([Extent::new(StoredAddress::new(16), 8).unwrap()]);
+        let error = plan_managers(&managers, StoredAddress::new(start), widths(8, 8))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(error, FormatError::OffsetOverflow { offset, length });
+    }
+
+    #[test]
+    fn manager_placement_preserves_the_maximum_exclusive_end() {
+        let managers = ManagerSections::flat([Extent::new(StoredAddress::new(16), 8).unwrap()]);
+        let length = manager_blocks_len(&managers, widths(8, 8)).unwrap();
+        let start = StoredAddress::new(u64::MAX - length);
+        let plan = plan_managers(&managers, start, widths(8, 8)).unwrap();
+        assert_eq!(plan.blocks[0].fshd_addr, start);
+        assert_eq!(plan.blocks[0].fsse_addr, start.checked_add(82).unwrap());
+        assert_eq!(plan.end_of_managers, StoredAddress::new(u64::MAX));
     }
 }

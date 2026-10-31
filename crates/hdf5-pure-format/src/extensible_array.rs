@@ -2551,7 +2551,8 @@ pub fn extensible_array_len(
 ///
 /// Returns [`FormatError::Internal`] if the stored size of a chunk does not fit the chunk size
 /// field, and [`FormatError::ValueTooLargeForPlatform`] if the length of the blocks or the count of
-/// a block that holds a chunk does not fit a `usize`.
+/// a block that holds a chunk does not fit a `usize`. Returns [`FormatError::OffsetOverflow`] if
+/// the array's exclusive end exceeds [`u64::MAX`].
 pub fn build_extensible_array_at(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
@@ -2570,6 +2571,7 @@ pub fn build_extensible_array_at(
         length_size,
         has_filters,
     );
+    ea_address.checked_add(layout.total_len)?;
     let ChunkElementEncoding {
         chunk_size_bytes,
         elem_size,
@@ -2586,8 +2588,8 @@ pub fn build_extensible_array_at(
 
     let page_nelmts = bits.page_nelmts().get().to_usize()?;
 
-    let index_block_address = ea_address.offset(header_len as u64);
-    let body_base = index_block_address.offset(index_block_len as u64);
+    let index_block_address = ea_address.checked_add(header_len as u64)?;
+    let body_base = index_block_address.checked_add(index_block_len as u64)?;
 
     let undef_addr = StoredAddress::undefined(offset_size);
 
@@ -2621,7 +2623,7 @@ pub fn build_extensible_array_at(
             elem_cursor += dblk_nelmts;
             continue;
         }
-        let addr = body_base.offset(body.len() as u64);
+        let addr = body_base.checked_add(body.len() as u64)?;
         let db_bytes = encode_data_block(
             slots,
             elem_cursor.to_usize()?,
@@ -2670,7 +2672,7 @@ pub fn build_extensible_array_at(
                 local_elem += dblk_nelmts;
                 continue;
             }
-            let addr = body_base.offset(body.len() as u64);
+            let addr = body_base.checked_add(body.len() as u64)?;
             let db_bytes = encode_data_block(
                 slots,
                 local_elem.to_usize()?,
@@ -2705,7 +2707,7 @@ pub fn build_extensible_array_at(
             local_elem += dblk_nelmts;
         }
 
-        let super_block_address = body_base.offset(body.len() as u64);
+        let super_block_address = body_base.checked_add(body.len() as u64)?;
         let super_block = encode_super_block(
             ea_address,
             sb_block_offset,
@@ -4933,5 +4935,43 @@ mod tests {
                 }
             )]
         );
+    }
+    #[rstest]
+    #[case::maximum_end(false)]
+    #[case::overflow(true)]
+    fn builder_checks_the_complete_exclusive_end(#[case] overflow: bool) {
+        let chunks = [ChunkRecord {
+            address: StoredAddress::new(16),
+            stored_size: 8,
+            filter_mask: 0,
+        }; 2];
+        let slots = IndexSlots::dense(&chunks);
+        let length = extensible_array_len(&slots, 8, OffsetWidth::Eight, LengthWidth::Eight, false);
+        let start = u64::MAX - length + u64::from(overflow);
+        let result = build_extensible_array_at(
+            &slots,
+            8,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            false,
+            StoredAddress::new(start),
+        );
+        if overflow {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::OffsetOverflow {
+                    offset: start,
+                    length
+                }
+            );
+        } else {
+            let bytes = result.unwrap();
+            assert_eq!(bytes.len() as u64, length);
+            assert_eq!(&bytes[..HEADER_SIGNATURE.len()], &HEADER_SIGNATURE);
+            assert_eq!(
+                StoredAddress::new(start).checked_add(length).unwrap(),
+                StoredAddress::new(u64::MAX)
+            );
+        }
     }
 }
