@@ -1,4 +1,4 @@
-//! The Fixed Array reads over a byte slice or a [`Source`](crate::source::Source).
+//! Fixed Array traversal through checked stored-coordinate range reads.
 //!
 //! [`read_chunks`] reads unpaged entry windows or initialized pages. With the `checksum` feature,
 //! the reader verifies the entire unpaged block in bounded reads before visiting any records.
@@ -12,7 +12,6 @@ use core::num::NonZeroUsize;
 
 #[cfg(feature = "checksum")]
 use hdf5_pure_core::__private::FileRange;
-#[cfg(feature = "std")]
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayDataBlock;
@@ -34,6 +33,9 @@ use crate::width::FormatWidths;
 /// Reads the Fixed Array at `address` and calls `visit` with the slot and the record of each
 /// element that stores a chunk address.
 ///
+/// The caller supplies a stored-coordinate view of the opened image. Returned metadata retains
+/// the source's physical ranges and ownership while the parsers use base-relative positions.
+///
 /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size. An array whose header
 /// stores the undefined data block address has no chunks, and this function reads only its
 /// header. With the `checksum` feature, the reader verifies the entire unpaged block before
@@ -41,8 +43,9 @@ use crate::width::FormatWidths;
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the data block, or
-/// a page, and the error of a failed read of a [`Source`](crate::source::Source). Returns the
+/// Returns [`FormatError::OffsetOverflow`] if resolving a stored position exceeds [`u64::MAX`].
+/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the data block,
+/// or a page, and the error of a failed read of a [`Source`](crate::source::Source). Returns the
 /// errors [`FixedArrayHeaderLocator::parse`],
 /// [`FixedArrayDataBlockRef::parse`](hdf5_pure_format::__private::FixedArrayDataBlockRef::parse),
 /// [`FixedArrayDataBlockRef::parse_unpaged_prefix`][unpaged],
@@ -51,7 +54,7 @@ use crate::width::FormatWidths;
 ///
 /// [unpaged]: hdf5_pure_format::__private::FixedArrayDataBlockRef::parse_unpaged_prefix
 pub(crate) fn read_chunks(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
     chunk_byte_size: u64,
@@ -67,26 +70,26 @@ pub(crate) fn read_chunks(
         })
     };
     if let Some(range) = block.unpaged_prefix_range()? {
-        let bytes = file.read_range(range)?;
+        let bytes = file.read_range(source::legacy_stored_range(range)?)?;
         let unpaged = block.parse_unpaged_prefix(source::legacy_framed_region(range, &bytes)?)?;
         verify_unpaged(file, unpaged)?;
         let mut first_slot = 0;
         while let Some(window) = unpaged.window(first_slot, ENTRY_WINDOW_ENTRIES)? {
             let range = window.parse_range();
-            let bytes = file.read_range(range)?;
+            let bytes = file.read_range(source::legacy_stored_range(range)?)?;
             visit_elements(window.parse(source::legacy_framed_region(range, &bytes)?)?)?;
             first_slot = window.end_slot();
         }
         return Ok(());
     }
     let range = block.parse_range()?;
-    let bytes = file.read_range(range)?;
+    let bytes = file.read_range(source::legacy_stored_range(range)?)?;
     match block.parse(source::legacy_framed_region(range, &bytes)?)? {
         FixedArrayDataBlock::Elements(elements) => visit_elements(elements),
         FixedArrayDataBlock::PageBitmap(bitmap) => bitmap.pages().try_for_each(|page| {
             let page = page?;
             let range = page.parse_range();
-            let bytes = file.read_range(range)?;
+            let bytes = file.read_range(source::legacy_stored_range(range)?)?;
             visit_elements(page.parse(source::legacy_framed_region(range, &bytes)?)?)
         }),
     }
@@ -101,19 +104,20 @@ pub(crate) fn read_chunks(
 ///
 /// # Errors
 ///
+/// Returns [`FormatError::OffsetOverflow`] if resolving a stored position exceeds [`u64::MAX`].
 /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the error of a
 /// failed read of a [`Source`](crate::source::Source), and the errors
 /// [`FixedArrayHeaderLocator::parse`] returns.
 #[cfg(feature = "std")]
 pub(crate) fn index_spans(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
     let header = read_header(file, widths, address)?;
     iter::once(header.range())
         .chain(header.data_block().map(|block| block.range()))
-        .map(|range| AddressRange::new(BaseAddress::ZERO.relative(range.start())?, range.length()))
+        .map(source::legacy_stored_range)
         .collect()
 }
 
@@ -121,15 +125,16 @@ pub(crate) fn index_spans(
 ///
 /// # Errors
 ///
+/// Returns [`FormatError::OffsetOverflow`] if resolving a stored position exceeds [`u64::MAX`].
 /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the block, and, with the
 /// `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum differs. Propagates
 /// source read errors.
 fn verify_unpaged(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     unpaged: FixedArrayUnpaged,
 ) -> Result<(), FormatError> {
     let range = unpaged.checksum_range()?;
-    let bytes = file.read_range(range)?;
+    let bytes = file.read_range(source::legacy_stored_range(range)?)?;
     #[cfg(feature = "checksum")]
     {
         let expected = u32::from_le_bytes(bytes.as_ref().try_into().map_err(|_error| {
@@ -146,7 +151,7 @@ fn verify_unpaged(
                 .expect("the checksum window starts within the range")
                 .min(CHECKSUM_WINDOW_BYTES);
             let window = FileRange::new(start, length)?;
-            checksum.update(&file.read_range(window)?)?;
+            checksum.update(&file.read_range(source::legacy_stored_range(window)?)?)?;
             start = window.end();
         }
         let computed = checksum.finish()?;
@@ -165,7 +170,7 @@ const ENTRY_WINDOW_ENTRIES: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 const CHECKSUM_WINDOW_BYTES: u64 = 4_096;
 
 fn read_header(
-    file: &(impl RangeReader + ?Sized),
+    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<FixedArrayHeader, FormatError> {
@@ -173,7 +178,7 @@ fn read_header(
     let range = locator.parse_range()?;
     locator.parse(source::legacy_framed_region(
         range,
-        &file.read_range(range)?,
+        &file.read_range(source::legacy_stored_range(range)?)?,
     )?)
 }
 
@@ -189,6 +194,7 @@ mod tests {
     use test_util::checksum;
 
     use super::*;
+    use crate::address::AddressContext;
     use crate::address::StoredAddressExt;
     use crate::array_test;
     use crate::placed_source::PlacedSource;
@@ -278,7 +284,8 @@ mod tests {
     fn buffered_records(image: &[u8], base: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
         read_chunks(
-            &source::framed_metadata(image, BaseAddress::new(base))?,
+            &source::PhysicalSource::new(&source::BytesSource::new(image))
+                .stored(AddressContext::from_effective_base(BaseAddress::new(base))),
             WIDTHS,
             StoredAddress::new(ARRAY_AT),
             8,
@@ -341,10 +348,14 @@ mod tests {
         #[values(0, 1 << 40)] base: u64,
     ) {
         let bytes = unpaged_image(n, has_filters);
-        let block = read_header(bytes.as_slice(), WIDTHS, StoredAddress::new(ARRAY_AT))
-            .unwrap()
-            .data_block()
-            .unwrap();
+        let block = read_header(
+            &source::zero_base_source(&source::BytesSource::new(bytes.as_slice())),
+            WIDTHS,
+            StoredAddress::new(ARRAY_AT),
+        )
+        .unwrap()
+        .data_block()
+        .unwrap();
         let range = block.parse_range().unwrap();
         let region = FileRegion::new(
             range,

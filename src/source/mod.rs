@@ -12,6 +12,7 @@ use alloc::{vec, vec::Vec};
 use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion, MetadataFrame};
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::MetadataSource;
@@ -693,6 +694,26 @@ pub(crate) fn framed_metadata(
     base: BaseAddress,
 ) -> Result<MetadataFrame<'_>, FormatError> {
     MetadataFrame::new(PhysicalAddress::new(base.get()), frame(bytes, base)?)
+}
+
+/// Borrows a stored-coordinate view of a source whose effective base is zero.
+#[cfg(test)]
+pub(crate) fn zero_base_source<S: Source + ?Sized>(source: &S) -> StoredSource<'_, S> {
+    PhysicalSource::new(source).stored(AddressContext::from_effective_base(BaseAddress::ZERO))
+}
+
+/// Interprets a legacy locator's base-relative endpoints as stored positions.
+///
+/// The caller initializes the locator with [`BaseAddressExt::ZERO`]. The numeric endpoints are
+/// stored positions, and the metadata owner's physical range is maintained separately.
+///
+/// # Errors
+///
+/// Returns errors from [`BaseAddressExt::relative`] and [`AddressRange::new`].
+pub(crate) fn legacy_stored_range(
+    range: FileRange,
+) -> Result<AddressRange<StoredAddress>, FormatError> {
+    AddressRange::new(BaseAddress::ZERO.relative(range.start())?, range.length())
 }
 
 /// Borrows the owner's bytes in the coordinate frame used by a legacy locator.

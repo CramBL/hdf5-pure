@@ -49,9 +49,11 @@ use crate::free_sections::PersistedManagerSet;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
+use crate::source;
 use crate::source::BytesSource;
 use crate::source::MetadataCacheConfig;
 use crate::source::RangeReader;
+use crate::source::Source;
 
 test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
@@ -915,23 +917,31 @@ impl Observation {
                     } => {
                         index_defined = true;
                         element_size = Some(usize::from(
-                            extensible_array::read_header(&source, widths, address)
-                                .unwrap()
-                                .header()
-                                .element_size,
+                            extensible_array::read_header(
+                                &source::zero_base_source(&source),
+                                widths,
+                                address,
+                            )
+                            .unwrap()
+                            .header()
+                            .element_size,
                         ));
                         element_blocks.extend(index_element_blocks(&source, widths, address));
                         live.extend(
-                            extensible_array::index_spans(&source, widths, address)
-                                .unwrap()
-                                .into_iter()
-                                .map(|range| {
-                                    Fact::new(
-                                        AllocationKind::Index,
-                                        range.start().get(),
-                                        range.length(),
-                                    )
-                                }),
+                            extensible_array::index_spans(
+                                &source::zero_base_source(&source),
+                                widths,
+                                address,
+                            )
+                            .unwrap()
+                            .into_iter()
+                            .map(|range| {
+                                Fact::new(
+                                    AllocationKind::Index,
+                                    range.start().get(),
+                                    range.length(),
+                                )
+                            }),
                         );
                         for allocation in extents::IndexStorage::read(bytes).allocations {
                             let stored = live
@@ -1281,11 +1291,12 @@ fn replace_free_sections(original: &[u8], coverage: &Coverage) -> Vec<u8> {
 }
 
 fn index_element_blocks(
-    source: &impl RangeReader,
+    source: &impl Source,
     widths: crate::width::FormatWidths,
     address: StoredAddress,
 ) -> Vec<Interval> {
-    let header = extensible_array::read_header(source, widths, address).unwrap();
+    let header =
+        extensible_array::read_header(&source::zero_base_source(source), widths, address).unwrap();
     let reference = header.index_block().unwrap();
     let range = reference.parse_range();
     let bytes = source.read_range(range).unwrap();

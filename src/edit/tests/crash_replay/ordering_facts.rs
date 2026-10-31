@@ -27,6 +27,7 @@ use crate::extensible_array;
 use crate::free_sections::PersistedManagerSet;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
+use crate::source;
 use crate::source::BytesSource;
 
 /// Parsed allocations and their writes for one persisted manager and EOF generation.
@@ -208,7 +209,7 @@ impl DatasetGeometry {
         }
         let (address, layout_pointer) = parsed.unwrap();
         let index = address.map_or_else(Vec::new, |address| {
-            extensible_array::index_spans(&source, widths, address)
+            extensible_array::index_spans(&source::zero_base_source(&source), widths, address)
                 .unwrap()
                 .into_iter()
                 .map(|range| {

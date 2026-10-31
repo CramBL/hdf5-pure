@@ -36,6 +36,7 @@ use crate::link_message::LinkTarget;
 use crate::message_type::MessageType;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
+use crate::source::PhysicalSource;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::GlobalHeapLiveness;
@@ -886,6 +887,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: base.effective_base(),
             },
+            &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
             &layout,
             &dataspace,
             self.widths(),
@@ -1050,6 +1052,7 @@ impl WriteEngine {
                 inner: &self.image(),
                 base: base.effective_base(),
             },
+            &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
             &layout,
             self.widths(),
         )
@@ -1243,6 +1246,7 @@ impl WriteEngine {
                         inner: &self.image(),
                         base: self.context.addresses().effective_base(),
                     },
+                    &PhysicalSource::new(&self.image()).stored(self.context.addresses()),
                     &layout,
                     &dataspace,
                     self.widths(),

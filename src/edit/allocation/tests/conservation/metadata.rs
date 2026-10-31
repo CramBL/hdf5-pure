@@ -17,6 +17,7 @@ use crate::FormatError;
 use crate::MemoryStrategy;
 use crate::data_layout::ChunkIndexLayout;
 use crate::data_layout::DataLayout;
+use crate::source;
 use crate::source::BytesSource;
 
 use super::CHUNK;
@@ -90,7 +91,7 @@ pub(super) fn reject(path: &Path, damage: Damage, writer: WritePath) {
     };
     drop(file);
     let array = crate::extensible_array::read_header(
-        &BytesSource::new(&original),
+        &source::zero_base_source(&BytesSource::new(&original)),
         context.widths(),
         address,
     )

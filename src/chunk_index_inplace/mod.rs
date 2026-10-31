@@ -82,6 +82,8 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
+#[cfg(test)]
+use crate::source;
 use crate::source::Source;
 use crate::width::{FormatWidths, OffsetWidth};
 
@@ -3764,7 +3766,7 @@ mod tests {
             ExtensibleArrayHeader::serialized_size_with_widths(store.widths),
         );
         let array = crate::extensible_array::read_header(
-            &store,
+            &source::zero_base_source(&store),
             store.widths,
             StoredAddress::new(header.to_u64()),
         )

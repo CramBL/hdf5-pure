@@ -10,6 +10,7 @@ use crate::dataspace::{Dataspace, DataspaceType};
 use crate::datatype::layout::FloatingPointLayout;
 use crate::datatype::{CharacterSet, StringPadding};
 use crate::fill_value::FillPattern;
+use crate::source;
 
 mod numeric;
 
@@ -239,6 +240,7 @@ fn unallocated_contiguous_reads_as_the_fill_value() {
     let seven = 7.0f64.to_le_bytes();
     let filled = read_raw_data_full(
         &[],
+        &source::zero_base_source(&source::BytesSource::new(&[])),
         RawReadSpec::parse(
             &layout,
             &ds,
@@ -319,11 +321,23 @@ fn streaming_contiguous_matches_buffered() {
     };
 
     let spec = RawReadSpec::plain(&layout, &ds, &dt);
-    let buffered = read_raw_data_full(&file_data, spec, TEST_WIDTHS).unwrap();
-    let from_mem =
-        read_raw_data_full_from_source(&BytesSource::new(&file_data), spec, TEST_WIDTHS).unwrap();
+    let buffered = read_raw_data_full(
+        &file_data,
+        &source::zero_base_source(&source::BytesSource::new(&file_data)),
+        spec,
+        TEST_WIDTHS,
+    )
+    .unwrap();
+    let from_mem = read_raw_data_full_from_source(
+        &BytesSource::new(&file_data),
+        &source::zero_base_source(&BytesSource::new(&file_data)),
+        spec,
+        TEST_WIDTHS,
+    )
+    .unwrap();
     let from_seek = read_raw_data_full_from_source(
-        &ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap(),
+        &ReadSeekSource::new(std::io::Cursor::new(&file_data)).unwrap(),
+        &source::zero_base_source(&ReadSeekSource::new(std::io::Cursor::new(&file_data)).unwrap()),
         spec,
         TEST_WIDTHS,
     )
@@ -346,9 +360,20 @@ fn streaming_compact_matches_buffered() {
     }
     let layout = DataLayout::Compact { data };
     let spec = RawReadSpec::plain(&layout, &ds, &dt);
-    let buffered = read_raw_data_full(&[], spec, TEST_WIDTHS).unwrap();
-    let streamed =
-        read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, TEST_WIDTHS).unwrap();
+    let buffered = read_raw_data_full(
+        &[],
+        &source::zero_base_source(&source::BytesSource::new(&[])),
+        spec,
+        TEST_WIDTHS,
+    )
+    .unwrap();
+    let streamed = read_raw_data_full_from_source(
+        &BytesSource::new(Vec::new()),
+        &source::zero_base_source(&BytesSource::new(Vec::new())),
+        spec,
+        TEST_WIDTHS,
+    )
+    .unwrap();
     assert_eq!(buffered, streamed);
 }
 
@@ -368,10 +393,20 @@ fn streaming_contiguous_unallocated_parity() {
         FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8)),
     ] {
         let spec = RawReadSpec::parse(&layout, &ds, &dt, None, fill).unwrap();
-        let buffered = read_raw_data_full(&[], spec, TEST_WIDTHS).unwrap();
-        let streamed =
-            read_raw_data_full_from_source(&BytesSource::new(Vec::new()), spec, TEST_WIDTHS)
-                .unwrap();
+        let buffered = read_raw_data_full(
+            &[],
+            &source::zero_base_source(&source::BytesSource::new(&[])),
+            spec,
+            TEST_WIDTHS,
+        )
+        .unwrap();
+        let streamed = read_raw_data_full_from_source(
+            &BytesSource::new(Vec::new()),
+            &source::zero_base_source(&BytesSource::new(Vec::new())),
+            spec,
+            TEST_WIDTHS,
+        )
+        .unwrap();
         assert_eq!(buffered, streamed);
         assert_eq!(buffered.len(), 24);
     }

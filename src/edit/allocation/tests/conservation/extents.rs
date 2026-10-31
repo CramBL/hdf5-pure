@@ -530,7 +530,12 @@ impl IndexStorage {
             return storage;
         };
         let source = BytesSource::new(bytes);
-        let header = extensible_array::read_header(&source, context.widths(), address).unwrap();
+        let header = extensible_array::read_header(
+            &source::zero_base_source(&source),
+            context.widths(),
+            address,
+        )
+        .unwrap();
         storage.push(
             bytes,
             context.superblock().eof_address,

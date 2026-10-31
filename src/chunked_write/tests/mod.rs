@@ -2,6 +2,7 @@ use rstest::rstest;
 
 use super::*;
 use crate::chunk_cache::ChunkCache;
+use crate::source;
 
 use crate::FillTime;
 use crate::chunked_read;
@@ -776,6 +777,7 @@ fn roundtrip_chunked(
 
     let output = chunked_read::read_chunked_data_cached(
         &file_data,
+        &source::zero_base_source(&source::BytesSource::new(&file_data)),
         RawReadSpec::parse(
             &layout,
             &dataspace,
@@ -1430,6 +1432,7 @@ fn roundtrip_ea(
 
     let output = chunked_read::read_chunked_data_cached(
         &file_data,
+        &source::zero_base_source(&source::BytesSource::new(&file_data)),
         RawReadSpec::plain(&layout, &dataspace, &datatype),
         crate::file_writer::WIDTHS,
         &ChunkCache::new(),

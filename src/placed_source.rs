@@ -3,13 +3,15 @@
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::source::BaseOffsetSource;
 use crate::source::BytesSource;
+use crate::source::PhysicalSource;
 use crate::source::Source;
+use crate::source::StoredSource;
 
 /// A source whose bytes start at address `start` and that records each metadata read.
 pub(crate) struct PlacedSource {
@@ -28,12 +30,11 @@ impl PlacedSource {
         }
     }
 
-    /// Returns the source with `start` as its base address.
-    pub(crate) fn framed(&self) -> BaseOffsetSource<'_, Self> {
-        BaseOffsetSource {
-            inner: self,
-            base: BaseAddress::new(self.start),
-        }
+    /// Borrows a stored-coordinate view with `start` as its effective base.
+    pub(crate) fn framed(&self) -> StoredSource<'_, Self> {
+        PhysicalSource::new(self).stored(AddressContext::from_effective_base(BaseAddress::new(
+            self.start,
+        )))
     }
 
     /// Returns the length of each metadata read, in the order of the reads.

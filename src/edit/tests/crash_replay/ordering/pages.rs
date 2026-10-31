@@ -472,8 +472,12 @@ impl Page {
             return Vec::new();
         };
         let widths = crate::superblock::read(bytes).unwrap().widths;
-        let header =
-            extensible_array::read_header(&BytesSource::new(bytes), widths, address).unwrap();
+        let header = extensible_array::read_header(
+            &source::zero_base_source(&BytesSource::new(bytes)),
+            widths,
+            address,
+        )
+        .unwrap();
         let index = header.index_block().unwrap();
         let index = index.parse(region(bytes, index.parse_range())).unwrap();
         index
