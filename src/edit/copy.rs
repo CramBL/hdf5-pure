@@ -1,6 +1,6 @@
 //! Object-tree copies, source reads, and reference screening for staged edits.
 
-use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
@@ -31,7 +31,7 @@ use crate::object_graph::TraversalBudget;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::OpenedSource;
 use crate::shared_message::SharedResolver;
-use crate::source::{BaseOffsetSource, OriginalSource, PhysicalSource, Source};
+use crate::source::{OriginalSource, PhysicalSource, Source};
 use crate::width::FormatWidths;
 
 use super::attributes::{self, DenseAttrSet};
@@ -939,13 +939,9 @@ impl CopyReader<'_> {
                 }
                 let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
 
-                let dview = BaseOffsetSource {
-                    inner: &src,
-                    base: base.effective_base(),
-                };
-
+                let source = PhysicalSource::new(&src).stored();
                 let infos = chunked_read::enumerate_chunks_from_source(
-                    &PhysicalSource::new(&src).stored(),
+                    &source,
                     &layout,
                     &ds,
                     crate::file_writer::WIDTHS,
@@ -964,12 +960,11 @@ impl CopyReader<'_> {
                 let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
                 for ci in &grid.grid_order {
                     let len = ci.chunk_size.to_usize()?;
-                    ci.address
-                        .get()
-                        .checked_add(len as u64)
-                        .filter(|&e| e <= dview.len())
+                    AddressRange::new(ci.address, ci.chunk_size.get())
+                        .ok()
+                        .filter(|range| range.end().get() <= source.len())
                         .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
-                    chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
+                    chunk_bytes.push(source.read_exact_at(ci.address, len)?);
                     meta.push(ChunkMeta {
                         compressed_size: ci.chunk_size.get(),
                         filter_mask: ci.filter_mask,

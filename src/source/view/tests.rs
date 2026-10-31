@@ -414,6 +414,60 @@ enum ResidentRead {
 }
 
 #[rstest]
+#[case::empty_at_end(32, 0, &[])]
+#[case::last_byte(31, 1, &[31])]
+#[case::interior(4, 3, &[4, 5, 6])]
+fn resident_borrowed_ranges_use_stored_slice_positions(
+    #[case] start: u64,
+    #[case] length: u64,
+    #[case] expected: &[u8],
+) {
+    let mut image = vec![0; 512];
+    image.extend(0..32u8);
+    let view = PhysicalBytes::for_test(
+        &image,
+        AddressContext::from_effective_base(BaseAddress::new(512)),
+    )
+    .stored()
+    .unwrap();
+    let borrowed = view
+        .borrow_range(AddressRange::new(StoredAddress::new(start), length).unwrap())
+        .unwrap();
+    assert_eq!(borrowed, expected);
+    assert_eq!(
+        borrowed.as_ptr(),
+        image[512 + usize::try_from(start).unwrap()..].as_ptr()
+    );
+}
+
+#[rstest]
+#[case::crosses_end(31, 2, 33)]
+#[case::empty_past_end(33, 0, 33)]
+#[case::above_32bit(u64::from(u32::MAX) + 1, 0, u64::from(u32::MAX) + 1)]
+#[case::maximum_address(u64::MAX, 0, u64::MAX)]
+fn resident_borrowed_ranges_report_stored_bounds(
+    #[case] start: u64,
+    #[case] length: u64,
+    #[case] expected: u64,
+) {
+    let image = [0; 544];
+    let view = PhysicalBytes::for_test(
+        &image,
+        AddressContext::from_effective_base(BaseAddress::new(512)),
+    )
+    .stored()
+    .unwrap();
+    assert_eq!(
+        view.borrow_range(AddressRange::new(StoredAddress::new(start), length).unwrap())
+            .unwrap_err(),
+        FormatError::UnexpectedSourceEof {
+            expected,
+            available: 32,
+        }
+    );
+}
+
+#[rstest]
 #[case::past_end(
     31,
     2,

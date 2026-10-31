@@ -10,6 +10,8 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectTimes;
 use rstest::rstest;
 use test_util::data_layout as layout_bytes;
+use test_util::dataspace as dataspace_bytes;
+use test_util::datatype as datatype_bytes;
 use test_util::link_message::HardLink;
 use test_util::link_message::SymbolicLink;
 use test_util::object_header::Message;
@@ -1706,6 +1708,54 @@ fn group_of_three_datasets() -> (Vec<u8>, u64) {
         .header_address()
         .unwrap();
     (bytes, addr)
+}
+
+#[rstest]
+#[case::crosses_end(252)]
+#[case::starts_at_end(256)]
+#[case::endpoint_overflow(u64::MAX - 4)]
+fn chunked_copies_reject_invalid_payload_extents(
+    #[case] address: u64,
+    #[values(0, 512)] base: u64,
+) {
+    let header = v2_bytes::Header::new()
+        .message(Message::new(
+            FixtureMessage::DATATYPE,
+            &datatype_bytes::f64_le(),
+        ))
+        .message(Message::new(
+            FixtureMessage::DATASPACE,
+            &dataspace_bytes::v2(
+                1,
+                dataspace_bytes::Flags::NONE,
+                dataspace_bytes::Kind::SIMPLE,
+                &[1],
+                None,
+            ),
+        ))
+        .message(Message::new(
+            FixtureMessage::DATA_LAYOUT,
+            &layout_bytes::implicit(address, &[1], 8),
+        ))
+        .build();
+    let mut image = vec![0; usize::try_from(base).unwrap()];
+    image.extend_from_slice(&header);
+    image.resize(usize::try_from(base + 256).unwrap(), 0);
+    let source = BytesSource::new(&image);
+    let source = OpenedSource::for_test(
+        &source,
+        AddressContext::from_effective_base(BaseAddress::new(base)),
+    );
+    let Err(error) = WriteEngine::read_copy_subtree(
+        &source,
+        AccessMode::ReadWrite,
+        base,
+        false,
+        file_writer::WIDTHS,
+    ) else {
+        panic!("expected an invalid chunk extent to be rejected");
+    };
+    common::assert_unsupported(error, "chunk data is out of bounds");
 }
 
 fn copy_reader<'a>(src: &'a BytesSource<&'a [u8]>) -> CopyReader<'a> {

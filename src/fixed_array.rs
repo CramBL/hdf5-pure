@@ -12,6 +12,7 @@ use core::num::NonZeroUsize;
 
 #[cfg(feature = "checksum")]
 use hdf5_pure_core::__private::FileRange;
+#[cfg(any(feature = "std", test))]
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayDataBlock;
@@ -27,13 +28,13 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::error::FormatError;
 use crate::source;
-use crate::source::RangeReader;
+use crate::source::StoredRead;
 use crate::width::FormatWidths;
 
 /// Reads the Fixed Array at `address` and calls `visit` with the slot and the record of each
 /// element that stores a chunk address.
 ///
-/// The caller supplies a stored-coordinate view of the opened image. Returned metadata retains
+/// The caller passes a [`StoredRead`] view of the opened image. Returned metadata retains
 /// the source's physical ranges and ownership while the parsers use base-relative positions.
 ///
 /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size. An array whose header
@@ -54,7 +55,7 @@ use crate::width::FormatWidths;
 ///
 /// [unpaged]: hdf5_pure_format::__private::FixedArrayDataBlockRef::parse_unpaged_prefix
 pub(crate) fn read_chunks(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
     chunk_byte_size: u64,
@@ -110,7 +111,7 @@ pub(crate) fn read_chunks(
 /// [`FixedArrayHeaderLocator::parse`] returns.
 #[cfg(feature = "std")]
 pub(crate) fn index_spans(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
@@ -130,7 +131,7 @@ pub(crate) fn index_spans(
 /// `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum differs. Propagates
 /// source read errors.
 fn verify_unpaged(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     unpaged: FixedArrayUnpaged,
 ) -> Result<(), FormatError> {
     let range = unpaged.checksum_range()?;
@@ -170,7 +171,7 @@ const ENTRY_WINDOW_ENTRIES: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 const CHECKSUM_WINDOW_BYTES: u64 = 4_096;
 
 fn read_header(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<FixedArrayHeader, FormatError> {

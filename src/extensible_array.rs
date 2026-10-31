@@ -12,6 +12,7 @@ use core::iter::Peekable;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
+#[cfg(any(feature = "std", test))]
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ExtensibleArray;
@@ -28,13 +29,13 @@ use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source;
-use crate::source::RangeReader;
+use crate::source::StoredRead;
 use crate::width::FormatWidths;
 
 /// Reads the Extensible Array at `address` and calls `visit` with the slot and the record of each
 /// element that stores a chunk address.
 ///
-/// The caller supplies a stored-coordinate view of the opened image. Returned metadata retains
+/// The caller passes a [`StoredRead`] view of the opened image. Returned metadata retains
 /// the source's physical ranges and ownership while the parsers use base-relative positions.
 ///
 /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size. An array whose header
@@ -54,7 +55,7 @@ use crate::width::FormatWidths;
 /// [`ExtensibleArrayDataBlockRef::parse`], and [`ExtensibleArrayPageRef::parse`] return, and the
 /// error `visit` returns.
 pub(crate) fn read_chunks(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
     chunk_byte_size: u64,
@@ -119,7 +120,7 @@ pub(crate) fn read_chunks(
 /// return.
 #[cfg(feature = "std")]
 pub(crate) fn index_spans(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
@@ -159,7 +160,7 @@ pub(crate) fn index_spans(
 /// failed read of a [`Source`](crate::source::Source), and the errors
 /// [`ExtensibleArrayHeaderLocator::parse`] returns.
 pub(crate) fn read_header(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
 ) -> Result<ExtensibleArray, FormatError> {
@@ -175,7 +176,7 @@ pub(crate) fn read_header(
 // each later run of adjacent initialized pages, with one read each, while the length of a read
 // fits a `usize`. No uninitialized page is read.
 fn read_data_block(
-    file: &(impl RangeReader<AddressRange<StoredAddress>> + ?Sized),
+    file: &(impl StoredRead + ?Sized),
     block: ExtensibleArrayDataBlockRef<'_>,
     visit_elements: &mut impl FnMut(ExtensibleArrayElements<'_>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
