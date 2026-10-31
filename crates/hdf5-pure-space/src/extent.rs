@@ -1,3 +1,4 @@
+use core::mem;
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::{NonEmptyRange, StoredAddressExt};
@@ -10,7 +11,7 @@ use hdf5_pure_core::{AddressRange, StoredAddress};
 /// beyond [`u64::MAX`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Extent {
-    range: AddressRange<StoredAddress>,
+    range: NonEmptyRange<StoredAddress>,
 }
 
 impl Extent {
@@ -41,9 +42,7 @@ impl Extent {
     /// ```
     pub fn new(start: StoredAddress, len: u64) -> Option<Self> {
         Some(Self {
-            range: NonEmptyRange::new(start, NonZeroU64::new(len)?)
-                .ok()?
-                .range(),
+            range: NonEmptyRange::new(start, NonZeroU64::new(len)?).ok()?,
         })
     }
 
@@ -54,7 +53,7 @@ impl Extent {
     }
 
     /// Returns the first byte of the extent.
-    pub fn start(self) -> StoredAddress {
+    pub const fn start(self) -> StoredAddress {
         self.range.start()
     }
 
@@ -64,8 +63,8 @@ impl Extent {
     }
 
     /// Returns the number of bytes in the extent.
-    pub fn len(self) -> u64 {
-        self.range.length()
+    pub const fn len(self) -> u64 {
+        self.range.length().get()
     }
 
     /// Returns whether the extent contains no bytes.
@@ -77,7 +76,7 @@ impl Extent {
 
     /// Returns `true` if this extent touches `other` without overlapping it.
     pub fn adjoins(self, other: Self) -> bool {
-        self.range.adjoins(other.range)
+        self.range().adjoins(other.range())
     }
 
     /// Returns the overlap of this extent and `other`, or `None` when they are disjoint.
@@ -88,7 +87,7 @@ impl Extent {
 
     /// Returns the checked interval with the same stored endpoints and positive length.
     pub fn range(self) -> AddressRange<StoredAddress> {
-        self.range
+        self.range.range()
     }
 
     /// Returns the whole `align`-sized units inside this extent, or `None` when it contains none.
@@ -107,6 +106,11 @@ impl Extent {
         Self::between(start, end)
     }
 }
+
+const _: () = {
+    assert!(mem::size_of::<Extent>() == 16);
+    assert!(mem::size_of::<Option<Extent>>() == 16);
+};
 
 #[cfg(test)]
 mod tests {

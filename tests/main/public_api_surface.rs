@@ -535,13 +535,8 @@ fn public_superblock_updates_reject_narrowing_without_changing_state(
 
 #[test]
 fn free_section_reports_preserve_public_address_types() {
-    const fn inspect<A: Copy>(section: &FreeSection<A>) -> (A, NonZeroU64, A, AddressRange<A>) {
-        (
-            section.address(),
-            section.length(),
-            section.end_address(),
-            section.range(),
-        )
+    const fn inspect<A: Copy>(section: &FreeSection<A>) -> (A, NonZeroU64) {
+        (section.address(), section.length())
     }
 
     let _: fn(&File, StoredAddress) -> Result<PhysicalAddress, FormatError> = File::resolve_address;

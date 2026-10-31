@@ -2,11 +2,11 @@
 
 use alloc::format;
 use alloc::vec::Vec;
+use core::mem;
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::{Address, FileRange, FileRegion, NonEmptyRange};
 use hdf5_pure_core::AddressRange;
-#[cfg(any(test, doc))]
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{self as format, FreeSpaceManagerHeaderRef};
 use hdf5_pure_space::__private::ManagerKind;
@@ -686,9 +686,9 @@ impl<A> FreeSection<A> {
     }
 
     /// Returns the exclusive end address in the section's coordinate system.
-    pub const fn end_address(&self) -> A
+    pub fn end_address(&self) -> A
     where
-        A: Copy,
+        A: Address,
     {
         self.range.end()
     }
@@ -696,9 +696,9 @@ impl<A> FreeSection<A> {
     /// Returns the checked interval in the section's coordinate system.
     ///
     /// The interval has the section's positive length and the same start and end addresses.
-    pub const fn range(&self) -> AddressRange<A>
+    pub fn range(&self) -> AddressRange<A>
     where
-        A: Copy,
+        A: Address,
     {
         self.range.range()
     }
@@ -711,6 +711,13 @@ impl<A> FreeSection<A> {
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
 const NONPAGED_MANAGER_SLOTS: usize = 6;
+
+const _: () = {
+    assert!(mem::size_of::<FreeSection<StoredAddress>>() == 16);
+    assert!(mem::size_of::<FreeSection<PhysicalAddress>>() == 16);
+    assert!(mem::size_of::<Option<FreeSection<StoredAddress>>>() == 16);
+    assert!(mem::size_of::<Option<FreeSection<PhysicalAddress>>>() == 16);
+};
 
 #[cfg(test)]
 mod tests {
