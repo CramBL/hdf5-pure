@@ -7,6 +7,7 @@ use rstest::rstest;
 use test_util::file_space_info;
 use test_util::object_header;
 use test_util::widths::Widths;
+use test_util_hdf5::reader::ReadBackend;
 
 use crate::Error;
 use crate::File;
@@ -24,7 +25,9 @@ use crate::ReusableSpaceStats;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::address::BaseAddressExt;
+use crate::address::StoredAddressExt;
 use crate::checksum;
+use crate::reader::test_util as reader_test_util;
 use crate::source::{BytesSource, Source};
 use crate::{PhysicalAddress, StoredAddress};
 
@@ -651,41 +654,123 @@ fn corrupted_manager_checksums_return_the_decode_error(
 }
 
 #[rstest]
+#[case::plain(0, 0)]
+#[case::userblock(4096, 4096)]
+#[case::inserted_userblock(0, 4096)]
+#[case::forward_relocation(4096, 8192)]
+#[case::removed_userblock(4096, 0)]
 fn relocated_sources_preserve_stored_section_coordinates(
-    #[values(0, 1024)] signature: usize,
-    #[values(false, true)] streaming: bool,
+    #[case] encoded_base: usize,
+    #[case] signature: usize,
+    #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("relocated-free-sections.h5");
+    let path = directory.path().join("original-free-sections.h5");
+    let relocated_path = directory.path().join("relocated-free-sections.h5");
     let mut builder = FileBuilder::new();
-    builder.with_userblock(UserblockSize::try_from(512).unwrap());
-    builder.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-    );
+    builder.with_userblock(UserblockSize::try_from(u64::try_from(encoded_base).unwrap()).unwrap());
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     builder.create_dataset("a").with_i32_data(&[1; 100]);
     builder.create_dataset("b").with_i32_data(&[2; 400]);
     builder.create_dataset("c").with_i32_data(&[3; 100]);
     builder.write(&path).unwrap();
-    {
-        let file = File::open_rw(&path).unwrap();
-        file.root().delete("b").unwrap();
-        file.commit().unwrap();
-    }
-    let expected = File::open(&path)
-        .unwrap()
-        .persisted_free_sections()
-        .unwrap();
-    let expected_settings = File::open(&path).unwrap().file_space_settings().unwrap();
+    let session = File::open_rw(&path).unwrap();
+    session.root().delete("b").unwrap();
+    session.commit().unwrap();
+    session.close().unwrap();
+    let original = File::open(&path).unwrap();
+    let expected = original.persisted_free_sections().unwrap().unwrap();
+    let expected_settings = original.file_space_settings().unwrap();
+    assert_eq!(
+        expected_settings,
+        Some(FileSpaceSettings::new(strategy).with_persistence(true))
+    );
+    original.close().unwrap();
+    assert!(expected.free_sections().section_count() > 0);
     let bytes = std::fs::read(&path).unwrap();
     let mut relocated = vec![0; signature];
-    relocated.extend_from_slice(&bytes[512..]);
-    let file = if streaming {
-        File::from_source(BytesSource::new(relocated)).unwrap()
+    relocated.extend_from_slice(&bytes[encoded_base..]);
+    std::fs::write(&relocated_path, &relocated).unwrap();
+    let file = reader_test_util::open(&relocated_path, backend).unwrap();
+    assert_eq!(
+        file.superblock().base_address.get(),
+        u64::try_from(encoded_base).unwrap()
+    );
+    assert_eq!(
+        file.inner.addresses().effective_base().get(),
+        u64::try_from(signature).unwrap()
+    );
+    let addresses = file.inner.addresses();
+    let effective_base = u64::try_from(signature).unwrap();
+    if effective_base == 0 {
+        assert_eq!(
+            addresses.resolve(StoredAddress::new(u64::MAX)).unwrap(),
+            PhysicalAddress::new(u64::MAX)
+        );
     } else {
-        File::from_bytes(relocated).unwrap()
-    };
-    assert_eq!(file.persisted_free_sections().unwrap(), expected);
+        assert_eq!(
+            addresses.resolve(StoredAddress::new(u64::MAX)).unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: effective_base
+            }
+        );
+        assert_eq!(
+            addresses.relative(effective_base - 1).unwrap_err(),
+            FormatError::AddressBelowBase {
+                address: effective_base - 1,
+                base: effective_base
+            }
+        );
+    }
+    let report = file.persisted_free_sections().unwrap().unwrap();
+    assert_eq!(report, expected);
     assert_eq!(file.file_space_settings().unwrap(), expected_settings);
+    for section in report.free_sections().sections() {
+        let address: StoredAddress = section.address();
+        let end: StoredAddress = section.end_address();
+        let physical = file.inner.addresses().resolve(address).unwrap();
+        let physical_end = file.inner.addresses().resolve(end).unwrap();
+        assert_eq!(
+            physical.get(),
+            u64::try_from(signature)
+                .unwrap()
+                .checked_add(address.get())
+                .unwrap()
+        );
+        assert_eq!(
+            physical.checked_add(section.length().get()).unwrap(),
+            physical_end
+        );
+        assert_eq!(
+            file.inner.addresses().relative(physical.get()).unwrap(),
+            address
+        );
+        assert_eq!(
+            file.inner.addresses().relative(physical_end.get()).unwrap(),
+            end
+        );
+        assert!(physical_end.get() <= u64::try_from(relocated.len()).unwrap());
+    }
+    assert_eq!(file.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);
+    assert_eq!(file.dataset("c").unwrap().read_i32().unwrap(), [3; 100]);
+    file.close().unwrap();
+    if encoded_base != signature {
+        let error = File::open_rw(&relocated_path).unwrap_err();
+        assert!(
+            matches!(error, Error::EditUnsupported(reason)
+            if reason == "a file whose superblock is not located at its base address is not editable in place"),
+            "{error:?}"
+        );
+    }
+    assert_eq!(std::fs::read(&relocated_path).unwrap(), relocated);
 }
 
 fn assert_summary_and_sections(file: &File) -> ReusableSpaceStats {

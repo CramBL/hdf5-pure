@@ -1,15 +1,35 @@
-//! Storage-ownership inspection through a file's private editing backend.
+//! Reader backend selection and storage-ownership inspection.
 
+use std::fs;
 use std::ops::Range;
+use std::path::Path;
+
+use test_util_hdf5::reader::ReadBackend;
 
 pub(in crate::reader) use test_util_hdf5::file_space::assert_eof_matches_physical_size;
 pub(in crate::reader) use test_util_hdf5::file_space::serialized_manager_padding;
 
 use crate::Layout;
+use crate::ReadSeekSource;
 use crate::edit::SpaceOwnership;
 use crate::error::Error;
 use crate::reader::Backend;
 use crate::reader::File;
+
+/// Opens a file through the selected reader backend.
+///
+/// # Errors
+///
+/// Returns the errors of [`File::open`], [`File::from_bytes`], [`File::from_source`], or
+/// [`File::open_streaming`] for the selected backend, and [`Error::Io`] for filesystem reads.
+pub(in crate::reader) fn open(path: &Path, backend: ReadBackend) -> Result<File, Error> {
+    match backend {
+        ReadBackend::Buffered => File::open(path),
+        ReadBackend::Bytes => File::from_bytes(fs::read(path)?),
+        ReadBackend::Source => File::from_source(ReadSeekSource::new(fs::File::open(path)?)?),
+        ReadBackend::Streaming => File::open_streaming(path),
+    }
+}
 
 /// Analyzes committed storage through the file's editing session.
 ///

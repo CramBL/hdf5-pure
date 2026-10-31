@@ -69,7 +69,18 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     {
         let _: PhysicalAddress = physical.address();
         let _: StoredAddress = stored.address();
-        assert_eq!(physical.address().get(), stored.address().get() + userblock);
+        assert_eq!(
+            second.inner.addresses().resolve(stored.address()).unwrap(),
+            physical.address()
+        );
+        assert_eq!(
+            second
+                .inner
+                .addresses()
+                .resolve(stored.end_address())
+                .unwrap(),
+            physical.end_address()
+        );
         assert_eq!(physical.length(), stored.length());
     }
     second
