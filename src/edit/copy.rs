@@ -2,6 +2,8 @@
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkedGeometry;
+use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
@@ -17,7 +19,6 @@ use crate::dataspace::Dataspace;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError};
 use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
-use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::Expansion;
@@ -35,6 +36,7 @@ use crate::width::FormatWidths;
 use super::attributes::{self, DenseAttrSet};
 use super::dataset::{self, ChunkGeometry};
 use super::group;
+use super::group_links;
 use super::object_header::OhRegion;
 use super::staging::StagedOp;
 use super::{InvalidatedAddresses, WriteEngine};
@@ -121,8 +123,9 @@ impl WriteEngine {
 
     /// Parses an object header and attribute storage for copying.
     ///
-    /// Dense attributes are read into an owned set for replacement storage. Hard-link children and
-    /// contiguous data locations are recorded separately from the retained header messages.
+    /// Dense attributes are read into an owned set for replacement storage. Keeps every Link
+    /// message in the retained header records, and records the byte offset of each hard link's
+    /// address field and of a contiguous dataset's data address within them.
     ///
     /// The layout version 3 and 4 fields are defined in "The Data Layout Message" of the
     /// [format specification, version 4.0][layout]. The Link Info version 0 fields are defined
@@ -130,9 +133,10 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the source uses external storage, unsupported
-    /// layouts or links, or an object that is neither a dataset nor a group. Propagates metadata
-    /// and attribute read, parse, and storage-planning errors.
+    /// Returns [`Error::EditUnsupported`] if the source uses external storage, an unsupported
+    /// layout, dense link storage, or a Link message the editor cannot reproduce, if a dataset
+    /// header contains Link messages, or if the object is neither a dataset nor a group.
+    /// Propagates metadata, attribute, and Link message read, parse, and storage-planning errors.
     ///
     /// [layout]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     /// [links]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
@@ -172,9 +176,8 @@ impl WriteEngine {
 
         let mut layout: Option<(usize, usize)> = None; // (body offset in kept, body size)
         let mut has_link_info = false;
-        // Preserve each hard link's name, optional creation index, and source address.
-        let mut children: Vec<(String, Option<u64>, StoredAddress)> = Vec::new();
-        // Retain records after separating child links and dense attributes.
+        let mut has_links = false;
+        let mut links = Vec::new();
         let mut kept = OhRegion::empty(region.props());
 
         let mut p = 0;
@@ -208,25 +211,19 @@ impl WriteEngine {
                     }
                 }
                 MessageType::LINK => {
-                    keep = false;
-                    match LinkMessage::parse_with_offset_width(
-                        &region[body..body_end],
-                        OFFSET_WIDTH,
-                    ) {
-                        Ok(LinkMessage {
-                            name,
-                            link_target:
-                                LinkTarget::Hard {
-                                    object_header_address,
-                                },
-                            creation_order,
-                            ..
-                        }) => children.push((name, creation_order, object_header_address)),
-                        _ => {
-                            return Err(Error::EditUnsupported(
-                                "a group contains a soft/external link (not copyable in place yet)",
-                            ));
-                        }
+                    has_links = true;
+                    let link = OwnedLink::parse(&region[body..body_end], OFFSET_WIDTH)
+                        .map_err(group_links::storage_error)?;
+                    if let OwnedLinkTarget::Hard {
+                        object_header_address,
+                    } = *link.target()
+                    {
+                        // `OwnedLink::parse` rejects trailing bytes, so the address ends the body.
+                        let address = body_end - usize::from(OFFSET_WIDTH.get());
+                        links.push(CopyLink {
+                            addr_off: kept.len() + (address - p),
+                            target: object_header_address,
+                        });
                     }
                 }
                 MessageType::DATA_LAYOUT => {
@@ -242,6 +239,11 @@ impl WriteEngine {
         }
 
         if let Some((lbody, lsize)) = layout {
+            if has_links {
+                return Err(Error::EditUnsupported(
+                    "a dataset header holds link messages",
+                ));
+            }
             let version = kept[lbody];
             if !(version == 3 || version == 4) || lsize < 2 {
                 return Err(Error::EditUnsupported(
@@ -285,8 +287,8 @@ impl WriteEngine {
             // Include the Group Info message required by subsequent link edits.
             group::ensure_group_info(&mut kept)?;
             Ok(ObjModel::Group {
-                non_link_region: kept,
-                children,
+                region: kept,
+                links,
                 dense_attrs,
             })
         } else {
@@ -408,27 +410,23 @@ impl WriteEngine {
                 dense_attrs.clone(),
             ),
             CopyNode::Group {
-                non_link_region,
+                region,
                 links,
                 dense_attrs,
             } => {
-                let mut region = non_link_region.clone();
-                for CopyLink {
-                    name,
-                    creation_order,
-                    target,
-                } in links
-                {
+                let mut region = region.clone();
+                for CopyLink { addr_off, target } in links {
                     let child = written.get(target.index()).copied().ok_or_else(|| {
                         FormatError::Internal(
                             "a copied group links an object that is not yet written".into(),
                         )
                     })?;
-                    region.push_link(
-                        name,
+                    hdf5_pure_format::__private::write_stored_address_at(
+                        region.bytes_mut(),
+                        *addr_off,
                         base.relative(PhysicalAddress::new(child))?,
-                        *creation_order,
-                    );
+                        OFFSET_WIDTH,
+                    )?;
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
@@ -462,11 +460,11 @@ pub(super) enum ObjModel {
         region: OhRegion,
         dense_attrs: DenseAttrSet,
     },
-    /// A group with its hard-link records separated from the other header records.
+    /// A group with its Link messages in `region`.
     Group {
-        non_link_region: OhRegion,
-        /// Each link's name, optional creation index, and source object-header address.
-        children: Vec<(String, Option<u64>, StoredAddress)>,
+        region: OhRegion,
+        /// The hard links in `region`, each with the stored address of its target in the source.
+        links: Vec<CopyLink<StoredAddress>>,
         dense_attrs: DenseAttrSet,
     },
 }
@@ -594,24 +592,21 @@ pub(super) enum CopyNode {
     },
     /// A group whose hard links target other nodes of the tree.
     Group {
-        non_link_region: OhRegion,
-        links: Vec<CopyLink>,
+        region: OhRegion,
+        links: Vec<CopyLink<CopyNodeId>>,
         dense_attrs: DenseAttrSet,
     },
 }
 
 impl CopyNode {
-    /// Returns the header records the copy keeps, without Link messages or the Attribute Info and
-    /// Attribute messages of dense attribute storage.
+    /// Returns the header records the copy keeps, without the Attribute Info and Attribute
+    /// messages of dense attribute storage.
     fn region(&self) -> &OhRegion {
         match self {
             Self::DatasetChunked { region, .. }
             | Self::DatasetContiguous { region, .. }
             | Self::DatasetVerbatim { region, .. }
-            | Self::Group {
-                non_link_region: region,
-                ..
-            } => region,
+            | Self::Group { region, .. } => region,
         }
     }
 
@@ -625,7 +620,7 @@ impl CopyNode {
     }
 
     /// Returns the hard links of a group, or an empty slice for a dataset.
-    fn links(&self) -> &[CopyLink] {
+    fn links(&self) -> &[CopyLink<CopyNodeId>] {
         match self {
             Self::DatasetChunked { .. }
             | Self::DatasetContiguous { .. }
@@ -750,12 +745,15 @@ impl CopyNode {
     }
 }
 
-/// A hard link of a copied group and the node it targets.
-pub(super) struct CopyLink {
-    pub(super) name: String,
-    /// The link's creation index, or `None` if the source Link message has none.
-    pub(super) creation_order: Option<u64>,
-    pub(super) target: CopyNodeId,
+/// A hard link of a copied group: the byte offset of its address field and its target.
+///
+/// The target is the stored address of the source object in [`ObjModel`] and a node of the tree
+/// in [`CopyNode`]. The writer replaces the address at `addr_off` with the address of the
+/// target's copy, and keeps the other bytes of the Link message.
+pub(super) struct CopyLink<T> {
+    /// The address field's byte offset within the group's `region`.
+    pub(super) addr_off: usize,
+    pub(super) target: T,
 }
 
 /// Reads a source subtree into the nodes of a [`CopyTree`].
@@ -796,7 +794,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
         &self,
         budget: TraversalBudget,
         addr: u64,
-    ) -> Result<ObjectTree<CopySource, CopyLinkLabel>, Error> {
+    ) -> Result<ObjectTree<CopySource, usize>, Error> {
         let root = ObjectId::new(PhysicalAddress::new(addr));
         ObjectGraph::discover(budget, root, |id| self.expand(id))?
             .into_tree()
@@ -809,10 +807,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     /// # Errors
     ///
     /// Returns the errors [`node`](Self::node) returns.
-    fn build_copy_tree(
-        &self,
-        tree: ObjectTree<CopySource, CopyLinkLabel>,
-    ) -> Result<CopyTree, Error> {
+    fn build_copy_tree(&self, tree: ObjectTree<CopySource, usize>) -> Result<CopyTree, Error> {
         let (descendants, root) = tree.into_parts();
         let mut nodes = CopyTreeBuilder::default();
         let mut ids = Vec::with_capacity(descendants.len());
@@ -826,12 +821,15 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     /// Reads the header and the dense attributes of the object `id` identifies, and the hard
     /// links it holds.
     ///
+    /// The label of each hard link is the byte offset of its address field within the header
+    /// records.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if a cross-file copy reads an object with references
     /// into the source file, and [`Error::Format`] if a link's address overflows. Returns the
     /// errors [`WriteEngine::read_object`] returns.
-    fn expand(&self, id: ObjectId) -> Result<Expansion<CopySource, CopyLinkLabel>, Error> {
+    fn expand(&self, id: ObjectId) -> Result<Expansion<CopySource, usize>, Error> {
         let Self {
             src,
             access_mode,
@@ -839,7 +837,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
             base,
             ..
         } = *self;
-        let (source, children) = CopySource::split(WriteEngine::read_object(
+        let (source, links) = CopySource::split(WriteEngine::read_object(
             src,
             access_mode,
             id.header_address().get(),
@@ -850,14 +848,11 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
             reject_foreign_addresses(region)?;
             reject_foreign_dense_attrs(dense_attrs.attrs())?;
         }
-        let links = children
+        let links = links
             .into_iter()
-            .map(|(name, creation_order, target)| {
+            .map(|CopyLink { addr_off, target }| {
                 Ok(HardLink {
-                    label: CopyLinkLabel {
-                        name,
-                        creation_order,
-                    },
+                    label: addr_off,
                     target: ObjectId::resolve(base, target)?,
                 })
             })
@@ -881,7 +876,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     /// an object that is not in `ids`. Propagates payload read and parse errors.
     fn node(
         &self,
-        object: GraphObject<CopySource, CopyLinkLabel>,
+        object: GraphObject<CopySource, usize>,
         ids: &[CopyNodeId],
     ) -> Result<CopyNode, Error> {
         let Self {
@@ -992,19 +987,15 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
                 }
             }
             CopySource::Group {
-                non_link_region,
+                region,
                 dense_attrs,
             } => CopyNode::Group {
-                non_link_region,
+                region,
                 links: links
                     .into_iter()
                     .map(
                         |HardLink {
-                             label:
-                                 CopyLinkLabel {
-                                     name,
-                                     creation_order,
-                                 },
+                             label: addr_off,
                              target,
                          }| {
                             let target = ids.get(target.get()).copied().ok_or_else(|| {
@@ -1012,11 +1003,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
                                     "a copied group links an object that is not yet read".into(),
                                 )
                             })?;
-                            Ok(CopyLink {
-                                name,
-                                creation_order,
-                                target,
-                            })
+                            Ok(CopyLink { addr_off, target })
                         },
                     )
                     .collect::<Result<_, Error>>()?,
@@ -1026,7 +1013,8 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     }
 }
 
-/// A source object's retained header records and storage locations, without its hard links.
+/// A source object's retained header records and storage locations, without the list of its hard
+/// links.
 ///
 /// [`CopyReader::expand`] splits it from an [`ObjModel`], and [`CopyReader::node`] reads its
 /// payload into a [`CopyNode`].
@@ -1050,17 +1038,17 @@ enum CopySource {
         region: OhRegion,
         dense_attrs: DenseAttrSet,
     },
-    /// A group without its Link messages.
+    /// A group with its Link messages in `region`.
     Group {
-        non_link_region: OhRegion,
+        region: OhRegion,
         dense_attrs: DenseAttrSet,
     },
 }
 
 impl CopySource {
-    /// Splits `model` into the source object and the hard links of a group, each as its name,
-    /// its creation index, and the stored address of its target.
-    fn split(model: ObjModel) -> (Self, Vec<(String, Option<u64>, StoredAddress)>) {
+    /// Splits `model` into the source object and the hard links of a group, each as the byte
+    /// offset of its address field and the stored address of its target.
+    fn split(model: ObjModel) -> (Self, Vec<CopyLink<StoredAddress>>) {
         match model {
             ObjModel::DatasetVerbatim {
                 region,
@@ -1099,15 +1087,15 @@ impl CopySource {
                 Vec::new(),
             ),
             ObjModel::Group {
-                non_link_region,
-                children,
+                region,
+                links,
                 dense_attrs,
             } => (
                 Self::Group {
-                    non_link_region,
+                    region,
                     dense_attrs,
                 },
-                children,
+                links,
             ),
         }
     }
@@ -1129,18 +1117,11 @@ impl CopySource {
                 dense_attrs,
             }
             | Self::Group {
-                non_link_region: region,
+                region,
                 dense_attrs,
             } => (region, dense_attrs),
         }
     }
-}
-
-/// The name and the creation index of a hard link a copy reproduces.
-struct CopyLinkLabel {
-    name: String,
-    /// The creation index of the link, or `None` if its Link message has none.
-    creation_order: Option<u64>,
 }
 
 /// Parsed dataset metadata with the filter pipeline preserved as stored bytes.
