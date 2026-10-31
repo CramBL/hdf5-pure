@@ -121,6 +121,7 @@ mod symbol_table_soft_links;
 mod test_util;
 mod unallocated_datasets;
 mod userblock_base_address;
+mod version_1_header_links;
 mod vlen_chunked;
 mod vlen_metadata;
 mod vlen_string_attrs;

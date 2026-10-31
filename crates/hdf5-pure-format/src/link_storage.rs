@@ -374,6 +374,26 @@ impl OwnedLink {
     /// [`LinkStorageError::Format`] for malformed prefix fields, unsupported link types, or
     /// truncated fields.
     pub fn parse(data: &[u8], offset_width: OffsetWidth) -> Result<Self, LinkStorageError> {
+        let (link, len) = Self::parse_padded(data, offset_width)?;
+        if len != data.len() {
+            return Err(LinkStorageError::TrailingBytes);
+        }
+        Ok(link)
+    }
+
+    /// Parses the version 1 Link message at the start of `data` and returns it with its length.
+    ///
+    /// The bytes past the link are left unread, such as the padding after a message in a version 1
+    /// object header.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::parse`] other than [`LinkStorageError::TrailingBytes`] for
+    /// bytes after the target.
+    pub fn parse_padded(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<(Self, usize), LinkStorageError> {
         let prefix = LinkPrefix::parse(data)?;
         let flags = data
             .get(1)
@@ -383,11 +403,14 @@ impl OwnedLink {
             return Err(LinkStorageError::Flags(flags));
         }
         let mut fields = bytes::Fields::new(data, prefix.target_pos);
-        let target = match prefix.link_type_code {
+        let (target, end) = match prefix.link_type_code {
             HARD_LINK => match fields.decoded_address(offset_width)? {
-                DecodedStoredAddress::Defined(object_header_address) => OwnedLinkTarget::Hard {
-                    object_header_address,
-                },
+                DecodedStoredAddress::Defined(object_header_address) => (
+                    OwnedLinkTarget::Hard {
+                        object_header_address,
+                    },
+                    fields.pos(),
+                ),
                 DecodedStoredAddress::Undefined => return Err(LinkStorageError::UndefinedAddress),
             },
             SOFT_LINK | EXTERNAL_LINK => {
@@ -398,10 +421,7 @@ impl OwnedLink {
                     .get(pos..)
                     .and_then(|bytes| bytes.get(..length))
                     .ok_or(LinkStorageError::TrailingBytes)?;
-                if pos.checked_add(length) != Some(data.len()) {
-                    return Err(LinkStorageError::TrailingBytes);
-                }
-                if prefix.link_type_code == SOFT_LINK {
+                let target = if prefix.link_type_code == SOFT_LINK {
                     OwnedLinkTarget::soft(value.to_vec())
                 } else {
                     let (&version_flags, strings) =
@@ -419,19 +439,18 @@ impl OwnedLink {
                         .and_then(|rest| rest.strip_suffix(&[0]))
                         .ok_or(LinkStorageError::ExternalValue)?;
                     OwnedLinkTarget::external(filename.to_vec(), object_path.to_vec())
-                }
+                };
+                (target, pos + length)
             }
             other => return Err(FormatError::InvalidLinkType(other).into()),
         };
-        if prefix.link_type_code == HARD_LINK && fields.pos() != data.len() {
-            return Err(LinkStorageError::TrailingBytes);
-        }
-        Self::new(
+        let link = Self::new(
             prefix.name.to_vec(),
             prefix.charset,
             target,
             prefix.creation_order,
-        )
+        )?;
+        Ok((link, end))
     }
 
     /// Creates an owned link from encoded name and target bytes and an optional creation index.
@@ -926,6 +945,33 @@ mod tests {
     use crate::link_message::{LinkMessage, LinkTarget};
 
     use super::*;
+
+    #[rstest]
+    #[case::hard(
+        b"\x01\x00\x01l\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        OwnedLinkTarget::Hard { object_header_address: StoredAddress::new(512) },
+        12,
+    )]
+    #[case::soft(
+        b"\x01\x08\x01\x01l\x04\x00../x\x00\x00\x00\x00\x00\x00",
+        OwnedLinkTarget::soft(b"../x".to_vec()),
+        11,
+    )]
+    fn a_padded_parse_reads_the_link_before_the_padding(
+        #[case] bytes: &[u8],
+        #[case] target: OwnedLinkTarget,
+        #[case] len: usize,
+    ) {
+        let expected = OwnedLink::new(b"l".to_vec(), CharacterSet::Ascii, target, None).unwrap();
+        assert_eq!(
+            OwnedLink::parse_padded(bytes, OffsetWidth::Eight),
+            Ok((expected, len))
+        );
+        assert_eq!(
+            OwnedLink::parse(bytes, OffsetWidth::Eight),
+            Err(LinkStorageError::TrailingBytes)
+        );
+    }
 
     #[rstest]
     #[case::hard(

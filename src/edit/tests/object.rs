@@ -10,6 +10,7 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectTimes;
 use rstest::rstest;
 use test_util::data_layout as layout_bytes;
+use test_util::link_message::HardLink;
 use test_util::object_header::Message;
 use test_util::object_header::v2 as v2_bytes;
 use test_util::object_header::v2::HeaderFlags;
@@ -65,6 +66,8 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::TraversalBudget;
 use crate::object_graph::TraversalLimit;
+use crate::object_header::HeaderMessage;
+use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::source::BytesSource;
@@ -592,6 +595,125 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
 fn fresh_group_region_pairs_link_info_with_group_info() {
     let types = region_types(&edit::group::fresh_group_region());
     assert_eq!(types, vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]);
+}
+
+#[test]
+fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
+    let link_info = padded(&LINK_INFO_UNTRACKED_COMPACT, 24);
+    let group_info = padded(&GROUP_INFO_BODY, 8);
+    let link = padded(&hard_link_a(), 16);
+    let header = version_1_header(vec![
+        (MessageType::LINK_INFO, MessageFlags::CONSTANT, link_info),
+        (MessageType::GROUP_INFO, MessageFlags::CONSTANT, group_info),
+        (MessageType::LINK, MessageFlags::NONE, link),
+    ]);
+    let region = edit::group::link_message_region(&header, OffsetWidth::Eight).unwrap();
+    let mut records = Vec::new();
+    let mut pos = 0;
+    while let Some(record) = region.layout().next_message(&region, pos).unwrap() {
+        records.push((record.msg_type, record.flags, record.body.to_vec()));
+        pos = record.body_range.end;
+    }
+    assert_eq!(
+        records,
+        [
+            (
+                MessageType::LINK_INFO,
+                MessageFlags::CONSTANT,
+                LINK_INFO_UNTRACKED_COMPACT.to_vec()
+            ),
+            (
+                MessageType::GROUP_INFO,
+                MessageFlags::CONSTANT,
+                GROUP_INFO_BODY.to_vec()
+            ),
+            (MessageType::LINK, MessageFlags::NONE, hard_link_a()),
+        ]
+    );
+}
+
+#[rstest]
+#[case::shared_flag(
+    MessageType::LINK,
+    MessageFlags::SHARED,
+    padded(&hard_link_a(), 16),
+    "a group's link metadata has object-header flags this editor cannot reproduce"
+)]
+#[case::truncated_group_info(
+    MessageType::GROUP_INFO,
+    MessageFlags::NONE,
+    vec![0, 1, 12, 0],
+    "a group's group-info message is truncated"
+)]
+fn converting_version_1_link_messages_rejects_link_storage_it_cannot_reproduce(
+    #[case] msg_type: MessageType,
+    #[case] flags: MessageFlags,
+    #[case] body: Vec<u8>,
+    #[case] reason: &str,
+) {
+    let header = version_1_header(vec![(msg_type, flags, body)]);
+    let Err(error) = edit::group::link_message_region(&header, OffsetWidth::Eight) else {
+        panic!("expected the region to be rejected");
+    };
+    assert!(
+        matches!(error, Error::EditUnsupported(actual) if actual == reason),
+        "{error:?}"
+    );
+}
+
+#[rstest]
+#[case::truncated_link(MessageType::LINK, hard_link_a()[..8].to_vec(), FormatError::UnexpectedEof { expected: hard_link_a().len(), available: 8 })]
+#[case::truncated_link_info(MessageType::LINK_INFO, LINK_INFO_UNTRACKED_COMPACT[..10].to_vec(), FormatError::UnexpectedEof { expected: 18, available: 10 })]
+fn converting_version_1_link_messages_rejects_a_truncated_body(
+    #[case] msg_type: MessageType,
+    #[case] body: Vec<u8>,
+    #[case] expected: FormatError,
+) {
+    let header = version_1_header(vec![(msg_type, MessageFlags::NONE, body)]);
+    let Err(error) = edit::group::link_message_region(&header, OffsetWidth::Eight) else {
+        panic!("expected the region to be rejected");
+    };
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, expected);
+}
+
+fn version_1_header(messages: Vec<(MessageType, MessageFlags, Vec<u8>)>) -> ObjectHeader {
+    ObjectHeader {
+        version: 1,
+        messages: messages
+            .into_iter()
+            .map(|(msg_type, flags, data)| HeaderMessage {
+                msg_type,
+                size: data.len(),
+                flags,
+                creation_order: None,
+                data,
+            })
+            .collect(),
+        reference_count: Some(1),
+        flags: 0,
+        access_time: None,
+        modification_time: None,
+        change_time: None,
+        birth_time: None,
+    }
+}
+
+fn padded(body: &[u8], len: usize) -> Vec<u8> {
+    let mut padded = body.to_vec();
+    padded.resize(len, 0);
+    padded
+}
+
+const LINK_INFO_UNTRACKED_COMPACT: [u8; 18] = [
+    0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF,
+];
+
+fn hard_link_a() -> Vec<u8> {
+    HardLink::new("a", 0x100).build(Widths::EIGHT)
 }
 
 #[test]

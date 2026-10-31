@@ -3,15 +3,19 @@
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
+use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_format::__private::OwnedLink;
 
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
-use crate::error::{Error, OBJECT_HEADER_MESSAGE_MAX};
+use crate::error::Error;
+use crate::error::FormatError;
+use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::file_writer::{self, OFFSET_WIDTH};
 use crate::group_v1;
 use crate::group_v2;
@@ -19,27 +23,34 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 use super::WriteEngine;
 use super::group_links;
 use super::object_header::{self, OhRegion};
 
 impl WriteEngine {
-    /// Converts a symbol-table group to a compact-link version 2 message region.
+    /// Converts the group whose version 1 object header is at `addr` to a version 2 message
+    /// region.
     ///
-    /// Writes each symbol table entry, hard or soft, as a Link message and preserves the attribute
-    /// bodies, re-encoding shared-message references. Other messages, including the symbol table,
-    /// are omitted.
+    /// For a symbol-table group, the region is compact and holds one Link message per symbol
+    /// table entry, hard or soft. For a group that stores its links in Link Info, Group Info, and
+    /// Link messages, the region holds those messages, see [`link_message_region`]. Attribute
+    /// bodies are copied in both cases, with shared-message references re-encoded. Other
+    /// messages, including the symbol table, are omitted.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the object is a dataset, a link cannot be reproduced
-    /// as a Link message, or an attribute is too large or has flags the conversion cannot
-    /// preserve. Returns parsing and source-read errors as reported by the group and object-header
+    /// Returns [`Error::EditUnsupported`] if the object is a dataset, the header stores a symbol
+    /// table beside link storage messages, the links or their storage messages are inconsistent
+    /// or cannot be reproduced, or an attribute is too large or has flags the conversion cannot
+    /// preserve. Returns [`FormatError::PathNotFound`] if the object is not a group. Returns
+    /// parsing and source-read errors as reported by the group, object-header, heap, and index
     /// readers.
     pub(super) fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let base = self.context.addresses();
@@ -59,34 +70,33 @@ impl WriteEngine {
                 "a target path names a dataset, not a group",
             ));
         }
-        let mut region = fresh_group_region();
-        match oh
+        if !group_v2::is_group(&oh) {
+            return Err(
+                FormatError::PathNotFound(String::from("object header is not a group")).into(),
+            );
+        }
+        let mut region = match oh
             .messages
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
         {
-            Some(message) => self.push_symbol_table_links(
-                &mut region,
-                &SymbolTableMessage::parse_with_offset_width(
+            Some(message) => {
+                if oh
+                    .messages
+                    .iter()
+                    .any(|m| is_link_storage_message(m.msg_type))
+                {
+                    return Err(Error::EditUnsupported(
+                        "a group mixes symbol-table storage with modern link storage",
+                    ));
+                }
+                self.symbol_table_region(&SymbolTableMessage::parse_with_offset_width(
                     &message.data,
                     self.context.widths().offsets,
-                )?,
-            )?,
-            None => {
-                let entries = group_v2::resolve_group_entries_from_source(
-                    &self.image(),
-                    AccessMode::ReadWrite,
-                    &oh,
-                    self.context.widths(),
-                    self.context.addresses(),
-                    group_v1::group_leaf_node_k(self.context.superblock()),
-                )?;
-                for e in &entries {
-                    // The new compact region does not track link creation order.
-                    region.push_link(&e.name, e.object_header_address, None);
-                }
+                )?)?
             }
-        }
+            None => link_message_region(&oh, self.context.widths().offsets)?,
+        };
         for m in &oh.messages {
             if m.msg_type == MessageType::ATTRIBUTE {
                 if m.data.len() > OBJECT_HEADER_MESSAGE_MAX {
@@ -145,11 +155,14 @@ impl WriteEngine {
         Ok(GroupInfo { region, links })
     }
 
-    fn push_symbol_table_links(
-        &self,
-        region: &mut OhRegion,
-        symbol_table: &SymbolTableMessage,
-    ) -> Result<(), Error> {
+    /// Returns a compact-link region with one Link message per entry of the version 1 group
+    /// `symbol_table` describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a link cannot be reproduced as a Link message, and
+    /// the parsing and source-read errors of the group readers.
+    fn symbol_table_region(&self, symbol_table: &SymbolTableMessage) -> Result<OhRegion, Error> {
         let widths = self.context.widths();
         let addresses = self.context.addresses();
         let k = group_v1::group_leaf_node_k(self.context.superblock());
@@ -166,6 +179,7 @@ impl WriteEngine {
             ),
         }
         .map_err(group_links::storage_error)?;
+        let mut region = fresh_group_region();
         for link in links {
             let body = link
                 .serialize(OFFSET_WIDTH)
@@ -177,7 +191,7 @@ impl WriteEngine {
             }
             region.push(MessageType::LINK, &body);
         }
-        Ok(())
+        Ok(region)
     }
 }
 
@@ -346,6 +360,91 @@ pub(super) fn fresh_group_region() -> OhRegion {
     );
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     region
+}
+
+/// Returns a region with the link storage messages of the version 1 header `object_header`, and a
+/// Group Info message if the header has none.
+///
+/// Each message is copied with its type and flags, and with its body stripped of the padding of
+/// the version 1 header, see [`unpadded_body`].
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if a link storage message has a flag other than the
+/// constant flag, and the errors of [`unpadded_body`] and of [`ensure_group_info`].
+pub(super) fn link_message_region(
+    object_header: &ObjectHeader,
+    offset_width: OffsetWidth,
+) -> Result<OhRegion, Error> {
+    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    for message in object_header
+        .messages
+        .iter()
+        .filter(|m| is_link_storage_message(m.msg_type))
+    {
+        if !message.flags.difference(MessageFlags::CONSTANT).is_empty() {
+            return Err(Error::EditUnsupported(
+                "a group's link metadata has object-header flags this editor cannot reproduce",
+            ));
+        }
+        // A version 1 header stores each message size in two bytes, so no body exceeds
+        // `OBJECT_HEADER_MESSAGE_MAX` and the record encoder cannot panic.
+        let record = region.layout().record_with_creation_index(
+            message.msg_type,
+            message.flags,
+            0,
+            unpadded_body(message, offset_width)?,
+        );
+        region.push_bytes(&record);
+    }
+    ensure_group_info(&mut region)?;
+    Ok(region)
+}
+
+/// Returns the body of the link storage message `message` without its trailing padding.
+///
+/// In a version 1 object header, each message body is padded to a multiple of eight bytes and the
+/// padding is included in the message size, as defined in "Version 1 Data Object Header Prefix"
+/// of the [format specification, version 4.0][spec]. The length of the body is read from the
+/// message's own fields.
+///
+/// # Errors
+///
+/// Returns the parse errors of the Link Info, Group Info, or Link message, and
+/// [`FormatError::Internal`] if `message` is not a link storage message.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&[u8], Error> {
+    let data = message.data.as_slice();
+    let len = match message.msg_type {
+        MessageType::LINK_INFO => LinkInfoMessage::parse_with_offset_width(data, offset_width)?
+            .serialize(offset_width)
+            .len(),
+        MessageType::GROUP_INFO => {
+            GroupPhaseChange::encoded_len(data).map_err(group_links::group_info_error)?
+        }
+        MessageType::LINK => {
+            OwnedLink::parse_padded(data, offset_width)
+                .map_err(group_links::storage_error)?
+                .1
+        }
+        _ => {
+            return Err(FormatError::Internal(
+                "only link storage messages have their padding removed".into(),
+            )
+            .into());
+        }
+    };
+    Ok(data.get(..len).ok_or_else(|| {
+        FormatError::Internal("a parsed link storage message is longer than its body".into())
+    })?)
+}
+
+fn is_link_storage_message(msg_type: MessageType) -> bool {
+    matches!(
+        msg_type,
+        MessageType::LINK_INFO | MessageType::GROUP_INFO | MessageType::LINK
+    )
 }
 
 /// Appends a minimal Group Info message if one is absent.
