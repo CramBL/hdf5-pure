@@ -65,7 +65,7 @@ impl<A> AddressRange<A> {
     {
         Ok(Self {
             start,
-            end: start.checked_advance(length)?,
+            end: start.checked_add(length)?,
         })
     }
 

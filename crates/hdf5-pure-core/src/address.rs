@@ -47,13 +47,21 @@ impl PhysicalAddress {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method delegates to the trait method with identical semantics"
+    )]
     pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
-        Address::checked_advance(self, length)
+        Address::checked_add(self, length)
     }
 
     /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method delegates to the trait method with identical semantics"
+    )]
     pub fn checked_sub(self, length: u64) -> Option<Self> {
-        Address::checked_retreat(self, length)
+        Address::checked_sub(self, length)
     }
 
     /// Returns the byte distance from `earlier` to this position, or `None` if `earlier` is
@@ -243,14 +251,22 @@ impl StoredAddress {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method delegates to the trait method with identical semantics"
+    )]
     pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
-        Address::checked_advance(self, length)
+        Address::checked_add(self, length)
     }
 
     /// Returns the encoded address `length` bytes before this one, or `None` if it would be below
     /// zero.
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method delegates to the trait method with identical semantics"
+    )]
     pub fn checked_sub(self, length: u64) -> Option<Self> {
-        Address::checked_retreat(self, length)
+        Address::checked_sub(self, length)
     }
 
     /// Returns the byte distance from `earlier` to this address, or `None` if `earlier` is greater.
@@ -345,7 +361,7 @@ pub trait Address: sealed::Sealed + Copy + Ord {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
-    fn checked_advance(self, length: u64) -> Result<Self, FormatError> {
+    fn checked_add(self, length: u64) -> Result<Self, FormatError> {
         self.value()
             .checked_add(length)
             .map(Self::from_u64)
@@ -356,7 +372,7 @@ pub trait Address: sealed::Sealed + Copy + Ord {
     }
 
     /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
-    fn checked_retreat(self, length: u64) -> Option<Self> {
+    fn checked_sub(self, length: u64) -> Option<Self> {
         self.value().checked_sub(length).map(Self::from_u64)
     }
 
@@ -413,13 +429,13 @@ mod tests {
     fn generic_address_arithmetic_preserves_coordinates<A: Address + Debug>(
         #[case] address: fn(u64) -> A,
     ) {
-        assert_eq!(address(512).checked_advance(96).unwrap(), address(608));
-        assert_eq!(address(608).checked_retreat(96), Some(address(512)));
+        assert_eq!(address(512).checked_add(96).unwrap(), address(608));
+        assert_eq!(address(608).checked_sub(96), Some(address(512)));
         assert_eq!(address(608).distance_from(address(512)), Some(96));
         assert_eq!(address(512).distance_from(address(608)), None);
-        assert_eq!(address(0).checked_retreat(1), None);
+        assert_eq!(address(0).checked_sub(1), None);
         assert_eq!(
-            address(u64::MAX).checked_advance(1).unwrap_err(),
+            address(u64::MAX).checked_add(1).unwrap_err(),
             FormatError::OffsetOverflow {
                 offset: u64::MAX,
                 length: 1,
