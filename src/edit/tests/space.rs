@@ -705,6 +705,67 @@ fn deleting_a_dense_link_group_reclaims_its_whole_subtree() {
 }
 
 #[test]
+fn deleting_a_compact_group_with_symbolic_links_reclaims_its_hard_linked_subtree() {
+    let path = test_util::temp::temp_path("symbolic_links.h5");
+    std::fs::write(&path, test_util::modern::v2_symbolic_links()).unwrap();
+    let reader = crate::reader::File::open(&path).unwrap();
+    let data_blocks: Vec<(FileRange, FreeClass)> = ["g/d", "g/σ/v"]
+        .into_iter()
+        .map(|dataset_path| {
+            let crate::Layout::Contiguous {
+                address: Some(data_addr),
+                size,
+            } = reader.dataset(dataset_path).unwrap().layout().unwrap()
+            else {
+                panic!("{dataset_path:?} stores its data contiguously");
+            };
+            (
+                FileRange::new(PhysicalAddress::new(data_addr), size).unwrap(),
+                FreeClass::Page(PageType::Raw),
+            )
+        })
+        .collect();
+    drop(reader);
+
+    let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let header_spans = |object_path: &str| {
+        let addr = crate::group_v2::resolve_path_any_from_source(
+            &session.image(),
+            AccessMode::ReadWrite,
+            session.superblock(),
+            session.widths(),
+            session.addresses(),
+            &ObjectPathBuf::parse(object_path).as_path(),
+        )
+        .unwrap();
+        (addr, session.oh_chunk_spans(addr).unwrap())
+    };
+    let (group, _) = header_spans("/g");
+    let mut expected: Vec<(FileRange, FreeClass)> = ["/g", "/g/d", "/g/σ", "/g/σ/v"]
+        .into_iter()
+        .flat_map(|object_path| reclaim::meta_spans(header_spans(object_path).1))
+        .chain(data_blocks)
+        .collect();
+    expected.sort_unstable_by_key(|&(range, _)| range.start());
+    let incoming = session.count_incoming_hard_links().unwrap();
+    let mut planned = Vec::new();
+    session.collect_free_spans(group, 0, &incoming, &mut planned);
+    planned.sort_unstable_by_key(|&(range, _)| range.start());
+    assert_eq!(planned, expected);
+
+    session.delete(&ObjectPathBuf::parse("/g")).unwrap();
+    session.commit().unwrap();
+    drop(session);
+    let reader = crate::reader::File::open(&path).unwrap();
+    assert_eq!(reader.dataset("target").unwrap().read_i32().unwrap(), [99]);
+    let err = reader.group("g").unwrap_err();
+    let Error::Format(FormatError::PathNotFound(missing)) = &err else {
+        panic!("expected PathNotFound for g, got {err:?}");
+    };
+    assert_eq!(missing, "g");
+}
+
+#[test]
 fn a_v2_btree_chunk_index_is_metadata_when_reclaimed() {
     let btree = ChunkIndexLayout::BTreeV2 {
         address: Some(StoredAddress::new(4096)),

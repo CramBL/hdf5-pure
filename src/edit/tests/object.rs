@@ -11,7 +11,9 @@ use hdf5_pure_format::__private::ObjectTimes;
 use rstest::rstest;
 use test_util::data_layout as layout_bytes;
 use test_util::link_message::HardLink;
+use test_util::link_message::SymbolicLink;
 use test_util::object_header::Message;
+use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2 as v2_bytes;
 use test_util::object_header::v2::HeaderFlags;
 use test_util::widths::Widths;
@@ -510,31 +512,35 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                     WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
                         .unwrap();
                 let ObjModel::Group {
-                    children,
+                    region,
+                    links,
                     dense_attrs,
-                    ..
                 } = object
                 else {
                     panic!("expected a group at {addr}");
                 };
                 assert!(dense_attrs.is_empty());
-                let [(link_name, creation_order, child)] = children.as_slice() else {
-                    panic!("expected one link at {addr}, got {children:?}");
+                let [link] = links.as_slice() else {
+                    panic!("expected one hard link at {addr}, got {}", links.len());
                 };
-                assert_eq!((link_name.as_str(), *creation_order), ("g", None));
-                addr = base.resolve(*child).unwrap().get();
+                assert_eq!(
+                    link_messages(&region),
+                    [file_writer::make_link("g", link.target)]
+                );
+                addr = base.resolve(link.target).unwrap().get();
             }
             let leaf = WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
                 .unwrap();
             let ObjModel::Group {
-                children,
+                region,
+                links,
                 dense_attrs,
-                ..
             } = leaf
             else {
                 panic!("expected a group at {addr}");
             };
-            assert!(children.is_empty(), "{children:?}");
+            assert!(links.is_empty());
+            assert_eq!(link_messages(&region), []);
             assert_eq!(dense_attrs.attrs(), [attr]);
         })
         .unwrap()
@@ -573,7 +579,7 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
     FileBuilder::new().write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let addr = engine.write_copy_subtree(&tree).unwrap();
-    let ObjModel::Group { children, .. } = WriteEngine::read_object(
+    let ObjModel::Group { region, links, .. } = WriteEngine::read_object(
         engine.image(),
         AccessMode::ReadWrite,
         addr,
@@ -583,12 +589,84 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
         panic!("expected a group at {addr}");
     };
     assert_eq!(
-        children
-            .iter()
-            .map(|(link_name, _, _)| link_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b", "c"]
+        link_messages(&region),
+        ["a", "b", "c"]
+            .into_iter()
+            .zip(&links)
+            .map(|(link_name, link)| file_writer::make_link(link_name, link.target))
+            .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn a_copied_group_with_an_unknown_link_type_is_rejected() {
+    let mut link = SymbolicLink::soft("s", "x").build();
+    link[LINK_TYPE_AT] = RESERVED_LINK_TYPE;
+    let Err(err) = read_group_with_link(&link) else {
+        panic!("expected the group to be rejected");
+    };
+    let Error::Format(FormatError::InvalidLinkType(link_type)) = err else {
+        panic!("expected InvalidLinkType, got {err:?}");
+    };
+    assert_eq!(link_type, RESERVED_LINK_TYPE);
+}
+
+#[test]
+fn a_copied_hard_link_with_bytes_past_its_address_is_rejected() {
+    let mut link = hard_link_a();
+    link.push(0);
+    let Err(err) = read_group_with_link(&link) else {
+        panic!("expected the group to be rejected");
+    };
+    common::assert_unsupported(
+        err,
+        "a group's links or link-info metadata cannot be reproduced",
+    );
+}
+
+#[test]
+fn a_copied_soft_link_keeps_a_target_that_is_not_utf8() {
+    let mut link = SymbolicLink::soft("s", "x").build();
+    *link.last_mut().unwrap() = 0xFF;
+    let ObjModel::Group { region, links, .. } = read_group_with_link(&link).unwrap() else {
+        panic!("expected a group");
+    };
+    assert!(links.is_empty());
+    assert_eq!(link_bodies(&region), [link.as_slice()]);
+}
+
+#[test]
+fn a_copied_dataset_header_with_a_link_message_is_rejected() {
+    let Err(err) = read_object_with_messages([
+        Message::new(
+            FixtureMessage::DATA_LAYOUT,
+            &layout_bytes::contiguous(0x2000, 8),
+        ),
+        Message::new(FixtureMessage::LINK, &hard_link_a()),
+    ]) else {
+        panic!("expected the dataset to be rejected");
+    };
+    common::assert_unsupported(err, "a dataset header holds link messages");
+}
+
+fn read_group_with_link(link: &[u8]) -> Result<ObjModel, Error> {
+    read_object_with_messages([
+        Message::new(FixtureMessage::LINK_INFO, &LINK_INFO_UNTRACKED_COMPACT),
+        Message::new(FixtureMessage::GROUP_INFO, &GROUP_INFO_BODY),
+        Message::new(FixtureMessage::LINK, link),
+    ])
+}
+
+fn read_object_with_messages(
+    messages: impl IntoIterator<Item = Message>,
+) -> Result<ObjModel, Error> {
+    let header = v2_bytes::Header::new().messages(messages).build();
+    WriteEngine::read_object(
+        &BytesSource::new(header.as_slice()),
+        AccessMode::ReadWrite,
+        0,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+    )
 }
 
 #[test]
@@ -1649,21 +1727,43 @@ fn verbatim_copy(region: OhRegion, dense_attrs: DenseAttrSet) -> CopyTree {
 fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     let mut nodes = CopyTreeBuilder::default();
     let leaf = CopyNode::Group {
-        non_link_region: edit::group::fresh_group_region(),
+        region: edit::group::fresh_group_region(),
         links: Vec::new(),
         dense_attrs: DenseAttrSet::new(vec![leaf_attr], DenseAttrCreationOrder::Untracked, [])
             .unwrap(),
     };
-    let root = (0..depth).fold(leaf, |child, _| CopyNode::Group {
-        non_link_region: edit::group::fresh_group_region(),
-        links: vec![CopyLink {
-            name: "g".into(),
-            creation_order: None,
-            target: nodes.push(child),
-        }],
-        dense_attrs: DenseAttrSet::default(),
+    let root = (0..depth).fold(leaf, |child, _| {
+        let mut region = edit::group::fresh_group_region();
+        region.push_link("g", StoredAddress::new(UNDEF), None);
+        CopyNode::Group {
+            links: vec![CopyLink {
+                addr_off: region.len() - usize::from(OFFSET_WIDTH.get()),
+                target: nodes.push(child),
+            }],
+            region,
+            dense_attrs: DenseAttrSet::default(),
+        }
     });
     nodes.finish(root)
+}
+
+fn link_messages(region: &OhRegion) -> Vec<LinkMessage> {
+    link_bodies(region)
+        .into_iter()
+        .map(|body| LinkMessage::parse_with_offset_width(body, OFFSET_WIDTH).unwrap())
+        .collect()
+}
+
+fn link_bodies(region: &OhRegion) -> Vec<&[u8]> {
+    let mut bodies = Vec::new();
+    let mut p = 0;
+    while let Some((msg_type, body, body_end)) = region.next_message(p).unwrap() {
+        if msg_type == MessageType::LINK {
+            bodies.push(&region[body..body_end]);
+        }
+        p = body_end;
+    }
+    bodies
 }
 
 fn message_record(msg_type: MessageType, body: &[u8]) -> Vec<u8> {
@@ -1941,6 +2041,8 @@ fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {
 }
 
 const UNKNOWN_MESSAGE_TYPE: MessageType = MessageType::from_u16(0x00C8);
+const LINK_TYPE_AT: usize = 2;
+const RESERVED_LINK_TYPE: u8 = 2;
 const DEEP_NESTING: usize = 100_000;
 const REMOVED_ADDRESS: u64 = 248;
 const SMALL_STACK: usize = 256 * 1024;
