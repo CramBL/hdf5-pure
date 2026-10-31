@@ -275,6 +275,12 @@ fn status_flags_have_named_constructors_and_typed_queries(
 
 #[test]
 fn filter_metadata_types_are_public() {
+    let _: fn(&hdf5_pure::Filter) -> FilterId = hdf5_pure::Filter::id;
+    let _: fn(&hdf5_pure::Filter) -> Option<&str> = hdf5_pure::Filter::name;
+    let _: fn(&hdf5_pure::Filter) -> bool = hdf5_pure::Filter::is_optional;
+    let _: fn(&hdf5_pure::Filter) -> &FilterParameters = hdf5_pure::Filter::parameters;
+    let _: fn(&hdf5_pure::Filter) -> u16 = hdf5_pure::Filter::flags;
+    let _: fn(&hdf5_pure::Filter) -> &[u32] = hdf5_pure::Filter::client_data;
     let _: fn(&hdf5_pure::Dataset) -> Result<Vec<hdf5_pure::FilterId>, Error> =
         hdf5_pure::Dataset::filters;
     let _: fn(&hdf5_pure::Dataset) -> Result<Vec<hdf5_pure::Filter>, Error> =

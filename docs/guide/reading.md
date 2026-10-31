@@ -170,12 +170,21 @@ Four accessors describe a dataset's storage layout without reading any data. The
 | [`Dataset::chunk_shape()`](crate::Dataset::chunk_shape) | `Option<Vec<u64>>`, the chunk dimensions, one per rank. `None` for a dataset that is not chunked |
 | [`Dataset::filters()`](crate::Dataset::filters) | `Result<Vec<FilterId>, Error>`, the typed filter identifiers in pipeline order. Empty for an unfiltered dataset |
 
-[`Dataset::filter_pipeline`](crate::Dataset::filter_pipeline) reads the parameters and recorded
-metadata for each filter. Known parameter errors are returned during introspection.
-Raw parameters remain available for [`FilterParameters::Opaque`](crate::FilterParameters::Opaque)
-filters. Staged datasets report [`FilterParameters::Pending`](crate::FilterParameters::Pending)
-until serialization. The recorded flags and client data remain available through
-[`Filter::flags`](crate::Filter::flags) and [`Filter::client_data`](crate::Filter::client_data).
+[`Dataset::filter_pipeline`](crate::Dataset::filter_pipeline) returns immutable
+[`Filter`](crate::Filter) inspection results in pipeline order. Read the recorded identifier and
+name through [`Filter::id`](crate::Filter::id) and [`Filter::name`](crate::Filter::name).
+[`Filter::is_optional`](crate::Filter::is_optional) reflects bit 0 of the recorded flags, and
+[`Filter::parameters`](crate::Filter::parameters) borrows an interpretation of the recorded client
+data. Known parameter errors are returned during introspection.
+
+[`Filter::flags`](crate::Filter::flags) preserves every recorded bit, and
+[`Filter::client_data`](crate::Filter::client_data) preserves the complete encoded parameter vector,
+including values outside the interpretation. For
+[`FilterParameters::Opaque`](crate::FilterParameters::Opaque) filters, inspect that vector directly.
+Staged datasets report [`FilterParameters::Pending`](crate::FilterParameters::Pending)
+with empty client data until serialization. Inspect the pipeline again after
+[`File::commit`](crate::File::commit) for the encoded parameters. Configure filters for writing
+through [`DatasetBuilder`](crate::DatasetBuilder).
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -218,9 +227,9 @@ let dataset = File::open(&path)?.dataset("samples")?;
 for chunk in dataset.chunks()? {
     for (filter, disposition) in chunk.filters().dispositions() {
         match disposition {
-            FilterDisposition::Applied => println!("{:?} applied", filter.id),
-            FilterDisposition::Skipped => println!("{:?} skipped", filter.id),
-            FilterDisposition::BypassedRaw => println!("{:?} bypassed", filter.id),
+            FilterDisposition::Applied => println!("{:?} applied", filter.id()),
+            FilterDisposition::Skipped => println!("{:?} skipped", filter.id()),
+            FilterDisposition::BypassedRaw => println!("{:?} bypassed", filter.id()),
         }
     }
 }

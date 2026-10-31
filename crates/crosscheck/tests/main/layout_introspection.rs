@@ -426,7 +426,7 @@ fn c_shuffle_then_deflate_pipeline() {
     let ds = f.dataset("d").unwrap();
 
     let pipeline = ds.filter_pipeline().unwrap();
-    let ids: Vec<FilterId> = pipeline.iter().map(|flt| flt.id).collect();
+    let ids: Vec<FilterId> = pipeline.iter().map(|flt| flt.id()).collect();
     assert_eq!(
         ids,
         vec![FilterId::Shuffle, FilterId::Deflate],
@@ -439,28 +439,30 @@ fn c_shuffle_then_deflate_pipeline() {
 
     let shuffle = pipeline
         .iter()
-        .find(|flt| flt.id == FilterId::Shuffle)
+        .find(|flt| flt.id() == FilterId::Shuffle)
         .unwrap();
     let deflate = pipeline
         .iter()
-        .find(|flt| flt.id == FilterId::Deflate)
+        .find(|flt| flt.id() == FilterId::Deflate)
         .unwrap();
     assert_eq!(
-        deflate.parameters,
-        FilterParameters::Deflate(DeflateLevel::Six)
+        deflate.parameters(),
+        &FilterParameters::Deflate(DeflateLevel::Six)
     );
     assert_eq!(
-        shuffle.parameters,
-        FilterParameters::Shuffle(NonZeroU32::new(4).unwrap())
+        shuffle.parameters(),
+        &FilterParameters::Shuffle(NonZeroU32::new(4).unwrap())
     );
     assert_eq!(deflate.client_data(), vec![6], "deflate level");
     assert_eq!(shuffle.client_data(), vec![4], "shuffle element size (i32)");
+    assert_eq!(u32::from(shuffle.flags()), hdf5_sys::h5z::H5Z_FLAG_OPTIONAL);
+    assert_eq!(u32::from(deflate.flags()), hdf5_sys::h5z::H5Z_FLAG_OPTIONAL);
     // The reference wrapper records filters as OPTIONAL (filter-flags bit 0),
     // "the same way h5py does it", so a reader may skip one it lacks. Our
     // `is_optional` reflects that faithfully — unlike the pure writer, which
     // writes them mandatory (see the pure `deflate_pipeline_details` test).
     assert!(
-        shuffle.is_optional && deflate.is_optional,
+        shuffle.is_optional() && deflate.is_optional(),
         "h5py/metno mark filters optional"
     );
     for c in ds.chunks().unwrap() {

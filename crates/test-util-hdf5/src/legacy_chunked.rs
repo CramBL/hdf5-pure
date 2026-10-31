@@ -74,13 +74,13 @@ pub fn assert_contents(file: &File, byte_order: DatatypeByteOrder) {
     );
     let pipeline = dataset.filter_pipeline().unwrap();
     assert_eq!(pipeline.len(), 1);
-    assert_eq!(pipeline[0].id, FilterId::Deflate);
+    assert_eq!(pipeline[0].id(), FilterId::Deflate);
     assert_eq!(
-        pipeline[0].parameters,
-        FilterParameters::Deflate(DeflateLevel::Six)
+        pipeline[0].parameters(),
+        &FilterParameters::Deflate(DeflateLevel::Six)
     );
-    assert!(pipeline[0].is_optional);
-    assert_eq!(pipeline[0].name.as_deref(), Some("deflate"));
+    assert!(pipeline[0].is_optional());
+    assert_eq!(pipeline[0].name(), Some("deflate"));
     assert_eq!(pipeline[0].client_data(), [6]);
     let mut chunks = dataset.chunks().unwrap();
     chunks.sort_by(|a, b| a.offset.cmp(&b.offset));

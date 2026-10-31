@@ -68,8 +68,8 @@ fn native_reader_observes_and_rewrites_fresh_pure_lzf_output() {
     assert_eq!(decoded_chunks.len(), chunks);
     for chunk in decoded_chunks {
         let (filter, disposition) = chunk.filters().filter(0).unwrap();
-        assert_eq!(filter.id, FilterId::Lzf);
-        assert!(filter.is_optional);
+        assert_eq!(filter.id(), FilterId::Lzf);
+        assert!(filter.is_optional());
         assert_eq!(disposition, FilterDisposition::Skipped);
         assert!(!chunk.filters().bypasses_pipeline());
     }

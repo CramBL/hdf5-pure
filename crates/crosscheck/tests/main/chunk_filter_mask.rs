@@ -95,7 +95,7 @@ fn assert_masks(path: &Path, mask: u32, uninterpreted: u32) {
         assert!(!view.bypasses_pipeline());
         assert_eq!(
             view.dispositions()
-                .map(|(filter, state)| (filter.id, state))
+                .map(|(filter, state)| (filter.id(), state))
                 .collect::<Vec<_>>(),
             [
                 (FilterId::Shuffle, FilterDisposition::Applied),

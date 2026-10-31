@@ -275,25 +275,23 @@ pub enum FilterDisposition {
     Skipped,
 }
 
-/// A filter's identifier, interpreted parameters, and encoded metadata.
+/// An immutable description of a filter inspected in a dataset's pipeline.
 ///
 /// Obtain filters in application order from
 /// [`Dataset::filter_pipeline`](crate::Dataset::filter_pipeline).
-/// The reader preserves the recorded name, flags, and client data alongside the interpreted
-/// parameters. A staged dataset has [`FilterParameters::Pending`] until its parameters are derived
-/// during serialization.
+/// The reader preserves the recorded identifier, name, flags, and client data. Interpreted
+/// parameters correspond to that identifier and client data. Configure filters for writing
+/// through [`DatasetBuilder`](crate::DatasetBuilder).
+///
+/// A staged dataset reports [`FilterParameters::Pending`] until serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
     /// The filter identifier encoded in the pipeline message.
-    pub id: FilterId,
+    id: FilterId,
     /// The recorded filter name, if present.
-    pub name: Option<String>,
-    /// Whether the writer may omit this filter if it fails during output.
-    ///
-    /// Inspect each chunk's disposition through [`Chunk::filters`].
-    pub is_optional: bool,
+    name: Option<String>,
     /// The interpreted parameters, or their opaque or pending classification.
-    pub parameters: FilterParameters,
+    parameters: FilterParameters,
     flags: u16,
     client_data: Vec<u32>,
 }
@@ -303,7 +301,6 @@ impl Filter {
         Self {
             id,
             name: None,
-            is_optional,
             parameters: FilterParameters::Pending,
             flags: if is_optional {
                 crate::filter_pipeline::H5Z_FLAG_OPTIONAL
@@ -327,20 +324,50 @@ impl Filter {
         Ok(Self {
             id,
             name,
-            is_optional: flags & crate::filter_pipeline::H5Z_FLAG_OPTIONAL != 0,
             parameters,
             flags,
             client_data,
         })
     }
 
-    /// Returns the filter flags, including reserved bits read from the file.
+    /// Returns the filter identifier recorded in the pipeline.
+    ///
+    /// Returns the configured identifier for a staged dataset.
+    pub fn id(&self) -> FilterId {
+        self.id
+    }
+
+    /// Returns the name recorded in the pipeline message, if present.
+    ///
+    /// The recorded name is independent of the identifier. A built-in filter's recorded name may
+    /// be absent.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Returns whether bit 0 (`H5Z_FLAG_OPTIONAL`) of the recorded flags is set.
+    ///
+    /// The writer may omit an optional filter if it fails during output. Inspect each chunk's
+    /// disposition through [`Chunk::filters`].
+    pub fn is_optional(&self) -> bool {
+        self.flags & crate::filter_pipeline::H5Z_FLAG_OPTIONAL != 0
+    }
+
+    /// Returns an interpretation of the recorded client data for this filter's identifier.
+    ///
+    /// Use [`Self::client_data`] for the complete encoded parameter vector.
+    pub fn parameters(&self) -> &FilterParameters {
+        &self.parameters
+    }
+
+    /// Returns the complete recorded flag word, including reserved bits.
     pub fn flags(&self) -> u16 {
         self.flags
     }
 
-    /// Returns the encoded filter parameters in their stored order.
+    /// Returns the complete original parameter vector in its recorded order.
     ///
+    /// Includes values that are not represented by [`FilterParameters`].
     /// Returns an empty slice for [`FilterParameters::Pending`].
     pub fn client_data(&self) -> &[u32] {
         &self.client_data
@@ -365,7 +392,10 @@ pub enum FilterParameters {
     ScaleOffset(ScaleOffsetParameters),
     /// Raw parameters for a filter or mode that this API does not interpret.
     Opaque,
-    /// Parameters awaiting serialization of a staged dataset.
+    /// Parameters of a staged dataset that have not yet been serialized.
+    ///
+    /// Inspect the pipeline again after [`File::commit`](crate::File::commit) for the encoded
+    /// parameters and their interpretation.
     Pending,
 }
 
@@ -595,26 +625,22 @@ impl fmt::Display for Filter {
     /// `custom(id=40000)` — so the parentheses hold the filter's parameters and
     /// nothing else.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let well_known = self.id.name();
+        let well_known = self.id().name();
         match well_known {
             Some(name) => f.write_str(name)?,
             // Recorded by the file, so escaped for the same reason a compound's
             // member name is.
-            None => write!(
-                f,
-                "{}",
-                EscapedName(self.name.as_deref().unwrap_or("filter"))
-            )?,
+            None => write!(f, "{}", EscapedName(self.name().unwrap_or("filter")))?,
         }
 
         // An unnamed identifier is a parameter of its own, and comes first.
         let write_id = well_known.is_none();
-        if write_id || !self.client_data.is_empty() {
+        if write_id || !self.client_data().is_empty() {
             f.write_str("(")?;
             if write_id {
-                write!(f, "id={}", self.id.get())?;
+                write!(f, "id={}", self.id().get())?;
             }
-            for (i, value) in self.client_data.iter().enumerate() {
+            for (i, value) in self.client_data().iter().enumerate() {
                 if write_id || i > 0 {
                     f.write_str(", ")?;
                 }
@@ -623,10 +649,10 @@ impl fmt::Display for Filter {
             f.write_str(")")?;
         }
 
-        if self.parameters == FilterParameters::Pending {
+        if self.parameters() == &FilterParameters::Pending {
             f.write_str(" [pending]")?;
         }
-        if self.is_optional {
+        if self.is_optional() {
             f.write_str(" [optional]")?;
         }
         Ok(())

@@ -65,10 +65,10 @@ fn mixed_overwrites_preserve_native_values_after_payload_transfer(#[case] layout
                 assert_eq!(strings.chunk_shape().unwrap(), Some(vec![2]));
                 let filters = strings.filter_pipeline().unwrap();
                 assert_eq!(filters.len(), 1);
-                assert_eq!(filters[0].id, FilterId::Deflate);
+                assert_eq!(filters[0].id(), FilterId::Deflate);
                 assert_eq!(
-                    filters[0].parameters,
-                    FilterParameters::Deflate(DeflateLevel::Six)
+                    filters[0].parameters(),
+                    &FilterParameters::Deflate(DeflateLevel::Six)
                 );
             }
             (_, actual) => panic!("expected {layout:?} storage, got {actual:?}"),

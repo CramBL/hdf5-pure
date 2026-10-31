@@ -1,4 +1,7 @@
 #[cfg(feature = "deflate")]
+use core::num::NonZeroU32;
+
+#[cfg(feature = "deflate")]
 use hdf5_pure::DatasetBuilder;
 #[cfg(feature = "deflate")]
 use hdf5_pure::DeflateLevel;
@@ -50,8 +53,8 @@ fn deflate_preserves_typed_level(
             .unwrap()
             .last()
             .unwrap()
-            .parameters,
-        FilterParameters::Deflate(level)
+            .parameters(),
+        &FilterParameters::Deflate(level)
     );
     assert_eq!(
         dataset
@@ -145,7 +148,11 @@ fn filter_accessors_report_malformed_metadata(
 #[case::lzf(32000, FilterId::Lzf)]
 #[case::zfp(32013, FilterId::Zfp)]
 #[case::custom(40000, FilterId::Custom(CustomFilterId::try_from(40000).unwrap()))]
-fn opaque_filter_metadata_is_lossless(#[case] raw: u16, #[case] id: FilterId) {
+fn opaque_filter_metadata_is_lossless(
+    #[case] raw: u16,
+    #[case] id: FilterId,
+    #[values(0x8000, 0x8001)] flags: u16,
+) {
     let values = vec![u32::MAX, 0, 7];
     let mut builder = FileBuilder::new();
     builder
@@ -158,7 +165,7 @@ fn opaque_filter_metadata_is_lossless(#[case] raw: u16, #[case] id: FilterId) {
         filters: vec![hdf5_pure_format::__private::FilterDescription {
             filter_id: raw,
             name: Some("xyz".into()),
-            flags: 0x8001,
+            flags,
             client_data: values.clone(),
         }],
     }
@@ -169,11 +176,14 @@ fn opaque_filter_metadata_is_lossless(#[case] raw: u16, #[case] id: FilterId) {
     assert_eq!(dataset.filters().unwrap(), [id]);
     let pipeline = dataset.filter_pipeline().unwrap();
     assert_eq!(pipeline.len(), 1);
-    assert_eq!(pipeline[0].id, id);
-    assert_eq!(pipeline[0].parameters, FilterParameters::Opaque);
-    assert_eq!(pipeline[0].name.as_deref(), Some("xyz"));
-    assert_eq!(pipeline[0].flags(), 0x8001);
-    assert!(pipeline[0].is_optional);
+    assert_eq!(pipeline[0].id(), id);
+    assert_eq!(pipeline[0].parameters(), &FilterParameters::Opaque);
+    assert_eq!(pipeline[0].name(), Some("xyz"));
+    assert_eq!(pipeline[0].flags(), flags);
+    assert_eq!(
+        pipeline[0].is_optional(),
+        flags & hdf5_pure_filter::__private::H5Z_FLAG_OPTIONAL != 0
+    );
     assert_eq!(pipeline[0].client_data(), values);
     let chunks = dataset.chunks().unwrap();
     assert_eq!(chunks.len(), 1);
@@ -182,9 +192,11 @@ fn opaque_filter_metadata_is_lossless(#[case] raw: u16, #[case] id: FilterId) {
     assert_eq!(disposition, FilterDisposition::Applied);
 }
 
-#[test]
+#[rstest]
 #[cfg(feature = "deflate")]
-fn staged_filter_parameters_are_pending_until_commit() {
+#[case::mandatory(false)]
+#[case::optional(true)]
+fn staged_filter_parameters_are_pending_until_commit(#[case] optional: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pending.h5");
     FileBuilder::new().write(&path).unwrap();
@@ -192,35 +204,72 @@ fn staged_filter_parameters_are_pending_until_commit() {
     let dataset = file
         .root()
         .create_dataset("data", |builder| {
-            builder
-                .with_i32_data(&[1, 2, 3, 4])
-                .with_shuffle()
-                .with_deflate(DeflateLevel::Six);
+            builder.with_i32_data(&[1, 2, 3, 4]).with_shuffle();
+            if optional {
+                builder.with_lzf();
+            } else {
+                builder.with_deflate(DeflateLevel::Six);
+            }
         })
         .unwrap();
-    assert_eq!(
-        dataset.filters().unwrap(),
-        [FilterId::Shuffle, FilterId::Deflate]
-    );
+    let id = if optional {
+        FilterId::Lzf
+    } else {
+        FilterId::Deflate
+    };
+    assert_eq!(dataset.filters().unwrap(), [FilterId::Shuffle, id]);
     let pending = dataset.filter_pipeline().unwrap();
     assert_eq!(
         pending
             .iter()
-            .map(|filter| &filter.parameters)
+            .map(|filter| filter.parameters())
             .collect::<Vec<_>>(),
         [&FilterParameters::Pending, &FilterParameters::Pending]
     );
+    assert_eq!(pending[0].id(), FilterId::Shuffle);
+    assert_eq!(pending[1].id(), id);
+    assert_eq!(pending[0].name(), None);
+    assert_eq!(pending[1].name(), None);
+    assert!(pending[0].client_data().is_empty());
+    assert!(pending[1].client_data().is_empty());
+    assert_eq!(pending[0].flags(), 0);
+    assert_eq!(
+        pending[1].flags(),
+        if optional {
+            hdf5_pure_filter::__private::H5Z_FLAG_OPTIONAL
+        } else {
+            0
+        }
+    );
+    assert!(!pending[0].is_optional());
+    assert_eq!(pending[1].is_optional(), optional);
     assert_eq!(pending[0].to_string(), "shuffle [pending]");
     file.commit().unwrap();
     let parsed = dataset.filter_pipeline().unwrap();
-    assert_eq!(parsed[0].id, FilterId::Shuffle);
+    assert_eq!(parsed[0].id(), FilterId::Shuffle);
+    assert_eq!(parsed[1].id(), id);
     assert_eq!(
-        parsed[1].parameters,
-        FilterParameters::Deflate(DeflateLevel::Six)
+        parsed[0].parameters(),
+        &FilterParameters::Shuffle(NonZeroU32::new(4).unwrap())
     );
-    assert_eq!(parsed[1].client_data(), [6]);
-    assert!(!parsed[0].is_optional);
-    assert!(!parsed[1].is_optional);
+    assert_eq!(parsed[0].client_data(), [4]);
+    if optional {
+        assert_eq!(parsed[1].parameters(), &FilterParameters::Opaque);
+        assert_eq!(parsed[1].client_data(), [4, 0x0105, 16]);
+        assert_eq!(parsed[1].name(), Some("lzf"));
+    } else {
+        assert_eq!(
+            parsed[1].parameters(),
+            &FilterParameters::Deflate(DeflateLevel::Six)
+        );
+        assert_eq!(parsed[1].client_data(), [6]);
+    }
+    assert_eq!(parsed[0].flags(), pending[0].flags());
+    assert_eq!(parsed[1].flags(), pending[1].flags());
+    assert!(!parsed[0].is_optional());
+    assert_eq!(parsed[1].is_optional(), optional);
+    assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4]);
+    assert_eq!(pending[1].parameters(), &FilterParameters::Pending);
 }
 
 #[derive(Clone, Copy)]

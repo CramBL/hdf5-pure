@@ -255,9 +255,9 @@ fn deflate_pipeline_details() {
     let pipeline = ds.filter_pipeline().unwrap();
     assert_eq!(pipeline.len(), 1);
     let deflate = &pipeline[0];
-    assert_eq!(deflate.id, FilterId::Deflate, "deflate filter id");
+    assert_eq!(deflate.id(), FilterId::Deflate, "deflate filter id");
     assert_eq!(deflate.client_data(), vec![6], "compression level");
-    assert!(!deflate.is_optional);
+    assert!(!deflate.is_optional());
     assert_eq!(
         ds.filters().unwrap(),
         vec![FilterId::Deflate],
@@ -296,7 +296,7 @@ fn shuffle_then_deflate_pipeline_order() {
         .filter_pipeline()
         .unwrap()
         .iter()
-        .map(|flt| flt.id)
+        .map(|flt| flt.id())
         .collect();
     assert_eq!(
         ids,
@@ -308,7 +308,7 @@ fn shuffle_then_deflate_pipeline_order() {
         vec![FilterId::Shuffle, FilterId::Deflate]
     );
     for flt in ds.filter_pipeline().unwrap() {
-        assert!(!flt.is_optional);
+        assert!(!flt.is_optional());
     }
 }
 
@@ -396,14 +396,14 @@ fn chunks_retain_their_own_pipeline_after_the_dataset_is_dropped() {
     assert_eq!(
         first_view
             .dispositions()
-            .map(|(filter, _)| filter.id)
+            .map(|(filter, _)| filter.id())
             .collect::<Vec<_>>(),
         [FilterId::Shuffle, FilterId::Fletcher32]
     );
     assert_eq!(
         second_view
             .dispositions()
-            .map(|(filter, _)| filter.id)
+            .map(|(filter, _)| filter.id())
             .collect::<Vec<_>>(),
         [FilterId::Deflate, FilterId::Fletcher32]
     );

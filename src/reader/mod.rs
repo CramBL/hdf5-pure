@@ -6799,7 +6799,7 @@ the same commit to replace it",
         self.filter_pipeline_parsed()?
             .into_iter()
             .flat_map(|pipeline| pipeline.filters)
-            .map(|description| Ok(Filter::from_description(description)?.id))
+            .map(|description| Ok(Filter::from_description(description)?.id()))
             .collect()
     }
 
