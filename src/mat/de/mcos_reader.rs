@@ -405,12 +405,13 @@ impl FileWrapper {
         }
         // The five region offsets used here must be non-decreasing and start
         // past the header so the name heap and tables carve cleanly.
+        // MATLAB R2022b writes the last two of the eight offsets as zero.
         if offsets[0] < FILEWRAPPER_HEADER_LEN {
             return Err(MatError::Custom(
                 "FileWrapper name-heap offset overlaps the header".into(),
             ));
         }
-        for w in offsets.windows(2) {
+        for w in offsets[..5].windows(2) {
             if w[1] < w[0] {
                 return Err(MatError::Custom(
                     "FileWrapper region offsets are not non-decreasing".into(),
@@ -1390,6 +1391,29 @@ mod tests {
         assert_eq!(block.props.len(), 1);
         assert_eq!(block.props[0].field_type, FIELD_TYPE_HEAP);
         assert_eq!(block.props[0].value, 0);
+    }
+
+    // MATLAB R2022b writes the last two of the eight region offsets as zero
+    // and ends the blob after the dynamic-property region.
+    #[test]
+    fn parses_string_filewrapper_blob_with_zero_trailing_offsets() {
+        let mut blob = string_object::build_string_filewrapper_metadata(1);
+        let end = read_u32(&blob, 8 + 5 * 4).unwrap().to_usize().unwrap();
+        blob.truncate(end);
+        blob[8 + 6 * 4..FILEWRAPPER_HEADER_LEN].fill(0);
+        let fw = FileWrapper::parse(&blob).expect("R2022b blob must parse");
+
+        assert_eq!(fw.names, vec!["any".to_owned(), "string".to_owned()]);
+        assert_eq!(fw.classes.len(), 2);
+        assert_eq!(fw.classes[1].name_idx, 2);
+        assert_eq!(fw.objects.len(), 2);
+        assert_eq!(fw.objects[1].class_id, 1);
+        assert_eq!(fw.objects[1].saveobj_id, 1);
+        assert_eq!(fw.objects[1].normalobj_id, 0);
+        assert_eq!(fw.seg1.len(), 2);
+        assert_eq!(fw.seg1[1].props.len(), 1);
+        assert_eq!(fw.seg1[1].props[0].field_type, FIELD_TYPE_HEAP);
+        assert_eq!(fw.seg1[1].props[0].value, 0);
     }
 
     #[test]
