@@ -1,5 +1,7 @@
 //! Physical file ranges and borrowed bytes associated with them.
 
+use core::mem;
+
 use crate::address::PhysicalAddress;
 use crate::address_range::AddressRange;
 use crate::error::FormatError;
@@ -166,6 +168,10 @@ impl FileRange {
         self.range
     }
 }
+
+const _: () = {
+    assert!(mem::size_of::<FileRange>() == 16);
+};
 
 #[cfg(test)]
 mod tests {

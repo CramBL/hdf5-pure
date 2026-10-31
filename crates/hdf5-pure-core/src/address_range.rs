@@ -1,5 +1,6 @@
 //! Checked byte intervals with endpoints in one address coordinate system.
 
+use core::mem;
 use core::num::NonZeroU64;
 
 use crate::address::Address;
@@ -190,7 +191,7 @@ impl<A> AddressRange<A> {
 /// module, outside the supported public API.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct NonEmptyRange<A> {
-    range: AddressRange<A>,
+    start: A,
     length: NonZeroU64,
 }
 
@@ -204,10 +205,8 @@ impl<A> NonEmptyRange<A> {
     where
         A: Address,
     {
-        Ok(Self {
-            range: AddressRange::new(start, length.get())?,
-            length,
-        })
+        start.checked_add(length.get())?;
+        Ok(Self { start, length })
     }
 
     /// Returns the inclusive start address in this interval's coordinate system.
@@ -215,15 +214,18 @@ impl<A> NonEmptyRange<A> {
     where
         A: Copy,
     {
-        self.range.start()
+        self.start
     }
 
     /// Returns the exclusive end address in this interval's coordinate system.
-    pub const fn end(self) -> A
+    pub fn end(self) -> A
     where
-        A: Copy,
+        A: Address,
     {
-        self.range.end()
+        // Construction checks the sum, and the private fields cannot change independently.
+        self.start
+            .checked_add(self.length.get())
+            .expect("a nonempty range has a representable end")
     }
 
     /// Returns the positive number of bytes between the endpoints.
@@ -232,16 +234,31 @@ impl<A> NonEmptyRange<A> {
     }
 
     /// Returns the interval with the same endpoints and coordinate type.
-    pub const fn range(self) -> AddressRange<A>
+    pub fn range(self) -> AddressRange<A>
     where
-        A: Copy,
+        A: Address,
     {
-        self.range
+        AddressRange {
+            start: self.start,
+            end: self.end(),
+        }
     }
 }
 
+const _: () = {
+    use crate::address::{PhysicalAddress, StoredAddress};
+
+    assert!(mem::size_of::<AddressRange<StoredAddress>>() == 16);
+    assert!(mem::size_of::<AddressRange<PhysicalAddress>>() == 16);
+    assert!(mem::size_of::<NonEmptyRange<StoredAddress>>() == 16);
+    assert!(mem::size_of::<NonEmptyRange<PhysicalAddress>>() == 16);
+    assert!(mem::size_of::<Option<NonEmptyRange<StoredAddress>>>() == 16);
+    assert!(mem::size_of::<Option<NonEmptyRange<PhysicalAddress>>>() == 16);
+};
+
 #[cfg(test)]
 mod tests {
+    use core::cmp::Ordering;
     use core::fmt::Debug;
 
     use rstest::rstest;
@@ -267,6 +284,25 @@ mod tests {
             AddressRange::new(address(start), length.get()).unwrap()
         );
         assert!(!range.range().is_empty());
+    }
+
+    #[rstest]
+    #[case::shorter_at_same_start((10, 2), (10, 8), Ordering::Less)]
+    #[case::longer_at_same_start((10, 8), (10, 2), Ordering::Greater)]
+    #[case::equal((10, 2), (10, 2), Ordering::Equal)]
+    #[case::contained_later_start((10, 8), (12, 2), Ordering::Less)]
+    #[case::adjacent((10, 2), (12, 2), Ordering::Less)]
+    fn nonempty_range_ordering_matches_endpoint_ordering<A: Address + Debug>(
+        #[case] left: (u64, u64),
+        #[case] right: (u64, u64),
+        #[case] expected: Ordering,
+        #[values(StoredAddress::new, PhysicalAddress::new)] address: fn(u64) -> A,
+    ) {
+        let left = NonEmptyRange::new(address(left.0), NonZeroU64::new(left.1).unwrap()).unwrap();
+        let right =
+            NonEmptyRange::new(address(right.0), NonZeroU64::new(right.1).unwrap()).unwrap();
+        assert_eq!(left.cmp(&right), expected);
+        assert_eq!(left.range().cmp(&right.range()), expected);
     }
 
     #[rstest]

@@ -9,6 +9,8 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
+use core::mem;
+
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -414,6 +416,12 @@ mod sealed {
     impl Sealed for super::StoredAddress {}
     impl Sealed for super::PhysicalAddress {}
 }
+
+const _: () = {
+    assert!(mem::size_of::<StoredAddress>() == 8);
+    assert!(mem::size_of::<PhysicalAddress>() == 8);
+    assert!(mem::size_of::<BaseAddress>() == 8);
+};
 
 #[cfg(test)]
 mod tests {
