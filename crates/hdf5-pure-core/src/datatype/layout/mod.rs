@@ -7,8 +7,11 @@
 
 use core::num::{NonZeroU16, NonZeroU32};
 
+use self::builder::{BitFieldTypeBuilder, FixedPointTypeBuilder};
 use super::byte_order::DatatypeByteOrder;
 use crate::FormatError;
+
+pub(crate) mod builder;
 
 /// A fixed-point datatype with a nonempty bit range contained within each element.
 ///
@@ -22,6 +25,13 @@ pub struct FixedPointType {
 }
 
 impl FixedPointType {
+    /// Creates an incomplete integer description with zero padding.
+    ///
+    /// See [`FixedPointTypeBuilder`] for the required properties and an example.
+    pub const fn builder() -> FixedPointTypeBuilder {
+        FixedPointTypeBuilder::new()
+    }
+
     /// Constructs an integer datatype with a nonempty significant bit range.
     ///
     /// `size` is the element size in bytes. `bit_offset` counts from the least significant bit,
@@ -506,6 +516,13 @@ pub struct BitFieldType {
 }
 
 impl BitFieldType {
+    /// Creates an incomplete bit-field description with zero padding.
+    ///
+    /// See [`BitFieldTypeBuilder`] for the required properties and an example.
+    pub const fn builder() -> BitFieldTypeBuilder {
+        BitFieldTypeBuilder::new()
+    }
+
     /// Constructs a bit-field datatype with a nonempty significant bit range.
     ///
     /// `size` is the element size in bytes. `bit_offset` counts from the least significant bit.

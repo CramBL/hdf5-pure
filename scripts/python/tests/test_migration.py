@@ -244,6 +244,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     [
         ("ConflictingDatasetStorage", []),
         ("InvalidAscii", []),
+        ("MissingNumericDatatypeProperty", []),
         ("UnalignedGlobalHeapCollection", []),
         (
             "UnrecognizedHeapError",
@@ -341,6 +342,9 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("VariableLengthType", []),
         ("PhysicalAddress", []),
         ("AddressRange", []),
+        ("BitFieldTypeBuilder", []),
+        ("FixedPointTypeBuilder", []),
+        ("NumericDatatypeProperty", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],
 )

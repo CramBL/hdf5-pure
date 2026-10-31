@@ -677,6 +677,7 @@ pub use hdf5_pure_core::ZfpRate;
 pub use compound::{CompoundField, CompoundType};
 #[doc(inline)]
 pub use hdf5_pure_core::BitFieldType;
+pub use hdf5_pure_core::BitFieldTypeBuilder;
 #[doc(inline)]
 pub use hdf5_pure_core::CharacterSet;
 #[doc(inline)]
@@ -692,6 +693,7 @@ pub use hdf5_pure_core::FillTime;
 #[doc(inline)]
 pub use hdf5_pure_core::FixedPointLayout;
 pub use hdf5_pure_core::FixedPointType;
+pub use hdf5_pure_core::FixedPointTypeBuilder;
 pub use hdf5_pure_core::FloatingPointField;
 #[doc(inline)]
 pub use hdf5_pure_core::FloatingPointLayout;
@@ -699,6 +701,7 @@ pub use hdf5_pure_core::FloatingPointType;
 pub use hdf5_pure_core::MantissaNormalization;
 #[doc(inline)]
 pub use hdf5_pure_core::MaxExtent;
+pub use hdf5_pure_core::NumericDatatypeProperty;
 #[doc(inline)]
 pub use hdf5_pure_core::ReferenceType;
 #[doc(inline)]
