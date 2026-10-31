@@ -42,7 +42,7 @@ mod address;
     unfulfilled_lint_expectations,
     reason = "the source module's public API lints do not apply inside a private benchmark module"
 )]
-#[path = "../src/source/mod.rs"]
+#[path = "../src/source/backend.rs"]
 mod source;
 
 #[global_allocator]
