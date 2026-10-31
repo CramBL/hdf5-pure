@@ -138,6 +138,65 @@ pub fn dense_attrs_root() -> Vec<u8> {
     Fixture::Root.build()
 }
 
+/// A selected corruption of the dataset fixture's dense-attribute leaf.
+#[derive(Clone, Copy, Debug)]
+pub enum NodeCorruption {
+    /// A one-bit change to the stored checksum.
+    Checksum,
+    /// Client type 11 (filtered chunks), with the selected [`ChecksumUpdate`].
+    ClientType(ChecksumUpdate),
+    /// The internal-node signature in place of the leaf signature.
+    Signature,
+    /// Encoded version 1.
+    Version,
+}
+
+impl NodeCorruption {
+    /// Returns [`dense_attrs`] with the selected leaf corruption.
+    ///
+    /// Recomputes the checksum for [`Self::Signature`] and [`Self::Version`]. For
+    /// [`Self::ClientType`], applies its [`ChecksumUpdate`].
+    pub fn build(self) -> Vec<u8> {
+        let mut image = dense_attrs();
+        let leaf = bytes::sole_signature(&image, btree_v2::LEAF_SIGNATURE);
+        let encoded_len = btree_v2::NODE_PREFIX
+            + usize::from(Fixture::Dataset.attribute_count()) * usize::from(ATTRIBUTE_RECORD_SIZE)
+            + core::mem::size_of::<u32>();
+        let update = match self {
+            Self::Checksum => {
+                image[leaf + encoded_len - core::mem::size_of::<u32>()] ^= 1;
+                ChecksumUpdate::Keep
+            }
+            Self::ClientType(update) => {
+                image[leaf + btree_v2::LEAF_SIGNATURE.len() + 1] = FILTERED_CHUNK_INDEX;
+                update
+            }
+            Self::Signature => {
+                image[leaf..leaf + btree_v2::LEAF_SIGNATURE.len()]
+                    .copy_from_slice(btree_v2::INTERNAL_SIGNATURE);
+                ChecksumUpdate::Recompute
+            }
+            Self::Version => {
+                image[leaf + btree_v2::LEAF_SIGNATURE.len()] = 1;
+                ChecksumUpdate::Recompute
+            }
+        };
+        if update == ChecksumUpdate::Recompute {
+            checksum::restamp(&mut image, leaf, encoded_len);
+        }
+        image
+    }
+}
+
+/// The checksum choice for a deliberately malformed node.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChecksumUpdate {
+    /// Retains the original checksum.
+    Keep,
+    /// Recomputes the checksum over the active node encoding.
+    Recompute,
+}
+
 fn dense_storage(image: &mut Image, fixture: Fixture) -> Message {
     let datatype = datatype::f64_le();
     let dataspace = dataspace::scalar();
@@ -259,6 +318,9 @@ const ATTRIBUTE_NAME_INDEX: u8 = 8;
 const ATTRIBUTE_RECORD_SIZE: u16 = 17;
 const HASH_AT: usize = 8 + 1 + 4;
 const BTREE_NODE_SIZE: usize = 1024;
+
+// Section `subsubsec_fmt4_infra_btrees_v2`, version 4.0, defines type 11 for filtered chunk indexes.
+const FILTERED_CHUNK_INDEX: u8 = 11;
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_linkinfo`, version 4.0.
 const LINK_INFO_VERSION: u8 = 0;

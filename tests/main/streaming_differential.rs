@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, SuperblockStatusFlags};
 use rstest::rstest;
 use test_util::attribute;
+use test_util::dense_attributes::ChecksumUpdate;
+use test_util::dense_attributes::NodeCorruption;
 use test_util::image::Image as FileImage;
 use test_util::object_header::{Message, MessageType, v2};
 use test_util::superblock;
@@ -16,6 +18,7 @@ mod oracle;
 
 #[rstest]
 #[case::legacy_dataset(Image::Dataset, 1, 2)]
+#[case::dense_attributes(Image::DenseAttributes, 1, 2)]
 #[case::legacy_groups(Image::Groups, 3, 4)]
 #[case::depth_limit(Image::DeepGroups, 3, 0)]
 #[case::children_limit(Image::ManyChildren, 9, 16)]
@@ -260,9 +263,28 @@ fn group_attribute_heap_range_rejections_preserve_backend_diagnostics(#[case] he
     );
 }
 
+#[rstest]
+#[case::owner_type_with_restamped_checksum(NodeCorruption::ClientType(ChecksumUpdate::Recompute))]
+#[case::owner_type_with_original_checksum(NodeCorruption::ClientType(ChecksumUpdate::Keep))]
+#[case::version_with_restamped_checksum(NodeCorruption::Version)]
+#[case::signature_with_restamped_checksum(NodeCorruption::Signature)]
+#[case::checksum_mismatch(NodeCorruption::Checksum)]
+fn dense_attribute_node_corruption_preserves_reader_outcome_parity(
+    #[case] corruption: NodeCorruption,
+) {
+    assert_eq!(
+        oracle::compare(&corruption.build()),
+        Comparison::Opened {
+            groups: 1,
+            datasets: 2
+        },
+    );
+}
+
 enum Image {
     Dataset,
     DeepGroups,
+    DenseAttributes,
     Groups,
     ManyChildren,
     NanAttributes,
@@ -272,6 +294,7 @@ impl Image {
     fn build(self) -> Vec<u8> {
         match self {
             Self::Dataset => test_util::legacy::simple_dataset(),
+            Self::DenseAttributes => test_util::dense_attributes::dense_attrs(),
             Self::DeepGroups => test_util::legacy::nested_groups(),
             Self::Groups => test_util::legacy::two_groups(),
             Self::ManyChildren => {
