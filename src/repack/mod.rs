@@ -53,7 +53,8 @@
 //!   object's reference count still matches its users.
 //! - **Unallocated storage**: destination element storage remains unallocated. A chunked
 //!   dataset's filter message is copied verbatim, including lossy and unsupported
-//!   filters. A resizable destination has an empty chunk index for in-place appends.
+//!   filters. A resizable destination with zero elements can retain a deferred Extensible
+//!   Array index, while nonempty resizable output receives an allocated chunk index for in-place appends.
 //! - Group hierarchy up to 128 levels deep.
 //! - Attributes, on datasets, groups, and root, carried across with the
 //!   encoding the source gave them rather than rebuilt from an [`AttrValue`],

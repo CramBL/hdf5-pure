@@ -45,7 +45,7 @@ The pattern is uniform at every level: build, finish, attach. A child must be fi
 
 See [Writing files](crate::_guide::writing) for the full dataset builder API used inside groups.
 
-There is no group creation property list: every group is written with the same fixed, timestamp-free, new-style layout regardless of settings or child count. [Group creation property list](crate#group-creation-property-list) has the details.
+There is no group creation property list. Whole-file writes use timestamp-free groups with dense links above eight links. During editing, root and nested groups transition according to their recorded phase-change thresholds, which default to eight links for compact storage and six for dense storage.
 
 ## Attributes
 

@@ -10,7 +10,7 @@ $ cargo run --example repack
 
 ## Why a delete cannot always shrink a file
 
-Deleting an object inside a [`File::open_rw`](crate::File::open_rw) session, which [Editing files](crate::_guide::editing) covers, reuses the freed space *within that session*, and the file is truncated when the freed bytes happen to reach the very end. But a single delete-then-close cannot shrink a file whose freed region sits in the middle: an HDF5 file is a single address space, and a hole in the middle cannot be removed by truncating the tail. This is the same reason the HDF5 C library ships a separate `h5repack` tool.
+Deleting an object inside a [`File::open_rw`](crate::File::open_rw) session, which [Editing files](crate::_guide::editing) covers, reuses freed space according to the allocation strategy, and can truncate a free tail when the allocation strategy permits reclamation. Under persistent managers, tail truncation and manager rewriting coexist. But a single delete-then-close cannot shrink a file whose freed region sits in the middle: an HDF5 file is a single address space, and a hole in the middle cannot be removed by truncating the tail. Truncating a tail and compacting interior holes remain distinct operations. This is the same reason the HDF5 C library ships a separate `h5repack` tool.
 
 [`repack`](crate::repack()) reads every surviving object and plans destination allocations before
 writing the file. The writer allocates the output under the selected file-space settings, so the
@@ -135,9 +135,7 @@ verbatim copying, repack preserves encoded chunk bytes and per-chunk filter mask
 
 Attributes keep their own encoding. An attribute is copied as the source encoded it, not as [`AttrValue`](crate::AttrValue) renders it. That matters because [`AttrValue`](crate::AttrValue) is a deliberately lossy convenience view: it has no byte order, no sub-width precision, no string padding rule, and no rank above one, so an attribute rebuilt from one would come back in this crate's own layout and flattened. Only an attribute whose element bytes hold a *location*, variable-length data or a reference, cannot be copied as-is. A variable-length string keeps its datatype and dataspace while its strings are written into the new file's heap, and a reference attribute is rejected. See [Attributes](crate::_guide::groups_attributes#attributes) for what a *read* still normalizes.
 
-Repack preserves unallocated element storage. For a resizable dataset, the writer creates an empty
-chunk index for later appends. For a partly allocated dataset with both stored chunks and unallocated
-entries, repack re-encodes and stores every slot.
+Repack preserves unallocated element storage. For a resizable dataset, zero-element unlimited output can retain a deferred Extensible Array index, while nonempty unlimited output receives an allocated index for subsequent appends. For a partly allocated dataset with both stored chunks and unallocated entries, repack re-encodes and stores every slot.
 
 Fully allocated chunked datasets whose element bytes contain no variable-length or object-reference addresses take a **verbatim chunk-copy path**: each encoded chunk is copied without decoding or re-encoding it. That preserves lossy filters such as floating-point D-scale scale-offset and ZFP, filters this crate cannot decode or encode such as SZIP, and unknown filters byte-for-byte. The destination rebuilds the chunk index around those encoded chunks.
 
