@@ -223,5 +223,5 @@ Miri. Actual Miri execution checks the selected memory operations and
 `cfg(miri)` paths. `scripts/soundness.just` defines the family selectors and
 feature profiles for both commands.
 
-The [crate documentation](crate#safety-and-robustness) covers the safety and
-robustness guarantees in more detail.
+The [Memory safety](#memory-safety) and [32-bit safety](#32-bit-safety) sections above
+cover the safety and robustness guarantees in more detail.

@@ -100,13 +100,21 @@
 //! Open an existing file for reading **and** writing with [`File::open_rw`] and
 //! reach every object by name through owned [`Dataset`] and [`Group`] handles
 //! that add, delete, copy, or overwrite objects without rewriting the file from
-//! scratch. New data and rebuilt object headers are appended at end-of-file
-//! and the superblock is repointed last, so the cost is proportional to what
-//! changes rather than to the file size. It edits files written by this crate,
-//! the reference HDF5 C library, and h5py across all of their on-disk formats.
-//! Memory follows the file, not the caller's choice of function: a latest-format
-//! file with no userblock is edited without ever building a whole-file copy of it
-//! (see [`MemoryStrategy`]).
+//! scratch. New data and rebuilt object headers are allocated according to the
+//! file-space strategy and the superblock is repointed last. It edits files
+//! written by this crate, the reference HDF5 C library, and h5py across all of
+//! their on-disk formats. Backing selection depends on the file structure: bounded
+//! editing requires 8-byte offsets and lengths, a canonical superblock position
+//! matching its base address, and no userblock. Files with a pre-v2 superblock, a
+//! userblock, or nonpersistent [`FileSpaceStrategy::Page`] require a whole-file
+//! mirror. Space reuse and tail truncation follow the allocation strategy: under
+//! persistent managers, tail truncation and manager rewriting coexist, while
+//! nonpersistent [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`]
+//! discard freed interior space without truncation.
+//! Durability guarantees depend on publication ordering, synchronization policy,
+//! page buffering, lossy-tail settings, and uncertain outcomes: an interrupted write
+//! can leave preceding allocations unreferenced or yield an unreadable file when torn
+//! metadata writes occur.
 //!
 //! ```rust
 //! # let dir = tempfile::tempdir()?;
