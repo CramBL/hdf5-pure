@@ -389,7 +389,6 @@ mod tests {
     use super::*;
     use crate::btree_v2;
     use crate::btree_v2::BTreeV2Header;
-    use crate::btree_v2::BTreeV2Record;
     use crate::dense_link_write::NAME_RECORD_LEN;
 
     const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
@@ -560,16 +559,11 @@ mod tests {
             })
         );
         assert_eq!(image.nodes.len(), BTREE_V2_NODE_SIZE as usize);
-        assert_eq!(
-            btree_v2::parse_btree_v2_leaf_records(&image.nodes, 0, 2, 17),
-            Ok(vec![
-                BTreeV2Record {
-                    data: records[..17].to_vec(),
-                },
-                BTreeV2Record {
-                    data: records[17..].to_vec(),
-                },
-            ])
-        );
+        let header = BTreeV2Header::parse(&image.header, 0, 8, 8).unwrap();
+        let layout = btree_v2::BTreeV2Layout::new(&header, OFFSET_WIDTH).unwrap();
+        let view = layout.root().unwrap().parse(&image.nodes).unwrap();
+        assert_eq!(view.record_count(), 2);
+        assert_eq!(view.record(0).unwrap(), &records[..17]);
+        assert_eq!(view.record(1).unwrap(), &records[17..]);
     }
 }

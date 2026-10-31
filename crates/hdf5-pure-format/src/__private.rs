@@ -38,8 +38,6 @@ pub use crate::btree_v2::HugeObjectRecordContext;
 pub use crate::btree_v2::HugeObjectRecordDecoder;
 pub use crate::btree_v2::HugeObjectTrackerRecord;
 pub use crate::btree_v2::btree_v2_header_size;
-pub use crate::btree_v2::parse_btree_v2_internal_child_pointers;
-pub use crate::btree_v2::parse_btree_v2_leaf_records;
 pub use crate::btree_v2_write::BTREE_V2_NODE_SIZE;
 pub use crate::btree_v2_write::BTreeV2Image;
 pub use crate::btree_v2_write::BTreeV2Plan;

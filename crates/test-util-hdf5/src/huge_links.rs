@@ -27,6 +27,7 @@ use hdf5_pure::MessageType;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::BTreeV2Header;
+use hdf5_pure_format::__private::BTreeV2Layout;
 use hdf5_pure_format::__private::BTreeV2Record;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapHeader;
@@ -37,6 +38,7 @@ use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::LinkMessage;
 use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_format::__private::OffsetWidth;
 use test_util::bytes;
 use test_util::checksum;
 
@@ -208,13 +210,16 @@ fn leaf_records(image: &[u8], header: &BTreeV2Header) -> Vec<BTreeV2Record> {
     assert_eq!(header.depth, 0);
     assert_eq!(header.total_records, 12);
     assert_eq!(header.num_records_in_root, 12);
-    format::parse_btree_v2_leaf_records(
-        image,
-        usize::try_from(header.root_node_address.get()).unwrap(),
-        header.num_records_in_root,
-        header.record_size,
-    )
-    .unwrap()
+    let layout = BTreeV2Layout::new(header, OffsetWidth::Eight).unwrap();
+    let root = layout.root().unwrap();
+    let view = root
+        .parse(&image[usize::try_from(root.address().get()).unwrap()..])
+        .unwrap();
+    (0..view.record_count())
+        .map(|index| BTreeV2Record {
+            data: view.record(index).unwrap().to_vec(),
+        })
+        .collect()
 }
 
 // Section `subsubsec_fmt4_infra_btrees_v2`, version 4.0, defines type 5

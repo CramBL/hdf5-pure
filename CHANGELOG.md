@@ -81,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::attrs` and related metadata reads accepting version 2 B-tree nodes with a nonzero version, a client type that differs from the owning header, or an incomplete checksum field ([#995](https://github.com/CramBL/hdf5-pure/pull/995)).
 - Fixed `Dataset::read_raw` panicking on 32-bit targets for malformed scale-offset raw payloads whose declared size is near `usize::MAX` ([#983](https://github.com/CramBL/hdf5-pure/pull/983)).
 - Fixed `Dataset::append` accepting malformed Extensible Array metadata required to plan the append, including when checksum verification is disabled for reads ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - Fixed premature publication of Extensible Array page initialization bits in `Dataset::append`. The editor flushes page contents before writing the bit and requests a durability barrier under the Always synchronization policy ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).

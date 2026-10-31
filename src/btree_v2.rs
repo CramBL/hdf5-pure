@@ -11,7 +11,6 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
 use core::cmp::Ordering;
-use core::num::NonZeroU16;
 
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
@@ -20,13 +19,12 @@ use alloc::vec::Vec;
 use hdf5_pure_core::__private::FileRange;
 pub use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::BTreeV2Layout;
-use hdf5_pure_format::__private::BTreeV2NodeInfo;
+use hdf5_pure_format::__private::BTreeV2Node;
 pub use hdf5_pure_format::__private::BTreeV2Record;
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -113,21 +111,14 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
         return Ok(extents);
     }
 
-    let node_info = BTreeV2NodeInfo::compute(
-        header.node_size,
-        header.record_size,
-        widths.offsets,
-        header.depth,
-    );
+    let layout = BTreeV2Layout::for_collection(&header, widths.offsets)?;
+    let root = layout.root().ok_or(FormatError::InvalidBTreeV2Signature)?;
     let mut visited = BTreeSet::new();
     collect_storage_node(
         source,
-        header.root_node_address,
-        header.num_records_in_root,
-        header.depth,
-        &header,
+        root,
+        header.node_size,
         widths.offsets,
-        &node_info,
         &mut visited,
         &mut extents,
     )?;
@@ -173,104 +164,30 @@ fn storage_header_has_root(
 /// 0 is a leaf, so recursion stops there after validating the leaf layout.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-#[allow(clippy::too_many_arguments)]
 fn collect_storage_node<S: Source + ?Sized>(
     source: &S,
-    address: StoredAddress,
-    num_records: u16,
-    depth: u16,
-    header: &BTreeV2Header,
+    node: BTreeV2Node<'_>,
+    node_size: u32,
     offset_width: OffsetWidth,
-    node_info: &BTreeV2NodeInfo,
     visited: &mut BTreeSet<StoredAddress>,
     extents: &mut Vec<Extent>,
 ) -> Result<(), FormatError> {
-    if !visited.insert(address) {
+    if !visited.insert(node.address()) {
         return Err(FormatError::InvalidBTreeV2Signature);
     }
-
-    let extent = extent_in_source(source, address.get(), u64::from(header.node_size))?;
-    let node = source.read_metadata(address.get(), u64::from(header.node_size).to_usize()?)?;
+    let extent = extent_in_source(source, node.address().get(), u64::from(node_size))?;
+    let bytes = source.read_metadata(node.address().get(), u64::from(node_size).to_usize()?)?;
+    let view = node.parse(&bytes)?;
     extents.push(extent);
-
-    let signature = if depth == 0 { b"BTLF" } else { b"BTIN" };
-    validate_node_prefix(&node, signature, header.tree_type)?;
-    let Some(depth) = NonZeroU16::new(depth) else {
-        return validate_storage_leaf(&node, num_records, header.record_size);
-    };
-    let children = hdf5_pure_format::__private::parse_btree_v2_internal_child_pointers(
-        &node,
-        num_records,
-        depth,
-        header.record_size,
-        offset_width,
-        node_info,
-    )?;
-    for (child_address, child_records) in children {
-        if child_address.is_undefined(offset_width) {
-            return Err(FormatError::InvalidBTreeV2Signature);
+    for index in 0..=view.record_count() {
+        if let Some(child) = view.child(index)? {
+            if child.address().is_undefined(offset_width) {
+                return Err(FormatError::InvalidBTreeV2Signature);
+            }
+            collect_storage_node(source, child, node_size, offset_width, visited, extents)?;
         }
-        collect_storage_node(
-            source,
-            child_address,
-            child_records,
-            depth.get() - 1,
-            header,
-            offset_width,
-            node_info,
-            visited,
-            extents,
-        )?;
     }
     Ok(())
-}
-
-/// Proves a node has the version and type required by its B-tree header.
-///
-/// "Version 2 B-trees" defines version 0 for both internal and leaf nodes, and requires each
-/// node's "Type" field to equal the tree type stored in `BTHD`.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn validate_node_prefix(
-    node: &[u8],
-    signature: &[u8; 4],
-    tree_type: u8,
-) -> Result<(), FormatError> {
-    bytes::ensure_len(node, 0, 6)?;
-    if &node[..4] != signature {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
-    let version = node[4];
-    if version != 0 {
-        return Err(FormatError::InvalidBTreeV2Version(version));
-    }
-    let node_type = node[5];
-    if node_type != tree_type {
-        return Err(FormatError::InvalidBTreeNodeType(node_type));
-    }
-    Ok(())
-}
-
-/// Proves the declared leaf contents fit inside the node allocation.
-///
-/// "Version 2 B-trees" lays out a leaf as the `BTLF` signature, version and type, R records of the
-/// header's "Record Size", and the checksum. This check requires the records and checksum of that
-/// declared layout to fit inside the already bounded "Node Size" allocation.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn validate_storage_leaf(
-    node: &[u8],
-    num_records: u16,
-    record_size: u16,
-) -> Result<(), FormatError> {
-    let record_bytes = u64::from(num_records) * u64::from(record_size);
-    let encoded_len = 6u64
-        .checked_add(record_bytes)
-        .and_then(|length| length.checked_add(4))
-        .ok_or(FormatError::InvalidBTreeV2Signature)?
-        .to_usize()?;
-    bytes::ensure_len(node, 0, encoded_len)?;
-    hdf5_pure_format::__private::verify_trailing(&node[..encoded_len])
 }
 
 /// Returns a checked extent after proving its complete byte range lies within `source`.
@@ -293,7 +210,10 @@ fn extent_in_source<S: Source + ?Sized>(
     Ok(extent)
 }
 
-/// Returns all records from a version 2 B-tree using a validated address width.
+/// Returns all records from a version 2 B-tree in tree order.
+///
+/// Returns an empty list when either record count in `header` is zero. Each visited node is
+/// parsed with its owning header's type and geometry before its records and children are read.
 ///
 /// # Errors
 ///
@@ -307,100 +227,41 @@ pub fn collect_btree_v2_records(
         return Ok(Vec::new());
     }
 
-    let Some(depth) = NonZeroU16::new(header.depth) else {
-        // Root is a leaf
-        return hdf5_pure_format::__private::parse_btree_v2_leaf_records(
-            file_data,
-            header.root_node_address.get().to_usize()?,
-            header.num_records_in_root,
-            header.record_size,
-        );
+    let layout = BTreeV2Layout::for_collection(header, offset_width)?;
+    let root = layout.root().ok_or(FormatError::InvalidBTreeV2Signature)?;
+    let mut records = if header.depth == 0 {
+        Vec::with_capacity(usize::from(header.num_records_in_root))
+    } else {
+        Vec::new()
     };
-    // Root is internal: traverse recursively
-    let node_info = BTreeV2NodeInfo::compute(
-        header.node_size,
-        header.record_size,
-        offset_width,
-        header.depth,
-    );
-    let mut records = Vec::new();
-    collect_internal_records(
-        file_data,
-        header.root_node_address.get().to_usize()?,
-        header.num_records_in_root,
-        depth,
-        header.record_size,
-        header.node_size,
-        offset_width,
-        &node_info,
-        &mut records,
-    )?;
+    collect_node_records(file_data, root, &mut records)?;
     Ok(records)
 }
 
-/// Recursively collects records from an internal node in the buffered path.
-#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
-fn collect_internal_records(
+fn collect_node_records(
     file_data: &[u8],
-    offset: usize,
-    num_records: u16,
-    depth: NonZeroU16,
-    record_size: u16,
-    node_size: u32,
-    offset_width: OffsetWidth,
-    node_info: &BTreeV2NodeInfo,
-    out: &mut Vec<BTreeV2Record>,
+    node: BTreeV2Node<'_>,
+    records: &mut Vec<BTreeV2Record>,
 ) -> Result<(), FormatError> {
-    bytes::ensure_len(file_data, offset, 6)?;
-    let node = &file_data[offset..];
-    let children = hdf5_pure_format::__private::parse_btree_v2_internal_child_pointers(
-        node,
-        num_records,
-        depth,
-        record_size,
-        offset_width,
-        node_info,
-    )?;
-
-    let nr = num_records as usize;
-    let rs = record_size as usize;
-    let child_depth = NonZeroU16::new(depth.get() - 1);
-
-    // Interleave: child[0], record[0], child[1], record[1], ..., child[nr].
-    for (i, &(child_addr, child_nrec)) in children.iter().enumerate() {
-        if let Some(child_depth) = child_depth {
-            collect_internal_records(
-                file_data,
-                child_addr.get().to_usize()?,
-                child_nrec,
-                child_depth,
-                record_size,
-                node_size,
-                offset_width,
-                node_info,
-                out,
-            )?;
-        } else {
-            out.extend(hdf5_pure_format::__private::parse_btree_v2_leaf_records(
-                file_data,
-                child_addr.get().to_usize()?,
-                child_nrec,
-                record_size,
-            )?);
+    let start = node.address().get().to_usize()?;
+    bytes::ensure_len(file_data, start, 0)?;
+    let view = node.parse(&file_data[start..])?;
+    for index in 0..=view.record_count() {
+        if let Some(child) = view.child(index)? {
+            collect_node_records(file_data, child, records)?;
         }
-
-        if i < nr {
-            let start = 6 + i * rs;
-            out.push(BTreeV2Record {
-                data: node[start..start + rs].to_vec(),
+        if index < view.record_count() {
+            records.push(BTreeV2Record {
+                data: view.record(index)?.to_vec(),
             });
         }
     }
-
     Ok(())
 }
 
 /// Returns all records from a version 2 B-tree source using a validated address width.
+///
+/// Uses the node parsing and empty-tree handling of [`collect_btree_v2_records`].
 ///
 /// # Errors
 ///
@@ -414,104 +275,40 @@ pub fn collect_btree_v2_records_from_source<S: Source + ?Sized>(
     if header.total_records == 0 || header.num_records_in_root == 0 {
         return Ok(Vec::new());
     }
-    let node_info = BTreeV2NodeInfo::compute(
-        header.node_size,
-        header.record_size,
-        offset_width,
-        header.depth,
-    );
+    let layout = BTreeV2Layout::for_collection(header, offset_width)?;
+    let root = layout.root().ok_or(FormatError::InvalidBTreeV2Signature)?;
     let mut visited = BTreeSet::new();
     let mut records = Vec::new();
-    collect_node_from_source(
-        source,
-        header.root_node_address.get(),
-        header.num_records_in_root,
-        header.depth,
-        header.tree_type,
-        header.record_size,
-        header.node_size,
-        offset_width,
-        &node_info,
-        &mut visited,
-        &mut records,
-    )?;
+    collect_node_from_source(source, root, header.node_size, &mut visited, &mut records)?;
     Ok(records)
 }
 
-/// Reads one node from the source and recursively collects its records in tree order.
-///
-/// This mirrors the buffered [`collect_btree_v2_records`] traversal.
-#[allow(clippy::too_many_arguments)]
 fn collect_node_from_source<S: Source + ?Sized>(
     source: &S,
-    address: u64,
-    num_records: u16,
-    depth: u16,
-    tree_type: u8,
-    record_size: u16,
+    node: BTreeV2Node<'_>,
     node_size: u32,
-    offset_width: OffsetWidth,
-    node_info: &BTreeV2NodeInfo,
     visited: &mut BTreeSet<StoredAddress>,
-    out: &mut Vec<BTreeV2Record>,
+    records: &mut Vec<BTreeV2Record>,
 ) -> Result<(), FormatError> {
-    if !visited.insert(StoredAddress::new(address)) {
+    if !visited.insert(node.address()) {
         return Err(FormatError::InvalidBTreeV2Signature);
     }
-
-    // Every node occupies `node_size` bytes; read that window (clamped to the
-    // bytes available, in case the final node abuts EOF).
+    let address = node.address().get();
     let node_len = u64::from(node_size)
         .min(source.len().saturating_sub(address))
         .to_usize()?;
-    let node = source.read_metadata(address, node_len)?;
-
-    let Some(depth) = NonZeroU16::new(depth) else {
-        validate_node_prefix(&node, b"BTLF", tree_type)?;
-        out.extend(hdf5_pure_format::__private::parse_btree_v2_leaf_records(
-            &node,
-            0,
-            num_records,
-            record_size,
-        )?);
-        return Ok(());
-    };
-
-    validate_node_prefix(&node, b"BTIN", tree_type)?;
-    let children = hdf5_pure_format::__private::parse_btree_v2_internal_child_pointers(
-        &node,
-        num_records,
-        depth,
-        record_size,
-        offset_width,
-        node_info,
-    )?;
-
-    let nr = num_records as usize;
-    let rs = record_size as usize;
-    let child_depth = depth.get() - 1;
-    for (i, &(child_addr, child_nrec)) in children.iter().enumerate() {
-        collect_node_from_source(
-            source,
-            child_addr.get(),
-            child_nrec,
-            child_depth,
-            tree_type,
-            record_size,
-            node_size,
-            offset_width,
-            node_info,
-            visited,
-            out,
-        )?;
-        if i < nr {
-            let start = 6 + i * rs;
-            out.push(BTreeV2Record {
-                data: node[start..start + rs].to_vec(),
+    let bytes = source.read_metadata(address, node_len)?;
+    let view = node.parse(&bytes)?;
+    for index in 0..=view.record_count() {
+        if let Some(child) = view.child(index)? {
+            collect_node_from_source(source, child, node_size, visited, records)?;
+        }
+        if index < view.record_count() {
+            records.push(BTreeV2Record {
+                data: view.record(index)?.to_vec(),
             });
         }
     }
-
     Ok(())
 }
 
@@ -527,6 +324,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::StoredAddressExt;
     use crate::address::{BaseAddress, BaseAddressExt};
     use crate::source::BytesSource;
     #[cfg(feature = "std")]
@@ -972,6 +770,27 @@ mod tests {
     }
 
     #[test]
+    fn record_walks_preserve_legacy_subtree_count_compatibility() {
+        let tree = depth_3_tree();
+        let mut header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        header.total_records = 1;
+        let expected: Vec<_> = (0..15).map(|id| BTreeV2Record { data: rec(id) }).collect();
+        assert_eq!(
+            collect_btree_v2_records(&tree.file, &header, OFFSET_WIDTH).unwrap(),
+            expected
+        );
+        assert_eq!(
+            collect_btree_v2_records_from_source(
+                &BytesSource::new(&tree.file),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn storage_walk_of_a_leaf_returns_header_and_full_node() {
         let (file, root) = single_leaf_tree(WIDTHS);
         let source = BytesSource::new(&file);
@@ -1400,28 +1219,115 @@ mod tests {
         let header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         let hdr = BTreeV2Header::parse(&header, 0, 8, 8).unwrap();
         let records = collect_btree_v2_records(&header, &hdr, OffsetWidth::Eight).unwrap();
-        assert!(records.is_empty());
+        assert_eq!(records, []);
+        assert_eq!(
+            collect_btree_v2_records_from_source(
+                &BytesSource::new(&header),
+                &hdr,
+                OffsetWidth::Eight
+            )
+            .unwrap(),
+            []
+        );
     }
 
-    #[test]
-    fn source_walk_rejects_node_type_mismatching_header() {
-        use crate::source::SourceMetadata;
-
-        let record = rec(1);
-        let leaf = btree_v2::leaf(11, &[record]);
-        let leaf_offset = 256usize;
-        let header =
-            btree_v2::Header::new(10, 11, u64::try_from(leaf_offset).unwrap(), 1).build(WIDTHS);
-        let mut file_data = vec![0u8; 512];
-        file_data[..header.len()].copy_from_slice(&header);
-        file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
-
-        let source = BytesSource::new(&file_data);
-        let header = BTreeV2Header::parse_from_source(&SourceMetadata(&source), 0, 8, 8).unwrap();
+    #[rstest::rstest]
+    #[case::signature(0, b'X', FormatError::InvalidBTreeV2Signature)]
+    #[case::version(4, 1, FormatError::InvalidBTreeV2Version(1))]
+    #[case::owner_type(5, 11, FormatError::InvalidBTreeNodeType(11))]
+    fn record_walks_reject_invalid_node_prefixes(
+        #[values(
+            NodePosition::RootLeaf,
+            NodePosition::RootInternal,
+            NodePosition::ChildInternal,
+            NodePosition::ChildLeaf
+        )]
+        position: NodePosition,
+        #[values(false, true)] restamp: bool,
+        #[case] at: usize,
+        #[case] value: u8,
+        #[case] expected: FormatError,
+    ) {
+        let (mut image, start, encoded_len) = position.image();
+        image[start + at] = value;
+        if restamp {
+            test_util::checksum::restamp(&mut image, start, encoded_len);
+        }
+        let header = BTreeV2Header::parse(&image, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
         assert_eq!(
-            collect_btree_v2_records_from_source(&source, &header, OffsetWidth::Eight,)
+            collect_btree_v2_records(&image, &header, OFFSET_WIDTH).unwrap_err(),
+            expected
+        );
+        let source = BytesSource::new(&image);
+        assert_eq!(
+            collect_btree_v2_records_from_source(&source, &header, OFFSET_WIDTH).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            collect_btree_v2_storage_extents(&source, StoredAddress::new(0), FORMAT_WIDTHS)
                 .unwrap_err(),
-            FormatError::InvalidBTreeNodeType(11)
+            expected
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum NodePosition {
+        ChildInternal,
+        ChildLeaf,
+        RootInternal,
+        RootLeaf,
+    }
+
+    impl NodePosition {
+        // `H5B2__hdr_init` in `H5B2hdr.c` (HDF5 2.2.0) computes one byte for direct counts and
+        // two bytes for subtree counts in these internal nodes.
+        fn image(self) -> (Vec<u8>, usize, usize) {
+            let leaf_extent = btree_v2::leaf(BTREE_V2_LINK_NAME, &[rec(0)]).len();
+            let (index, extent) = match self {
+                Self::ChildInternal => (
+                    12,
+                    btree_v2::NODE_PREFIX
+                        + rec(0).len()
+                        + 2 * (WIDTHS.offset + 1 + 2)
+                        + core::mem::size_of::<u32>(),
+                ),
+                Self::ChildLeaf => (0, leaf_extent),
+                Self::RootInternal => (
+                    14,
+                    btree_v2::NODE_PREFIX
+                        + rec(0).len()
+                        + 2 * (WIDTHS.offset + 1 + 2)
+                        + core::mem::size_of::<u32>(),
+                ),
+                Self::RootLeaf => {
+                    let (image, root) = single_leaf_tree(WIDTHS);
+                    return (image, root.to_usize().unwrap(), leaf_extent);
+                }
+            };
+            let tree = depth_3_tree();
+            (tree.file, tree.nodes[index].to_usize().unwrap(), extent)
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::one_byte(1)]
+    #[case::complete_field(4)]
+    fn record_walks_require_the_complete_checksum_field(#[case] missing: usize) {
+        let (mut image, start, encoded_len) = NodePosition::RootLeaf.image();
+        image.truncate(start + encoded_len - missing);
+        let header = BTreeV2Header::parse(&image, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let expected = FormatError::UnexpectedEof {
+            expected: encoded_len,
+            available: encoded_len - missing,
+        };
+        assert_eq!(
+            collect_btree_v2_records(&image, &header, OFFSET_WIDTH).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            collect_btree_v2_records_from_source(&BytesSource::new(&image), &header, OFFSET_WIDTH)
+                .unwrap_err(),
+            expected
         );
     }
 

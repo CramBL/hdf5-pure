@@ -72,7 +72,7 @@ pub struct BTreeV2Record {
     pub data: Vec<u8>,
 }
 
-/// The validated node geometry and child-pointer count widths of a version 2 B-tree.
+/// The node geometry and child-pointer count widths of a version 2 B-tree.
 ///
 /// The caller obtains the root from [`root`](Self::root), supplies node bytes to
 /// [`BTreeV2Node::parse`], and follows children through [`BTreeV2NodeView::child`].
@@ -86,7 +86,7 @@ pub struct BTreeV2Layout {
     node_size: usize,
     record_size: usize,
     offset_width: OffsetWidth,
-    info: BTreeV2NodeInfo,
+    geometry: BTreeV2Geometry,
     root: Option<BTreeV2NodeFrame>,
 }
 
@@ -132,10 +132,8 @@ impl BTreeV2Layout {
             Some(BTreeV2NodeFrame {
                 address: root_node_address,
                 kind: BTreeV2NodeKind::from_depth(depth),
-                records: NonZeroU16::new(num_records_in_root)
-                    .ok_or(FormatError::InvalidBTreeV2Signature)?,
-                total_records: NonZeroU64::new(total_records)
-                    .ok_or(FormatError::InvalidBTreeV2Signature)?,
+                records: num_records_in_root,
+                total_records,
             })
         };
         let layout = Self {
@@ -143,7 +141,7 @@ impl BTreeV2Layout {
             node_size: u64::from(node_size).to_usize()?,
             record_size: usize::from(record_size),
             offset_width,
-            info,
+            geometry: BTreeV2Geometry::Indexed(info),
             root,
         };
         if let Some(root) = root {
@@ -152,7 +150,77 @@ impl BTreeV2Layout {
         Ok(layout)
     }
 
-    /// Returns the root's inherited counts and stored address, or `None` for an empty tree.
+    /// Creates a node layout with the declared root address and record counts.
+    ///
+    /// Accepts zero counts and a defined empty root. Records and child-pointer fields must fit
+    /// the node allocation. Subtree totals are retained as supplied. [`new`](Self::new) applies
+    /// the additional address and count constraints used for indexed lookup.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use hdf5_pure_format::__private::{
+    /// #     BTreeV2Header, BTreeV2Layout, BTREE_V2_LINK_NAME, OffsetWidth,
+    /// # };
+    /// # use hdf5_pure_format::FormatError;
+    /// # use test_util::{btree_v2, widths::Widths};
+    /// # let header_bytes = btree_v2::Header::new(BTREE_V2_LINK_NAME, 11, 512, 0)
+    /// #     .build(Widths::EIGHT);
+    /// # let header = BTreeV2Header::parse(&header_bytes, 0, 8, 8)?;
+    /// # let node_bytes = btree_v2::leaf(BTREE_V2_LINK_NAME, &[]);
+    /// let layout = BTreeV2Layout::for_collection(&header, OffsetWidth::Eight)?;
+    /// let root = layout.root().unwrap();
+    /// let node = root.parse(&node_bytes)?;
+    /// assert_eq!(node.record_count(), 0);
+    /// assert_eq!(node.child(0)?, None);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] if the node allocation is too small for
+    /// its prefix and checksum, or the inherited records and child pointers exceed it.
+    pub fn for_collection(
+        header: &BTreeV2Header,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
+        let BTreeV2Header {
+            tree_type,
+            node_size,
+            record_size,
+            depth,
+            root_node_address,
+            num_records_in_root,
+            total_records,
+        } = *header;
+        if node_size < NODE_OVERHEAD {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        let root = BTreeV2NodeFrame {
+            address: root_node_address,
+            kind: BTreeV2NodeKind::from_depth(depth),
+            records: num_records_in_root,
+            total_records,
+        };
+        let layout = Self {
+            tree_type,
+            node_size: u64::from(node_size).to_usize()?,
+            record_size: usize::from(record_size),
+            offset_width,
+            geometry: BTreeV2Geometry::Collection(
+                (depth != 0)
+                    .then(|| BTreeV2NodeInfo::compute(node_size, record_size, offset_width, depth)),
+            ),
+            root: Some(root),
+        };
+        layout.node_geometry(root)?;
+        Ok(layout)
+    }
+
+    /// Returns the root's inherited counts and stored address.
+    ///
+    /// Returns `None` when [`new`](Self::new) accepts an empty header. A layout constructed with
+    /// [`for_collection`](Self::for_collection) retains the declared root, including zero counts.
     pub fn root(&self) -> Option<BTreeV2Node<'_>> {
         self.root.map(|frame| BTreeV2Node {
             layout: self,
@@ -172,7 +240,7 @@ impl BTreeV2Layout {
             node_size,
             record_size,
             offset_width,
-            info,
+            geometry,
             root: _,
         } = self;
         let BTreeV2NodeFrame {
@@ -182,30 +250,32 @@ impl BTreeV2Layout {
             total_records,
         } = node;
         let depth = kind.depth();
-        let records = records.get();
-        let total_records = total_records.get();
-        let capacity = info
-            .max_nrec
-            .get(usize::from(depth))
-            .copied()
-            .ok_or(FormatError::InvalidBTreeV2Signature)?;
-        let subtree_capacity = info
-            .cum_max_nrec
-            .get(usize::from(depth))
-            .copied()
-            .ok_or(FormatError::InvalidBTreeV2Signature)?;
-        let minimum = u64::from(records)
-            .checked_add(1)
-            .and_then(|children| children.checked_mul((1u64 << depth) - 1))
-            .and_then(|descendants| descendants.checked_add(u64::from(records)))
-            .ok_or(FormatError::InvalidBTreeV2Signature)?;
-        if address.get() >= StoredAddress::undefined(*offset_width).get()
-            || u64::from(records) > capacity
-            || total_records < minimum
-            || total_records > subtree_capacity
-            || (depth == 0 && total_records != u64::from(records))
-        {
-            return Err(FormatError::InvalidBTreeV2Signature);
+        if let BTreeV2Geometry::Indexed(info) = geometry {
+            let capacity = info
+                .max_nrec
+                .get(usize::from(depth))
+                .copied()
+                .ok_or(FormatError::InvalidBTreeV2Signature)?;
+            let subtree_capacity = info
+                .cum_max_nrec
+                .get(usize::from(depth))
+                .copied()
+                .ok_or(FormatError::InvalidBTreeV2Signature)?;
+            let minimum = u64::from(records)
+                .checked_add(1)
+                .and_then(|children| children.checked_mul((1u64 << depth) - 1))
+                .and_then(|descendants| descendants.checked_add(u64::from(records)))
+                .ok_or(FormatError::InvalidBTreeV2Signature)?;
+            if records == 0
+                || total_records == 0
+                || address.get() >= StoredAddress::undefined(*offset_width).get()
+                || u64::from(records) > capacity
+                || total_records < minimum
+                || total_records > subtree_capacity
+                || (depth == 0 && total_records != u64::from(records))
+            {
+                return Err(FormatError::InvalidBTreeV2Signature);
+            }
         }
         let records_end = usize::from(records)
             .checked_mul(*record_size)
@@ -214,7 +284,10 @@ impl BTreeV2Layout {
         let pointer_size = if depth == 0 {
             0
         } else {
-            info.child_ptr_size(depth, *offset_width)
+            geometry
+                .info()
+                .ok_or(FormatError::InvalidBTreeV2Signature)?
+                .child_ptr_size(depth, *offset_width)
         };
         let children_end = (usize::from(records) + 1)
             .checked_mul(pointer_size)
@@ -228,8 +301,8 @@ impl BTreeV2Layout {
 /// A reference to a version 2 B-tree node and its owning layout.
 ///
 /// Obtained from [`BTreeV2Layout::root`] or [`BTreeV2NodeView::child`]. The stored address, depth,
-/// and record counts come from the header or a parsed parent. The record count and subtree total
-/// are positive and within the capacities of the borrowed [`BTreeV2Layout`].
+/// and record counts come from the header or a parsed parent. Records and child-pointer fields
+/// fit the allocation size of the borrowed [`BTreeV2Layout`].
 #[derive(Clone, Copy)]
 pub struct BTreeV2Node<'a> {
     layout: &'a BTreeV2Layout,
@@ -318,7 +391,7 @@ impl<'a> BTreeV2Node<'a> {
 
     /// Returns the record count for this node and all its descendants.
     pub fn total_records(self) -> u64 {
-        self.frame.total_records.get()
+        self.frame.total_records
     }
 }
 
@@ -350,7 +423,7 @@ pub struct BTreeV2NodeView<'a, 'b> {
 impl<'a, 'b> BTreeV2NodeView<'a, 'b> {
     /// Returns the number of records inherited from the node's parent or header.
     pub fn record_count(&self) -> usize {
-        usize::from(self.node.frame.records.get())
+        usize::from(self.node.frame.records)
     }
 
     /// Returns the encoded record at the zero-based `index` without copying it.
@@ -375,8 +448,9 @@ impl<'a, 'b> BTreeV2NodeView<'a, 'b> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidBTreeV2Signature`] if an internal node's `index` is outside
-    /// its children or the selected child's address or counts are invalid.
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] if `index` is outside an internal node's
+    /// children, the child's encoded extent exceeds its allocation, or its address or counts
+    /// violate the selected layout's constraints.
     pub fn child(&self, index: usize) -> Result<Option<BTreeV2Node<'a>>, FormatError> {
         let Self {
             node,
@@ -394,10 +468,14 @@ impl<'a, 'b> BTreeV2NodeView<'a, 'b> {
             return Ok(None);
         };
         let depth = depth.get();
-        if index > usize::from(parent_records.get()) {
+        if index > usize::from(parent_records) {
             return Err(FormatError::InvalidBTreeV2Signature);
         }
-        let width = layout.info.child_ptr_size(depth, layout.offset_width);
+        let info = layout
+            .geometry
+            .info()
+            .ok_or(FormatError::InvalidBTreeV2Signature)?;
+        let width = info.child_ptr_size(depth, layout.offset_width);
         let start = index
             .checked_mul(width)
             .ok_or(FormatError::InvalidBTreeV2Signature)?;
@@ -407,30 +485,41 @@ impl<'a, 'b> BTreeV2NodeView<'a, 'b> {
             layout.offset_width,
         )?);
         let count_at = start + usize::from(layout.offset_width.get());
-        let records = u16::try_from(read_var_uint(
-            children,
-            count_at,
-            layout.info.max_nrec_size,
-        )?)
-        .map_err(|_error| FormatError::InvalidBTreeV2Signature)?;
-        let total_width = layout.info.total_nrec_size(depth);
+        let records = u16::try_from(read_var_uint(children, count_at, info.max_nrec_size)?)
+            .map_err(|_error| FormatError::InvalidBTreeV2Signature)?;
+        let total_width = info.total_nrec_size(depth);
         let total_records = if total_width == 0 {
             u64::from(records)
         } else {
-            read_var_uint(children, count_at + layout.info.max_nrec_size, total_width)?
+            read_var_uint(children, count_at + info.max_nrec_size, total_width)?
         };
         let frame = BTreeV2NodeFrame {
             address,
             kind: BTreeV2NodeKind::from_depth(depth - 1),
-            records: NonZeroU16::new(records).ok_or(FormatError::InvalidBTreeV2Signature)?,
-            total_records: NonZeroU64::new(total_records)
-                .ok_or(FormatError::InvalidBTreeV2Signature)?,
+            records,
+            total_records,
         };
         layout.node_geometry(frame)?;
-        if total_records > parent_total.get() - u64::from(parent_records.get()) {
+        if matches!(layout.geometry, BTreeV2Geometry::Indexed(_))
+            && total_records > parent_total - u64::from(parent_records)
+        {
             return Err(FormatError::InvalidBTreeV2Signature);
         }
         Ok(Some(BTreeV2Node { layout, frame }))
+    }
+}
+
+enum BTreeV2Geometry {
+    Collection(Option<BTreeV2NodeInfo>),
+    Indexed(BTreeV2NodeInfo),
+}
+
+impl BTreeV2Geometry {
+    fn info(&self) -> Option<&BTreeV2NodeInfo> {
+        match self {
+            Self::Collection(info) => info.as_ref(),
+            Self::Indexed(info) => Some(info),
+        }
     }
 }
 
@@ -438,8 +527,8 @@ impl<'a, 'b> BTreeV2NodeView<'a, 'b> {
 struct BTreeV2NodeFrame {
     address: StoredAddress,
     kind: BTreeV2NodeKind,
-    records: NonZeroU16,
-    total_records: NonZeroU64,
+    records: u16,
+    total_records: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1551,133 +1640,6 @@ impl BTreeV2NodeInfo {
     }
 }
 
-/// Parses the `num_records` records of the version 2 B-tree leaf node at `offset` in `file_data`.
-///
-/// With the `checksum` feature, the function also verifies the checksum that follows the records,
-/// where `file_data` holds it.
-///
-/// The node is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidBTreeV2Signature`] if the node does not begin with `BTLF`,
-/// [`FormatError::UnexpectedEof`] if the records run past the end of `file_data`, and, with the
-/// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from the
-/// computed one.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-pub fn parse_btree_v2_leaf_records(
-    file_data: &[u8],
-    offset: usize,
-    num_records: u16,
-    record_size: u16,
-) -> Result<Vec<BTreeV2Record>, FormatError> {
-    // signature(4) + version(1) + type(1) = 6 bytes header
-    bytes::ensure_len(file_data, offset, 6)?;
-    if &file_data[offset..offset + 4] != b"BTLF" {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
-
-    let pos = offset + 6;
-    let rs = record_size as usize;
-    let total = num_records as usize * rs;
-    bytes::ensure_len(file_data, pos, total)?;
-
-    #[cfg(feature = "checksum")]
-    {
-        let checksum_pos = pos + total;
-        if file_data.len() >= checksum_pos + 4 {
-            let stored = LittleEndian::read_u32(&file_data[checksum_pos..checksum_pos + 4]);
-            let computed = crate::checksum::jenkins_lookup3(&file_data[offset..checksum_pos]);
-            if computed != stored {
-                return Err(FormatError::ChecksumMismatch {
-                    expected: stored,
-                    computed,
-                });
-            }
-        }
-    }
-
-    let mut records = Vec::with_capacity(num_records as usize);
-    for i in 0..num_records as usize {
-        let start = pos + i * rs;
-        records.push(BTreeV2Record {
-            data: file_data[start..start + rs].to_vec(),
-        });
-    }
-    Ok(records)
-}
-
-/// Parses the child pointers of the version 2 B-tree internal node at the start of `node`, and
-/// returns the address and the record count of each child.
-///
-/// The node holds `num_records` records of `record_size` bytes and one more child pointer than
-/// records. `depth` is the depth of the node, and `node_info` the table of its tree, which gives
-/// the widths of the counts in each pointer. `offset_width` is the validated width of an address
-/// in the file. The records sit at `node[6 + i * record_size..]`, where a caller reads them.
-///
-/// The node is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidBTreeV2Signature`] if the node does not begin with `BTIN`,
-/// [`FormatError::UnexpectedEof`] if the records, child pointers, or checksum run past the end of
-/// `node`, and, with the `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored
-/// checksum differs from the computed one.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-pub fn parse_btree_v2_internal_child_pointers(
-    node: &[u8],
-    num_records: u16,
-    depth: NonZeroU16,
-    record_size: u16,
-    offset_width: OffsetWidth,
-    node_info: &BTreeV2NodeInfo,
-) -> Result<Vec<(StoredAddress, u16)>, FormatError> {
-    // signature(4) + version(1) + type(1) = 6
-    bytes::ensure_len(node, 0, 6)?;
-    if &node[0..4] != b"BTIN" {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
-
-    let nr = num_records as usize;
-    let rs = record_size as usize;
-    // Records come first, then the child pointers.
-    let mut pos = 6;
-    bytes::ensure_len(node, pos, nr * rs)?;
-    pos += nr * rs;
-
-    let nrec_width = node_info.max_nrec_size;
-    let total_nrec_width = node_info.total_nrec_size(depth.get());
-
-    let num_children = nr + 1;
-    let child_ptr_size = node_info.child_ptr_size(depth.get(), offset_width);
-    bytes::ensure_len(node, pos, num_children * child_ptr_size)?;
-
-    let mut children = Vec::with_capacity(num_children);
-    for _ in 0..num_children {
-        let addr = StoredAddress::new(bytes::read_offset_width(node, pos, offset_width)?);
-        pos += usize::from(offset_width.get());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "`H5B2__hdr_init` in `H5B2hdr.c` (HDF5 2.2.0) asserts that `max_nrec_size` is at \
-                      most 2 bytes, so the count in a file libhdf5 writes fits `u16`"
-        )]
-        let child_nrec = read_var_uint(node, pos, nrec_width)? as u16;
-        pos += nrec_width;
-        pos += total_nrec_width; // skip total-records-in-subtree
-        children.push((addr, child_nrec));
-    }
-
-    let checksum_end = pos
-        .checked_add(4)
-        .ok_or(FormatError::InvalidBTreeV2Signature)?;
-    bytes::ensure_len(node, pos, 4)?;
-    crate::checksum::verify_trailing(&node[..checksum_end])?;
-
-    Ok(children)
-}
-
 /// The type of a version 2 B-tree that indexes the huge objects of a fractal heap that the heap
 /// does not filter and whose heap IDs store a key.
 ///
@@ -1869,8 +1831,8 @@ mod tests {
                 frame: BTreeV2NodeFrame {
                     address: StoredAddress::new(1024),
                     kind: BTreeV2NodeKind::Internal(NonZeroU16::new(1).unwrap()),
-                    records: NonZeroU16::new(1).unwrap(),
-                    total_records: NonZeroU64::new(3).unwrap(),
+                    records: 1,
+                    total_records: 3,
                 },
             }
         );
@@ -2573,29 +2535,29 @@ mod tests {
         assert_eq!(BTreeV2Header::parse(&header, 0, 4, 8), Ok(expected.clone()));
         assert_eq!(
             BTreeV2Header::parse_from_source(header.as_slice(), 0, 4, 8),
-            Ok(expected)
+            Ok(expected.clone())
         );
-        assert_eq!(
-            parse_btree_v2_leaf_records(&leaf, 0, 2, 11),
-            Ok(vec![
-                BTreeV2Record { data: vec![1; 11] },
-                BTreeV2Record { data: vec![2; 11] },
-            ])
-        );
-        assert_eq!(
-            parse_btree_v2_internal_child_pointers(
-                &internal,
-                1,
-                NonZeroU16::MIN,
-                11,
-                OffsetWidth::Four,
-                &BTreeV2NodeInfo::compute(512, 11, OffsetWidth::Four, 1),
-            ),
-            Ok(vec![
-                (StoredAddress::new(0x300), 1),
-                (StoredAddress::new(0x400), 1),
-            ])
-        );
+        let layout = BTreeV2Layout::new(&expected, OffsetWidth::Four).unwrap();
+        let root = layout.root().unwrap().parse(&internal).unwrap();
+        assert_eq!(root.record_count(), 1);
+        assert_eq!(root.record(0).unwrap(), &[3; 11]);
+        let first = root.child(0).unwrap().unwrap();
+        assert_eq!(first.address(), StoredAddress::new(0x300));
+        assert_eq!(first.total_records(), 1);
+        let second = root.child(1).unwrap().unwrap();
+        assert_eq!(second.address(), StoredAddress::new(0x400));
+        assert_eq!(second.total_records(), 1);
+        let header = BTreeV2Header {
+            depth: 0,
+            num_records_in_root: 2,
+            total_records: 2,
+            ..expected
+        };
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Four).unwrap();
+        let view = layout.root().unwrap().parse(&leaf).unwrap();
+        assert_eq!(view.record_count(), 2);
+        assert_eq!(view.record(0).unwrap(), &[1; 11]);
+        assert_eq!(view.record(1).unwrap(), &[2; 11]);
     }
 
     const WIDTHS: Widths = Widths::EIGHT;
