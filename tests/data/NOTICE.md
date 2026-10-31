@@ -1,6 +1,6 @@
 # Test data
 
-Committed reference files and minimized regressions are organized by origin. Each
+Committed reference files and malformed regressions are organized by origin. Each
 directory notice records producers, consumers, invariants, licensing evidence,
 and regeneration instructions or retention rationale. `just test-data` lists
 producer-specific commands.
@@ -9,7 +9,7 @@ producer-specific commands.
 - [LZF references][lzf] and [ZFP references][zfp]: h5py-produced vectors and pipeline files
 - [MATLAB files][matlab]: native output and deliberately corrupted derivatives
 - [Historical pure file][pure]: a frozen hdf5-pure 0.28.0 collision regression
-- [Malformed fuzz inputs][fuzz]: minimized ordinary regressions
+- [Malformed fuzz inputs][fuzz]: ordinary regression inputs
 
 A test reads a file from here and never writes one. The separate [mutation corpus][corpus]
 records its own frozen seed origins and retention coverage.

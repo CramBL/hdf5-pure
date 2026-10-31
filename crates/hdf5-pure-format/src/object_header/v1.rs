@@ -39,7 +39,7 @@ impl ObjectHeader {
     ) -> Result<ObjectHeader, FormatError> {
         // version(1) + reserved(1) + num_messages(2) + ref_count(4) + header_size(4) = 12
         // then pad to 8-byte alignment from start of header
-        bytes::ensure_len(data, offset, 12)?;
+        bytes::ensure_len(data, offset, UNPADDED_HEADER_PREFIX_LEN)?;
 
         let version = data[offset];
         if version != 1 {
@@ -53,7 +53,7 @@ impl ObjectHeader {
         // Pad to 8-byte alignment: header prefix is 12 bytes, pad to 16
         let padding = 4; // pad 12-byte prefix to 16-byte alignment
         let msg_start = offset
-            .checked_add(12 + padding)
+            .checked_add(UNPADDED_HEADER_PREFIX_LEN + padding)
             .ok_or(FormatError::UnexpectedEof {
                 expected: usize::MAX,
                 available: data.len(),
@@ -205,7 +205,7 @@ impl ObjectHeader {
     ) -> Result<ObjectHeader, FormatError> {
         // version(1) + reserved(1) + num_messages(2) + ref_count(4) +
         // header_size(4) = 12, padded to 16 before the first message.
-        let prefix = source.read_metadata(address, 16)?;
+        let prefix = source.read_metadata(address, UNPADDED_HEADER_PREFIX_LEN)?;
         let version = prefix[0];
         if version != 1 {
             return Err(FormatError::InvalidObjectHeaderVersion(version));
@@ -213,6 +213,13 @@ impl ObjectHeader {
         let num_messages = LittleEndian::read_u16(&prefix[2..4]);
         let reference_count = LittleEndian::read_u32(&prefix[4..8]);
         let header_data_size = u64::from(LittleEndian::read_u32(&prefix[8..12]));
+        let region_addr =
+            address
+                .checked_add(ALIGNED_HEADER_PREFIX_LEN)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: address,
+                    length: ALIGNED_HEADER_PREFIX_LEN,
+                })?;
 
         // Capacity is bounded by the header's message count and the number of
         // minimum-size records the chunk can hold. [`parse_v1`] uses the same bound.
@@ -224,7 +231,7 @@ impl ObjectHeader {
         Self::parse_v1_chunk_from_source(
             source,
             context,
-            address + 16,
+            region_addr,
             header_data_size,
             num_messages,
             false,
@@ -415,3 +422,19 @@ struct Continuation {
     address: StoredAddress,
     length: u64,
 }
+
+/// The number of bytes before the alignment padding of a version 1 object header.
+///
+/// The fields are defined in "Version 1 Data Object Header Prefix" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+const UNPADDED_HEADER_PREFIX_LEN: usize = 12;
+
+/// The number of bytes before the first message of a version 1 object header.
+///
+/// This includes the fields and alignment padding defined in "Version 1 Data Object Header
+/// Prefix" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+const ALIGNED_HEADER_PREFIX_LEN: u64 = 16;

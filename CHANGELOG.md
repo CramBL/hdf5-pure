@@ -81,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::attrs` and related streaming metadata reads reporting truncation errors for invalid object-header versions when alignment padding is absent ([#1000](https://github.com/CramBL/hdf5-pure/pull/1000)).
 - Fixed `Group::attrs` reading shared dense attributes from the object's private heap in buffered and streaming files ([#998](https://github.com/CramBL/hdf5-pure/pull/998)).
 
 - Fixed `Dataset::attrs` and related metadata reads accepting version 2 B-tree nodes with a nonzero version, a client type that differs from the owning header, or an incomplete checksum field ([#995](https://github.com/CramBL/hdf5-pure/pull/995)).
