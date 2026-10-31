@@ -27,7 +27,15 @@ use test_util::widths::Widths;
 use source::SourceMetadata;
 use source::{BytesSource, MetadataCacheConfig, MetadataCachingSource, ReadSeekSource, Source};
 
-#[path = "metadata_cache/address.rs"]
+#[expect(
+    dead_code,
+    reason = "the benchmark does not reconcile or inspect opened image addresses"
+)]
+#[allow(
+    unused_imports,
+    reason = "the shared address module also exports types used by the reader"
+)]
+#[path = "../src/address.rs"]
 mod address;
 #[expect(dead_code, reason = "the benchmark only acquires metadata nodes")]
 #[allow(
