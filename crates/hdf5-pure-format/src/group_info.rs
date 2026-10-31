@@ -30,28 +30,16 @@ impl GroupPhaseChange {
     /// or [`GroupInfoError::Thresholds`] if the minimum dense count exceeds the maximum
     /// compact count.
     pub fn parse(bytes: &[u8]) -> Result<Self, GroupInfoError> {
-        let actual = u16::try_from(bytes.len()).map_err(|_error| GroupInfoError::TrailingBytes)?;
-        let (&[version, flags], fields) = bytes
-            .split_first_chunk::<{ GROUP_INFO_PREFIX_LENGTH as usize }>()
-            .ok_or(GroupInfoError::Length {
-                expected: GROUP_INFO_PREFIX_LENGTH,
-                actual,
-            })?;
-        if version != GROUP_INFO_VERSION {
-            return Err(GroupInfoError::Version(version));
-        }
-        if flags & !(STORES_PHASE_CHANGE | STORES_ESTIMATES) != 0 {
-            return Err(GroupInfoError::Flags(flags));
-        }
-        let expected = GROUP_INFO_PREFIX_LENGTH
-            + GROUP_INFO_PAIR_LENGTH
-                * (u8::from(flags & STORES_PHASE_CHANGE != 0)
-                    + u8::from(flags & STORES_ESTIMATES != 0));
+        let DeclaredLength {
+            flags,
+            expected,
+            actual,
+        } = DeclaredLength::read(bytes)?;
         if actual != u16::from(expected) {
             return Err(GroupInfoError::Length { expected, actual });
         }
         let result = if flags & STORES_PHASE_CHANGE != 0 {
-            let &[a, b, c, d, ..] = fields else {
+            let &[_version, _flags, a, b, c, d, ..] = bytes else {
                 return Err(GroupInfoError::Length { expected, actual });
             };
             Self {
@@ -73,6 +61,29 @@ impl GroupPhaseChange {
         Ok(result)
     }
 
+    /// Returns the length of the message at the start of `bytes`, computed from its flags byte.
+    ///
+    /// The bytes past that length are left unread, such as the padding after a message in a
+    /// version 1 object header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GroupInfoError::Version`] if the version is not zero,
+    /// [`GroupInfoError::Flags`] if reserved flag bits are set, or
+    /// [`GroupInfoError::Length`] if `bytes` is shorter than the message.
+    /// Returns [`GroupInfoError::TrailingBytes`] if the byte count exceeds [`u16::MAX`].
+    pub fn encoded_len(bytes: &[u8]) -> Result<usize, GroupInfoError> {
+        let DeclaredLength {
+            flags: _,
+            expected,
+            actual,
+        } = DeclaredLength::read(bytes)?;
+        if actual < u16::from(expected) {
+            return Err(GroupInfoError::Length { expected, actual });
+        }
+        Ok(usize::from(expected))
+    }
+
     /// Returns the maximum number of links to store in the object header.
     pub fn max_compact(&self) -> u16 {
         self.max_compact
@@ -81,6 +92,49 @@ impl GroupPhaseChange {
     /// Returns the minimum number of links to store in the fractal heap.
     pub fn min_dense(&self) -> u16 {
         self.min_dense
+    }
+}
+
+/// The flags byte of a Group Info message, the message length for those flags, and the number of
+/// bytes passed.
+struct DeclaredLength {
+    flags: u8,
+    expected: u8,
+    actual: u16,
+}
+
+impl DeclaredLength {
+    /// Parses the version and the flags byte at the start of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GroupInfoError::Version`] if the version is not zero,
+    /// [`GroupInfoError::Flags`] if reserved flag bits are set, or
+    /// [`GroupInfoError::Length`] if `bytes` is shorter than two bytes.
+    /// Returns [`GroupInfoError::TrailingBytes`] if the byte count exceeds [`u16::MAX`].
+    fn read(bytes: &[u8]) -> Result<Self, GroupInfoError> {
+        let actual = u16::try_from(bytes.len()).map_err(|_error| GroupInfoError::TrailingBytes)?;
+        let &[version, flags, ..] = bytes else {
+            return Err(GroupInfoError::Length {
+                expected: GROUP_INFO_PREFIX_LENGTH,
+                actual,
+            });
+        };
+        if version != GROUP_INFO_VERSION {
+            return Err(GroupInfoError::Version(version));
+        }
+        if flags & !(STORES_PHASE_CHANGE | STORES_ESTIMATES) != 0 {
+            return Err(GroupInfoError::Flags(flags));
+        }
+        let expected = GROUP_INFO_PREFIX_LENGTH
+            + GROUP_INFO_PAIR_LENGTH
+                * (u8::from(flags & STORES_PHASE_CHANGE != 0)
+                    + u8::from(flags & STORES_ESTIMATES != 0));
+        Ok(Self {
+            flags,
+            expected,
+            actual,
+        })
     }
 }
 
@@ -125,6 +179,19 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::defaults(&[0, 0, 0, 0, 0, 0, 0, 0], Ok(2))]
+    #[case::phase_change(&[0, 1, 12, 0, 4, 0, 0, 0], Ok(6))]
+    #[case::both(&[0, 3, 12, 0, 4, 0, 7, 0, 20, 0, 0, 0, 0, 0, 0, 0], Ok(10))]
+    #[case::truncated(&[0, 1, 12, 0], Err(GroupInfoError::Length { expected: 6, actual: 4 }))]
+    #[case::version(&[1, 0, 0, 0, 0, 0, 0, 0], Err(GroupInfoError::Version(1)))]
+    fn the_encoded_length_excludes_bytes_past_the_declared_fields(
+        #[case] bytes: &[u8],
+        #[case] expected: Result<usize, GroupInfoError>,
+    ) {
+        assert_eq!(GroupPhaseChange::encoded_len(bytes), expected);
+    }
 
     #[rstest]
     #[case::defaults(&[0, 0], 8, 6)]

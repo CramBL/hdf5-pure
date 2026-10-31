@@ -34,6 +34,10 @@ fn both_readers_convert_the_links_libhdf5_writes_in_a_symbol_table_group(
                     object_header_address: StoredAddress::new(address),
                 },
                 NativeLink::Soft { target } => OwnedLinkTarget::soft(target.into_bytes()),
+                NativeLink::External {
+                    filename,
+                    object_path,
+                } => OwnedLinkTarget::external(filename.into_bytes(), object_path.into_bytes()),
             };
             OwnedLink::new(name.into_bytes(), CharacterSet::Ascii, target, None).unwrap()
         })

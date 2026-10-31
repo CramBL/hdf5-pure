@@ -98,7 +98,7 @@ fn write_value(group: &Group, value: i32) {
         .unwrap();
 }
 
-/// A hard or a soft link, as libhdf5 reports it.
+/// A hard, soft, or external link, as libhdf5 reports it.
 #[cfg(feature = "__hdf5-1.10")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeLink {
@@ -106,14 +106,19 @@ pub enum NativeLink {
     Hard { address: u64 },
     /// A soft link whose value is `target`.
     Soft { target: String },
+    /// An external link to the object at `object_path` in the file `filename`.
+    External {
+        filename: String,
+        object_path: String,
+    },
 }
 
 /// Returns the name and the target of each link of `group`, in the order libhdf5 visits them.
 ///
 /// # Panics
 ///
-/// Panics if a libhdf5 call fails, a link is an external link, or a soft link's value is not UTF-8
-/// or is longer than 1022 bytes.
+/// Panics if a libhdf5 call fails, or if the value of a soft or an external link is longer than
+/// 1022 bytes or has a path that is not UTF-8.
 #[cfg(feature = "__hdf5-1.10")]
 pub fn native_links(file: &hdf5::File, group: &str) -> Vec<(String, NativeLink)> {
     let mut links = Vec::new();
@@ -133,9 +138,9 @@ pub fn native_links(file: &hdf5::File, group: &str) -> Vec<(String, NativeLink)>
                     address: c_object::header_address(file, &path),
                 },
                 LinkType::Soft => NativeLink::Soft {
-                    target: soft_link_value(file, &path),
+                    target: String::from_utf8(link_value(file, &path)).unwrap(),
                 },
-                LinkType::External => panic!("{path:?} is an external link"),
+                LinkType::External => external_link(&link_value(file, &path)),
             };
             (name, link)
         })
@@ -143,7 +148,19 @@ pub fn native_links(file: &hdf5::File, group: &str) -> Vec<(String, NativeLink)>
 }
 
 #[cfg(feature = "__hdf5-1.10")]
-fn soft_link_value(file: &hdf5::File, path: &str) -> String {
+fn external_link(value: &[u8]) -> NativeLink {
+    let (_version_and_flags, strings) = value.split_first().unwrap();
+    let mut strings = strings
+        .split(|&byte| byte == 0)
+        .map(|string| String::from_utf8(string.to_vec()).unwrap());
+    NativeLink::External {
+        filename: strings.next().unwrap(),
+        object_path: strings.next().unwrap(),
+    }
+}
+
+#[cfg(feature = "__hdf5-1.10")]
+fn link_value(file: &hdf5::File, path: &str) -> Vec<u8> {
     let name = CString::new(path).unwrap();
     let mut value = vec![0_u8; 1024];
     let status = hdf5::sync::sync(|| {
@@ -161,11 +178,14 @@ fn soft_link_value(file: &hdf5::File, path: &str) -> String {
         }
     });
     assert!(status >= 0, "H5Lget_val failed for {path:?}");
-    let end = value.iter().position(|&byte| byte == 0).unwrap();
+    let end = value
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |last| last + 1);
     assert!(
         end + 1 < value.len(),
         "the value of {path:?} may be truncated to {end} bytes"
     );
     value.truncate(end);
-    String::from_utf8(value).unwrap()
+    value
 }

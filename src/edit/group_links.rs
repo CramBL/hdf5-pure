@@ -352,7 +352,11 @@ impl<S: Source + ?Sized> IndexReader<'_, S> {
 /// Returns [`Error::EditUnsupported`] if the message has an unsupported encoding or its
 /// minimum dense threshold exceeds its maximum compact threshold.
 pub(super) fn phase_change(bytes: &[u8]) -> Result<GroupPhaseChange, Error> {
-    GroupPhaseChange::parse(bytes).map_err(|error| match error {
+    GroupPhaseChange::parse(bytes).map_err(group_info_error)
+}
+
+pub(super) fn group_info_error(error: GroupInfoError) -> Error {
+    match error {
         GroupInfoError::Length { expected, actual } if actual < u16::from(expected) => {
             Error::EditUnsupported("a group's group-info message is truncated")
         }
@@ -365,7 +369,7 @@ pub(super) fn phase_change(bytes: &[u8]) -> Result<GroupPhaseChange, Error> {
         | GroupInfoError::TrailingBytes => {
             Error::EditUnsupported("a group's group-info message uses an unsupported encoding")
         }
-    })
+    }
 }
 
 pub(super) fn storage_error(error: LinkStorageError) -> Error {

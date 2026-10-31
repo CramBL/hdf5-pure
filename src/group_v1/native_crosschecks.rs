@@ -124,6 +124,10 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
                 object_header_address: value,
             },
             NativeLink::Soft { target } => LinkTarget::soft(target.clone()),
+            NativeLink::External {
+                filename,
+                object_path,
+            } => LinkTarget::external(filename.clone(), object_path.clone()),
         });
         let name = LinkName::new(name).unwrap();
         let buffered = find_link(bytes.as_slice(), &table, widths, addresses, k, name, || {
