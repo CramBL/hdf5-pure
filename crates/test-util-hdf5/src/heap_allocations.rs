@@ -1,16 +1,14 @@
 //! Allocation ranges decoded from controlled fractal-heap fixtures.
 
-use std::num::NonZeroU16;
 use std::ops::Range;
 
 use hdf5_pure::File;
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    BTreeV2Header, BTreeV2NodeInfo, BTreeV2Record, FormatWidths, FractalHeapFiltering,
+    BTreeV2Header, BTreeV2Layout, BTreeV2Node, BTreeV2Record, FormatWidths, FractalHeapFiltering,
     FractalHeapHeader, FreeSpaceManagerHeaderFrame, LengthWidth, OffsetWidth,
 };
-use test_util::btree_v2;
 use test_util::checksum;
 use test_util::fractal_heap;
 
@@ -331,22 +329,9 @@ impl<'a> Heap<'a> {
             AllocationKind::HugeIndex,
         );
         self.huge_index_depth = Some(tree.depth);
-        let node_info = BTreeV2NodeInfo::compute(
-            tree.node_size,
-            tree.record_size,
-            OffsetWidth::Eight,
-            tree.depth,
-        );
+        let nodes = BTreeV2Layout::new(&tree, OffsetWidth::Eight).unwrap();
         let mut records = Vec::new();
-        self.huge_node(
-            bytes,
-            &tree,
-            &node_info,
-            tree.root_node_address.get(),
-            tree.num_records_in_root,
-            tree.depth,
-            &mut records,
-        );
+        self.huge_node(bytes, tree.node_size, nodes.root().unwrap(), &mut records);
         assert_eq!(
             u64::try_from(records.len()).unwrap(),
             self.header.huge_objects_count
@@ -366,22 +351,14 @@ impl<'a> Heap<'a> {
         assert_eq!(total, self.header.huge_objects_size);
     }
 
-    // Version 2 B-tree nodes store records after a six-byte prefix, as defined in section
-    // `subsubsec_fmt4_infra_btrees_v2`, version 4.0.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The recursive walk shares one record accumulator and immutable tree geometry."
-    )]
     fn huge_node(
         &mut self,
         bytes: &[u8],
-        tree: &BTreeV2Header,
-        node_info: &BTreeV2NodeInfo,
-        address: u64,
-        count: u16,
-        depth: u16,
+        node_size: u32,
+        node: BTreeV2Node<'_>,
         records: &mut Vec<BTreeV2Record>,
     ) {
+        let address = node.address().get();
         assert!(
             !self
                 .allocations
@@ -392,48 +369,20 @@ impl<'a> Heap<'a> {
         let allocation = Allocation::new(
             bytes,
             address,
-            u64::from(tree.node_size),
+            u64::from(node_size),
             AllocationKind::HugeIndex,
         );
-        let node = bytes.get(allocation.range.clone()).unwrap();
+        let view = node
+            .parse(bytes.get(allocation.range.clone()).unwrap())
+            .unwrap();
         self.allocations.push(allocation);
-        assert_eq!(
-            *node.get(btree_v2::LEAF_SIGNATURE.len()).unwrap(),
-            BTREE_NODE_VERSION
-        );
-        assert_eq!(*node.get(5).unwrap(), tree.tree_type);
-        let Some(depth) = NonZeroU16::new(depth) else {
-            records.extend(
-                format::parse_btree_v2_leaf_records(node, 0, count, tree.record_size).unwrap(),
-            );
-            return;
-        };
-        let children = format::parse_btree_v2_internal_child_pointers(
-            node,
-            count,
-            depth,
-            tree.record_size,
-            OffsetWidth::Eight,
-            node_info,
-        )
-        .unwrap();
-        for (index, (child, child_count)) in children.into_iter().enumerate() {
-            self.huge_node(
-                bytes,
-                tree,
-                node_info,
-                child.get(),
-                child_count,
-                depth.get() - 1,
-                records,
-            );
-            if index < usize::from(count) {
-                let start = btree_v2::NODE_PREFIX
-                    .checked_add(index.checked_mul(usize::from(tree.record_size)).unwrap())
-                    .unwrap();
-                let end = start.checked_add(usize::from(tree.record_size)).unwrap();
+        for index in 0..=view.record_count() {
+            if let Some(child) = view.child(index).unwrap() {
+                self.huge_node(bytes, node_size, child, records);
+            }
+            if index < view.record_count() {
                 records.push(BTreeV2Record {
-                    data: node.get(start..end).unwrap().to_vec(),
+                    data: view.record(index).unwrap().to_vec(),
                 });
             }
         }
@@ -670,8 +619,3 @@ const HUGE_DIRECT_ID_LEN: u16 = 1 + HUGE_RECORD_LEN;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
 const HUGE_FILTERED_DIRECT_ID_LEN: u16 = 1 + HUGE_FILTERED_RECORD_LEN;
-
-/// The on-disk node version in "Version 2 B-trees" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-const BTREE_NODE_VERSION: u8 = 0;
