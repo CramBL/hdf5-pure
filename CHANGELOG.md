@@ -81,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
 - Fixed `File::open_rw` edits dropping the soft links, external links, and link creation order of a group in a version 1 object header without a symbol table ([#1001](https://github.com/CramBL/hdf5-pure/pull/1001)).
 - Fixed `Group::attrs` and related streaming metadata reads reporting truncation errors for invalid object-header versions when alignment padding is absent ([#1000](https://github.com/CramBL/hdf5-pure/pull/1000)).
 - Fixed `Group::attrs` reading shared dense attributes from the object's private heap in buffered and streaming files ([#998](https://github.com/CramBL/hdf5-pure/pull/998)).
