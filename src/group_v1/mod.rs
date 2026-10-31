@@ -5,6 +5,7 @@ use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU16;
 
 use hdf5_pure_format::__private::LocalHeap;
+use hdf5_pure_format::__private::LocalHeapDataSegment;
 use hdf5_pure_format::__private::LocalHeapLocator;
 use hdf5_pure_format::__private::SymbolTableEntry;
 use hdf5_pure_format::__private::SymbolTableNode;
@@ -26,6 +27,12 @@ use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::FormatWidths;
 
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    #[cfg(test)]
+    mod native_crosschecks;
+}
+
 /// A resolved group entry (child name + object header address).
 #[derive(Debug, Clone)]
 pub struct GroupEntry {
@@ -33,21 +40,18 @@ pub struct GroupEntry {
     pub name: String,
     /// Address of the child's object header.
     pub object_header_address: StoredAddress,
-    /// Cache type from the symbol table (SNOD) entry. The group walks never return a
-    /// [`SYMBOLIC_LINK`] entry.
-    #[allow(dead_code)]
-    pub cache_type: u32,
 }
 
 /// Returns one entry per child using validated file widths.
 ///
 /// A symbolic link ([`SYMBOLIC_LINK`]) identifies no object header in this file and is passed
-/// over, as a version 2 group's soft links are. `group_leaf_node_k` is the value
-/// [`group_leaf_node_k`] returns for the file's superblock.
+/// over once its value parses, as a version 2 group's soft links are. `group_leaf_node_k` is the
+/// value [`group_leaf_node_k`] returns for the file's superblock.
 ///
 /// # Errors
 ///
-/// Returns the [`FormatError`] of the first group structure that does not parse.
+/// Returns the [`FormatError`] of the first group structure that does not parse, such as
+/// [`FormatError::InvalidSymbolTableCacheType`] for an entry whose cache type is not 0, 1, or 2.
 pub fn resolve_v1_group_entries(
     file_data: &[u8],
     sym_table_msg: &SymbolTableMessage,
@@ -55,22 +59,19 @@ pub fn resolve_v1_group_entries(
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    symbols(
+    let mut entries = Vec::new();
+    visit_v1_group_links(
         file_data,
         sym_table_msg,
         widths,
         addresses,
         group_leaf_node_k,
-        || {
-            btree_v1::collect_symbol_table_nodes(
-                file_data,
-                sym_table_msg.btree_address,
-                widths,
-                addresses,
-            )
+        |link| {
+            entries.extend(link.into_group_entry()?);
+            Ok(())
         },
-        is_child,
-    )
+    )?;
+    Ok(entries)
 }
 
 /// Returns one entry per child from `source` using validated file widths.
@@ -86,22 +87,31 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    v1_symbols_from_source(
+    let mut entries = Vec::new();
+    visit_v1_group_links_from_source(
         source,
         sym_table_msg,
         widths,
         addresses,
         group_leaf_node_k,
-        is_child,
-    )
+        |link| {
+            entries.extend(link.into_group_entry()?);
+            Ok(())
+        },
+    )?;
+    Ok(entries)
 }
 
 /// Returns the target of the version 1 group link named `name`.
 ///
+/// The name and the cache type of every entry are parsed, and the value of a symbolic link only
+/// for the link named `name`.
+///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidSymbolTableCacheType`] for an unsupported cache type,
-/// and errors from the local heap and symbol table parsers and `file` reads.
+/// Returns the [`FormatError`] of the first group structure that does not parse, such as
+/// [`FormatError::InvalidSymbolTableCacheType`] for an entry whose cache type is not 0, 1, or 2,
+/// the error `symbol_table_nodes` returns, and the errors of [`RangeReader::read_range`].
 pub(crate) fn find_link(
     file: &(impl RangeReader + ?Sized),
     sym_table_msg: &SymbolTableMessage,
@@ -111,43 +121,33 @@ pub(crate) fn find_link(
     name: LinkName<'_>,
     symbol_table_nodes: impl FnOnce() -> Result<Vec<StoredAddress>, FormatError>,
 ) -> Result<Option<LinkTarget>, FormatError> {
-    let heap = read_local_heap(file, sym_table_msg, widths, addresses)?;
-    let range = heap.data_segment_range();
-    let bytes = file.read_range(range)?;
-    let names = heap.data_segment(source::legacy_framed_region(range, &bytes)?)?;
     let mut found = None;
-    for address in symbol_table_nodes()? {
-        let node = read_symbol_table_node(file, widths, addresses, group_leaf_node_k, address)?;
-        for entry in node.entries {
-            let link_name = names.name(entry.link_name_offset)?;
-            if link_name != name.as_str() {
-                continue;
+    visit_links(
+        file,
+        sym_table_msg,
+        widths,
+        addresses,
+        group_leaf_node_k,
+        symbol_table_nodes,
+        |link| {
+            if found.is_none() && link.name == name.as_str() {
+                found = Some(link.target.to_link_target()?);
             }
-            let target = match entry.cache_type {
-                UNCACHED | CACHED_GROUP => LinkTarget::Hard {
-                    object_header_address: entry.object_header_address,
-                },
-                SYMBOLIC_LINK => {
-                    let [a, b, c, d, ..] = entry.scratch_pad;
-                    // The first four scratch-pad bytes store the local-heap offset, as defined in
-                    // "Symbol Table Entry" of the format specification, version 4.0.
-                    let offset = u64::from(u32::from_le_bytes([a, b, c, d]));
-                    LinkTarget::soft(String::from(names.name(offset)?))
-                }
-                other => return Err(FormatError::InvalidSymbolTableCacheType(other)),
-            };
-            found = found.or(Some(target));
-        }
-    }
+            Ok(())
+        },
+    )?;
     Ok(found)
 }
 
 /// Returns whether the version 1 group `sym_table_msg` describes holds a symbolic link
 /// ([`SYMBOLIC_LINK`]), which [`resolve_v1_group_entries_from_source`] passes over.
 ///
+/// Only the name and the cache type of each entry are parsed.
+///
 /// # Errors
 ///
-/// Returns the errors of [`resolve_v1_group_entries_from_source`].
+/// Returns the errors of [`resolve_v1_group_entries_from_source`] other than those of a symbolic
+/// link's value.
 pub(crate) fn v1_group_holds_symbolic_link_from_source<S: Source + ?Sized>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
@@ -155,15 +155,19 @@ pub(crate) fn v1_group_holds_symbolic_link_from_source<S: Source + ?Sized>(
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<bool, FormatError> {
-    Ok(!v1_symbols_from_source(
+    let mut holds_symbolic_link = false;
+    visit_v1_group_links_from_source(
         source,
         sym_table_msg,
         widths,
         addresses,
         group_leaf_node_k,
-        |entry| entry.cache_type == SYMBOLIC_LINK,
-    )?
-    .is_empty())
+        |link| {
+            holds_symbolic_link |= matches!(link.target, TargetRef::Soft(_));
+            Ok(())
+        },
+    )?;
+    Ok(holds_symbolic_link)
 }
 
 /// Returns the "Group Leaf Node K" field of `superblock`, or `None` where the field is absent or 0.
@@ -173,17 +177,54 @@ pub(crate) fn group_leaf_node_k(superblock: &Superblock) -> Option<NonZeroU16> {
     superblock.group_leaf_node_k.and_then(NonZeroU16::new)
 }
 
-/// Returns the entries of the version 1 group `sym_table_msg` describes for which `keep` returns
-/// `true`.
-fn v1_symbols_from_source<S: Source + ?Sized>(
+/// Calls `visit` with each link of the version 1 group `sym_table_msg` describes, read from
+/// `file_data` through the group's B-tree.
+///
+/// # Errors
+///
+/// Returns the errors of [`visit_links`] and of [`btree_v1::collect_symbol_table_nodes`].
+fn visit_v1_group_links(
+    file_data: &[u8],
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
+    visit: impl FnMut(LinkRef<'_>) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    visit_links(
+        file_data,
+        sym_table_msg,
+        widths,
+        addresses,
+        group_leaf_node_k,
+        || {
+            btree_v1::collect_symbol_table_nodes(
+                file_data,
+                sym_table_msg.btree_address,
+                widths,
+                addresses,
+            )
+        },
+        visit,
+    )
+}
+
+/// Calls `visit` with each link of the version 1 group `sym_table_msg` describes, read from
+/// `source` through the group's B-tree.
+///
+/// # Errors
+///
+/// Returns the errors of [`visit_links`] and of
+/// [`btree_v1::collect_symbol_table_nodes_from_source`].
+fn visit_v1_group_links_from_source<S: Source + ?Sized>(
     source: &S,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
-    keep: impl Fn(&SymbolTableEntry) -> bool,
-) -> Result<Vec<GroupEntry>, FormatError> {
-    symbols(
+    visit: impl FnMut(LinkRef<'_>) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    visit_links(
         source,
         sym_table_msg,
         widths,
@@ -197,55 +238,141 @@ fn v1_symbols_from_source<S: Source + ?Sized>(
                 addresses,
             )
         },
-        keep,
+        visit,
     )
 }
 
-/// Returns whether `entry` points to an object header, which every entry but a symbolic link
-/// ([`SYMBOLIC_LINK`]) does.
-fn is_child(entry: &SymbolTableEntry) -> bool {
-    entry.cache_type != SYMBOLIC_LINK
-}
-
-/// Returns the entries of the version 1 group `sym_table_msg` describes for which `keep` returns
-/// `true`, read from `file`.
+/// Calls `visit` with each link of the version 1 group `sym_table_msg` describes, read from
+/// `file`.
 ///
-/// `symbol_table_nodes` returns the addresses of the group's symbol table nodes. The name of every
-/// entry is parsed, including the names of the entries for which `keep` returns `false`.
+/// `symbol_table_nodes` returns the addresses of the group's symbol table nodes. The name and the
+/// cache type of each entry are parsed before `visit` is called with it. A symbolic link's value
+/// is parsed by [`SoftValue::path`].
 ///
 /// # Errors
 ///
-/// Returns the [`FormatError`] of the first group structure that does not parse, and the errors
-/// of [`RangeReader::read_range`].
-fn symbols(
+/// Returns the [`FormatError`] of the first group structure that does not parse, the error
+/// `symbol_table_nodes` or `visit` returns, and the errors of [`RangeReader::read_range`].
+fn visit_links(
     file: &(impl RangeReader + ?Sized),
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
     addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
     symbol_table_nodes: impl FnOnce() -> Result<Vec<StoredAddress>, FormatError>,
-    keep: impl Fn(&SymbolTableEntry) -> bool,
-) -> Result<Vec<GroupEntry>, FormatError> {
+    mut visit: impl FnMut(LinkRef<'_>) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
     let heap = read_local_heap(file, sym_table_msg, widths, addresses)?;
     let range = heap.data_segment_range();
     let bytes = file.read_range(range)?;
     let names = heap.data_segment(source::legacy_framed_region(range, &bytes)?)?;
 
-    let mut entries = Vec::new();
     for address in symbol_table_nodes()? {
         let node = read_symbol_table_node(file, widths, addresses, group_leaf_node_k, address)?;
-        for entry in node.entries {
-            let link_name = names.name(entry.link_name_offset)?;
-            if keep(&entry) {
-                entries.push(GroupEntry {
-                    name: String::from(link_name),
-                    object_header_address: entry.object_header_address,
-                    cache_type: entry.cache_type,
-                });
-            }
+        for entry in &node.entries {
+            visit(LinkRef::parse(names, entry)?)?;
         }
     }
-    Ok(entries)
+    Ok(())
+}
+
+/// A link of a version 1 group, with its name borrowed from the local heap's data segment.
+#[derive(Clone, Copy, Debug)]
+struct LinkRef<'a> {
+    name: &'a str,
+    target: TargetRef<'a>,
+}
+
+impl<'a> LinkRef<'a> {
+    /// Parses `entry` into a link, with the name at its link name offset in `names`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidSymbolTableCacheType`] if the cache type of `entry` is not
+    /// [`UNCACHED`], [`CACHED_GROUP`], or [`SYMBOLIC_LINK`], and the errors of
+    /// [`LocalHeapDataSegment::name`] for the link name.
+    fn parse(
+        names: LocalHeapDataSegment<'a>,
+        entry: &SymbolTableEntry,
+    ) -> Result<Self, FormatError> {
+        let name = names.name(entry.link_name_offset)?;
+        let target = match entry.cache_type {
+            UNCACHED | CACHED_GROUP => TargetRef::Hard(entry.object_header_address),
+            SYMBOLIC_LINK => {
+                // The first four scratch-pad bytes store the local-heap offset of the link value,
+                // as defined in "Symbol Table Entry" of the format specification, version 4.0.
+                let [a, b, c, d, ..] = entry.scratch_pad;
+                TargetRef::Soft(SoftValue {
+                    names,
+                    offset: u64::from(u32::from_le_bytes([a, b, c, d])),
+                })
+            }
+            other => return Err(FormatError::InvalidSymbolTableCacheType(other)),
+        };
+        Ok(Self { name, target })
+    }
+
+    /// Returns the child entry of a hard link, or `None` for a symbolic link whose value parses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`SoftValue::path`] for a symbolic link.
+    fn into_group_entry(self) -> Result<Option<GroupEntry>, FormatError> {
+        let Self { name, target } = self;
+        Ok(match target {
+            TargetRef::Hard(object_header_address) => Some(GroupEntry {
+                name: String::from(name),
+                object_header_address,
+            }),
+            TargetRef::Soft(value) => {
+                value.path()?;
+                None
+            }
+        })
+    }
+}
+
+/// The target of a version 1 group link.
+#[derive(Clone, Copy, Debug)]
+enum TargetRef<'a> {
+    /// The object header address the symbol table entry stores.
+    Hard(StoredAddress),
+    /// The value of a symbolic link.
+    Soft(SoftValue<'a>),
+}
+
+impl TargetRef<'_> {
+    /// Returns the owned [`LinkTarget`], with the value of a symbolic link parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`SoftValue::path`] for a symbolic link.
+    fn to_link_target(self) -> Result<LinkTarget, FormatError> {
+        Ok(match self {
+            Self::Hard(object_header_address) => LinkTarget::Hard {
+                object_header_address,
+            },
+            Self::Soft(value) => LinkTarget::soft(String::from(value.path()?)),
+        })
+    }
+}
+
+/// The value of a symbolic link, at `offset` in the local heap's data segment `names`.
+#[derive(Clone, Copy, Debug)]
+struct SoftValue<'a> {
+    names: LocalHeapDataSegment<'a>,
+    offset: u64,
+}
+
+impl<'a> SoftValue<'a> {
+    /// Returns the path the symbolic link points to.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`LocalHeapDataSegment::name`].
+    fn path(self) -> Result<&'a str, FormatError> {
+        self.names.name(self.offset)
+    }
 }
 
 /// Reads the header of the local heap `sym_table_msg` locates from `file`, and parses it.
@@ -352,6 +479,69 @@ mod tests {
         AtTheEnd,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Child {
+        Uncached(&'static str, u64),
+        CachedGroup(&'static str, u64),
+        Soft(&'static str, &'static str),
+    }
+
+    impl Child {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Uncached(name, _) | Self::CachedGroup(name, _) | Self::Soft(name, _) => name,
+            }
+        }
+
+        fn soft_target(self) -> Option<&'static str> {
+            match self {
+                Self::Uncached(..) | Self::CachedGroup(..) => None,
+                Self::Soft(_, target) => Some(target),
+            }
+        }
+
+        fn link_target(self) -> LinkTarget {
+            match self {
+                Self::Uncached(_, address) | Self::CachedGroup(_, address) => LinkTarget::Hard {
+                    object_header_address: StoredAddress::new(address),
+                },
+                Self::Soft(_, target) => LinkTarget::soft(String::from(target)),
+            }
+        }
+
+        fn link(self) -> (String, LinkTarget) {
+            (String::from(self.name()), self.link_target())
+        }
+
+        fn entry(
+            self,
+            widths: Widths,
+            name_offset: u64,
+            target_offset: impl FnOnce() -> u64,
+        ) -> symbol_table::Entry {
+            match self {
+                Self::Uncached(_, address) => symbol_table::Entry::new(name_offset, address),
+                Self::CachedGroup(_, address) => symbol_table::Entry {
+                    cache_type: CACHED_GROUP,
+                    ..symbol_table::Entry::new(name_offset, address)
+                },
+                Self::Soft(..) => {
+                    let mut scratch_pad = [0; symbol_table::SCRATCH_PAD];
+                    scratch_pad[..4]
+                        .copy_from_slice(&u32::try_from(target_offset()).unwrap().to_le_bytes());
+                    symbol_table::Entry {
+                        cache_type: SYMBOLIC_LINK,
+                        scratch_pad,
+                        ..symbol_table::Entry::new(
+                            name_offset,
+                            u64::MAX >> (64 - 8 * widths.offset),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     struct Group {
         bytes: Vec<u8>,
         message: SymbolTableMessage,
@@ -362,6 +552,20 @@ mod tests {
     }
 
     impl Group {
+        fn file(&self, base: u64) -> Vec<u8> {
+            let mut file = vec![0; usize::try_from(base).unwrap()];
+            file.extend_from_slice(&self.bytes);
+            file
+        }
+
+        fn set_entry_field(&mut self, entry: usize, field_at: usize, value: u32) {
+            let at = usize::try_from(self.nodes[0].0).unwrap()
+                + NODE_PREFIX_LEN
+                + entry * EIGHT_BYTE_ENTRY_LEN
+                + field_at;
+            test_util::bytes::set_uint_at(&mut self.bytes, at, 4, value.into());
+        }
+
         fn reads(&self, base: u64) -> Vec<(u64, usize)> {
             let Self {
                 bytes: _,
@@ -388,10 +592,23 @@ mod tests {
         }
     }
 
-    fn group(nodes: &[&[(&str, u64, u32)]], widths: Widths, data_segment: DataSegment) -> Group {
-        let names: Vec<&str> = nodes
+    const NODE_PREFIX_LEN: usize = 8;
+
+    const EIGHT_BYTE_ENTRY_LEN: usize = 40;
+
+    const CACHE_TYPE_AT: usize = 16;
+
+    const SCRATCH_PAD_AT: usize = 24;
+
+    fn group(nodes: &[&[Child]], widths: Widths, data_segment: DataSegment) -> Group {
+        let children: Vec<Child> = nodes
             .iter()
-            .flat_map(|children| children.iter().map(|&(name, _, _)| name))
+            .flat_map(|children| children.iter().copied())
+            .collect();
+        let names: Vec<&str> = children
+            .iter()
+            .map(|child| child.name())
+            .chain(children.iter().filter_map(|child| child.soft_target()))
             .collect();
         let segment = local_heap::Segment::of_names(0, &names);
         let header_len = local_heap::header_len(widths);
@@ -413,15 +630,18 @@ mod tests {
         let btree_len = btree(&vec![0; nodes.len()]).len();
         let btree_at = image.append_aligned(&vec![0; btree_len], 8);
 
-        let mut name_offsets = (0..names.len()).map(|index| segment.offset_of(index));
+        let mut name_offsets = (0..children.len()).map(|index| segment.offset_of(index));
+        let mut target_offsets =
+            (children.len()..names.len()).map(|index| segment.offset_of(index));
         let nodes: Vec<(u64, usize)> = nodes
             .iter()
             .map(|children| {
                 let entries: Vec<_> = children
                     .iter()
-                    .map(|&(_, header_address, cache_type)| symbol_table::Entry {
-                        cache_type,
-                        ..symbol_table::Entry::new(name_offsets.next().unwrap(), header_address)
+                    .map(|child| {
+                        child.entry(widths, name_offsets.next().unwrap(), || {
+                            target_offsets.next().unwrap()
+                        })
                     })
                     .collect();
                 let node = symbol_table::node(&entries, widths);
@@ -466,18 +686,23 @@ mod tests {
         NonZeroU16::new(k)
     }
 
-    fn links(entries: Vec<GroupEntry>) -> Vec<(String, StoredAddress)> {
+    fn listed(entries: Vec<GroupEntry>) -> Vec<(String, StoredAddress)> {
         entries
             .into_iter()
             .map(|entry| (entry.name, entry.object_header_address))
             .collect()
     }
 
-    fn links_of(nodes: &[&[(&str, u64, u32)]]) -> Vec<(String, StoredAddress)> {
+    fn hard_children(nodes: &[&[Child]]) -> Vec<(String, StoredAddress)> {
         nodes
             .iter()
             .flat_map(|children| children.iter())
-            .map(|&(name, address, _)| (String::from(name), StoredAddress::new(address)))
+            .filter_map(|child| match *child {
+                Child::Uncached(name, address) | Child::CachedGroup(name, address) => {
+                    Some((String::from(name), StoredAddress::new(address)))
+                }
+                Child::Soft(..) => None,
+            })
             .collect()
     }
 
@@ -487,18 +712,16 @@ mod tests {
         base: u64,
         group_leaf_node_k: Option<NonZeroU16>,
     ) -> [Result<Vec<(String, StoredAddress)>, FormatError>; 2] {
-        let mut file = vec![0; usize::try_from(base).unwrap()];
-        file.extend_from_slice(&group.bytes);
         let widths = format_widths(widths);
         [
             resolve_v1_group_entries(
-                &file,
+                &group.file(base),
                 &group.message,
                 widths,
                 addresses(base),
                 group_leaf_node_k,
             )
-            .map(links),
+            .map(listed),
             resolve_v1_group_entries_from_source(
                 &PlacedSource::new(base, group.bytes.clone()),
                 &group.message,
@@ -506,50 +729,256 @@ mod tests {
                 addresses(base),
                 group_leaf_node_k,
             )
-            .map(links),
+            .map(listed),
         ]
+    }
+
+    fn read_links_both(
+        group: &Group,
+        widths: Widths,
+        base: u64,
+    ) -> [Result<Vec<(String, LinkTarget)>, FormatError>; 2] {
+        let widths = format_widths(widths);
+        let mut buffered = Vec::new();
+        let mut streaming = Vec::new();
+        [
+            visit_v1_group_links(
+                &group.file(base),
+                &group.message,
+                widths,
+                addresses(base),
+                k(2),
+                |link| {
+                    buffered.push(owned(link)?);
+                    Ok(())
+                },
+            )
+            .map(|()| buffered),
+            visit_v1_group_links_from_source(
+                &PlacedSource::new(base, group.bytes.clone()),
+                &group.message,
+                widths,
+                addresses(base),
+                k(2),
+                |link| {
+                    streaming.push(owned(link)?);
+                    Ok(())
+                },
+            )
+            .map(|()| streaming),
+        ]
+    }
+
+    fn owned(link: LinkRef<'_>) -> Result<(String, LinkTarget), FormatError> {
+        Ok((String::from(link.name), link.target.to_link_target()?))
+    }
+
+    fn look_up_both(
+        group: &Group,
+        widths: Widths,
+        base: u64,
+        name: &str,
+    ) -> [Result<Option<LinkTarget>, FormatError>; 2] {
+        let widths = format_widths(widths);
+        let name = LinkName::new(name).unwrap();
+        let nodes = || {
+            Ok(group
+                .nodes
+                .iter()
+                .map(|&(address, _)| StoredAddress::new(address))
+                .collect())
+        };
+        [
+            find_link(
+                group.file(base).as_slice(),
+                &group.message,
+                widths,
+                addresses(base),
+                k(2),
+                name,
+                nodes,
+            ),
+            find_link(
+                &PlacedSource::new(base, group.bytes.clone()),
+                &group.message,
+                widths,
+                addresses(base),
+                k(2),
+                name,
+                nodes,
+            ),
+        ]
+    }
+
+    fn holds_symbolic_link(group: &Group) -> Result<bool, FormatError> {
+        v1_group_holds_symbolic_link_from_source(
+            &PlacedSource::new(0, group.bytes.clone()),
+            &group.message,
+            format_widths(Widths::EIGHT),
+            addresses(0),
+            k(2),
+        )
+    }
+
+    #[track_caller]
+    fn assert_the_listings_and_the_lookup_reject(
+        group: &Group,
+        name: &str,
+        expected: &FormatError,
+    ) {
+        assert_eq!(
+            read_links_both(group, Widths::EIGHT, 0),
+            [Err(expected.clone()), Err(expected.clone())]
+        );
+        assert_eq!(
+            read_both(group, Widths::EIGHT, 0, k(2)),
+            [Err(expected.clone()), Err(expected.clone())]
+        );
+        assert_eq!(
+            look_up_both(group, Widths::EIGHT, 0, name),
+            [Err(expected.clone()), Err(expected.clone())]
+        );
+    }
+
+    #[rstest]
+    #[case::uncached(Child::Uncached("data", 0x1000))]
+    #[case::cached_group(Child::CachedGroup("group", 0x2000))]
+    #[case::absolute_soft_link(Child::Soft("absolute", "/group/data"))]
+    #[case::relative_soft_link(Child::Soft("relative", "data"))]
+    #[case::dangling_soft_link(Child::Soft("dangling", "missing"))]
+    fn both_readers_read_each_link_as_its_typed_record(
+        #[case] child: Child,
+        #[values(Widths::new(2, 2), Widths::FOUR, Widths::new(8, 2), Widths::EIGHT)] widths: Widths,
+        #[values(0, 512)] base: u64,
+    ) {
+        let nodes: &[&[Child]] = &[&[Child::Uncached("sibling", 0x300), child]];
+        let group = group(nodes, widths, DataSegment::AtTheEnd);
+        let expected = vec![Child::Uncached("sibling", 0x300).link(), child.link()];
+        assert_eq!(
+            read_links_both(&group, widths, base),
+            [Ok(expected.clone()), Ok(expected)]
+        );
+        let expected = Some(child.link_target());
+        assert_eq!(
+            look_up_both(&group, widths, base, child.name()),
+            [Ok(expected.clone()), Ok(expected)]
+        );
+        let expected = hard_children(nodes);
+        assert_eq!(
+            read_both(&group, widths, base, k(2)),
+            [Ok(expected.clone()), Ok(expected)]
+        );
     }
 
     #[rstest]
     #[case::first_unknown_type(3)]
     #[case::maximum_cache_type(u32::MAX)]
-    fn a_lookup_rejects_an_unknown_symbol_table_cache_type(#[case] cache_type: u32) {
-        let group = group(
-            &[&[("child", 0x100, cache_type)]],
+    fn every_read_rejects_an_unknown_symbol_table_cache_type(#[case] cache_type: u32) {
+        let mut group = group(
+            &[&[
+                Child::Uncached("child", 0x100),
+                Child::Uncached("other", 0x200),
+            ]],
             Widths::EIGHT,
             DataSegment::FollowsHeader,
         );
-        let widths = format_widths(Widths::EIGHT);
-        let error = find_link(
-            group.bytes.as_slice(),
-            &group.message,
-            widths,
-            addresses(0),
-            k(16),
-            LinkName::new("child").unwrap(),
-            || {
-                Ok(group
-                    .nodes
-                    .iter()
-                    .map(|&(address, _)| StoredAddress::new(address))
-                    .collect())
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error, FormatError::InvalidSymbolTableCacheType(cache_type));
+        group.set_entry_field(1, CACHE_TYPE_AT, cache_type);
+        assert_the_listings_and_the_lookup_reject(
+            &group,
+            "child",
+            &FormatError::InvalidSymbolTableCacheType(cache_type),
+        );
+        assert_eq!(
+            holds_symbolic_link(&group),
+            Err(FormatError::InvalidSymbolTableCacheType(cache_type))
+        );
     }
 
-    const CHILDREN: &[(&str, u64, u32)] = &[("alpha", 0x1000, 0), ("beta", 0x2000, 1)];
+    #[rstest]
+    #[case::at_the_end_of_the_data_segment(None)]
+    #[case::maximum_offset(Some(u32::MAX))]
+    fn a_soft_link_value_outside_the_local_heap_is_rejected_where_it_is_read(
+        #[case] offset: Option<u32>,
+    ) {
+        let mut group = group(
+            &[&[
+                Child::Uncached("child", 0x100),
+                Child::Soft("soft", "/child"),
+            ]],
+            Widths::EIGHT,
+            DataSegment::FollowsHeader,
+        );
+        let data_segment_size = group.data_segment.1.to_u64();
+        let offset = offset.unwrap_or(u32::try_from(data_segment_size).unwrap());
+        group.set_entry_field(1, SCRATCH_PAD_AT, offset);
+        assert_the_listings_and_the_lookup_reject(
+            &group,
+            "soft",
+            &FormatError::InvalidLocalHeapNameOffset {
+                offset: offset.into(),
+                data_segment_size,
+            },
+        );
+        assert_the_sibling_lookup_and_the_soft_link_check_succeed(&group);
+    }
 
-    const THREE_NODES: &[&[(&str, u64, u32)]] = &[
+    #[test]
+    fn a_soft_link_value_that_is_not_utf8_is_rejected_where_it_is_read() {
+        let mut group = group(
+            &[&[
+                Child::Uncached("child", 0x100),
+                Child::Soft("soft", "/child"),
+            ]],
+            Widths::EIGHT,
+            DataSegment::FollowsHeader,
+        );
+        let segment_at = usize::try_from(group.data_segment.0).unwrap();
+        let value_at =
+            test_util::bytes::find_signature(&group.bytes[segment_at..], b"/child\0").unwrap();
+        let value = segment_at + value_at..segment_at + value_at + "/child".len();
+        group.bytes[value.start + 1] = 0xFF;
+        let source = core::str::from_utf8(&group.bytes[value]).unwrap_err();
+        assert_eq!(source.valid_up_to(), 1);
+        assert_the_listings_and_the_lookup_reject(
+            &group,
+            "soft",
+            &FormatError::InvalidLocalHeapName {
+                offset: value_at.to_u64(),
+                source,
+            },
+        );
+        assert_the_sibling_lookup_and_the_soft_link_check_succeed(&group);
+    }
+
+    #[track_caller]
+    fn assert_the_sibling_lookup_and_the_soft_link_check_succeed(group: &Group) {
+        let hard = Some(Child::Uncached("child", 0x100).link_target());
+        assert_eq!(
+            look_up_both(group, Widths::EIGHT, 0, "child"),
+            [Ok(hard.clone()), Ok(hard)]
+        );
+        assert_eq!(holds_symbolic_link(group), Ok(true));
+    }
+
+    const CHILDREN: &[Child] = &[
+        Child::Uncached("alpha", 0x1000),
+        Child::CachedGroup("beta", 0x2000),
+    ];
+
+    const THREE_NODES: &[&[Child]] = &[
         &[
-            ("a", 0x100, 0),
-            ("b", 0x200, 0),
-            ("c", 0x300, 1),
-            ("d", 0x400, 0),
+            Child::Uncached("a", 0x100),
+            Child::Uncached("b", 0x200),
+            Child::CachedGroup("c", 0x300),
+            Child::Uncached("d", 0x400),
         ],
-        &[("e", 0x500, 0), ("f", 0x600, 0)],
-        &[("g", 0x700, 1), ("h", 0x800, 0), ("i", 0x900, 0)],
+        &[Child::Uncached("e", 0x500), Child::Uncached("f", 0x600)],
+        &[
+            Child::CachedGroup("g", 0x700),
+            Child::Soft("s", "/a"),
+            Child::Uncached("h", 0x800),
+            Child::Uncached("i", 0x900),
+        ],
     ];
 
     #[rstest]
@@ -564,10 +993,10 @@ mod tests {
         widths: Widths,
         #[values(0, 512)] base: u64,
         #[values(DataSegment::FollowsHeader, DataSegment::AtTheEnd)] data_segment: DataSegment,
-        #[values(&[CHILDREN][..], THREE_NODES)] nodes: &[&[(&str, u64, u32)]],
+        #[values(&[CHILDREN][..], THREE_NODES)] nodes: &[&[Child]],
     ) {
         let group = group(nodes, widths, data_segment);
-        let expected = links_of(nodes);
+        let expected = hard_children(nodes);
         assert_eq!(
             read_both(&group, widths, base, k(2)),
             [Ok(expected.clone()), Ok(expected)]
@@ -589,7 +1018,7 @@ mod tests {
             k(2),
         )
         .unwrap();
-        assert_eq!(links(entries), links_of(THREE_NODES));
+        assert_eq!(listed(entries), hard_children(THREE_NODES));
         assert_eq!(source.reads.into_inner(), group.reads(base));
     }
 
@@ -650,12 +1079,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case::at_capacity(k(2), Ok(links_of(THREE_NODES)))]
+    #[case::at_capacity(k(2), Ok(hard_children(THREE_NODES)))]
     #[case::above_capacity(
         k(1),
         Err(FormatError::InvalidSymbolTableNodeSymbolCount { symbols: 4, capacity: 2 })
     )]
-    #[case::unknown_capacity(None, Ok(links_of(THREE_NODES)))]
+    #[case::unknown_capacity(None, Ok(hard_children(THREE_NODES)))]
     fn a_node_holds_at_most_twice_the_group_leaf_node_k(
         #[case] group_leaf_node_k: Option<NonZeroU16>,
         #[case] expected: Result<Vec<(String, StoredAddress)>, FormatError>,
@@ -736,32 +1165,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_symbolic_link_is_not_a_child() {
-        let group = group(
-            &[&[
-                ("data", 0x1000, 0),
-                ("pointer", u64::MAX, SYMBOLIC_LINK),
-                ("group", 0x2000, 1),
-            ]],
-            Widths::EIGHT,
-            DataSegment::FollowsHeader,
-        );
-        let expected = links_of(&[&[("data", 0x1000, 0), ("group", 0x2000, 1)]]);
+    #[rstest]
+    #[case::soft_link(
+        &[Child::Uncached("data", 0x1000), Child::Soft("pointer", "data"), Child::CachedGroup("group", 0x2000)],
+        true
+    )]
+    #[case::hard_links_only(CHILDREN, false)]
+    fn the_listing_passes_over_the_symbolic_links_the_check_reports(
+        #[case] children: &[Child],
+        #[case] holds: bool,
+    ) {
+        let group = group(&[children], Widths::EIGHT, DataSegment::FollowsHeader);
+        let expected = hard_children(&[children]);
         assert_eq!(
             read_both(&group, Widths::EIGHT, 0, k(2)),
             [Ok(expected.clone()), Ok(expected)]
         );
-        assert!(
-            v1_group_holds_symbolic_link_from_source(
-                &PlacedSource::new(0, group.bytes),
-                &group.message,
-                format_widths(Widths::EIGHT),
-                addresses(0),
-                k(2),
-            )
-            .unwrap()
-        );
+        assert_eq!(holds_symbolic_link(&group), Ok(holds));
     }
 
     // Helper to extract dataset components from an object header
