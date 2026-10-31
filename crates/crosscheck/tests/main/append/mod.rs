@@ -434,7 +434,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
     assert_eq!(persisted.free_sections().free_bytes(), native_free);
     for section in persisted.free_sections().sections() {
         for chunk in &chunks {
-            let start = section.address();
+            let start = section.address().get();
             assert!(
                 start + section.length().get() <= chunk.address()
                     || chunk.address() + chunk.size() <= start
@@ -534,8 +534,8 @@ fn assert_retired_chunk_is_reusable(file: &File, predecessor: &Chunk) {
             .unwrap()
             .sections()
             .iter()
-            .any(|section| section.address() <= predecessor.address
-                && predecessor.address + predecessor.storage_size <= section.end_address()),
+            .any(|section| section.address().get() <= predecessor.address
+                && predecessor.address + predecessor.storage_size <= section.end_address().get()),
         "predecessor {}..{} is unavailable",
         predecessor.address,
         predecessor.address + predecessor.storage_size

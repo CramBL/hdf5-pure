@@ -19,12 +19,12 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterId;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::FreeSections;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSections;
+use hdf5_pure::PhysicalAddress;
 use hdf5_pure::ReusableSpaceStats;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SyncPolicy;
@@ -1089,8 +1089,12 @@ fn final_state(path: &Path, base: Base, file: &File, live: &VecDeque<usize>) -> 
     }
 }
 
-fn pressure(base: Base, stats: &ReusableSpaceStats, sections: &FreeSections) -> u64 {
-    crate::assert_free_sections_consistent!(stats, sections, FreeSectionCoordinates::Absolute);
+fn pressure(
+    base: Base,
+    stats: &ReusableSpaceStats,
+    sections: &FreeSections<PhysicalAddress>,
+) -> u64 {
+    crate::assert_free_sections_consistent!(stats, sections, PhysicalAddress);
     base.logical_size(stats)
         .checked_sub(stats.reusable_free_bytes())
         .expect("reusable free cannot exceed logical size")

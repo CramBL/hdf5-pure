@@ -65,7 +65,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(test)]
 use test_util::disk_log;
 
-use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 
 use hdf5_pure_core::MetadataBytes;
 
@@ -1750,7 +1751,7 @@ mod tests {
     ) {
         use std::error::Error as StdError;
 
-        use hdf5_pure_core::__private::PhysicalAddress;
+        use hdf5_pure_core::PhysicalAddress;
 
         let path = test_util::temp::temp_path("truncated.h5");
         fs::write(&path, []).unwrap();

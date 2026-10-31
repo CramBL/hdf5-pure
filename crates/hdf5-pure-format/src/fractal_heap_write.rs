@@ -821,7 +821,8 @@ fn place(region: &mut [u8], offset: u64, data: &[u8]) -> Result<(), FormatError>
 
 #[cfg(test)]
 mod tests {
-    use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+    use hdf5_pure_core::__private::{FileRange, FileRegion};
+    use hdf5_pure_core::PhysicalAddress;
     use rstest::rstest;
     use test_util::fractal_heap;
     use test_util::widths::Widths;

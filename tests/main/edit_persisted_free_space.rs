@@ -11,9 +11,9 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSpacePolicy;
+use hdf5_pure::PhysicalAddress;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
@@ -390,11 +390,11 @@ fn strict_persisted_open_preserves_reuse_and_policy(
         .sections()
         .iter()
         .filter(|section| {
-            section.address() + userblock >= hole.start
-                && section.end_address() + userblock <= hole.end
+            section.address().get() + userblock >= hole.start
+                && section.end_address().get() + userblock <= hole.end
                 && section.length().get() >= 1200
         })
-        .map(|section| section.address() + userblock)
+        .map(|section| section.address().get() + userblock)
         .min()
         .unwrap();
     std::fs::copy(&path, &tolerant_path).unwrap();
@@ -640,9 +640,9 @@ fn persisted_inspection_reports_overlapping_extents(
         .max_by_key(|section| section.length())
         .unwrap();
     assert!(hole.length().get() >= 1024);
-    let previous_address = hole.address() + 256;
+    let previous_address = hole.address().get() + 256;
     let address = previous_address + displacement;
-    let list_address = StoredAddress::new(hole.address());
+    let list_address = hole.address();
     let superblock = file.superblock();
     let widths = format::FormatWidths {
         offsets: superblock.offset_size,
@@ -746,11 +746,8 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     let available_or_reused = second.reusable_free_sections().unwrap();
     let metadata = storage::file_metadata_extents(&second, &bytes);
     assert_eq!(
-        test_util_hdf5::covered_free_bytes!(
-            &available_or_reused,
-            &hole,
-            FreeSectionCoordinates::Absolute
-        ) + range::covered_len(&metadata, &hole),
+        test_util_hdf5::covered_free_bytes!(&available_or_reused, &hole, PhysicalAddress)
+            + range::covered_len(&metadata, &hole),
         HOLE_BYTES
     );
     let expected = persisted
@@ -758,11 +755,11 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .sections()
         .iter()
         .filter(|section| {
-            section.address() + userblock >= hole.start
-                && section.end_address() + userblock <= hole.end
+            section.address().get() + userblock >= hole.start
+                && section.end_address().get() + userblock <= hole.end
                 && section.length().get() >= 1_200
         })
-        .map(|section| section.address() + userblock)
+        .map(|section| section.address().get() + userblock)
         .min()
         .unwrap();
     let reusable = second.reusable_free_sections().unwrap();
@@ -775,9 +772,9 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .iter()
         .zip(persisted.free_sections().sections())
     {
-        assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
-        assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(physical.address(), stored.address() + userblock);
+        let _: PhysicalAddress = physical.address();
+        let _: StoredAddress = stored.address();
+        assert_eq!(physical.address().get(), stored.address().get() + userblock);
         assert_eq!(physical.length(), stored.length());
     }
     second
@@ -842,7 +839,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             reusable
                 .sections()
                 .iter()
-                .all(|section| section.address() >= userblock),
+                .all(|section| section.address().get() >= userblock),
             "{step:?}"
         );
         let stored_free = file.persisted_free_sections().unwrap().unwrap();
@@ -857,19 +854,11 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             .iter()
             .zip(reusable.sections())
         {
+            let _: StoredAddress = section.address();
+            let _: PhysicalAddress = physical.address();
             assert_eq!(
-                section.coordinates(),
-                FreeSectionCoordinates::Stored,
-                "{step:?}"
-            );
-            assert_eq!(
-                physical.coordinates(),
-                FreeSectionCoordinates::Absolute,
-                "{step:?}"
-            );
-            assert_eq!(
-                section.address(),
-                physical.address() - userblock,
+                section.address().get(),
+                physical.address().get() - userblock,
                 "{step:?}"
             );
             assert_eq!(section.length(), physical.length(), "{step:?}");
@@ -949,7 +938,7 @@ fn a_deletion_that_frees_the_end_of_the_file_truncates_it(
         .unwrap()
         .sections()
         .last()
-        .map_or(0, |section| section.end_address());
+        .map_or(0, |section| section.end_address().get());
     session.close().unwrap();
 
     assert_eq!((grown - before, truncated - before), (growth, kept));
@@ -1000,9 +989,7 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
         .unwrap();
     assert!(
         persisted.free_sections().sections().iter().any(|section| {
-            section.coordinates() == FreeSectionCoordinates::Stored
-                && section.address() == pages.start - userblock
-                && section.length().get() == PAGE
+            section.address().get() == pages.start - userblock && section.length().get() == PAGE
         }),
         "{persisted:?}"
     );

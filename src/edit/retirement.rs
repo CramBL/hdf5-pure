@@ -1,6 +1,7 @@
 //! Chunk allocation ownership for immediate and staged replacements.
 
-use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, FreeClass, PageType};
 
 use crate::address::AddressContext;
@@ -103,7 +104,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::Path;
 
-    use hdf5_pure_core::__private::PhysicalAddress;
+    use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_space::__private::{FreeClass, PageType};
     use rstest::rstest;
     use test_util::disk_log;
@@ -379,8 +380,9 @@ mod tests {
             retained
                 .sections()
                 .iter()
-                .any(|section| section.address() <= predecessor.address
-                    && predecessor.address + predecessor.storage_size <= section.end_address())
+                .any(|section| section.address().get() <= predecessor.address
+                    && predecessor.address + predecessor.storage_size
+                        <= section.end_address().get())
         );
         if completed == 0 {
             assert_eq!(retained, before);

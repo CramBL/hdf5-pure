@@ -13,8 +13,9 @@ use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{PageTransition, PageType};
 
-use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::MetadataBytes;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::DatatypeByteOrder;
 use crate::SuperblockVersion;

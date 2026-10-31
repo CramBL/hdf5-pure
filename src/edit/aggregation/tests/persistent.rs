@@ -160,7 +160,8 @@ fn active_spare_is_excluded_until_persistent_settlement(
             .sections()
             .iter()
             .any(|section| {
-                section.address() <= interior.start() && section.end_address() >= interior.end()
+                section.address().get() <= interior.start()
+                    && section.end_address().get() >= interior.end()
             })
     );
 }
@@ -342,8 +343,8 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
         free.free_sections()
             .sections()
             .iter()
-            .any(|section| section.address() <= extent.start()
-                && section.end_address() >= extent.end()),
+            .any(|section| section.address().get() <= extent.start()
+                && section.end_address().get() >= extent.end()),
         tracked
     );
 }
@@ -649,7 +650,8 @@ fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
                 .sections()
                 .iter()
                 .all(|section| {
-                    extent.end() <= section.address() || section.end_address() <= extent.start()
+                    extent.end() <= section.address().get()
+                        || section.end_address().get() <= extent.start()
                 })
         );
     }

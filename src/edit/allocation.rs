@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{FreeClass, SessionAppendSnapshot};
 
 use super::aggregation::AggregateSpace;
 use super::commit::{PublicationPurpose, PublicationState};
 use super::object_header;
 use super::{SyncPolicy, TailPlacement, WriteEngine};
-use crate::address::{StoredAddress, StoredAddressExt};
 use crate::free_sections::PersistedManagerSet;
 use crate::source::Source;
 
@@ -545,7 +545,7 @@ impl WriteEngine {
         }
         for section in report.free_sections().sections() {
             let range = FileRange::new(
-                addresses.resolve(StoredAddress::new(section.address()))?,
+                addresses.resolve(section.address())?,
                 section.length().get(),
             )?;
             if let Some(allocation) = allocations.iter().find(|allocation| {

@@ -16,8 +16,8 @@ use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MessageType;
+use hdf5_pure::StoredAddress;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeInfoMessage;
@@ -252,8 +252,8 @@ fn persistent_free(path: &Path) -> Vec<(u64, u64)> {
         .sections()
         .iter()
         .map(|section| {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-            (section.address(), section.length().get())
+            let _: StoredAddress = section.address();
+            (section.address().get(), section.length().get())
         })
         .collect()
 }

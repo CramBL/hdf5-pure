@@ -17,6 +17,8 @@
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
 
+use core::num::NonZeroU64;
+
 use hdf5_pure::CharacterSet;
 use hdf5_pure::Datatype;
 use hdf5_pure::FileSpaceSettings;
@@ -37,6 +39,9 @@ use hdf5_pure::UserblockSize;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
+use hdf5_pure::{
+    FreeSection, FreeSections, FreeSpaceManagerSections, PersistedFreeSections, PhysicalAddress,
+};
 use rstest::rstest;
 
 use test_util::temp;
@@ -525,4 +530,34 @@ fn public_superblock_updates_reject_narrowing_without_changing_state(
     assert_eq!(superblock, before);
     assert_eq!(superblock.version(), version);
     assert_eq!(superblock.consistency_flags().bits(), 0);
+}
+
+#[test]
+fn free_section_reports_preserve_public_address_types() {
+    let _: fn(PhysicalAddress) -> u64 = hdf5_pure_core::PhysicalAddress::get;
+    let _: fn(u64) -> PhysicalAddress = hdf5_pure_core::PhysicalAddress::new;
+    let _: fn(PhysicalAddress, u64) -> Result<PhysicalAddress, FormatError> =
+        PhysicalAddress::checked_add;
+    let _: fn(&FreeSection<StoredAddress>) -> StoredAddress = FreeSection::<StoredAddress>::address;
+    let _: fn(&FreeSection<StoredAddress>) -> StoredAddress =
+        FreeSection::<StoredAddress>::end_address;
+    let _: fn(&FreeSection<PhysicalAddress>) -> PhysicalAddress =
+        FreeSection::<PhysicalAddress>::address;
+    let _: fn(&FreeSection<PhysicalAddress>) -> PhysicalAddress =
+        FreeSection::<PhysicalAddress>::end_address;
+    let _: fn(&FreeSection<StoredAddress>) -> NonZeroU64 = FreeSection::<StoredAddress>::length;
+    let _: fn(&FreeSection<PhysicalAddress>) -> NonZeroU64 = FreeSection::<PhysicalAddress>::length;
+    let _: fn(&FreeSections<StoredAddress>) -> &[FreeSection<StoredAddress>] =
+        FreeSections::<StoredAddress>::sections;
+    let _: fn(&FreeSections<PhysicalAddress>) -> &[FreeSection<PhysicalAddress>] =
+        FreeSections::<PhysicalAddress>::sections;
+    let _: fn(&PersistedFreeSections) -> &FreeSections<StoredAddress> =
+        PersistedFreeSections::free_sections;
+    let _: fn(&FreeSpaceManagerSections) -> &FreeSections<StoredAddress> =
+        FreeSpaceManagerSections::free_sections;
+    let _: fn(&File) -> Result<FreeSections<PhysicalAddress>, Error> = File::reusable_free_sections;
+    assert_eq!(
+        PhysicalAddress::new(512).checked_add(32).unwrap().get(),
+        544
+    );
 }

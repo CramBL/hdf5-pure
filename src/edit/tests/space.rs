@@ -30,9 +30,9 @@ use test_util_hdf5::file_space::persisted::ManagerSlot;
 use super::common;
 use crate::DatatypeByteOrder;
 use crate::FileSpaceSettings;
-use crate::FreeSectionCoordinates;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -1375,8 +1375,8 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
             .read_exact_at(0, usize::try_from(eof).unwrap())
             .unwrap();
         for section in free.sections() {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
-            let at = usize::try_from(section.address()).unwrap();
+            let _: PhysicalAddress = section.address();
+            let at = usize::try_from(section.address().get()).unwrap();
             bytes[at..at + usize::try_from(section.length().get()).unwrap()].fill(0);
         }
         bytes
@@ -1408,11 +1408,7 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
         summary_after.reusable_free_bytes(),
         summary_before.reusable_free_bytes()
     );
-    test_util_hdf5::assert_free_sections_consistent!(
-        &summary_after,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&summary_after, &sections, PhysicalAddress);
     assert!(
         live_bytes(&s) == before,
         "the failed commit changed live bytes"

@@ -2,7 +2,7 @@
 
 use std::io::ErrorKind;
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
 use test_util::identity::Fixture as IdentityFixture;
 use test_util_hdf5::assertion::StatusOpen;

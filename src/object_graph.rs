@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt;
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
@@ -468,7 +468,7 @@ mod tests {
     use core::convert::Infallible;
     use std::thread;
 
-    use hdf5_pure_core::__private::PhysicalAddress;
+    use hdf5_pure_core::PhysicalAddress;
     use rstest::rstest;
 
     use super::Expansion;

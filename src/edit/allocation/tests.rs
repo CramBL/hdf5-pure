@@ -1,4 +1,4 @@
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
 
 use super::*;

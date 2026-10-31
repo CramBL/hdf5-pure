@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion};
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{self as format, FreeSpaceManagerHeaderRef};
 use hdf5_pure_space::__private::ManagerKind;
 
@@ -99,7 +100,7 @@ impl ReusableSpaceStats {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistedFreeSections {
     managers: Vec<FreeSpaceManagerSections>,
-    free_sections: FreeSections,
+    free_sections: FreeSections<StoredAddress>,
     manager_metadata_bytes: u64,
 }
 
@@ -134,7 +135,7 @@ impl PersistedFreeSections {
     /// Returns the combined sections of every defined manager.
     ///
     /// The count and byte total equal the sums of the per-manager counts and byte totals.
-    pub const fn free_sections(&self) -> &FreeSections {
+    pub const fn free_sections(&self) -> &FreeSections<StoredAddress> {
         &self.free_sections
     }
 
@@ -244,9 +245,9 @@ impl PersistedManagerSet {
                 return Err(S::contextual_error(
                     *context,
                     FreeSectionsError::Overlap {
-                        address: section.address(),
+                        address: section.address().get(),
                         length: section.length().get(),
-                        previous_address: previous.address(),
+                        previous_address: previous.address().get(),
                         previous_length: previous.length().get(),
                     }
                     .into(),
@@ -319,7 +320,7 @@ impl<S: PersistedManagerSource> PersistedManagerReader<'_, S> {
         &self,
         context: &mut PersistedManagerContext,
         allocations: &mut Vec<FileRange>,
-        tagged: &mut Vec<(FreeSection, PersistedManagerContext)>,
+        tagged: &mut Vec<(FreeSection<StoredAddress>, PersistedManagerContext)>,
         info: &FileSpaceInfo,
     ) -> Result<FreeSpaceManagerSections, S::Error> {
         let Self {
@@ -367,20 +368,16 @@ impl<S: PersistedManagerSource> PersistedManagerReader<'_, S> {
             .into_iter()
             .map(|section| {
                 context.section = Some((section.addr, section.size));
-                let checked = FreeSection::new(
-                    section.addr.get(),
-                    section.size,
-                    FreeSectionCoordinates::Stored,
-                )?;
-                if checked.end_address() > stored_eof {
+                let checked = FreeSection::new(section.addr, section.size)?;
+                if checked.end_address().get() > stored_eof {
                     return Err(FormatError::InvalidFreeSpaceManager(format!(
                         "the free section at {}, {} bytes long, exceeds the file allocation",
-                        checked.address(),
+                        checked.address().get(),
                         checked.length()
                     ))
                     .into());
                 }
-                let end = addresses.resolve(StoredAddress::new(checked.end_address()))?;
+                let end = addresses.resolve(checked.end_address())?;
                 if end.get() > source.len() {
                     return Err(FormatError::UnexpectedSourceEof {
                         expected: end.get(),
@@ -474,7 +471,7 @@ pub struct FreeSpaceManagerSections {
     slot: usize,
     address: StoredAddress,
     role: FreeSpaceManagerRole,
-    free_sections: FreeSections,
+    free_sections: FreeSections<StoredAddress>,
     metadata_bytes: u64,
 }
 
@@ -500,7 +497,7 @@ impl FreeSpaceManagerSections {
     }
 
     /// Returns this manager's sections in stored, base-relative coordinates.
-    pub const fn free_sections(&self) -> &FreeSections {
+    pub const fn free_sections(&self) -> &FreeSections<StoredAddress> {
         &self.free_sections
     }
 
@@ -549,18 +546,18 @@ pub enum FreeSpaceManagerRole {
 
 /// Checked free sections in ascending address order, with their count and total length.
 ///
-/// [`File::reusable_free_sections`](crate::File::reusable_free_sections) returns absolute
-/// physical offsets for an editing session. [`PersistedFreeSections`] contains base-relative
-/// sections read from storage. Each section records its [`coordinates`](FreeSection::coordinates).
+/// [`File::reusable_free_sections`](crate::File::reusable_free_sections) returns sections with
+/// [`PhysicalAddress`] offsets for an editing session. [`PersistedFreeSections`] contains
+/// base-relative [`StoredAddress`] sections read from storage.
 /// Sections are disjoint, and adjacent sections are permitted. The byte total is the checked
 /// sum of the section lengths.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FreeSections {
-    sections: Vec<FreeSection>,
+pub struct FreeSections<A> {
+    sections: Vec<FreeSection<A>>,
     free_bytes: u64,
 }
 
-impl FreeSections {
+impl<A> FreeSections<A> {
     /// Sorts disjoint sections by address and computes their total length.
     ///
     /// # Errors
@@ -568,7 +565,10 @@ impl FreeSections {
     /// Returns [`FreeSectionsError::Overlap`] if two sections overlap, including duplicates.
     /// Returns [`FreeSectionsError::Format`] with [`FormatError::OffsetOverflow`] if the sum
     /// of section lengths exceeds [`u64::MAX`].
-    pub(crate) fn new(mut sections: Vec<FreeSection>) -> Result<Self, FreeSectionsError> {
+    pub(crate) fn new(mut sections: Vec<FreeSection<A>>) -> Result<Self, FreeSectionsError>
+    where
+        A: SectionAddress,
+    {
         sections.sort_unstable_by_key(FreeSection::address);
         let free_bytes = sections.iter().try_fold(0u64, |sum, section| {
             sum.checked_add(section.length().get())
@@ -579,11 +579,11 @@ impl FreeSections {
         })?;
         for pair in sections.windows(2) {
             let [previous, section] = pair else { continue };
-            if section.address() < previous.end_address() {
+            if section.address() < previous.address().end(previous.length().get()) {
                 return Err(FreeSectionsError::Overlap {
-                    address: section.address(),
+                    address: section.address().get(),
                     length: section.length().get(),
-                    previous_address: previous.address(),
+                    previous_address: previous.address().get(),
                     previous_length: previous.length().get(),
                 });
             }
@@ -595,7 +595,7 @@ impl FreeSections {
     }
 
     /// Returns the sections in ascending address order.
-    pub fn sections(&self) -> &[FreeSection] {
+    pub fn sections(&self) -> &[FreeSection<A>] {
         &self.sections
     }
 
@@ -629,45 +629,58 @@ impl From<FormatError> for FreeSectionsError {
 
 /// A free byte range with a positive length and a representable exclusive end address.
 ///
-/// The reader checks the range before returning it. [`coordinates`](Self::coordinates)
-/// determines how to interpret the start and end addresses.
+/// Persisted sections use [`StoredAddress`], relative to the opened image's effective base.
+/// Session-reusable sections use [`PhysicalAddress`], measured from the beginning of the source.
+/// Both ends retain the address type of the section.
+///
+/// # Examples
+///
+/// Passing a stored address as a physical address is a type error:
+///
+/// ```compile_fail,E0308
+/// use hdf5_pure::{FreeSection, PhysicalAddress, StoredAddress};
+///
+/// fn expects_physical(_: PhysicalAddress) {}
+///
+/// fn invalid(section: &FreeSection<StoredAddress>) {
+///     expects_physical(section.address());
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FreeSection {
-    address: u64,
+pub struct FreeSection<A> {
+    address: A,
     length: NonZeroU64,
-    coordinates: FreeSectionCoordinates,
 }
 
-impl FreeSection {
-    /// Constructs a section with a positive length and a checked end address.
+impl<A> FreeSection<A> {
+    /// Constructs a section with a positive length and a representable exclusive end.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFreeSpaceManager`] if `length` is zero, or
     /// [`FormatError::OffsetOverflow`] if the end address exceeds [`u64::MAX`].
-    pub(crate) fn new(
-        address: u64,
-        length: u64,
-        coordinates: FreeSectionCoordinates,
-    ) -> Result<Self, FormatError> {
+    pub(crate) fn new(address: A, length: u64) -> Result<Self, FormatError>
+    where
+        A: SectionAddress,
+    {
         let length = NonZeroU64::new(length).ok_or_else(|| {
             FormatError::InvalidFreeSpaceManager("a free section has zero length".into())
         })?;
         address
+            .get()
             .checked_add(length.get())
             .ok_or(FormatError::OffsetOverflow {
-                offset: address,
+                offset: address.get(),
                 length: length.get(),
             })?;
-        Ok(Self {
-            address,
-            length,
-            coordinates,
-        })
+        Ok(Self { address, length })
     }
 
-    /// Returns the start address in this section's [`coordinates`](Self::coordinates).
-    pub const fn address(&self) -> u64 {
+    /// Returns the start address in the section's coordinate system.
+    pub const fn address(&self) -> A
+    where
+        A: Copy,
+    {
         self.address
     }
 
@@ -675,33 +688,46 @@ impl FreeSection {
     pub const fn length(&self) -> NonZeroU64 {
         self.length
     }
+}
 
-    /// Returns the exclusive end address in this section's [`coordinates`](Self::coordinates).
-    ///
-    /// This is the start address plus the length, checked when the section is constructed.
-    pub const fn end_address(&self) -> u64 {
-        self.address + self.length.get()
-    }
-
-    /// Returns the coordinate system of the start and end addresses.
-    pub const fn coordinates(&self) -> FreeSectionCoordinates {
-        self.coordinates
+impl FreeSection<StoredAddress> {
+    /// Returns the exclusive end address relative to the opened image's effective base.
+    pub fn end_address(&self) -> StoredAddress {
+        self.address.offset(self.length.get())
     }
 }
 
-/// The coordinate system of a free section's start and end addresses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FreeSectionCoordinates {
-    /// Physical byte offsets from the beginning of the opened file or source.
-    ///
-    /// Session-reusable sections use these coordinates. Offsets count the bytes in any
-    /// userblock prefix.
-    Absolute,
-    /// HDF5 addresses relative to the base address.
-    ///
-    /// Persisted sections use these coordinates. For a relocated source image, the reader
-    /// resolves stored addresses against the effective base of that image.
-    Stored,
+impl FreeSection<PhysicalAddress> {
+    /// Returns the exclusive end offset from the beginning of the source.
+    pub const fn end_address(&self) -> PhysicalAddress {
+        PhysicalAddress::new(self.address.get() + self.length.get())
+    }
+}
+
+/// The address operations used to check section ends and ordering.
+pub(crate) trait SectionAddress: Copy + Ord {
+    fn get(self) -> u64;
+    fn end(self, length: u64) -> Self;
+}
+
+impl SectionAddress for StoredAddress {
+    fn get(self) -> u64 {
+        self.get()
+    }
+
+    fn end(self, length: u64) -> Self {
+        self.offset(length)
+    }
+}
+
+impl SectionAddress for PhysicalAddress {
+    fn get(self) -> u64 {
+        self.get()
+    }
+
+    fn end(self, length: u64) -> Self {
+        Self::new(self.get() + length)
+    }
 }
 
 /// The number of manager slots used without paged aggregation.
@@ -715,6 +741,7 @@ const NONPAGED_MANAGER_SLOTS: usize = 6;
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+    use core::fmt::Debug;
 
     use hdf5_pure_core::__private::FileSpaceInfoFields;
     use hdf5_pure_format::__private as format;
@@ -727,39 +754,108 @@ mod tests {
     use crate::file_space_info::FileSpaceStrategy;
     use crate::source::BytesSource;
 
-    #[test]
-    fn section_ends_and_aggregate_sums_are_checked() {
-        let zero = FreeSection::new(10, 0, FreeSectionCoordinates::Stored).unwrap_err();
+    #[rstest]
+    #[case::stored(StoredAddress::new)]
+    #[case::physical(PhysicalAddress::new)]
+    fn section_lengths_and_ends_are_checked<A: SectionAddress + Debug>(
+        #[case] address: fn(u64) -> A,
+    ) {
         assert_eq!(
-            zero,
+            FreeSection::new(address(10), 0).unwrap_err(),
             FormatError::InvalidFreeSpaceManager("a free section has zero length".into())
         );
-        assert!(matches!(
-            FreeSection::new(u64::MAX, 1, FreeSectionCoordinates::Stored).unwrap_err(),
+        assert_eq!(
+            FreeSection::new(address(u64::MAX), 1).unwrap_err(),
             FormatError::OffsetOverflow {
                 offset: u64::MAX,
                 length: 1
             }
-        ));
+        );
+        let section = FreeSection::new(address(u64::MAX - 1), 1).unwrap();
+        assert_eq!(section.address(), address(u64::MAX - 1));
+        assert_eq!(section.length().get(), 1);
+    }
+
+    #[rstest]
+    #[case::stored(StoredAddress::new)]
+    #[case::physical(PhysicalAddress::new)]
+    fn collection_totals_are_checked_before_overlaps<A: SectionAddress + Debug>(
+        #[case] address: fn(u64) -> A,
+    ) {
         let sections = vec![
-            FreeSection::new(0, u64::MAX, FreeSectionCoordinates::Stored).unwrap(),
-            FreeSection::new(0, 1, FreeSectionCoordinates::Stored).unwrap(),
+            FreeSection::new(address(0), u64::MAX).unwrap(),
+            FreeSection::new(address(0), 1).unwrap(),
         ];
-        assert!(matches!(
+        assert_eq!(
             FreeSections::new(sections).unwrap_err(),
             FreeSectionsError::Format(FormatError::OffsetOverflow {
                 offset: u64::MAX,
                 length: 1
             })
-        ));
-        let section = FreeSection::new(10, 20, FreeSectionCoordinates::Absolute).unwrap();
+        );
+    }
+
+    #[rstest]
+    #[case::stored(StoredAddress::new)]
+    #[case::physical(PhysicalAddress::new)]
+    fn collections_sort_sections_and_permit_adjacency<A: SectionAddress + Debug>(
+        #[case] address: fn(u64) -> A,
+    ) {
+        let first = FreeSection::new(address(10), 20).unwrap();
+        let second = FreeSection::new(address(30), 5).unwrap();
+        let third = FreeSection::new(address(40), 2).unwrap();
+        let report = FreeSections::new(vec![third, second, first]).unwrap();
+        assert_eq!(report.sections(), &[first, second, third]);
+        assert_eq!(report.section_count(), 3);
+        assert_eq!(report.free_bytes(), 27);
+        let empty = FreeSections::<A>::new(Vec::new()).unwrap();
+        assert_eq!(empty.sections(), &[]);
+        assert_eq!(empty.section_count(), 0);
+        assert_eq!(empty.free_bytes(), 0);
+    }
+
+    #[rstest]
+    #[case::stored_overlap(StoredAddress::new, 20, 5)]
+    #[case::stored_duplicate(StoredAddress::new, 10, 20)]
+    #[case::physical_overlap(PhysicalAddress::new, 20, 5)]
+    #[case::physical_duplicate(PhysicalAddress::new, 10, 20)]
+    fn collections_reject_overlaps<A: SectionAddress + Debug>(
+        #[case] address: fn(u64) -> A,
+        #[case] start: u64,
+        #[case] length: u64,
+    ) {
+        let first = FreeSection::new(address(10), 20).unwrap();
+        let second = FreeSection::new(address(start), length).unwrap();
         assert_eq!(
+            FreeSections::new(vec![second, first]).unwrap_err(),
+            FreeSectionsError::Overlap {
+                address: start,
+                length,
+                previous_address: 10,
+                previous_length: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn section_accessors_preserve_address_types() {
+        let stored = FreeSection::new(StoredAddress::new(10), 20).unwrap();
+        let stored_start: StoredAddress = stored.address();
+        let stored_end: StoredAddress = stored.end_address();
+        assert_eq!(
+            (stored_start, stored.length().get(), stored_end),
+            (StoredAddress::new(10), 20, StoredAddress::new(30))
+        );
+        let physical = FreeSection::new(PhysicalAddress::new(u64::MAX - 20), 20).unwrap();
+        let physical_start: PhysicalAddress = physical.address();
+        let physical_end: PhysicalAddress = physical.end_address();
+        assert_eq!(
+            (physical_start, physical.length().get(), physical_end),
             (
-                section.address(),
-                section.length().get(),
-                section.end_address()
-            ),
-            (10, 20, 30)
+                PhysicalAddress::new(u64::MAX - 20),
+                20,
+                PhysicalAddress::new(u64::MAX)
+            )
         );
     }
 
@@ -821,7 +917,7 @@ mod tests {
         assert_eq!(report.free_sections().free_bytes(), 32);
         assert_eq!(
             report.free_sections().sections(),
-            [FreeSection::new(256, 32, FreeSectionCoordinates::Stored).unwrap()]
+            [FreeSection::new(StoredAddress::new(256), 32).unwrap()]
         );
     }
 
@@ -1178,8 +1274,8 @@ mod tests {
             &info,
         )
         .unwrap();
-        let first = FreeSection::new(256, 32, FreeSectionCoordinates::Stored).unwrap();
-        let second = FreeSection::new(320, 16, FreeSectionCoordinates::Stored).unwrap();
+        let first = FreeSection::new(StoredAddress::new(256), 32).unwrap();
+        let second = FreeSection::new(StoredAddress::new(320), 16).unwrap();
         assert_eq!(report.free_sections().sections(), [first, second]);
         assert_eq!(report.free_sections().section_count(), 2);
         assert_eq!(report.free_sections().free_bytes(), 48);

@@ -10,8 +10,9 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-use hdf5_pure_core::__private::{FileRange, FileRegion, MetadataFrame, PhysicalAddress};
+use hdf5_pure_core::__private::{FileRange, FileRegion, MetadataFrame};
 use hdf5_pure_core::MetadataBytes;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::MetadataSource;
 
 use crate::address::BaseAddressExt;
@@ -1221,7 +1222,7 @@ mod tests {
     #[cfg(feature = "std")]
     use std::io::{Read, Seek, SeekFrom};
 
-    use hdf5_pure_core::__private::PhysicalAddress;
+    use hdf5_pure_core::PhysicalAddress;
     #[cfg(feature = "std")]
     use rstest::rstest;
 

@@ -4,7 +4,7 @@
 //! between scalar totals and section lengths.
 
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::PhysicalAddress;
 use hdf5_pure::{File, FileBuilder};
 use test_util_hdf5::storage;
 use test_util_hdf5::{
@@ -36,11 +36,7 @@ fn fresh_session_reports_file_size_and_no_reusable_free() {
         "a freshly opened non-persisting session tracks no reusable free space"
     );
     assert_eq!(sections.section_count(), 0);
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
 }
 
 #[test]
@@ -71,16 +67,8 @@ fn logical_size_grows_with_immediate_append() {
         std::fs::metadata(&p).unwrap().len(),
         "logical_size must match the on-disk file length after a durable append"
     );
-    test_util_hdf5::assert_free_sections!(
-        &sections,
-        &[(before + 32, 2016)],
-        FreeSectionCoordinates::Absolute
-    );
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections!(&sections, &[(before + 32, 2016)], PhysicalAddress);
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
 }
 
 #[test]
@@ -113,11 +101,7 @@ fn staged_delete_is_not_counted_until_commit() {
          (got {})",
         stats.reusable_free_bytes()
     );
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
 }
 
 #[test]
@@ -148,11 +132,7 @@ fn reused_free_shrinks_the_reusable_total() {
             "reusing the hole must shrink the reusable total ({free_before} -> {})",
             stats.reusable_free_bytes()
         );
-        test_util_hdf5::assert_free_sections_consistent!(
-            &stats,
-            &sections,
-            FreeSectionCoordinates::Absolute
-        );
+        test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
     }
 
     // Reopen only after the session (and its exclusive file lock) is dropped —
@@ -186,11 +166,7 @@ fn fresh_nonpersisting_session_ignores_existing_holes() {
     );
     assert_eq!(sections.section_count(), 0);
     assert_eq!(stats.logical_size(), std::fs::metadata(&p).unwrap().len());
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
 }
 
 #[test]
@@ -230,11 +206,7 @@ fn persisting_session_seeds_reusable_free_on_open() {
         "a persisting session seeds its reusable free from disk to match the reader"
     );
     assert!(sections.section_count() > 0);
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
 }
 
 #[test]
@@ -274,18 +246,10 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
 
     let stats = session.reusable_space_stats().unwrap();
     let sections = session.reusable_free_sections().unwrap();
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
     for (start, len) in original {
         assert_eq!(
-            test_util_hdf5::covered_free_bytes!(
-                &sections,
-                &(start..start + len),
-                FreeSectionCoordinates::Absolute
-            ),
+            test_util_hdf5::covered_free_bytes!(&sections, &(start..start + len), PhysicalAddress),
             len,
             "old allocation {start}..{} is not fully reclaimed: {:?}",
             start + len,
@@ -296,7 +260,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
         sections
             .sections()
             .iter()
-            .filter(|section| section.address() < original_end)
+            .filter(|section| section.address().get() < original_end)
             .count(),
         2,
     );

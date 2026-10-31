@@ -406,8 +406,8 @@ impl Fixture {
         let file = File::from_bytes(base).unwrap();
         let report = file.persisted_free_sections().unwrap().unwrap();
         assert!(report.free_sections().sections().iter().all(|section| {
-            section.end_address() <= page.block.start().get()
-                || section.address() >= page.block.end().get()
+            section.end_address().get() <= page.block.start().get()
+                || section.address().get() >= page.block.end().get()
         }));
         Self { start, page }
     }

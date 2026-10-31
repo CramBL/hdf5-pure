@@ -204,13 +204,9 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         .iter()
         .find(|manager| manager.role() == FreeSpaceManagerRole::PageLargeGeneric)
         .unwrap();
-    assert!(
-        manager
-            .free_sections()
-            .sections()
-            .iter()
-            .any(|section| { section.address() % PAGE != 0 || section.length().get() % PAGE != 0 })
-    );
+    assert!(manager.free_sections().sections().iter().any(|section| {
+        section.address().get() % PAGE != 0 || section.length().get() % PAGE != 0
+    }));
 }
 
 /// Checks the fixed header-chunk addresses and lengths of the independent image.

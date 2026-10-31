@@ -56,7 +56,7 @@ use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::AttributeMessage;
 use hdf5_pure_format::__private::DataspaceType;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;

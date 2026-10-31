@@ -7,7 +7,7 @@
 //! in each trace.
 
 use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use test_util::allocation_oracle::Coverage;
@@ -401,7 +401,11 @@ impl Ownership {
         .unwrap()
         .into_parts();
         ownership.free = Coverage::new(report.free_sections().sections().iter().map(|section| {
-            Interval::new(section.address(), section.end_address() - section.address()).unwrap()
+            Interval::new(
+                section.address().get(),
+                section.end_address().get() - section.address().get(),
+            )
+            .unwrap()
         }));
         ownership.initialized.extend(
             object_header::read_oh_chunks(&source, extension, addresses)

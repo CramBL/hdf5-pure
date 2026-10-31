@@ -16,9 +16,9 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
-use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::Layout;
 use hdf5_pure::PersistedFreeSections;
+use hdf5_pure::PhysicalAddress;
 use test_util::temp;
 
 use crate::file_space;
@@ -134,7 +134,7 @@ fn run_endurance_inner(
                                 .superblock()
                                 .base_address
                                 .get()
-                                .checked_add(section.address())
+                                .checked_add(section.address().get())
                                 .unwrap(),
                             section.length().get(),
                         )
@@ -258,11 +258,7 @@ impl<'a> Context<'a> {
     fn assert_reusable_space(&self) {
         let sections = self.unwrap(self.file.reusable_free_sections());
         let stats = self.unwrap(self.file.reusable_space_stats());
-        crate::assert_free_sections_consistent!(
-            &stats,
-            &sections,
-            FreeSectionCoordinates::Absolute
-        );
+        crate::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
         assert_eq!(stats.logical_size(), self.file.file_size(), "{self}");
     }
 

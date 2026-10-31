@@ -8,7 +8,7 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::MetadataFrame;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 #[cfg(test)]
 use crate::VariableLengthStringType;

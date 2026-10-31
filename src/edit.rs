@@ -279,7 +279,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
@@ -307,7 +307,6 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_sections::FreeSection;
-use crate::free_sections::FreeSectionCoordinates;
 use crate::free_sections::FreeSections;
 use crate::free_sections::PersistedManagerSet;
 use crate::free_sections::ReusableSpaceStats;
@@ -2020,7 +2019,7 @@ impl WriteEngine {
             .iter()
             .flat_map(|manager| {
                 manager.free_sections().sections().iter().map(|section| {
-                    FreeExtent::new(section.address(), section.length().get())
+                    FreeExtent::new(section.address().get(), section.length().get())
                         .map(|extent| {
                             (
                                 free_space_manager::manager_kind(info.strategy, manager.slot()),
@@ -2529,16 +2528,12 @@ impl WriteEngine {
         rustdoc::private_doc_tests,
         reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
     )]
-    pub(crate) fn reusable_free_sections(&self) -> Result<FreeSections, Error> {
+    pub(crate) fn reusable_free_sections(&self) -> Result<FreeSections<PhysicalAddress>, Error> {
         FreeSections::new(
             self.reusable_ranges()
                 .map(|range| {
                     let range = range?;
-                    FreeSection::new(
-                        range.start().get(),
-                        range.length(),
-                        FreeSectionCoordinates::Absolute,
-                    )
+                    FreeSection::new(range.start(), range.length())
                 })
                 .collect::<Result<Vec<_>, FormatError>>()?,
         )

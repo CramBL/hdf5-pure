@@ -9,7 +9,8 @@
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
@@ -254,13 +255,13 @@ proptest! {
                 let len = extent.end - extent.start;
                 if isolated && len < threshold {
                         let sections = file.reusable_free_sections().unwrap();
-                        prop_assert_eq!(test_util_hdf5::covered_free_bytes!(&sections, &extent, FreeSectionCoordinates::Absolute), 0);
+                        prop_assert_eq!(test_util_hdf5::covered_free_bytes!(&sections, &extent, PhysicalAddress), 0);
                         dropped.push(extent);
                 }
             }
             for extent in &dropped {
                 prop_assert_eq!(
-                    test_util_hdf5::covered_free_bytes!(&file.reusable_free_sections().unwrap(), extent, FreeSectionCoordinates::Absolute),
+                    test_util_hdf5::covered_free_bytes!(&file.reusable_free_sections().unwrap(), extent, PhysicalAddress),
                     0
                 );
             }
@@ -273,9 +274,9 @@ proptest! {
         if let Some(report) = &sections {
             for extent in &dropped {
                 for section in report.free_sections().sections() {
-                    prop_assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+                    let _: StoredAddress = section.address();
                     prop_assert!(
-                        section.end_address() <= extent.start || section.address() >= extent.end,
+                        section.end_address().get() <= extent.start || section.address().get() >= extent.end,
                         "stored section {section:?} overlaps {extent:?}"
                     );
                 }

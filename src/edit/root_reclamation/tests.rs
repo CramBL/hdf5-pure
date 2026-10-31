@@ -87,8 +87,8 @@ fn fixed_width_root_updates_reach_stable_physical_length(
                 sections
                     .sections()
                     .iter()
-                    .all(|section| root_addr < section.address()
-                        || root_addr >= section.end_address())
+                    .all(|section| root_addr < section.address().get()
+                        || root_addr >= section.end_address().get())
             );
         }
         if reopen {

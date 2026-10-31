@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_core::__private::{self, SuperblockFields};
+use hdf5_pure_core::PhysicalAddress;
 pub(crate) use hdf5_pure_core::Superblock;
 use hdf5_pure_core::{SuperblockStatus, SuperblockVersion};
 

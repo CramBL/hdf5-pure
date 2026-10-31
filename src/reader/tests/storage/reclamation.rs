@@ -6,7 +6,7 @@ use test_util::temp;
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
 use crate::FileSpaceSettings;
-use crate::FreeSectionCoordinates;
+use crate::PhysicalAddress;
 use crate::edit::SpaceOwnership;
 use crate::reader::test_util as reader_test_util;
 use crate::{
@@ -168,7 +168,8 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
                 before
                     .sections()
                     .iter()
-                    .any(|section| addr >= section.address() && addr < section.end_address()),
+                    .any(|section| addr >= section.address().get()
+                        && addr < section.end_address().get()),
                 "commit {i}: a manager block landed at {addr}, which was not free \
                  before the commit ({before:?}) — the tail appended instead of \
                  reusing"
@@ -364,11 +365,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
 
     let stats = session.reusable_space_stats().unwrap();
     let sections = session.reusable_free_sections().unwrap();
-    test_util_hdf5::assert_free_sections_consistent!(
-        &stats,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
+    test_util_hdf5::assert_free_sections_consistent!(&stats, &sections, PhysicalAddress);
     for (start, len) in original
         .live_metadata_space
         .into_iter()
@@ -376,11 +373,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
         .filter(|&(start, _)| start != 0)
     {
         assert_eq!(
-            test_util_hdf5::covered_free_bytes!(
-                &sections,
-                &(start..start + len),
-                FreeSectionCoordinates::Absolute
-            ),
+            test_util_hdf5::covered_free_bytes!(&sections, &(start..start + len), PhysicalAddress),
             len,
             "old allocation {start}..{} is not fully reclaimed: {:?}",
             start + len,
@@ -391,7 +384,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
         sections
             .sections()
             .iter()
-            .filter(|section| section.address() < original_end)
+            .filter(|section| section.address().get() < original_end)
             .count(),
         2,
     );

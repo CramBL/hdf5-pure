@@ -13,7 +13,7 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::bytes;
 use crate::error::FormatError;
@@ -31,7 +31,8 @@ use crate::width::LengthWidth;
 /// # Examples
 ///
 /// ```
-/// # use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_core::__private::{FileRange, FileRegion};
+/// # use hdf5_pure_core::PhysicalAddress;
 /// # use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 /// # use hdf5_pure_format::__private::LengthWidth;
 /// # use hdf5_pure_format::__private::encode_global_heap_collection;
@@ -252,7 +253,8 @@ impl GlobalHeapCollection {
 ///
 /// ```
 /// # use core::num::NonZeroU16;
-/// # use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_core::__private::{FileRange, FileRegion};
+/// # use hdf5_pure_core::PhysicalAddress;
 /// # use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 /// # use hdf5_pure_format::__private::LengthWidth;
 /// # use hdf5_pure_format::__private::encode_global_heap_collection;

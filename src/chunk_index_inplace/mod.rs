@@ -29,7 +29,8 @@
 
 use core::num::NonZeroUsize;
 
-use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::BlockOffsetWidth;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
@@ -2597,8 +2598,9 @@ mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
 
+    use hdf5_pure_core::__private::FileRange;
     use hdf5_pure_core::__private::FileRegion;
-    use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+    use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_format::__private::LAYOUT_PROPERTIES_OFFSET;
     use hdf5_pure_format::__private::LayoutVersion;
     use rstest::rstest;

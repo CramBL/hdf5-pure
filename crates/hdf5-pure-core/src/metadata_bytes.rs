@@ -20,7 +20,8 @@ use crate::region::{FileRange, FileRegion};
 /// Borrow a slice and select a contained physical range:
 ///
 /// ```
-/// use hdf5_pure_core::__private::{FileRange, MetadataBytes, PhysicalAddress};
+/// use hdf5_pure_core::__private::{FileRange, MetadataBytes};
+/// use hdf5_pure_core::PhysicalAddress;
 ///
 /// let data = [1, 2, 3, 4];
 /// let range = FileRange::new(PhysicalAddress::new(512), 4)?;
@@ -34,7 +35,8 @@ use crate::region::{FileRange, FileRegion};
 /// Transfer a vector and retain its bytes through another owner:
 ///
 /// ```
-/// use hdf5_pure_core::__private::{FileRange, MetadataBytes, PhysicalAddress};
+/// use hdf5_pure_core::__private::{FileRange, MetadataBytes};
+/// use hdf5_pure_core::PhysicalAddress;
 ///
 /// let range = FileRange::new(PhysicalAddress::new(512), 3)?;
 /// let bytes = MetadataBytes::owned(range, vec![1, 2, 3])?;
@@ -277,7 +279,8 @@ enum MetadataBacking<'a> {
 /// # Examples
 ///
 /// ```
-/// use hdf5_pure_core::__private::{MetadataFrame, PhysicalAddress};
+/// use hdf5_pure_core::__private::{MetadataFrame};
+/// use hdf5_pure_core::PhysicalAddress;
 ///
 /// let data = [1, 2, 3, 4];
 /// let frame = MetadataFrame::new(PhysicalAddress::new(512), &data)?;

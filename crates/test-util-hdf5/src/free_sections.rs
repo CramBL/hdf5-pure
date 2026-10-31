@@ -1,19 +1,19 @@
 //! Assertions and range coverage for typed free-section reports.
 
-/// Asserts exact section boundaries, coordinates, count, and total bytes.
+/// Asserts exact section boundaries, count, and total bytes.
 ///
 /// Accepts a borrowed [`hdf5_pure::FreeSections`] report, borrowed `(u64, u64)` address-length
-/// pairs in report order, and the expected [`hdf5_pure::FreeSectionCoordinates`].
+/// pairs in report order, and the section address type. The type must match the sections.
 ///
 /// # Panics
 ///
-/// Panics if a section address, length, or coordinate differs, or the count or byte total differs.
+/// Panics if a section address or length differs, or the count or byte total differs.
 ///
 /// # Examples
 ///
 /// ```
 /// use hdf5_pure::File;
-/// use hdf5_pure::FreeSectionCoordinates;
+/// use hdf5_pure::PhysicalAddress;
 /// use test_util_hdf5::paged;
 ///
 /// # let directory = tempfile::tempdir()?;
@@ -24,24 +24,23 @@
 /// test_util_hdf5::assert_free_sections!(
 ///     &sections,
 ///     &[(513, 511)],
-///     FreeSectionCoordinates::Absolute,
+///     PhysicalAddress,
 /// );
 /// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 #[macro_export]
 macro_rules! assert_free_sections {
-    ($sections:expr, $expected:expr, $coordinates:expr $(,)?) => {{
+    ($sections:expr, $expected:expr, $address:ty $(,)?) => {{
         let sections = $sections;
         let expected = $expected;
-        let coordinates = $coordinates;
         ::core::assert_eq!(sections.section_count(), expected.len());
         ::core::assert_eq!(
             sections.free_bytes(),
             expected.iter().map(|&(_, length)| length).sum::<u64>()
         );
         for (section, &(address, length)) in sections.sections().iter().zip(expected) {
-            ::core::assert_eq!(section.coordinates(), coordinates);
-            ::core::assert_eq!(section.address(), address);
+            let _: $address = section.address();
+            ::core::assert_eq!(section.address().get(), address);
             ::core::assert_eq!(section.length().get(), length);
         }
     }};
@@ -50,19 +49,19 @@ macro_rules! assert_free_sections {
 /// Asserts agreement between reusable-space statistics and sorted, disjoint sections.
 ///
 /// Accepts borrowed [`hdf5_pure::ReusableSpaceStats`] and [`hdf5_pure::FreeSections`] reports
-/// and the expected [`hdf5_pure::FreeSectionCoordinates`]. Checks section ends against the logical
-/// file length and compares the scalar reusable-byte total with the summed section lengths.
+/// and the section address type, which must match the sections. Checks section ends against the
+/// logical file length and
+/// compares the scalar reusable-byte total with the summed section lengths.
 ///
 /// # Panics
 ///
-/// Panics if totals differ, sections overlap or exceed the logical file length, or coordinates
-/// differ from the expected value.
+/// Panics if totals differ, sections overlap, or sections exceed the logical file length.
 ///
 /// # Examples
 ///
 /// ```
 /// use hdf5_pure::File;
-/// use hdf5_pure::FreeSectionCoordinates;
+/// use hdf5_pure::PhysicalAddress;
 /// use test_util_hdf5::paged;
 ///
 /// # let directory = tempfile::tempdir()?;
@@ -74,16 +73,15 @@ macro_rules! assert_free_sections {
 /// test_util_hdf5::assert_free_sections_consistent!(
 ///     &stats,
 ///     &sections,
-///     FreeSectionCoordinates::Absolute,
+///     PhysicalAddress,
 /// );
 /// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 #[macro_export]
 macro_rules! assert_free_sections_consistent {
-    ($stats:expr, $sections:expr, $coordinates:expr $(,)?) => {{
+    ($stats:expr, $sections:expr, $address:ty $(,)?) => {{
         let stats = $stats;
         let sections = $sections;
-        let coordinates = $coordinates;
         ::core::assert_eq!(stats.reusable_free_bytes(), sections.free_bytes());
         ::core::assert_eq!(
             sections.free_bytes(),
@@ -100,7 +98,8 @@ macro_rules! assert_free_sections_consistent {
                 .all(|pair| pair[0].end_address() <= pair[1].address())
         );
         ::core::assert!(sections.sections().iter().all(|section| {
-            section.coordinates() == coordinates && section.end_address() <= stats.logical_size()
+            let _: $address = section.address();
+            section.end_address().get() <= stats.logical_size()
         }));
     }};
 }
@@ -108,18 +107,14 @@ macro_rules! assert_free_sections_consistent {
 /// Returns the sum of section intersections with a byte range.
 ///
 /// Accepts a borrowed [`hdf5_pure::FreeSections`] report, a borrowed [`core::ops::Range<u64>`],
-/// and the expected [`hdf5_pure::FreeSectionCoordinates`]. The range uses the same coordinates as
-/// the sections.
-///
-/// # Panics
-///
-/// Panics if any section's coordinates differ from the expected value.
+/// and the section address type, which must match the sections. The range uses the same
+/// coordinates as the sections.
 ///
 /// # Examples
 ///
 /// ```
 /// use hdf5_pure::File;
-/// use hdf5_pure::FreeSectionCoordinates;
+/// use hdf5_pure::PhysicalAddress;
 /// use test_util_hdf5::paged;
 ///
 /// # let directory = tempfile::tempdir()?;
@@ -130,26 +125,26 @@ macro_rules! assert_free_sections_consistent {
 /// let covered = test_util_hdf5::covered_free_bytes!(
 ///     &sections,
 ///     &(500..600),
-///     FreeSectionCoordinates::Absolute,
+///     PhysicalAddress,
 /// );
 /// assert_eq!(covered, 87);
 /// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 #[macro_export]
 macro_rules! covered_free_bytes {
-    ($sections:expr, $extent:expr, $coordinates:expr $(,)?) => {{
+    ($sections:expr, $extent:expr, $address:ty $(,)?) => {{
         let sections = $sections;
         let extent = $extent;
-        let coordinates = $coordinates;
         sections
             .sections()
             .iter()
             .map(|section| {
-                ::core::assert_eq!(section.coordinates(), coordinates);
+                let _: $address = section.address();
                 section
                     .end_address()
+                    .get()
                     .min(extent.end)
-                    .saturating_sub(section.address().max(extent.start))
+                    .saturating_sub(section.address().get().max(extent.start))
             })
             .sum::<u64>()
     }};

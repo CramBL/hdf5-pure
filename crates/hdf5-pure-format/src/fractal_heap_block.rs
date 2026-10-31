@@ -6,7 +6,8 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
 
-use hdf5_pure_core::__private::{DecodedStoredAddress, FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::__private::{DecodedStoredAddress, FileRange, FileRegion};
+use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::bytes;
@@ -30,7 +31,8 @@ use crate::width::OffsetWidth;
 /// # Examples
 ///
 /// ```
-/// # use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
+/// # use hdf5_pure_core::PhysicalAddress;
 /// # use hdf5_pure_core::BaseAddress;
 /// # use hdf5_pure_format::__private::{FractalHeapBlock, FractalHeapBlockLayout, FractalHeapHeader, LengthWidth, OffsetWidth};
 /// # use hdf5_pure_format::FormatError;
@@ -438,7 +440,7 @@ impl FractalHeapDirectBlockRef<'_> {
     /// ```
     /// # use hdf5_pure_core::__private::BaseAddressExt;
     /// # use hdf5_pure_core::__private::FileRegion;
-    /// # use hdf5_pure_core::__private::PhysicalAddress;
+    /// # use hdf5_pure_core::PhysicalAddress;
     /// # use hdf5_pure_core::BaseAddress;
     /// # use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
     /// # use hdf5_pure_format::__private::FractalHeapBlock;

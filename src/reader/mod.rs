@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::PhysicalAddress;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::MetadataBytes;
@@ -66,8 +66,6 @@ use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolic
 use crate::file_space_info::FileSpaceInfo;
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
-#[cfg(doc)]
-use crate::free_sections::FreeSectionCoordinates;
 use crate::free_sections::FreeSections;
 use crate::free_sections::PersistedFreeSections;
 use crate::free_sections::ReusableSpaceStats;
@@ -3866,9 +3864,8 @@ impl File {
     /// copy. Returns `None` if the File Space Info message is absent or persistence is disabled.
     /// Configured persistence with zero sections returns `Some` with an empty report.
     ///
-    /// Section and manager addresses are relative to the HDF5 base address. Every section has
-    /// [`FreeSectionCoordinates::Stored`] coordinates. For a relocated source image, the reader
-    /// resolves stored addresses against the effective base of that image.
+    /// Section and manager addresses are base-relative [`StoredAddress`] values. For a relocated
+    /// source image, the reader resolves stored addresses against the effective base of that image.
     ///
     /// Each defined manager has a report, including empty managers and managers with an unknown
     /// role. The combined count and free-byte total equal the sums of the per-manager values.
@@ -3917,7 +3914,7 @@ impl File {
     ///
     /// ```
     /// # use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
-    /// use hdf5_pure::FreeSectionCoordinates;
+    /// use hdf5_pure::StoredAddress;
     /// # let directory = tempfile::tempdir()?;
     /// # let path = directory.path().join("free-sections.h5");
     /// # let mut builder = FileBuilder::new();
@@ -3941,8 +3938,9 @@ impl File {
     /// println!("Free section bytes: {}", sections.free_bytes());
     /// println!("Persisted manager metadata bytes: {}", report.manager_metadata_bytes());
     /// let section = sections.sections().first().expect("deleted storage is free");
-    /// assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-    /// assert_eq!(section.end_address() - section.address(), section.length().get());
+    /// let start: StoredAddress = section.address();
+    /// let end: StoredAddress = section.end_address();
+    /// assert_eq!(end.get() - start.get(), section.length().get());
     /// assert_eq!(
     ///     report.managers().iter().map(|manager| manager.free_sections().section_count())
     ///         .sum::<usize>(),
@@ -3982,8 +3980,8 @@ impl File {
     /// Returns the free sections currently reusable by this editing session.
     ///
     /// Reports committed changes and immediate in-place appends. Staged edits affect the report after
-    /// [`commit`](Self::commit). Sections use [`FreeSectionCoordinates::Absolute`] physical
-    /// offsets from the beginning of the file, counting any userblock prefix.
+    /// [`commit`](Self::commit). Sections use [`PhysicalAddress`] offsets from the beginning of
+    /// the file, counting any userblock prefix.
     ///
     /// The report can include session aggregate reservations and space absent from persisted
     /// managers. Persisted manager contents are available through
@@ -4000,7 +3998,7 @@ impl File {
     ///
     /// ```
     /// # use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
-    /// use hdf5_pure::FreeSectionCoordinates;
+    /// use hdf5_pure::PhysicalAddress;
     /// # let directory = tempfile::tempdir()?;
     /// # let path = directory.path().join("reusable-sections.h5");
     /// # let mut builder = FileBuilder::new();
@@ -4018,11 +4016,13 @@ impl File {
     /// assert!(sections.section_count() > 0);
     /// assert_eq!(stats.reusable_free_bytes(), sections.free_bytes());
     /// for section in sections.sections() {
-    ///     assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
+    ///     let start: PhysicalAddress = section.address();
+    ///     let end: PhysicalAddress = section.end_address();
+    ///     assert_eq!(end.get() - start.get(), section.length().get());
     /// }
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
-    pub fn reusable_free_sections(&self) -> Result<FreeSections, Error> {
+    pub fn reusable_free_sections(&self) -> Result<FreeSections<PhysicalAddress>, Error> {
         match &self.inner.backend {
             Backend::Edit(engine) => {
                 let session = engine

@@ -4,9 +4,10 @@ use std::io::ErrorKind;
 use rstest::rstest;
 use test_util::disk_log;
 
+use crate::StoredAddress;
 use crate::{
     Error, File, FileAccessProperties, FileBuilder, FileSpacePageSize, FileSpaceSettings,
-    FileSpaceStrategy, FreeSectionCoordinates, MaxExtent, MemoryStrategy, SyncPolicy,
+    FileSpaceStrategy, MaxExtent, MemoryStrategy, SyncPolicy,
 };
 
 #[rstest]
@@ -110,10 +111,10 @@ fn assert_image(bytes: &[u8], expected: &[i32]) -> Vec<(u64, u64)> {
             assert!(start >= other_end || other_start >= end);
         }
         for section in free.free_sections().sections() {
-            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-            assert!(section.end_address() <= bytes.len() as u64);
+            let _: StoredAddress = section.address();
+            assert!(section.end_address().get() <= bytes.len() as u64);
             assert!(
-                section.address() >= end || start >= section.end_address(),
+                section.address().get() >= end || start >= section.end_address().get(),
                 "free section {section:?} overlaps chunk {chunk:?}"
             );
         }

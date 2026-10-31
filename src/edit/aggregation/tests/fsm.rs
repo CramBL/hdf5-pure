@@ -14,10 +14,10 @@ use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
-use crate::FreeSectionCoordinates;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::address::AddressContext;
@@ -197,7 +197,7 @@ fn accounting_coalesces_spare_with_adjacent_reusable_bytes() {
     test_util_hdf5::assert_free_sections!(
         &engine.reusable_free_sections().unwrap(),
         &[(address, 2048)],
-        FreeSectionCoordinates::Absolute
+        PhysicalAddress
     );
     assert_eq!(
         engine.reusable_space_stats().unwrap().reusable_free_bytes(),

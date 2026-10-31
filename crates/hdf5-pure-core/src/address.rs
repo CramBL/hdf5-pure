@@ -14,8 +14,20 @@ use crate::width::OffsetWidth;
 
 /// A byte position in a physical source.
 ///
-/// The reader resolves a [`StoredAddress`] using the opened image's effective base before
-/// constructing this value. Physical positions are represented as [`u64`] on every platform.
+/// Offsets count bytes from the beginning of the opened source, including any userblock prefix.
+/// The reader resolves a [`StoredAddress`] against the opened image's effective base to obtain
+/// a physical position. Physical positions are represented as [`u64`] on every platform.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::PhysicalAddress;
+///
+/// let start = PhysicalAddress::new(512);
+/// let end = start.checked_add(32)?;
+/// assert_eq!(end.get(), 544);
+/// # Ok::<(), hdf5_pure_core::FormatError>(())
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PhysicalAddress(u64);
 

@@ -27,7 +27,6 @@ use crate::SuperblockStatusFlags;
 
 pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
-pub use crate::address::PhysicalAddress;
 pub use crate::address::StoredAddressExt;
 pub use crate::display::DISPLAY_MAX_MEMBERS;
 pub use crate::display::Dims;

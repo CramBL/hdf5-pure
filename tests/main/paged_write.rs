@@ -9,7 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::PhysicalAddress;
 use hdf5_pure::VlenStringReadOptions;
 use rstest::rstest;
 
@@ -72,7 +72,7 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
         test_util_hdf5::assert_free_sections!(
             &initial,
             &[(base + page + 1, page - 1)],
-            FreeSectionCoordinates::Absolute
+            PhysicalAddress
         );
     }
     assert_eq!(
@@ -108,10 +108,9 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
     storage::assert_unavailable(&reopened, &metadata);
     if exact_fill && threshold == 1 {
         assert!(metadata.iter().any(|&(at, len)| {
-            initial
-                .sections()
-                .iter()
-                .any(|section| section.address() <= at && at + len <= section.end_address())
+            initial.sections().iter().any(|section| {
+                section.address().get() <= at && at + len <= section.end_address().get()
+            })
         }));
     }
     assert_eq!(reopened.reusable_free_sections().unwrap(), reusable);

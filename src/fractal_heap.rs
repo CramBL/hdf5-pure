@@ -7,8 +7,9 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
-use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::MetadataBytes;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::{

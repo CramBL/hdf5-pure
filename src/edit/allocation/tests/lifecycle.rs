@@ -81,7 +81,8 @@ fn unpublished_manager_writes_are_discarded_before_allocation_reuse(
     );
     let sections = file.persisted_free_sections().unwrap().unwrap();
     assert!(sections.free_sections().sections().iter().all(|section| {
-        section.end_address() <= range.start().get() || range.end().get() <= section.address()
+        section.end_address().get() <= range.start().get()
+            || range.end().get() <= section.address().get()
     }));
 }
 
