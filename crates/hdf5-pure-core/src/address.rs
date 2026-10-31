@@ -49,19 +49,11 @@ impl PhysicalAddress {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
-    #[expect(
-        clippy::same_name_method,
-        reason = "the inherent method delegates to the trait method with identical semantics"
-    )]
     pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
         Address::checked_add(self, length)
     }
 
     /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
-    #[expect(
-        clippy::same_name_method,
-        reason = "the inherent method delegates to the trait method with identical semantics"
-    )]
     pub fn checked_sub(self, length: u64) -> Option<Self> {
         Address::checked_sub(self, length)
     }
@@ -253,20 +245,12 @@ impl StoredAddress {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
-    #[expect(
-        clippy::same_name_method,
-        reason = "the inherent method delegates to the trait method with identical semantics"
-    )]
     pub fn checked_add(self, length: u64) -> Result<Self, FormatError> {
         Address::checked_add(self, length)
     }
 
     /// Returns the encoded address `length` bytes before this one, or `None` if it would be below
     /// zero.
-    #[expect(
-        clippy::same_name_method,
-        reason = "the inherent method delegates to the trait method with identical semantics"
-    )]
     pub fn checked_sub(self, length: u64) -> Option<Self> {
         Address::checked_sub(self, length)
     }
@@ -351,18 +335,26 @@ impl StoredAddressExt for StoredAddress {
 ///
 /// Only [`StoredAddress`] and [`PhysicalAddress`] implement this trait. Workspace crates import it
 /// from the hidden `__private` module, outside the supported public API.
-pub trait Address: sealed::Sealed + Copy + Ord {
-    /// Returns the byte position in this address's coordinate system.
-    fn value(self) -> u64;
-
-    /// Creates an address from a byte position in its coordinate system.
-    fn from_u64(value: u64) -> Self;
-
+///
+/// Arithmetic is provided by a single blanket implementation for the sealed coordinate
+/// representations. Separate implementations for individual coordinate types are prohibited.
+pub trait Address: sealed::AddressRepresentation {
     /// Returns the position `length` bytes after this one.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    fn checked_add(self, length: u64) -> Result<Self, FormatError>;
+
+    /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
+    fn checked_sub(self, length: u64) -> Option<Self>;
+
+    /// Returns the byte distance from `earlier` to this position, or `None` if `earlier` is
+    /// greater.
+    fn distance_from(self, earlier: Self) -> Option<u64>;
+}
+
+impl<T: sealed::AddressRepresentation> Address for T {
     fn checked_add(self, length: u64) -> Result<Self, FormatError> {
         self.value()
             .checked_add(length)
@@ -373,48 +365,51 @@ pub trait Address: sealed::Sealed + Copy + Ord {
             })
     }
 
-    /// Returns the position `length` bytes before this one, or `None` if it would be below zero.
     fn checked_sub(self, length: u64) -> Option<Self> {
         self.value().checked_sub(length).map(Self::from_u64)
     }
 
-    /// Returns the byte distance from `earlier` to this position, or `None` if `earlier` is
-    /// greater.
     fn distance_from(self, earlier: Self) -> Option<u64> {
         self.value().checked_sub(earlier.value())
     }
 }
 
-impl Address for StoredAddress {
-    fn value(self) -> u64 {
-        self.get()
-    }
-
-    fn from_u64(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl Address for PhysicalAddress {
-    fn value(self) -> u64 {
-        self.get()
-    }
-
-    fn from_u64(value: u64) -> Self {
-        Self(value)
-    }
-}
-
 mod sealed {
-    /// An address type supported by the shared arithmetic operations.
+    /// An address with a lossless [`u64`] representation and matching numeric ordering.
+    ///
+    /// Implementations must preserve every [`u64`] value in both directions. Address equality
+    /// and ordering must match equality and ordering of the represented values.
     #[expect(
         unnameable_types,
         reason = "the private supertrait prevents implementations outside the supported address types"
     )]
-    pub trait Sealed {}
+    pub trait AddressRepresentation: Copy + Ord {
+        /// Returns the byte position in this address's coordinate system.
+        fn value(self) -> u64;
 
-    impl Sealed for super::StoredAddress {}
-    impl Sealed for super::PhysicalAddress {}
+        /// Creates an address whose represented byte position equals `value`.
+        fn from_u64(value: u64) -> Self;
+    }
+
+    impl AddressRepresentation for super::StoredAddress {
+        fn value(self) -> u64 {
+            self.get()
+        }
+
+        fn from_u64(value: u64) -> Self {
+            Self(value)
+        }
+    }
+
+    impl AddressRepresentation for super::PhysicalAddress {
+        fn value(self) -> u64 {
+            self.get()
+        }
+
+        fn from_u64(value: u64) -> Self {
+            Self(value)
+        }
+    }
 }
 
 const _: () = {
@@ -448,6 +443,50 @@ mod tests {
                 offset: u64::MAX,
                 length: 1,
             }
+        );
+    }
+
+    #[rstest]
+    #[case::zero(0, 0)]
+    #[case::underflow(0, 1)]
+    #[case::maximum(u64::MAX, 0)]
+    #[case::maximum_sum(u64::MAX - 1, 1)]
+    #[case::overflow(u64::MAX, 1)]
+    #[case::maximum_displacement(u64::MAX, u64::MAX)]
+    #[case::large_low_address(12_345_678_901, 9_876_543_210)]
+    #[case::large_high_address(17_654_321_098_765_432_100, 987_654_321_012_345_678)]
+    #[case::large_underflow(987_654_321_012_345_678, 17_654_321_098_765_432_100)]
+    fn shared_address_arithmetic_matches_checked_integers<A: Address + Debug>(
+        #[case] position: u64,
+        #[case] displacement: u64,
+        #[values(StoredAddress::new, PhysicalAddress::new)] address: fn(u64) -> A,
+    ) {
+        assert_eq!(
+            address(position).checked_add(displacement),
+            position
+                .checked_add(displacement)
+                .map(address)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: position,
+                    length: displacement,
+                })
+        );
+        assert_eq!(
+            address(position).checked_sub(displacement),
+            position.checked_sub(displacement).map(address)
+        );
+        assert_eq!(
+            address(position).distance_from(address(displacement)),
+            position.checked_sub(displacement)
+        );
+        assert_eq!(
+            address(displacement).distance_from(address(position)),
+            displacement.checked_sub(position)
+        );
+        assert_eq!(address(position).distance_from(address(position)), Some(0));
+        assert_eq!(
+            address(position).cmp(&address(displacement)),
+            position.cmp(&displacement)
         );
     }
 

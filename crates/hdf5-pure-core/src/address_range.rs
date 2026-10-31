@@ -91,7 +91,8 @@ impl<A> AddressRange<A> {
     where
         A: Address,
     {
-        // Construction establishes that the end is at or after the start.
+        // Checked construction and intersection preserve endpoint order. The blanket arithmetic
+        // implementation computes the distance from the unchanged coordinate values.
         self.end
             .distance_from(self.start)
             .expect("a checked range has ordered endpoints")
@@ -158,7 +159,11 @@ impl<A> AddressRange<A> {
     {
         let start = self.start.max(other.start);
         let end = self.end.min(other.end);
-        (start < end).then_some(Self { start, end })
+        if start < end {
+            Some(Self { start, end })
+        } else {
+            None
+        }
     }
 
     /// Returns `true` if either interval's end equals the other's start.
@@ -222,7 +227,8 @@ impl<A> NonEmptyRange<A> {
     where
         A: Address,
     {
-        // Construction checks the sum, and the private fields cannot change independently.
+        // Construction checks this sum through the blanket arithmetic implementation, and the
+        // private start and length cannot change independently.
         self.start
             .checked_add(self.length.get())
             .expect("a nonempty range has a representable end")
@@ -284,6 +290,58 @@ mod tests {
             AddressRange::new(address(start), length.get()).unwrap()
         );
         assert!(!range.range().is_empty());
+    }
+
+    #[rstest]
+    #[case::zero(0, 0)]
+    #[case::empty_at_maximum(u64::MAX, 0)]
+    #[case::last_byte(u64::MAX - 1, 1)]
+    #[case::maximum_length(0, u64::MAX)]
+    #[case::overflow_at_maximum(u64::MAX, 1)]
+    #[case::overflow_by_one(u64::MAX - 1, 2)]
+    #[case::large_low_address(12_345_678_901, 9_876_543_210)]
+    #[case::large_high_address(17_654_321_098_765_432_100, 987_654_321_012_345_678)]
+    #[case::large_overflow(17_654_321_098_765_432_100, 1_234_567_890_123_456_789)]
+    fn range_construction_and_accessors_match_checked_integers<A: Address + Debug>(
+        #[case] start: u64,
+        #[case] length: u64,
+        #[values(StoredAddress::new, PhysicalAddress::new)] address: fn(u64) -> A,
+    ) {
+        let expected_end = start
+            .checked_add(length)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: start,
+                length,
+            });
+        match expected_end {
+            Ok(end) => {
+                let range = AddressRange::new(address(start), length).unwrap();
+                assert_eq!(range.start(), address(start));
+                assert_eq!(range.end(), address(end));
+                assert_eq!(range.length(), length);
+                assert_eq!(range.is_empty(), length == 0);
+                assert_eq!(range.intersection(range), (length > 0).then_some(range));
+                assert!(range.contains(range));
+                if let Some(positive_length) = NonZeroU64::new(length) {
+                    let nonempty = NonEmptyRange::new(address(start), positive_length).unwrap();
+                    assert_eq!(nonempty.start(), address(start));
+                    assert_eq!(nonempty.end(), address(end));
+                    assert_eq!(nonempty.length(), positive_length);
+                    assert_eq!(nonempty.range(), range);
+                }
+            }
+            Err(error) => {
+                assert_eq!(
+                    AddressRange::new(address(start), length).unwrap_err(),
+                    error
+                );
+                assert_eq!(
+                    NonEmptyRange::new(address(start), NonZeroU64::new(length).unwrap())
+                        .unwrap_err(),
+                    error
+                );
+            }
+        }
     }
 
     #[rstest]
