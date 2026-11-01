@@ -458,6 +458,32 @@ pub fn added_group_link_count(path: &Path, parent: &str) -> u64 {
     count
 }
 
+/// Writes the `filtered` group with deflate link filtering and `count` soft links.
+///
+/// The link names are `link_0000`, `link_0001`, and so on. Each target is `/absent`.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, configure, populate, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_filtered_link_fixture(path: &Path, count: usize) {
+    let file = crate::file::libhdf5_create_v18(path);
+    let properties = GroupCreate::build().finish().unwrap();
+    assert_eq!(crate::group_filter::set_deflate(&properties, 6), 0);
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&properties)
+        .create("filtered")
+        .unwrap();
+    for index in 0..count {
+        group
+            .link_soft("/absent", &format!("link_{index:04}"))
+            .unwrap();
+    }
+    drop(group);
+    file.close().unwrap();
+}
+
 /// Writes a group with links stored as huge fractal-heap objects.
 ///
 /// The `g` group contains twelve datasets with link names longer than 5000 bytes.

@@ -398,6 +398,8 @@ impl RepackOptions {
 /// path, through an alias or a cycle, since a repack writes each object at one path. Returns
 /// [`Error::TraversalLimitExceeded`] if `src` reaches more than 16,777,216 objects or hard links,
 /// or if, after the drop paths, `src` nests groups more than 128 levels deep.
+/// Returns [`Error::RepackUnsupported`] for group link filters, including those configured on
+/// compact groups before dense storage is allocated.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,

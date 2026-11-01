@@ -2174,7 +2174,8 @@ impl FileInner {
     /// # Errors
     ///
     /// Returns [`Error::RepackUnsupported`] for mixed or unsupported storage, repeated Link Info,
-    /// or inconsistent link metadata. Propagates source, address, and parsing errors.
+    /// inconsistent link metadata, or a compact group's nonempty Filter Pipeline message.
+    /// Propagates source, address, and parsing errors.
     fn group_link_storage(&self, header: &ObjectHeader) -> Result<GroupLinkStorage, Error> {
         let widths = self.widths;
         let mut info = LinkInfoMessage {
@@ -2281,6 +2282,18 @@ impl FileInner {
                     Error::EditUnsupported(reason) => Error::RepackUnsupported(reason.into()),
                     error => error,
                 })?;
+        } else {
+            for message in &header.messages {
+                if message.msg_type == MessageType::FILTER_PIPELINE
+                    && !crate::filter_pipeline::parse_filter_pipeline(&self.message_body(message)?)?
+                        .filters
+                        .is_empty()
+                {
+                    return Err(Error::RepackUnsupported(
+                        "a compact group's link filters cannot be reproduced".into(),
+                    ));
+                }
+            }
         }
         GroupLinkStorage::new(&info, links, widths.offsets).map_err(repack_link_error)
     }
