@@ -40,6 +40,8 @@ pub(super) struct AnalysisPhase<'a> {
     references: BTreeMap<ObjectId, ObjectReferences>,
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     allocations: BTreeMap<PhysicalAddress, Result<FileRange, FormatError>>,
+    #[cfg(test)]
+    candidate_lookups: u64,
 }
 
 impl<'a> AnalysisPhase<'a> {
@@ -53,6 +55,8 @@ impl<'a> AnalysisPhase<'a> {
             references: BTreeMap::new(),
             liveness: None,
             allocations: BTreeMap::new(),
+            #[cfg(test)]
+            candidate_lookups: 0,
         }
     }
 
@@ -77,6 +81,8 @@ impl<'a> AnalysisPhase<'a> {
             references: _,
             liveness: _,
             allocations: _,
+            #[cfg(test)]
+                candidate_lookups: _,
         } = self;
         topology
             .get_or_insert_with(|| {
@@ -173,6 +179,8 @@ impl<'a> AnalysisPhase<'a> {
             links: _,
             references: _,
             liveness: _,
+            #[cfg(test)]
+                candidate_lookups: _,
         } = self;
         let range = allocations.entry(address).or_insert_with(|| {
             #[cfg(test)]
@@ -234,6 +242,10 @@ impl<'a> AnalysisPhase<'a> {
             .into_values()
             .filter_map(|candidate| {
                 let CollectionCandidate { range, origins: _ } = candidate;
+                #[cfg(test)]
+                {
+                    self.candidate_lookups = self.candidate_lookups.saturating_add(1);
+                }
                 if referenced_collections.contains(&range.start().get()) {
                     return None;
                 }
@@ -306,6 +318,8 @@ impl<'a> AnalysisPhase<'a> {
             references,
             liveness: _,
             allocations: _,
+            #[cfg(test)]
+                candidate_lookups: _,
         } = self;
         match references.entry(object) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
@@ -336,6 +350,60 @@ impl<'a> AnalysisPhase<'a> {
                     complete,
                 }))
             }
+        }
+    }
+    /// Returns retained summary sizes and candidate-membership query counts.
+    #[cfg(test)]
+    fn work(&self) -> AnalysisWork {
+        let Self {
+            engine: _,
+            topology,
+            budget: _,
+            root: _,
+            links,
+            references,
+            liveness,
+            allocations,
+            candidate_lookups,
+        } = self;
+        let topology = topology.as_ref().and_then(Option::as_ref);
+        let objects = topology.map_or(0, |topology| topology.indices.len() as u64);
+        let edges = topology.map_or(0, |topology| {
+            topology
+                .indices
+                .values()
+                .map(|&index| topology.graph.object(index).links.len() as u64)
+                .sum()
+        });
+        let link_name_bytes = topology.map_or(0, |topology| {
+            topology
+                .indices
+                .values()
+                .map(|&index| {
+                    topology
+                        .graph
+                        .object(index)
+                        .value
+                        .names
+                        .keys()
+                        .map(|name| name.len() as u64)
+                        .sum::<u64>()
+                })
+                .sum()
+        });
+        AnalysisWork {
+            topology_objects: objects,
+            topology_edges: edges,
+            link_name_bytes,
+            cached_link_objects: links.len() as u64,
+            reference_objects: references.len() as u64,
+            collection_references: references
+                .values()
+                .map(|references| references.collections.len() as u64)
+                .sum(),
+            allocation_results: allocations.len() as u64,
+            liveness_results: u64::from(liveness.is_some()),
+            candidate_lookups: *candidate_lookups,
         }
     }
 }
@@ -639,6 +707,30 @@ pub(super) struct CollectionProvenance {
     pub(super) object: ObjectId,
     /// The attribute name, or [`None`] for an object-wide candidate.
     pub(super) attribute: Option<String>,
+}
+
+/// Retained phase summaries and candidate-membership query counts.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AnalysisWork {
+    /// Objects in complete topology.
+    topology_objects: u64,
+    /// Hard-link edges in complete topology.
+    topology_edges: u64,
+    /// Bytes in the topology's indexed link names.
+    link_name_bytes: u64,
+    /// Entries in the separate object-link cache.
+    cached_link_objects: u64,
+    /// Cached object-reference summaries.
+    reference_objects: u64,
+    /// Collection addresses summed across cached object-reference summaries.
+    collection_references: u64,
+    /// Cached collection-allocation results, including errors.
+    allocation_results: u64,
+    /// Cached root reference results, either zero or one.
+    liveness_results: u64,
+    /// Candidate-membership queries against a complete reference set.
+    candidate_lookups: u64,
 }
 
 #[cfg(test)]

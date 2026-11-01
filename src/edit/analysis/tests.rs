@@ -18,6 +18,7 @@ use crate::source::SourceMetadata;
 use crate::{AttrValue, File, FileBuilder};
 
 mod collections;
+mod foundations;
 
 #[rstest]
 #[case::compact(4, false)]

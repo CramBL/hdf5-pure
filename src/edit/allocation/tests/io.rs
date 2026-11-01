@@ -15,7 +15,7 @@ use crate::SyncPolicy;
 use crate::chunk_index_inplace::Store;
 use crate::edit::WriteEngine;
 use crate::error::{Error, FormatError};
-use crate::image::{FileImage, MirrorImage, WriteBuffering};
+use crate::image::{FileImage, ImageWork, MirrorImage, WriteBuffering};
 use crate::object_path::ObjectPathBuf;
 use crate::source::Source;
 
@@ -367,6 +367,10 @@ impl BoundaryImage {
 }
 
 impl FileImage for BoundaryImage {
+    fn buffering_work(&self) -> ImageWork {
+        self.inner.buffering_work()
+    }
+
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.inner.disk_bytes()
     }

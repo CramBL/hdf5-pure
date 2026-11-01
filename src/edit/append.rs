@@ -842,9 +842,10 @@ impl EditStore<'_> {
         let bytes = Self::prepare_allocation_bytes(length, address, prepare)?;
         if let Some(transition) = transition {
             if let PageTransition::Pad { extent, .. } = transition {
-                self.engine
-                    .image
-                    .append(&vec![0u8; extent.len().to_usize()?])?;
+                let length = extent.len().to_usize()?;
+                #[cfg(test)]
+                super::observations::record_zeros(length, length);
+                self.engine.image.append(&vec![0u8; length])?;
             }
             self.engine
                 .space

@@ -374,6 +374,8 @@ test_util_hdf5::hdf5_1_10_tests! {
 }
 mod group_links;
 pub(crate) mod object_header;
+#[cfg(test)]
+mod observations;
 mod paged_persistence;
 mod reclaim;
 mod reservation;
@@ -2669,7 +2671,10 @@ impl WriteEngine {
         if let Some(transition @ PageTransition::Pad { extent, .. }) =
             self.space.page_padding(eoa)?
         {
-            self.append(&vec![0u8; extent.len().to_usize()?])?;
+            let length = extent.len().to_usize()?;
+            #[cfg(test)]
+            observations::record_zeros(length, length);
+            self.append(&vec![0u8; length])?;
             self.space.record_page_padding(transition);
         }
         Ok(())
@@ -2728,6 +2733,8 @@ impl WriteEngine {
         let len = self.image.len();
         if target > len {
             let pad = (target - len).to_usize()?;
+            #[cfg(test)]
+            observations::record_zeros(pad, pad);
             self.append(&vec![0u8; pad])?;
         }
         debug_assert_eq!(self.image.len(), target);
@@ -2767,7 +2774,10 @@ impl WriteEngine {
             return Ok(());
         };
         if let PageTransition::Pad { extent, .. } = transition {
-            image.append(&vec![0u8; extent.len().to_usize()?])?;
+            let length = extent.len().to_usize()?;
+            #[cfg(test)]
+            observations::record_zeros(length, length);
+            image.append(&vec![0u8; length])?;
         }
         space.record_transition(ty, transition);
         Ok(())
