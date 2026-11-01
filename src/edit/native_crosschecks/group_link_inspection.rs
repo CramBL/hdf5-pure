@@ -1,15 +1,244 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::GroupPhaseChange;
+use hdf5_pure_format::__private::LinkInfoMessage;
+use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
+use test_util::filter_pipeline;
+use test_util::group_info;
+use test_util::group_info::HeaderVersion;
+use test_util::group_info::Userblock;
+use test_util::object_header::Message;
+use test_util::object_header::MessageType as FixtureMessageType;
+use test_util_hdf5::creation_order;
+use test_util_hdf5::dense_links;
 use test_util_hdf5::dense_links::GroupOrder;
+use test_util_hdf5::file;
 
 use crate::CharacterSet;
 use crate::Error;
+use crate::File;
+use crate::FileAccessProperties;
+use crate::MemoryStrategy;
+use crate::MessageType;
+use crate::access_mode::AccessMode;
 use crate::edit::group_inspection;
+use crate::width::OffsetWidth;
+
+#[rstest]
+#[case::default((8, 6), 1, false)]
+#[case::custom((12, 8), 1, false)]
+#[case::staged_custom((12, 8), 2, true)]
+#[case::one_way((12, 0), 1, false)]
+#[case::always_dense((0, 0), 1, false)]
+fn filtered_compact_transitions_reject_mutation_before_writing(
+    #[case] thresholds: (u32, u32),
+    #[case] added: usize,
+    #[case] replace: bool,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("edited.h5");
+    let reference = directory.path().join("reference.h5");
+    let count = usize::try_from(thresholds.0).unwrap();
+    dense_links::write_filtered_link_fixture(&path, count - usize::from(replace), thresholds);
+    if replace {
+        creation_order::add_reference_group(&path, "filtered/replace");
+    }
+    dense_links::write_filtered_link_fixture(&reference, count, thresholds);
+    let before = filtered_group_metadata(&path);
+    assert_eq!(before.1, None);
+    creation_order::add_reference_group(&reference, "filtered/added");
+    let native = filtered_group_metadata(&reference);
+    assert_eq!(native.0, before.0);
+    assert_eq!(native.1, Some(true));
+    let original = std::fs::read(&path).unwrap();
+    let session = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    let group = session.group("filtered").unwrap();
+    for index in 0..added {
+        group.create_group(&format!("added_{index}")).unwrap();
+    }
+    if replace {
+        group.delete("replace").unwrap();
+    }
+    let error = session.commit().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::EditUnsupported("a group's link filters cannot be reproduced in dense storage")
+        ),
+        "{error:?}"
+    );
+    assert!(session.has_staged_edits());
+    assert_eq!(session.group_inspection_snapshot().unwrap(), original);
+    assert_eq!(session.page_publication_snapshot().unwrap(), original);
+    assert_eq!(session.disk_bytes().unwrap(), original);
+    drop(group);
+    drop(session);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(filtered_group_metadata(&path), before);
+    directory.close().unwrap();
+}
+
+#[rstest]
+#[case::default((8, 6))]
+#[case::custom((12, 8))]
+#[case::one_way((12, 0))]
+fn filtered_compact_edits_preserve_the_pipeline_and_policy(
+    #[case] thresholds: (u32, u32),
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("edited.h5");
+    let count = usize::try_from(thresholds.0).unwrap();
+    dense_links::write_filtered_link_fixture(&path, count - 1, thresholds);
+    creation_order::add_reference_group(&path, "filtered/replace");
+    let before = filtered_group_metadata(&path);
+    assert_eq!(before.1, None);
+    let native = file::libhdf5_open(&path);
+    let filters = native
+        .group("filtered")
+        .unwrap()
+        .gcpl()
+        .unwrap()
+        .get_filters()
+        .unwrap();
+    assert_eq!(filters.len(), 1);
+    native.close().unwrap();
+    let session = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    let group = session.group("filtered").unwrap();
+    let policy = group.link_phase_change().unwrap();
+    group.create_group("added").unwrap();
+    group.delete("replace").unwrap();
+    session.commit().unwrap();
+    assert_eq!(group.link_phase_change().unwrap(), policy);
+    drop(group);
+    session.close().unwrap();
+    assert_eq!(filtered_group_metadata(&path), before);
+    let native = file::libhdf5_open(&path);
+    let group = native.group("filtered").unwrap();
+    assert_eq!(group.gcpl().unwrap().get_filters().unwrap(), filters);
+    let policy = group.gcpl().unwrap().get_link_phase_change().unwrap();
+    assert_eq!((policy.max_compact, policy.min_dense), thresholds);
+    let mut names = group.member_names().unwrap();
+    names.sort();
+    let expected = std::iter::once("added".to_owned())
+        .chain((0..count - 1).map(|index| format!("link_{index:04}")))
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected);
+    assert_eq!(group.info().unwrap().nlinks, u64::try_from(count).unwrap());
+    drop(group);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
+
+fn filtered_group_metadata(path: &Path) -> (Vec<u8>, Option<bool>) {
+    let file = File::open(path).unwrap();
+    let address =
+        usize::try_from(file.group("filtered").unwrap().header_address().unwrap()).unwrap();
+    file.close().unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, address, 8, 8).unwrap();
+    let pipeline = header
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::FILTER_PIPELINE)
+        .unwrap()
+        .data
+        .clone();
+    let info = header
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::LINK_INFO)
+        .unwrap();
+    let info = LinkInfoMessage::parse_with_offset_width(&info.data, OffsetWidth::Eight).unwrap();
+    let filtered = info.fractal_heap_address.map(|address| {
+        FractalHeapHeader::parse(&bytes, usize::try_from(address.get()).unwrap(), 8, 8)
+            .unwrap()
+            .filtering
+            .is_filtered()
+    });
+    (pipeline, filtered)
+}
+
+#[rstest]
+#[case::compact(false)]
+#[case::dense(true)]
+fn version_one_group_conversion_preserves_filters_or_rejects_dense_storage(#[case] dense: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("version-one.h5");
+    let pipeline = filter_pipeline::user_filter(true);
+    std::fs::write(
+        &path,
+        group_info::file(
+            &[Message::new(FixtureMessageType::FILTER_PIPELINE, &pipeline)],
+            HeaderVersion::V1,
+            Userblock::Absent,
+        ),
+    )
+    .unwrap();
+    let native = file::libhdf5_open(&path);
+    let expected = native
+        .group("child")
+        .unwrap()
+        .gcpl()
+        .unwrap()
+        .get_filters()
+        .unwrap();
+    assert_eq!(expected.len(), 1);
+    native.close().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let session = File::open_rw(&path).unwrap();
+    let group = session.group("child").unwrap();
+    for index in 0..if dense { 9 } else { 1 } {
+        group.create_group(&format!("added_{index}")).unwrap();
+    }
+    if dense {
+        let error = session.commit().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::EditUnsupported(
+                    "a group's link filters cannot be reproduced in dense storage"
+                )
+            ),
+            "{error:?}"
+        );
+        assert_eq!(session.group_inspection_snapshot().unwrap(), original);
+        assert_eq!(session.page_publication_snapshot().unwrap(), original);
+    } else {
+        session.commit().unwrap();
+    }
+    drop(group);
+    drop(session);
+    if dense {
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    let native = file::libhdf5_open(&path);
+    let group = native.group("child").unwrap();
+    assert_eq!(group.gcpl().unwrap().get_filters().unwrap(), expected);
+    let expected_names = if dense {
+        Vec::new()
+    } else {
+        vec!["added_0".to_owned()]
+    };
+    assert_eq!(group.member_names().unwrap(), expected_names);
+    drop(group);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
 
 #[rstest]
 #[case::untracked(GroupOrder::Untracked, false, false)]

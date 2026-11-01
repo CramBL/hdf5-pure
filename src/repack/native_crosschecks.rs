@@ -52,7 +52,7 @@ fn repack_rejects_unsupported_link_storage_before_publication_and_can_drop_it(
         dense_links::write_huge_inspection_fixture(&path);
         "g"
     } else {
-        dense_links::write_filtered_link_fixture(&path, count);
+        dense_links::write_filtered_link_fixture(&path, count, (8, 6));
         "filtered"
     };
     let source = if streaming {

@@ -461,14 +461,21 @@ pub fn added_group_link_count(path: &Path, parent: &str) -> u64 {
 /// Writes the `filtered` group with deflate link filtering and `count` soft links.
 ///
 /// The link names are `link_0000`, `link_0001`, and so on. Each target is `/absent`.
+/// Applies `thresholds` as the maximum compact and minimum dense counts.
 ///
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, configure, populate, or close the fixture.
 #[cfg(feature = "__hdf5-1.10")]
-pub fn write_filtered_link_fixture(path: &Path, count: usize) {
+pub fn write_filtered_link_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
     let file = crate::file::libhdf5_create_v18(path);
-    let properties = GroupCreate::build().finish().unwrap();
+    let properties = GroupCreate::build()
+        .link_phase_change(LinkPhaseChange {
+            max_compact: thresholds.0,
+            min_dense: thresholds.1,
+        })
+        .finish()
+        .unwrap();
     assert_eq!(crate::group_filter::set_deflate(&properties, 6), 0);
     let group = file
         .create_group_builder()
