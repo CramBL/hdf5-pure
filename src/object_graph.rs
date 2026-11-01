@@ -355,6 +355,110 @@ pub(crate) struct LinkIndex {
     position: usize,
 }
 
+pub(crate) struct ObjectTraversal {
+    pending: Vec<(ObjectId, u32)>,
+    visited: BTreeSet<ObjectId>,
+    budget: TraversalBudget,
+    depth_limit: u32,
+    expanded: usize,
+    links: usize,
+    complete: bool,
+}
+
+impl ObjectTraversal {
+    /// Starts a depth-first traversal from `roots` at depth zero.
+    ///
+    /// The last root is visited first. `budget` bounds returned objects and scheduled child links.
+    /// Objects at `depth_limit` or deeper are skipped. Repeated roots do not count as child links.
+    pub(crate) fn new(
+        roots: impl IntoIterator<Item = ObjectId>,
+        budget: TraversalBudget,
+        depth_limit: u32,
+    ) -> Self {
+        Self {
+            pending: roots.into_iter().map(|id| (id, 0)).collect(),
+            visited: BTreeSet::new(),
+            budget,
+            depth_limit,
+            expanded: 0,
+            links: 0,
+            complete: true,
+        }
+    }
+
+    /// Returns the most recently scheduled unvisited object and its depth.
+    ///
+    /// Returns `None` after exhausting the pending objects, including those skipped by a limit.
+    pub(crate) fn next(&mut self) -> Option<(ObjectId, u32)> {
+        self.next_matching(|_| true)
+    }
+
+    /// Returns the next unvisited object accepted by `include`, with its depth.
+    ///
+    /// Excluded objects are marked visited without consuming the object budget. Excluding an
+    /// object makes the traversal incomplete, as does skipping an object because of a limit.
+    pub(crate) fn next_matching(
+        &mut self,
+        mut include: impl FnMut(ObjectId) -> bool,
+    ) -> Option<(ObjectId, u32)> {
+        let Self {
+            pending,
+            visited,
+            budget,
+            depth_limit,
+            expanded,
+            links: _,
+            complete,
+        } = self;
+        while let Some((id, depth)) = pending.pop() {
+            if visited.contains(&id) {
+                continue;
+            }
+            if !include(id) {
+                visited.insert(id);
+                *complete = false;
+                continue;
+            }
+            if depth >= *depth_limit || *expanded >= budget.objects {
+                *complete = false;
+                continue;
+            }
+            visited.insert(id);
+            *expanded += 1;
+            return Some((id, depth));
+        }
+        None
+    }
+
+    /// Schedules `id` one level below its parent, counting the link even for a repeated target.
+    ///
+    /// Depth overflow or an exhausted link budget makes the traversal incomplete and leaves
+    /// `id` unscheduled.
+    pub(crate) fn push_child(&mut self, id: ObjectId, parent_depth: u32) {
+        let Some(depth) = parent_depth.checked_add(1) else {
+            self.complete = false;
+            return;
+        };
+        let Some(links) = self
+            .links
+            .checked_add(1)
+            .filter(|&links| links <= self.budget.links)
+        else {
+            self.complete = false;
+            return;
+        };
+        self.links = links;
+        self.pending.push((id, depth));
+    }
+
+    /// Returns whether every requested object was included within the traversal limits.
+    ///
+    /// The caller must exhaust the pending objects before using this as a completeness proof.
+    pub(crate) fn complete(&self) -> bool {
+        self.complete
+    }
+}
+
 /// The numbers of objects and of hard links past which the discovery of an [`ObjectGraph`] stops.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TraversalBudget {
@@ -478,6 +582,7 @@ mod tests {
     use super::ObjectGraph;
     use super::ObjectId;
     use super::ObjectIndex;
+    use super::ObjectTraversal;
     use super::TraversalBudget;
     use super::TraversalError;
     use super::TraversalLimit;
@@ -495,6 +600,48 @@ mod tests {
             vec![(4, vec![]), (2, vec![0]), (3, vec![])],
         );
         assert_eq!(summary(&root), (1, vec![1, 2]));
+    }
+
+    #[rstest]
+    #[case::complete(TraversalBudget::new(4, 4), 4, vec![1, 3, 2, 4], true)]
+    #[case::object_limit(TraversalBudget::new(2, 4), 4, vec![1, 3], false)]
+    #[case::edge_limit(TraversalBudget::new(4, 1), 4, vec![1, 2], false)]
+    #[case::depth_limit(TraversalBudget::new(4, 4), 2, vec![1, 3, 2], false)]
+    fn shared_traversal_preserves_depth_first_order_and_reports_limits(
+        #[case] budget: TraversalBudget,
+        #[case] depth_limit: u32,
+        #[case] expected: Vec<u64>,
+        #[case] complete: bool,
+    ) {
+        let mut traversal = ObjectTraversal::new([object(1)], budget, depth_limit);
+        let mut visited = Vec::new();
+        while let Some((id, depth)) = traversal.next() {
+            let address = id.header_address().get();
+            visited.push(address);
+            match address {
+                1 => {
+                    traversal.push_child(object(2), depth);
+                    traversal.push_child(object(3), depth);
+                }
+                2 => traversal.push_child(object(4), depth),
+                3 => traversal.push_child(object(1), depth),
+                _ => {}
+            }
+        }
+        assert_eq!(visited, expected);
+        assert_eq!(traversal.complete(), complete);
+    }
+
+    #[test]
+    fn excluded_objects_do_not_consume_the_expansion_budget() {
+        let mut traversal =
+            ObjectTraversal::new([object(1), object(2)], TraversalBudget::new(1, 0), 1);
+        assert_eq!(
+            traversal.next_matching(|id| id != object(2)),
+            Some((object(1), 0))
+        );
+        assert_eq!(traversal.next(), None);
+        assert!(!traversal.complete());
     }
 
     #[rstest]

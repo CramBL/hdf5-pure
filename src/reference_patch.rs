@@ -69,7 +69,7 @@
 //! better served before this module existed. The crate's
 //! [limitations](crate#limitations) record the set as a whole.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::FileRange;
 
@@ -92,6 +92,7 @@ use crate::group_v1;
 use crate::group_v2;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::{ObjectId, ObjectTraversal, TraversalBudget};
 use crate::object_header::ObjectHeader;
 use crate::source::OriginalSource;
 use crate::source::SourceMetadata;
@@ -303,34 +304,17 @@ fn walk(
     let addresses = src.addresses();
     let base = addresses;
 
-    let mut visited: BTreeSet<u64> = BTreeSet::new();
-    let mut stack: Vec<u64> = vec![addresses.resolve(superblock.root_group_address)?.get()];
-    let mut budget = budget;
+    let mut traversal = ObjectTraversal::new(
+        [ObjectId::resolve(addresses, superblock.root_group_address)?],
+        TraversalBudget::new(budget as usize, usize::MAX),
+        u32::MAX,
+    );
     let mut saw_reference = false;
     let mut complete = true;
-    while let Some(addr) = stack.pop() {
-        if !visited.insert(addr) {
-            continue; // already expanded (also breaks hard-link cycles)
-        }
-        // Never scan a header this commit vacated. Walking the *committed* tree
-        // is supposed to make that impossible, and a link naming a superseded
-        // header is a link the commit failed to repoint — which happens today
-        // when a group with more than one hard link is rebuilt, since only the
-        // parent link is patched. Those bytes are already in the free list by
-        // the time this runs, so editing them writes into space the next
-        // allocation may take. Nothing is lost by skipping: a superseded group
-        // lists the same children as the rebuilt one the walk reaches by the
-        // link that *was* repointed.
-        if relocations.contains_key(&addr) {
-            complete = false;
-            continue;
-        }
-        if budget == 0 {
-            complete = false;
-            break;
-        }
-        budget -= 1;
-
+    while let Some((id, depth)) =
+        traversal.next_matching(|id| !relocations.contains_key(&id.header_address().get()))
+    {
+        let addr = id.header_address().get();
         // One pass over the header serves both needs: it collects the byte edits
         // this object owes, and it reports whether the object is a group. Only a
         // group is parsed a second time, into the form
@@ -383,11 +367,11 @@ fn walk(
                 .resolve(e.object_header_address)
                 .map(PhysicalAddress::get)
             {
-                stack.push(child);
+                traversal.push_child(ObjectId::new(PhysicalAddress::new(child)), depth);
             }
         }
     }
-    plan.proved_free_of_references = complete && !saw_reference;
+    plan.proved_free_of_references = complete && traversal.complete() && !saw_reference;
     Ok(plan)
 }
 
