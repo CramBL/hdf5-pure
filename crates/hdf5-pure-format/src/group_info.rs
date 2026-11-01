@@ -1,4 +1,153 @@
-//! Link storage thresholds from version 0 Group Info messages.
+//! Link storage thresholds and entry estimates from version 0 Group Info messages.
+
+use alloc::vec::Vec;
+
+/// The link thresholds and optional entry estimates of a version 0 Group Info message.
+///
+/// Entry estimates are independent of the link thresholds. Their presence is retained when
+/// parsing and serializing, including estimates equal to the defaults.
+///
+/// The message is defined in "The Group Info Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::__private::{GroupEstimates, GroupInfo, GroupPhaseChange};
+///
+/// let info = GroupInfo::new(GroupPhaseChange::new(12, 8).unwrap())
+///     .with_estimates(Some(GroupEstimates { entries: 7, name_length: 20 }));
+/// let bytes = info.serialize();
+/// assert_eq!(bytes, [0, 3, 12, 0, 8, 0, 7, 0, 20, 0]);
+/// assert_eq!(GroupInfo::parse(&bytes).unwrap(), info);
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroupInfo {
+    phase_change: GroupPhaseChange,
+    estimates: Option<GroupEstimates>,
+}
+
+impl GroupInfo {
+    /// Parses a complete message, retaining any stored entry estimates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GroupInfoError::Version`] if the version is not zero,
+    /// [`GroupInfoError::Flags`] if reserved flag bits are set, or
+    /// [`GroupInfoError::Length`] if the byte count differs from the message length.
+    /// Returns [`GroupInfoError::TrailingBytes`] if the byte count exceeds [`u16::MAX`],
+    /// or [`GroupInfoError::Thresholds`] if the minimum dense count exceeds the maximum
+    /// compact count.
+    pub fn parse(bytes: &[u8]) -> Result<Self, GroupInfoError> {
+        let phase_change = GroupPhaseChange::parse(bytes)?;
+        let estimates = if bytes
+            .get(1)
+            .is_some_and(|flags| flags & STORES_ESTIMATES != 0)
+        {
+            let &[.., a, b, c, d] = bytes else {
+                return Err(GroupInfoError::Length {
+                    expected: GROUP_INFO_PREFIX_LENGTH + GROUP_INFO_PAIR_LENGTH,
+                    actual: u16::try_from(bytes.len())
+                        .map_err(|_error| GroupInfoError::TrailingBytes)?,
+                });
+            };
+            Some(GroupEstimates {
+                entries: u16::from_le_bytes([a, b]),
+                name_length: u16::from_le_bytes([c, d]),
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            phase_change,
+            estimates,
+        })
+    }
+
+    /// Creates a message using default entry estimates.
+    pub const fn new(phase_change: GroupPhaseChange) -> Self {
+        Self {
+            phase_change,
+            estimates: None,
+        }
+    }
+
+    /// Sets the optional stored entry estimates.
+    ///
+    /// Pass [`None`] to omit the estimate fields. The format defines defaults of four entries and
+    /// eight bytes per link name.
+    pub const fn with_estimates(mut self, estimates: Option<GroupEstimates>) -> Self {
+        self.estimates = estimates;
+        self
+    }
+
+    /// Returns the effective thresholds, including defaults for omitted fields.
+    pub const fn phase_change(&self) -> GroupPhaseChange {
+        self.phase_change
+    }
+
+    /// Returns the stored estimates, or [`None`] when the estimate fields are omitted.
+    pub const fn estimates(&self) -> Option<GroupEstimates> {
+        self.estimates
+    }
+
+    /// Serializes the message with default link thresholds omitted.
+    ///
+    /// Writes the estimate fields whenever [`Self::estimates`] returns [`Some`], including
+    /// estimates equal to the defaults.
+    pub fn serialize(&self) -> Vec<u8> {
+        let Self {
+            phase_change,
+            estimates,
+        } = self;
+        let stores_phase_change = phase_change.max_compact != DEFAULT_MAX_COMPACT
+            || phase_change.min_dense != DEFAULT_MIN_DENSE;
+        let flags = if stores_phase_change {
+            STORES_PHASE_CHANGE
+        } else {
+            0
+        } | if estimates.is_some() {
+            STORES_ESTIMATES
+        } else {
+            0
+        };
+        let mut bytes = Vec::with_capacity(
+            usize::from(GROUP_INFO_PREFIX_LENGTH)
+                + usize::from(GROUP_INFO_PAIR_LENGTH)
+                    * (usize::from(stores_phase_change) + usize::from(estimates.is_some())),
+        );
+        bytes.extend_from_slice(&[GROUP_INFO_VERSION, flags]);
+        if stores_phase_change {
+            bytes.extend_from_slice(&phase_change.max_compact.to_le_bytes());
+            bytes.extend_from_slice(&phase_change.min_dense.to_le_bytes());
+        }
+        if let Some(GroupEstimates {
+            entries,
+            name_length,
+        }) = estimates
+        {
+            bytes.extend_from_slice(&entries.to_le_bytes());
+            bytes.extend_from_slice(&name_length.to_le_bytes());
+        }
+        bytes
+    }
+}
+
+/// The entry count and link name length estimates for sizing a group's object header.
+///
+/// The fields are defined in "The Group Info Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroupEstimates {
+    /// The estimated number of links in the group.
+    pub entries: u16,
+    /// The estimated length of a link name, in bytes.
+    pub name_length: u16,
+}
 
 /// The link counts for transitions between compact and dense storage.
 ///
@@ -17,6 +166,27 @@ pub struct GroupPhaseChange {
 }
 
 impl GroupPhaseChange {
+    /// Creates thresholds with a minimum dense count at most the maximum compact count.
+    ///
+    /// A zero maximum requires a zero minimum. A positive maximum with a zero minimum disables
+    /// compact reversion by link count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GroupInfoError::Thresholds`] if `min_dense` exceeds `max_compact`.
+    pub const fn new(max_compact: u16, min_dense: u16) -> Result<Self, GroupInfoError> {
+        if min_dense > max_compact {
+            return Err(GroupInfoError::Thresholds {
+                max_compact,
+                min_dense,
+            });
+        }
+        Ok(Self {
+            max_compact,
+            min_dense,
+        })
+    }
+
     /// Parses the thresholds, using defaults when the message omits them.
     ///
     /// Checks the message length, including any optional entry estimates.
@@ -38,27 +208,15 @@ impl GroupPhaseChange {
         if actual != u16::from(expected) {
             return Err(GroupInfoError::Length { expected, actual });
         }
-        let result = if flags & STORES_PHASE_CHANGE != 0 {
+        let (max_compact, min_dense) = if flags & STORES_PHASE_CHANGE != 0 {
             let &[_version, _flags, a, b, c, d, ..] = bytes else {
                 return Err(GroupInfoError::Length { expected, actual });
             };
-            Self {
-                max_compact: u16::from_le_bytes([a, b]),
-                min_dense: u16::from_le_bytes([c, d]),
-            }
+            (u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]))
         } else {
-            Self {
-                max_compact: DEFAULT_MAX_COMPACT,
-                min_dense: DEFAULT_MIN_DENSE,
-            }
+            (DEFAULT_MAX_COMPACT, DEFAULT_MIN_DENSE)
         };
-        if result.min_dense > result.max_compact {
-            return Err(GroupInfoError::Thresholds {
-                max_compact: result.max_compact,
-                min_dense: result.min_dense,
-            });
-        }
-        Ok(result)
+        Self::new(max_compact, min_dense)
     }
 
     /// Returns the length of the message at the start of `bytes`, computed from its flags byte.
@@ -181,6 +339,55 @@ mod tests {
     use super::*;
 
     #[rstest]
+    #[case::defaults(8, 6, None, &[0, 0])]
+    #[case::thresholds(12, 8, None, &[0, 1, 12, 0, 8, 0])]
+    #[case::one_way(12, 0, None, &[0, 1, 12, 0, 0, 0])]
+    #[case::always_dense(0, 0, None, &[0, 1, 0, 0, 0, 0])]
+    #[case::equal(1, 1, None, &[0, 1, 1, 0, 1, 0])]
+    #[case::high_bytes(513, 257, None, &[0, 1, 1, 2, 1, 1])]
+    #[case::maximum(u16::MAX, u16::MAX, None, &[0, 1, 255, 255, 255, 255])]
+    #[case::estimates(8, 6, Some(GroupEstimates { entries: 7, name_length: 20 }), &[0, 2, 7, 0, 20, 0])]
+    #[case::zero_estimates(8, 6, Some(GroupEstimates { entries: 0, name_length: 0 }), &[0, 2, 0, 0, 0, 0])]
+    #[case::explicit_default_estimates(8, 6, Some(GroupEstimates { entries: 4, name_length: 8 }), &[0, 2, 4, 0, 8, 0])]
+    #[case::both(12, 8, Some(GroupEstimates { entries: 513, name_length: u16::MAX }), &[0, 3, 12, 0, 8, 0, 1, 2, 255, 255])]
+    fn group_info_encoding_preserves_independent_estimates(
+        #[case] max_compact: u16,
+        #[case] min_dense: u16,
+        #[case] estimates: Option<GroupEstimates>,
+        #[case] bytes: &[u8],
+    ) {
+        let phase_change = GroupPhaseChange::new(max_compact, min_dense).unwrap();
+        let info = GroupInfo::new(phase_change).with_estimates(estimates);
+        assert_eq!(info.phase_change(), phase_change);
+        assert_eq!(info.estimates(), estimates);
+        assert_eq!(info.serialize(), bytes);
+        assert_eq!(GroupInfo::parse(bytes).unwrap(), info);
+    }
+
+    #[rstest]
+    #[case::thresholds(&[0, 1, 8, 0, 6, 0], &[0, 0])]
+    #[case::both(&[0, 3, 8, 0, 6, 0, 7, 0, 20, 0], &[0, 2, 7, 0, 20, 0])]
+    fn encoding_omits_default_thresholds_and_preserves_estimates(
+        #[case] bytes: &[u8],
+        #[case] expected: &[u8],
+    ) {
+        assert_eq!(GroupInfo::parse(bytes).unwrap().serialize(), expected);
+    }
+
+    #[rstest]
+    #[case::inverted(3, 4)]
+    #[case::zero_maximum(0, 1)]
+    fn constructing_inverted_thresholds_fails(#[case] max_compact: u16, #[case] min_dense: u16) {
+        assert_eq!(
+            GroupPhaseChange::new(max_compact, min_dense).unwrap_err(),
+            GroupInfoError::Thresholds {
+                max_compact,
+                min_dense
+            }
+        );
+    }
+
+    #[rstest]
     #[case::defaults(&[0, 0, 0, 0, 0, 0, 0, 0], Ok(2))]
     #[case::phase_change(&[0, 1, 12, 0, 4, 0, 0, 0], Ok(6))]
     #[case::both(&[0, 3, 12, 0, 4, 0, 7, 0, 20, 0, 0, 0, 0, 0, 0, 0], Ok(10))]
@@ -218,6 +425,8 @@ mod tests {
     #[rstest]
     #[case::prefix(&[0], GroupInfoError::Length { expected: 2, actual: 1 })]
     #[case::phase_change(&[0, 1], GroupInfoError::Length { expected: 6, actual: 2 })]
+    #[case::estimates(&[0, 2], GroupInfoError::Length { expected: 6, actual: 2 })]
+    #[case::both(&[0, 3, 12, 0, 8, 0, 7, 0], GroupInfoError::Length { expected: 10, actual: 8 })]
     #[case::trailing(&[0, 0, 0], GroupInfoError::Length { expected: 2, actual: 3 })]
     #[case::oversized(&vec![0; 65_536], GroupInfoError::TrailingBytes)]
     #[case::flags(&[0, 0x80], GroupInfoError::Flags(0x80))]
@@ -225,5 +434,6 @@ mod tests {
     #[case::thresholds(&[0, 1, 3, 0, 4, 0], GroupInfoError::Thresholds { max_compact: 3, min_dense: 4 })]
     fn rejects_malformed_group_info(#[case] bytes: &[u8], #[case] expected: GroupInfoError) {
         assert_eq!(GroupPhaseChange::parse(bytes).unwrap_err(), expected);
+        assert_eq!(GroupInfo::parse(bytes).unwrap_err(), expected);
     }
 }

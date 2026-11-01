@@ -72,6 +72,7 @@ mod global_heap_framing;
 mod global_heap_length_width;
 mod global_heap_liveness;
 mod global_heap_reads;
+mod group_info;
 mod group_link_inspection;
 mod hdf5;
 mod hdf5_release_feature;
