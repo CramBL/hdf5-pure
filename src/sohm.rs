@@ -1,11 +1,9 @@
-//! The reads of a file's shared messages: the records of an index, and the body of a message from
-//! the fractal heap of the index that covers its type.
+//! Reads shared-message tables, index records, and heap message bodies.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use hdf5_pure_format::__private::FractalHeapIdLayout;
-#[cfg(any(feature = "std", test))]
 pub use hdf5_pure_format::__private::SharedMessageTableMessage;
 pub use hdf5_pure_format::__private::SohmIndexHeader;
 use hdf5_pure_format::__private::SohmIndexKind;
@@ -16,38 +14,41 @@ pub use hdf5_pure_format::__private::SohmTable;
 
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
-#[cfg(test)]
-use crate::address::BaseAddress;
-#[cfg(test)]
-use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
+use crate::btree_v2;
 use crate::btree_v2::BTreeV2Header;
+use crate::btree_v2::BTreeV2Source;
 use crate::error::FormatError;
 #[cfg(any(test, doc))]
 use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::HeapObjectReader;
+use crate::fractal_heap::HeapSource;
 use crate::fractal_heap::LegacyHeapObjectReader;
 use crate::message_type::MessageType;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::source::Source;
-use crate::source::SourceMetadata;
+use crate::source::StoredBytes;
+use crate::source::StoredMetadata;
+use crate::source::StoredRead;
 use crate::width::FormatWidths;
+use crate::width::OffsetWidth;
 
 /// B-tree v2 type of a shared-message index (`H5B2_SOHM_INDEX_ID`).
 const BTREE_SOHM_INDEX_TYPE: u8 = 7;
 
-/// Every record of `index`, whichever kind of index it is.
+/// Reads every record of a shared-message list or B-tree index.
 ///
-/// An index with no address holds nothing: the library allocates neither a list
-/// nor a B-tree until the first message is shared.
+/// Returns an empty vector if `index` has no allocated address. Metadata reads use stored
+/// addresses through [`StoredRead::read_metadata`].
 ///
-/// Only a [`Source`] form exists. Reading a message needs the master table and
-/// the heap alone — the fractal-heap ID in a reference locates it directly — so
-/// the records have one caller, the edit engine's screen, and it reads the file
-/// through a `Source` whichever backing it has.
-pub fn read_index_records_from_source<S: Source + ?Sized>(
-    source: &S,
+/// # Errors
+///
+/// Returns [`FormatError::InvalidSohmBTreeType`] if a B-tree has the wrong client type. Returns
+/// the parser error if the index or a record is malformed, and source errors if a read fails.
+pub fn read_index_records_from_source(
+    source: &(impl StoredRead + ?Sized),
     index: &SohmIndexHeader,
     widths: FormatWidths,
 ) -> Result<Vec<SohmRecord>, FormatError> {
@@ -58,7 +59,7 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
         SohmIndexKind::List => {
             let len =
                 hdf5_pure_format::__private::sohm_list_len(index.message_count, widths.offsets);
-            let image = source.read_metadata(address.get(), len)?;
+            let image = source.read_metadata(address, len)?;
             hdf5_pure_format::__private::parse_sohm_list_with_offset_width(
                 &image,
                 index.message_count,
@@ -67,13 +68,13 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
         }
         SohmIndexKind::BTree => {
             let header = BTreeV2Header::parse_from_source_with_widths(
-                &SourceMetadata(source),
+                &StoredMetadata(source),
                 address.get(),
                 widths,
             )?;
             check_btree_type(&header)?;
-            let records = crate::btree_v2::legacy_collect_btree_v2_records_from_source(
-                source,
+            let records = btree_v2::collect_btree_v2_records_from_source(
+                &BTreeV2Source::new(source),
                 &header,
                 widths.offsets,
             )?;
@@ -85,11 +86,108 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
     }
 }
 
-/// Refuse a B-tree that is not a shared-message index.
+/// Reads the master table named by `message` from resident file bytes.
 ///
-/// Every B-tree v2 in a file has the same header shape, so an index address that
-/// named the wrong tree would decode its records as shared messages and report
-/// heap IDs assembled from link names.
+/// # Errors
+///
+/// Returns errors from [`SohmTable::read_with_offset_width`].
+pub(crate) fn read_table(
+    source: StoredBytes<'_>,
+    message: &SharedMessageTableMessage,
+    offset_width: OffsetWidth,
+) -> Result<SohmTable, FormatError> {
+    SohmTable::read_with_offset_width(source.metadata_frame().bytes(), message, offset_width)
+}
+
+/// Reads the master table named by `message` through stored-address metadata reads.
+///
+/// # Errors
+///
+/// Returns errors from [`SohmTable::read_from_source_with_offset_width`].
+pub(crate) fn read_table_from_source(
+    source: &(impl StoredRead + ?Sized),
+    message: &SharedMessageTableMessage,
+    offset_width: OffsetWidth,
+) -> Result<SohmTable, FormatError> {
+    SohmTable::read_from_source_with_offset_width(&StoredMetadata(source), message, offset_width)
+}
+
+/// Reads a message body from the shared-message heap for `message_type`.
+///
+/// The caller can parse the returned bytes as an object header message of `message_type`.
+/// Borrows resident heap metadata through `source`. Read-write access requires complete
+/// validation of checksummed direct blocks before reading a managed heap object.
+///
+/// # Errors
+///
+/// Returns [`FormatError::SohmIndexMissing`] if `table` has no allocated heap for `message_type`,
+/// [`FormatError::InvalidFractalHeapIdLength`] if the heap's declared ID length differs from
+/// [`FHEAP_ID_LEN`], and errors from
+/// [`read_header_and_range_from_source`](crate::fractal_heap::read_header_and_range_from_source),
+/// [`FractalHeapIdLayout::parse`], or [`HeapObjectReader::read`].
+pub(crate) fn read_heap_message(
+    source: StoredBytes<'_>,
+    access_mode: AccessMode,
+    table: &SohmTable,
+    message_type: MessageType,
+    heap_id: &[u8; FHEAP_ID_LEN],
+    widths: FormatWidths,
+) -> Result<Vec<u8>, FormatError> {
+    read_heap_message_with(
+        HeapSource::resident(source),
+        access_mode,
+        table,
+        message_type,
+        heap_id,
+        widths,
+    )
+}
+
+/// Reads a shared message body through stored-address metadata reads.
+///
+/// # Errors
+///
+/// Returns the errors of [`read_heap_message`], and source errors if a read fails.
+pub(crate) fn read_heap_message_from_source(
+    source: &dyn StoredRead,
+    access_mode: AccessMode,
+    table: &SohmTable,
+    message_type: MessageType,
+    heap_id: &[u8; FHEAP_ID_LEN],
+    widths: FormatWidths,
+) -> Result<Vec<u8>, FormatError> {
+    read_heap_message_with(
+        HeapSource::new(source),
+        access_mode,
+        table,
+        message_type,
+        heap_id,
+        widths,
+    )
+}
+
+fn read_heap_message_with(
+    source: HeapSource<'_>,
+    access_mode: AccessMode,
+    table: &SohmTable,
+    message_type: MessageType,
+    heap_id: &[u8; FHEAP_ID_LEN],
+    widths: FormatWidths,
+) -> Result<Vec<u8>, FormatError> {
+    let (_, heap_address) = index_for_read(table, message_type)?;
+    let (heap, _) =
+        crate::fractal_heap::read_header_and_range_from_source(&source, heap_address, widths)?;
+    let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
+    let id = layout.parse(heap_id)?;
+    HeapObjectReader::new(source, &heap, heap_address, access_mode, widths).read(id)
+}
+
+/// Rejects a B-tree whose client type differs from the shared-message index type.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidSohmBTreeType`] if the client type differs from
+/// [`BTREE_SOHM_INDEX_TYPE`].
 fn check_btree_type(header: &BTreeV2Header) -> Result<(), FormatError> {
     if header.tree_type != BTREE_SOHM_INDEX_TYPE {
         return Err(FormatError::InvalidSohmBTreeType(header.tree_type));
@@ -97,8 +195,11 @@ fn check_btree_type(header: &BTreeV2Header) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// The index that must hold `message_type`, or an error naming why the lookup
-/// cannot proceed.
+/// Returns the index for `message_type` and its allocated heap address.
+///
+/// # Errors
+///
+/// Returns [`FormatError::SohmIndexMissing`] if the index or its heap address is absent.
 fn index_for_read(
     table: &SohmTable,
     message_type: MessageType,
@@ -125,7 +226,7 @@ fn index_for_read(
 /// [`FHEAP_ID_LEN`], and the errors of
 /// [`legacy_parse_header`](crate::fractal_heap::legacy_parse_header),
 /// [`FractalHeapIdLayout::parse`], and [`LegacyHeapObjectReader::read`] if parsing or resolution fails.
-pub fn read_heap_message(
+pub fn legacy_read_heap_message(
     file_data: &[u8],
     access_mode: AccessMode,
     addresses: AddressContext,
@@ -151,8 +252,8 @@ pub fn read_heap_message(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`read_heap_message`], and the error `source` returns if a read fails.
-pub fn read_heap_message_from_source<S: Source + ?Sized>(
+/// Returns the errors of [`legacy_read_heap_message`], and source errors if a read fails.
+pub fn legacy_read_heap_message_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     addresses: AddressContext,
@@ -177,11 +278,19 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use test_util::btree_v2;
     use test_util::fractal_heap;
     use test_util::sohm;
     use test_util::widths::Widths;
 
+    use crate::address::BaseAddress;
+    use crate::address::BaseAddressExt;
     use crate::source::BytesSource;
+    #[cfg(feature = "std")]
+    use crate::source::MetadataCacheConfig;
+    #[cfg(feature = "std")]
+    use crate::source::MetadataCachingSource;
+    use crate::source::PhysicalSource;
     use crate::width::{LengthWidth, OffsetWidth};
 
     use super::*;
@@ -190,6 +299,200 @@ mod tests {
         offsets: OffsetWidth::Eight,
         lengths: LengthWidth::Eight,
     };
+
+    #[derive(Clone, Copy, Debug)]
+    enum InvalidIndex {
+        AddressOverflow,
+        BTreeTruncated,
+        BTreeType,
+        ListSignature,
+        ListTruncated,
+    }
+
+    #[rstest]
+    #[case::address_overflow(InvalidIndex::AddressOverflow)]
+    #[case::btree_truncated(InvalidIndex::BTreeTruncated)]
+    #[case::btree_type(InvalidIndex::BTreeType)]
+    #[case::list_signature(InvalidIndex::ListSignature)]
+    #[case::list_truncated(InvalidIndex::ListTruncated)]
+    fn stored_indexes_preserve_exact_errors(
+        #[case] invalid: InvalidIndex,
+        #[values(0, 512)] base: usize,
+    ) {
+        let btree = matches!(
+            invalid,
+            InvalidIndex::BTreeTruncated | InvalidIndex::BTreeType
+        );
+        let address = if matches!(invalid, InvalidIndex::AddressOverflow) {
+            u64::MAX
+        } else {
+            64
+        };
+        let mut encoded = if btree {
+            btree_v2::Header::new(6, 17, 256, 1).build(Widths::EIGHT)
+        } else {
+            sohm::list(&[sohm::heap_record(7, 3, [0; 8], Widths::EIGHT)])
+        };
+        let expected = match invalid {
+            InvalidIndex::AddressOverflow => FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: if base == 0 {
+                    encoded.len() as u64
+                } else {
+                    base as u64
+                },
+            },
+            InvalidIndex::BTreeTruncated => {
+                encoded.truncate(encoded.len() - 5);
+                FormatError::UnexpectedEof {
+                    expected: encoded.len() + 1,
+                    available: encoded.len(),
+                }
+            }
+            InvalidIndex::ListTruncated => {
+                let expected = (base + 64 + encoded.len()) as u64;
+                encoded.pop();
+                FormatError::UnexpectedSourceEof {
+                    expected,
+                    available: expected - 1,
+                }
+            }
+            InvalidIndex::BTreeType => FormatError::InvalidSohmBTreeType(6),
+            InvalidIndex::ListSignature => {
+                encoded[0] = 0;
+                FormatError::InvalidSohmListSignature
+            }
+        };
+        let mut image = vec![0; base + 64];
+        image.extend_from_slice(&encoded);
+        let source = BytesSource::new(image);
+        let stored = PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::new(base as u64)),
+        )
+        .stored();
+        let index = SohmIndexHeader {
+            message_type_flags: 1 << MessageType::DATATYPE.to_u16(),
+            min_message_size: 0,
+            list_max: 50,
+            btree_min: 40,
+            message_count: 1,
+            kind: if btree {
+                SohmIndexKind::BTree
+            } else {
+                SohmIndexKind::List
+            },
+            index_address: Some(StoredAddress::new(address)),
+            heap_address: None,
+        };
+        assert_eq!(
+            read_index_records_from_source(&stored, &index, FORMAT_WIDTHS).unwrap_err(),
+            expected,
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::borrowed(false)]
+    #[case::owned(true)]
+    fn shared_tables_preserve_metadata_ranges_owners_and_cache_admission(
+        #[case] owned: bool,
+        #[values(0, 512)] base: usize,
+    ) {
+        let index = sohm::Index {
+            kind: sohm::Kind::LIST,
+            message_type_flags: 1 << MessageType::DATATYPE.to_u16(),
+            min_message_size: 1,
+            list_max: 50,
+            btree_min: 40,
+            message_count: 2,
+            index_address: Some(128),
+            heap_address: Some(256),
+        };
+        let encoded = sohm::table(&[index], Widths::EIGHT);
+        let mut image = vec![0; base + 64];
+        image.extend_from_slice(&encoded);
+        let borrowed = BytesSource::new(&image);
+        let allocating = AllocatingSource {
+            bytes: &image,
+            origin: 37,
+        };
+        let source: &dyn Source = if owned { &allocating } else { &borrowed };
+        let cached = MetadataCachingSource::new(source, MetadataCacheConfig::new(1024));
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base as u64));
+        let stored = PhysicalSource::for_test(&cached, addresses).stored();
+        let message = SharedMessageTableMessage {
+            table_address: StoredAddress::new(64),
+            index_count: 1,
+        };
+        let expected = SohmTable {
+            indexes: vec![SohmIndexHeader {
+                message_type_flags: index.message_type_flags,
+                min_message_size: 1,
+                list_max: 50,
+                btree_min: 40,
+                message_count: 2,
+                kind: SohmIndexKind::List,
+                index_address: Some(StoredAddress::new(128)),
+                heap_address: Some(StoredAddress::new(256)),
+            }],
+        };
+        assert_eq!(
+            read_table_from_source(&stored, &message, OffsetWidth::Eight).unwrap(),
+            expected
+        );
+        assert_eq!(
+            read_table_from_source(&stored, &message, OffsetWidth::Eight).unwrap(),
+            expected
+        );
+        let stats = cached.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (stats.hits(), stats.misses(), stats.entries(), stats.bytes()),
+            if owned {
+                (1, 1, 1, encoded.len())
+            } else {
+                (0, 2, 0, 0)
+            },
+        );
+        let metadata = stored
+            .read_metadata(message.table_address, encoded.len())
+            .unwrap();
+        assert_eq!(metadata.as_ref(), encoded);
+        assert_eq!(
+            metadata.offset(),
+            (base + 64) as u64 + if owned { 37 } else { 0 }
+        );
+        assert_eq!(metadata.shared().is_some(), owned);
+        if !owned {
+            assert_eq!(metadata.as_ptr(), image[base + 64..].as_ptr());
+        }
+        let retained = metadata.shared();
+        drop(metadata);
+        drop(cached);
+        if let Some(retained) = retained {
+            assert_eq!(retained.as_ref(), encoded);
+            assert_eq!(retained.offset(), (base + 64 + 37) as u64);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    struct AllocatingSource<'a> {
+        bytes: &'a [u8],
+        origin: u64,
+    }
+
+    #[cfg(feature = "std")]
+    impl Source for AllocatingSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn metadata_origin(&self) -> Result<u64, FormatError> {
+            Ok(self.origin)
+        }
+        fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+            BytesSource::new(self.bytes).read_at(offset, buffer)
+        }
+    }
 
     #[rstest]
     #[case::buffered_long(false, 9)]
@@ -216,7 +519,6 @@ mod tests {
         assert_eq!(shared_message(streaming, 8).unwrap(), b"a");
     }
 
-    /// An index that was never used has no address, so reading it returns an empty list.
     #[test]
     fn an_index_with_no_address_holds_no_records() {
         let index = SohmIndexHeader {
@@ -231,13 +533,16 @@ mod tests {
         };
         let empty = crate::source::BytesSource::new(Vec::new());
         assert!(
-            read_index_records_from_source(&empty, &index, FORMAT_WIDTHS)
-                .unwrap()
-                .is_empty()
+            read_index_records_from_source(
+                &crate::source::zero_base_source(&empty),
+                &index,
+                FORMAT_WIDTHS
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
-    /// A list index read through a [`Source`], at an address the header names.
     #[test]
     fn a_list_index_is_read_at_the_address_its_header_names() {
         let mut image = vec![0u8; 64];
@@ -259,7 +564,12 @@ mod tests {
         };
 
         let source = crate::source::BytesSource::new(image);
-        let records = read_index_records_from_source(&source, &index, FORMAT_WIDTHS).unwrap();
+        let records = read_index_records_from_source(
+            &crate::source::zero_base_source(&source),
+            &index,
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
         assert_eq!(
             records[0].location,
             SohmLocation::Heap {
@@ -289,9 +599,6 @@ mod tests {
         );
     }
 
-    /// An index that covers the type but has allocated no heap cannot hold the
-    /// message either, and says so by the same name rather than parsing address
-    /// zero as a fractal heap.
     #[test]
     fn an_index_without_a_heap_cannot_answer_a_lookup() {
         let table = SohmTable {
@@ -339,9 +646,8 @@ mod tests {
         let id = [TINY_ID_FIRST_BYTE, b'a', 0, 0, 0, 0, 0, 0];
         if streaming {
             read_heap_message_from_source(
-                &BytesSource::new(image),
+                &crate::source::zero_base_source(&BytesSource::new(image)),
                 AccessMode::ReadOnly,
-                AddressContext::from_effective_base(BaseAddress::new(0)),
                 &table,
                 MessageType::DATATYPE,
                 &id,
@@ -349,9 +655,8 @@ mod tests {
             )
         } else {
             read_heap_message(
-                &image,
+                crate::source::zero_base_bytes(&image),
                 AccessMode::ReadOnly,
-                AddressContext::from_effective_base(BaseAddress::ZERO),
                 &table,
                 MessageType::DATATYPE,
                 &id,

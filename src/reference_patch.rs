@@ -93,7 +93,7 @@ use crate::group_v2;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::source::Source;
+use crate::source::OriginalSource;
 use crate::source::SourceMetadata;
 use crate::superblock::Superblock;
 use crate::width::FormatWidths;
@@ -260,18 +260,17 @@ pub(crate) fn walks() -> usize {
 /// nothing — and the two differ because their partial results do. Half a link
 /// count would over-reclaim and corrupt a survivor; half a repointing is half
 /// the references corrected and the rest exactly as they were.
-pub(crate) fn plan<S: Source + ?Sized>(
+pub(crate) fn plan<S: OriginalSource + ?Sized>(
     src: &S,
     superblock: &Superblock,
     widths: FormatWidths,
-    addresses: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     budget: u32,
 ) -> Result<Plan, Error> {
     if relocations.is_empty() {
         return Ok(Plan::default());
     }
-    walk(src, superblock, widths, addresses, relocations, budget)
+    walk(src, superblock, widths, relocations, budget)
 }
 
 /// Returns whether every reachable object was inspected and has no object references.
@@ -284,28 +283,24 @@ pub(crate) fn plan<S: Source + ?Sized>(
 /// Returns [`Error::EditUnsupported`] for a truncated object-header record and [`Error::Format`]
 /// for other record errors or a root-address overflow.
 pub(crate) fn prove_free_of_references(
-    src: &(impl Source + ?Sized),
+    src: &(impl OriginalSource + ?Sized),
     superblock: &Superblock,
     widths: FormatWidths,
-    addresses: AddressContext,
     budget: u32,
 ) -> Result<bool, Error> {
-    Ok(
-        walk(src, superblock, widths, addresses, &BTreeMap::new(), budget)?
-            .proved_free_of_references(),
-    )
+    Ok(walk(src, superblock, widths, &BTreeMap::new(), budget)?.proved_free_of_references())
 }
 
 fn walk(
-    src: &(impl Source + ?Sized),
+    src: &(impl OriginalSource + ?Sized),
     superblock: &Superblock,
     widths: FormatWidths,
-    addresses: AddressContext,
     relocations: &BTreeMap<u64, u64>,
     budget: u32,
 ) -> Result<Plan, Error> {
     let mut plan = Plan::default();
     WALKS.with(|count| count.set(count.get() + 1));
+    let addresses = src.addresses();
     let base = addresses;
 
     let mut visited: BTreeSet<u64> = BTreeSet::new();
@@ -347,7 +342,7 @@ fn walk(
         // once only groups were. No test holds those figures — unlike
         // `publish_checksummed`, whose claim its own crash test pins — so treat
         // them as a record of one measurement rather than as a bound.
-        let outcome = scan_object(src, addr, base, widths, relocations, &mut plan)?;
+        let outcome = scan_object(src, addr, widths, relocations, &mut plan)?;
         saw_reference |= outcome.holds_a_reference;
         complete &= outcome.fully_read;
         if !outcome.descend {
@@ -371,7 +366,7 @@ fn walk(
         // element data — which lives outside the header — and not an attribute's
         // value, which does not.
         if !outcome.header_located {
-            saw_reference |= scan_parsed_header(src, &header, base, widths, relocations, &mut plan);
+            saw_reference |= scan_parsed_header(src, &header, widths, relocations, &mut plan);
         }
         let Ok(entries) = group_v2::resolve_group_entries_from_source(
             src,
@@ -401,15 +396,15 @@ fn walk(
 ///
 /// The parsed messages have no file offsets for inline attribute or compact data patches.
 /// Returns whether the element datatype can contain an object reference.
-fn scan_parsed_header<S: Source + ?Sized>(
+fn scan_parsed_header<S: OriginalSource + ?Sized>(
     src: &S,
     header: &ObjectHeader,
-    base: AddressContext,
     widths: FormatWidths,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
 ) -> bool {
     use crate::shared_message::SharedResolver as _;
+    let base = src.addresses();
     let mut element_dt = None;
     let mut layout = None;
     for message in &header.messages {
@@ -423,13 +418,8 @@ fn scan_parsed_header<S: Source + ?Sized>(
             MessageType::DATATYPE => {
                 let resolved;
                 let encoded = if message.flags.is_shared() {
-                    let framed = crate::source::BaseOffsetSource {
-                        inner: src,
-                        base: base.effective_base(),
-                    };
                     let resolver = crate::shared_message::SourceResolver::new(
-                        &framed,
-                        base,
+                        src,
                         AccessMode::ReadWrite,
                         widths,
                         // No shared-message table: a heap-stored datatype is not
@@ -525,10 +515,9 @@ struct Scanned {
 /// Reports whether the caller should descend through this object looking for
 /// children, which this walk establishes on the way past — see
 /// [`Scanned::descend`], which is not quite "this object is a group".
-fn scan_object<S: Source + ?Sized>(
+fn scan_object<S: OriginalSource + ?Sized>(
     src: &S,
     addr: u64,
-    base: AddressContext,
     widths: FormatWidths,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
@@ -537,6 +526,7 @@ fn scan_object<S: Source + ?Sized>(
     // is reported as a group so the caller still tries to descend through it:
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
+    let base = src.addresses();
     let Ok(chunks) = edit::object_header::read_oh_chunks(src, addr, base) else {
         return Ok(Scanned {
             descend: true,
@@ -546,20 +536,9 @@ fn scan_object<S: Source + ?Sized>(
         });
     };
     use crate::shared_message::SharedResolver as _;
-    // Framed at the base address, which is what a shared-message resolver
-    // requires: a committed datatype's message body holds a *base-relative*
-    // address, and `SourceResolver` reads it as absolute within the view it is
-    // given. Unframed, every committed datatype on a userblock file resolves to
-    // the wrong offset, fails to parse, and takes the object's references with
-    // it — silently, since a datatype that will not parse is treated as one this
-    // walk cannot read. Every other resolver in the crate is framed this way.
-    let framed = crate::source::BaseOffsetSource {
-        inner: src,
-        base: base.effective_base(),
-    };
+    // Resolve committed datatype addresses through the opened source's effective base.
     let resolver = crate::shared_message::SourceResolver::new(
-        &framed,
-        base,
+        src,
         AccessMode::ReadWrite,
         widths,
         // No shared-message table; see the note on the other resolver in this
@@ -866,6 +845,7 @@ mod tests {
     use crate::attribute::AttributeMessage;
     use crate::datatype::ReferenceType;
     use crate::edit;
+    use crate::reader::OpenedSource;
     use crate::source::BytesSource;
     use crate::type_builders::{self, AttrValue};
     use test_util::attribute;
@@ -962,9 +942,8 @@ mod tests {
         let mut plan = Plan::default();
         let map: BTreeMap<u64, u64> = relocations.iter().copied().collect();
         let scanned = scan_object(
-            src,
+            &OpenedSource::for_test(src, AddressContext::from_effective_base(BaseAddress::ZERO)),
             HEADER_AT,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             crate::file_writer::WIDTHS,
             &map,
             &mut plan,
@@ -1210,16 +1189,6 @@ mod tests {
         );
     }
 
-    /// A committed datatype is resolved through the base address, so a file with
-    /// a userblock reaches its references like any other.
-    ///
-    /// A committed type's message body holds a *base-relative* address, and the
-    /// resolver reads it as absolute within the view it is handed. Hand it the
-    /// unframed image and every such datatype on a userblock file resolves to
-    /// the wrong offset and fails to parse — which this walk cannot distinguish
-    /// from a datatype it is not able to read, so the object's references are
-    /// passed over in silence. Base zero is the control: it cannot fail, which
-    /// is exactly why the bug survived one.
     #[test]
     fn a_committed_datatype_is_resolved_through_the_base_address() {
         for base in [
@@ -1264,9 +1233,8 @@ mod tests {
                 900 + base.effective_base().get(),
             )]);
             let scanned = scan_object(
-                &BytesSource::new(bytes),
+                &OpenedSource::for_test(&BytesSource::new(bytes), base),
                 HEADER_AT,
-                base,
                 crate::file_writer::WIDTHS,
                 &map,
                 &mut plan,
@@ -1322,14 +1290,17 @@ mod tests {
         // The control: `d` has moved, the root has not, so the walk descends
         // through the root and repoints the one element in `refs`.
         let moved = BTreeMap::from([(stored, stored + 4096)]);
-        let reached = super::plan(
+        let opened = OpenedSource::for_test(
             &source,
+            AddressContext::from_effective_base(superblock.base_address),
+        );
+        let reached = super::plan(
+            &opened,
             &superblock,
             FormatWidths {
                 offsets: superblock.offset_size,
                 lengths: superblock.length_size,
             },
-            AddressContext::from_effective_base(superblock.base_address),
             &moved,
             1 << 20,
         )
@@ -1343,13 +1314,12 @@ mod tests {
         let mut vacated = moved.clone();
         vacated.insert(root, root + 8192);
         let skipped = super::plan(
-            &source,
+            &opened,
             &superblock,
             FormatWidths {
                 offsets: superblock.offset_size,
                 lengths: superblock.length_size,
             },
-            AddressContext::from_effective_base(superblock.base_address),
             &vacated,
             1 << 20,
         )

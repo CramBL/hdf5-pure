@@ -34,9 +34,9 @@ use crate::fractal_heap::LegacyHeapObjectReader;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::shared_message::BufferedResolver;
+use crate::shared_message::LegacyBufferedResolver;
+use crate::shared_message::LegacySourceResolver;
 use crate::shared_message::SharedResolver;
-use crate::shared_message::SourceResolver;
 use crate::sohm::{self, SohmTable};
 use crate::source::Source;
 use crate::source::SourceMetadata;
@@ -125,7 +125,7 @@ pub fn extract_attributes_full(
     widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
-    let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
+    let resolver = LegacyBufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
     let mut attrs = Vec::new();
 
     // Collect compact attributes (inline in OH)
@@ -232,7 +232,7 @@ pub fn extract_stored_attributes_from_source<S: Source + ?Sized>(
     widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let resolver = SourceResolver::new(source, addresses, access_mode, widths, sohm);
+    let resolver = LegacySourceResolver::new(source, addresses, access_mode, widths, sohm);
     let mut attrs = Vec::new();
 
     // Collect compact attributes (inline in OH)
@@ -328,7 +328,7 @@ fn extract_dense_attributes(
     let records =
         crate::btree_v2::legacy_collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
 
-    let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
+    let resolver = LegacyBufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = LegacyHeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     let mut attrs = Vec::new();
@@ -337,7 +337,7 @@ fn extract_dense_attributes(
             DenseAttributeRecord::parse(&record.data, btree_hdr.tree_type, fh.heap_id_length)?;
         let attr_data = match record.target(&layout)? {
             DenseAttributeTarget::Private(id) => heap.read(file_data, id.id())?,
-            DenseAttributeTarget::Shared(id) => sohm::read_heap_message(
+            DenseAttributeTarget::Shared(id) => sohm::legacy_read_heap_message(
                 file_data,
                 access_mode,
                 addresses,
@@ -372,7 +372,7 @@ fn extract_dense_attributes_from_source<S: Source + ?Sized>(
     widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
-    let resolver = SourceResolver::new(source, addresses, access_mode, widths, sohm);
+    let resolver = LegacySourceResolver::new(source, addresses, access_mode, widths, sohm);
     let mut attrs = Vec::new();
     visit_dense_attribute_messages_from_source(
         source,
@@ -460,7 +460,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
         }
         let attr_data = match record.target(&layout)? {
             DenseAttributeTarget::Private(id) => heap.read_from_source(source, id.id())?,
-            DenseAttributeTarget::Shared(id) => sohm::read_heap_message_from_source(
+            DenseAttributeTarget::Shared(id) => sohm::legacy_read_heap_message_from_source(
                 source,
                 access_mode,
                 addresses,

@@ -163,10 +163,9 @@ fn a_copied_compact_reference_dataset_is_screened(#[case] address: u64, #[case] 
     let tree = verbatim_copy(compact_reference_region(address), DenseAttrSet::default());
     let got = copy::screen_copied_references(
         &tree,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
         &invalidated,
-        &empty,
+        &OpenedSource::for_test(&empty, invalidated.base),
     );
     if rejected {
         common::assert_unsupported(got.unwrap_err(), REFERENCE_INTO_RECLAIMED_SPACE);
@@ -194,10 +193,9 @@ fn a_copied_reference_dataset_without_layout_is_rejected() {
     );
     let err = copy::screen_copied_references(
         &no_layout,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
         &invalidated,
-        &empty,
+        &OpenedSource::for_test(&empty, invalidated.base),
     )
     .unwrap_err();
     common::assert_unsupported(
@@ -227,10 +225,9 @@ fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
 
     let err = copy::screen_copied_references(
         &tree,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
         &invalidated,
-        &empty,
+        &OpenedSource::for_test(&empty, invalidated.base),
     )
     .unwrap_err();
     let Error::CopyScreenUnreadable { message, source } = &err else {
@@ -466,10 +463,9 @@ fn a_copied_reference_attribute_is_screened_in_both_storages(
     };
     let result = copy::screen_copied_references(
         &tree,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
         &invalidated,
-        &empty,
+        &OpenedSource::for_test(&empty, invalidated.base),
     );
     if rejected {
         common::assert_unsupported(result.unwrap_err(), REFERENCE_INTO_RECLAIMED_SPACE);
@@ -494,10 +490,9 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
             };
             let err = copy::screen_copied_references(
                 &tree,
-                AddressContext::from_effective_base(BaseAddress::ZERO),
                 crate::file_writer::WIDTHS,
                 &invalidated,
-                &BytesSource::new(Vec::new()),
+                &OpenedSource::for_test(&BytesSource::new(Vec::new()), invalidated.base),
             )
             .unwrap_err();
             let Error::EditUnsupported(reason) = err else {

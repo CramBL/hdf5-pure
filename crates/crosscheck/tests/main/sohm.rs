@@ -22,12 +22,22 @@ use std::path::{Path, PathBuf};
 
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
+#[cfg(target_endian = "little")]
+use hdf5_pure::Error;
+#[cfg(target_endian = "little")]
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FixedPointType;
+#[cfg(target_endian = "little")]
+use hdf5_pure::FormatError;
+#[cfg(target_endian = "little")]
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::btree_v2;
 use test_util::bytes;
+#[cfg(target_endian = "little")]
+use test_util::sohm as shared_fixture;
 #[cfg(target_endian = "little")]
 use test_util_hdf5::reader::ReadBackend;
 
@@ -223,9 +233,6 @@ fn a_list_indexed_shared_message_file_reads_back_whole() {
     assert_reads_back(&fixture.path, 4);
 }
 
-/// The same file read through the streaming backend, which resolves references
-/// by reading windows of the file rather than indexing a whole-file image. The
-/// two backends have separate resolvers and separate heap readers.
 #[test]
 #[cfg(target_endian = "little")]
 fn the_streaming_backend_resolves_shared_messages_too() {
@@ -485,3 +492,190 @@ fn dense_shared_attribute_records_read_from_the_shared_heap(
 // as the shared-message flag.
 #[cfg(target_endian = "little")]
 const SHARED_ATTRIBUTE_FLAG: u8 = 0x02;
+
+#[rstest]
+#[case::zero_base(0, 0)]
+#[case::userblock(512, 512)]
+#[case::forward_relocated(0, 512)]
+#[case::backward_relocated(512, 0)]
+#[cfg(target_endian = "little")]
+fn shared_and_committed_messages_resolve_after_native_file_relocation(
+    #[case] encoded_base: usize,
+    #[case] effective_base: usize,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared-relocated.h5");
+    write_shared_committed_file(&path, encoded_base);
+    let image = fs::read(&path).unwrap();
+    let mut relocated = vec![0; effective_base];
+    relocated.extend_from_slice(&image[encoded_base..]);
+    fs::write(&path, relocated).unwrap();
+    let file = backend.open(&path).unwrap();
+    assert_shared_committed_messages(&file);
+    file.close().unwrap();
+}
+
+#[rstest]
+#[case::zero_bounded(0, 0, MemoryStrategy::Bounded, None)]
+#[case::zero_mirrored(0, 0, MemoryStrategy::Mirrored, None)]
+#[case::userblock_mirrored(512, 512, MemoryStrategy::Mirrored, None)]
+#[case::userblock_bounded(
+    512,
+    512,
+    MemoryStrategy::Bounded,
+    Some(
+        "bounded read-write access does not support a file with a userblock (non-zero base address); leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to fall back to the whole-file mirror here"
+    )
+)]
+#[case::forward_relocated(
+    0,
+    512,
+    MemoryStrategy::Mirrored,
+    Some("a file whose superblock is not located at its base address is not editable in place")
+)]
+#[case::backward_relocated(
+    512,
+    0,
+    MemoryStrategy::Mirrored,
+    Some("a file whose superblock is not located at its base address is not editable in place")
+)]
+#[cfg(target_endian = "little")]
+fn writable_shared_and_committed_messages_retain_the_opened_frame(
+    #[case] encoded_base: usize,
+    #[case] effective_base: usize,
+    #[case] strategy: MemoryStrategy,
+    #[case] rejected: Option<&str>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared-writable.h5");
+    write_shared_committed_file(&path, encoded_base);
+    let image = fs::read(&path).unwrap();
+    let mut relocated = vec![0; effective_base];
+    relocated.extend_from_slice(&image[encoded_base..]);
+    fs::write(&path, relocated).unwrap();
+    let opened = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(strategy),
+    );
+    if let Some(expected) = rejected {
+        let error = opened.unwrap_err();
+        let Error::EditUnsupported(reason) = error else {
+            panic!("expected EditUnsupported, got {error:?}");
+        };
+        assert_eq!(reason, expected);
+        return;
+    }
+    let file = opened.unwrap();
+    assert_shared_committed_messages(&file);
+    file.root().create_group("added").unwrap();
+    file.commit().unwrap();
+    assert_shared_committed_messages(&file);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_shared_committed_messages(&file);
+    assert_eq!(
+        file.group("added").unwrap().groups().unwrap(),
+        Vec::<String>::new()
+    );
+    file.close().unwrap();
+}
+
+#[cfg(target_endian = "little")]
+fn write_shared_committed_file(path: &Path, base: usize) {
+    let file = hdf5::File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| {
+            properties
+                .userblock(base as u64)
+                .shared_mesg_phase_change(50, 40)
+                .shared_mesg_indexes(&[SharedMessageIndex {
+                    message_types: SharedMessageType::ALL,
+                    min_message_size: 1,
+                }])
+        })
+        .create(path)
+        .unwrap();
+    write_shared_objects(&file, 2);
+    let datatype = hdf5::Datatype::from_type::<i32>().unwrap();
+    file.commit_datatype("integer_type", &datatype).unwrap();
+    let dataset = file
+        .new_dataset_builder()
+        .empty_as(&datatype)
+        .shape([3])
+        .create("typed")
+        .unwrap();
+    dataset.write(&[11, 13, 17]).unwrap();
+    assert!(dataset.dtype().unwrap().is_committed());
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [11, 13, 17]);
+    assert_eq!(
+        file.dataset("d1").unwrap().read_raw::<i32>().unwrap(),
+        dataset_values(1)
+    );
+    drop(dataset);
+    drop(datatype);
+    file.close().unwrap();
+    bytes::sole_signature(&fs::read(path).unwrap(), shared_fixture::TABLE_SIGNATURE);
+}
+
+#[cfg(target_endian = "little")]
+fn assert_shared_committed_messages(file: &File) {
+    let shared = file.dataset("d1").unwrap();
+    assert_eq!(shared.datatype().unwrap(), i32_type());
+    assert_eq!(shared.shape().unwrap(), [ROWS as u64]);
+    assert_eq!(shared.read_i32().unwrap(), dataset_values(1));
+    let committed = file.dataset("typed").unwrap();
+    assert_eq!(committed.datatype().unwrap(), i32_type());
+    assert_eq!(committed.shape().unwrap(), [3]);
+    assert_eq!(committed.read_i32().unwrap(), [11, 13, 17]);
+}
+
+#[rstest]
+#[case::zero_bounded(0, MemoryStrategy::Bounded)]
+#[case::zero_mirrored(0, MemoryStrategy::Mirrored)]
+#[case::userblock_mirrored(512, MemoryStrategy::Mirrored)]
+#[cfg(target_endian = "little")]
+fn unreadable_shared_tables_are_best_effort_for_reads_and_strict_for_edits(
+    #[case] base: usize,
+    #[case] strategy: MemoryStrategy,
+    #[values(ReadBackend::Bytes, ReadBackend::Source)] backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared-corrupt.h5");
+    write_shared_committed_file(&path, base);
+    let mut image = fs::read(&path).unwrap();
+    let table = bytes::sole_signature(&image, shared_fixture::TABLE_SIGNATURE);
+    image[table] = 0;
+    fs::write(&path, image).unwrap();
+    let file = backend.open(&path).unwrap();
+    assert_eq!(file.root().groups().unwrap(), ["g0", "g1"]);
+    let error = file.dataset("d1").unwrap().datatype().unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::UnsupportedSohmReference)),
+        "{error:?}"
+    );
+    file.close().unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(strategy),
+    )
+    .unwrap();
+    file.root().create_group("added").unwrap();
+    let error = file.commit().unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::InvalidSohmTableSignature)),
+        "{error:?}"
+    );
+    drop(file);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.root().groups().unwrap(), ["g0", "g1"]);
+    file.close().unwrap();
+}

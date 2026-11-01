@@ -24,7 +24,6 @@ mod view;
 
 #[cfg(test)]
 pub(crate) use view::PhysicalBytes;
-#[cfg(any(feature = "std", test, doc))]
 pub(crate) use view::PhysicalSource;
 #[cfg(any(test, doc))]
 pub(crate) use view::StoredSource;

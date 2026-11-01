@@ -1275,7 +1275,7 @@ fn reject_foreign_dense_attrs(attrs: &[crate::attribute::AttributeMessage]) -> R
 /// Chunk payloads are copied as stored, so a chunked dataset with object references is rejected
 /// whenever `invalidated` is nonempty. Returns immediately if `invalidated` is empty.
 ///
-/// The caller passes the session image framed at its base address as `src`. Message flags are
+/// The caller passes the session's original opened source as `src`. Message flags are
 /// defined in "Version 2 Data Object Header Prefix" of the [format specification,
 /// version 4.0][spec].
 ///
@@ -1289,22 +1289,16 @@ fn reject_foreign_dense_attrs(attrs: &[crate::attribute::AttributeMessage]) -> R
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
 pub(super) fn screen_copied_references(
     tree: &CopyTree,
-    addresses: AddressContext,
     widths: FormatWidths,
     invalidated: &InvalidatedAddresses,
-    src: &(impl Source + ?Sized),
+    src: &(impl OriginalSource + ?Sized),
 ) -> Result<(), Error> {
     if invalidated.is_empty() {
         return Ok(());
     }
     // The resolver supports committed object headers without a shared-message table.
-    let resolver = crate::shared_message::SourceResolver::new(
-        src,
-        addresses,
-        AccessMode::ReadWrite,
-        widths,
-        None,
-    );
+    let resolver =
+        crate::shared_message::SourceResolver::new(src, AccessMode::ReadWrite, widths, None);
     tree.preorder()
         .try_for_each(|node| node.screen_references(&resolver, widths, invalidated))
 }
