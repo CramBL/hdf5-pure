@@ -7,7 +7,7 @@ use hdf5_pure_space::__private::{FreeClass, PageType};
 use rstest::rstest;
 use test_util::global_heap::Object;
 use test_util::object_header::{Message, MessageType};
-use test_util::snapshot::{Report, Value};
+use test_util::snapshot::text::{Report, Value};
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::super::{

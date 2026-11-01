@@ -1,4 +1,4 @@
-use test_util::snapshot::{Report, Value};
+use test_util::snapshot::text::{Report, Value};
 
 #[test]
 fn report_aligns_columns_and_groups_decimal_values() {

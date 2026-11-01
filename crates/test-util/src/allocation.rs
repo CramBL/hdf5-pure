@@ -23,7 +23,7 @@
 
 use std::sync::OnceLock;
 
-use crate::snapshot;
+use crate::snapshot::number;
 
 /// Allocation counts and byte totals for one measured region.
 #[derive(Clone, Copy, Debug)]
@@ -46,10 +46,10 @@ impl Measured {
              Cumulative bytes:  {:>13}\n\
              Peak bytes:        {:>13}\n\
              Retained bytes:    {:>13}",
-            snapshot::grouped_decimal(self.blocks),
-            snapshot::grouped_decimal(self.bytes),
-            snapshot::grouped_decimal(self.peak_bytes),
-            snapshot::grouped_decimal(self.live_bytes),
+            number::grouped_decimal(self.blocks),
+            number::grouped_decimal(self.bytes),
+            number::grouped_decimal(self.peak_bytes),
+            number::grouped_decimal(self.live_bytes),
         )
     }
 }
