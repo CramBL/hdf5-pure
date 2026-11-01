@@ -109,6 +109,7 @@ mod partial_read;
 mod provenance_verify;
 mod public_api_surface;
 mod repack;
+mod repack_link_policy;
 mod roundtrip_properties;
 mod seals;
 mod serde_roundtrip;

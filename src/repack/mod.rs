@@ -360,6 +360,7 @@ impl RepackOptions {
 ///
 /// Preserves the source's recorded effective file-space settings by default, including
 /// persistence. [`RepackOptions::with_file_space_settings`] selects a different output policy.
+/// Retains each group's link thresholds and stored entry estimates when reconstructing its header.
 ///
 /// Fidelity checks and destination layout planning run before output. An
 /// [`Error::RepackUnsupported`] for an object or drop path is reported before bytes are written
@@ -561,9 +562,13 @@ impl ObjectSource for RepackSource {
             }
             ObjectClass::Group => {
                 let mut builder = GroupBuilder::new("repack");
+                let (attributes, group_info) = file.attr_messages_and_group_info_at(
+                    object.id.header_address(),
+                    objects.take_header(index)?,
+                )?;
                 copy_attrs(
                     &mut builder,
-                    file.attr_messages_at(object.id.header_address(), objects.take_header(index)?)?,
+                    attributes,
                     || {
                         file.group_at(object.id.header_address(), path.clone())
                             .attrs()
@@ -571,7 +576,7 @@ impl ObjectSource for RepackSource {
                     &group_owner(&path),
                     objects,
                 )?;
-                Ok(Object::group(&builder.finish().attrs)?)
+                Ok(Object::group(&builder.finish().attrs, group_info)?)
             }
             ObjectClass::NamedDatatype => {
                 let datatype = file
