@@ -1,6 +1,7 @@
 //! File-creation properties as one reusable value — the `fcpl` analogue.
 
 use crate::FileSpaceSettings;
+use crate::LinkPhaseChange;
 use crate::UserblockSize;
 use crate::libver::LibVer;
 
@@ -17,7 +18,11 @@ use crate::libver::LibVer;
 /// runtime property registry, and no setter that can fail. `fcpl` and each
 /// `H5Pset_*` it models are doc aliases, so a search for either lands here.
 ///
-/// One setting crosses the class line. `H5Pset_libver_bounds` is officially a
+/// The root group's link thresholds correspond to the group-creation property
+/// `H5Pset_link_phase_change`. Configure them with
+/// [`with_root_group_link_phase_change`](Self::with_root_group_link_phase_change).
+///
+/// `H5Pset_libver_bounds` is officially a
 /// *file access* property, but this crate checks the bound as the file is
 /// written, so [`with_libver_bounds`](Self::with_libver_bounds) lives here with
 /// the other write-time settings rather than on
@@ -129,7 +134,8 @@ use crate::libver::LibVer;
 /// | `H5Pset_fill_value` / `H5Pset_fill_time` (`dcpl`) | [`DatasetBuilder::with_fill_value`](crate::DatasetBuilder::with_fill_value), [`with_fill_time`](crate::DatasetBuilder::with_fill_time) | **Genuine** (per dataset) | Encodes the fill value and fill time in a v3 Fill Value message, and [`Dataset::fill_value`](crate::Dataset::fill_value) and [`Dataset::fill_time`](crate::Dataset::fill_time) read them back, from this crate's files and the C library's. |
 /// | `H5Pset_obj_track_times` (`ocpl`) | none | **Unsupported** | Every object is written with times untracked, which is equivalent to `false`, and tracking cannot be enabled. |
 /// | `H5Pset_sym_k` / `H5Pset_istore_k` | none | **N/A** | The v3 superblock omits these fields, and every group is new-style, with link messages and a v2 object header. |
-/// | `H5Pset_link_phase_change` / `H5Pset_est_link_info` (`gcpl`) | none | **Unsupported** | The Group Info message is written minimal, so the C library's defaults apply (max-compact 8, min-dense 6), and the thresholds are not tunable. |
+/// | `H5Pset_link_phase_change` (`gcpl`) | [`with_root_group_link_phase_change`](Self::with_root_group_link_phase_change) | **Genuine** | Sets root link thresholds. [`GroupBuilder::with_link_phase_change`](crate::GroupBuilder::with_link_phase_change) sets each nested group's thresholds. |
+/// | `H5Pset_est_link_info` (`gcpl`) | none | **Unsupported** | New groups use default entry estimates. |
 ///
 /// [space-new]: crate::FileSpaceSettings::new
 /// [space-persist]: crate::FileSpaceSettings::with_persistence
@@ -188,16 +194,18 @@ pub struct FileCreateProperties {
     userblock: UserblockSize,
     libver_bounds: Option<(LibVer, LibVer)>,
     file_space_settings: Option<FileSpaceSettings>,
+    root_group_link_phase_change: LinkPhaseChange,
 }
 
 impl FileCreateProperties {
     /// Constructs properties that reserve zero prefix bytes and leave format and file-space
-    /// settings unset.
+    /// settings unset, with default root link thresholds.
     pub const fn new() -> Self {
         Self {
             userblock: UserblockSize::NONE,
             libver_bounds: None,
             file_space_settings: None,
+            root_group_link_phase_change: LinkPhaseChange::DEFAULT,
         }
     }
 
@@ -250,6 +258,36 @@ impl FileCreateProperties {
     pub const fn with_file_space_settings(mut self, settings: FileSpaceSettings) -> Self {
         self.file_space_settings = Some(settings);
         self
+    }
+
+    /// Sets the root group's compact and dense link storage thresholds.
+    ///
+    /// The default is [`LinkPhaseChange::default`]. Nested groups have their own policies, set through
+    /// [`GroupBuilder::with_link_phase_change`](crate::GroupBuilder::with_link_phase_change).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FileCreateProperties, LinkPhaseChange};
+    ///
+    /// let properties = FileCreateProperties::new()
+    ///     .with_root_group_link_phase_change(LinkPhaseChange::AlwaysDense);
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_create_properties(properties);
+    /// builder.create_dataset("values").with_i32_data(&[1, 2]);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.root().link_phase_change()?, LinkPhaseChange::AlwaysDense);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    #[doc(alias = "H5Pset_link_phase_change")]
+    pub const fn with_root_group_link_phase_change(mut self, policy: LinkPhaseChange) -> Self {
+        self.root_group_link_phase_change = policy;
+        self
+    }
+
+    /// Returns the root group's configured thresholds, including the default policy when unset.
+    pub const fn root_group_link_phase_change(&self) -> LinkPhaseChange {
+        self.root_group_link_phase_change
     }
 
     /// Returns the effective file-space configuration, or `None` if it is unset.

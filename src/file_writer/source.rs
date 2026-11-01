@@ -24,6 +24,7 @@ use super::preparation::PreparedAttributes;
 use super::preparation::PreparedDataset;
 use super::preparation::VlPatch;
 use crate::FileSpaceSettings;
+use crate::LinkPhaseChange;
 use crate::SuperblockStatus;
 use crate::SuperblockStatusFlags;
 use crate::address::BaseAddress;
@@ -257,14 +258,22 @@ impl Object {
             }
             Kind::Group { attributes, .. } => {
                 let links = links_at(source, index, None)?;
-                let plan = super::dense_links_plan(&links)?;
+                let plan = super::dense_links_plan(
+                    &links,
+                    LinkPhaseChange::default().group_info()?.phase_change(),
+                )?;
                 let link_info = plan
                     .as_ref()
                     .map(|plan| plan.link_info(StoredAddress::ZERO))
                     .transpose()
                     .map_err(super::dense_link_error)?;
-                let header =
-                    super::build_group_oh(&links, attributes, info.as_deref(), link_info.as_ref())?;
+                let header = super::build_group_oh(
+                    &links,
+                    attributes,
+                    info.as_deref(),
+                    link_info.as_ref(),
+                    LinkPhaseChange::default().group_info()?,
+                )?;
                 (
                     header.len() as u64,
                     None,
@@ -928,7 +937,13 @@ impl<S: ObjectSource> Plan<S> {
                 } else {
                     links_at(&self.source, index, Some(&self.records))?
                 };
-                super::build_group_oh(&links, attributes, info.as_deref(), link_info.as_ref())?
+                super::build_group_oh(
+                    &links,
+                    attributes,
+                    info.as_deref(),
+                    link_info.as_ref(),
+                    LinkPhaseChange::default().group_info()?,
+                )?
             }
             Kind::Committed(datatype) => {
                 super::build_committed_datatype_oh(datatype, record.references)?
@@ -958,6 +973,7 @@ impl<S: ObjectSource> Plan<S> {
         Ok(super::dense_links_image(
             &links_at(&self.source, index, Some(&self.records))?,
             (span.address, span.length.to_usize()?),
+            LinkPhaseChange::default().group_info()?.phase_change(),
         )?
         .bytes)
     }
@@ -1376,6 +1392,7 @@ mod tests {
     use crate::FileSpaceStrategy;
     use crate::GroupBuilder;
     use crate::LibVer;
+    use crate::LinkPhaseChange;
     use crate::MaxExtent;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
@@ -1398,7 +1415,15 @@ mod tests {
         let links: Vec<_> = (0..9)
             .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
             .collect();
-        let plan = file_writer::dense_links_plan(&links).unwrap().unwrap();
+        let plan = file_writer::dense_links_plan(
+            &links,
+            LinkPhaseChange::default()
+                .group_info()
+                .unwrap()
+                .phase_change(),
+        )
+        .unwrap()
+        .unwrap();
         let geometry = DenseLinks::new(&plan.link_info(StoredAddress::new(0)).unwrap()).unwrap();
         let span = Allocation {
             address: StoredAddress::new(address.unwrap_or(u64::MAX - plan.serialized_len())),
@@ -1417,7 +1442,15 @@ mod tests {
         let links: Vec<_> = (0..9)
             .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
             .collect();
-        let plan = file_writer::dense_links_plan(&links).unwrap().unwrap();
+        let plan = file_writer::dense_links_plan(
+            &links,
+            LinkPhaseChange::default()
+                .group_info()
+                .unwrap()
+                .phase_change(),
+        )
+        .unwrap()
+        .unwrap();
         let geometry = DenseLinks::new(&plan.link_info(StoredAddress::new(0)).unwrap()).unwrap();
         let length = plan.serialized_len();
         let address = if undefined {

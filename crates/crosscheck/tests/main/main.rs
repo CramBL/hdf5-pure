@@ -86,6 +86,7 @@ mod legacy_chunked;
 mod legacy_compound;
 mod libver_matrix;
 mod libver_output;
+mod link_phase_change;
 mod link_storage;
 mod lzf;
 mod mat_streaming;

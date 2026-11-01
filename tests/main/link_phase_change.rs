@@ -3,6 +3,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileCreateProperties;
+use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     CompactReversion, Error, File, FileBuilder, FormatError, LinkPhaseChange, ReadSeekSource,
     Source,
@@ -234,6 +239,128 @@ fn policy_inspection_rejects_a_root_without_group_messages() {
         panic!("expected NotAGroup, got {error:?}");
     };
     assert_eq!(path, "");
+}
+
+#[test]
+fn root_creation_policy_is_const_and_replacing_properties_restores_defaults() {
+    const PROPERTIES: FileCreateProperties =
+        FileCreateProperties::new().with_root_group_link_phase_change(THRESHOLDS);
+    assert_eq!(PROPERTIES.root_group_link_phase_change(), THRESHOLDS);
+    let mut builder = FileBuilder::new();
+    builder.with_create_properties(PROPERTIES);
+    builder.with_create_properties(FileCreateProperties::new());
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    assert_eq!(
+        file.root().link_phase_change().unwrap(),
+        LinkPhaseChange::default()
+    );
+}
+
+#[test]
+fn detached_and_callback_groups_keep_independent_creation_policies() {
+    let mut builder = FileBuilder::new();
+    let mut parent = builder.create_group("parent");
+    parent.with_link_phase_change(ONE_WAY);
+    let mut child = parent.create_group("detached");
+    child.with_link_phase_change(LinkPhaseChange::AlwaysDense);
+    child.with_link_phase_change(THRESHOLDS);
+    parent.add_group(child.finish());
+    parent
+        .create_group_with("callback", |group| {
+            group.with_link_phase_change(LinkPhaseChange::AlwaysDense);
+            Ok(())
+        })
+        .unwrap();
+    builder.add_group(parent.finish());
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    assert_eq!(
+        file.root().link_phase_change().unwrap(),
+        LinkPhaseChange::default()
+    );
+    assert_eq!(
+        file.group("parent").unwrap().link_phase_change().unwrap(),
+        ONE_WAY
+    );
+    assert_eq!(
+        file.group("parent/detached")
+            .unwrap()
+            .link_phase_change()
+            .unwrap(),
+        THRESHOLDS
+    );
+    assert_eq!(
+        file.group("parent/callback")
+            .unwrap()
+            .link_phase_change()
+            .unwrap(),
+        LinkPhaseChange::AlwaysDense
+    );
+}
+
+#[test]
+fn owned_file_creation_keeps_the_root_policy_after_commit_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root-policy.h5");
+    let file = File::create_with_options(
+        &path,
+        FileCreateProperties::new().with_root_group_link_phase_change(THRESHOLDS),
+        FileAccessProperties::new(),
+    )
+    .unwrap();
+    assert_eq!(file.root().link_phase_change().unwrap(), THRESHOLDS);
+    let child = file.root().create_group("child").unwrap();
+    drop(child);
+    file.commit().unwrap();
+    assert_eq!(file.root().link_phase_change().unwrap(), THRESHOLDS);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.root().link_phase_change().unwrap(), THRESHOLDS);
+    file.close().unwrap();
+    directory.close().unwrap();
+}
+
+#[rstest]
+#[case::default(LinkPhaseChange::default())]
+#[case::thresholds(THRESHOLDS)]
+#[case::one_way(ONE_WAY)]
+#[case::always_dense(LinkPhaseChange::AlwaysDense)]
+fn configured_group_headers_match_between_buffered_and_streaming_output(
+    #[case] policy: LinkPhaseChange,
+    #[values(false, true)] paged: bool,
+) {
+    let build = || {
+        let mut properties = FileCreateProperties::new()
+            .with_userblock(UserblockSize::try_from(4096).unwrap())
+            .with_root_group_link_phase_change(policy);
+        if paged {
+            properties = properties.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+            );
+        }
+        let mut builder = FileBuilder::new();
+        builder.with_create_properties(properties);
+        for index in 0..13 {
+            builder
+                .create_dataset(&format!("root_{index}"))
+                .with_i32_data(&[index]);
+        }
+        builder
+            .create_group_with("nested", |group| {
+                group.with_link_phase_change(policy);
+                for index in 0..13 {
+                    group
+                        .create_dataset(&format!("child_{index}"))
+                        .with_i32_data(&[index]);
+                }
+                Ok(())
+            })
+            .unwrap();
+        builder
+    };
+    let buffered = build().finish().unwrap();
+    let mut streamed = Vec::new();
+    build().finish_to(&mut streamed).unwrap();
+    assert_eq!(streamed, buffered);
 }
 
 struct FailingSource {
