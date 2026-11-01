@@ -40,6 +40,7 @@ mod edit_free_space_churn;
 mod edit_free_space_endurance;
 mod edit_global_heap_reclaim;
 mod edit_in_place;
+mod edit_link_size;
 mod edit_persisted_free_space;
 mod edit_reference_repointing;
 mod edit_second_layout;
