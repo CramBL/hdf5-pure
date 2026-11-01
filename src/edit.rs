@@ -321,8 +321,10 @@ use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::{FileAccessProperties, OpenedSource, PersistedFreeSpacePolicy};
+use crate::source::MetadataCacheConfig;
+use crate::source::PhysicalSource;
+use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::source::{BaseOffsetSource, MetadataCacheConfig, Source};
 use crate::superblock;
 use crate::superblock::Superblock;
 #[cfg(doc)]
@@ -2293,12 +2295,15 @@ impl WriteEngine {
         self.context.addresses()
     }
 
-    /// The file's shared-message (SOHM) master table, or `None` for a file that
-    /// shares no messages — which is every file this crate writes and nearly
-    /// every file it is handed.
+    /// Reads the shared-message master table if the superblock extension is readable.
     ///
-    /// Costs one small object-header parse per commit on a file that has a
-    /// superblock extension at all, and nothing on one that does not.
+    /// Returns `None` if the extension is absent, cannot be addressed or parsed, or has no
+    /// Shared Message Table message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the table message is malformed or the declared table cannot
+    /// be read.
     fn shared_message_table(&self) -> Result<Option<crate::sohm::SohmTable>, Error> {
         let widths = self.context.widths();
         let rel = match self.context.superblock().superblock_extension_address {
@@ -2335,21 +2340,22 @@ impl WriteEngine {
             &msg.data,
             widths.offsets,
         )?;
-        let framed = BaseOffsetSource {
-            inner: self.image(),
-            base: base.effective_base(),
-        };
-        Ok(Some(
-            crate::sohm::SohmTable::read_from_source_with_offset_width(
-                &SourceMetadata(&framed),
-                &message,
-                widths.offsets,
-            )?,
-        ))
+        let opened = self.opened_source();
+        Ok(Some(crate::sohm::read_table_from_source(
+            &PhysicalSource::new(&opened).stored(),
+            &message,
+            widths.offsets,
+        )?))
     }
 
-    /// Refuse a commit that would strand a shared-message index record naming an
-    /// object header. See [`SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT`].
+    /// Rejects a commit that invalidates a shared-message record's object-header address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a record refers to an invalidated header. Returns
+    /// errors from [`Self::shared_message_table`] or
+    /// [`read_index_records_from_source`](crate::sohm::read_index_records_from_source) if the
+    /// table or index cannot be read.
     fn screen_shared_message_index(&self, invalidated: &InvalidatedAddresses) -> Result<(), Error> {
         if invalidated.is_empty() {
             return Ok(());
@@ -2357,14 +2363,11 @@ impl WriteEngine {
         let Some(table) = self.shared_message_table()? else {
             return Ok(());
         };
-        let base = self.context.addresses();
-        let framed = BaseOffsetSource {
-            inner: self.image(),
-            base: base.effective_base(),
-        };
+        let opened = self.opened_source();
+        let stored = PhysicalSource::new(&opened).stored();
         for index in &table.indexes {
             let records =
-                crate::sohm::read_index_records_from_source(&framed, index, self.context.widths())?;
+                crate::sohm::read_index_records_from_source(&stored, index, self.context.widths())?;
             screen_shared_message_records(&records, invalidated)?;
         }
         Ok(())

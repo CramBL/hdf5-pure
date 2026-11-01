@@ -345,10 +345,9 @@ impl WriteEngine {
             return Ok(());
         }
         let plan = crate::reference_patch::plan(
-            &self.image(),
+            &self.opened_source(),
             self.context.superblock(),
             self.context.widths(),
-            self.context.addresses(),
             relocations,
             MAX_LINK_GRAPH_NODES,
         )?;

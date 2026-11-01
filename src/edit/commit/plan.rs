@@ -26,7 +26,7 @@ use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, REFERENCE_TO_A_MOVED_OBJECT};
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::source::{BaseOffsetSource, Source};
+use crate::source::Source;
 use crate::type_builders::ObjectRefTarget;
 
 #[cfg(test)]
@@ -833,19 +833,14 @@ impl WriteEngine {
             base: self.context.addresses(),
         };
         {
-            let image = self.image();
-            let framed = BaseOffsetSource {
-                inner: image,
-                base: self.context.addresses().effective_base(),
-            };
+            let opened = self.opened_source();
             for key in keys {
                 for (_, tree) in &nodes[key].prepared.copies {
                     copy::screen_copied_references(
                         tree,
-                        self.context.addresses(),
                         self.context.widths(),
                         &for_copied,
-                        &framed,
+                        &opened,
                     )?;
                 }
             }
@@ -1031,10 +1026,9 @@ impl WriteEngine {
                     })
             })
             || !crate::reference_patch::prove_free_of_references(
-                &self.image(),
+                &self.opened_source(),
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 MAX_LINK_GRAPH_NODES,
             )?
         {

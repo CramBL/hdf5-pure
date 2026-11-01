@@ -94,10 +94,9 @@ impl WriteEngine {
             let mut prospective = self.context.superblock().clone();
             prospective.root_group_address = self.context.addresses().relative(new_root)?;
             if !crate::reference_patch::prove_free_of_references(
-                &self.image(),
+                &self.opened_source(),
                 &prospective,
                 self.context.widths(),
-                self.context.addresses(),
                 super::MAX_LINK_GRAPH_NODES,
             )? {
                 return Ok(None);

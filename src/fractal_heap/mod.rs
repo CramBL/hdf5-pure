@@ -36,14 +36,10 @@ use crate::width::FormatWidths;
 #[cfg(test)]
 use crate::width::{LengthWidth, OffsetWidth};
 
-#[cfg(any(test, doc))]
 mod stored;
 
-#[cfg(any(test, doc))]
 pub(crate) use stored::HeapObjectReader;
-#[cfg(any(test, doc))]
 pub(crate) use stored::HeapSource;
-#[cfg(any(test, doc))]
 pub(crate) use stored::read_header_and_range_from_source;
 
 /// Parses a heap header using validated file widths.

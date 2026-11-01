@@ -83,7 +83,9 @@ use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 use crate::page_publication_failure::PagePublicationFailure;
 use crate::read_region::{ReadRegion, RegionRequest};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
-use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
+use crate::shared_message;
+use crate::shared_message::SharedResolver;
+use crate::shared_message::SourceResolver;
 use crate::source::SourceMetadata;
 use crate::source::{
     self, BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats,
@@ -1725,13 +1727,10 @@ impl FileInner {
         hdf5_pure_format::__private::parse_file_space_info(self.widths, &msg.data).map(Some)
     }
 
-    /// Parse the Shared Message Table message from the superblock extension and
-    /// read the master table it names, if the file records one.
+    /// Reads the shared-message master table declared in the superblock extension.
     ///
-    /// Best-effort in the same way and for the same reason as
-    /// [`Self::read_file_space_info`]: a file whose shared-message table is
-    /// unreadable still opens, and every object in it that shares no message
-    /// still reads.
+    /// Returns `None` if the extension, message, or table cannot be read. The caller can read
+    /// objects with inline metadata when the shared-message table is unavailable.
     fn read_sohm_table(&self) -> Option<Box<crate::sohm::SohmTable>> {
         let rel = self.superblock.superblock_extension_address?;
         if rel.is_undefined(self.widths.offsets) {
@@ -1748,62 +1747,20 @@ impl FileInner {
             self.widths.offsets,
         )
         .ok()?;
-        // The table's address, like every address in a header message, is stored
-        // relative to the file's base address, so the read is framed the same way
-        // every other metadata walk here is.
-        let base = self.addresses().effective_base();
-        let offset_width = self.widths.offsets;
-        match &self.backend {
-            Backend::InMemory(v) => crate::sohm::SohmTable::read_with_offset_width(
-                source::frame(v, base).ok()?,
-                &message,
-                offset_width,
-            )
-            .ok(),
-            Backend::Streaming(s) if base.is_zero() => {
-                crate::sohm::SohmTable::read_from_source_with_offset_width(
-                    &SourceMetadata(s.as_ref()),
+        self.with_opened_source(|source| {
+            let physical = PhysicalSource::new(source);
+            match physical.resident() {
+                Some(bytes) => {
+                    crate::sohm::read_table(bytes.stored()?, &message, self.widths.offsets)
+                }
+                None => crate::sohm::read_table_from_source(
+                    &physical.stored(),
                     &message,
-                    offset_width,
-                )
-                .ok()
+                    self.widths.offsets,
+                ),
             }
-            Backend::Streaming(s) => crate::sohm::SohmTable::read_from_source_with_offset_width(
-                &SourceMetadata(&BaseOffsetSource {
-                    inner: s.as_ref(),
-                    base,
-                }),
-                &message,
-                offset_width,
-            )
-            .ok(),
-            Backend::Edit(m) => Self::with_engine(
-                m,
-                |d| {
-                    Ok::<_, Error>(crate::sohm::SohmTable::read_with_offset_width(
-                        source::frame(d, base)?,
-                        &message,
-                        offset_width,
-                    )?)
-                },
-                |s| {
-                    if base.is_zero() {
-                        Ok(crate::sohm::SohmTable::read_from_source_with_offset_width(
-                            &SourceMetadata(s),
-                            &message,
-                            offset_width,
-                        )?)
-                    } else {
-                        Ok(crate::sohm::SohmTable::read_from_source_with_offset_width(
-                            &SourceMetadata(&BaseOffsetSource { inner: s, base }),
-                            &message,
-                            offset_width,
-                        )?)
-                    }
-                },
-            )
-            .ok(),
-        }
+        })
+        .ok()
         .map(Box::new)
     }
 
@@ -2258,16 +2215,13 @@ impl FileInner {
         }
     }
 
-    /// The content of a header message, following the reference when the record
-    /// marks the message *shared*.
+    /// Returns message bytes, resolving shared references through the opened source.
     ///
-    /// A shared record's body is not the message: it is an address, and a
-    /// committed (`H5Tcommit`) datatype is stored exactly that way. Decoding the
-    /// body directly turns a named `H5T_STD_I32LE` into a zero-width time type
-    /// with no error anywhere, so every read of a message that HDF5 permits to be
-    /// shared — datatype, dataspace, fill value, filter pipeline — goes through
-    /// here. The borrowed case allocates nothing, which is every message this
-    /// crate writes and nearly every one it reads.
+    /// Borrows inline content and returns owned content for shared references.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the reference or target message cannot be read.
     fn message_body<'m>(
         &self,
         msg: &'m crate::object_header::HeaderMessage,
@@ -2275,64 +2229,15 @@ impl FileInner {
         if !msg.flags.is_shared() {
             return Ok(Cow::Borrowed(&msg.data));
         }
-        let (widths, base) = (self.widths, self.addresses().effective_base());
-        let access = self.access_mode();
-        let sohm = self.sohm_table.as_deref();
-        // A shared reference stores its address relative to the base address, so
-        // frame the file at `base` exactly as [`Self::attr_messages_of`] does.
-        let resolved = match &self.backend {
-            Backend::InMemory(v) => BufferedResolver::new(
-                source::frame(v, base)?,
-                self.addresses(),
-                access,
-                widths,
-                sohm,
-            )
-            .resolve(&msg.data, msg.msg_type),
-            Backend::Streaming(s) if base.is_zero() => {
-                SourceResolver::new(s.as_ref(), self.addresses(), access, widths, sohm)
-                    .resolve(&msg.data, msg.msg_type)
-            }
-            Backend::Streaming(s) => SourceResolver::new(
-                &BaseOffsetSource {
-                    inner: s.as_ref(),
-                    base,
-                },
-                self.addresses(),
-                access,
-                widths,
-                sohm,
-            )
-            .resolve(&msg.data, msg.msg_type),
-            Backend::Edit(m) => Self::with_engine(
-                m,
-                |d| {
-                    BufferedResolver::new(
-                        source::frame(d, base)?,
-                        self.addresses(),
-                        access,
-                        widths,
-                        sohm,
-                    )
-                    .resolve(&msg.data, msg.msg_type)
-                },
-                |s| {
-                    if base.is_zero() {
-                        SourceResolver::new(s, self.addresses(), access, widths, sohm)
-                            .resolve(&msg.data, msg.msg_type)
-                    } else {
-                        SourceResolver::new(
-                            &BaseOffsetSource { inner: s, base },
-                            self.addresses(),
-                            access,
-                            widths,
-                            sohm,
-                        )
-                        .resolve(&msg.data, msg.msg_type)
-                    }
-                },
-            ),
-        }?;
+        let resolved = self.with_opened_source(|source| {
+            SourceResolver::with_resident(
+                source,
+                self.access_mode(),
+                self.widths,
+                self.sohm_table.as_deref(),
+            )?
+            .resolve(&msg.data, msg.msg_type)
+        })?;
         Ok(Cow::Owned(resolved))
     }
 
