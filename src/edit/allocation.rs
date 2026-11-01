@@ -545,6 +545,7 @@ impl WriteEngine {
         let OpeningExtension {
             info,
             allocations: extension,
+            shared_table: _,
         } = OpeningExtension::read(self.image(), &self.context)?;
         let (_, info) = info.ok_or(Error::EditUnsupported(
             "persistent allocation requires File Space Info",

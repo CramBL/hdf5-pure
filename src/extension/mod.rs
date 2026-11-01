@@ -5,14 +5,20 @@ use hdf5_pure_format::__private::ObjectHeaderChunk;
 
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::FileSpaceInfo;
 use crate::message_type::MessageType;
 use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
+use crate::sohm;
 use crate::sohm::SharedMessageTableMessage;
+use crate::sohm::SohmTable;
+use crate::source::OriginalSource;
+use crate::source::PhysicalSource;
 use crate::source::Source;
 use crate::source::SourceMetadata;
+use crate::superblock::Superblock;
 use crate::width::FormatWidths;
 
 /// Independent first-message outcomes under an immutable source borrow.
@@ -114,6 +120,19 @@ impl<'a, S: Source + ?Sized> ExtensionSummary<'a, S> {
         Ok(self.file_space?.map(|info| (self.address, info)))
     }
 
+    /// Returns independent message outcomes for the same unchanged source phase.
+    ///
+    /// Retains message-body errors separately from successful or absent messages. The caller
+    /// keeps the source unchanged until dependent reads are complete.
+    pub(crate) fn into_parts(self) -> ExtensionMessages {
+        ExtensionMessages {
+            file_space: self
+                .file_space
+                .map(|info| info.map(|info| (self.address, info))),
+            shared_table: self.shared_table,
+        }
+    }
+
     /// Returns the first Shared Message Table message, or `None` if absent.
     ///
     /// # Errors
@@ -121,6 +140,76 @@ impl<'a, S: Source + ?Sized> ExtensionSummary<'a, S> {
     /// Returns the retained decoding error from the first Shared Message Table body.
     fn into_shared_table(self) -> Result<Option<SharedMessageTableMessage>, FormatError> {
         self.shared_table
+    }
+}
+
+/// Decoded first-message outcomes after a complete extension-header parse.
+///
+/// The caller uses both outcomes within the source phase of the originating
+/// [`ExtensionSummary`].
+pub(crate) struct ExtensionMessages {
+    /// The extension's physical address and first File Space Info message, or its decoding error.
+    pub(crate) file_space: Result<Option<(PhysicalAddress, FileSpaceInfo)>, FormatError>,
+    /// The first Shared Message Table message, or its decoding error.
+    pub(crate) shared_table: Result<Option<SharedMessageTableMessage>, FormatError>,
+}
+
+/// Shared-message metadata read before exposing an opened file to callers.
+///
+/// An absent or unreadable extension, message, or table is represented by an absent table.
+pub(crate) struct OpeningMetadata {
+    table: Option<Box<SohmTable>>,
+}
+
+impl OpeningMetadata {
+    /// Reads the shared-message table without decoding File Space Info.
+    ///
+    /// Uses the resident parser when whole-file bytes are available, and the source parser
+    /// otherwise. The source remains unchanged throughout this opening phase.
+    pub(crate) fn read(
+        source: &impl OriginalSource,
+        mode: AccessMode,
+        superblock: &Superblock,
+        widths: FormatWidths,
+    ) -> Self {
+        let message = superblock
+            .superblock_extension_address
+            .filter(|address| !address.is_undefined(widths.offsets))
+            .and_then(|address| source.addresses().resolve(address).ok())
+            .and_then(|address| SharedTableSummary::read_opened(source, mode, address, widths).ok())
+            .and_then(|summary| summary.into_message().ok().flatten());
+        Self::from_message(source, Ok(message), widths)
+    }
+
+    /// Reads a table from a message outcome prepared in the same unchanged source phase.
+    ///
+    /// Skips the table read for an absent or failed message outcome. Represents table-read
+    /// errors with an absent table.
+    pub(crate) fn from_message(
+        source: &impl OriginalSource,
+        message: Result<Option<SharedMessageTableMessage>, FormatError>,
+        widths: FormatWidths,
+    ) -> Self {
+        let table = message
+            .ok()
+            .flatten()
+            .and_then(|message| {
+                let physical = PhysicalSource::new(source);
+                match physical.resident() {
+                    Some(bytes) => sohm::read_table(bytes.stored().ok()?, &message, widths.offsets),
+                    None => {
+                        sohm::read_table_from_source(&physical.stored(), &message, widths.offsets)
+                    }
+                }
+                .ok()
+            })
+            .map(Box::new);
+        Self { table }
+    }
+
+    /// Returns the parsed table, or `None` if it was absent or unreadable.
+    pub(crate) fn into_table(self) -> Option<Box<SohmTable>> {
+        self.table
     }
 }
 
@@ -133,6 +222,41 @@ pub(crate) struct SharedTableSummary {
 }
 
 impl SharedTableSummary {
+    /// Reads the shared-table outcome with the opened backend's parser.
+    ///
+    /// Uses [`ObjectHeader::parse_filtered_with_widths`] for resident bytes and
+    /// [`read`](Self::read) otherwise, preserving their respective continuation-depth limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns header or source-read errors from the selected parser, or
+    /// [`FormatError::ValueTooLargeForPlatform`] if a resident address exceeds [`usize::MAX`].
+    /// Message-body errors remain in the returned summary.
+    fn read_opened(
+        source: &impl OriginalSource,
+        mode: AccessMode,
+        address: PhysicalAddress,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
+        let Some(bytes) = source.resident_bytes() else {
+            return Self::read(source, mode, address, widths, source.addresses());
+        };
+        let mut summary = Self { first: None };
+        let mut capture = |kind, body: &[u8]| {
+            summary.observe(widths, kind, body);
+            false
+        };
+        ObjectHeader::parse_filtered_with_widths(
+            bytes,
+            mode,
+            address.get().to_usize()?,
+            widths,
+            source.addresses().effective_base(),
+            MessageFilter::Only(&mut capture),
+        )?;
+        Ok(summary)
+    }
+
     /// Reads the shared-table outcome while skipping File Space Info decoding.
     ///
     /// # Errors
