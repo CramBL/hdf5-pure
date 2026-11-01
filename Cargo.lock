@@ -406,8 +406,8 @@ checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
 name = "hdf5-metno"
-version = "0.14.1"
-source = "git+https://github.com/metno/hdf5-rust?rev=605a2e28c17f2209bf2a6d0a8be11ef0b6546034#605a2e28c17f2209bf2a6d0a8be11ef0b6546034"
+version = "0.15.1"
+source = "git+https://github.com/CramBL/hdf5-rust?rev=4bc73a2f1dea72f18f9d1904ab290a2c589dba17#4bc73a2f1dea72f18f9d1904ab290a2c589dba17"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -424,7 +424,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-derive"
 version = "0.10.2"
-source = "git+https://github.com/metno/hdf5-rust?rev=605a2e28c17f2209bf2a6d0a8be11ef0b6546034#605a2e28c17f2209bf2a6d0a8be11ef0b6546034"
+source = "git+https://github.com/CramBL/hdf5-rust?rev=4bc73a2f1dea72f18f9d1904ab290a2c589dba17#4bc73a2f1dea72f18f9d1904ab290a2c589dba17"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -435,7 +435,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-src"
 version = "0.10.4"
-source = "git+https://github.com/metno/hdf5-rust?rev=605a2e28c17f2209bf2a6d0a8be11ef0b6546034#605a2e28c17f2209bf2a6d0a8be11ef0b6546034"
+source = "git+https://github.com/CramBL/hdf5-rust?rev=4bc73a2f1dea72f18f9d1904ab290a2c589dba17#4bc73a2f1dea72f18f9d1904ab290a2c589dba17"
 dependencies = [
  "cmake",
  "libz-sys",
@@ -443,8 +443,8 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-sys"
-version = "0.12.3"
-source = "git+https://github.com/metno/hdf5-rust?rev=605a2e28c17f2209bf2a6d0a8be11ef0b6546034#605a2e28c17f2209bf2a6d0a8be11ef0b6546034"
+version = "0.12.5"
+source = "git+https://github.com/CramBL/hdf5-rust?rev=4bc73a2f1dea72f18f9d1904ab290a2c589dba17#4bc73a2f1dea72f18f9d1904ab290a2c589dba17"
 dependencies = [
  "hdf5-metno-src",
  "libc",
@@ -461,7 +461,7 @@ dependencies = [
 [[package]]
 name = "hdf5-metno-types"
 version = "0.11.1"
-source = "git+https://github.com/metno/hdf5-rust?rev=605a2e28c17f2209bf2a6d0a8be11ef0b6546034#605a2e28c17f2209bf2a6d0a8be11ef0b6546034"
+source = "git+https://github.com/CramBL/hdf5-rust?rev=4bc73a2f1dea72f18f9d1904ab290a2c589dba17#4bc73a2f1dea72f18f9d1904ab290a2c589dba17"
 dependencies = [
  "ascii",
  "cfg-if",
