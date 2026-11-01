@@ -43,6 +43,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
 use crate::source::MetadataCacheConfig;
 use crate::source::PhysicalBytes;
+use crate::source::PhysicalSource;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::superblock;
@@ -202,8 +203,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         .expect("the dense link storage is structurally complete");
     session.assert_ownership_covers_storage(&link_storage, false);
     let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-        &session.image(),
-        AddressContext::from_effective_base(BaseAddress::ZERO),
+        &PhysicalSource::new(&session.opened_source()).stored(),
         heap_address,
         crate::file_writer::WIDTHS,
     )

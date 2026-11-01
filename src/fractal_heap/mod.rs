@@ -14,14 +14,17 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
 #[cfg(any(test, doc))]
+use hdf5_pure_format::__private::FractalHeapHeaderLocator;
+#[cfg(any(test, doc))]
 use hdf5_pure_format::__private::FractalHeapIdKind;
 use hdf5_pure_format::__private::{
     BTreeV2Layout, FractalHeapBlock, FractalHeapBlockFilters, FractalHeapBlockLayout,
-    FractalHeapHeaderLocator, FractalHeapHugeObjectId, FractalHeapHugeObjectLayout,
-    FractalHeapHugeObjectRef, FractalHeapIdView, HugeIndirectKeyEncoding,
+    FractalHeapHugeObjectId, FractalHeapHugeObjectLayout, FractalHeapHugeObjectRef,
+    FractalHeapIdView, HugeIndirectKeyEncoding,
 };
 
 use crate::access_mode::AccessMode;
+#[cfg(any(test, doc))]
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -35,6 +38,7 @@ use crate::filters;
 use crate::filters::ChunkContext;
 #[cfg(any(test, doc))]
 use crate::source;
+#[cfg(any(test, doc))]
 use crate::source::Source;
 use crate::width::FormatWidths;
 #[cfg(test)]
@@ -75,6 +79,7 @@ pub(crate) fn legacy_read_header_from_source(
 /// # Errors
 ///
 /// Returns the errors of [`legacy_read_header_from_source`].
+#[cfg(any(test, doc))]
 pub(crate) fn legacy_read_header_and_range_from_source(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
@@ -101,6 +106,7 @@ pub(crate) fn legacy_read_header_and_range_from_source(
 /// Returns [`FormatError::AddressBelowBase`] if the range starts below the effective base,
 /// [`FormatError::ValueTooLargeForPlatform`] if the read length exceeds [`usize::MAX`], and the
 /// source error if a read fails.
+#[cfg(any(test, doc))]
 pub(crate) fn legacy_read_header_range(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,

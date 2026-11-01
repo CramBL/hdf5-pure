@@ -64,7 +64,7 @@ impl<'a> HeapSource<'a> {
     /// [`FormatError::AddressBelowBase`] if a source range starts below its metadata origin,
     /// and errors from [`StoredRead::metadata_origin`] or [`StoredRead::read_metadata`].
     /// Returns [`FormatError::ValueTooLargeForPlatform`] if a source read exceeds [`usize::MAX`].
-    fn read_range(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError> {
+    pub(crate) fn read_range(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError> {
         match self.backing {
             Backing::Resident(source) => {
                 let frame = source.metadata_frame();

@@ -37,7 +37,7 @@ use crate::message_type::MessageType;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::source::PhysicalSource;
-use crate::source::{BaseOffsetSource, Source, SourceMetadata};
+use crate::source::{Source, SourceMetadata};
 
 use super::GlobalHeapLiveness;
 use super::copy::ObjModel;
@@ -384,11 +384,7 @@ impl WriteEngine {
     ) -> Option<Vec<(FileRange, FreeClass)>> {
         let base = self.context.addresses();
         let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: base.effective_base(),
-            },
-            self.context.addresses(),
+            &PhysicalSource::new(&self.opened_source()).stored(),
             heap_address,
             self.widths(),
         )
@@ -1377,11 +1373,7 @@ impl WriteEngine {
         metadata: &mut Vec<FileRange>,
     ) -> Result<bool, Error> {
         let storage = match fractal_heap_storage::collect_fractal_heap_storage_from_source(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            },
-            self.context.addresses(),
+            &PhysicalSource::new(&self.opened_source()).stored(),
             heap,
             self.widths(),
         ) {

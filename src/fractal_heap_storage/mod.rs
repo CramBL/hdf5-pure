@@ -1,8 +1,8 @@
 //! Proves the complete set of file allocations owned by supported fractal heaps.
 //!
-//! The ownership walk is read-only and operates through [`Source`]. It uses the validated
-//! [`FractalHeapBlockLayout`] for managed-block references. Checksummed direct blocks require
-//! complete checksum validation before the walker records their ownership.
+//! The walker reads metadata through [`StoredRead`] and parses managed blocks through the
+//! validated [`FractalHeapBlockLayout`]. Checksummed direct blocks require complete checksum
+//! validation before the walker records their ownership.
 //! For huge objects, the walker reads the tracker metadata and accounts for encoded payload
 //! extents. It compares the record count and summed decoded sizes with the heap header.
 
@@ -11,7 +11,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::DecodedStoredAddress;
-use hdf5_pure_core::__private::FileRegion;
 #[cfg(test)]
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 #[cfg(test)]
@@ -37,18 +36,26 @@ use hdf5_pure_format::__private::HugeObjectTrackerRecord;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
 
+#[cfg(test)]
 use crate::address::AddressContext;
+use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-#[cfg(test)]
-use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::BTreeV2Header;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::fractal_heap;
+use crate::fractal_heap::HeapSource;
 #[cfg(test)]
 use crate::source::BytesSource;
-use crate::source::{Source, SourceMetadata};
+#[cfg(test)]
+use crate::source::PhysicalSource;
+#[cfg(any(test, doc))]
+use crate::source::Source;
+use crate::source::StoredMetadata;
+use crate::source::StoredRead;
 #[cfg(test)]
 use crate::width::{LengthWidth, OffsetWidth};
 
@@ -173,8 +180,9 @@ impl FractalHeapAllocation {
 
 /// Returns the complete allocation set for the heap at `heap_header_address`.
 ///
-/// `source` is framed at the effective base in `addresses`. Owned extents use base-relative
-/// coordinates. The walker bounds every allocation and parses managed blocks through
+/// The walker resolves stored addresses against [`StoredRead::metadata_origin`] for parsing.
+/// It preserves metadata borrowing, shared ownership, and physical ranges. Owned extents use
+/// stored coordinates. The walker bounds every allocation and parses managed blocks through
 /// [`FractalHeapBlockLayout`]. Checksummed direct blocks are read and validated in full,
 /// regardless of the `checksum` feature. Direct blocks without checksums require only their prefix.
 /// A filtered direct block is read at its filtered size and decoded, and its decoded bytes are
@@ -196,15 +204,13 @@ impl FractalHeapAllocation {
 /// including malformed block geometry, incorrect heap-header owner addresses, truncated
 /// allocations, invalid checksums, filtered blocks that do not decode, and unsupported serialized
 /// manager section classes.
-pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
-    source: &S,
-    addresses: AddressContext,
+pub(crate) fn collect_fractal_heap_storage_from_source(
+    source: &dyn StoredRead,
     heap_header_address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
-    let (header, header_range) = crate::fractal_heap::legacy_read_header_and_range_from_source(
-        source,
-        addresses,
+    let (header, header_range) = fractal_heap::read_header_and_range_from_source(
+        &HeapSource::new(source),
         heap_header_address,
         widths,
     )?;
@@ -216,13 +222,12 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
         FractalHeapAllocation::Header,
     )];
 
-    let mut managed =
-        ManagedStorageWalk::new(source, addresses, &header, &blocks, &mut allocations);
+    let mut managed = ManagedStorageWalk::new(source, &header, &blocks, &mut allocations);
     managed.collect()?;
 
     collect_huge_storage(source, &header, widths, &mut allocations)?;
 
-    collect_managed_fsm_storage(source, addresses, &header, widths, &mut allocations)?;
+    collect_managed_fsm_storage(source, &header, widths, &mut allocations)?;
 
     allocations.sort_unstable_by_key(|&(extent, _)| extent);
     if allocations
@@ -241,16 +246,18 @@ fn collect_fractal_heap_storage(
     heap_header_address: StoredAddress,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
     collect_fractal_heap_storage_from_source(
-        &BytesSource::new(file_data),
-        AddressContext::from_effective_base(BaseAddress::ZERO),
+        &PhysicalSource::for_test(
+            &BytesSource::new(file_data),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+        )
+        .stored(),
         heap_header_address,
         FORMAT_WIDTHS,
     )
 }
 
-struct ManagedStorageWalk<'a, 'e, S: Source + ?Sized> {
-    source: &'a S,
-    addresses: AddressContext,
+struct ManagedStorageWalk<'a, 'e> {
+    source: &'a dyn StoredRead,
     header: &'a FractalHeapHeader,
     blocks: &'a FractalHeapBlockLayout,
     visited: BTreeSet<StoredAddress>,
@@ -258,17 +265,15 @@ struct ManagedStorageWalk<'a, 'e, S: Source + ?Sized> {
     allocated_direct_space: u64,
 }
 
-impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
+impl<'a, 'e> ManagedStorageWalk<'a, 'e> {
     fn new(
-        source: &'a S,
-        addresses: AddressContext,
+        source: &'a dyn StoredRead,
         header: &'a FractalHeapHeader,
         blocks: &'a FractalHeapBlockLayout,
         allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
     ) -> Self {
         Self {
             source,
-            addresses,
             header,
             blocks,
             allocations,
@@ -310,7 +315,9 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
             }
             match block {
                 FractalHeapBlock::Direct(block) => {
-                    let reference = block.at(self.addresses.resolve(address)?)?;
+                    let reference = block
+                        .at(BaseAddress::new(self.source.metadata_origin()?.get())
+                            .resolve(address)?)?;
                     let extent =
                         extent_in_source(self.source, address, reference.range().length())?;
                     match block.filters() {
@@ -325,15 +332,14 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
                         .ok_or(FractalHeapStorageError::InvalidStorage)?;
                 }
                 FractalHeapBlock::Indirect(block) => {
-                    let reference = block.at(self.addresses.resolve(address)?)?;
+                    let reference = block
+                        .at(BaseAddress::new(self.source.metadata_origin()?.get())
+                            .resolve(address)?)?;
                     let range = reference.parse_range();
                     let extent = extent_in_source(self.source, address, range.length())?;
-                    let bytes = crate::fractal_heap::legacy_read_header_range(
-                        self.source,
-                        self.addresses,
-                        range,
-                    )?;
-                    let view = reference.parse(FileRegion::new(range, &bytes)?)?;
+                    let heap_source = HeapSource::new(self.source);
+                    let bytes = heap_source.read_range(range)?;
+                    let view = reference.parse(bytes.region())?;
                     self.allocations
                         .push((extent, FractalHeapAllocation::IndirectBlock));
                     for child in view.children() {
@@ -366,9 +372,9 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
         } else {
             reference.prefix_range()?
         };
-        let bytes =
-            crate::fractal_heap::legacy_read_header_range(self.source, self.addresses, range)?;
-        let region = FileRegion::new(range, &bytes)?;
+        let heap_source = HeapSource::new(self.source);
+        let bytes = heap_source.read_range(range)?;
+        let region = bytes.region();
         if checksummed {
             reference.parse_checked(region)?;
         } else {
@@ -391,11 +397,8 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
         reference: FractalHeapDirectBlockRef<'_>,
         filters: FractalHeapBlockFilters<'_>,
     ) -> Result<(), FractalHeapStorageError> {
-        let encoded = crate::fractal_heap::legacy_read_header_range(
-            self.source,
-            self.addresses,
-            reference.range(),
-        )?;
+        let heap_source = HeapSource::new(self.source);
+        let encoded = heap_source.read_range(reference.range())?;
         let decoded =
             crate::fractal_heap::decode_direct_block(&encoded, filters, block.decoded_size())
                 .map_err(|error| match error {
@@ -419,8 +422,7 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
 /// with nonzero size or space totals. Returns [`FractalHeapStorageError::Format`] for parser,
 /// source, or range failures, including unsupported serialized section classes.
 fn collect_managed_fsm_storage(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
+    source: &dyn StoredRead,
     heap: &FractalHeapHeader,
     widths: FormatWidths,
     allocations: &mut Vec<(Extent, FractalHeapAllocation)>,
@@ -429,11 +431,13 @@ fn collect_managed_fsm_storage(
     if address.is_undefined(widths.offsets) {
         return Ok(());
     }
-    let reference = FreeSpaceManagerHeaderRef::new(widths, addresses.resolve(address)?)?;
+    let origin = BaseAddress::new(source.metadata_origin()?.get());
+    let heap_source = HeapSource::new(source);
+    let reference = FreeSpaceManagerHeaderRef::new(widths, origin.resolve(address)?)?;
     let extent = extent_in_source(source, address, reference.range().length())?;
     let range = reference.parse_range();
-    let bytes = crate::fractal_heap::legacy_read_header_range(source, addresses, range)?;
-    let frame = reference.parse_checked(FileRegion::new(range, &bytes)?)?;
+    let bytes = heap_source.read_range(range)?;
+    let frame = reference.parse_checked(bytes.region())?;
     let manager = frame.fractal_heap_header(heap)?;
     allocations.push((extent, FractalHeapAllocation::ManagedFsmHeader));
     let DecodedStoredAddress::Defined(list_address) = frame.section_list_addr() else {
@@ -445,11 +449,11 @@ fn collect_managed_fsm_storage(
         }
         return Ok(());
     };
-    let reference = manager.section_list_ref(address, addresses.resolve(list_address)?)?;
+    let reference = manager.section_list_ref(address, origin.resolve(list_address)?)?;
     let extent = extent_in_source(source, list_address, reference.range().length())?;
     let range = reference.parse_range();
-    let bytes = crate::fractal_heap::legacy_read_header_range(source, addresses, range)?;
-    reference.parse_checked(FileRegion::new(range, &bytes)?)?;
+    let bytes = heap_source.read_range(range)?;
+    reference.parse_checked(bytes.region())?;
     allocations.push((extent, FractalHeapAllocation::ManagedFsmSectionList));
     Ok(())
 }
@@ -461,8 +465,8 @@ fn collect_managed_fsm_storage(
 /// Returns [`FractalHeapStorageError::InvalidStorage`] if record counts or decoded-size totals
 /// disagree, numeric keys repeat, or the tracker encoding differs from the heap's parameters.
 /// Returns [`FractalHeapStorageError::Format`] for parser, source, or extent errors.
-fn collect_huge_storage<S: Source + ?Sized>(
-    source: &S,
+fn collect_huge_storage(
+    source: &dyn StoredRead,
     heap: &FractalHeapHeader,
     widths: FormatWidths,
     allocations: &mut Vec<(Extent, FractalHeapAllocation)>,
@@ -475,7 +479,7 @@ fn collect_huge_storage<S: Source + ?Sized>(
         return Ok(());
     }
     let header = BTreeV2Header::parse_from_source_with_widths(
-        &SourceMetadata(source),
+        &StoredMetadata(source),
         tree_address.get(),
         widths,
     )?;
@@ -508,8 +512,8 @@ fn collect_huge_storage<S: Source + ?Sized>(
 }
 
 /// Accumulates huge-object allocations, numeric keys, and decoded-size totals.
-struct HugeStorageWalk<'a, 'e, S: Source + ?Sized> {
-    source: &'a S,
+struct HugeStorageWalk<'a, 'e> {
+    source: &'a dyn StoredRead,
     decoder: HugeObjectRecordDecoder,
     allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
     keys: BTreeSet<u64>,
@@ -518,7 +522,7 @@ struct HugeStorageWalk<'a, 'e, S: Source + ?Sized> {
     count: u64,
 }
 
-impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
+impl HugeStorageWalk<'_, '_> {
     /// Collects complete index allocations and checks record and decoded-size totals.
     ///
     /// # Errors
@@ -547,8 +551,7 @@ impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
             } = &mut self;
             let allocation =
                 extent_in_source(*source, node.address(), u64::from(header.node_size))?;
-            let bytes =
-                source.read_metadata(allocation.start().get(), allocation.len().to_usize()?)?;
+            let bytes = source.read_metadata(allocation.start(), allocation.len().to_usize()?)?;
             let view = node.parse(&bytes)?;
             allocations.push((allocation, FractalHeapAllocation::HugeObjectIndex));
             *count = count
@@ -635,9 +638,15 @@ impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
     }
 }
 
-/// Returns a checked non-empty extent after proving its whole range lies in `source`.
-fn extent_in_source<S: Source + ?Sized>(
-    source: &S,
+/// Bounds a nonempty allocation in stored coordinates.
+///
+/// # Errors
+///
+/// Returns [`FractalHeapStorageError::Format`] with [`FormatError::OffsetOverflow`] if `length`
+/// is zero or the end exceeds [`u64::MAX`], or [`FormatError::UnexpectedSourceEof`] if the
+/// allocation exceeds [`StoredRead::len`]. Both errors report stored coordinates.
+fn extent_in_source(
+    source: &dyn StoredRead,
     address: StoredAddress,
     length: u64,
 ) -> Result<Extent, FractalHeapStorageError> {
@@ -661,6 +670,8 @@ mod tests {
     use alloc::string::ToString;
     use core::cell::RefCell;
 
+    use hdf5_pure_core::MetadataBytes;
+    use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_format::__private;
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
@@ -677,6 +688,10 @@ mod tests {
     use crate::address::OpenedImageContext;
     use crate::fractal_heap::LegacyHeapObjectReader;
     use crate::source::BaseOffsetSource;
+    #[cfg(feature = "std")]
+    use crate::source::MetadataCacheConfig;
+    #[cfg(feature = "std")]
+    use crate::source::MetadataCachingSource;
     use crate::test_data;
     use crate::{AttrValue, FileBuilder};
 
@@ -833,8 +848,11 @@ mod tests {
             reads: RefCell::new(Vec::new()),
         };
         let result = collect_fractal_heap_storage_from_source(
-            &source,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &PhysicalSource::for_test(
+                &source,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+            )
+            .stored(),
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         );
@@ -882,8 +900,11 @@ mod tests {
             reads: RefCell::new(Vec::new()),
         };
         let storage = collect_fractal_heap_storage_from_source(
-            &source,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &PhysicalSource::for_test(
+                &source,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+            )
+            .stored(),
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         )
@@ -925,6 +946,236 @@ mod tests {
             self.reads.borrow_mut().push((offset, length));
             BytesSource::new(self.bytes).read_metadata_at(offset, length)
         }
+    }
+
+    /// Supplies borrowed or owned metadata at a caller-selected physical origin.
+    struct StorageSource<'a> {
+        bytes: &'a [u8],
+        origin: u64,
+        owned: bool,
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl Source for StorageSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len().to_u64()
+        }
+        fn metadata_origin(&self) -> Result<u64, FormatError> {
+            Ok(self.origin)
+        }
+        fn read_at(&self, _offset: u64, _bytes: &mut [u8]) -> Result<(), FormatError> {
+            Err(FormatError::Source("unexpected payload read".into()))
+        }
+        fn read_metadata_at(&self, _offset: u64, _length: usize) -> Result<Vec<u8>, FormatError> {
+            Err(FormatError::Source(
+                "unexpected vector metadata read".into(),
+            ))
+        }
+        fn read_metadata(
+            &self,
+            offset: u64,
+            length: usize,
+        ) -> Result<MetadataBytes<'_>, FormatError> {
+            self.reads.borrow_mut().push((offset, length));
+            let range = crate::convert::slice_range(offset, length.to_u64())?;
+            let bytes = self
+                .bytes
+                .get(range)
+                .ok_or(FormatError::UnexpectedSourceEof {
+                    expected: offset + length.to_u64(),
+                    available: self.len(),
+                })?;
+            let start = PhysicalAddress::new(self.origin).checked_add(offset)?;
+            if self.owned {
+                MetadataBytes::from_vec(start.get(), bytes.to_vec())
+            } else {
+                MetadataBytes::from_slice(start.get(), bytes)
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest::rstest]
+    #[case::borrowed(false)]
+    #[case::owned(true)]
+    fn storage_reads_preserve_metadata_ownership_and_cache_admission(
+        #[case] owned: bool,
+        #[values(0, 512)] base: u64,
+        #[values(0, 37)] origin: u64,
+    ) {
+        const DIRECT: u64 = 0x500;
+        let (mut image, used) = managed_fsm_image(64);
+        let mut header =
+            FractalHeapHeader::parse(&image, STORAGE_HEAP_AT.to_usize().unwrap(), 8, 8).unwrap();
+        header.current_rows_in_root_indirect_block = 2;
+        header.managed_space = 1024;
+        place_storage_header(&mut image, &header);
+        let indirect = indirect_block(&header, 0, 2, &[(0, DIRECT, None)]);
+        place(&mut image, STORAGE_ROOT_AT, &indirect);
+        let direct = direct_block(0, 128);
+        place(&mut image, DIRECT, &direct);
+        let header_length =
+            FractalHeapHeader::serialized_size(OffsetWidth::Eight, LengthWidth::Eight);
+        let expected = vec![
+            allocation(
+                STORAGE_HEAP_AT,
+                header_length.to_u64(),
+                FractalHeapAllocation::Header,
+            ),
+            allocation(
+                STORAGE_ROOT_AT,
+                indirect.len().to_u64(),
+                FractalHeapAllocation::IndirectBlock,
+            ),
+            allocation(
+                DIRECT,
+                direct.len().to_u64(),
+                FractalHeapAllocation::DirectBlock,
+            ),
+            allocation(
+                MANAGED_FSM_AT,
+                __private::free_space_manager_header_len(FORMAT_WIDTHS),
+                FractalHeapAllocation::ManagedFsmHeader,
+            ),
+            allocation(
+                MANAGED_FSSE_AT,
+                used + 64,
+                FractalHeapAllocation::ManagedFsmSectionList,
+            ),
+        ];
+        let mut physical = vec![0; base.to_usize().unwrap()];
+        physical.extend_from_slice(&image);
+        let source = StorageSource {
+            bytes: &physical,
+            origin,
+            owned,
+            reads: RefCell::new(Vec::new()),
+        };
+        let retained = {
+            let cached = MetadataCachingSource::new(&source, MetadataCacheConfig::new(8192));
+            let stored = PhysicalSource::for_test(
+                &cached,
+                AddressContext::from_effective_base(BaseAddress::new(base)),
+            )
+            .stored();
+            let first = collect_fractal_heap_storage_from_source(
+                &stored,
+                StoredAddress::new(STORAGE_HEAP_AT),
+                FORMAT_WIDTHS,
+            )
+            .unwrap();
+            assert_eq!(first.allocations(), expected);
+            let requests = source.reads.borrow().clone();
+            assert_eq!(requests.len(), 6);
+            assert_eq!(requests[2], (base + STORAGE_ROOT_AT, indirect.len()));
+            assert_eq!(
+                requests[3],
+                (
+                    base + DIRECT,
+                    managed_prefix(fractal_heap::DIRECT_BLOCK_SIGNATURE, 0).len()
+                )
+            );
+            let before = cached.metadata_cache_stats().unwrap();
+            let second = collect_fractal_heap_storage_from_source(
+                &stored,
+                StoredAddress::new(STORAGE_HEAP_AT),
+                FORMAT_WIDTHS,
+            )
+            .unwrap();
+            assert_eq!(second.allocations(), expected);
+            let after = cached.metadata_cache_stats().unwrap();
+            if owned {
+                assert_eq!(*source.reads.borrow(), requests);
+                assert_eq!(before.entries(), requests.len());
+                assert_eq!(after.hits() - before.hits(), requests.len().to_u64());
+            } else {
+                assert_eq!(source.reads.borrow().len(), requests.len() * 2);
+                assert_eq!((after.entries(), after.bytes(), after.hits()), (0, 0, 0));
+            }
+            let metadata = stored
+                .read_metadata(StoredAddress::new(STORAGE_HEAP_AT), header_length)
+                .unwrap();
+            let expected_bytes =
+                &physical[(base + STORAGE_HEAP_AT).to_usize().unwrap()..][..header_length];
+            assert_eq!(metadata.as_ref(), expected_bytes);
+            assert_eq!(metadata.offset(), origin + base + STORAGE_HEAP_AT);
+            assert_eq!(metadata.shared().is_some(), owned);
+            if !owned {
+                assert_eq!(metadata.as_ptr(), expected_bytes.as_ptr());
+            }
+            metadata.shared()
+        };
+        if let Some(retained) = retained {
+            assert_eq!(
+                retained.as_ref(),
+                &image[STORAGE_HEAP_AT.to_usize().unwrap()..][..header_length]
+            );
+            assert_eq!(retained.offset(), origin + base + STORAGE_HEAP_AT);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::direct_eof(false, false)]
+    #[case::indirect_eof(true, false)]
+    #[case::direct_overflow(false, true)]
+    #[case::indirect_overflow(true, true)]
+    fn storage_reads_preserve_block_extent_errors(
+        #[case] indirect: bool,
+        #[case] overflow: bool,
+        #[values(0, 512)] base: u64,
+        #[values(0, 37)] origin: u64,
+    ) {
+        let address = if overflow {
+            u64::MAX - base - origin - 31
+        } else {
+            0x780
+        };
+        let header = FractalHeapHeader {
+            root_block_address: StoredAddress::new(address),
+            current_rows_in_root_indirect_block: if indirect { 2 } else { 0 },
+            managed_space: if indirect { 1024 } else { 128 },
+            allocated_managed_space: 128,
+            ..storage_header()
+        };
+        let length = if indirect {
+            storage_layout(&header).indirect_block_size(2).unwrap()
+        } else {
+            128
+        };
+        let mut image = vec![0; 0x7c0];
+        place_storage_header(&mut image, &header);
+        let mut physical = vec![0; base.to_usize().unwrap()];
+        physical.extend_from_slice(&image);
+        let source = StorageSource {
+            bytes: &physical,
+            origin,
+            owned: false,
+            reads: RefCell::new(Vec::new()),
+        };
+        let stored = PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::new(base)),
+        )
+        .stored();
+        let error = collect_fractal_heap_storage_from_source(
+            &stored,
+            StoredAddress::new(STORAGE_HEAP_AT),
+            FORMAT_WIDTHS,
+        )
+        .unwrap_err();
+        let expected = if overflow {
+            FormatError::OffsetOverflow {
+                offset: u64::MAX - 31,
+                length,
+            }
+        } else {
+            FormatError::UnexpectedSourceEof {
+                expected: address + length,
+                available: image.len().to_u64(),
+            }
+        };
+        assert_eq!(error, FractalHeapStorageError::Format(expected));
+        assert_eq!(source.reads.borrow().len(), 2);
     }
 
     #[rstest::rstest]
@@ -1120,8 +1371,11 @@ mod tests {
 
         let buffered = collect_storage(&file).unwrap();
         let streamed = collect_fractal_heap_storage_from_source(
-            &BytesSource::new(&file),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &PhysicalSource::for_test(
+                &BytesSource::new(&file),
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+            )
+            .stored(),
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         )
@@ -1415,8 +1669,11 @@ mod tests {
         };
 
         let storage = collect_fractal_heap_storage_from_source(
-            &source,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &PhysicalSource::for_test(
+                &source,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+            )
+            .stored(),
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         )
@@ -1576,21 +1833,20 @@ mod tests {
         #[values(false, true)] internal: bool,
         #[values(false, true)] managed: bool,
         #[values(0, 512)] base: usize,
+        #[values(0, 37)] origin: u64,
     ) {
         let fixture = FilteredHugeStorage::new(direct, internal, managed);
         let mut physical = vec![0; base];
         physical.extend_from_slice(&fixture.bytes);
-        let source = PrefixSource {
+        let source = StorageSource {
             bytes: &physical,
+            origin,
+            owned: false,
             reads: RefCell::new(Vec::new()),
         };
         let addresses = AddressContext::from_effective_base(BaseAddress::new(base.to_u64()));
         let storage = collect_fractal_heap_storage_from_source(
-            &BaseOffsetSource {
-                inner: &source,
-                base: addresses.effective_base(),
-            },
-            addresses,
+            &PhysicalSource::for_test(&source, addresses).stored(),
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         )
@@ -2333,13 +2589,9 @@ mod tests {
         let inner = BytesSource::new(&physical);
         let addresses =
             AddressContext::from_effective_base(BaseAddress::new(u64::try_from(base).unwrap()));
-        let source = BaseOffsetSource {
-            inner: &inner,
-            base: addresses.effective_base(),
-        };
+        let source = PhysicalSource::for_test(&inner, addresses).stored();
         let result = collect_fractal_heap_storage_from_source(
             &source,
-            addresses,
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         )
@@ -2383,8 +2635,11 @@ mod tests {
             reads: RefCell::new(Vec::new()),
         };
         let storage = collect_fractal_heap_storage_from_source(
-            &source,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &PhysicalSource::for_test(
+                &source,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+            )
+            .stored(),
             StoredAddress::new(STORAGE_HEAP_AT),
             FORMAT_WIDTHS,
         )
