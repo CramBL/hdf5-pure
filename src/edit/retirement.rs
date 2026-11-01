@@ -223,11 +223,10 @@ mod tests {
             .unwrap();
         let dataset_path = ObjectPathBuf::parse("d");
         let address = group_v2::resolve_path_any_from_source(
-            &engine.image(),
+            &engine.opened_source(),
             AccessMode::ReadWrite,
             engine.superblock(),
             engine.widths(),
-            engine.addresses(),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -266,11 +265,10 @@ mod tests {
         assert_eq!(engine.publication.attempted(), root);
         let published = superblock::read(&engine.image()).unwrap();
         let published_dataset = group_v2::resolve_path_any_from_source(
-            &engine.image(),
+            &engine.opened_source(),
             AccessMode::ReadWrite,
             &published.superblock,
             published.widths,
-            engine.addresses(),
             &ObjectPath::parse("d"),
         )
         .unwrap();

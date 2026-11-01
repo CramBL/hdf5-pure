@@ -41,11 +41,10 @@ pub(super) fn open_bounded_session(path: &Path) -> WriteEngine {
 /// Resolves dataset `d` to its absolute position in the session image.
 pub(super) fn dataset_addr(engine: &WriteEngine) -> u64 {
     crate::group_v2::resolve_path_any_from_source(
-        &engine.image(),
+        &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.superblock(),
         engine.widths(),
-        engine.addresses(),
         &ObjectPath::parse("d"),
     )
     .unwrap()

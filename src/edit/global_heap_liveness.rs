@@ -106,11 +106,10 @@ impl WriteEngine {
     ) -> Result<bool, Error> {
         if crate::group_v2::is_group(header) {
             for entry in crate::group_v2::resolve_group_entries_from_source(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 header,
                 self.widths(),
-                self.context.addresses(),
                 crate::group_v1::group_leaf_node_k(self.context.superblock()),
             )? {
                 if !entry

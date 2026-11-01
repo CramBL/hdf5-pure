@@ -373,11 +373,10 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
         })
         .collect::<BTreeSet<_>>();
     let chunks_addr = crate::group_v2::resolve_path_any_from_source(
-        &engine.image(),
+        &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.context.superblock(),
         engine.context.widths(),
-        engine.context.addresses(),
         &ObjectPathBuf::parse("chunks").as_path(),
     )
     .unwrap();

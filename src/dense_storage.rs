@@ -10,7 +10,9 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree_v2::{self, BTreeV2Header};
 use crate::error::FormatError;
+#[cfg(any(test, doc))]
 use crate::source::Source;
+#[cfg(any(test, doc))]
 use crate::source::SourceMetadata;
 use crate::source::StoredMetadata;
 use crate::source::StoredRead;
@@ -41,6 +43,7 @@ impl DenseIndex {
 ///
 /// Returns the structural error from the version 2 B-tree storage walker or
 /// [`FormatError::InvalidBTreeV2Signature`] when the proven allocations overlap the heap header.
+#[cfg(any(test, doc))]
 pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
     source: &S,
     heap_header: StoredAddress,

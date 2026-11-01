@@ -22,7 +22,6 @@ mod backend;
 mod original;
 mod view;
 
-#[cfg(test)]
 pub(crate) use view::PhysicalBytes;
 pub(crate) use view::PhysicalSource;
 #[cfg(any(test, doc))]
@@ -30,16 +29,20 @@ pub(crate) use view::StoredSource;
 pub(crate) use view::{StoredBytes, StoredRead};
 
 #[cfg(any(feature = "std", test, doc))]
+pub(crate) use backend::BaseOffsetSource;
+#[cfg(any(feature = "std", test, doc))]
 pub(crate) use backend::BytesSource;
-pub(crate) use backend::{
-    BaseOffsetSource, RangeReader, SourceMetadata, bytes_in, frame, framed_metadata,
-    legacy_framed_region, legacy_stored_range, unexpected_eof,
-};
+#[cfg(test)]
+pub(crate) use backend::frame;
 pub use backend::{MetadataCacheConfig, MetadataCacheStats, Source};
 #[cfg(feature = "std")]
 pub use backend::{MetadataCachingSource, ReadSeekSource};
 #[cfg(feature = "std")]
 pub(crate) use backend::{MetadataReadCache, ValidatedSource};
+pub(crate) use backend::{
+    RangeReader, SourceMetadata, bytes_in, framed_metadata, legacy_framed_region,
+    legacy_stored_range, unexpected_eof,
+};
 
 pub(crate) use original::OriginalSource;
 

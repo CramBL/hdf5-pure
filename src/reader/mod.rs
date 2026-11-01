@@ -1836,7 +1836,10 @@ impl FileInner {
         Err(last_err.expect("refresh retried at least once before failing"))
     }
 
-    /// Resolves a path to an object-header address, following hard and soft links.
+    /// Returns the physical object-header position reached through hard and soft links.
+    ///
+    /// Resolves stored addresses with the opened backend's context. For an editing session,
+    /// traverses under the engine lock with the current root from the engine's superblock.
     ///
     /// # Errors
     ///
@@ -1844,47 +1847,46 @@ impl FileInner {
     fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
         let access = self.access_mode();
         Ok(match &self.backend {
-            Backend::InMemory(v) => group_v2::resolve_read_path_any(
-                v,
-                access,
-                &self.superblock,
-                self.widths,
-                self.addresses(),
-                path,
-            )?,
-            Backend::Streaming(s) => group_v2::resolve_read_path_any_from_source(
-                s.as_ref(),
-                access,
-                &self.superblock,
-                self.widths,
-                self.addresses(),
-                path,
-            )?,
-            // A staged commit can relocate the object tree's root, so this
-            // file's cached superblock may name a stale one; resolve against the
-            // session's own superblock, which the commit updates.
             Backend::Edit(m) => {
                 let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let sb = core.superblock().clone();
-                match core.image_slice() {
-                    Some(data) => group_v2::resolve_read_path_any(
-                        data,
+                let source = core.opened_source();
+                let physical = PhysicalSource::new(&source);
+                match physical.resident() {
+                    Some(bytes) => group_v2::resolve_read_path_any(
+                        bytes,
                         access,
-                        &sb,
+                        core.superblock(),
                         core.widths(),
-                        core.addresses(),
                         path,
                     )?,
                     None => group_v2::resolve_read_path_any_from_source(
-                        core.image(),
+                        &source,
                         access,
-                        &sb,
+                        core.superblock(),
                         core.widths(),
-                        core.addresses(),
                         path,
                     )?,
                 }
             }
+            _ => self.with_opened_source(|source| {
+                let physical = PhysicalSource::new(source);
+                match physical.resident() {
+                    Some(bytes) => group_v2::resolve_read_path_any(
+                        bytes,
+                        access,
+                        &self.superblock,
+                        self.widths,
+                        path,
+                    ),
+                    None => group_v2::resolve_read_path_any_from_source(
+                        source,
+                        access,
+                        &self.superblock,
+                        self.widths,
+                        path,
+                    ),
+                }
+            })?,
         })
     }
 
@@ -2107,45 +2109,33 @@ impl FileInner {
         }
     }
 
-    /// Returns the entries of the group `hdr` describes, dispatching on the backend.
+    /// Returns one entry per hard link in the group `hdr` describes.
     ///
-    /// Each entry holds the address the file stores for its child, which
-    /// [`entry_address`](Self::entry_address) turns into a position to read at.
+    /// Borrows resident metadata or reads through the opened source's metadata operation.
+    /// Each entry holds the child's stored address, which [`entry_address`](Self::entry_address)
+    /// converts to a physical position.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the group's own structures do not parse, or if `hdr` describes
-    /// no group at all.
+    /// Returns [`Error::Format`] for malformed group metadata, a non-group header, address
+    /// resolution errors, or source metadata read errors.
     fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
-        let (widths, base) = (self.widths, self.addresses());
         let k = group_v1::group_leaf_node_k(&self.superblock);
-        match &self.backend {
-            Backend::InMemory(v) => {
-                group_v2::resolve_group_entries(v, self.access_mode, hdr, widths, base, k)
+        self.with_opened_source(|source| {
+            let physical = PhysicalSource::new(source);
+            match physical.resident() {
+                Some(bytes) => {
+                    group_v2::resolve_group_entries(bytes, self.access_mode, hdr, self.widths, k)
+                }
+                None => group_v2::resolve_group_entries_from_source(
+                    source,
+                    self.access_mode,
+                    hdr,
+                    self.widths,
+                    k,
+                ),
             }
-            Backend::Streaming(s) => group_v2::resolve_group_entries_from_source(
-                s.as_ref(),
-                self.access_mode,
-                hdr,
-                widths,
-                base,
-                k,
-            ),
-            Backend::Edit(m) => Self::with_engine(
-                m,
-                |d| group_v2::resolve_group_entries(d, self.access_mode, hdr, widths, base, k),
-                |s| {
-                    group_v2::resolve_group_entries_from_source(
-                        s,
-                        self.access_mode,
-                        hdr,
-                        widths,
-                        base,
-                        k,
-                    )
-                },
-            ),
-        }
+        })
         .map_err(Error::Format)
     }
 
@@ -2163,39 +2153,37 @@ impl FileInner {
 
     /// Returns the parsed target of the child named `name`.
     ///
-    /// Compact group lookups compare borrowed names and parse matching targets.
+    /// Resolves stored addresses with the opened backend's context. Borrows resident metadata or
+    /// reads through the source's metadata operation. Compact group lookups compare borrowed names
+    /// and parse matching targets. `group_address` is relative to the original source's start.
     ///
     /// # Errors
     ///
-    /// Returns errors from the group metadata and link target parsers.
+    /// Returns errors from address resolution, source metadata reads, group metadata parsing,
+    /// or link target parsing.
     fn group_child(
         &self,
         group_address: u64,
         name: LinkName<'_>,
     ) -> Result<ChildLookup, FormatError> {
-        let (widths, base) = (self.widths, self.addresses());
         let k = group_v1::group_leaf_node_k(&self.superblock);
         let access = self.access_mode();
-        let addr = group_address;
-        match &self.backend {
-            Backend::InMemory(v) => {
-                group_v2::find_child_target(v, access, addr, widths, base, k, name)
+        self.with_opened_source(|source| {
+            let physical = PhysicalSource::new(source);
+            match physical.resident() {
+                Some(bytes) => {
+                    group_v2::find_child_target(bytes, access, group_address, self.widths, k, name)
+                }
+                None => group_v2::find_child_target_from_source(
+                    source,
+                    access,
+                    group_address,
+                    self.widths,
+                    k,
+                    name,
+                ),
             }
-            Backend::Streaming(s) => group_v2::find_child_target_from_source(
-                s.as_ref(),
-                access,
-                addr,
-                widths,
-                base,
-                k,
-                name,
-            ),
-            Backend::Edit(m) => Self::with_engine(
-                m,
-                |d| group_v2::find_child_target(d, access, addr, widths, base, k, name),
-                |s| group_v2::find_child_target_from_source(s, access, addr, widths, base, k, name),
-            ),
-        }
+        })
     }
 
     /// Read all attributes attached to an object header, dispatching on the
@@ -4957,24 +4945,16 @@ impl Group {
         Ok(Group::new(self.file.clone(), revisions.at(address), child))
     }
 
-    /// Returns the address of the object header `path` identifies, walking from this group, or
-    /// from the root group where `path` is absolute.
+    /// Returns the physical object-header position reached through hard and soft links.
     ///
-    /// [`FileInner::group_child`] looks each component up by name, which reads the one Link
-    /// message a compact group holds for it and enumerates a version 1 or a dense group
-    /// (issue #228). A `path` that spells no link identifies the object the walk starts from.
-    ///
-    /// The root is the one handle whose object nothing classifies: every other `Group` comes from
-    /// a lookup that classified it (`File::group`, `Group::group`, `iter_groups`,
-    /// `object_at_relative`) or re-resolves through `header_address`, which classifies again.
-    /// `File::root` takes the superblock's word for it, so a root whose header describes some
-    /// other object is rejected here, under the empty path a root handle stores.
+    /// Resolves absolute paths from the root and relative paths from this group using
+    /// [`FileInner::group_child`].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::PathNotFound`] if a component reaches nothing and
-    /// [`Error::NotAGroup`] if an object along the way is not a group. Both report the object
-    /// through [`root_relative`](Self::root_relative).
+    /// Returns errors from [`header_address`](Self::header_address),
+    /// [`group_v2::resolve_link_path`], and backend metadata reads.
+    /// Returns [`Error::NotAGroup`] with an empty path if traversal encounters a non-group root.
     fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
         let own = self.header_address()?;
         Ok(group_v2::resolve_link_path(

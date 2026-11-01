@@ -85,6 +85,8 @@ use crate::prepared_chunk::PreparedChunk;
 use crate::reader::OpenedSource;
 #[cfg(test)]
 use crate::source;
+#[cfg(test)]
+use crate::source::PhysicalBytes;
 use crate::source::{PhysicalSource, Source};
 use crate::width::{FormatWidths, OffsetWidth};
 
@@ -3445,11 +3447,13 @@ mod tests {
 
     fn dataset_address(store: &WindowProbeStore) -> u64 {
         group_v2::resolve_path_any(
-            &store.data,
+            PhysicalBytes::for_test(
+                &store.data,
+                AddressContext::from_effective_base(store.superblock.base_address),
+            ),
             AccessMode::ReadOnly,
             &store.superblock,
             crate::file_writer::WIDTHS,
-            AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap()
@@ -3526,11 +3530,13 @@ mod tests {
     fn the_header_walk_reads_the_prefix_window_then_the_chunk_0_messages() {
         let store = WindowProbeStore::open(build_unlimited(4, 1));
         let oh_addr = group_v2::resolve_path_any(
-            &store.data,
+            PhysicalBytes::for_test(
+                &store.data,
+                AddressContext::from_effective_base(store.superblock.base_address),
+            ),
             AccessMode::ReadOnly,
             &store.superblock,
             crate::file_writer::WIDTHS,
-            AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -3708,11 +3714,13 @@ mod tests {
         );
         let store = WindowProbeStore::open(data);
         let oh_addr = group_v2::resolve_path_any(
-            &store.data,
+            PhysicalBytes::for_test(
+                &store.data,
+                AddressContext::from_effective_base(store.superblock.base_address),
+            ),
             AccessMode::ReadOnly,
             &store.superblock,
             crate::file_writer::WIDTHS,
-            AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
         .unwrap();
@@ -4499,11 +4507,10 @@ mod tests {
             }
             ReferenceChange::UseOtherDataset => {
                 let address = group_v2::resolve_path_any(
-                    &store.data,
+                    PhysicalBytes::for_test(&store.data, store.addresses()),
                     AccessMode::ReadOnly,
                     &store.superblock,
                     store.widths,
-                    store.addresses(),
                     &ObjectPath::parse("e"),
                 )
                 .unwrap();

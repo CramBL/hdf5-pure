@@ -1,55 +1,8 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Reading the structures the C library places in a file that has a userblock.
+//! Native files with userblocks and relocated superblocks.
 //!
-//! The format specification says of the superblock's base address that "unless
-//! otherwise noted, all other file addresses are relative to this base address".
-//! A userblock makes that base non-zero — 512 bytes for a `.mat` file — so every
-//! stored address is short of its real position by exactly that much, and a
-//! reader that forgets to add it back lands inside the userblock.
-//!
-//! Two structures this crate does not itself write reach that path, so nothing
-//! in the suite exercised them until now:
-//!
-//! - an **object header continuation block**, which the C library creates when a
-//!   header outgrows its chunk. This crate always writes single-chunk headers.
-//! - **dense link storage** (fractal heap + version 2 B-tree), which the C
-//!   library switches a group to past eight links. This crate writes compact
-//!   Link messages.
-//!
-//! Both appear the moment a C-based tool touches a `.mat` file, since every one
-//! carries a userblock: `h5repack`, `h5copy`, or MATLAB writing over the file.
-//! The failure was total rather than partial — the root group would not list at
-//! all — and it needed no edit from us to happen, as
-//! [`c_written_dense_links_in_a_userblock_file`] shows.
-//!
-//! Each test reads through every backend, because they resolve addresses by
-//! different code: [`File::open`] indexes one buffer, [`File::open_streaming`]
-//! reads windows through a `Source`, and [`File::from_bytes`] takes an image the
-//! caller owns.
-//!
-//! [`every_c_written_shape_reads_under_a_userblock`] is a different kind of test
-//! from the rest. It fixes no defect: every shape in it already read correctly.
-//! It exists because a missing base address has now been a bug three separate
-//! times — dense attributes in #214, then the two above — which makes it a
-//! *class* rather than three incidents, and a class is worth covering by its
-//! ground rather than by its instances.
-//!
-//! The read path applies the base in four independent places, and this file is
-//! sized to catch each. Measured by removing the base from one place at a time
-//! and recording which tests notice:
-//!
-//! | base removed from | tests that fail |
-//! | --- | --- |
-//! | raw data reads (contiguous, chunked, chunk indices, global heap) | all six |
-//! | dense attribute storage | `every_c_written_shape` only |
-//! | object header continuation | the two `c_modified`/`c_added_attribute` tests |
-//! | dense link storage | the three dense-link tests |
-//!
-//! Worth reading the second and third rows together. The class test is the only
-//! guard on dense attribute storage, and it is *not* a guard on continuations —
-//! its six-deep group nesting does not produce one, which the measurement showed
-//! and an unchecked assumption would not have. Continuations stay covered by the
-//! two tests that provoke them directly.
+//! Exercises object-header continuations, dense storage, dataset layouts, and address
+//! resolution through each reader backend.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -166,6 +119,103 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
             .unwrap(),
         [4, 5, 6, 7]
     );
+}
+
+#[rstest]
+#[case::zero_base(0, 0)]
+#[case::userblock(512, 512)]
+#[case::forward_relocated(0, 512)]
+#[case::backward_relocated(512, 0)]
+fn dense_group_lookup_and_listing_follow_relocated_native_images(
+    #[case] encoded_base: usize,
+    #[case] effective_base: usize,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Streaming,
+        ReadBackend::Bytes,
+        ReadBackend::Source
+    )]
+    backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let original_path = directory.path().join("original.h5");
+    let relocated_path = directory.path().join("relocated.h5");
+    let native = hdf5::File::with_options()
+        .with_fcpl(|properties| properties.userblock(encoded_base as u64))
+        .with_fapl(|properties| properties.libver_v110())
+        .create(&original_path)
+        .unwrap();
+    {
+        let group = native.create_group("dense").unwrap();
+        for index in 0..20 {
+            group
+                .new_dataset::<i32>()
+                .shape([1])
+                .create(format!("dataset_{index:03}").as_str())
+                .unwrap()
+                .write(&[index])
+                .unwrap();
+        }
+        group.link_soft("dataset_015", "alias").unwrap();
+        assert_eq!(
+            group.info().unwrap().storage_type,
+            hdf5::GroupStorageType::Dense
+        );
+        assert_eq!(
+            group.dataset("alias").unwrap().read_raw::<i32>().unwrap(),
+            [15]
+        );
+        assert_eq!(group.member_names().unwrap().len(), 21);
+    }
+    native.close().unwrap();
+    let original = std::fs::read(&original_path).unwrap();
+    let mut relocated = vec![0; effective_base];
+    relocated.extend_from_slice(&original[encoded_base..]);
+    std::fs::write(&relocated_path, relocated).unwrap();
+    {
+        let oracle = hdf5::File::open(&relocated_path).unwrap();
+        let group = oracle.group("dense").unwrap();
+        assert_eq!(
+            group.info().unwrap().storage_type,
+            hdf5::GroupStorageType::Dense
+        );
+        assert_eq!(
+            group
+                .dataset("dataset_015")
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            [15]
+        );
+        assert_eq!(
+            group.dataset("alias").unwrap().read_raw::<i32>().unwrap(),
+            [15]
+        );
+    }
+    let file = backend.open(&relocated_path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), encoded_base as u64);
+    assert_eq!(file.root().groups().unwrap(), ["dense"]);
+    {
+        let group = file.group("dense").unwrap();
+        let mut names = group.datasets().unwrap();
+        names.sort_unstable();
+        let expected: Vec<_> = (0..20).map(|index| format!("dataset_{index:03}")).collect();
+        assert_eq!(names, expected);
+        assert_eq!(
+            group.dataset("dataset_015").unwrap().read_i32().unwrap(),
+            [15]
+        );
+        assert_eq!(group.dataset("alias").unwrap().read_i32().unwrap(), [15]);
+        let error = file.dataset("dense/absent").unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::PathNotFound(String::from("dense/absent"))
+        );
+    }
+    file.close().unwrap();
 }
 
 #[rstest]
@@ -564,8 +614,7 @@ fn editor_rejects_relocated_image(#[case] stored_base: usize, #[case] signature_
 /// The size MATLAB uses, and the one every `.mat` this crate writes carries.
 const UB: u64 = 512;
 
-/// Read `path` through every backend and return each one's view of the root
-/// group's dataset names, sorted.
+/// Returns sorted root dataset names from buffered, streaming, and byte-image reads of `path`.
 fn names_via_every_backend(path: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
     let sorted = |f: &File| -> Vec<String> {
         let mut v = f.root().datasets().expect("list the root group");
@@ -831,7 +880,7 @@ fn a_mat_file_repacked_by_the_c_library_still_reads() {
 // The defect class, rather than the two instances of it
 // ---------------------------------------------------------------------------
 
-/// Read `path` through every backend and check it with `read`.
+/// Compares `read` results from buffered, streaming, and byte-image reads of `path`.
 fn every_backend(path: &std::path::Path, what: &str, read: impl Fn(&File) -> String) {
     let expected = read(&File::open(path).unwrap());
     for (backend, file) in [
@@ -850,25 +899,7 @@ fn every_backend(path: &std::path::Path, what: &str, read: impl Fn(&File) -> Str
     }
 }
 
-/// Every shape the C library writes that makes this crate resolve a stored
-/// address, read back from a file with a userblock and from one without.
-///
-/// A stored address is short of its real position by the base, so a reader that
-/// forgets to add it back lands inside the userblock — and each of these shapes
-/// is read by a *different* one. The `ub = 0` half is the control: it holds the
-/// content constant so a failure can only be the base address, not the shape.
-///
-/// The module documentation carries the measured coverage table for the whole
-/// file. What this test adds to it is the only guard on dense attribute storage,
-/// and the widest guard on raw data reads: every shape below stops reading when
-/// the base is removed from the data path, so a regression there cannot hide in
-/// whichever storage kind happens to be untested.
-///
-/// Some of these have userblock coverage elsewhere — dense attributes in
-/// `userblock_dense_attrs.rs`, chunked editing in `edit_userblock_chunked.rs` —
-/// and are kept anyway. The point is one place where the class is visible at
-/// once, so the next address-consuming reader added to this crate has an obvious
-/// home for its case.
+// Compares native-written storage layouts with and without a userblock.
 #[test]
 fn every_c_written_shape_reads_under_a_userblock() {
     let dir = tempfile::tempdir().unwrap();

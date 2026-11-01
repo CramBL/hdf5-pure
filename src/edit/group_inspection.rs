@@ -49,11 +49,10 @@ pub(super) fn inspect_group_links(
         WriteEngine::open_with_locking(path, FileLocking::Enabled)?
     };
     let address = group_v2::resolve_path_any_from_source(
-        engine.image(),
+        &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.superblock(),
         engine.widths(),
-        engine.addresses(),
         &ObjectPath::parse(group_path),
     )?;
     let info = engine.inspect_group(address)?;

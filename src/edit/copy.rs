@@ -76,7 +76,7 @@ impl WriteEngine {
         src: &ObjectPathBuf,
         dst: &ObjectPathBuf,
     ) -> Result<(), Error> {
-        let src_data = source.in_memory_image().ok_or(Error::EditUnsupported(
+        source.in_memory_image().ok_or(Error::EditUnsupported(
             "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
         ))?;
         let src_sb = source.superblock();
@@ -98,16 +98,18 @@ impl WriteEngine {
             return Err(Error::EditUnsupported("copy destination path is empty"));
         }
 
-        let src_addr = crate::group_v2::resolve_path_any(
-            src_data,
-            source.access_mode(),
-            src_sb,
-            source.widths(),
-            source.addresses(),
-            &src.as_path(),
-        )?;
-        // The source has base address zero, so its stored addresses are absolute.
         let tree = source.with_opened_source(|opened| {
+            let physical = PhysicalSource::new(opened);
+            let bytes = physical.resident().ok_or(Error::EditUnsupported(
+                "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
+            ))?;
+            let src_addr = crate::group_v2::resolve_path_any(
+                bytes,
+                source.access_mode(),
+                src_sb,
+                source.widths(),
+                &src.as_path(),
+            )?;
             Self::read_copy_subtree(
                 opened,
                 source.access_mode(),

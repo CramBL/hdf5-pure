@@ -356,7 +356,7 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
                 moved: moved.into_iter().map(PhysicalAddress::new).collect(),
                 base: AddressContext::from_effective_base(BaseAddress::ZERO),
             },
-            &engine.image(),
+            &engine.opened_source(),
             &engine.context,
         )
     };
@@ -416,7 +416,7 @@ fn reference_targets_resolve_equivalent_path_spellings(#[case] spelling: &str) {
                 moved: Vec::new(),
                 base: AddressContext::from_effective_base(BaseAddress::ZERO),
             },
-            &engine.image(),
+            &engine.opened_source(),
             &engine.context,
         )
     };
@@ -1573,11 +1573,10 @@ fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
         StoredAddress::undefined(OffsetWidth::Eight)
     );
     let err = crate::group_v2::resolve_path_any_from_source(
-        session.image(),
+        &session.opened_source(),
         AccessMode::ReadWrite,
         session.context.superblock(),
         session.context.widths(),
-        session.context.addresses(),
         &ObjectPath::parse("d"),
     )
     .map_err(Error::from)
