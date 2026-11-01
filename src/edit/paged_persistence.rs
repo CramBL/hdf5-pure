@@ -1,12 +1,12 @@
 //! Pure placement and encoding of the managers for a persistent PAGE edit.
 
 use hdf5_pure_format::__private as format;
-use hdf5_pure_space::__private::{Extent, FreeClass, ManagerSections, PagedTail, SessionSpace};
+use hdf5_pure_space::__private::{Extent, FreeClass, PagedTail, SessionSpace};
 
 use crate::address::StoredAddress;
 use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
-use crate::free_space_manager;
+use crate::free_space_manager::{EncodedManager, ManagerProjection};
 use crate::width::FormatWidths;
 
 /// Holds the encoded managers and the same final free-space state for adoption.
@@ -41,11 +41,11 @@ impl PagedPersistencePlan {
         widths: FormatWidths,
         reuse_only: bool,
     ) -> Result<Option<Self>, FormatError> {
-        let page = space.page_size().ok_or_else(|| {
+        space.page_size().ok_or_else(|| {
             FormatError::Internal("PAGE persistence requires PAGE session space".into())
         })?;
         if let Some(tail) = space.plan_paged_tail(eoa, freed, old_blocks, extension_len, false)? {
-            if ManagerSections::paged(&tail.post.sections(), page).is_empty() {
+            if ManagerProjection::new(tail.post.admitted_snapshot(), widths)?.is_empty() {
                 return Ok(Some(Self {
                     tail,
                     slots: [StoredAddress::undefined(widths.offsets); NUM_FILE_FSM_MANAGERS],
@@ -73,33 +73,42 @@ impl PagedPersistencePlan {
                 offset: fixed,
                 length: section_limit as u64,
             })?;
-        let reused = space.plan_paged_tail(eoa, freed, old_blocks, capacity, false)?;
-        let mut tail = match reused {
-            Some(tail) if !ManagerSections::paged(&tail.post.sections(), page).is_empty() => tail,
+        let reused = space
+            .plan_paged_tail(eoa, freed, old_blocks, capacity, false)?
+            .map(|tail| ProjectedTail::new(tail, widths))
+            .transpose()?;
+        let mut projected = match reused {
+            Some(projected) if !projected.managers.is_empty() => projected,
             _ if reuse_only => return Ok(None),
-            _ => space
-                .plan_paged_tail(eoa, freed, old_blocks, capacity, true)?
-                .ok_or_else(|| {
-                    FormatError::Internal(
-                        "an appended PAGE tail requires no reusable extent".into(),
-                    )
-                })?,
+            _ => ProjectedTail::new(
+                space
+                    .plan_paged_tail(eoa, freed, old_blocks, capacity, true)?
+                    .ok_or_else(|| {
+                        FormatError::Internal(
+                            "an appended PAGE tail requires no reusable extent".into(),
+                        )
+                    })?,
+                widths,
+            )?,
         };
-        if ManagerSections::paged(&tail.post.sections(), page).is_empty() {
+        if projected.managers.is_empty() {
             capacity = capacity.checked_add(1).ok_or(FormatError::OffsetOverflow {
                 offset: capacity,
                 length: 1,
             })?;
-            tail = space
-                .plan_paged_tail(eoa, freed, old_blocks, capacity, true)?
-                .ok_or_else(|| {
-                    FormatError::Internal(
-                        "an appended PAGE tail requires no reusable extent".into(),
-                    )
-                })?;
+            projected = ProjectedTail::new(
+                space
+                    .plan_paged_tail(eoa, freed, old_blocks, capacity, true)?
+                    .ok_or_else(|| {
+                        FormatError::Internal(
+                            "an appended PAGE tail requires no reusable extent".into(),
+                        )
+                    })?,
+                widths,
+            )?;
         }
-        let managers = ManagerSections::paged(&tail.post.sections(), page);
-        let measured = free_space_manager::manager_blocks_len(&managers, widths)?;
+        let ProjectedTail { tail, managers } = projected;
+        let measured = managers.encoded_len();
         let used = extension_len
             .checked_add(measured)
             .ok_or(FormatError::OffsetOverflow {
@@ -112,58 +121,43 @@ impl PagedPersistencePlan {
             ));
         }
         let start = tail.allocation.start().checked_add(extension_len)?;
-        let plan = free_space_manager::plan_managers(&managers, start, widths)?;
-        let last = plan.blocks.len() - 1;
+        let plan = managers.into_plan(start)?;
+        let slots = plan.slots;
         let blocks = plan
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(index, block)| {
-                let sizes: Vec<_> = block.sections.iter().map(|section| section.size).collect();
-                let allocation = format::section_info_len(widths, &sizes)
-                    + if index == last { capacity - used } else { 0 };
-                let (header, section_list) = format::serialize_free_space_manager_with_allocation(
-                    widths,
-                    &block.sections,
-                    block.fshd_addr,
-                    block.fsse_addr,
-                    block.class,
-                    Some(allocation),
-                )?;
-                Ok(EncodedManager {
-                    header_address: block.fshd_addr,
-                    header,
-                    section_list_address: block.fsse_addr,
-                    section_list,
-                })
-            })
-            .collect::<Result<Vec<_>, FormatError>>()?;
+            .encode(tail.allocation.end())?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(Self {
             tail,
-            slots: plan.slots,
+            slots,
             blocks,
         }))
     }
 }
 
-/// Holds the complete header and allocated section-list bytes for one manager.
-pub(super) struct EncodedManager {
-    pub header_address: StoredAddress,
-    pub header: Vec<u8>,
-    pub section_list_address: StoredAddress,
-    pub section_list: Vec<u8>,
+/// A proposed PAGE tail and the manager projection measured from its free state.
+struct ProjectedTail {
+    tail: PagedTail,
+    managers: ManagerProjection,
+}
+
+impl ProjectedTail {
+    fn new(tail: PagedTail, widths: FormatWidths) -> Result<Self, FormatError> {
+        let managers = ManagerProjection::new(tail.post.admitted_snapshot(), widths)?;
+        Ok(Self { tail, managers })
+    }
 }
 
 const PAGED_MANAGERS: u64 = 3;
 
 #[cfg(test)]
 mod tests {
-    use hdf5_pure_space::__private::{ManagerKind, PageType};
+    use hdf5_pure_space::__private::{ManagerKind, ManagerSections, PageType};
     use rstest::rstest;
 
     use crate::AddressRange;
     use crate::address::{StoredAddress, StoredAddressExt};
     use crate::file_space_info::{FileSpacePageSize, FileSpaceStrategy};
+    use crate::free_space_manager;
 
     use super::*;
 

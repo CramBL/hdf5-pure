@@ -1,20 +1,18 @@
 //! Recycling of persistent extension and manager storage after publication.
 
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::ManagerSections;
 use hdf5_pure_space::__private::ReturnedExtents;
 
 use crate::address::StoredAddress;
 use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
-use crate::free_space_manager;
 
 use super::FreeClass;
 use super::FreeExtent;
-use super::FreeList;
 use super::PersistState;
 use super::TailPlacement;
 use super::WriteEngine;
+use super::free_snapshot::{FlatProjection, FlatTailLayout};
 
 impl WriteEngine {
     /// Rewrites persistent metadata in a reserved allocation after publishing its replacement.
@@ -91,19 +89,21 @@ impl WriteEngine {
         old_blocks: &[FreeExtent],
         extension_len: u64,
         target: FreeExtent,
-    ) -> Option<(FreeList, Option<StoredAddress>, u64, StoredAddress)> {
+    ) -> Option<FlatTailLayout> {
         let (post, mut eoa) = self.flat_post_free(eoa, to_free, old_blocks);
-        let managers = ManagerSections::flat(post.extents().iter().copied());
-        let len = extension_len.checked_add(
-            free_space_manager::manager_blocks_len(&managers, self.context.widths()).ok()?,
-        )?;
+        let projection = FlatProjection::new(post, self.context.widths()).ok()?;
+        let len = extension_len.checked_add(projection.managers().encoded_len())?;
         if len > target.len() {
             return None;
         }
-        let len = if post.is_empty() { len } else { target.len() };
+        let len = if projection.is_empty() {
+            len
+        } else {
+            target.len()
+        };
         if eoa == target.end() {
             eoa = target.start().checked_add(len).ok()?;
         }
-        Some((post, Some(target.start()), len, eoa))
+        Some(projection.place(Some(target.start()), len, eoa))
     }
 }

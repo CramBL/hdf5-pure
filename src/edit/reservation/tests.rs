@@ -20,6 +20,7 @@ use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
 use super::{AppendCursor, ReservationFailure, ReservationPlan};
+use crate::edit::block::{BlockRequest, EncodingDependency};
 
 #[rstest]
 #[case::append(FileSpaceStrategy::None, &[0, 16, 48], 72)]
@@ -388,6 +389,61 @@ fn engine(strategy: FileSpaceStrategy, userblock: u64) -> (tempfile::TempDir, Wr
         engine.space = SessionSpace::from_strategy(Some(strategy), 1, FileSpacePageSize::DEFAULT);
     }
     (directory, engine)
+}
+
+#[rstest]
+#[case::appended(false)]
+#[case::reused(true)]
+fn block_reservations_keep_capacity_separate_from_encoding(#[case] reused: bool) {
+    let (_directory, mut engine) = engine(FileSpaceStrategy::FsmAggr, 0);
+    engine.aggregation = None;
+    let start = engine.image.len();
+    if reused {
+        engine.append(&[13; 128]).unwrap();
+        engine.space = flat(&[(start, 128)]);
+    }
+    let requests = [
+        BlockRequest::new(
+            request(64, PageType::Raw),
+            16,
+            EncodingDependency::Independent,
+        )
+        .unwrap(),
+        BlockRequest::complete(request(32, PageType::Raw), EncodingDependency::Independent),
+    ];
+    let mut plan = engine
+        .plan_blocks(&requests)
+        .unwrap_or_else(|failure| panic!("block reservation failed: {:?}", failure.error));
+    assert_eq!(
+        plan.reservations()[0].range(),
+        FileRange::new(PhysicalAddress::new(start), 64).unwrap()
+    );
+    assert_eq!(
+        plan.reservations()[1].range(),
+        FileRange::new(PhysicalAddress::new(start + 64), 32).unwrap()
+    );
+    assert_eq!(
+        plan.write_next(&[7; 16]).unwrap(),
+        PhysicalAddress::new(start)
+    );
+    assert_eq!(
+        plan.write_next(&[11; 32]).unwrap(),
+        PhysicalAddress::new(start + 64)
+    );
+    plan.finish().unwrap();
+    assert_eq!(engine.image().read_exact_at(start, 16).unwrap(), [7; 16]);
+    assert_eq!(
+        engine.image().read_exact_at(start + 16, 48).unwrap(),
+        [if reused { 13 } else { 0 }; 48]
+    );
+    assert_eq!(
+        engine.image().read_exact_at(start + 64, 32).unwrap(),
+        [11; 32]
+    );
+    assert_eq!(
+        engine.space.reusable_bytes().unwrap(),
+        if reused { 32 } else { 0 }
+    );
 }
 
 fn planned<'a>(

@@ -11,8 +11,8 @@ use hdf5_pure_space::__private as free_space;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;
 use hdf5_pure_space::__private::{
-    AllocationClass, Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections,
-    PageType, ReturnedExtents,
+    AllocationClass, Extent as FreeExtent, FreeClass, FreeList, ManagerKind, PageType,
+    ReturnedExtents,
 };
 
 use super::{PublicationPurpose, PublicationState};
@@ -20,13 +20,14 @@ use crate::SuperblockVersion;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
 use crate::edit::SyncPolicy;
 use crate::edit::context::SuperblockPublication;
+use crate::edit::free_snapshot::{FlatProjection, FlatTailLayout};
 use crate::edit::object_header;
 use crate::edit::retirement::{PendingRootFrees, RootRetirement};
 use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, WriteEngine};
 use crate::edit::{PersistState, paged_persistence};
 use crate::error::{Error, FormatError};
 use crate::file_space_info::{self, NUM_FILE_FSM_MANAGERS};
-use crate::free_space_manager;
+use crate::free_space_manager::ManagerProjection;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
@@ -460,7 +461,7 @@ impl WriteEngine {
         } else {
             None
         };
-        let (post, placed_at, tail_len, eoa) = if let Some(recycled) = recycled {
+        let layout = if let Some(recycled) = recycled {
             recycled
         } else {
             self.flat_tail_layout(
@@ -473,15 +474,14 @@ impl WriteEngine {
                 purpose,
             )?
         };
+        let (post, managers, placed_at, tail_len, eoa) = layout.into_parts();
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass requires a reusable allocation below the old tail.
             return Ok(());
         }
         let reused = placed_at.is_some();
         let ext_addr = placed_at.unwrap_or(current_eoa);
-        let managers = ManagerSections::flat(post.extents().iter().copied());
-        let plan =
-            free_space_manager::plan_managers(&managers, ext_addr.checked_add(ext_len)?, widths)?;
+        let plan = managers.into_plan(ext_addr.checked_add(ext_len)?)?;
         // For a reused tail, truncate to the planned EOA after publication. The post-commit
         // free list excludes dropped trailing regions and the suffix released by
         // `FreeList::release_trailing_run`. An appended tail ends the file itself.
@@ -561,25 +561,10 @@ impl WriteEngine {
 
         // The extension and manager blocks remain unreferenced until superblock publication.
         self.write_tail_block(region, ext_addr, &ext_oh)?;
-        if let Some(block) = flat_block {
-            let fshd_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
-            let fsse_allocated = tail_len
-                .checked_sub(ext_len)
-                .and_then(|manager_len| manager_len.checked_sub(fshd_len))
-                .ok_or(Error::Format(FormatError::Internal(
-                    "flat free-space tail is shorter than its extension and manager header".into(),
-                )))?;
-            let (fshd, fsse) =
-                hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
-                    widths,
-                    &block.sections,
-                    block.fshd_addr,
-                    block.fsse_addr,
-                    block.class,
-                    Some(fsse_allocated),
-                )?;
-            self.write_tail_block(region, block.fshd_addr, &fshd)?;
-            self.write_tail_block(region, block.fsse_addr, &fsse)?;
+        for block in plan.encode(region.end())? {
+            let block = block?;
+            self.write_tail_block(region, block.header_address, &block.header)?;
+            self.write_tail_block(region, block.section_list_address, &block.section_list)?;
         }
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.persistence_barrier(purpose)?;
@@ -653,9 +638,9 @@ impl WriteEngine {
 
     /// Reserves a flat manager tail and computes the free space and EOA to publish.
     ///
-    /// Returns the prospective free list, reserved stored address, reserved length, and EOA.
-    /// The address is [`None`] when the caller must append at `current_eoa`. In that case,
-    /// the returned EOA is `current_eoa`, before appending the tail.
+    /// Returns the prospective free list and its manager projection with the reserved stored address,
+    /// reserved length, and EOA. The address is [`None`] when the caller must append at `current_eoa`.
+    /// In that case, the returned EOA is `current_eoa`, before appending the tail.
     ///
     /// Reservations come from session free space. With a `limit`, only extents ending at or
     /// below it are eligible.
@@ -682,14 +667,14 @@ impl WriteEngine {
         widths: FormatWidths,
         limit: Option<StoredAddress>,
         purpose: PublicationPurpose,
-    ) -> Result<(FreeList, Option<StoredAddress>, u64, StoredAddress), FormatError> {
+    ) -> Result<FlatTailLayout, FormatError> {
         /// Limits reservation retries when the serialized manager length increases.
         const ROUNDS: usize = 4;
 
         // Size the append fallback before trying reservations from reusable space.
         let (probe, _) = self.flat_post_free(current_eoa, to_free, old_blocks);
-        let managers = ManagerSections::flat(probe.extents().iter().copied());
-        let appended_len = flat_tail_capacity(ext_len, &managers, widths, purpose)?;
+        let projection = FlatProjection::new(probe, widths)?;
+        let appended_len = flat_tail_capacity(ext_len, projection.managers(), widths, purpose)?;
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
@@ -707,8 +692,15 @@ impl WriteEngine {
             // has already been removed from this list, so the trailing run starts at or
             // above the reservation's end.
             let eoa = post.release_trailing_run(eoa, proposed);
-            let managers = ManagerSections::flat(post.extents().iter().copied());
-            let len = match flat_tail_capacity(ext_len, &managers, widths, purpose) {
+            let projection = match FlatProjection::new(post, widths) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    self.space
+                        .return_allocation(reserved, AllocationClass::Metadata);
+                    return Err(error);
+                }
+            };
+            let len = match flat_tail_capacity(ext_len, projection.managers(), widths, purpose) {
                 Ok(len) => len,
                 Err(error) => {
                     self.space
@@ -716,7 +708,7 @@ impl WriteEngine {
                     return Err(error);
                 }
             };
-            if post.is_empty() && len < proposed {
+            if projection.is_empty() && len < proposed {
                 self.space
                     .return_allocation(reserved, AllocationClass::Metadata);
                 break;
@@ -727,14 +719,14 @@ impl WriteEngine {
                     "a reused tail at {at:?} of {proposed} bytes runs past the end-of-allocation \
                      {eoa:?} it was placed under"
                 );
-                return Ok((post, Some(at), proposed, eoa));
+                return Ok(projection.place(Some(at), proposed, eoa));
             }
             self.space
                 .return_allocation(reserved, AllocationClass::Metadata);
             proposed = len;
         }
         // Append beyond the current EOA, retaining the prospective free list below the tail.
-        Ok((probe, None, appended_len, current_eoa))
+        Ok(projection.place(None, appended_len, current_eoa))
     }
 
     /// Publishes the root, extension, and final per-class free sections of a persistent PAGE edit.
@@ -1054,11 +1046,11 @@ impl WriteEngine {
 /// [`u64::MAX`].
 fn flat_tail_capacity(
     ext_len: u64,
-    managers: &[ManagerSections],
+    managers: &ManagerProjection,
     widths: FormatWidths,
     purpose: PublicationPurpose,
 ) -> Result<u64, FormatError> {
-    let manager_len = free_space_manager::manager_blocks_len(managers, widths)?;
+    let manager_len = managers.encoded_len();
     let len = ext_len
         .checked_add(manager_len)
         .ok_or(FormatError::OffsetOverflow {
@@ -1090,9 +1082,10 @@ fn flat_tail_capacity(
 mod tests {
     use hdf5_pure_space::__private::Extent;
     use hdf5_pure_space::__private::ManagerSections;
+    use hdf5_pure_space::__private::{AdmittedFreeSnapshot, FreeList};
     use rstest::rstest;
 
-    use super::PublicationPurpose;
+    use super::{ManagerProjection, PublicationPurpose};
     use crate::address::{StoredAddress, StoredAddressExt};
     use crate::free_space_manager;
     use crate::width::FormatWidths;
@@ -1115,7 +1108,12 @@ mod tests {
             (0..sections).map(|i| Extent::new(StoredAddress::new(i * 2), 1).unwrap()),
         );
         let minimum = ext_len + free_space_manager::manager_blocks_len(&managers, widths).unwrap();
-        let actual = super::flat_tail_capacity(ext_len, &managers, widths, purpose).unwrap();
+        let free = FreeList::from_sorted(
+            (0..sections).map(|i| Extent::new(StoredAddress::new(i * 2), 1).unwrap()),
+        )
+        .unwrap();
+        let projection = ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths).unwrap();
+        let actual = super::flat_tail_capacity(ext_len, &projection, widths, purpose).unwrap();
         assert_eq!(actual, capacity.unwrap_or(minimum));
         assert!(actual >= minimum);
         assert!(actual < 2 * minimum);

@@ -12,6 +12,7 @@ use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
 
 use super::aggregation::AggregateSpace;
+use super::block::{BlockRequest, EncodingDependency, PlannedBlock};
 use super::commit::PublicationState;
 use super::{Placement, WriteEngine};
 
@@ -34,7 +35,7 @@ pub(super) struct ReservationPlan<'a> {
 impl<'a> ReservationPlan<'a> {
     fn new(
         engine: &'a mut WriteEngine,
-        requests: &[ReservationRequest],
+        requests: impl ExactSizeIterator<Item = BlockRequest>,
         mode: ReservationMode,
     ) -> Result<Self, Box<ReservationFailure<'a>>> {
         let mut plan = Self {
@@ -58,8 +59,9 @@ impl<'a> ReservationPlan<'a> {
 
     /// Writes the next allocation at its planned physical range.
     ///
-    /// The byte length must match the complete reserved length. A length mismatch permits retrying
-    /// the same allocation. A failed padding or content write prevents further writes.
+    /// The byte length must match the planned encoding length. Allocation capacity beyond that
+    /// encoding remains owned. A length mismatch permits retrying the same allocation. A failed
+    /// padding or content write prevents further writes.
     ///
     /// # Errors
     ///
@@ -87,21 +89,26 @@ impl<'a> ReservationPlan<'a> {
         let reservation = reservations.as_slice().get(*next).ok_or_else(|| {
             FormatError::Internal("reservation plan has no pending allocation".into())
         })?;
-        if bytes.len() as u64 != reservation.range.length() {
-            return Err(FormatError::SerializationError(format!(
-                "a placement reserved {} bytes but built {}",
-                reservation.range.length(),
-                bytes.len()
-            ))
-            .into());
-        }
-        let placement = reservation.placement;
+        let region = reservation.block.region(bytes)?;
+        let addr = region.range().start().get();
+        let len = region.range().length();
+        let placement = match reservation.placement {
+            Placement::Aggregated { end, .. } => Placement::Aggregated { addr, len, end },
+            Placement::Appended { .. } => Placement::Appended { addr, len },
+            Placement::Reused { .. } => Placement::Reused { addr, len },
+        };
         let result = Self::prepare_transition(
             engine,
             reservation.request().page_type(),
             reservation.transition,
         )
-        .and_then(|()| engine.place(placement, bytes));
+        .and_then(|()| engine.place(placement, region.bytes()))
+        .and_then(|address| {
+            if engine.image.len() < reservation.range().end().get() {
+                engine.pad_zeros_to(reservation.range().end().get())?;
+            }
+            Ok(address)
+        });
         match result {
             Ok(address) => {
                 *next += 1;
@@ -200,7 +207,7 @@ impl<'a> ReservationPlan<'a> {
 
     fn build(
         &mut self,
-        requests: &[ReservationRequest],
+        mut requests: impl ExactSizeIterator<Item = BlockRequest>,
         mode: ReservationMode,
     ) -> Result<(), Error> {
         let Self {
@@ -246,7 +253,7 @@ impl<'a> ReservationPlan<'a> {
                 .space
                 .reservation_batch(if reuse { requests.len() } else { 0 })
         };
-        let result = requests.iter().copied().try_for_each(|request| {
+        let result = requests.try_for_each(|request| {
             let planned = Self::reserve_one(
                 &mut batch,
                 &mut aggregation,
@@ -270,10 +277,11 @@ impl<'a> ReservationPlan<'a> {
         batch: &mut ReservationBatch<'_>,
         aggregation: &mut Option<AggregateSpace>,
         page: &mut AppendCursor,
-        request: ReservationRequest,
+        block_request: BlockRequest,
         reuse: bool,
         unresolved: &mut Option<ReusableReservation>,
     ) -> Result<PlannedReservation, Error> {
+        let request = block_request.reservation();
         if reuse && let Some(reservation) = batch.reserve(request) {
             let extent = reservation.extent();
             let range = match page.physical_range(extent.start(), extent.len()) {
@@ -288,8 +296,7 @@ impl<'a> ReservationPlan<'a> {
                     addr: range.start().get(),
                     len: range.length(),
                 },
-                range,
-                request,
+                block: PlannedBlock::new(range, block_request)?,
                 transition: None,
             });
         }
@@ -304,8 +311,7 @@ impl<'a> ReservationPlan<'a> {
             page.cursor = aggregation.eoa();
             return Ok(PlannedReservation {
                 placement,
-                range,
-                request,
+                block: PlannedBlock::new(range, block_request)?,
                 transition: None,
             });
         }
@@ -315,8 +321,7 @@ impl<'a> ReservationPlan<'a> {
                 addr: range.start().get(),
                 len: range.length(),
             },
-            range,
-            request,
+            block: PlannedBlock::new(range, block_request)?,
             transition,
         })
     }
@@ -325,18 +330,20 @@ impl<'a> ReservationPlan<'a> {
 /// A complete physical allocation, its request, and any preceding PAGE transition.
 pub(super) struct PlannedReservation {
     placement: Placement,
-    range: FileRange,
-    request: ReservationRequest,
+    block: PlannedBlock,
     transition: Option<PageTransition>,
 }
 
 impl PlannedReservation {
     pub(super) fn range(&self) -> FileRange {
-        self.range
+        self.block.allocation()
     }
 
     pub(super) fn request(&self) -> ReservationRequest {
-        self.request
+        self.block.request().reservation()
+    }
+    pub(super) fn encoding_dependency(&self) -> EncodingDependency {
+        self.block.request().dependency()
     }
 }
 
@@ -474,7 +481,26 @@ impl WriteEngine {
         &mut self,
         requests: &[ReservationRequest],
     ) -> Result<ReservationPlan<'_>, Box<ReservationFailure<'_>>> {
-        ReservationPlan::new(self, requests, ReservationMode::Staged)
+        ReservationPlan::new(
+            self,
+            requests
+                .iter()
+                .copied()
+                .map(|request| BlockRequest::complete(request, EncodingDependency::Allocation)),
+            ReservationMode::Staged,
+        )
+    }
+
+    /// Reserves complete block capacity before writing each block's encoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reservation failure described by [`Self::plan_reservations`].
+    pub(super) fn plan_blocks(
+        &mut self,
+        requests: &[BlockRequest],
+    ) -> Result<ReservationPlan<'_>, Box<ReservationFailure<'_>>> {
+        ReservationPlan::new(self, requests.iter().copied(), ReservationMode::Staged)
     }
 
     /// Reserves one allocation under the session's immediate-write reuse policy.
@@ -488,7 +514,10 @@ impl WriteEngine {
     ) -> Result<ReservationPlan<'_>, Box<ReservationFailure<'_>>> {
         ReservationPlan::new(
             self,
-            core::slice::from_ref(&request),
+            core::iter::once(BlockRequest::complete(
+                request,
+                EncodingDependency::Allocation,
+            )),
             ReservationMode::Immediate,
         )
     }
