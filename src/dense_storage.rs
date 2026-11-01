@@ -10,10 +10,6 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree_v2::{self, BTreeV2Header};
 use crate::error::FormatError;
-#[cfg(any(test, doc))]
-use crate::source::Source;
-#[cfg(any(test, doc))]
-use crate::source::SourceMetadata;
 use crate::source::StoredMetadata;
 use crate::source::StoredRead;
 use crate::width::FormatWidths;
@@ -35,36 +31,6 @@ impl DenseIndex {
             expected_tree_type,
         }
     }
-}
-
-/// Returns all allocations of a proven dense-storage index set using validated file widths.
-///
-/// # Errors
-///
-/// Returns the structural error from the version 2 B-tree storage walker or
-/// [`FormatError::InvalidBTreeV2Signature`] when the proven allocations overlap the heap header.
-#[cfg(any(test, doc))]
-pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
-    source: &S,
-    heap_header: StoredAddress,
-    indexes: impl IntoIterator<Item = DenseIndex>,
-    widths: FormatWidths,
-) -> Result<Vec<Extent>, FormatError> {
-    collect_index_storage(heap_header, indexes, |index| {
-        let DenseIndex {
-            address,
-            expected_tree_type,
-        } = index;
-        let header = BTreeV2Header::parse_from_source_with_widths(
-            &SourceMetadata(source),
-            address.get(),
-            widths,
-        )?;
-        if header.tree_type != expected_tree_type {
-            return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
-        }
-        btree_v2::legacy_collect_btree_v2_storage_extents(source, address, widths)
-    })
 }
 
 /// Returns disjoint index allocations in stored-address order.
@@ -188,8 +154,8 @@ mod tests {
         ));
         expected.sort_unstable();
 
-        let extents = collect_dense_index_storage_extents(
-            &BytesSource::new(file),
+        let extents = collect_dense_index_storage_extents_from_source(
+            &crate::source::zero_base_source(&BytesSource::new(file)),
             StoredAddress::new(0x80),
             [
                 DenseIndex::new(StoredAddress::new(0x100), BTREE_V2_LINK_NAME),
@@ -207,8 +173,8 @@ mod tests {
         let mut file = vec![0; 0x800];
         place_index_tree(&mut file, 0x100, 0x200, BTREE_V2_LINK_CREATION_ORDER);
 
-        let err = collect_dense_index_storage_extents(
-            &BytesSource::new(file),
+        let err = collect_dense_index_storage_extents_from_source(
+            &crate::source::zero_base_source(&BytesSource::new(file)),
             StoredAddress::new(0x80),
             [DenseIndex::new(
                 StoredAddress::new(0x100),
@@ -230,8 +196,8 @@ mod tests {
         place_index_tree(&mut file, 0x100, 0x200, BTREE_V2_LINK_NAME);
         let index = DenseIndex::new(StoredAddress::new(0x100), BTREE_V2_LINK_NAME);
 
-        let err = collect_dense_index_storage_extents(
-            &BytesSource::new(file),
+        let err = collect_dense_index_storage_extents_from_source(
+            &crate::source::zero_base_source(&BytesSource::new(file)),
             StoredAddress::new(0x80),
             [index, index],
             FORMAT_WIDTHS,
@@ -246,8 +212,8 @@ mod tests {
         let mut file = vec![0; 0x800];
         place_index_tree(&mut file, 0x100, 0x200, BTREE_V2_LINK_NAME);
 
-        let err = collect_dense_index_storage_extents(
-            &BytesSource::new(file),
+        let err = collect_dense_index_storage_extents_from_source(
+            &crate::source::zero_base_source(&BytesSource::new(file)),
             StoredAddress::new(0x100),
             [DenseIndex::new(
                 StoredAddress::new(0x100),
@@ -275,8 +241,8 @@ mod tests {
         file[0x500..0x500 + header.len()].copy_from_slice(&header);
         let available = file.len();
 
-        let err = collect_dense_index_storage_extents(
-            &BytesSource::new(file),
+        let err = collect_dense_index_storage_extents_from_source(
+            &crate::source::zero_base_source(&BytesSource::new(file)),
             StoredAddress::new(0x80),
             [
                 DenseIndex::new(StoredAddress::new(0x100), BTREE_V2_LINK_NAME),

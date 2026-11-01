@@ -686,12 +686,12 @@ mod tests {
 
     use crate::access_mode::AccessMode;
     use crate::address::OpenedImageContext;
-    use crate::fractal_heap::LegacyHeapObjectReader;
-    use crate::source::BaseOffsetSource;
+    use crate::fractal_heap::HeapObjectReader;
     #[cfg(feature = "std")]
     use crate::source::MetadataCacheConfig;
     #[cfg(feature = "std")]
     use crate::source::MetadataCachingSource;
+    use crate::source::PhysicalBytes;
     use crate::test_data;
     use crate::{AttrValue, FileBuilder};
 
@@ -1240,30 +1240,31 @@ mod tests {
         )
         .unwrap()
         .addresses();
-        let buffered = LegacyHeapObjectReader::new(
-            &header,
-            addresses,
-            StoredAddress::new(STORAGE_HEAP_AT),
-            AccessMode::ReadOnly,
-            FORMAT_WIDTHS,
-        )
-        .read(&image, parsed)
-        .unwrap();
         let mut physical = vec![0xFF; effective_base];
         physical.extend_from_slice(&image);
-        let source = BytesSource::new(&physical);
-        let framed = BaseOffsetSource {
-            inner: &source,
-            base: addresses.effective_base(),
-        };
-        let streamed = LegacyHeapObjectReader::new(
+        let buffered = HeapObjectReader::new(
+            HeapSource::resident(
+                PhysicalBytes::for_test(&physical, addresses)
+                    .stored()
+                    .unwrap(),
+            ),
             &header,
-            addresses,
             StoredAddress::new(STORAGE_HEAP_AT),
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         )
-        .read_from_source(&framed, parsed)
+        .read(parsed)
+        .unwrap();
+        let source = BytesSource::new(&physical);
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let streamed = HeapObjectReader::new(
+            HeapSource::new(&stored),
+            &header,
+            StoredAddress::new(STORAGE_HEAP_AT),
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
+        )
+        .read(parsed)
         .unwrap();
         assert_eq!(buffered, b"abc");
         assert_eq!(streamed, buffered);

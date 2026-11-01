@@ -34,8 +34,6 @@ use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
-#[cfg(any(test, doc))]
-use crate::source::SourceMetadata;
 use crate::source::StoredBytes;
 use crate::source::StoredMetadata;
 use crate::source::StoredRead;
@@ -170,20 +168,6 @@ fn search_nodes<'layout, 'reader>(
     }
 }
 
-/// Returns the allocations reachable from a version 2 B-tree header using validated file widths.
-///
-/// # Errors
-///
-/// Returns the structural error of the first B-tree header or node that does not parse.
-#[cfg(any(test, doc))]
-pub(crate) fn legacy_collect_btree_v2_storage_extents<S: Source + ?Sized>(
-    source: &S,
-    header_address: StoredAddress,
-    widths: FormatWidths,
-) -> Result<Vec<Extent>, FormatError> {
-    collect_storage_extents(&SourceMetadata(source), header_address, widths)
-}
-
 /// Returns the header and full node allocations in stored-address order.
 ///
 /// Reads metadata through [`StoredRead::read_metadata`]. The returned addresses are relative to
@@ -197,19 +181,11 @@ pub(crate) fn collect_btree_v2_storage_extents(
     header_address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<Vec<Extent>, FormatError> {
-    collect_storage_extents(&StoredMetadata(source), header_address, widths)
-}
-
-fn collect_storage_extents<S: MetadataSource + ?Sized>(
-    source: &S,
-    header_address: StoredAddress,
-    widths: FormatWidths,
-) -> Result<Vec<Extent>, FormatError> {
     // "Node Size" applies to BTIN and BTLF nodes. BTHD has its own layout and encoded length.
     let header_len =
         hdf5_pure_format::__private::btree_v2_header_size(widths.offsets, widths.lengths);
     let header_extent = extent_in_source(source, header_address, header_len.to_u64())?;
-    let header_bytes = source.read_metadata(header_address.get(), header_len)?;
+    let header_bytes = source.read_metadata(header_address, header_len)?;
     let header = BTreeV2Header::parse_with_widths(&header_bytes, 0, widths)?;
     // BTIN and BTLF both have a 6-byte signature/version/type prefix and a 4-byte checksum.
     if header.node_size < 10 {
@@ -278,8 +254,8 @@ fn storage_header_has_root(
 /// 0 is a leaf, so recursion stops there after validating the leaf layout.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn collect_storage_node<S: MetadataSource + ?Sized>(
-    source: &S,
+fn collect_storage_node(
+    source: &(impl StoredRead + ?Sized),
     node: BTreeV2Node<'_>,
     node_size: u32,
     offset_width: OffsetWidth,
@@ -290,7 +266,7 @@ fn collect_storage_node<S: MetadataSource + ?Sized>(
         return Err(FormatError::InvalidBTreeV2Signature);
     }
     let extent = extent_in_source(source, node.address(), u64::from(node_size))?;
-    let bytes = source.read_metadata(node.address().get(), u64::from(node_size).to_usize()?)?;
+    let bytes = source.read_metadata(node.address(), u64::from(node_size).to_usize()?)?;
     let view = node.parse(&bytes)?;
     extents.push(extent);
     for index in 0..=view.record_count() {
@@ -305,8 +281,8 @@ fn collect_storage_node<S: MetadataSource + ?Sized>(
 }
 
 /// Returns a checked extent after proving its complete byte range lies within `source`.
-fn extent_in_source<S: MetadataSource + ?Sized>(
-    source: &S,
+fn extent_in_source(
+    source: &(impl StoredRead + ?Sized),
     address: StoredAddress,
     length: u64,
 ) -> Result<Extent, FormatError> {
@@ -326,29 +302,14 @@ fn extent_in_source<S: MetadataSource + ?Sized>(
 
 /// Reads all records in tree order from the resident image at stored addresses.
 ///
-/// Uses the node parsing and empty-tree handling of [`legacy_collect_btree_v2_records`].
+/// Returns an empty vector when either record count in `header` is zero. Parses each visited
+/// node with the header's type and geometry before reading its records and children.
 ///
 /// # Errors
 ///
 /// Returns errors from address conversion or B-tree parsing.
 pub(crate) fn collect_btree_v2_records(
     source: StoredBytes<'_>,
-    header: &BTreeV2Header,
-    offset_width: OffsetWidth,
-) -> Result<Vec<BTreeV2Record>, FormatError> {
-    legacy_collect_btree_v2_records(source.metadata_frame().bytes(), header, offset_width)
-}
-
-/// Returns all records from a version 2 B-tree in tree order.
-///
-/// Returns an empty list when either record count in `header` is zero. Each visited node is
-/// parsed with its owning header's type and geometry before its records and children are read.
-///
-/// # Errors
-///
-/// Returns the [`FormatError`] of the first B-tree node that does not parse.
-pub fn legacy_collect_btree_v2_records(
-    file_data: &[u8],
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
 ) -> Result<Vec<BTreeV2Record>, FormatError> {
@@ -363,21 +324,22 @@ pub fn legacy_collect_btree_v2_records(
     } else {
         Vec::new()
     };
-    collect_node_records(file_data, root, &mut records)?;
+    collect_node_records(source, root, &mut records)?;
     Ok(records)
 }
 
 fn collect_node_records(
-    file_data: &[u8],
+    source: StoredBytes<'_>,
     node: BTreeV2Node<'_>,
     records: &mut Vec<BTreeV2Record>,
 ) -> Result<(), FormatError> {
+    let file_data = source.metadata_frame().bytes();
     let start = node.address().get().to_usize()?;
     bytes::ensure_len(file_data, start, 0)?;
     let view = node.parse(&file_data[start..])?;
     for index in 0..=view.record_count() {
         if let Some(child) = view.child(index)? {
-            collect_node_records(file_data, child, records)?;
+            collect_node_records(source, child, records)?;
         }
         if index < view.record_count() {
             records.push(BTreeV2Record {
@@ -403,14 +365,6 @@ pub(crate) fn collect_btree_v2_records_from_source(
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
 ) -> Result<Vec<BTreeV2Record>, FormatError> {
-    collect_records_from_metadata(source, header, offset_width)
-}
-
-fn collect_records_from_metadata<S: MetadataSource + ?Sized>(
-    source: &S,
-    header: &BTreeV2Header,
-    offset_width: OffsetWidth,
-) -> Result<Vec<BTreeV2Record>, FormatError> {
     if header.total_records == 0 || header.num_records_in_root == 0 {
         return Ok(Vec::new());
     }
@@ -422,8 +376,8 @@ fn collect_records_from_metadata<S: MetadataSource + ?Sized>(
     Ok(records)
 }
 
-fn collect_node_from_source<S: MetadataSource + ?Sized>(
-    source: &S,
+fn collect_node_from_source(
+    source: &BTreeV2Source<'_, impl StoredRead + ?Sized>,
     node: BTreeV2Node<'_>,
     node_size: u32,
     visited: &mut BTreeSet<StoredAddress>,
@@ -1039,17 +993,20 @@ mod tests {
         let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
         let expected: Vec<_> = (0..15).map(|id| BTreeV2Record { data: rec(id) }).collect();
         assert_eq!(
-            legacy_collect_btree_v2_records(&tree.file, &header, OffsetWidth::Eight).unwrap(),
+            collect_btree_v2_records(
+                crate::source::zero_base_bytes(&tree.file),
+                &header,
+                OffsetWidth::Eight
+            )
+            .unwrap(),
             expected
         );
 
         #[cfg(feature = "std")]
         {
-            use crate::source::SourceMetadata;
-
             let source = BytesSource::new(&tree.file);
             let header = BTreeV2Header::parse_from_source(
-                &SourceMetadata(&source),
+                &StoredMetadata(&crate::source::zero_base_source(&source)),
                 0,
                 OFFSET_SIZE,
                 LENGTH_SIZE,
@@ -1074,7 +1031,12 @@ mod tests {
         header.total_records = 1;
         let expected: Vec<_> = (0..15).map(|id| BTreeV2Record { data: rec(id) }).collect();
         assert_eq!(
-            legacy_collect_btree_v2_records(&tree.file, &header, OFFSET_WIDTH).unwrap(),
+            collect_btree_v2_records(
+                crate::source::zero_base_bytes(&tree.file),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap(),
             expected
         );
         assert_eq!(
@@ -1590,8 +1552,12 @@ mod tests {
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
 
         let hdr = BTreeV2Header::parse(&file_data, 0, 8, 8).unwrap();
-        let records =
-            legacy_collect_btree_v2_records(&file_data, &hdr, OffsetWidth::Eight).unwrap();
+        let records = collect_btree_v2_records(
+            crate::source::zero_base_bytes(&file_data),
+            &hdr,
+            OffsetWidth::Eight,
+        )
+        .unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].data, rec1.to_vec());
         assert_eq!(records[1].data, rec2.to_vec());
@@ -1601,7 +1567,12 @@ mod tests {
     fn empty_tree() {
         let header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         let hdr = BTreeV2Header::parse(&header, 0, 8, 8).unwrap();
-        let records = legacy_collect_btree_v2_records(&header, &hdr, OffsetWidth::Eight).unwrap();
+        let records = collect_btree_v2_records(
+            crate::source::zero_base_bytes(&header),
+            &hdr,
+            OffsetWidth::Eight,
+        )
+        .unwrap();
         assert_eq!(records, []);
         assert_eq!(
             collect_btree_v2_records_from_source(
@@ -1638,7 +1609,12 @@ mod tests {
         }
         let header = BTreeV2Header::parse(&image, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
         assert_eq!(
-            legacy_collect_btree_v2_records(&image, &header, OFFSET_WIDTH).unwrap_err(),
+            collect_btree_v2_records(
+                crate::source::zero_base_bytes(&image),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap_err(),
             expected
         );
         let source = BytesSource::new(&image);
@@ -1713,7 +1689,12 @@ mod tests {
             available: encoded_len - missing,
         };
         assert_eq!(
-            legacy_collect_btree_v2_records(&image, &header, OFFSET_WIDTH).unwrap_err(),
+            collect_btree_v2_records(
+                crate::source::zero_base_bytes(&image),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap_err(),
             expected
         );
         assert_eq!(
@@ -1730,7 +1711,6 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn streaming_btree_matches_buffered() {
-        use crate::source::SourceMetadata;
         let rec1 = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
         let rec2 = [11u8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
         let leaf = build_leaf_node(5, &[&rec1, &rec2]);
@@ -1741,15 +1721,24 @@ mod tests {
         file_data[leaf_offset..leaf_offset + leaf.len()].copy_from_slice(&leaf);
 
         let hdr = BTreeV2Header::parse(&file_data, 0, 8, 8).unwrap();
-        let buffered: Vec<_> =
-            legacy_collect_btree_v2_records(&file_data, &hdr, OffsetWidth::Eight)
-                .unwrap()
-                .into_iter()
-                .map(|r| r.data)
-                .collect();
+        let buffered: Vec<_> = collect_btree_v2_records(
+            crate::source::zero_base_bytes(&file_data),
+            &hdr,
+            OffsetWidth::Eight,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.data)
+        .collect();
 
         let mem = BytesSource::new(&file_data);
-        let hdr_mem = BTreeV2Header::parse_from_source(&SourceMetadata(&mem), 0, 8, 8).unwrap();
+        let hdr_mem = BTreeV2Header::parse_from_source(
+            &StoredMetadata(&crate::source::zero_base_source(&mem)),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
         assert_eq!(hdr_mem.root_node_address, hdr.root_node_address);
         let from_mem: Vec<_> = collect_btree_v2_records_from_source(
             &BTreeV2Source::new(&crate::source::zero_base_source(&mem)),
@@ -1762,7 +1751,13 @@ mod tests {
         .collect();
 
         let seek = ReadSeekSource::new(Cursor::new(file_data)).unwrap();
-        let hdr_seek = BTreeV2Header::parse_from_source(&SourceMetadata(&seek), 0, 8, 8).unwrap();
+        let hdr_seek = BTreeV2Header::parse_from_source(
+            &StoredMetadata(&crate::source::zero_base_source(&seek)),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
         let from_seek: Vec<_> = collect_btree_v2_records_from_source(
             &BTreeV2Source::new(&crate::source::zero_base_source(&seek)),
             &hdr_seek,
@@ -1790,7 +1785,7 @@ mod tests {
         buf
     }
 
-    /// Writes a tree of `count` records, reads it back with [`legacy_collect_btree_v2_records`], and
+    /// Writes a tree of `count` records, reads it back with [`collect_btree_v2_records`], and
     /// returns its depth and the record indices in the order the walk reads them.
     fn round_trip(count: usize, record_size: u16) -> (u16, Vec<u64>) {
         let plan = BTreeV2Plan::new(
@@ -1823,8 +1818,12 @@ mod tests {
         let header = BTreeV2Header::parse(&file, 0, OFFSET_SIZE, LENGTH_SIZE).expect("header");
         assert_eq!(header.node_size, BTREE_V2_NODE_SIZE);
         assert_eq!(header.total_records, count as u64);
-        let read =
-            legacy_collect_btree_v2_records(&file, &header, OffsetWidth::Eight).expect("read");
+        let read = collect_btree_v2_records(
+            crate::source::zero_base_bytes(&file),
+            &header,
+            OffsetWidth::Eight,
+        )
+        .expect("read");
         let ids = read
             .iter()
             .map(|r| u64::from_le_bytes(r.data[..8].try_into().expect("8 bytes")))
