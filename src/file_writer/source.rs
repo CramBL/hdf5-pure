@@ -1544,7 +1544,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use hdf5_pure_format::__private::DenseLinkPlan;
     use hdf5_pure_format::__private::LinkCreationPolicy;
+    use hdf5_pure_format::__private::LinkInfoMessage;
     use hdf5_pure_format::__private::OwnedLink;
     use hdf5_pure_format::__private::OwnedLinkTarget;
     use rstest::rstest;
@@ -1618,9 +1620,127 @@ mod tests {
     }
 
     #[rstest]
+    #[case::tracked(false)]
+    #[case::indexed(true)]
+    fn tracked_dense_link_geometry_retains_offsets_and_counter(
+        #[case] indexed: bool,
+        #[values(0, (1_u64 << 32) + 512)] address: u64,
+    ) {
+        let plan = tracked_dense_plan(indexed);
+        let geometry = DenseLinks::new(
+            &plan.link_info(StoredAddress::ZERO).unwrap(),
+            LinkPhaseChange::default()
+                .group_info()
+                .unwrap()
+                .phase_change(),
+        )
+        .unwrap();
+        let span = Allocation {
+            address: StoredAddress::new(address),
+            length: plan.serialized_len(),
+        };
+        assert_eq!(
+            geometry.link_info(span).unwrap(),
+            plan.link_info(span.address).unwrap()
+        );
+        assert_eq!(
+            geometry.link_info(span).unwrap().max_creation_order,
+            Some(17)
+        );
+    }
+
+    fn tracked_dense_plan(indexed: bool) -> DenseLinkPlan {
+        let info = LinkInfoMessage {
+            max_creation_order: Some(17),
+            fractal_heap_address: None,
+            btree_name_index_address: None,
+            btree_creation_order_address: indexed.then_some(None),
+        };
+        let links = (0..9)
+            .map(|index| {
+                OwnedLink::new(
+                    format!("d{index:04}").into_bytes(),
+                    CharacterSet::Ascii,
+                    OwnedLinkTarget::Hard {
+                        object_header_address: StoredAddress::new(100),
+                    },
+                    Some(index + 1),
+                )
+                .unwrap()
+            })
+            .collect();
+        DenseLinkPlan::new(
+            super::link_storage(links, LinkCreationPolicy::from_info(&info).unwrap()).unwrap(),
+            super::super::LENGTH_WIDTH,
+        )
+        .unwrap()
+    }
+
+    #[rstest]
+    #[case::absent(None)]
+    #[case::zero(Some(StoredAddress::ZERO))]
+    fn dense_link_geometry_rejects_an_unmeasured_creation_index(
+        #[case] creation: Option<StoredAddress>,
+    ) {
+        let info = LinkInfoMessage {
+            max_creation_order: Some(17),
+            fractal_heap_address: Some(StoredAddress::ZERO),
+            btree_name_index_address: Some(StoredAddress::new(512)),
+            btree_creation_order_address: Some(creation),
+        };
+        assert_eq!(
+            DenseLinks::new(
+                &info,
+                LinkPhaseChange::default()
+                    .group_info()
+                    .unwrap()
+                    .phase_change(),
+            )
+            .map(|_| ())
+            .unwrap_err(),
+            FormatError::Internal(
+                "source-backed metadata differs from its planned allocation".into()
+            )
+        );
+    }
+
+    #[rstest]
+    #[case::before_creation_index(1023)]
+    #[case::at_creation_index(1024)]
+    fn dense_link_geometry_rejects_a_creation_index_outside_the_reservation(#[case] length: u64) {
+        let geometry = DenseLinks::new(
+            &LinkInfoMessage {
+                max_creation_order: Some(17),
+                fractal_heap_address: Some(StoredAddress::ZERO),
+                btree_name_index_address: Some(StoredAddress::new(512)),
+                btree_creation_order_address: Some(Some(StoredAddress::new(1024))),
+            },
+            LinkPhaseChange::default()
+                .group_info()
+                .unwrap()
+                .phase_change(),
+        )
+        .unwrap();
+        assert_eq!(
+            geometry
+                .link_info(Allocation {
+                    address: StoredAddress::new(4096),
+                    length,
+                })
+                .unwrap_err(),
+            FormatError::Internal(
+                "source-backed metadata differs from its planned allocation".into()
+            )
+        );
+    }
+
+    #[rstest]
     #[case::undefined(true)]
     #[case::overflow(false)]
-    fn dense_link_geometry_rejects_a_placement_outside_the_address_width(#[case] undefined: bool) {
+    fn dense_link_geometry_rejects_a_placement_outside_the_address_width(
+        #[case] undefined: bool,
+        #[values(None, Some(false), Some(true))] indexed: Option<bool>,
+    ) {
         let links: Vec<_> = (0..9)
             .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
             .collect();
@@ -1633,6 +1753,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let plan = indexed.map(tracked_dense_plan).unwrap_or(plan);
         let geometry = DenseLinks::new(
             &plan.link_info(StoredAddress::new(0)).unwrap(),
             LinkPhaseChange::default()
