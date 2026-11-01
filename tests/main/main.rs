@@ -89,6 +89,7 @@ mod memory_strategy;
 mod metadata_owners;
 mod modern;
 mod named_datatypes;
+mod native_complex;
 mod object_header_continuation;
 mod object_path;
 mod owned_append;

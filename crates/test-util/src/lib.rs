@@ -38,6 +38,7 @@ pub mod local_heap;
 pub mod mat_struct_array;
 pub mod mcos;
 pub mod modern;
+pub mod native_complex;
 pub mod object_header;
 pub mod paged_index;
 pub mod process;

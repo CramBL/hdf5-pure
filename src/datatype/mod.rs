@@ -20,6 +20,7 @@ pub(crate) fn datatype_class_name(datatype: &Datatype) -> &'static str {
         Datatype::Enumeration { .. } => "Enumeration",
         Datatype::VariableLength(_) => "VariableLength",
         Datatype::Array { .. } => "Array",
+        Datatype::Complex(_) => "Complex",
         _ => "Unknown",
     }
 }

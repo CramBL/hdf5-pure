@@ -17,7 +17,7 @@
 //! Currently reproducible:
 //!
 //! - Datasets with fixed-point, floating-point, time, fixed-length string,
-//!   bit-field, opaque, compound, enumeration, and array datatypes,
+//!   bit-field, opaque, compound, enumeration, array, and native complex datatypes,
 //!   contiguous/compact or chunked.
 //! - **Chunked** datasets copy their compressed chunks **verbatim** (chunk by
 //!   chunk, never decoded), so *every* filter is preserved byte-exact: deflate,
@@ -1384,7 +1384,8 @@ fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
         | Datatype::Time(..)
         | Datatype::String { .. }
         | Datatype::BitField(..)
-        | Datatype::Opaque { .. } => true,
+        | Datatype::Opaque { .. }
+        | Datatype::Complex(_) => true,
         Datatype::Compound { members, .. } => members
             .iter()
             .all(|m| attr_bytes_are_position_independent(&m.datatype)),
@@ -1506,15 +1507,15 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
         )))
     };
     match dt {
-        // Scalar and opaque-bytes datatypes whose on-disk form `Datatype::serialize`
-        // reproduces exactly (including the time type's byte order), so reading the
-        // raw element bytes and re-emitting them is byte-for-byte faithful.
+        // Fixed-size datatypes whose metadata the writer serializes faithfully. Their raw
+        // element bytes can be copied unchanged, preserving numeric byte order and layout.
         Datatype::FixedPoint(..)
         | Datatype::FloatingPoint(..)
         | Datatype::Time(..)
         | Datatype::String { .. }
         | Datatype::BitField(..)
-        | Datatype::Opaque { .. } => Ok(()),
+        | Datatype::Opaque { .. }
+        | Datatype::Complex(_) => Ok(()),
         // String-shaped variable-length datatypes (`VariableLengthType::String`, or the
         // MATLAB VLEN-of-1-byte-ASCII-string shape) are reproduced by reading
         // each element's exact heap bytes and re-staging them through the
@@ -1578,7 +1579,8 @@ fn check_vlen_base_type(dt: &Datatype, owner: &str) -> Result<(), Error> {
         | Datatype::Time(..)
         | Datatype::String { .. }
         | Datatype::BitField(..)
-        | Datatype::Opaque { .. } => Ok(()),
+        | Datatype::Opaque { .. }
+        | Datatype::Complex(_) => Ok(()),
         Datatype::Reference { .. } => bad("references"),
         Datatype::VariableLength(_) => bad("variable-length elements"),
         Datatype::Compound { members, .. } => {
