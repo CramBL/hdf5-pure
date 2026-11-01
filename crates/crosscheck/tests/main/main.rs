@@ -97,6 +97,7 @@ mod ndarray_roundtrip;
 mod null_attr_padding;
 mod numeric_decode;
 mod numeric_padding;
+mod object_header_padding;
 mod object_header_v1_malformed;
 mod object_path;
 mod owned_append;

@@ -62,7 +62,7 @@ impl ContinuationWorklist {
 ///
 /// [`ContinuationWorklist::discover`] rejects the next one, which ends the parse of a header whose
 /// blocks refer to each other in a cycle.
-const MAX_CONTINUATIONS: usize = 256;
+pub(super) const MAX_CONTINUATIONS: usize = 256;
 
 #[cfg(test)]
 mod tests {

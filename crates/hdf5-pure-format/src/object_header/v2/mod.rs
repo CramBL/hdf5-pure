@@ -24,11 +24,13 @@ use crate::object_header::v2::collector::HeaderCollector;
 use crate::width::FormatWidths;
 use crate::width::UintWidth;
 
+mod allocation;
 mod chunk;
 mod collector;
 mod splice;
 mod worklist;
 
+pub use allocation::ObjectHeaderAllocation;
 pub use splice::RecordSplice;
 
 impl ObjectHeader {
@@ -356,19 +358,22 @@ impl ObjectHeaderPrefix {
         messages_len: usize,
         write_messages: impl FnOnce(&mut Vec<u8>),
     ) -> Vec<u8> {
-        let width = UintWidth::smallest_for_len(messages_len);
+        self.encode_header_at_width(
+            UintWidth::smallest_for_len(messages_len),
+            messages_len,
+            write_messages,
+        )
+    }
+
+    fn encode_header_at_width(
+        self,
+        width: UintWidth,
+        messages_len: usize,
+        write_messages: impl FnOnce(&mut Vec<u8>),
+    ) -> Vec<u8> {
         let prefix_len = OHDR_SIGNATURE.len() + 2 + self.optional_len() + usize::from(width.get());
         let mut buf = Vec::with_capacity(prefix_len + messages_len + CHECKSUM_LEN);
-        buf.extend_from_slice(&OHDR_SIGNATURE);
-        buf.push(OBJECT_HEADER_VERSION);
-        buf.push(width.flag_bits() | self.header_flags());
-        if let Some(times) = self.times {
-            buf.extend_from_slice(&times.to_bytes());
-        }
-        if let Some(phase) = self.attribute_phase_change {
-            buf.extend_from_slice(&phase.to_bytes());
-        }
-        width.write(&mut buf, messages_len);
+        self.write_prefix(&mut buf, width, messages_len);
         write_messages(&mut buf);
         assert_eq!(
             buf.len(),
@@ -378,6 +383,25 @@ impl ObjectHeaderPrefix {
         let checksum = checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());
         buf
+    }
+
+    /// Appends the signature, flags, optional fields, and chunk-size field.
+    ///
+    /// The fields are defined in "Version 2 Data Object Header Prefix" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+    fn write_prefix(self, buf: &mut Vec<u8>, width: UintWidth, messages_len: usize) {
+        buf.extend_from_slice(&OHDR_SIGNATURE);
+        buf.push(OBJECT_HEADER_VERSION);
+        buf.push(width.flag_bits() | self.header_flags());
+        if let Some(times) = self.times {
+            buf.extend_from_slice(&times.to_bytes());
+        }
+        if let Some(phase) = self.attribute_phase_change {
+            buf.extend_from_slice(&phase.to_bytes());
+        }
+        width.write(buf, messages_len);
     }
 
     /// Returns the flag bits of these properties, apart from the two bits of the width of the
@@ -566,16 +590,13 @@ impl MessageRecordLayout {
             clippy::cast_possible_truncation,
             reason = "the first assertion above admits only a type that fits the 1-byte field"
         )]
-        buf.push(msg_type.to_u16() as u8);
+        let msg_type = msg_type.to_u16() as u8;
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the second assertion above bounds the body to the 2-byte size field"
         )]
-        buf.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        buf.push(flags.get());
-        if self.tracks_creation_order() {
-            buf.extend_from_slice(&creation_index.to_le_bytes());
-        }
+        let body_len = body.len() as u16;
+        self.write_record_prefix(buf, msg_type, flags, creation_index, body_len);
         buf.extend_from_slice(body);
     }
 
@@ -588,6 +609,28 @@ impl MessageRecordLayout {
     /// than [`OBJECT_HEADER_MESSAGE_MAX`].
     pub fn record(self, msg_type: MessageType, body: &[u8]) -> Vec<u8> {
         self.record_with_creation_index(msg_type, MessageFlags::NONE, 0, body)
+    }
+
+    /// Appends the fixed record fields and the optional creation index.
+    ///
+    /// The fields are defined in "Version 2 Data Object Header Prefix" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+    fn write_record_prefix(
+        self,
+        buf: &mut Vec<u8>,
+        msg_type: u8,
+        flags: MessageFlags,
+        creation_index: u16,
+        body_len: u16,
+    ) {
+        buf.push(msg_type);
+        buf.extend_from_slice(&body_len.to_le_bytes());
+        buf.push(flags.get());
+        if self.tracks_creation_order() {
+            buf.extend_from_slice(&creation_index.to_le_bytes());
+        }
     }
 }
 
@@ -791,7 +834,9 @@ mod tests {
 
     #[test]
     fn an_encoded_header_matches_the_bytes_of_an_independent_builder() {
-        let message = Message::new(RecordType::DATATYPE, &[5, 6]);
+        let message = Message::new(RecordType::DATATYPE, &[5, 6])
+            .with_flags(test_util::object_header::MessageFlags::CONSTANT)
+            .with_creation_order(17);
         let expected = v2_bytes::Header::new()
             .timestamps(v2_bytes::Timestamps {
                 access: 1,

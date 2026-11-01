@@ -20,6 +20,7 @@ pub use v2::AttributePhaseChange;
 pub use v2::MessageRecord;
 pub use v2::MessageRecordLayout;
 pub use v2::OBJECT_HEADER_PREFIX_MAX_LEN;
+pub use v2::ObjectHeaderAllocation;
 pub use v2::ObjectHeaderContinuation;
 pub use v2::ObjectHeaderPrefix;
 pub use v2::ObjectTimes;

@@ -268,6 +268,7 @@ pub use crate::object_header::MessageRecord;
 pub use crate::object_header::MessageRecordLayout;
 pub use crate::object_header::OBJECT_HEADER_PREFIX_MAX_LEN;
 pub use crate::object_header::ObjectHeader;
+pub use crate::object_header::ObjectHeaderAllocation;
 pub use crate::object_header::ObjectHeaderContinuation;
 pub use crate::object_header::ObjectHeaderPrefix;
 pub use crate::object_header::ObjectTimes;
