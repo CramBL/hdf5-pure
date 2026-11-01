@@ -166,7 +166,7 @@ fn chunk_file(stored: Option<&[u8]>, extent: u64, skipped: bool, fill: i32) -> V
     let mut header = Header::new()
         .message(Message::new(
             MessageType::DATATYPE,
-            &format::serialize_datatype(&hdf5_pure::make_i32_type()),
+            &format::serialize_datatype(&hdf5_pure::make_i32_type()).unwrap(),
         ))
         .message(Message::new(
             MessageType::DATASPACE,

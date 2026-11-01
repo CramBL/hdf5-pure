@@ -753,6 +753,30 @@ pub enum FormatError {
     InvalidObjectReference(u64),
     /// Invalid offset size (must be 2, 4, or 8).
     InvalidOffsetSize(u8),
+    /// An opaque datatype has nonzero reserved class bits.
+    InvalidOpaqueReservedBits {
+        /// The reserved bits, with bit 8 of the class bit field at bit 0.
+        bits: u16,
+    },
+    /// A caller-supplied opaque tag contains a NUL byte.
+    InvalidOpaqueTagByte {
+        /// The byte offset within the logical tag.
+        offset: usize,
+        /// The invalid byte.
+        byte: u8,
+    },
+    /// An opaque tag property has a recorded length that is not a multiple of eight.
+    InvalidOpaqueTagLength {
+        /// The recorded property length, in bytes.
+        length: u8,
+    },
+    /// An opaque tag property contains a nonzero byte after its first NUL.
+    InvalidOpaqueTagPadding {
+        /// The byte offset within the tag property.
+        offset: usize,
+        /// The nonzero padding byte.
+        byte: u8,
+    },
     /// Invalid reference type.
     InvalidReferenceType(u8),
     /// A scale-offset byte-order code is neither little endian nor big endian.
@@ -996,6 +1020,11 @@ pub enum FormatError {
         offset: u64,
         /// Second operand (typically the length/size).
         length: u64,
+    },
+    /// A caller-supplied opaque tag exceeds the 247-byte encoding limit.
+    OpaqueTagTooLong {
+        /// The logical tag length, in bytes.
+        length: usize,
     },
     /// Two floating-point fields occupy at least one common bit.
     OverlappingFloatingPointFields {
@@ -1453,6 +1482,30 @@ impl fmt::Display for FormatError {
                     f,
                     "unsupported message type {id:#06x} marked as must-understand"
                 )
+            }
+            Self::InvalidOpaqueReservedBits { bits } => {
+                write!(f, "opaque datatype has reserved bits {bits:#06x}")
+            }
+            Self::InvalidOpaqueTagByte { offset, byte } => {
+                write!(
+                    f,
+                    "opaque tag has invalid byte {byte:#04x} at offset {offset}"
+                )
+            }
+            Self::InvalidOpaqueTagLength { length } => {
+                write!(
+                    f,
+                    "opaque tag property length {length} is not a multiple of eight"
+                )
+            }
+            Self::InvalidOpaqueTagPadding { offset, byte } => {
+                write!(
+                    f,
+                    "opaque tag padding has nonzero byte {byte:#04x} at offset {offset}"
+                )
+            }
+            Self::OpaqueTagTooLong { length } => {
+                write!(f, "opaque tag length {length} exceeds 247 bytes")
             }
             Self::InvalidDatatypeClass(c) => {
                 write!(f, "invalid datatype class: {c}")

@@ -127,6 +127,13 @@ pub(crate) const COMPACT_LINK_INFO: LinkInfoMessage = LinkInfoMessage {
 
 // ---- OH builders ----
 
+/// Builds a chunked dataset's object header with its supplied layout and filter messages.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque tag longer
+/// than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte.
+/// Propagates attribute and object-header serialization errors.
 pub(crate) fn build_chunked_dataset_oh(
     dt: &Datatype,
     dt_location: &DatatypeLocation,
@@ -139,7 +146,7 @@ pub(crate) fn build_chunked_dataset_oh(
     fill: Option<&[u8]>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
-    add_datatype(&mut w, dt, dt_location);
+    add_datatype(&mut w, dt, dt_location)?;
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
@@ -187,6 +194,10 @@ pub(crate) fn contiguous_layout_version(libver: LibVer) -> LayoutVersion {
 
 /// Builds a contiguous dataset's object header, whose data layout message stores
 /// `data_addr` and the `data_size` bytes there.
+///
+/// # Errors
+///
+/// Returns the same serialization errors as [`build_chunked_dataset_oh`].
 pub(crate) fn build_dataset_oh(
     dt: &Datatype,
     dt_location: &DatatypeLocation,
@@ -200,7 +211,7 @@ pub(crate) fn build_dataset_oh(
     libver: LibVer,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
-    add_datatype(&mut w, dt, dt_location);
+    add_datatype(&mut w, dt, dt_location)?;
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
@@ -221,11 +232,19 @@ pub(crate) fn build_dataset_oh(
     w.serialize()
 }
 
-/// Add a dataset's Datatype message: the encoding itself, or — when the type is
-/// committed — the reference standing in for it, under a record whose shared flag
-/// says the body is one. Without that flag the ten reference bytes decode as a
-/// zero-width time datatype, which is the defect issue #254 was filed for.
-fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLocation) {
+/// Adds an inline datatype or a shared reference to a committed datatype.
+///
+/// Writes a committed reference with the shared-message flag.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque tag longer
+/// than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte.
+fn add_datatype(
+    w: &mut ObjectHeaderWriter,
+    dt: &Datatype,
+    location: &DatatypeLocation,
+) -> Result<(), FormatError> {
     match location.reference_bytes(OFFSET_WIDTH) {
         Some(reference) => {
             w.add_message_with_flags(
@@ -236,36 +255,25 @@ fn add_datatype(w: &mut ObjectHeaderWriter, dt: &Datatype, location: &DatatypeLo
         }
         None => w.add_message_with_flags(
             MessageType::DATATYPE,
-            hdf5_pure_format::__private::serialize_datatype(dt),
+            hdf5_pure_format::__private::serialize_datatype(dt)?,
             MessageFlags::CONSTANT,
         ),
     }
+    Ok(())
 }
 
-/// Build the object header of a committed (`H5Tcommit`) datatype object.
+/// Builds an object header for a committed datatype.
 ///
-/// What makes the object a named datatype is the message set: the C library's
-/// `H5O__dtype_isa` calls any header holding a Datatype message and no dataspace
-/// or layout one a datatype, which is also how this crate's reader tells them
-/// apart.
+/// Writes constant datatype metadata with sharing forbidden. Writes an Object Reference Count
+/// message when `references` exceeds one. The count includes hard links and shared datatype
+/// references.
 ///
-/// `references` is the object's link count *plus* every message that names it
-/// through a shared reference, matching `H5O_link`, which the C library calls
-/// once per hard link and once more each time a dataset or attribute is created
-/// against the committed type. It goes in an Object Reference Count message,
-/// which the format only carries above one — a header without one reads as
-/// singly referenced.
+/// # Errors
 ///
-/// Nothing *reading* the file notices a wrong count. It decides what a later
-/// unlink does: the C library decrements it and deletes the object at zero, so a
-/// count of 1 means unlinking the name takes the type away from every object
-/// still naming it. (Measured here, the datasets kept reading afterwards — the
-/// freed header had not been reused yet — which is what makes an undercount a
-/// latent fault rather than an immediate one.)
-///
-/// The message flags match what libhdf5 writes: constant, since a committed
-/// type's datatype never changes, and do-not-share, since this copy *is* the
-/// shared one and must not be moved into shared storage again.
+/// Returns [`FormatError::OpaqueTagTooLong`] if the datatype contains an opaque tag longer than
+/// 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte.
+/// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the datatype message exceeds the
+/// object-header message size limit.
 pub(crate) fn build_committed_datatype_oh(
     dt: &Datatype,
     references: u32,
@@ -273,7 +281,7 @@ pub(crate) fn build_committed_datatype_oh(
     let mut w = ObjectHeaderWriter::new();
     w.add_message_with_flags(
         MessageType::DATATYPE,
-        hdf5_pure_format::__private::serialize_datatype(dt),
+        hdf5_pure_format::__private::serialize_datatype(dt)?,
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
     if references > 1 {
@@ -1182,8 +1190,8 @@ impl FileWriter {
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
-            if hdf5_pure_format::__private::serialize_datatype(&committed[ci].dt)
-                != hdf5_pure_format::__private::serialize_datatype(dt)
+            if hdf5_pure_format::__private::serialize_datatype(&committed[ci].dt)?
+                != hdf5_pure_format::__private::serialize_datatype(dt)?
             {
                 return Err(FormatError::CommittedDatatypeMismatch {
                     path: path.to_string(),

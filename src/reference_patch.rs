@@ -1004,7 +1004,8 @@ mod tests {
             MessageType::DATATYPE,
             &hdf5_pure_format::__private::serialize_datatype(
                 &type_builders::make_object_reference_type(),
-            ),
+            )
+            .unwrap(),
         );
         let mut layout = vec![3u8, 0];
         layout.extend_from_slice(&8u16.to_le_bytes());
@@ -1184,7 +1185,8 @@ mod tests {
                     MessageType::DATATYPE,
                     &hdf5_pure_format::__private::serialize_datatype(
                         &type_builders::make_object_reference_type(),
-                    ),
+                    )
+                    .unwrap(),
                 )))
                 .unwrap();
 

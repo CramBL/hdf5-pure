@@ -177,15 +177,18 @@ impl Object {
     ///
     /// Returns [`FormatError::CommittedDatatypeMismatch`] if a use differs from its committed
     /// datatype. Returns [`FormatError::Internal`] if a target is not a committed datatype or its
-    /// index is outside `references`. Propagates source loading and path resolution errors.
+    /// index is outside `references`. Returns [`FormatError::OpaqueTagTooLong`] if a compared
+    /// datatype contains an opaque tag longer than 247 bytes, or
+    /// [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte. Propagates source
+    /// loading and path resolution errors.
     fn count_uses(&self, source: &impl ObjectSource, references: &mut [u32]) -> Result<(), Error> {
         let mut use_type = |path: &ObjectPathBuf, datatype: &Datatype| -> Result<(), Error> {
             let target = source.resolve(path)?;
             let Kind::Committed(committed) = source.load(target)?.kind else {
                 return Err(inconsistent().into());
             };
-            if hdf5_pure_format::__private::serialize_datatype(&committed)
-                != hdf5_pure_format::__private::serialize_datatype(datatype)
+            if hdf5_pure_format::__private::serialize_datatype(&committed)?
+                != hdf5_pure_format::__private::serialize_datatype(datatype)?
             {
                 return Err(FormatError::CommittedDatatypeMismatch {
                     path: path.to_string(),

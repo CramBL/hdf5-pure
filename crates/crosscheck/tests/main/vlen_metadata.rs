@@ -130,7 +130,7 @@ fn reads_c_variable_length_string_metadata(
         dataset.read_string().unwrap(),
         ["alpha", if utf8 { "mètre" } else { "beta" }]
     );
-    let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype);
+    let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype).unwrap();
     assert_eq!(
         hdf5_pure_format::__private::parse_datatype(&encoded).unwrap(),
         (datatype, encoded.len())
@@ -163,7 +163,7 @@ fn reports_variable_length_metadata_errors_through_the_public_api(
         .unwrap()
         .datatype()
         .unwrap();
-    let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype);
+    let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     let offset = bytes
         .windows(encoded.len())
@@ -217,7 +217,7 @@ fn reads_c_nested_variable_length_sequence_datatype() {
             ))
         )))
     );
-    let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype);
+    let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype).unwrap();
     assert_eq!(
         hdf5_pure_format::__private::parse_datatype(&encoded).unwrap(),
         (datatype, encoded.len())
@@ -368,7 +368,7 @@ fn preserves_c_variable_length_integer_string_bases(
         panic!("expected variable-length string, got {actual:?}");
     };
     assert_eq!(string.base_type(), &expected);
-    let bytes = hdf5_pure_format::__private::serialize_datatype(&actual);
+    let bytes = hdf5_pure_format::__private::serialize_datatype(&actual).unwrap();
     assert_eq!(
         hdf5_pure_format::__private::parse_datatype(&bytes).unwrap(),
         (actual, bytes.len())

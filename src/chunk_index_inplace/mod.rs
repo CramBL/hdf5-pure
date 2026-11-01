@@ -3899,7 +3899,8 @@ mod tests {
             .find(|m| m.msg_type == MessageType::DATATYPE)
             .unwrap();
         let wider =
-            hdf5_pure_format::__private::serialize_datatype(&crate::type_builders::make_i64_type());
+            hdf5_pure_format::__private::serialize_datatype(&crate::type_builders::make_i64_type())
+                .unwrap();
         assert_eq!(wider.len(), datatype.size);
         store
             .publish_checksummed(

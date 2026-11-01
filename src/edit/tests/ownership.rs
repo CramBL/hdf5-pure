@@ -196,7 +196,7 @@ fn a_malformed_live_collection_is_an_error() {
     MessageType::ATTRIBUTE,
     &Attribute::new(
         "a",
-        &format::serialize_datatype(&global_heap_fixture::object_reference()),
+        &format::serialize_datatype(&global_heap_fixture::object_reference()).unwrap(),
         &dataspace::scalar(),
         &vec![0; global_heap_fixture::object_reference().type_size() as usize],
     )
@@ -460,7 +460,7 @@ fn ownership_chain(depth: usize, leaf: &[Message]) -> Vec<u8> {
 fn datatype_message() -> Message {
     Message::new(
         MessageType::DATATYPE,
-        &format::serialize_datatype(&crate::make_u8_type()),
+        &format::serialize_datatype(&crate::make_u8_type()).unwrap(),
     )
 }
 

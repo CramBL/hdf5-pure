@@ -64,8 +64,13 @@ impl Form {
             Self::CompactAttribute => {
                 return vec![Message::new(
                     MessageType::ATTRIBUTE,
-                    &Attribute::new("a", &format::serialize_datatype(datatype), &space, elements)
-                        .build(),
+                    &Attribute::new(
+                        "a",
+                        &format::serialize_datatype(datatype).unwrap(),
+                        &space,
+                        elements,
+                    )
+                    .build(),
                 )];
             }
             Self::CompactDataset => data_layout::compact(elements),
@@ -182,7 +187,10 @@ fn superblock() -> Superblock {
 /// Returns the datatype and dataspace messages of a dataset object header.
 pub fn dataset_messages(datatype: &Datatype, space: &[u8]) -> Vec<Message> {
     vec![
-        Message::new(MessageType::DATATYPE, &format::serialize_datatype(datatype)),
+        Message::new(
+            MessageType::DATATYPE,
+            &format::serialize_datatype(datatype).unwrap(),
+        ),
         Message::new(MessageType::DATASPACE, space),
     ]
 }

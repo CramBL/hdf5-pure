@@ -41,6 +41,7 @@ pub mod mcos;
 pub mod modern;
 pub mod native_complex;
 pub mod object_header;
+pub mod opaque;
 pub mod paged_index;
 pub mod process;
 pub mod publication;

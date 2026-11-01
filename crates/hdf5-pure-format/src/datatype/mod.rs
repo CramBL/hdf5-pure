@@ -50,6 +50,12 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 
 /// Parses a datatype message body and returns the type and the number of bytes read.
 ///
+/// Reads an opaque tag's complete recorded property and copies its logical bytes into
+/// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
+/// and its zero padding from a tagged property. Also accepts aligned properties filled entirely
+/// by tag bytes. `H5O__dtype_encode_helper` writes that form for tags whose logical length is a
+/// multiple of eight (H5Odtype.c, HDF5 2.2.0).
+///
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if the body ends within a field,
@@ -65,6 +71,10 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 /// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
 /// outside that range, [`FormatError::OverlappingFloatingPointFields`] if fields overlap, or
 /// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
+///
+/// Returns [`FormatError::InvalidOpaqueReservedBits`] if an opaque datatype has nonzero reserved
+/// bits, [`FormatError::InvalidOpaqueTagLength`] if its property length is not a multiple of
+/// eight, or [`FormatError::InvalidOpaqueTagPadding`] if a byte after the first NUL is nonzero.
 ///
 /// Returns [`FormatError::InvalidVariableLengthSubtype`] if a variable-length subtype is
 /// neither sequence nor string, [`FormatError::InvalidVariableLengthReservedBits`] if its
@@ -218,14 +228,18 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             ))
         }
         OPAQUE_CLASS => {
-            // Opaque
-            let tag_len = bf0 as usize;
-            bytes::ensure_len(data, pos, tag_len)?;
-            let tag = data[pos..pos + tag_len].to_vec();
-            // Tags are padded to multiple of 8 bytes
-            let padded = (tag_len + 7) & !7;
-            let pos = 8 + padded; // from start of properties
-            Ok((Datatype::Opaque { size, tag }, pos))
+            let reserved = u16::from_le_bytes([bf1, bf2]);
+            if reserved != 0 {
+                return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
+            }
+            let tag = OpaqueTagWire::parse(bf0, &data[pos..])?;
+            Ok((
+                Datatype::Opaque {
+                    size,
+                    tag: tag.logical.to_vec(),
+                },
+                pos + usize::from(tag.encoded_len),
+            ))
         }
         COMPOUND_CLASS => {
             // Compound
@@ -411,8 +425,16 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 ///
 /// Writes [`Datatype::Complex`] as class 11 in version 5, with one floating-point parent.
 /// Writes each containing datatype at a message version at least as high as its children's.
-pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
-    match datatype {
+/// Writes a nonempty opaque tag with a NUL terminator and zero padding to a multiple of eight
+/// bytes, recording that complete property length in the class bit field. Writes an empty tag
+/// with a zero-length property. Preserves non-ASCII tag bytes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OpaqueTagTooLong`] if an opaque tag exceeds 247 bytes, or
+/// [`FormatError::InvalidOpaqueTagByte`] if it contains a NUL byte, including in nested types.
+pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
+    Ok(match datatype {
         Datatype::FixedPoint(datatype) => {
             let layout = datatype.layout();
             let mut bf0 = padding_bits(layout.low_padding(), layout.high_padding());
@@ -477,7 +499,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
                 complex.size().get(),
             );
-            append_datatype(&mut buf, &Datatype::FloatingPoint(complex.component()));
+            append_datatype(&mut buf, &Datatype::FloatingPoint(complex.component()))?;
             buf
         }
         Datatype::String {
@@ -522,7 +544,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 [bf0, bf1, 0],
                 16,
             );
-            append_datatype(&mut buf, kind.base_type());
+            append_datatype(&mut buf, kind.base_type())?;
             buf
         }
         Datatype::Compound { size, members } => {
@@ -543,7 +565,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 // Byte offset (variable-width)
                 buf.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
                 // Recursively serialize member datatype
-                append_datatype(&mut buf, &m.datatype);
+                append_datatype(&mut buf, &m.datatype)?;
             }
             buf
         }
@@ -566,7 +588,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 *size,
             );
             // Base type
-            append_datatype(&mut buf, base_type);
+            append_datatype(&mut buf, base_type)?;
             // All names (null-terminated)
             for m in members {
                 buf.extend_from_slice(m.name.as_bytes());
@@ -596,7 +618,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             for &d in dimensions {
                 buf.extend_from_slice(&d.to_le_bytes());
             }
-            append_datatype(&mut buf, base_type);
+            append_datatype(&mut buf, base_type)?;
             buf
         }
         Datatype::Reference { size, ref_type } => {
@@ -636,17 +658,15 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             buf
         }
         Datatype::Opaque { size, tag } => {
-            // `bf0` carries the ASCII tag length the tag is padded with zero
-            // bytes to a multiple of 8, mirroring `parse`.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "opaque tag length is written into the 1-byte tag-length bit field (bf0)"
-            )]
-            let bf0 = tag.len() as u8;
-            let mut buf = build_header(OPAQUE_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size);
-            buf.extend_from_slice(tag);
-            let padded = (tag.len() + 7) & !7;
-            buf.resize(buf.len() + (padded - tag.len()), 0);
+            let tag = OpaqueTagWire::encode(tag)?;
+            let mut buf = build_header(
+                OPAQUE_CLASS,
+                DATATYPE_VERSION_ONE,
+                [tag.encoded_len, 0, 0],
+                *size,
+            );
+            buf.extend_from_slice(tag.logical);
+            buf.resize(DATATYPE_HEADER_SIZE + usize::from(tag.encoded_len), 0);
             buf
         }
         #[expect(
@@ -654,17 +674,110 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             reason = "the version-locked core crate defines only the matched datatype variants"
         )]
         _ => unreachable!("core datatype variant lacks an HDF5 encoder"),
-    }
+    })
 }
 
 // `H5O__dtype_decode_helper` checks that a container's datatype version is at least its
 // highest child version (H5Odtype.c, HDF5 2.2.0).
-fn append_datatype(buf: &mut Vec<u8>, datatype: &Datatype) {
-    let encoded = serialize_datatype(datatype);
+fn append_datatype(buf: &mut Vec<u8>, datatype: &Datatype) -> Result<(), FormatError> {
+    let encoded = serialize_datatype(datatype)?;
     let version = (buf[0] >> DATATYPE_VERSION_SHIFT).max(encoded[0] >> DATATYPE_VERSION_SHIFT);
     buf[0] = (buf[0] & DATATYPE_CLASS_MASK) | (version << DATATYPE_VERSION_SHIFT);
     buf.extend_from_slice(&encoded);
+    Ok(())
 }
+
+/// An opaque tag with a checked aligned property length and borrowed logical bytes.
+///
+/// The parser accepts a full property without a terminator. The encoder reserves a terminator
+/// for every nonempty tag.
+struct OpaqueTagWire<'a> {
+    encoded_len: u8,
+    logical: &'a [u8],
+}
+
+impl<'a> OpaqueTagWire<'a> {
+    fn parse(encoded_len: u8, data: &'a [u8]) -> Result<Self, FormatError> {
+        if !encoded_len.is_multiple_of(OPAQUE_TAG_ALIGNMENT) {
+            return Err(FormatError::InvalidOpaqueTagLength {
+                length: encoded_len,
+            });
+        }
+        let length = usize::from(encoded_len);
+        bytes::ensure_len(data, 0, length)?;
+        let property = &data[..length];
+        if property.is_empty() {
+            return Ok(Self {
+                encoded_len,
+                logical: property,
+            });
+        }
+        // `H5O__dtype_encode_helper` fills aligned tags without a terminator
+        // (H5Odtype.c, HDF5 2.2.0).
+        let terminator = property.iter().position(|&byte| byte == 0);
+        let logical = if let Some(terminator) = terminator {
+            if let Some(offset) = property[terminator + 1..]
+                .iter()
+                .position(|&byte| byte != 0)
+            {
+                let offset = terminator + 1 + offset;
+                return Err(FormatError::InvalidOpaqueTagPadding {
+                    offset,
+                    byte: property[offset],
+                });
+            }
+            &property[..terminator]
+        } else {
+            property
+        };
+        Ok(Self {
+            encoded_len,
+            logical,
+        })
+    }
+
+    fn encode(logical: &'a [u8]) -> Result<Self, FormatError> {
+        if logical.len() > OPAQUE_TAG_MAX_LEN {
+            return Err(FormatError::OpaqueTagTooLong {
+                length: logical.len(),
+            });
+        }
+        if let Some(offset) = logical.iter().position(|&byte| byte == 0) {
+            return Err(FormatError::InvalidOpaqueTagByte {
+                offset,
+                byte: logical[offset],
+            });
+        }
+        let encoded_len = if logical.is_empty() {
+            0
+        } else {
+            let length = (logical.len() + usize::from(OPAQUE_TAG_ALIGNMENT))
+                & !(usize::from(OPAQUE_TAG_ALIGNMENT) - 1);
+            u8::try_from(length).map_err(|_error| FormatError::OpaqueTagTooLong {
+                length: logical.len(),
+            })?
+        };
+        Ok(Self {
+            encoded_len,
+            logical,
+        })
+    }
+}
+
+/// The alignment of an opaque tag property, defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// `H5O__dtype_decode_helper` requires an aligned recorded length (H5Odtype.c, HDF5 2.2.0).
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const OPAQUE_TAG_ALIGNMENT: u8 = 8;
+/// The maximum logical tag length with space for its terminator in an aligned one-byte length.
+///
+/// The length field and padding are defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const OPAQUE_TAG_MAX_LEN: usize = 247;
 
 fn parse_complex(
     data: &[u8],

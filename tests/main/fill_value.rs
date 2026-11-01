@@ -652,7 +652,7 @@ fn rejects_scalar_fill_size(#[case] raw: &[u8]) {
             Message::new(MessageType::DATASPACE, &dataspace::scalar()),
             Message::new(
                 MessageType::DATATYPE,
-                &format::serialize_datatype(&datatype),
+                &format::serialize_datatype(&datatype).unwrap(),
             ),
             Message::new(MessageType::FILL_VALUE, &fill),
             Message::new(
