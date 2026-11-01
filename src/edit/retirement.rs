@@ -1,8 +1,8 @@
-//! Chunk allocation ownership for immediate and staged replacements.
+//! Allocation ownership and retirement through replacement publication.
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::{Extent, FreeClass, PageType};
+use hdf5_pure_space::__private::{Extent, FreeClass, PageType, ReturnedExtents};
 
 use crate::address::AddressContext;
 use crate::chunked_read::ChunkInfo;
@@ -90,14 +90,54 @@ impl RootRetirement {
              }| { (range, class) },
         ));
         super::retain_disjoint_in_bounds(&mut spans, eof);
-        PendingRootFrees { root, spans }
+        PendingRootFrees {
+            root,
+            batch: ProvenRetirementBatch { spans },
+        }
     }
 }
 
 /// A replacement root and the physical spans awaiting its publication.
 pub(super) struct PendingRootFrees {
     pub(super) root: PhysicalAddress,
-    pub(super) spans: Vec<(FileRange, FreeClass)>,
+    pub(super) batch: ProvenRetirementBatch,
+}
+
+/// Nonempty, disjoint physical allocations selected for retirement.
+///
+/// The editor proves ownership and eligibility for retirement before constructing the batch.
+/// The editor retains each complete allocation length and class until threshold admission.
+pub(super) struct ProvenRetirementBatch {
+    spans: Vec<(FileRange, FreeClass)>,
+}
+
+impl ProvenRetirementBatch {
+    /// Converts physical allocations to stored extents, preserving boundaries and classes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if an allocation starts below the effective base,
+    /// or [`FormatError::Internal`] if a batch invariant is violated.
+    pub(super) fn into_stored(
+        self,
+        addresses: AddressContext,
+    ) -> Result<ReturnedExtents, FormatError> {
+        let entries = self
+            .spans
+            .into_iter()
+            .map(|(range, class)| {
+                let start = addresses.relative(range.start())?;
+                let extent = Extent::new(start, range.length()).ok_or_else(|| {
+                    FormatError::Internal(
+                        "a proven retirement allocation is empty or overflowing".into(),
+                    )
+                })?;
+                Ok((extent, class))
+            })
+            .collect::<Result<Vec<_>, FormatError>>()?;
+        ReturnedExtents::from_sorted(entries)
+            .map_err(|error| FormatError::Internal(error.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -105,8 +145,9 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::Path;
 
+    use hdf5_pure_core::__private::FileRange;
     use hdf5_pure_core::PhysicalAddress;
-    use hdf5_pure_space::__private::{FreeClass, PageType};
+    use hdf5_pure_space::__private::{Extent, FreeClass, PageType};
     use rstest::rstest;
     use test_util::disk_log;
 
@@ -128,6 +169,107 @@ mod tests {
         AppendBuilder, DeflateLevel, File, FileBuilder, FileSpaceSettings, FileSpaceStrategy,
         MaxExtent,
     };
+
+    #[rstest]
+    #[case::zero_base(0)]
+    #[case::userblock(512)]
+    #[case::high_base(u64::from(u32::MAX) + 512)]
+    fn retirement_conversion_preserves_complete_allocations(#[case] base: u64) {
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+        let spans = vec![
+            (
+                FileRange::new(PhysicalAddress::new(base + 120), 30).unwrap(),
+                FreeClass::Page(PageType::Raw),
+            ),
+            (
+                FileRange::new(PhysicalAddress::new(base + 100), 20).unwrap(),
+                FreeClass::Page(PageType::Meta),
+            ),
+        ];
+        let pending = RootRetirement::new(PhysicalAddress::new(base + 8), Vec::new())
+            .into_pending_frees(spans, base + 150);
+        assert_eq!(pending.root, PhysicalAddress::new(base + 8));
+        let batch = pending.batch.into_stored(addresses).unwrap();
+        assert_eq!(
+            batch.entries(),
+            [
+                (
+                    Extent::new(StoredAddress::new(100), 20).unwrap(),
+                    FreeClass::Page(PageType::Meta)
+                ),
+                (
+                    Extent::new(StoredAddress::new(120), 30).unwrap(),
+                    FreeClass::Page(PageType::Raw)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn retirement_conversion_rejects_physical_addresses_below_the_base() {
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(512));
+        let pending = RootRetirement::new(PhysicalAddress::new(520), Vec::new())
+            .into_pending_frees(
+                vec![(
+                    FileRange::new(PhysicalAddress::new(511), 1).unwrap(),
+                    FreeClass::Dead,
+                )],
+                600,
+            );
+        assert_eq!(
+            pending.batch.into_stored(addresses).unwrap_err(),
+            FormatError::AddressBelowBase {
+                address: 511,
+                base: 512
+            }
+        );
+    }
+
+    #[test]
+    fn retirement_batch_retains_disjoint_nonempty_ranges_within_eof() {
+        let pending = RootRetirement::new(PhysicalAddress::new(8), Vec::new()).into_pending_frees(
+            vec![
+                (
+                    FileRange::new(PhysicalAddress::new(100), 20).unwrap(),
+                    FreeClass::Dead,
+                ),
+                (
+                    FileRange::new(PhysicalAddress::new(110), 20).unwrap(),
+                    FreeClass::Dead,
+                ),
+                (
+                    FileRange::new(PhysicalAddress::new(120), 0).unwrap(),
+                    FreeClass::Dead,
+                ),
+                (
+                    FileRange::new(PhysicalAddress::new(120), 20).unwrap(),
+                    FreeClass::Page(PageType::Raw),
+                ),
+                (
+                    FileRange::new(PhysicalAddress::new(140), 21).unwrap(),
+                    FreeClass::Dead,
+                ),
+            ],
+            160,
+        );
+        assert_eq!(
+            pending
+                .batch
+                .into_stored(AddressContext::from_effective_base(BaseAddress::new(0)))
+                .unwrap()
+                .entries(),
+            [
+                (
+                    Extent::new(StoredAddress::new(100), 20).unwrap(),
+                    FreeClass::Dead
+                ),
+                (
+                    Extent::new(StoredAddress::new(120), 20).unwrap(),
+                    FreeClass::Page(PageType::Raw)
+                ),
+            ]
+        );
+    }
 
     #[rstest]
     #[case::unfiltered(512, 4096, 0)]
@@ -154,7 +296,10 @@ mod tests {
         let retirement = RootRetirement::new(root, vec![allocation]);
         let pending = retirement.into_pending_frees(Vec::new(), base + 64 + stored_size);
         assert_eq!(pending.root, root);
-        assert_eq!(pending.spans, vec![(range, FreeClass::Page(PageType::Raw))]);
+        assert_eq!(
+            pending.batch.spans,
+            vec![(range, FreeClass::Page(PageType::Raw))]
+        );
     }
 
     #[rstest]

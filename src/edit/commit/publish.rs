@@ -12,7 +12,7 @@ use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::SessionSpace;
 use hdf5_pure_space::__private::{
     AllocationClass, Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections,
-    PageType,
+    PageType, ReturnedExtents,
 };
 
 use super::{PublicationPurpose, PublicationState};
@@ -61,9 +61,9 @@ impl WriteEngine {
         } = tree;
         let PendingRootFrees {
             root: new_root,
-            spans: to_free,
+            batch,
         } = retirement.into_pending_frees(freed, self.image.len());
-        let mut to_free = self.stored_spans(to_free)?;
+        let mut to_free = batch.into_stored(self.context.addresses())?;
         if self.persist.is_some() {
             let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
             self.commit_persisting_releasing_reserve(new_root, to_free)?;
@@ -114,11 +114,15 @@ impl WriteEngine {
     pub(in crate::edit) fn commit_persisting_releasing_reserve(
         &mut self,
         new_root: PhysicalAddress,
-        mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        mut to_free: ReturnedExtents,
     ) -> Result<(), Error> {
         self.release_aggregates_for_tail(&mut to_free)?;
         if let Some(target) = self.recyclable_flat_tail() {
-            self.commit_persisting(new_root, Vec::new(), TailPlacement::Preserve)?;
+            self.commit_persisting(
+                new_root,
+                ReturnedExtents::default(),
+                TailPlacement::Preserve,
+            )?;
             self.recycle_flat_tail(new_root, to_free, target)?;
         } else {
             self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
@@ -173,7 +177,11 @@ impl WriteEngine {
         {
             return Ok(());
         }
-        self.commit_persisting(new_root, Vec::new(), TailPlacement::ReuseOnly)
+        self.commit_persisting(
+            new_root,
+            ReturnedExtents::default(),
+            TailPlacement::ReuseOnly,
+        )
     }
 
     /// Verifies pending PAGE publication and clears its recovery state on success.
@@ -282,50 +290,22 @@ impl WriteEngine {
     /// flat reusable-space strategy changes during release.
     pub(in crate::edit) fn release_freed(
         &mut self,
-        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        to_free: ReturnedExtents,
     ) -> Result<Option<PhysicalAddress>, FormatError> {
         let eoa = self.end_of_allocation()?;
         if let Some(aggregation) = &mut self.aggregation {
             return aggregation
                 .release_freed(
                     &mut self.space,
-                    to_free
-                        .into_iter()
-                        .filter_map(|(addr, len, _)| FreeExtent::new(addr, len)),
+                    to_free.into_iter().map(|(extent, _)| extent),
                 )?
                 .map(|cut| self.context.addresses().resolve(cut))
                 .transpose();
         }
         self.space
-            .release_freed(
-                eoa,
-                to_free
-                    .into_iter()
-                    .filter_map(|(addr, len, _)| FreeExtent::new(addr, len)),
-            )
+            .release_freed(eoa, to_free.into_iter().map(|(extent, _)| extent))
             .map(|cut| self.context.addresses().resolve(cut))
             .transpose()
-    }
-
-    /// Returns `spans` with each file position converted to a stored address.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AddressBelowBase`] if a span starts below the base address.
-    pub(in crate::edit) fn stored_spans(
-        &self,
-        spans: Vec<(FileRange, FreeClass)>,
-    ) -> Result<Vec<(StoredAddress, u64, FreeClass)>, FormatError> {
-        spans
-            .into_iter()
-            .map(|(range, class)| {
-                Ok((
-                    self.context.addresses().relative(range.start())?,
-                    range.length(),
-                    class,
-                ))
-            })
-            .collect()
     }
 
     /// Repoints stored references to object headers relocated by this commit.
@@ -382,7 +362,7 @@ impl WriteEngine {
     pub(in crate::edit) fn commit_persisting(
         &mut self,
         new_root: PhysicalAddress,
-        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        to_free: ReturnedExtents,
         placement: TailPlacement,
     ) -> Result<(), Error> {
         self.publish_persisting(new_root, to_free, placement, PublicationPurpose::Commit)
@@ -409,7 +389,7 @@ impl WriteEngine {
     pub(in crate::edit) fn publish_persisting(
         &mut self,
         new_root: PhysicalAddress,
-        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        to_free: ReturnedExtents,
         placement: TailPlacement,
         purpose: PublicationPurpose,
     ) -> Result<(), Error> {
@@ -657,12 +637,13 @@ impl WriteEngine {
     pub(in crate::edit) fn flat_post_free(
         &self,
         eof: StoredAddress,
-        to_free: &[(StoredAddress, u64, FreeClass)],
+        to_free: &ReturnedExtents,
         old_blocks: &[FreeExtent],
     ) -> (FreeList, StoredAddress) {
         let extents = to_free
+            .entries()
             .iter()
-            .filter_map(|&(addr, len, _)| FreeExtent::new(addr, len))
+            .map(|&(extent, _)| extent)
             .chain(old_blocks.iter().copied());
         // PAGE sessions are dispatched before a flat tail is planned.
         self.space
@@ -695,7 +676,7 @@ impl WriteEngine {
     pub(in crate::edit) fn flat_tail_layout(
         &mut self,
         current_eoa: StoredAddress,
-        to_free: &[(StoredAddress, u64, FreeClass)],
+        to_free: &ReturnedExtents,
         old_blocks: &[FreeExtent],
         ext_len: u64,
         widths: FormatWidths,
@@ -779,7 +760,7 @@ impl WriteEngine {
     pub(in crate::edit) fn commit_persisting_paged(
         &mut self,
         new_root: PhysicalAddress,
-        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        to_free: ReturnedExtents,
         placement: TailPlacement,
         purpose: PublicationPurpose,
     ) -> Result<(), Error> {
@@ -831,16 +812,10 @@ impl WriteEngine {
         .len() as u64;
 
         let current_eoa = self.end_of_allocation()?;
-        let freed: Vec<_> = to_free
-            .iter()
-            .filter_map(|&(addr, len, class)| {
-                FreeExtent::new(addr, len).map(|extent| (extent, class))
-            })
-            .collect();
         let Some(plan) = paged_persistence::PagedPersistencePlan::new(
             &self.space,
             current_eoa,
-            &freed,
+            to_free.entries(),
             &old_blocks,
             ext_len,
             widths,

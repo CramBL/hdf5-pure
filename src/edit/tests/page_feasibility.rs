@@ -28,6 +28,7 @@ use crate::address::{
 };
 use crate::edit;
 use crate::edit::WriteEngine;
+use crate::edit::retirement::RootRetirement;
 use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_writer;
@@ -131,7 +132,12 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     assert_eq!(header / page_size, root / page_size);
     engine.pad_to_page().unwrap();
     assert_eq!(engine.end_of_allocation().unwrap().get() % page_size, 0);
-    let freed = engine.stored_spans(
+    let physical_root = engine
+        .context
+        .addresses()
+        .resolve(StoredAddress::new(root))
+        .unwrap();
+    let pending = RootRetirement::new(physical_root, Vec::new()).into_pending_frees(
         root_spans
             .into_iter()
             .map(|range| (range, FreeClass::Page(PageType::Meta)))
@@ -140,12 +146,16 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
                 FreeClass::Page(PageType::Raw),
             )])
             .collect(),
+        engine.image.len(),
     );
-    assert_eq!(engine.release_freed(freed.unwrap()).unwrap(), None);
-    assert!(engine.space.reusable_sections().next().is_none());
-    engine
-        .publish_nonpersisting(PhysicalAddress::new(userblock + root), None)
+    assert_eq!(pending.root, physical_root);
+    let freed = pending
+        .batch
+        .into_stored(engine.context.addresses())
         .unwrap();
+    assert_eq!(engine.release_freed(freed).unwrap(), None);
+    assert!(engine.space.reusable_sections().next().is_none());
+    engine.publish_nonpersisting(pending.root, None).unwrap();
     engine.finalize_persist().unwrap();
     let operations = disk_log::take();
     let superblock_len =

@@ -2,9 +2,10 @@
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ManagerSections;
+use hdf5_pure_space::__private::ReturnedExtents;
 
 use crate::address::StoredAddress;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
 use crate::free_space_manager;
 
@@ -30,7 +31,7 @@ impl WriteEngine {
     pub(super) fn recycle_flat_tail(
         &mut self,
         root: PhysicalAddress,
-        mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        mut to_free: ReturnedExtents,
         target: FreeExtent,
     ) -> Result<(), Error> {
         let spare = self
@@ -40,11 +41,11 @@ impl WriteEngine {
         if let Some(aggregation) = self.aggregation {
             self.aggregation = Some(aggregation.without_spare());
         }
-        to_free.extend(
-            spare
-                .into_iter()
-                .map(|extent| (extent.start(), extent.len(), FreeClass::Dead)),
-        );
+        for extent in spare {
+            to_free
+                .insert(extent, FreeClass::Dead)
+                .map_err(|error| FormatError::Internal(error.to_string()))?;
+        }
         self.commit_persisting(root, to_free, TailPlacement::Recycle(target))
     }
 
@@ -86,7 +87,7 @@ impl WriteEngine {
     pub(super) fn recycled_tail_layout(
         &self,
         eoa: StoredAddress,
-        to_free: &[(StoredAddress, u64, FreeClass)],
+        to_free: &ReturnedExtents,
         old_blocks: &[FreeExtent],
         extension_len: u64,
         target: FreeExtent,

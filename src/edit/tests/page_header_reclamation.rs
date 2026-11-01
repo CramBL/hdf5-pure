@@ -13,6 +13,7 @@ use crate::FileSpaceSettings;
 use crate::PhysicalAddress;
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::WriteEngine;
+use crate::edit::retirement::RootRetirement;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
@@ -71,7 +72,18 @@ fn header_classification_uses_stored_alignment_and_preserves_physical_extents(
         .object_header_free_spans(&[range(physical, length)])
         .unwrap();
     assert_eq!(spans, [(range(physical, length), expected)]);
-    assert_eq!(engine.stored_spans(spans).unwrap()[0].0.get(), stored);
+    assert_eq!(
+        RootRetirement::new(PhysicalAddress::new(physical), Vec::new())
+            .into_pending_frees(spans, physical + length)
+            .batch
+            .into_stored(engine.context.addresses())
+            .unwrap()
+            .entries()[0]
+            .0
+            .start()
+            .get(),
+        stored
+    );
     let error = engine
         .object_header_free_spans(&[range(511, 10)])
         .unwrap_err();

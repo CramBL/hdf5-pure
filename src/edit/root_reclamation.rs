@@ -1,10 +1,10 @@
 //! Reuse of a superseded root header after publication.
 
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_space::__private::ReturnedExtents;
 
-use crate::address::StoredAddress;
 use crate::convert::Narrow;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
 
 use super::FreeClass;
@@ -36,7 +36,7 @@ impl WriteEngine {
     pub(super) fn plan_root_reclamation(
         &self,
         new_root: PhysicalAddress,
-        to_free: &mut Vec<(StoredAddress, u64, FreeClass)>,
+        to_free: &mut ReturnedExtents,
     ) -> Result<Option<RootReclamation>, Error> {
         let Some(persist) = &self.persist else {
             return Ok(None);
@@ -44,8 +44,9 @@ impl WriteEngine {
         if persist.strategy != FileSpaceStrategy::FsmAggr {
             return Ok(None);
         }
-        if !to_free.iter().any(|&(addr, len, _)| {
-            addr == self.context.superblock().root_group_address && len < persist.threshold
+        if !to_free.entries().iter().any(|&(extent, _)| {
+            extent.start() == self.context.superblock().root_group_address
+                && extent.len() < persist.threshold
         }) {
             return Ok(None);
         }
@@ -85,8 +86,9 @@ impl WriteEngine {
             return Ok(None);
         };
         let Some(index) = to_free
+            .entries()
             .iter()
-            .position(|&(addr, len, _)| addr == target.start() && len == target.len())
+            .position(|&(extent, _)| extent == target)
         else {
             return Ok(None);
         };
@@ -129,7 +131,8 @@ impl WriteEngine {
         self.write_at(target_addr.get(), &bytes)?;
         self.commit_persisting_releasing_reserve(
             target_addr,
-            vec![(source.start(), source.len(), FreeClass::Dead)],
+            ReturnedExtents::from_sorted(vec![(source, FreeClass::Dead)])
+                .map_err(|error| FormatError::Internal(error.to_string()))?,
         )
     }
 }

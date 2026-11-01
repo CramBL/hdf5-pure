@@ -5,6 +5,8 @@
 //! publication is attempted.
 //! Publication and recovery use [`PublicationState`] to preserve that boundary after I/O errors.
 
+use hdf5_pure_space::__private::ReturnedExtents;
+
 #[cfg(doc)]
 use crate::edit::SyncPolicy;
 use crate::error::Error;
@@ -212,7 +214,7 @@ impl WriteEngine {
             self.context
                 .addresses()
                 .resolve(self.context.superblock().root_group_address)?,
-            Vec::new(),
+            ReturnedExtents::default(),
         )
     }
 

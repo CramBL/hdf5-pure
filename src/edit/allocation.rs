@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::{FreeClass, SessionAppendSnapshot};
+use hdf5_pure_space::__private::{FreeClass, ReturnedExtents, SessionAppendSnapshot};
 
 use super::aggregation::AggregateSpace;
 use super::commit::{PublicationPurpose, PublicationState};
@@ -488,7 +488,7 @@ impl WriteEngine {
                 .resolve(self.context.superblock().root_group_address)?;
             return self.publish_persisting(
                 root,
-                Vec::new(),
+                ReturnedExtents::default(),
                 TailPlacement::Anywhere,
                 PublicationPurpose::Allocation,
             );

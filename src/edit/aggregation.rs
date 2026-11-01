@@ -6,6 +6,7 @@ use hdf5_pure_space::__private::AggregationError;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::SessionSpace;
 
 use crate::address::AddressContext;
@@ -241,10 +242,11 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the image length cannot be converted to a stored address.
+    /// Returns [`Error::Format`] if the image length cannot be converted to a stored address or
+    /// unused aggregate space overlaps another returned allocation.
     pub(super) fn release_aggregates_for_tail(
         &mut self,
-        to_free: &mut Vec<(StoredAddress, u64, FreeClass)>,
+        to_free: &mut ReturnedExtents,
     ) -> Result<(), Error> {
         let Some(aggregation) = self.aggregation else {
             return Ok(());
@@ -274,11 +276,11 @@ impl WriteEngine {
             manager_dirty: true,
             ..aggregation
         });
-        to_free.extend(
-            spare
-                .into_iter()
-                .map(|extent| (extent.start(), extent.len(), FreeClass::Dead)),
-        );
+        for extent in spare {
+            to_free
+                .insert(extent, FreeClass::Dead)
+                .map_err(|error| FormatError::Internal(error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -300,7 +302,8 @@ impl WriteEngine {
         if !aggregation.publication_confirmed {
             return Ok(());
         }
-        let spare = aggregation.unused().collect::<Vec<_>>();
+        let mut spare = aggregation.unused().collect::<Vec<_>>();
+        spare.sort_unstable_by_key(|extent| extent.start());
         if spare.is_empty()
             && !aggregation.manager_dirty
             && !self.fsm_dirty
@@ -312,16 +315,17 @@ impl WriteEngine {
             .context
             .addresses()
             .resolve(self.context.superblock().root_group_address)?;
+        let returned = ReturnedExtents::from_sorted(
+            spare
+                .into_iter()
+                .map(|extent| (extent, FreeClass::Dead))
+                .collect(),
+        )
+        .map_err(|error| FormatError::Internal(error.to_string()))?;
         let snapshot = self.snapshot_free();
         self.aggregation = Some(AggregateSpace::new(aggregation.eoa));
         self.publication = PublicationState::Ready;
-        let result = self.commit_persisting_releasing_reserve(
-            root,
-            spare
-                .into_iter()
-                .map(|extent| (extent.start(), extent.len(), FreeClass::Dead))
-                .collect(),
-        );
+        let result = self.commit_persisting_releasing_reserve(root, returned);
         if result.is_err() && !self.publication.attempted() {
             self.restore_free(snapshot);
         } else if let Some(state) = &mut self.aggregation {

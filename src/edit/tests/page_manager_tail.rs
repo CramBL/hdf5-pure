@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 
 use hdf5_pure_format::__private::HDF5_SIGNATURE;
 use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::{Extent, ManagerKind, ManagerSections};
 use rstest::rstest;
 use test_util::disk_log::{self, DiskOp};
@@ -158,12 +159,12 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
     let before = issued_bytes(&engine);
     disk_log::start();
     engine
-        .commit_persisting(root, Vec::new(), TailPlacement::ReuseOnly)
+        .commit_persisting(root, ReturnedExtents::default(), TailPlacement::ReuseOnly)
         .unwrap();
     assert!(disk_log::take().is_empty());
     assert_eq!(issued_bytes(&engine), before);
     engine
-        .commit_persisting(root, Vec::new(), TailPlacement::Anywhere)
+        .commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
         .unwrap();
     let end = engine.persist.as_ref().unwrap().old_blocks[0].end();
     let tail = engine
