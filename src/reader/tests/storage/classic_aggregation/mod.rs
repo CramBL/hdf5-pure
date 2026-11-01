@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use rstest::rstest;
@@ -19,6 +18,8 @@ use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
 use crate::reader::test_util as reader_test_util;
+
+mod report;
 
 #[rstest]
 #[case::mirror(MemoryStrategy::Mirrored, 0)]
@@ -217,7 +218,7 @@ fn hdf5_pure_places_a_workload_under_page_as_recorded(
     );
     for (index, &step) in workload.steps.iter().enumerate() {
         apply_step(step, &file);
-        write_page_step(
+        report::write_page_step(
             &mut report,
             index + 1,
             step,
@@ -315,80 +316,6 @@ fn live_extents(ownership: &SpaceOwnership) -> BTreeSet<(u64, u64)> {
         .chain(&ownership.free_space_manager_space)
         .copied()
         .collect()
-}
-
-/// Writes the operation and an extent table sorted by offset within each category.
-///
-/// # Panics
-///
-/// Panics if an extent's end offset exceeds [`u64::MAX`].
-fn write_page_step(report: &mut String, number: usize, step: Step, ownership: SpaceOwnership) {
-    write!(report, "\nStep {number}: ").unwrap();
-    match step {
-        Step::Create(Object::Dataset(name, len)) => {
-            writeln!(report, "Create dataset {name:?} with {len} i32 elements").unwrap();
-        }
-        Step::Create(Object::Group(name)) => writeln!(report, "Create group {name:?}").unwrap(),
-        Step::Create(Object::Strings(name)) => {
-            writeln!(report, "Create variable-length string dataset {name:?}").unwrap();
-        }
-        Step::Delete(name) => writeln!(report, "Delete link {name:?}").unwrap(),
-    }
-    let SpaceOwnership {
-        physical_size,
-        logical_size,
-        userblock_space,
-        live_raw_space,
-        live_metadata_space,
-        free_space_manager_space,
-        reusable_free_space,
-        unclassified_space,
-        analysis_complete,
-        trailing_slack_space,
-    } = ownership;
-    writeln!(
-        report,
-        "  Physical size: {physical_size}, logical size: {logical_size}, analysis: {}",
-        if analysis_complete {
-            "complete"
-        } else {
-            "incomplete"
-        }
-    )
-    .unwrap();
-    writeln!(
-        report,
-        "  {:<19} {:>10} {:>10} {:>10}",
-        "Category", "Start", "End", "Length"
-    )
-    .unwrap();
-    let mut empty = Vec::new();
-    for (category, mut extents) in [
-        ("Userblock", userblock_space),
-        ("Live metadata", live_metadata_space),
-        ("Live raw data", live_raw_space),
-        ("Free-space managers", free_space_manager_space),
-        ("Reusable free space", reusable_free_space),
-        ("Unclassified", unclassified_space),
-        ("Trailing slack", trailing_slack_space),
-    ] {
-        if extents.is_empty() {
-            empty.push(category);
-            continue;
-        }
-        extents.sort_unstable();
-        for (start, length) in extents {
-            writeln!(
-                report,
-                "  {category:<19} {start:>10} {:>10} {length:>10}",
-                start.checked_add(length).unwrap()
-            )
-            .unwrap();
-        }
-    }
-    if !empty.is_empty() {
-        writeln!(report, "  No extents: {}", empty.join(", ")).unwrap();
-    }
 }
 
 fn create_file(path: &Path, strategy: FileSpaceStrategy, persist: bool) -> File {
