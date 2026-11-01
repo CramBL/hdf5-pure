@@ -6,7 +6,6 @@
 //! and file sizes.
 
 use std::collections::BTreeSet;
-use std::fmt::Display;
 use std::fs;
 use std::path::Path;
 
@@ -25,6 +24,8 @@ use hdf5_sys::h5f::H5F_info2_t;
 use hdf5_sys::{h5f, h5p};
 
 use crate::file_space;
+
+mod report;
 
 /// Asserts persisted manager allocation sizes against file headers and a fresh C handle.
 ///
@@ -304,7 +305,7 @@ pub struct FreeSpaceOracleCheckpoint {
     pub physical_file_size: u64,
     /// The base address at the end of the userblock, or zero.
     pub base: u64,
-    properties: String,
+    properties: CreationProperties,
 }
 
 impl FreeSpaceOracleCheckpoint {
@@ -437,36 +438,22 @@ impl FreeSpaceOracleCheckpoint {
                 ),
             });
         }
-        let mut properties = String::from("file-space properties\n");
-        for row in [
-            paired_row("property", "hdf5-pure", "libhdf5"),
-            paired_row(
-                "strategy",
-                strategy_name(&expected),
-                strategy_name(&c_strategy),
-            ),
-            paired_row(
-                "persistence",
-                info.as_ref().is_some_and(|i| i.persist),
-                c_persist,
-            ),
-            paired_row(
-                "threshold (bytes)",
-                info.as_ref().map_or(DEFAULT_THRESHOLD, |i| i.threshold),
-                c_threshold,
-            ),
-            paired_row(
-                "page size (bytes)",
-                info.as_ref().map_or_else(
-                    || "not stored".to_owned(),
-                    |i| i.page_size.get().to_string(),
-                ),
-                page,
-            ),
-            paired_row("base / userblock (bytes)", base, c_base),
-        ] {
-            properties.push_str(&row);
-        }
+        let properties = CreationProperties {
+            rust: PropertyValues {
+                strategy: strategy_name(&expected),
+                persist: info.as_ref().is_some_and(|i| i.persist),
+                threshold: info.as_ref().map_or(DEFAULT_THRESHOLD, |i| i.threshold),
+                page_size: info.as_ref().map(|i| i.page_size.get()),
+                base,
+            },
+            c: PropertyValues {
+                strategy: strategy_name(&c_strategy),
+                persist: c_persist,
+                threshold: c_threshold,
+                page_size: Some(page),
+                base: c_base,
+            },
+        };
         file.close().map_err(|source| OracleError::C {
             operation: "H5Fclose",
             source,
@@ -516,117 +503,25 @@ impl FreeSpaceOracleCheckpoint {
             self.case, self.step
         );
     }
-
-    /// Formats every section from both libraries beside file sizes and free-space totals.
-    ///
-    /// Missing rows and unequal pairs are marked explicitly. Section addresses and lengths are
-    /// formatted in aligned hexadecimal columns padded with zeros. Reports include both
-    /// section-byte sums and the separate `H5Fget_freespace` total.
-    pub fn render(&self) -> String {
-        let mut out = format!(
-            "case:       {}\ncheckpoint: {}\n\n{}\n",
-            self.case, self.step, self.properties
-        );
-        self.render_sizes(&mut out);
-        self.render_sections(&mut out);
-        self.render_totals(&mut out);
-        out.push_str(&format!(
-            "\nexact section map equal: {}\n\n",
-            self.rust.sections == self.c.sections
-        ));
-        out
-    }
-
-    fn render_sizes(&self, out: &mut String) {
-        out.push_str("file sizes (absolute bytes)\n");
-        out.push_str(&format!("  {:<28} {:>14}\n", "measurement", "bytes"));
-        for (label, bytes) in [
-            ("hdf5-pure stored EOF", self.rust_logical_size),
-            ("libhdf5 H5Fget_filesize", self.c_file_size),
-            ("physical file", self.physical_file_size),
-        ] {
-            out.push_str(&format!("  {label:<28} {bytes:>14}\n"));
-        }
-        out.push('\n');
-    }
-
-    fn render_sections(&self, out: &mut String) {
-        let count = self.rust.sections.len().max(self.c.sections.len());
-        let (max_address, max_length) = self
-            .rust
-            .sections
-            .iter()
-            .chain(&self.c.sections)
-            .fold((0, 0), |(address, length), &(at, len)| {
-                (address.max(at), length.max(len))
-            });
-        let index_width = count.to_string().len().max("index".len());
-        let address_width = format!("{max_address:#x}").len().max(10);
-        let length_width = format!("{max_length:#x}").len().max(10);
-        let section_width = address_width + length_width + 4;
-        let columns = format!(
-            " {:>address_width$}  {:>length_width$} ",
-            "address", "length"
-        );
-        out.push_str("free-space sections (stored addresses, byte lengths)\n");
-        out.push_str(&format!(
-            "  {:>index_width$} | {:^section_width$} | {:^section_width$} | match\n",
-            "index", "hdf5-pure", "libhdf5"
-        ));
-        out.push_str(&format!(
-            "  {:>index_width$} | {columns} | {columns} |\n",
-            ""
-        ));
-        out.push_str(&format!(
-            "  {}-+-{}-+-{}-+------\n",
-            "-".repeat(index_width),
-            "-".repeat(section_width),
-            "-".repeat(section_width)
-        ));
-        if count == 0 {
-            out.push_str("  (no sections)\n");
-        }
-        for index in 0..count {
-            let rust = self.rust.sections.get(index);
-            let c = self.c.sections.get(index);
-            let row = |section: Option<&(u64, u64)>| match section {
-                Some((address, length)) => {
-                    format!("({address:#0address_width$x}, {length:#0length_width$x})")
-                }
-                None => format!("{:<section_width$}", "<missing>"),
-            };
-            out.push_str(&format!(
-                "  {index:>index_width$} | {} | {} | {}\n",
-                row(rust),
-                row(c),
-                if rust == c { "yes" } else { "NO" }
-            ));
-        }
-        out.push('\n');
-    }
-
-    fn render_totals(&self, out: &mut String) {
-        out.push_str("free-space totals\n");
-        for row in [
-            paired_row("measurement", "hdf5-pure", "libhdf5"),
-            paired_row(
-                "section count",
-                self.rust.sections.len(),
-                self.c.sections.len(),
-            ),
-            paired_row("section bytes", self.rust.bytes, self.c.bytes),
-            paired_row("H5Fget_freespace", "-", self.c_reported_freespace),
-            paired_row(
-                "reported - section bytes",
-                "-",
-                i128::from(self.c_reported_freespace) - i128::from(self.c.bytes),
-            ),
-        ] {
-            out.push_str(&row);
-        }
-        out.push('\n');
-    }
 }
+
+/// The file-space creation properties observed through both libraries.
+#[derive(Debug)]
+struct CreationProperties {
+    rust: PropertyValues,
+    c: PropertyValues,
+}
+
+/// File-space settings from one library, with an optional page size.
+#[derive(Debug)]
+struct PropertyValues {
+    strategy: &'static str,
+    persist: bool,
+    threshold: u64,
+    page_size: Option<u64>,
+    base: u64,
+}
+
 /// A sorted list of positive, disjoint sections within a base-relative allocation boundary.
 ///
 /// Adjacent sections retain their individual boundaries.
@@ -820,11 +715,6 @@ pub fn enumeration_complete(expected: usize, actual: isize) -> Result<(), Oracle
 /// Returns [`OracleError::C`] if `count` is negative or cannot fit in [`usize`].
 pub fn enumeration_count(count: isize) -> Result<usize, OracleError> {
     usize::try_from(count).map_err(|_error| c_error("H5Fget_free_sections"))
-}
-
-/// Formats a label and two values in the report's aligned columns.
-fn paired_row(label: &str, left: impl Display, right: impl Display) -> String {
-    format!("  {label:<28} {left:>14} {right:>14}\n")
 }
 
 fn strategy_name(strategy: &CStrategy) -> &'static str {

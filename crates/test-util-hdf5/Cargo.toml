@@ -35,6 +35,7 @@ ndarray = { workspace = true, optional = true }
 test-util.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
 hdf5-pure = { workspace = true, features = ["deflate"] }
 tempfile.workspace = true
 

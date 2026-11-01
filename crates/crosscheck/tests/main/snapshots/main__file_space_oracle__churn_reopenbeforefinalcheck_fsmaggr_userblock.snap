@@ -2,207 +2,221 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-case:       churn/ReopenBeforeFinalCheck/FsmAggr/Userblock
-checkpoint: final-check-after-epoch-90
+checkpoint
+  measurement  value
+  -----------  ----------------------------------------------
+  case         churn/ReopenBeforeFinalCheck/FsmAggr/Userblock
+  checkpoint   final-check-after-epoch-90
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)               4096           4096
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)                 1         1
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)      4,096     4,096
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF               30280709
-  libhdf5 H5Fget_filesize            30280709
-  physical file                      30280709
+  Metric                        bytes
+  -----------------------  ----------
+  hdf5-pure stored EOF     30,280,709
+  libhdf5 H5Fget_filesize  30,280,709
+  physical file            30,280,709
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x0000006a, 0x00000004) | (0x0000006a, 0x00000004) | yes
-      1 | (0x00000442, 0x00000003) | (0x00000442, 0x00000003) | yes
-      2 | (0x000004ef, 0x00000031) | (0x000004ef, 0x00000031) | yes
-      3 | (0x00103b49, 0x00000046) | (0x00103b49, 0x00000046) | yes
-      4 | (0x00105030, 0x0000000c) | (0x00105030, 0x0000000c) | yes
-      5 | (0x0010508c, 0x00000001) | (0x0010508c, 0x00000001) | yes
-      6 | (0x001050d4, 0x00000025) | (0x001050d4, 0x00000025) | yes
-      7 | (0x0019049a, 0x00007a46) | (0x0019049a, 0x00007a46) | yes
-      8 | (0x0019856a, 0x00000003) | (0x0019856a, 0x00000003) | yes
-      9 | (0x00199bc9, 0x00000023) | (0x00199bc9, 0x00000023) | yes
-     10 | (0x00199c0c, 0x00000007) | (0x00199c0c, 0x00000007) | yes
-     11 | (0x0019a2fa, 0x00000006) | (0x0019a2fa, 0x00000006) | yes
-     12 | (0x0019ecaf, 0x00000005) | (0x0019ecaf, 0x00000005) | yes
-     13 | (0x001a53e0, 0x00000030) | (0x001a53e0, 0x00000030) | yes
-     14 | (0x001a613c, 0x00000033) | (0x001a613c, 0x00000033) | yes
-     15 | (0x001a68ab, 0x0000002d) | (0x001a68ab, 0x0000002d) | yes
-     16 | (0x001a6c43, 0x00000006) | (0x001a6c43, 0x00000006) | yes
-     17 | (0x00446dfb, 0x000009f2) | (0x00446dfb, 0x000009f2) | yes
-     18 | (0x00449e77, 0x00000006) | (0x00449e77, 0x00000006) | yes
-     19 | (0x00544db1, 0x00000460) | (0x00544db1, 0x00000460) | yes
-     20 | (0x005b6ce9, 0x001ae772) | (0x005b6ce9, 0x001ae772) | yes
-     21 | (0x008747c6, 0x00006ec8) | (0x008747c6, 0x00006ec8) | yes
-     22 | (0x008909ac, 0x00006d25) | (0x008909ac, 0x00006d25) | yes
-     23 | (0x00998ec9, 0x000003e4) | (0x00998ec9, 0x000003e4) | yes
-     24 | (0x00999417, 0x00000006) | (0x00999417, 0x00000006) | yes
-     25 | (0x0099972b, 0x00000007) | (0x0099972b, 0x00000007) | yes
-     26 | (0x0099aa82, 0x000004d5) | (0x0099aa82, 0x000004d5) | yes
-     27 | (0x0099af86, 0x00000f91) | (0x0099af86, 0x00000f91) | yes
-     28 | (0x0099dda3, 0x0000002a) | (0x0099dda3, 0x0000002a) | yes
-     29 | (0x00a9f8d8, 0x00000007) | (0x00a9f8d8, 0x00000007) | yes
-     30 | (0x00a9fd79, 0x0000040a) | (0x00a9fd79, 0x0000040a) | yes
-     31 | (0x00aa16dc, 0x00000016) | (0x00aa16dc, 0x00000016) | yes
-     32 | (0x00aa1e21, 0x00000024) | (0x00aa1e21, 0x00000024) | yes
-     33 | (0x00aa1f69, 0x00000005) | (0x00aa1f69, 0x00000005) | yes
-     34 | (0x00aa21af, 0x0000002f) | (0x00aa21af, 0x0000002f) | yes
-     35 | (0x00dd7129, 0x00012ed7) | (0x00dd7129, 0x00012ed7) | yes
-     36 | (0x00eeb643, 0x00001e5b) | (0x00eeb643, 0x00001e5b) | yes
-     37 | (0x00eedc15, 0x000002d6) | (0x00eedc15, 0x000002d6) | yes
-     38 | (0x00eee166, 0x00000008) | (0x00eee166, 0x00000008) | yes
-     39 | (0x01003c17, 0x00000497) | (0x01003c17, 0x00000497) | yes
-     40 | (0x01004106, 0x00000026) | (0x01004106, 0x00000026) | yes
-     41 | (0x0119a113, 0x0000171f) | (0x0119a113, 0x0000171f) | yes
-     42 | (0x0123214f, 0x0000000a) | (0x0123214f, 0x0000000a) | yes
-     43 | (0x0123628f, 0x000004f1) | (0x0123628f, 0x000004f1) | yes
-     44 | (0x012368e5, 0x00000005) | (0x012368e5, 0x00000005) | yes
-     45 | (0x01329aae, 0x0000d801) | (0x01329aae, 0x0000d801) | yes
-     46 | (0x01337e29, 0x00000001) | (0x01337e29, 0x00000001) | yes
-     47 | (0x0133abd2, 0x00000006) | (0x0133abd2, 0x00000006) | yes
-     48 | (0x0156f781, 0x00009f7e) | (0x0156f781, 0x00009f7e) | yes
-     49 | (0x0157aadc, 0x0000002e) | (0x0157aadc, 0x0000002e) | yes
-     50 | (0x0157c17c, 0x000004b2) | (0x0157c17c, 0x000004b2) | yes
-     51 | (0x0157c676, 0x00000036) | (0x0157c676, 0x00000036) | yes
-     52 | (0x0157c964, 0x00000018) | (0x0157c964, 0x00000018) | yes
-     53 | (0x0167d12b, 0x00000005) | (0x0167d12b, 0x00000005) | yes
-     54 | (0x0167e31e, 0x00000033) | (0x0167e31e, 0x00000033) | yes
-     55 | (0x0167e74c, 0x0000002e) | (0x0167e74c, 0x0000002e) | yes
-     56 | (0x016804ef, 0x00000005) | (0x016804ef, 0x00000005) | yes
-     57 | (0x01682d29, 0x00000006) | (0x01682d29, 0x00000006) | yes
-     58 | (0x01682f8d, 0x00000043) | (0x01682f8d, 0x00000043) | yes
-     59 | (0x017871c7, 0x00000026) | (0x017871c7, 0x00000026) | yes
-     60 | (0x019c2651, 0x00006cc3) | (0x019c2651, 0x00006cc3) | yes
-     61 | (0x01aca3d4, 0x00000043) | (0x01aca3d4, 0x00000043) | yes
-     62 | (0x01acad26, 0x00000007) | (0x01acad26, 0x00000007) | yes
-     63 | (0x01acb10f, 0x00000001) | (0x01acb10f, 0x00000001) | yes
-     64 | (0x01acf9c3, 0x00000001) | (0x01acf9c3, 0x00000001) | yes
-     65 | (0x01bd262b, 0x00000004) | (0x01bd262b, 0x00000004) | yes
-     66 | (0x01bd2e2f, 0x00000003) | (0x01bd2e2f, 0x00000003) | yes
-     67 | (0x01cdf5c9, 0x00000002) | (0x01cdf5c9, 0x00000002) | yes
-     68 | (0x01cdfaf4, 0x00000025) | (0x01cdfaf4, 0x00000025) | yes
-     69 | (0x01cdfbd2, 0x00000033) | (0x01cdfbd2, 0x00000033) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x0000006a        0x00000004       0x0000006a      0x00000004  yes
+      1         0x00000442        0x00000003       0x00000442      0x00000003  yes
+      2         0x000004ef        0x00000031       0x000004ef      0x00000031  yes
+      3         0x00103b49        0x00000046       0x00103b49      0x00000046  yes
+      4         0x00105030        0x0000000c       0x00105030      0x0000000c  yes
+      5         0x0010508c        0x00000001       0x0010508c      0x00000001  yes
+      6         0x001050d4        0x00000025       0x001050d4      0x00000025  yes
+      7         0x0019049a        0x00007a46       0x0019049a      0x00007a46  yes
+      8         0x0019856a        0x00000003       0x0019856a      0x00000003  yes
+      9         0x00199bc9        0x00000023       0x00199bc9      0x00000023  yes
+     10         0x00199c0c        0x00000007       0x00199c0c      0x00000007  yes
+     11         0x0019a2fa        0x00000006       0x0019a2fa      0x00000006  yes
+     12         0x0019ecaf        0x00000005       0x0019ecaf      0x00000005  yes
+     13         0x001a53e0        0x00000030       0x001a53e0      0x00000030  yes
+     14         0x001a613c        0x00000033       0x001a613c      0x00000033  yes
+     15         0x001a68ab        0x0000002d       0x001a68ab      0x0000002d  yes
+     16         0x001a6c43        0x00000006       0x001a6c43      0x00000006  yes
+     17         0x00446dfb        0x000009f2       0x00446dfb      0x000009f2  yes
+     18         0x00449e77        0x00000006       0x00449e77      0x00000006  yes
+     19         0x00544db1        0x00000460       0x00544db1      0x00000460  yes
+     20         0x005b6ce9        0x001ae772       0x005b6ce9      0x001ae772  yes
+     21         0x008747c6        0x00006ec8       0x008747c6      0x00006ec8  yes
+     22         0x008909ac        0x00006d25       0x008909ac      0x00006d25  yes
+     23         0x00998ec9        0x000003e4       0x00998ec9      0x000003e4  yes
+     24         0x00999417        0x00000006       0x00999417      0x00000006  yes
+     25         0x0099972b        0x00000007       0x0099972b      0x00000007  yes
+     26         0x0099aa82        0x000004d5       0x0099aa82      0x000004d5  yes
+     27         0x0099af86        0x00000f91       0x0099af86      0x00000f91  yes
+     28         0x0099dda3        0x0000002a       0x0099dda3      0x0000002a  yes
+     29         0x00a9f8d8        0x00000007       0x00a9f8d8      0x00000007  yes
+     30         0x00a9fd79        0x0000040a       0x00a9fd79      0x0000040a  yes
+     31         0x00aa16dc        0x00000016       0x00aa16dc      0x00000016  yes
+     32         0x00aa1e21        0x00000024       0x00aa1e21      0x00000024  yes
+     33         0x00aa1f69        0x00000005       0x00aa1f69      0x00000005  yes
+     34         0x00aa21af        0x0000002f       0x00aa21af      0x0000002f  yes
+     35         0x00dd7129        0x00012ed7       0x00dd7129      0x00012ed7  yes
+     36         0x00eeb643        0x00001e5b       0x00eeb643      0x00001e5b  yes
+     37         0x00eedc15        0x000002d6       0x00eedc15      0x000002d6  yes
+     38         0x00eee166        0x00000008       0x00eee166      0x00000008  yes
+     39         0x01003c17        0x00000497       0x01003c17      0x00000497  yes
+     40         0x01004106        0x00000026       0x01004106      0x00000026  yes
+     41         0x0119a113        0x0000171f       0x0119a113      0x0000171f  yes
+     42         0x0123214f        0x0000000a       0x0123214f      0x0000000a  yes
+     43         0x0123628f        0x000004f1       0x0123628f      0x000004f1  yes
+     44         0x012368e5        0x00000005       0x012368e5      0x00000005  yes
+     45         0x01329aae        0x0000d801       0x01329aae      0x0000d801  yes
+     46         0x01337e29        0x00000001       0x01337e29      0x00000001  yes
+     47         0x0133abd2        0x00000006       0x0133abd2      0x00000006  yes
+     48         0x0156f781        0x00009f7e       0x0156f781      0x00009f7e  yes
+     49         0x0157aadc        0x0000002e       0x0157aadc      0x0000002e  yes
+     50         0x0157c17c        0x000004b2       0x0157c17c      0x000004b2  yes
+     51         0x0157c676        0x00000036       0x0157c676      0x00000036  yes
+     52         0x0157c964        0x00000018       0x0157c964      0x00000018  yes
+     53         0x0167d12b        0x00000005       0x0167d12b      0x00000005  yes
+     54         0x0167e31e        0x00000033       0x0167e31e      0x00000033  yes
+     55         0x0167e74c        0x0000002e       0x0167e74c      0x0000002e  yes
+     56         0x016804ef        0x00000005       0x016804ef      0x00000005  yes
+     57         0x01682d29        0x00000006       0x01682d29      0x00000006  yes
+     58         0x01682f8d        0x00000043       0x01682f8d      0x00000043  yes
+     59         0x017871c7        0x00000026       0x017871c7      0x00000026  yes
+     60         0x019c2651        0x00006cc3       0x019c2651      0x00006cc3  yes
+     61         0x01aca3d4        0x00000043       0x01aca3d4      0x00000043  yes
+     62         0x01acad26        0x00000007       0x01acad26      0x00000007  yes
+     63         0x01acb10f        0x00000001       0x01acb10f      0x00000001  yes
+     64         0x01acf9c3        0x00000001       0x01acf9c3      0x00000001  yes
+     65         0x01bd262b        0x00000004       0x01bd262b      0x00000004  yes
+     66         0x01bd2e2f        0x00000003       0x01bd2e2f      0x00000003  yes
+     67         0x01cdf5c9        0x00000002       0x01cdf5c9      0x00000002  yes
+     68         0x01cdfaf4        0x00000025       0x01cdfaf4      0x00000025  yes
+     69         0x01cdfbd2        0x00000033       0x01cdfbd2      0x00000033  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                            70             70
-  section bytes                       2082405        2082405
-  H5Fget_freespace                          -        2082405
-  reported - section bytes                  -              0
+  measurement               hdf5-pure    libhdf5
+  ------------------------  ---------  ---------
+  section count                    70         70
+  section bytes             2,082,405  2,082,405
+  H5Fget_freespace                  -  2,082,405
+  reported - section bytes          -          0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       churn/ReopenBeforeFinalCheck/FsmAggr/Userblock
-checkpoint: final-close
+checkpoint
+  measurement  value
+  -----------  ----------------------------------------------
+  case         churn/ReopenBeforeFinalCheck/FsmAggr/Userblock
+  checkpoint   final-close
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)               4096           4096
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)                 1         1
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)      4,096     4,096
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF               30280709
-  libhdf5 H5Fget_filesize            30280709
-  physical file                      30280709
+  Metric                        bytes
+  -----------------------  ----------
+  hdf5-pure stored EOF     30,280,709
+  libhdf5 H5Fget_filesize  30,280,709
+  physical file            30,280,709
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x0000006a, 0x00000004) | (0x0000006a, 0x00000004) | yes
-      1 | (0x00000442, 0x00000003) | (0x00000442, 0x00000003) | yes
-      2 | (0x000004ef, 0x00000031) | (0x000004ef, 0x00000031) | yes
-      3 | (0x00103b49, 0x00000046) | (0x00103b49, 0x00000046) | yes
-      4 | (0x00105030, 0x0000000c) | (0x00105030, 0x0000000c) | yes
-      5 | (0x0010508c, 0x00000001) | (0x0010508c, 0x00000001) | yes
-      6 | (0x001050d4, 0x00000025) | (0x001050d4, 0x00000025) | yes
-      7 | (0x0019049a, 0x00007a46) | (0x0019049a, 0x00007a46) | yes
-      8 | (0x0019856a, 0x00000003) | (0x0019856a, 0x00000003) | yes
-      9 | (0x00199bc9, 0x00000023) | (0x00199bc9, 0x00000023) | yes
-     10 | (0x00199c0c, 0x00000007) | (0x00199c0c, 0x00000007) | yes
-     11 | (0x0019a2fa, 0x00000006) | (0x0019a2fa, 0x00000006) | yes
-     12 | (0x0019ecaf, 0x00000005) | (0x0019ecaf, 0x00000005) | yes
-     13 | (0x001a53e0, 0x00000030) | (0x001a53e0, 0x00000030) | yes
-     14 | (0x001a613c, 0x00000033) | (0x001a613c, 0x00000033) | yes
-     15 | (0x001a68ab, 0x0000002d) | (0x001a68ab, 0x0000002d) | yes
-     16 | (0x001a6c43, 0x00000006) | (0x001a6c43, 0x00000006) | yes
-     17 | (0x00446dfb, 0x000009f2) | (0x00446dfb, 0x000009f2) | yes
-     18 | (0x00449e77, 0x00000006) | (0x00449e77, 0x00000006) | yes
-     19 | (0x00544db1, 0x00000460) | (0x00544db1, 0x00000460) | yes
-     20 | (0x005b6ce9, 0x001ae772) | (0x005b6ce9, 0x001ae772) | yes
-     21 | (0x008747c6, 0x00006ec8) | (0x008747c6, 0x00006ec8) | yes
-     22 | (0x008909ac, 0x00006d25) | (0x008909ac, 0x00006d25) | yes
-     23 | (0x00998ec9, 0x000003e4) | (0x00998ec9, 0x000003e4) | yes
-     24 | (0x00999417, 0x00000006) | (0x00999417, 0x00000006) | yes
-     25 | (0x0099972b, 0x00000007) | (0x0099972b, 0x00000007) | yes
-     26 | (0x0099aa82, 0x000004d5) | (0x0099aa82, 0x000004d5) | yes
-     27 | (0x0099af86, 0x00000f91) | (0x0099af86, 0x00000f91) | yes
-     28 | (0x0099dda3, 0x0000002a) | (0x0099dda3, 0x0000002a) | yes
-     29 | (0x00a9f8d8, 0x00000007) | (0x00a9f8d8, 0x00000007) | yes
-     30 | (0x00a9fd79, 0x0000040a) | (0x00a9fd79, 0x0000040a) | yes
-     31 | (0x00aa16dc, 0x00000016) | (0x00aa16dc, 0x00000016) | yes
-     32 | (0x00aa1e21, 0x00000024) | (0x00aa1e21, 0x00000024) | yes
-     33 | (0x00aa1f69, 0x00000005) | (0x00aa1f69, 0x00000005) | yes
-     34 | (0x00aa21af, 0x0000002f) | (0x00aa21af, 0x0000002f) | yes
-     35 | (0x00dd7129, 0x00012ed7) | (0x00dd7129, 0x00012ed7) | yes
-     36 | (0x00eeb643, 0x00001e5b) | (0x00eeb643, 0x00001e5b) | yes
-     37 | (0x00eedc15, 0x000002d6) | (0x00eedc15, 0x000002d6) | yes
-     38 | (0x00eee166, 0x00000008) | (0x00eee166, 0x00000008) | yes
-     39 | (0x01003c17, 0x00000497) | (0x01003c17, 0x00000497) | yes
-     40 | (0x01004106, 0x00000026) | (0x01004106, 0x00000026) | yes
-     41 | (0x0119a113, 0x0000171f) | (0x0119a113, 0x0000171f) | yes
-     42 | (0x0123214f, 0x0000000a) | (0x0123214f, 0x0000000a) | yes
-     43 | (0x0123628f, 0x000004f1) | (0x0123628f, 0x000004f1) | yes
-     44 | (0x012368e5, 0x00000005) | (0x012368e5, 0x00000005) | yes
-     45 | (0x01329aae, 0x0000d801) | (0x01329aae, 0x0000d801) | yes
-     46 | (0x01337e29, 0x00000001) | (0x01337e29, 0x00000001) | yes
-     47 | (0x0133abd2, 0x00000006) | (0x0133abd2, 0x00000006) | yes
-     48 | (0x0156f781, 0x00009f7e) | (0x0156f781, 0x00009f7e) | yes
-     49 | (0x0157aadc, 0x0000002e) | (0x0157aadc, 0x0000002e) | yes
-     50 | (0x0157c17c, 0x000004b2) | (0x0157c17c, 0x000004b2) | yes
-     51 | (0x0157c676, 0x00000036) | (0x0157c676, 0x00000036) | yes
-     52 | (0x0157c964, 0x00000018) | (0x0157c964, 0x00000018) | yes
-     53 | (0x0167d12b, 0x00000005) | (0x0167d12b, 0x00000005) | yes
-     54 | (0x0167e31e, 0x00000033) | (0x0167e31e, 0x00000033) | yes
-     55 | (0x0167e74c, 0x0000002e) | (0x0167e74c, 0x0000002e) | yes
-     56 | (0x016804ef, 0x00000005) | (0x016804ef, 0x00000005) | yes
-     57 | (0x01682d29, 0x00000006) | (0x01682d29, 0x00000006) | yes
-     58 | (0x01682f8d, 0x00000043) | (0x01682f8d, 0x00000043) | yes
-     59 | (0x017871c7, 0x00000026) | (0x017871c7, 0x00000026) | yes
-     60 | (0x019c2651, 0x00006cc3) | (0x019c2651, 0x00006cc3) | yes
-     61 | (0x01aca3d4, 0x00000043) | (0x01aca3d4, 0x00000043) | yes
-     62 | (0x01acad26, 0x00000007) | (0x01acad26, 0x00000007) | yes
-     63 | (0x01acb10f, 0x00000001) | (0x01acb10f, 0x00000001) | yes
-     64 | (0x01acf9c3, 0x00000001) | (0x01acf9c3, 0x00000001) | yes
-     65 | (0x01bd262b, 0x00000004) | (0x01bd262b, 0x00000004) | yes
-     66 | (0x01bd2e2f, 0x00000003) | (0x01bd2e2f, 0x00000003) | yes
-     67 | (0x01cdf5c9, 0x00000002) | (0x01cdf5c9, 0x00000002) | yes
-     68 | (0x01cdfaf4, 0x00000025) | (0x01cdfaf4, 0x00000025) | yes
-     69 | (0x01cdfbd2, 0x00000033) | (0x01cdfbd2, 0x00000033) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x0000006a        0x00000004       0x0000006a      0x00000004  yes
+      1         0x00000442        0x00000003       0x00000442      0x00000003  yes
+      2         0x000004ef        0x00000031       0x000004ef      0x00000031  yes
+      3         0x00103b49        0x00000046       0x00103b49      0x00000046  yes
+      4         0x00105030        0x0000000c       0x00105030      0x0000000c  yes
+      5         0x0010508c        0x00000001       0x0010508c      0x00000001  yes
+      6         0x001050d4        0x00000025       0x001050d4      0x00000025  yes
+      7         0x0019049a        0x00007a46       0x0019049a      0x00007a46  yes
+      8         0x0019856a        0x00000003       0x0019856a      0x00000003  yes
+      9         0x00199bc9        0x00000023       0x00199bc9      0x00000023  yes
+     10         0x00199c0c        0x00000007       0x00199c0c      0x00000007  yes
+     11         0x0019a2fa        0x00000006       0x0019a2fa      0x00000006  yes
+     12         0x0019ecaf        0x00000005       0x0019ecaf      0x00000005  yes
+     13         0x001a53e0        0x00000030       0x001a53e0      0x00000030  yes
+     14         0x001a613c        0x00000033       0x001a613c      0x00000033  yes
+     15         0x001a68ab        0x0000002d       0x001a68ab      0x0000002d  yes
+     16         0x001a6c43        0x00000006       0x001a6c43      0x00000006  yes
+     17         0x00446dfb        0x000009f2       0x00446dfb      0x000009f2  yes
+     18         0x00449e77        0x00000006       0x00449e77      0x00000006  yes
+     19         0x00544db1        0x00000460       0x00544db1      0x00000460  yes
+     20         0x005b6ce9        0x001ae772       0x005b6ce9      0x001ae772  yes
+     21         0x008747c6        0x00006ec8       0x008747c6      0x00006ec8  yes
+     22         0x008909ac        0x00006d25       0x008909ac      0x00006d25  yes
+     23         0x00998ec9        0x000003e4       0x00998ec9      0x000003e4  yes
+     24         0x00999417        0x00000006       0x00999417      0x00000006  yes
+     25         0x0099972b        0x00000007       0x0099972b      0x00000007  yes
+     26         0x0099aa82        0x000004d5       0x0099aa82      0x000004d5  yes
+     27         0x0099af86        0x00000f91       0x0099af86      0x00000f91  yes
+     28         0x0099dda3        0x0000002a       0x0099dda3      0x0000002a  yes
+     29         0x00a9f8d8        0x00000007       0x00a9f8d8      0x00000007  yes
+     30         0x00a9fd79        0x0000040a       0x00a9fd79      0x0000040a  yes
+     31         0x00aa16dc        0x00000016       0x00aa16dc      0x00000016  yes
+     32         0x00aa1e21        0x00000024       0x00aa1e21      0x00000024  yes
+     33         0x00aa1f69        0x00000005       0x00aa1f69      0x00000005  yes
+     34         0x00aa21af        0x0000002f       0x00aa21af      0x0000002f  yes
+     35         0x00dd7129        0x00012ed7       0x00dd7129      0x00012ed7  yes
+     36         0x00eeb643        0x00001e5b       0x00eeb643      0x00001e5b  yes
+     37         0x00eedc15        0x000002d6       0x00eedc15      0x000002d6  yes
+     38         0x00eee166        0x00000008       0x00eee166      0x00000008  yes
+     39         0x01003c17        0x00000497       0x01003c17      0x00000497  yes
+     40         0x01004106        0x00000026       0x01004106      0x00000026  yes
+     41         0x0119a113        0x0000171f       0x0119a113      0x0000171f  yes
+     42         0x0123214f        0x0000000a       0x0123214f      0x0000000a  yes
+     43         0x0123628f        0x000004f1       0x0123628f      0x000004f1  yes
+     44         0x012368e5        0x00000005       0x012368e5      0x00000005  yes
+     45         0x01329aae        0x0000d801       0x01329aae      0x0000d801  yes
+     46         0x01337e29        0x00000001       0x01337e29      0x00000001  yes
+     47         0x0133abd2        0x00000006       0x0133abd2      0x00000006  yes
+     48         0x0156f781        0x00009f7e       0x0156f781      0x00009f7e  yes
+     49         0x0157aadc        0x0000002e       0x0157aadc      0x0000002e  yes
+     50         0x0157c17c        0x000004b2       0x0157c17c      0x000004b2  yes
+     51         0x0157c676        0x00000036       0x0157c676      0x00000036  yes
+     52         0x0157c964        0x00000018       0x0157c964      0x00000018  yes
+     53         0x0167d12b        0x00000005       0x0167d12b      0x00000005  yes
+     54         0x0167e31e        0x00000033       0x0167e31e      0x00000033  yes
+     55         0x0167e74c        0x0000002e       0x0167e74c      0x0000002e  yes
+     56         0x016804ef        0x00000005       0x016804ef      0x00000005  yes
+     57         0x01682d29        0x00000006       0x01682d29      0x00000006  yes
+     58         0x01682f8d        0x00000043       0x01682f8d      0x00000043  yes
+     59         0x017871c7        0x00000026       0x017871c7      0x00000026  yes
+     60         0x019c2651        0x00006cc3       0x019c2651      0x00006cc3  yes
+     61         0x01aca3d4        0x00000043       0x01aca3d4      0x00000043  yes
+     62         0x01acad26        0x00000007       0x01acad26      0x00000007  yes
+     63         0x01acb10f        0x00000001       0x01acb10f      0x00000001  yes
+     64         0x01acf9c3        0x00000001       0x01acf9c3      0x00000001  yes
+     65         0x01bd262b        0x00000004       0x01bd262b      0x00000004  yes
+     66         0x01bd2e2f        0x00000003       0x01bd2e2f      0x00000003  yes
+     67         0x01cdf5c9        0x00000002       0x01cdf5c9      0x00000002  yes
+     68         0x01cdfaf4        0x00000025       0x01cdfaf4      0x00000025  yes
+     69         0x01cdfbd2        0x00000033       0x01cdfbd2      0x00000033  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                            70             70
-  section bytes                       2082405        2082405
-  H5Fget_freespace                          -        2082405
-  reported - section bytes                  -              0
+  measurement               hdf5-pure    libhdf5
+  ------------------------  ---------  ---------
+  section count                    70         70
+  section bytes             2,082,405  2,082,405
+  H5Fget_freespace                  -  2,082,405
+  reported - section bytes          -          0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

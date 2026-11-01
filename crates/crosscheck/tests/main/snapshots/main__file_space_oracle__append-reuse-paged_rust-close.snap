@@ -2,40 +2,47 @@
 source: crates/crosscheck/tests/main/test_util/file_space.rs
 expression: report
 ---
-case:       append-reuse-paged
-checkpoint: rust-close
+checkpoint
+  measurement  value
+  -----------  ------------------
+  case         append-reuse-paged
+  checkpoint   rust-close
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               PAGE           PAGE
-  persistence                            true           true
-  threshold (bytes)                         1              1
-  page size (bytes)                     16384          16384
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       PAGE     PAGE
+  persistence                    true     true
+  threshold (bytes)                 1        1
+  page size (bytes)            16,384   16,384
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                3194880
-  libhdf5 H5Fget_filesize             3194880
-  physical file                       3194880
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     3,194,880
+  libhdf5 H5Fget_filesize  3,194,880
+  physical file            3,194,880
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x00000030, 0x0000003a) | (0x00000030, 0x0000003a) | yes
-      1 | (0x0000014c, 0x0000005e) | (0x0000014c, 0x0000005e) | yes
-      2 | (0x0000020d, 0x0000027b) | (0x0000020d, 0x0000027b) | yes
-      3 | (0x000006f1, 0x0000390f) | (0x000006f1, 0x0000390f) | yes
-      4 | (0x00004658, 0x000039a8) | (0x00004658, 0x000039a8) | yes
-      5 | (0x00008000, 0x00004000) | (0x00008000, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x00000030        0x0000003a       0x00000030      0x0000003a  yes
+      1         0x0000014c        0x0000005e       0x0000014c      0x0000005e  yes
+      2         0x0000020d        0x0000027b       0x0000020d      0x0000027b  yes
+      3         0x000006f1        0x0000390f       0x000006f1      0x0000390f  yes
+      4         0x00004658        0x000039a8       0x00004658      0x000039a8  yes
+      5         0x00008000        0x00004000       0x00008000      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             6              6
-  section bytes                         46538          46538
-  H5Fget_freespace                          -          46538
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     6        6
+  section bytes                46,538   46,538
+  H5Fget_freespace                  -   46,538
+  reported - section bytes          -        0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

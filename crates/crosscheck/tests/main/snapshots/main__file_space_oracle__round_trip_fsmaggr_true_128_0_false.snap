@@ -3,356 +3,426 @@ source: crates/crosscheck/tests/main/test_util/file_space.rs
 assertion_line: 34
 expression: report
 ---
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: created
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   created
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19397
-  libhdf5 H5Fget_filesize               19397
-  physical file                         19397
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,397
+  libhdf5 H5Fget_filesize  19,397
+  physical file            19,397
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000001e8, 0x00000648) | (0x000001e8, 0x00000648) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000001e8        0x00000648       0x000001e8      0x00000648  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             1              1
-  section bytes                          1608           1608
-  H5Fget_freespace                          -           1608
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     1        1
+  section bytes                 1,608    1,608
+  H5Fget_freespace                  -    1,608
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: rust-deletion
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   rust-deletion
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x0000015c, 0x0000008c) | (0x0000015c, 0x0000008c) | yes
-      1 | (0x00000354, 0x000004dc) | (0x00000354, 0x000004dc) | yes
-      2 | (0x000009c0, 0x00004000) | (0x000009c0, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x0000015c        0x0000008c       0x0000015c      0x0000008c  yes
+      1         0x00000354        0x000004dc       0x00000354      0x000004dc  yes
+      2         0x000009c0        0x00004000       0x000009c0      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                         17768          17768
-  H5Fget_freespace                          -          17768
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     3        3
+  section bytes                17,768   17,768
+  H5Fget_freespace                  -   17,768
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: rust-reuse-0
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   rust-reuse-0
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000001a3, 0x000001b1) | (0x000001a3, 0x000001b1) | yes
-      1 | (0x000004da, 0x00000356) | (0x000004da, 0x00000356) | yes
-      2 | (0x000038a0, 0x00001120) | (0x000038a0, 0x00001120) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000001a3        0x000001b1       0x000001a3      0x000001b1  yes
+      1         0x000004da        0x00000356       0x000004da      0x00000356  yes
+      2         0x000038a0        0x00001120       0x000038a0      0x00001120  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                          5671           5671
-  H5Fget_freespace                          -           5671
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     3        3
+  section bytes                 5,671    5,671
+  H5Fget_freespace                  -    5,671
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: manager-rewrite-0
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   manager-rewrite-0
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000002fd, 0x00000533) | (0x000002fd, 0x00000533) | yes
-      1 | (0x000009c0, 0x00004000) | (0x000009c0, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000002fd        0x00000533       0x000002fd      0x00000533  yes
+      1         0x000009c0        0x00004000       0x000009c0      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             2              2
-  section bytes                         17715          17715
-  H5Fget_freespace                          -          17715
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     2        2
+  section bytes                17,715   17,715
+  H5Fget_freespace                  -   17,715
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: rust-reuse-1
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   rust-reuse-1
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000001a3, 0x0000015a) | (0x000001a3, 0x0000015a) | yes
-      1 | (0x000004ca, 0x00000366) | (0x000004ca, 0x00000366) | yes
-      2 | (0x00003a30, 0x00000f90) | (0x00003a30, 0x00000f90) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000001a3        0x0000015a       0x000001a3      0x0000015a  yes
+      1         0x000004ca        0x00000366       0x000004ca      0x00000366  yes
+      2         0x00003a30        0x00000f90       0x00003a30      0x00000f90  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                          5200           5200
-  H5Fget_freespace                          -           5200
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     3        3
+  section bytes                 5,200    5,200
+  H5Fget_freespace                  -    5,200
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: manager-rewrite-1
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   manager-rewrite-1
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000002fd, 0x00000533) | (0x000002fd, 0x00000533) | yes
-      1 | (0x000009c0, 0x00004000) | (0x000009c0, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000002fd        0x00000533       0x000002fd      0x00000533  yes
+      1         0x000009c0        0x00004000       0x000009c0      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             2              2
-  section bytes                         17715          17715
-  H5Fget_freespace                          -          17715
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     2        2
+  section bytes                17,715   17,715
+  H5Fget_freespace                  -   17,715
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: rust-reuse-2
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   rust-reuse-2
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000001a3, 0x0000015a) | (0x000001a3, 0x0000015a) | yes
-      1 | (0x000004ca, 0x00000366) | (0x000004ca, 0x00000366) | yes
-      2 | (0x00003bc0, 0x00000e00) | (0x00003bc0, 0x00000e00) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000001a3        0x0000015a       0x000001a3      0x0000015a  yes
+      1         0x000004ca        0x00000366       0x000004ca      0x00000366  yes
+      2         0x00003bc0        0x00000e00       0x00003bc0      0x00000e00  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                          4800           4800
-  H5Fget_freespace                          -           4800
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     3        3
+  section bytes                 4,800    4,800
+  H5Fget_freespace                  -    4,800
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: manager-rewrite-2
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   manager-rewrite-2
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19280
-  libhdf5 H5Fget_filesize               19280
-  physical file                         19280
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,280
+  libhdf5 H5Fget_filesize  19,280
+  physical file            19,280
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000002fd, 0x00000533) | (0x000002fd, 0x00000533) | yes
-      1 | (0x000009c0, 0x00004000) | (0x000009c0, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000002fd        0x00000533       0x000002fd      0x00000533  yes
+      1         0x000009c0        0x00004000       0x000009c0      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             2              2
-  section bytes                         17715          17715
-  H5Fget_freespace                          -          17715
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     2        2
+  section bytes                17,715   17,715
+  H5Fget_freespace                  -   17,715
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: c-reuse
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   c-reuse
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19906
-  libhdf5 H5Fget_filesize               19906
-  physical file                         19906
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,906
+  libhdf5 H5Fget_filesize  19,906
+  physical file            19,906
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x0000026d, 0x00000009) | (0x0000026d, 0x00000009) | yes
-      1 | (0x000002fd, 0x00000533) | (0x000002fd, 0x00000533) | yes
-      2 | (0x000038a0, 0x00001120) | (0x000038a0, 0x00001120) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x0000026d        0x00000009       0x0000026d      0x00000009  yes
+      1         0x000002fd        0x00000533       0x000002fd      0x00000533  yes
+      2         0x000038a0        0x00001120       0x000038a0      0x00001120  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                          5724           5724
-  H5Fget_freespace                          -           5724
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     3        3
+  section bytes                 5,724    5,724
+  H5Fget_freespace                  -    5,724
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
-checkpoint: c-delete
+checkpoint
+  measurement  value
+  -----------  ------------------------------------------------------------------
+  case         FsmAggr/persist=true/page=4096/threshold=128/base=0/c_origin=false
+  checkpoint   c-delete
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                       128            128
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)               128       128
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)          0         0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  19587
-  libhdf5 H5Fget_filesize               19587
-  physical file                         19587
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     19,587
+  libhdf5 H5Fget_filesize  19,587
+  physical file            19,587
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x0000026d, 0x00000009) | (0x0000026d, 0x00000009) | yes
-      1 | (0x000002fd, 0x00000533) | (0x000002fd, 0x00000533) | yes
-      2 | (0x000009c0, 0x00004000) | (0x000009c0, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x0000026d        0x00000009       0x0000026d      0x00000009  yes
+      1         0x000002fd        0x00000533       0x000002fd      0x00000533  yes
+      2         0x000009c0        0x00004000       0x000009c0      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                         17724          17724
-  H5Fget_freespace                          -          17724
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     3        3
+  section bytes                17,724   17,724
+  H5Fget_freespace                  -   17,724
+  reported - section bytes          -        0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
