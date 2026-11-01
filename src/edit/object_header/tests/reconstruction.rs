@@ -449,6 +449,7 @@ fn previous_opening_extension(source: &impl Source, context: &FileContext) -> Op
     OpeningExtension {
         info: info.map(|info| (address, info)),
         allocations,
+        shared_table: Ok(None),
     }
 }
 
