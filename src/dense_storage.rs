@@ -54,7 +54,7 @@ pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
         if header.tree_type != index.expected_tree_type {
             return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
         }
-        extents.extend(btree_v2::collect_btree_v2_storage_extents(
+        extents.extend(btree_v2::legacy_collect_btree_v2_storage_extents(
             source,
             index.address,
             widths,

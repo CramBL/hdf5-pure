@@ -173,7 +173,7 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
 #[case::userblock(512, 512)]
 #[case::forward_relocated(0, 512)]
 #[case::backward_relocated(512, 0)]
-fn custom_sources_borrow_native_array_metadata_after_relocation(
+fn custom_sources_borrow_native_chunk_indexes_after_relocation(
     #[case] encoded_base: usize,
     #[case] effective_base: usize,
     #[values(false, true)] cache_enabled: bool,
@@ -182,6 +182,7 @@ fn custom_sources_borrow_native_array_metadata_after_relocation(
     let path = directory.path().join("native-arrays.h5");
     let fixed_values = [2, 3, 5, 7, 11, 13, 17, 19];
     let extensible_values = [23, 29, 31, 37, 41, 43, 47, 53];
+    let btree_values = [59, 61, 67, 71, 73, 79, 83, 89];
     let native = hdf5::File::with_options()
         .with_fcpl(|properties| properties.userblock(encoded_base as u64))
         .with_fapl(|properties| properties.libver_v110())
@@ -207,6 +208,16 @@ fn custom_sources_borrow_native_array_metadata_after_relocation(
         extensible.resize([extensible_values.len()]).unwrap();
         extensible.write(&extensible_values).unwrap();
         assert_eq!(extensible.read_raw::<i32>().unwrap(), extensible_values);
+        let btree = native
+            .new_dataset::<i32>()
+            .shape((0.., 0..))
+            .chunk([1, 2])
+            .deflate(1)
+            .create("btree")
+            .unwrap();
+        btree.resize([2, 4]).unwrap();
+        btree.write_raw(&btree_values).unwrap();
+        assert_eq!(btree.read_raw::<i32>().unwrap(), btree_values);
     }
     native.close().unwrap();
     let original = std::fs::read(&path).unwrap();
@@ -249,6 +260,13 @@ fn custom_sources_borrow_native_array_metadata_after_relocation(
         assert_eq!(
             extensible.read_i32_region(&[1], &[5]).unwrap(),
             extensible_values[1..6]
+        );
+        let btree = file.dataset("btree").unwrap();
+        assert_eq!(btree.chunk_index().unwrap(), Some(ChunkIndex::BTreeV2));
+        assert_eq!(btree.read_i32().unwrap(), btree_values);
+        assert_eq!(
+            btree.read_i32_region(&[0, 1], &[2, 2]).unwrap(),
+            [61, 67, 79, 83],
         );
     }
     let reads = metadata_reads.load(Ordering::Relaxed);
