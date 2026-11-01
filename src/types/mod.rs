@@ -66,7 +66,7 @@ pub enum DType {
     /// A datatype outside the simplified variants.
     ///
     /// Retains the complete [`Datatype`] at the top level and inside compound
-    /// fields or arrays.
+    /// fields or arrays. Native complex datatypes use this variant.
     Other(Box<Datatype>),
 }
 
@@ -151,6 +151,7 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
             ref_type: crate::datatype::ReferenceType::Object,
             ..
         } => DType::ObjectReference,
+        Datatype::Complex(_) => DType::Other(Box::new(dt.clone())),
         // The type itself, not a rendering of it: this is the only view a
         // caller gets of a member or an array base that the curated set has no
         // name for.

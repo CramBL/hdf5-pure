@@ -208,9 +208,10 @@ impl AppendBuilder {
 
     /// Appends element bytes encoded in the dataset's on-disk datatype.
     ///
-    /// The total byte length must be a multiple of the element size. Numeric fields must be
-    /// little-endian, except one-byte integers, whose byte order is immaterial. Variable-length
-    /// and reference datatypes are rejected when the append is prepared.
+    /// The total byte length must be a multiple of the element size. Numeric fields, including
+    /// native complex components, must be little-endian, except one-byte integers, whose byte
+    /// order is immaterial. Variable-length and reference datatypes are rejected when the
+    /// append is prepared.
     pub fn append_raw(&mut self, bytes: &[u8]) -> &mut Self {
         self.raw.extend_from_slice(bytes);
         self
@@ -1171,6 +1172,9 @@ pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
             numeric.size().get() == 1 || numeric.byte_order() == DatatypeByteOrder::LittleEndian
         }
         Datatype::FloatingPoint(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
+        Datatype::Complex(complex) => {
+            complex.component().byte_order() == DatatypeByteOrder::LittleEndian
+        }
         Datatype::Time(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
         Datatype::BitField(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
         Datatype::String { .. } | Datatype::Opaque { .. } => true,
