@@ -25,9 +25,151 @@ use hdf5_pure::FormatError;
 use hdf5_pure::GroupBuilder;
 use hdf5_pure::LibVer;
 use hdf5_pure::LinkPhaseChange;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::RepackOptions;
 use hdf5_pure::UserblockSize;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure_format::__private::AccessMode;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure_format::__private::GroupEstimates;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure_format::__private::GroupInfo;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
 use test_util_hdf5::dense_links;
+#[cfg(feature = "__hdf5-1.10")]
+use test_util_hdf5::reader::ReadBackend;
+
+#[cfg(feature = "__hdf5-1.10")]
+#[rstest]
+#[case::default(8, 6, 9)]
+#[case::compact_nondefault(12, 8, 9)]
+#[case::custom_equal(12, 8, 12)]
+#[case::custom_dense(12, 8, 13)]
+#[case::one_way(12, 0, 9)]
+#[case::always_dense(0, 0, 1)]
+#[case::always_dense_empty(0, 0, 0)]
+fn repack_retains_native_link_policy(
+    #[case] max_compact: u32,
+    #[case] min_dense: u32,
+    #[case] count: usize,
+    #[values(Target::Root, Target::Nested)] target: Target,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+    #[values(
+        FileSpaceStrategy::None,
+        FileSpaceStrategy::FsmAggr,
+        FileSpaceStrategy::Page
+    )]
+    strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    dense_links::write_edit_fixture(
+        &source_path,
+        target.path(),
+        count,
+        Some((max_compact, min_dense)),
+    );
+    let source = backend.open(&source_path).unwrap();
+    let options = RepackOptions::new().with_file_space_settings(
+        FileSpaceSettings::new(strategy).with_persistence(strategy != FileSpaceStrategy::None),
+    );
+    hdf5_pure::repack_to_path(&source, &destination, &options).unwrap();
+    source.close().unwrap();
+    let native = hdf5::File::open(&destination).unwrap();
+    let group = native.group(target.path()).unwrap();
+    assert_eq!(
+        group.gcpl().unwrap().get_link_phase_change().unwrap(),
+        NativeLinkPhaseChange {
+            max_compact,
+            min_dense
+        }
+    );
+    assert_eq!(group.info().unwrap().nlinks, u64::try_from(count).unwrap());
+    assert_eq!(
+        group.info().unwrap().storage_type,
+        if count > usize::try_from(max_compact).unwrap() {
+            GroupStorageType::Dense
+        } else {
+            GroupStorageType::Compact
+        }
+    );
+    let expected_names = (0..count)
+        .map(|index| format!("link_{index:04}"))
+        .collect::<Vec<_>>();
+    let mut names = group.member_names().unwrap();
+    names.sort();
+    assert_eq!(names, expected_names);
+    for index in 0..count {
+        assert_eq!(
+            group
+                .dataset(&format!("link_{index:04}"))
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            vec![i32::try_from(index).unwrap(), 42]
+        );
+    }
+    drop(group);
+    native.close().unwrap();
+    let file = File::open(&destination).unwrap();
+    let policy = file
+        .group(target.path())
+        .unwrap()
+        .link_phase_change()
+        .unwrap();
+    assert_eq!(
+        (
+            u32::from(policy.max_compact()),
+            u32::from(policy.min_dense())
+        ),
+        (max_compact, min_dense)
+    );
+    file.close().unwrap();
+    directory.close().unwrap();
+}
+
+#[cfg(feature = "__hdf5-1.10")]
+#[rstest]
+#[case::estimates_only((8, 6), (7, 20), 9)]
+#[case::default_estimates((12, 8), (4, 8), 12)]
+#[case::custom_estimates((12, 0), (7, 20), 13)]
+#[case::zero_estimates((0, 0), (0, 0), 1)]
+fn repack_retains_native_group_entry_estimates(
+    #[case] thresholds: (u32, u32),
+    #[case] estimates: (u32, u32),
+    #[case] count: usize,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    dense_links::write_group_info_fixture(&source, thresholds, estimates, count);
+    let original = read_group_info(&source, "group");
+    assert_eq!(
+        original.phase_change().max_compact(),
+        u16::try_from(thresholds.0).unwrap()
+    );
+    assert_eq!(
+        original.phase_change().min_dense(),
+        u16::try_from(thresholds.1).unwrap()
+    );
+    let expected = GroupEstimates {
+        entries: u16::try_from(estimates.0).unwrap(),
+        name_length: u16::try_from(estimates.1).unwrap(),
+    };
+    assert_eq!(original.estimates().unwrap_or(DEFAULT_ESTIMATES), expected);
+    hdf5_pure::repack(&source, &destination, &RepackOptions::new()).unwrap();
+    assert_eq!(read_group_info(&destination, "group"), original);
+    let native = hdf5::File::open(&destination).unwrap();
+    assert_eq!(
+        native.group("group").unwrap().info().unwrap().nlinks,
+        u64::try_from(count).unwrap()
+    );
+    native.close().unwrap();
+    directory.close().unwrap();
+}
 
 #[cfg(feature = "__hdf5-1.10")]
 #[rstest]
@@ -397,6 +539,34 @@ fn link_name(index: usize) -> String {
     format!("entry_{index:02}_λ")
 }
 
+#[cfg(feature = "__hdf5-1.10")]
+fn read_group_info(path: &Path, group_path: &str) -> GroupInfo {
+    let bytes = std::fs::read(path).unwrap();
+    let file = File::open(path).unwrap();
+    let group = file.group(group_path).unwrap();
+    let superblock = file.superblock();
+    let header = ObjectHeader::parse(
+        &bytes,
+        AccessMode::ReadOnly,
+        usize::try_from(
+            test_util_hdf5::storage::root_object_address(&file, &bytes, group_path).get(),
+        )
+        .unwrap(),
+        superblock.offset_size.get(),
+        superblock.length_size.get(),
+    )
+    .unwrap();
+    let message = header
+        .messages
+        .iter()
+        .find(|message| message.msg_type == hdf5_pure::MessageType::GROUP_INFO)
+        .unwrap();
+    let info = GroupInfo::parse(&message.data).unwrap();
+    drop(group);
+    file.close().unwrap();
+    info
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Target {
     Nested,
@@ -514,3 +684,11 @@ const HIGH_BYTES: LinkPhaseChange = LinkPhaseChange::builder()
     .max_compact::<513>()
     .min_dense::<257>()
     .build();
+
+// "The Group Info Message" in the format specification, version 4.0, defines these
+// estimates when the Group Info message omits its entry estimate fields.
+#[cfg(feature = "__hdf5-1.10")]
+const DEFAULT_ESTIMATES: GroupEstimates = GroupEstimates {
+    entries: 4,
+    name_length: 8,
+};

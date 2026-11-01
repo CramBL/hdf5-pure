@@ -13,6 +13,8 @@ use std::path::Path;
 use hdf5_pure_core::__private::SuperblockFields;
 use hdf5_pure_format::__private::DenseAttrCreationOrder;
 use hdf5_pure_format::__private::DenseAttrFixup;
+use hdf5_pure_format::__private::GroupInfo;
+use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_space::__private::AllocationClass;
 
@@ -24,7 +26,6 @@ use super::preparation::PreparedAttributes;
 use super::preparation::PreparedDataset;
 use super::preparation::VlPatch;
 use crate::FileSpaceSettings;
-use crate::LinkPhaseChange;
 use crate::SuperblockStatus;
 use crate::SuperblockStatusFlags;
 use crate::address::BaseAddress;
@@ -119,12 +120,17 @@ impl Object {
         Self::new(Kind::Dataset(Box::new(dataset)), heaps)
     }
 
-    /// Prepares a group's attributes without its hard links.
+    /// Prepares a group's attributes, link thresholds, and entry estimates.
+    ///
+    /// Hard links are supplied separately through [`ObjectSource::links`].
     ///
     /// # Errors
     ///
     /// Propagates errors from [`PreparedAttributes::new`].
-    pub(crate) fn group(attributes: &AttributeSpecs) -> Result<Self, FormatError> {
+    pub(crate) fn group(
+        attributes: &AttributeSpecs,
+        group_info: GroupInfo,
+    ) -> Result<Self, FormatError> {
         let PreparedAttributes {
             messages,
             committed_datatype_paths,
@@ -133,6 +139,7 @@ impl Object {
         Self::new(
             Kind::Group {
                 attributes: messages,
+                group_info,
                 paths: committed_datatype_paths,
             },
             heaps,
@@ -256,12 +263,13 @@ impl Object {
                     None,
                 )
             }
-            Kind::Group { attributes, .. } => {
+            Kind::Group {
+                attributes,
+                group_info,
+                ..
+            } => {
                 let links = links_at(source, index, None)?;
-                let plan = super::dense_links_plan(
-                    &links,
-                    LinkPhaseChange::default().group_info()?.phase_change(),
-                )?;
+                let plan = super::dense_links_plan(&links, group_info.phase_change())?;
                 let link_info = plan
                     .as_ref()
                     .map(|plan| plan.link_info(StoredAddress::ZERO))
@@ -272,7 +280,7 @@ impl Object {
                     attributes,
                     info.as_deref(),
                     link_info.as_ref(),
-                    LinkPhaseChange::default().group_info()?,
+                    *group_info,
                 )?;
                 (
                     header.len() as u64,
@@ -283,7 +291,10 @@ impl Object {
                         length: plan.serialized_len(),
                     }),
                     None,
-                    link_info.as_ref().map(DenseLinks::new).transpose()?,
+                    link_info
+                        .as_ref()
+                        .map(|info| DenseLinks::new(info, group_info.phase_change()))
+                        .transpose()?,
                 )
             }
             Kind::Committed(_) => (0, None, false, None, None, None),
@@ -501,6 +512,7 @@ enum Kind {
     Dataset(Box<PreparedDataset>),
     Group {
         attributes: Vec<AttributeMessage>,
+        group_info: GroupInfo,
         /// Indices in `attributes` paired with the paths of their committed datatypes.
         paths: Vec<(usize, ObjectPathBuf)>,
     },
@@ -930,7 +942,11 @@ impl<S: ObjectSource> Plan<S> {
                     measured.map(|measured| (measured.layout_message, measured.pipeline_message));
                 dataset.build_header(address, messages.as_ref(), info.as_deref(), self.libver)?
             }
-            Kind::Group { attributes, .. } => {
+            Kind::Group {
+                attributes,
+                group_info,
+                ..
+            } => {
                 let link_info = record.link_info()?;
                 let links = if link_info.is_some() {
                     Vec::new()
@@ -942,7 +958,7 @@ impl<S: ObjectSource> Plan<S> {
                     attributes,
                     info.as_deref(),
                     link_info.as_ref(),
-                    LinkPhaseChange::default().group_info()?,
+                    *group_info,
                 )?
             }
             Kind::Committed(datatype) => {
@@ -973,27 +989,32 @@ impl<S: ObjectSource> Plan<S> {
         Ok(super::dense_links_image(
             &links_at(&self.source, index, Some(&self.records))?,
             (span.address, span.length.to_usize()?),
-            LinkPhaseChange::default().group_info()?.phase_change(),
+            self.records
+                .get(index)
+                .and_then(|record| record.dense_links)
+                .ok_or_else(inconsistent)?
+                .phase_change,
         )?
         .bytes)
     }
 }
 
-/// The name-index offset within untracked dense link storage.
+/// The thresholds and name-index offset for untracked dense link storage.
 #[derive(Clone, Copy)]
 struct DenseLinks {
+    phase_change: GroupPhaseChange,
     /// Relative to the stored address of the fractal heap.
     name_index_offset: NonZeroU64,
 }
 
 impl DenseLinks {
-    /// Records relative name-index geometry measured with the heap at address zero.
+    /// Records thresholds and relative name-index geometry measured with the heap at address zero.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if creation-order metadata is present, the heap
     /// address is absent or nonzero, or the name-index address is absent or zero.
-    fn new(info: &LinkInfoMessage) -> Result<Self, FormatError> {
+    fn new(info: &LinkInfoMessage, phase_change: GroupPhaseChange) -> Result<Self, FormatError> {
         let LinkInfoMessage {
             max_creation_order,
             fractal_heap_address,
@@ -1007,6 +1028,7 @@ impl DenseLinks {
             return Err(inconsistent());
         }
         Ok(Self {
+            phase_change,
             name_index_offset: NonZeroU64::new(
                 btree_name_index_address.ok_or_else(inconsistent)?.get(),
             )
@@ -1022,7 +1044,10 @@ impl DenseLinks {
     /// [`FormatError::OffsetOverflow`] if its end exceeds [`u64::MAX`], or
     /// [`FormatError::Internal`] if the name-index offset is outside the allocation.
     fn link_info(self, span: Allocation) -> Result<LinkInfoMessage, FormatError> {
-        let Self { name_index_offset } = self;
+        let Self {
+            name_index_offset,
+            phase_change: _,
+        } = self;
         let Allocation { address, length } = span;
         if address == super::UNDEF_ADDRESS {
             return Err(FormatError::AddressTooLarge {
@@ -1424,7 +1449,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let geometry = DenseLinks::new(&plan.link_info(StoredAddress::new(0)).unwrap()).unwrap();
+        let geometry = DenseLinks::new(
+            &plan.link_info(StoredAddress::new(0)).unwrap(),
+            LinkPhaseChange::default()
+                .group_info()
+                .unwrap()
+                .phase_change(),
+        )
+        .unwrap();
         let span = Allocation {
             address: StoredAddress::new(address.unwrap_or(u64::MAX - plan.serialized_len())),
             length: plan.serialized_len(),
@@ -1451,7 +1483,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let geometry = DenseLinks::new(&plan.link_info(StoredAddress::new(0)).unwrap()).unwrap();
+        let geometry = DenseLinks::new(
+            &plan.link_info(StoredAddress::new(0)).unwrap(),
+            LinkPhaseChange::default()
+                .group_info()
+                .unwrap()
+                .phase_change(),
+        )
+        .unwrap();
         let length = plan.serialized_len();
         let address = if undefined {
             u64::MAX
@@ -1595,7 +1634,10 @@ mod tests {
             } = self;
             loads[index].fetch_add(1, Ordering::Relaxed);
             if index == *count {
-                return Ok(Object::group(&GroupBuilder::new("root").finish().attrs)?);
+                return Ok(Object::group(
+                    &GroupBuilder::new("root").finish().attrs,
+                    LinkPhaseChange::default().group_info()?,
+                )?);
             }
             let mut builder = DatasetBuilder::new(&format!("d{index:04}"));
             if *unallocated {
@@ -1744,7 +1786,10 @@ mod tests {
 
         fn load(&self, index: usize) -> Result<Object, Error> {
             if index == 1 {
-                return Ok(Object::group(&GroupBuilder::new("root").finish().attrs)?);
+                return Ok(Object::group(
+                    &GroupBuilder::new("root").finish().attrs,
+                    LinkPhaseChange::default().group_info()?,
+                )?);
             }
             let mut builder = DatasetBuilder::new("values");
             builder.with_raw_chunks_lazy(
@@ -1820,7 +1865,10 @@ mod tests {
                     );
                 }
             }
-            Ok(Object::group(&group.finish().attrs)?)
+            Ok(Object::group(
+                &group.finish().attrs,
+                LinkPhaseChange::default().group_info()?,
+            )?)
         }
 
         fn links(

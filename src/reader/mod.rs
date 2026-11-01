@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::GroupInfo;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::MetadataBytes;
@@ -2140,6 +2141,29 @@ impl FileInner {
         .map_err(Error::Format)
     }
 
+    /// Reads Group Info, using defaults when `header` omits the message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::DuplicateGroupInfo`] for repeated messages.
+    /// Propagates source read and Group Info parsing errors.
+    fn group_info_of(&self, header: &ObjectHeader) -> Result<GroupInfo, Error> {
+        let mut messages = header
+            .messages
+            .iter()
+            .filter(|message| message.msg_type == MessageType::GROUP_INFO);
+        let Some(message) = messages.next() else {
+            return Ok(LinkPhaseChange::default().group_info()?);
+        };
+        if messages.next().is_some() {
+            return Err(FormatError::DuplicateGroupInfo.into());
+        }
+        Ok(LinkPhaseChange::stored_group_info(
+            &self.message_body(message)?,
+            header.version,
+        )?)
+    }
+
     /// Returns the absolute file address of the object header `entry` names.
     ///
     /// # Errors
@@ -3986,21 +4010,21 @@ impl File {
         ))
     }
 
-    /// Reads the attributes of the object whose header is at `header`.
+    /// Reads attributes and effective Group Info from the object header at `header`.
     ///
     /// Consumes `parsed` under the source, address, and revision checks of [`ParsedHeader`].
-    /// For streaming sources, the reader retains attribute messages and attribute storage
-    /// information during a fresh parse.
+    /// For streaming sources, the reader retains Attribute, Attribute Info, and Group Info
+    /// messages during a fresh parse. Uses default Group Info when the message is absent.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] with [`FormatError::Internal`] if `parsed` belongs to another
-    /// source or address. Propagates object-header and attribute-reading errors.
-    pub(crate) fn attr_messages_at(
+    /// source or address. Propagates object-header, attribute-reading, and Group Info parsing errors.
+    pub(crate) fn attr_messages_and_group_info_at(
         &self,
         header: PhysicalAddress,
         parsed: Option<ParsedHeader>,
-    ) -> Result<Vec<AttributeMessage>, Error> {
+    ) -> Result<(Vec<AttributeMessage>, GroupInfo), Error> {
         let parsed = parsed
             .map(|parsed| parsed.reuse(self, header))
             .transpose()?
@@ -4017,14 +4041,19 @@ impl File {
                     MessageFilter::Only(&mut |message_type, _| {
                         matches!(
                             message_type,
-                            MessageType::ATTRIBUTE | MessageType::ATTRIBUTE_INFO
+                            MessageType::ATTRIBUTE
+                                | MessageType::ATTRIBUTE_INFO
+                                | MessageType::GROUP_INFO
                         )
                     }),
                 )?
             }
             (None, _) => self.inner.parse_header(header.get())?,
         };
-        self.inner.attr_messages_of(&header)
+        Ok((
+            self.inner.attr_messages_of(&header)?,
+            self.inner.group_info_of(&header)?,
+        ))
     }
 
     /// Returns a handle to the group whose object header is at `header`, which `path` identifies
@@ -4492,20 +4521,10 @@ impl Group {
         if !group_v2::is_group(&header) {
             return Err(Error::NotAGroup(reported_path(self.path.as_ref())));
         }
-        let mut messages = header
-            .messages
-            .iter()
-            .filter(|message| message.msg_type == MessageType::GROUP_INFO);
-        let Some(message) = messages.next() else {
-            return Ok(LinkPhaseChange::default());
-        };
-        if messages.next().is_some() {
-            return Err(FormatError::DuplicateGroupInfo.into());
-        }
-        Ok(LinkPhaseChange::from_group_info(
-            &self.file.message_body(message)?,
-            header.version,
-        )?)
+        Ok(
+            LinkPhaseChange::try_from(self.file.group_info_of(&header)?.phase_change())
+                .map_err(|_error| FormatError::Internal("parsed group policy is invalid".into()))?,
+        )
     }
 
     /// List the names of datasets in this group.

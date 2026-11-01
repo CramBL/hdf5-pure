@@ -13,6 +13,8 @@ use hdf5::file::LibraryVersion;
 use hdf5::plist::GroupCreate;
 use hdf5::plist::group_create::LinkCreationOrder;
 #[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::group_create::LinkPhaseChange;
+#[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
@@ -571,6 +573,51 @@ fn write_edit_root_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
         }
     });
     populate_edit_group(&reference, count);
+    reference.close().unwrap();
+}
+
+/// Writes a native group with configurable link thresholds and entry estimates.
+///
+/// Creates `group` with `thresholds` and `estimates`, then populates it with `count` datasets
+/// through [`populate_edit_group`].
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create or configure the file or group, or if populating the group fails.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_group_info_fixture(
+    path: &Path,
+    thresholds: (u32, u32),
+    estimates: (u32, u32),
+    count: usize,
+) {
+    let reference = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .create(path)
+        .unwrap();
+    let properties = GroupCreate::build()
+        .link_phase_change(LinkPhaseChange {
+            max_compact: thresholds.0,
+            min_dense: thresholds.1,
+        })
+        .finish()
+        .unwrap();
+    hdf5::sync::sync(|| {
+        assert_eq!(
+            // SAFETY: The library lock serializes access and `properties` owns the live list.
+            unsafe {
+                hdf5_sys::h5p::H5Pset_est_link_info(properties.id(), estimates.0, estimates.1)
+            },
+            0
+        );
+    });
+    let group = reference
+        .create_group_builder()
+        .set_gcpl(&properties)
+        .create("group")
+        .unwrap();
+    populate_edit_group(&group, count);
+    drop(group);
     reference.close().unwrap();
 }
 
