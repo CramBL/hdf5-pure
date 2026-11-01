@@ -340,6 +340,7 @@ use self::context::FileContext;
 use self::dataset::FlatDataset;
 #[cfg(doc)]
 use self::dataset::{MovingWrite, WritePlan};
+use self::free_snapshot::FreeSpaceSnapshot;
 #[cfg(test)]
 use self::group::LinkCreationOrder;
 pub(crate) use self::object_header::OhRegion;
@@ -355,6 +356,7 @@ mod commit;
 mod context;
 mod copy;
 mod dataset;
+mod free_snapshot;
 mod global_heap_liveness;
 mod group;
 #[cfg(test)]
@@ -2497,21 +2499,7 @@ impl WriteEngine {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the byte sum exceeds [`u64::MAX`].
     pub(crate) fn reusable_space_stats(&self) -> Result<ReusableSpaceStats, FormatError> {
-        let mut reusable_free_bytes = self.space.reusable_bytes()?;
-        if let Some(aggregation) = self.aggregation {
-            let unused = aggregation.unused_bytes()?;
-            reusable_free_bytes =
-                reusable_free_bytes
-                    .checked_add(unused)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: reusable_free_bytes,
-                        length: unused,
-                    })?;
-        }
-        Ok(ReusableSpaceStats::new(
-            self.image.len(),
-            reusable_free_bytes,
-        ))
+        FreeSpaceSnapshot::new(self).stats()
     }
 
     /// Returns sorted reusable sections at absolute physical offsets.
@@ -2570,36 +2558,7 @@ impl WriteEngine {
     /// page-type boundaries.
     /// Resolves stored ranges against the opened image's effective base.
     fn reusable_ranges(&self) -> impl Iterator<Item = Result<FileRange, FormatError>> + '_ {
-        let aggregate_only = self.aggregation.filter(|_| !self.space.is_enabled());
-        let managers_only = self.aggregation.is_none();
-        let combined = aggregate_only.is_none() && !managers_only;
-        aggregate_only
-            .into_iter()
-            .flat_map(AggregateSpace::unused)
-            .chain(
-                managers_only
-                    .then(|| self.space.reusable_sections())
-                    .into_iter()
-                    .flatten(),
-            )
-            .chain(
-                combined
-                    .then(|| {
-                        self.space.reusable_sections_with_raw(
-                            self.aggregation
-                                .into_iter()
-                                .flat_map(AggregateSpace::unused),
-                        )
-                    })
-                    .into_iter()
-                    .flatten(),
-            )
-            .map(|extent| {
-                FileRange::new(
-                    self.context.addresses().resolve(extent.start())?,
-                    extent.len(),
-                )
-            })
+        FreeSpaceSnapshot::new(self).ranges()
     }
 
     /// Returns whether the strategy permits immediate reuse outside SWMR writing.

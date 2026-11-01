@@ -11,6 +11,7 @@ use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, TRAILING_RESERVE_TAILS};
+use super::snapshot::AdmittedFreeSnapshot;
 
 /// Identifies whether an allocation belongs to metadata or raw-data pages.
 ///
@@ -358,39 +359,9 @@ impl PagedEdit {
         self.track(extent, ty.into());
     }
 
-    /// Returns the sum of the cached metadata and raw-data free-byte totals.
-    ///
-    /// Excludes dead and unclassified extents.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
-    pub(crate) fn reusable_bytes(&self) -> Result<u64, FormatError> {
-        let metadata = self.meta.total_bytes();
-        let raw = self.raw.total_bytes();
-        metadata
-            .checked_add(raw)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: metadata,
-                length: raw,
-            })
-    }
-
-    /// Returns the reusable metadata and raw-data extents.
-    pub(crate) fn reusable_extents(&self) -> (&[Extent], &[Extent]) {
-        (self.meta.extents(), self.raw.extents())
-    }
-
-    /// Returns raw-data free space with additional raw extents folded into it.
-    pub(crate) fn reusable_raw_with(
-        &self,
-        raw_extents: impl IntoIterator<Item = Extent>,
-    ) -> Vec<Extent> {
-        let mut raw = self.raw.clone();
-        for extent in raw_extents {
-            raw.free(extent);
-        }
-        raw.into_extents()
+    /// Borrows classified and unclassified admitted extents and their cached byte totals.
+    pub(crate) fn admitted_snapshot(&self) -> AdmittedFreeSnapshot<'_> {
+        AdmittedFreeSnapshot::paged(self.page_size, &self.meta, &self.raw, &self.unclassified)
     }
 
     /// Returns the start of the free run that reaches `eoa` across all PAGE lists.
@@ -891,7 +862,10 @@ mod tests {
         assert_eq!(paged.sections().metadata(), []);
         assert_eq!(paged.sections().raw(), [pages]);
         assert_eq!(paged.sections().unclassified(), edges);
-        assert_eq!(paged.reusable_bytes().unwrap(), pages.len());
+        assert_eq!(
+            paged.admitted_snapshot().reusable_bytes().unwrap(),
+            pages.len()
+        );
         assert_eq!(paged.largest(ty), pages.len());
         assert_eq!(paged.allocate(pages.len() + 1, ty), None);
 
@@ -911,7 +885,10 @@ mod tests {
         let allocation = Extent::new(pages.start(), length).unwrap();
         assert_eq!(paged.allocate(length, ty), Some(allocation));
         assert_eq!(paged.sections().unclassified(), edges);
-        assert_eq!(paged.reusable_bytes().unwrap(), page_size / 2);
+        assert_eq!(
+            paged.admitted_snapshot().reusable_bytes().unwrap(),
+            page_size / 2
+        );
         assert_eq!(paged.allocate(page_size / 2 + 1, ty), None);
         paged.restore_allocation(snapshot);
         assert_eq!(paged.sections().metadata(), []);
@@ -938,7 +915,7 @@ mod tests {
         assert_eq!(paged.sections().metadata(), []);
         assert_eq!(paged.sections().raw(), []);
         assert_eq!(paged.sections().unclassified(), [section]);
-        assert_eq!(paged.reusable_bytes().unwrap(), 0);
+        assert_eq!(paged.admitted_snapshot().reusable_bytes().unwrap(), 0);
         assert_eq!(paged.allocate(1, PageType::Meta), None);
         assert_eq!(paged.allocate(1, PageType::Raw), None);
     }
@@ -982,7 +959,7 @@ mod tests {
         paged.meta.free(extent(0, u64::MAX));
         paged.raw.free(extent(0, 1));
         assert_eq!(
-            paged.reusable_bytes(),
+            paged.admitted_snapshot().reusable_bytes(),
             Err(FormatError::OffsetOverflow {
                 offset: u64::MAX,
                 length: 1
