@@ -11,6 +11,7 @@ use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, TRAILING_RESERVE_TAILS};
+use super::reservation::ReservationBatch;
 use super::snapshot::AdmittedFreeSnapshot;
 
 /// Identifies whether an allocation belongs to metadata or raw-data pages.
@@ -320,6 +321,11 @@ impl PagedEdit {
             &mut self.dead,
             self.page_size,
         );
+    }
+
+    /// Borrows both reusable page-type lists for indexed reservations.
+    pub(crate) fn reservation_batch(&mut self) -> ReservationBatch<'_> {
+        ReservationBatch::paged(&mut self.meta, &mut self.raw, self.page_size)
     }
 
     /// Allocates `len` bytes that may be used for `ty`.

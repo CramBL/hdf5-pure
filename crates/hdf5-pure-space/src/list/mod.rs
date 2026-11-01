@@ -8,6 +8,8 @@ use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::persistence::TRAILING_RESERVE_TAILS;
 
+pub(crate) mod indexed;
+
 /// A sorted, coalesced set of free regions in stored-address coordinates.
 ///
 /// Each region has [`StoredAddress`] endpoints relative to the file's address base.

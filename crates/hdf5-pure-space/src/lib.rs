@@ -25,5 +25,6 @@ mod extent;
 mod list;
 mod paged;
 mod persistence;
+mod reservation;
 mod session;
 mod snapshot;
