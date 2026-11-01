@@ -1,3 +1,4 @@
+use core::cell::Cell;
 use core::ops::Range;
 use std::path::Path;
 
@@ -10,6 +11,8 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
+use test_util::btree_v2;
+use test_util::widths::Widths;
 
 use crate::AddressRange;
 use crate::File;
@@ -30,22 +33,33 @@ use crate::file_lock::FileLocking;
 use crate::link_message::LinkMessage;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::OpenedSource;
 use crate::source::BytesSource;
+use crate::source::MetadataCacheConfig;
+use crate::source::MetadataCachingSource;
+use crate::source::PhysicalSource;
+use crate::source::Source;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 
 #[rstest]
-#[case::untracked(false, false)]
-#[case::tracked(true, false)]
-#[case::indexed(true, true)]
+#[case::untracked_zero(false, false, 0)]
+#[case::untracked_userblock(false, false, 512)]
+#[case::untracked_relocated(false, false, 1024)]
+#[case::tracked_zero(true, false, 0)]
+#[case::tracked_userblock(true, false, 512)]
+#[case::tracked_relocated(true, false, 1024)]
+#[case::indexed_zero(true, true, 0)]
+#[case::indexed_userblock(true, true, 512)]
+#[case::indexed_relocated(true, true, 1024)]
 fn inspection_preserves_encoded_names_and_targets(
     #[case] tracked: bool,
     #[case] indexed: bool,
     #[values(false, true)] dense: bool,
     #[values(OffsetWidth::Four, OffsetWidth::Eight)] offset_width: OffsetWidth,
-    #[values(512, 1024)] effective_base: u64,
+    #[case] effective_base: u64,
 ) {
     let widths = FormatWidths {
         offsets: offset_width,
@@ -84,11 +98,13 @@ fn inspection_preserves_encoded_names_and_targets(
     ];
     let storage = GroupLinkStorage::new(&info, links.clone(), offset_width).unwrap();
     let (bytes, region) = fixture(storage, dense);
-    let mut source = vec![0xAC; usize::try_from(effective_base - 512).unwrap()];
-    source.extend_from_slice(&bytes);
+    let mut source = vec![0xAC; usize::try_from(effective_base).unwrap()];
+    source.extend_from_slice(&bytes[512..]);
     let inspected = group_links::inspect(
-        &BytesSource::new(&source),
-        AddressContext::from_effective_base(BaseAddress::new(effective_base)),
+        &OpenedSource::for_test(
+            &BytesSource::new(&source),
+            AddressContext::from_effective_base(BaseAddress::new(effective_base)),
+        ),
         widths,
         &region,
     )
@@ -124,6 +140,156 @@ fn inspection_preserves_encoded_names_and_targets(
 }
 
 #[rstest]
+#[case::borrowed_zero(false, 0)]
+#[case::borrowed_userblock(false, 512)]
+#[case::owned_zero(true, 0)]
+#[case::owned_userblock(true, 512)]
+fn dense_inspection_preserves_metadata_ownership_and_cache_admission(
+    #[case] owned: bool,
+    #[case] base: u64,
+) {
+    let expected = one_link_storage().links().to_vec();
+    let (image, region) = fixture(one_link_storage(), true);
+    let mut physical = vec![0xAC; usize::try_from(base).unwrap()];
+    physical.extend_from_slice(&image[512..]);
+    let borrowed = BytesSource::new(&physical);
+    let allocating = CountingSource {
+        inner: BytesSource::new(physical.clone()),
+        reads: Cell::new(0),
+        origin: 37,
+    };
+    let source: &dyn Source = if owned { &allocating } else { &borrowed };
+    let cached = MetadataCachingSource::new(source, MetadataCacheConfig::new(8192));
+    let opened = OpenedSource::for_test(
+        &cached,
+        AddressContext::from_effective_base(BaseAddress::new(base)),
+    );
+    let first = group_links::inspect(&opened, widths(), &region).unwrap();
+    let before = cached.metadata_cache_stats().unwrap();
+    let reads = allocating.reads.get();
+    let second = group_links::inspect(&opened, widths(), &region).unwrap();
+    assert_eq!(first.links(), expected);
+    assert_eq!(second.links(), expected);
+    assert_eq!(first.creation_order().next_index(), Some(5));
+    assert!(first.creation_order().is_indexed());
+    assert_eq!(first.info(), second.info());
+    let after = cached.metadata_cache_stats().unwrap();
+    if owned {
+        assert!(before.entries() > 0);
+        assert!(after.hits() > before.hits());
+        assert_eq!(after.misses(), before.misses());
+        assert_eq!(allocating.reads.get(), reads);
+    } else {
+        assert_eq!((after.hits(), after.entries(), after.bytes()), (0, 0, 0));
+        assert_eq!(after.misses(), 2 * before.misses());
+    }
+    let stored = PhysicalSource::new(&opened).stored();
+    let address = first.info().btree_name_index_address.unwrap();
+    let metadata = stored
+        .read_metadata(address, btree_v2::SIGNATURE.len())
+        .unwrap();
+    assert_eq!(metadata.as_ref(), btree_v2::SIGNATURE);
+    assert_eq!(
+        metadata.offset(),
+        base + address.get() + if owned { 37 } else { 0 }
+    );
+    assert_eq!(metadata.shared().is_some(), owned);
+    if !owned {
+        assert_eq!(
+            metadata.as_ptr(),
+            physical[usize::try_from(base + address.get()).unwrap()..].as_ptr()
+        );
+    }
+    let retained = metadata.shared();
+    drop(metadata);
+    drop(cached);
+    if let Some(retained) = retained {
+        assert_eq!(retained.as_ref(), btree_v2::SIGNATURE);
+        assert_eq!(retained.offset(), base + address.get() + 37);
+    }
+}
+
+struct CountingSource {
+    inner: BytesSource<Vec<u8>>,
+    reads: Cell<u64>,
+    origin: u64,
+}
+
+impl Source for CountingSource {
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        Ok(self.origin)
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+        self.reads.set(self.reads.get() + 1);
+        self.inner.read_at(offset, buffer)
+    }
+}
+
+#[rstest]
+#[case::eof_zero(false, 0)]
+#[case::eof_userblock(false, 512)]
+#[case::overflow_zero(true, 0)]
+#[case::overflow_userblock(true, 512)]
+fn dense_inspection_preserves_node_range_errors(#[case] overflow: bool, #[case] base: u64) {
+    let (image, region) = fixture(one_link_storage(), true);
+    let mut physical = vec![0xAC; usize::try_from(base).unwrap()];
+    physical.extend_from_slice(&image[512..]);
+    let (_, start, end) = find_message(&region, MessageType::LINK_INFO);
+    let info = LinkInfoMessage::parse(&region[start..end], widths().offsets.get()).unwrap();
+    let at = usize::try_from(base + info.btree_name_index_address.unwrap().get()).unwrap();
+    let header = BTreeV2Header::parse(&physical, at, 8, 8).unwrap();
+    assert_eq!(header.depth, 0);
+    assert_eq!(header.num_records_in_root, 1);
+    let physical_start = if overflow {
+        u64::MAX - 1
+    } else {
+        u64::try_from(physical.len()).unwrap()
+    };
+    let encoded = btree_v2::Header::new(
+        header.tree_type,
+        header.record_size,
+        physical_start - base,
+        header.num_records_in_root,
+    )
+    .node_size(header.node_size)
+    .build(Widths::EIGHT);
+    physical[at..at + encoded.len()].copy_from_slice(&encoded);
+    let length = u64::try_from(
+        btree_v2::NODE_PREFIX + usize::from(header.record_size) + test_util::checksum::CHECKSUM,
+    )
+    .unwrap();
+    let error = group_links::inspect(
+        &OpenedSource::for_test(
+            &BytesSource::new(&physical),
+            AddressContext::from_effective_base(BaseAddress::new(base)),
+        ),
+        widths(),
+        &region,
+    )
+    .unwrap_err();
+    let expected = if overflow {
+        FormatError::OffsetOverflow {
+            offset: physical_start,
+            length,
+        }
+    } else {
+        FormatError::UnexpectedSourceEof {
+            expected: physical_start + length,
+            available: u64::try_from(physical.len()).unwrap(),
+        }
+    };
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, expected);
+}
+
+#[rstest]
 #[case::huge(|header: &mut FractalHeapHeader| header.huge_objects_count = 1, "a group's fractal heap uses filters, huge objects, or tiny objects")]
 #[case::tiny(|header: &mut FractalHeapHeader| header.tiny_objects_count = 1, "a group's fractal heap uses filters, huge objects, or tiny objects")]
 #[case::reserved_flags(|header: &mut FractalHeapHeader| header.flags |= 0x80, "a group's fractal heap uses unsupported flags")]
@@ -140,8 +306,12 @@ fn dense_inspection_rejects_unsupported_heap_configurations(
         .serialize(OffsetWidth::Eight, LengthWidth::Eight)
         .unwrap();
     bytes[512..512 + encoded.len()].copy_from_slice(&encoded);
-    let error =
-        group_links::inspect(&BytesSource::new(bytes), addresses(), widths(), &region).unwrap_err();
+    let error = group_links::inspect(
+        &OpenedSource::for_test(&BytesSource::new(bytes), addresses()),
+        widths(),
+        &region,
+    )
+    .unwrap_err();
     assert!(
         matches!(error, Error::EditUnsupported(message) if message == reason),
         "{error:?}"
@@ -202,8 +372,12 @@ fn dense_inspection_rejects_inconsistent_index_metadata(
     let (_, start, end) = find_message(&region, MessageType::LINK_INFO);
     let info = LinkInfoMessage::parse(&region[start..end], 8).unwrap();
     change(&mut bytes, &info);
-    let error =
-        group_links::inspect(&BytesSource::new(bytes), addresses(), widths(), &region).unwrap_err();
+    let error = group_links::inspect(
+        &OpenedSource::for_test(&BytesSource::new(bytes), addresses()),
+        widths(),
+        &region,
+    )
+    .unwrap_err();
     match reason {
         Some(reason) => assert!(
             matches!(error, Error::EditUnsupported(message) if message == reason),
@@ -243,8 +417,12 @@ fn compact_inspection_rejects_inconsistent_metadata(
 ) {
     let (bytes, mut region) = fixture(one_link_storage(), false);
     change(&mut region);
-    let error =
-        group_links::inspect(&BytesSource::new(bytes), addresses(), widths(), &region).unwrap_err();
+    let error = group_links::inspect(
+        &OpenedSource::for_test(&BytesSource::new(bytes), addresses()),
+        widths(),
+        &region,
+    )
+    .unwrap_err();
     assert!(
         matches!(error, Error::EditUnsupported(message) if message == reason),
         "{error:?}"

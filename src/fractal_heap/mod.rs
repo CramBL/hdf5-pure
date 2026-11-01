@@ -1,7 +1,6 @@
 //! Resolves managed, huge, and tiny objects stored in a fractal heap.
 //!
 //! [`HeapObjectReader`] binds its validation caches to one [`HeapSource`].
-//! [`LegacyHeapObjectReader`] reads from either an in-memory file image or a [`Source`].
 
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
@@ -14,10 +13,12 @@ use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
+#[cfg(any(test, doc))]
+use hdf5_pure_format::__private::FractalHeapIdKind;
 use hdf5_pure_format::__private::{
     BTreeV2Layout, FractalHeapBlock, FractalHeapBlockFilters, FractalHeapBlockLayout,
     FractalHeapHeaderLocator, FractalHeapHugeObjectId, FractalHeapHugeObjectLayout,
-    FractalHeapHugeObjectRef, FractalHeapIdKind, FractalHeapIdView, HugeIndirectKeyEncoding,
+    FractalHeapHugeObjectRef, FractalHeapIdView, HugeIndirectKeyEncoding,
 };
 
 use crate::access_mode::AccessMode;
@@ -56,6 +57,7 @@ pub(crate) use stored::read_header_and_range_from_source;
 /// the parsing errors of [`FractalHeapHeaderLocator::parse`] and
 /// [`FractalHeapHeaderRef::parse`](hdf5_pure_format::__private::FractalHeapHeaderRef::parse).
 /// Returns the source error if a read fails.
+#[cfg(any(test, doc))]
 pub(crate) fn legacy_read_header_from_source(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
@@ -382,6 +384,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
     /// the reader's lifetime. `access_mode` selects bounded read-only lookup or mandatory
     /// read-write checksum validation. `widths` contains the validated address and length widths
     /// of the file.
+    #[cfg(any(test, doc))]
     pub(crate) fn new(
         header: &'h FractalHeapHeader,
         addresses: AddressContext,
@@ -403,6 +406,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
     ///
     /// The file context and access requirements are those of [`new`](Self::new). The reader
     /// checks payload sizes before reading their bytes and tracker limits during index traversal.
+    #[cfg(any(test, doc))]
     pub(crate) fn with_huge_limits(
         header: &'h FractalHeapHeader,
         addresses: AddressContext,
@@ -501,6 +505,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
     ///
     /// Panics in debug builds if cached checksum validation or a cached huge-object index is reused
     /// through both this method and [`read`](Self::read).
+    #[cfg(any(test, doc))]
     pub fn read_from_source<S: Source + ?Sized>(
         &mut self,
         source: &S,
@@ -539,6 +544,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
         )
     }
 
+    #[cfg(any(test, doc))]
     fn read_huge_from_source(
         &mut self,
         source: &(impl Source + ?Sized),
@@ -683,6 +689,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
         )
     }
 
+    #[cfg(any(test, doc))]
     fn read_managed_object_from_source(
         &mut self,
         source: &(impl Source + ?Sized),
