@@ -82,3 +82,7 @@ filtered-chunk-bench *ARGS:
 filtered-pipeline-profile CASE="shuffle_deflate" DIRECTION="decode" PATTERN="cycling" SCRATCH="reused" ELEMENTS="1024" ROUNDS="100" OUTPUT="target/filter-pipeline.callgrind.%p":
     CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --locked --release --example filter_pipeline_profile
     "${VALGRIND:-valgrind}" --tool=callgrind --collect-atstart=no --toggle-collect='*profile_batch*' --callgrind-out-file={{ quote(OUTPUT) }} "${CARGO_TARGET_DIR:-target}/release/examples/filter_pipeline_profile" {{ quote(CASE) }} {{ quote(DIRECTION) }} {{ quote(PATTERN) }} {{ quote(SCRATCH) }} {{ quote(ELEMENTS) }} {{ quote(ROUNDS) }}
+
+# Measure bounded writable opening of native fragmented PAGE files.
+fragmented-recovery:
+    cargo bench --locked -p {{ CROSSCHECK }} --features __hdf5-bundled --bench fragmented_recovery
