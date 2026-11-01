@@ -1,10 +1,14 @@
-//! Native observations of private verbatim attributes before and after repacking.
+//! Native observations of link and attribute metadata before and after repacking.
+
+use std::path::Path;
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
+use test_util_hdf5::creation_order;
+use test_util_hdf5::creation_order::Indexing;
 use test_util_hdf5::dense_links;
 use test_util_hdf5::dense_links::GroupOrder;
 use test_util_hdf5::exotic_attributes;
@@ -19,6 +23,179 @@ use crate::width::OffsetWidth;
 
 use super::test_util::ExoticAttributes;
 use crate::RepackOptions;
+
+#[rstest]
+#[case::ordinary((12, 8))]
+#[case::one_way((12, 0))]
+#[case::always_dense((0, 0))]
+fn reconstructed_link_policies_keep_counters_across_edits_and_empty_reconstruction(
+    #[case] thresholds: (u32, u32),
+    #[values(Indexing::No, Indexing::Yes)] indexing: Indexing,
+    #[values("/", "/group")] group_path: &str,
+    #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    let empty = directory.path().join("empty.h5");
+    creation_order::write_link_fixture(&path, group_path, 13, indexing, thresholds);
+    let source = File::open_rw(&path).unwrap();
+    source
+        .group(group_path)
+        .unwrap()
+        .delete("link_0000")
+        .unwrap();
+    source.commit().unwrap();
+    let expected_policy = source
+        .group(group_path)
+        .unwrap()
+        .link_phase_change()
+        .unwrap();
+    let options = RepackOptions::new()
+        .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
+    super::repack_to_path(&source, &destination, &options).unwrap();
+    source.close().unwrap();
+    let file = File::open(&destination).unwrap();
+    let group = file.group(group_path).unwrap();
+    assert_eq!(group.link_phase_change().unwrap(), expected_policy);
+    let mut expected = (1..13)
+        .map(|index| (format!("link_{index:04}"), index))
+        .collect::<Vec<_>>();
+    drop(group);
+    file.close().unwrap();
+    assert_tracked_links(
+        &destination,
+        group_path,
+        &expected,
+        13,
+        thresholds.0 == 0,
+        indexing,
+    );
+    let file = File::open_rw(&destination).unwrap();
+    let group = file.group(group_path).unwrap();
+    group.create_group("added").unwrap();
+    file.commit().unwrap();
+    expected.push(("added".into(), 13));
+    drop(group);
+    file.close().unwrap();
+    assert_tracked_links(&destination, group_path, &expected, 14, true, indexing);
+    let file = File::open_rw(&destination).unwrap();
+    let group = file.group(group_path).unwrap();
+    for index in 1..6 {
+        group.delete(&format!("link_{index:04}")).unwrap();
+    }
+    file.commit().unwrap();
+    expected.retain(|(_, index)| *index >= 6);
+    drop(group);
+    file.close().unwrap();
+    assert_tracked_links(&destination, group_path, &expected, 14, true, indexing);
+    let file = File::open_rw(&destination).unwrap();
+    let group = file.group(group_path).unwrap();
+    group.delete("link_0006").unwrap();
+    file.commit().unwrap();
+    expected.retain(|(_, index)| *index >= 7);
+    drop(group);
+    file.close().unwrap();
+    assert_tracked_links(
+        &destination,
+        group_path,
+        &expected,
+        14,
+        thresholds.1 == 0,
+        indexing,
+    );
+    let file = File::open_rw(&destination).unwrap();
+    let group = file.group(group_path).unwrap();
+    for (name, _) in &expected {
+        group.delete(name).unwrap();
+    }
+    file.commit().unwrap();
+    drop(group);
+    file.close().unwrap();
+    assert_tracked_links(
+        &destination,
+        group_path,
+        &[],
+        14,
+        thresholds.1 == 0,
+        indexing,
+    );
+    let file = File::open(&destination).unwrap();
+    super::repack_to_path(&file, &empty, &options).unwrap();
+    file.close().unwrap();
+    let file = File::open(&empty).unwrap();
+    assert_eq!(
+        file.group(group_path).unwrap().link_phase_change().unwrap(),
+        expected_policy
+    );
+    file.close().unwrap();
+    assert_tracked_links(&empty, group_path, &[], 14, false, indexing);
+    let native = file::libhdf5_open(&empty);
+    let group = native.group(group_path).unwrap();
+    let policy = group.gcpl().unwrap().get_link_phase_change().unwrap();
+    assert_eq!((policy.max_compact, policy.min_dense), thresholds);
+    assert_eq!(group.info().unwrap().max_corder, 14);
+    assert_eq!(group.info().unwrap().nlinks, 0);
+    drop(group);
+    native.close().unwrap();
+    creation_order::add_reference_group(&empty, &format!("{group_path}/native"));
+    assert_tracked_links(
+        &empty,
+        group_path,
+        &[("native".into(), 14)],
+        15,
+        thresholds.0 == 0,
+        indexing,
+    );
+    let native = file::libhdf5_open(&empty);
+    let group = native.group(group_path).unwrap();
+    assert_eq!(group.info().unwrap().max_corder, 15);
+    assert_eq!(dense_links::creation_order_names(&group), ["native"]);
+    drop(group);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
+
+fn assert_tracked_links(
+    file_path: &Path,
+    path: &str,
+    expected: &[(String, u64)],
+    next: u64,
+    dense: bool,
+    indexing: Indexing,
+) {
+    let file = File::open(file_path).unwrap();
+    let links = read_links(&file, path);
+    assert_eq!(links.creation_order().next_index(), Some(next));
+    assert_eq!(links.info().fractal_heap_address.is_some(), dense);
+    assert_eq!(links.info().btree_name_index_address.is_some(), dense);
+    assert_eq!(
+        links.info().btree_creation_order_address.is_some(),
+        matches!(indexing, Indexing::Yes)
+    );
+    assert_eq!(
+        links
+            .info()
+            .btree_creation_order_address
+            .flatten()
+            .is_some(),
+        dense && matches!(indexing, Indexing::Yes)
+    );
+    let mut observed = links
+        .links()
+        .iter()
+        .map(|link| {
+            (
+                String::from_utf8(link.name().to_vec()).unwrap(),
+                link.creation_order().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    observed.sort_by_key(|(_, index)| *index);
+    assert_eq!(observed, expected);
+    file.close().unwrap();
+    creation_order::assert_link_group(file_path, path, expected, next, indexing, dense);
+}
 
 #[rstest]
 #[case::compact(6)]
