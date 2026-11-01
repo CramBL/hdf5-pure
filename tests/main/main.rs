@@ -71,6 +71,7 @@ mod legacy;
 mod legacy_attributes;
 mod legacy_chunked;
 mod legacy_compound;
+mod link_phase_change;
 mod lzf_roundtrip;
 mod mat_builder;
 mod mat_cell_read;
