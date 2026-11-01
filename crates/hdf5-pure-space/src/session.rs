@@ -14,6 +14,7 @@ use super::paged::{
     PagedPostFree, PagedSections, PagedTail,
 };
 use super::persistence::ManagerKind;
+use super::reservation::ReservationBatch;
 use super::snapshot::AdmittedFreeSnapshot;
 
 /// The reusable-space strategy active for one editing session.
@@ -279,6 +280,61 @@ impl SessionSpace {
     pub fn finish_seed(&mut self) {
         if let Self::Paged(space) = self {
             space.paged.finish_seed();
+        }
+    }
+
+    /// Borrows reusable space for sequential reservations with shared lookup state.
+    ///
+    /// `requests` is the expected request count, used to select the lookup mechanism. A count of at
+    /// most one, a disabled allocator, or a flat list with at most one extent uses scalar allocation.
+    /// Other batches index each reusable list once. The count does not limit calls to
+    /// [`ReservationBatch::reserve`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroU64;
+    ///
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+    /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest, SessionSpace};
+    ///
+    /// let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
+    /// let mut space = SessionSpace::from_persisted(
+    ///     Some(FileSpaceStrategy::FsmAggr),
+    ///     1,
+    ///     FileSpacePageSize::DEFAULT,
+    ///     [(None, extent(100, 100)), (None, extent(300, 100))],
+    /// )?;
+    /// let request = |size| ReservationRequest::new(
+    ///     NonZeroU64::new(size).unwrap(), AllocationClass::Raw,
+    /// );
+    /// let mut batch = space.reservation_batch(2);
+    /// let reserved = batch.reserve(request(64)).unwrap();
+    /// assert_eq!(reserved.extent(), extent(100, 64));
+    /// assert_eq!(batch.reserve(request(128)), None);
+    /// batch.finish();
+    /// assert_eq!(space.reusable_sections().collect::<Vec<_>>(),
+    ///     [extent(164, 36), extent(300, 100)]);
+    /// let (extent, class, page_type) = reserved.into_parts();
+    /// space.return_allocation_with_page_type(extent, class, page_type);
+    /// assert_eq!(space.reusable_bytes()?, 200);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn reservation_batch(&mut self, requests: usize) -> ReservationBatch<'_> {
+        let scalar = requests <= 1
+            || match self {
+                Self::Disabled => true,
+                Self::Flat(space) => space.free.extents().len() <= 1,
+                Self::Paged(_) => false,
+            };
+        if scalar {
+            return ReservationBatch::scalar(self);
+        }
+        match self {
+            Self::Disabled => ReservationBatch::disabled(),
+            Self::Flat(space) => ReservationBatch::flat(&mut space.free),
+            Self::Paged(space) => space.paged.reservation_batch(),
         }
     }
 

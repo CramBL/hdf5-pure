@@ -33,3 +33,7 @@ pub use crate::session::SessionSpace;
 pub use crate::session::SessionSpaceSnapshot;
 
 pub use crate::snapshot::AdmittedFreeSnapshot;
+
+pub use crate::reservation::{
+    ReservationBatch, ReservationRequest, ReservationWork, ReusableReservation,
+};
