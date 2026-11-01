@@ -23,6 +23,8 @@
 
 use std::sync::OnceLock;
 
+use crate::snapshot;
+
 /// Allocation counts and byte totals for one measured region.
 #[derive(Clone, Copy, Debug)]
 pub struct Measured {
@@ -44,10 +46,10 @@ impl Measured {
              Cumulative bytes:  {:>13}\n\
              Peak bytes:        {:>13}\n\
              Retained bytes:    {:>13}",
-            grouped_decimal(self.blocks),
-            grouped_decimal(self.bytes),
-            grouped_decimal(self.peak_bytes),
-            grouped_decimal(self.live_bytes),
+            snapshot::grouped_decimal(self.blocks),
+            snapshot::grouped_decimal(self.bytes),
+            snapshot::grouped_decimal(self.peak_bytes),
+            snapshot::grouped_decimal(self.live_bytes),
         )
     }
 }
@@ -176,35 +178,9 @@ fn measure_region<R>(name: &str, work: impl FnOnce() -> R) -> (R, Measured) {
     (result, measured)
 }
 
-fn grouped_decimal(value: u64) -> String {
-    let digits = value.to_string();
-    let mut grouped = String::new();
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
-}
-
 #[cfg(test)]
 mod tests {
-    use rstest::rstest;
-
     use super::Measured;
-
-    #[rstest]
-    #[case::zero(0, "0")]
-    #[case::below_thousand(999, "999")]
-    #[case::thousand(1_000, "1,000")]
-    #[case::below_million(999_999, "999,999")]
-    #[case::million(1_000_000, "1,000,000")]
-    #[case::readable_example(1_300_233, "1,300,233")]
-    #[case::maximum(u64::MAX, "18,446,744,073,709,551,615")]
-    fn decimal_numbers_have_thousands_separators(#[case] value: u64, #[case] expected: &str) {
-        assert_eq!(super::grouped_decimal(value), expected);
-    }
 
     #[test]
     fn snapshot_report_labels_and_aligns_allocation_metrics() {

@@ -44,6 +44,7 @@ pub mod process;
 pub mod publication;
 pub mod publication_order;
 pub mod range;
+pub mod snapshot;
 pub mod sohm;
 pub mod superblock;
 pub mod symbol_table;
