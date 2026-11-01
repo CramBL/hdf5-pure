@@ -1824,15 +1824,16 @@ impl WriteEngine {
 
     /// Configures reusable space and records allocations for persistent-manager rewrites.
     ///
-    /// Installs checked recovery when supplied. Otherwise, reads managers tolerantly, omitting
-    /// manager parse failures and invalid extents from reusable space. A nonpersistent PAGE session
-    /// starts with empty free lists. Files without File Space Info use the default `FSM_AGGR`
-    /// strategy with separate metadata and raw aggregates.
+    /// Installs checked recovery when supplied. Otherwise, reads every defined manager tolerantly.
+    /// Excludes the entire manager set from reusable space if any manager read fails. After
+    /// successful reads, omits invalid, overlapping, or out-of-bounds extents. A nonpersistent PAGE
+    /// session starts with empty free lists. Files without File Space Info use the default
+    /// `FSM_AGGR` strategy with separate metadata and raw aggregates.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] with [`FormatError::Internal`] if checked recovery cannot be
-    /// represented as allocator extents.
+    /// represented as allocator extents or canonical free lists.
     fn load_persisted_free_space(
         &mut self,
         file_space_info: Option<(u64, FileSpaceInfo)>,
@@ -1844,15 +1845,16 @@ impl WriteEngine {
             }
             return Ok(());
         };
-        self.space =
+        let mut space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
         if (info.strategy == FileSpaceStrategy::Aggr || info.strategy == FileSpaceStrategy::FsmAggr)
             && let Ok(eoa) = self.end_of_allocation()
         {
             self.aggregation = Some(AggregateSpace::new(eoa));
         }
-        let paged = self.space.is_paged();
-        if !info.persist || !self.space.is_enabled() {
+        let paged = space.is_paged();
+        if !info.persist || !space.is_enabled() {
+            self.space = space;
             return Ok(());
         }
         if let Some(recovered) = recovered {
@@ -1860,6 +1862,7 @@ impl WriteEngine {
         }
         let widths = self.context.widths();
         let Ok(eoa) = self.end_of_allocation() else {
+            self.space = space;
             return Ok(());
         };
         let managers: Vec<(
@@ -1909,14 +1912,14 @@ impl WriteEngine {
                 }
                 tagged.sort_unstable_by_key(|&(_, extent)| extent.start());
                 let mut prev_end = StoredAddress::ZERO;
-                for (kind, extent) in tagged {
+                let admitted = tagged.into_iter().filter(|&(_, extent)| {
                     if extent.end() > eoa || extent.start() < prev_end {
-                        continue;
+                        return false;
                     }
                     prev_end = extent.end();
-                    self.space.seed_persisted(kind, extent);
-                }
-                self.space.finish_seed();
+                    true
+                });
+                space = Self::recovered_space(&info, admitted)?;
             }
         } else if let Ok(mut sections) = managers.iter().try_fold(
             Vec::new(),
@@ -1927,16 +1930,15 @@ impl WriteEngine {
         ) {
             sections.sort_unstable_by_key(|section| section.addr);
             let mut prev_end = StoredAddress::ZERO;
-            for section in sections {
-                let Some(extent) = FreeExtent::new(section.addr, section.size) else {
-                    continue;
-                };
+            let admitted = sections.into_iter().filter_map(|section| {
+                let extent = FreeExtent::new(section.addr, section.size)?;
                 if extent.end() > eoa || extent.start() < prev_end {
-                    continue;
+                    return None;
                 }
                 prev_end = extent.end();
-                self.space.seed_persisted(Some(ManagerKind::Flat), extent);
-            }
+                Some((Some(ManagerKind::Flat), extent))
+            });
+            space = Self::recovered_space(&info, admitted)?;
         }
 
         let mut old_blocks = Vec::new();
@@ -1956,6 +1958,7 @@ impl WriteEngine {
             }
         }
 
+        self.space = space;
         self.persist = Some(PersistState {
             strategy: info.strategy,
             threshold: info.threshold,
@@ -1971,8 +1974,8 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] with [`FormatError::Internal`] if a checked section or metadata
-    /// allocation cannot be represented as an allocator extent.
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if checked recovery cannot be
+    /// represented as allocator extents or canonical free lists.
     fn install_persisted_free_space(
         &mut self,
         info: FileSpaceInfo,
@@ -2015,10 +2018,8 @@ impl WriteEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         tagged.sort_unstable_by_key(|(_, extent)| extent.start());
-        for (kind, extent) in tagged {
-            self.space.seed_persisted(kind, extent);
-        }
-        self.space.finish_seed();
+        let space = Self::recovered_space(&info, tagged)?;
+        self.space = space;
         self.persist = Some(PersistState {
             strategy: info.strategy,
             threshold: info.threshold,
@@ -2026,6 +2027,30 @@ impl WriteEngine {
             old_blocks,
         });
         Ok(())
+    }
+
+    /// Constructs session space from address-sorted sections admitted by recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if admitted sections are unsorted
+    /// or overlap.
+    fn recovered_space(
+        info: &FileSpaceInfo,
+        sections: impl IntoIterator<Item = (Option<ManagerKind>, FreeExtent)>,
+    ) -> Result<SessionSpace, Error> {
+        SessionSpace::from_persisted(
+            Some(info.strategy),
+            info.threshold,
+            info.page_size,
+            sections,
+        )
+        .map_err(|error| {
+            FormatError::Internal(format!(
+                "admitted free sections cannot form a free list: {error}"
+            ))
+            .into()
+        })
     }
 
     /// Returns the extent of the free-space manager header at the stored address `addr`, in stored
