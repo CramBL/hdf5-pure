@@ -156,7 +156,7 @@ impl WriteEngine {
                     leaf.as_str(),
                     base.relative(PhysicalAddress::new(root))?,
                     link_order.take()?,
-                );
+                )?;
             }
 
             let mut group_datasets: Vec<FlatDataset> =
@@ -195,7 +195,7 @@ impl WriteEngine {
                     fd.name.as_str(),
                     base.relative(PhysicalAddress::new(oh_addr))?,
                     link_order.take()?,
-                );
+                )?;
                 path_addr.insert(dataset_path, oh_addr);
             }
 
@@ -231,7 +231,7 @@ impl WriteEngine {
                             leaf.as_str(),
                             base.relative(PhysicalAddress::new(path_addr[&path]))?,
                             link_order.take()?,
-                        );
+                        )?;
                     }
                     ChildLink::Replace { path, leaf } => {
                         group::patch_link_target(
