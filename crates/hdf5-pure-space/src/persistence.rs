@@ -42,10 +42,9 @@ impl ManagerSections {
 
     /// Classifies PAGE sections into the managers this writer emits.
     ///
-    /// Metadata and raw-data sections are split at page boundaries. Fragments shorter than one
-    /// page remain in their typed small manager, while whole pages enter the generic-large
-    /// manager. Unclassified sections stay in the generic-large manager without splitting because
-    /// their page type is deliberately unknown.
+    /// Stores each aligned whole-page interior as one generic-large section. Partial edges remain
+    /// within their pages in the typed small manager. Unclassified sections are stored unchanged
+    /// in the generic-large manager.
     pub fn paged(sections: &PagedSections, page_size: FileSpacePageSize) -> Vec<Self> {
         Self::paged_lists(
             sections.metadata(),
@@ -57,7 +56,7 @@ impl ManagerSections {
 
     /// Projects admitted extents into the semantic managers used for persistence.
     ///
-    /// Uses the snapshot's page size and classes for PAGE splitting. Returns one generic manager
+    /// Uses the snapshot's page size and classes for PAGE classification. Returns one generic manager
     /// for a nonempty flat snapshot, or no managers for disabled allocation.
     ///
     /// # Examples
@@ -130,25 +129,56 @@ impl ManagerSections {
         small: &mut Vec<Extent>,
         generic: &mut Vec<Extent>,
     ) {
-        let page_size = page_size.get();
         for &extent in sections {
-            let mut start = extent.start();
-            while start < extent.end() {
-                let boundary = start
-                    .checked_add(page_size - start.get() % page_size)
-                    .unwrap_or(extent.end());
-                let end = extent.end().min(boundary);
-                debug_assert!(start < end && end <= extent.end());
-                let piece = Extent::between(start, end)
-                    .expect("the split piece is a non-empty range inside its parent extent");
-                if piece.len() < page_size {
-                    small.push(piece);
-                } else {
-                    generic.push(piece);
-                }
-                start = end;
-            }
+            let PageParts {
+                leading,
+                interior,
+                trailing,
+            } = PageParts::new(extent, page_size);
+            small.extend(leading);
+            generic.extend(interior);
+            small.extend(trailing);
         }
+    }
+}
+
+/// Holds an extent's within-page edges and aligned whole-page interior.
+///
+/// The nonempty pieces are ordered, disjoint, and cover the original extent. Each edge is
+/// contained in one page, and the interior is page aligned at both ends.
+pub(super) struct PageParts {
+    leading: Option<Extent>,
+    interior: Option<Extent>,
+    trailing: Option<Extent>,
+}
+
+impl PageParts {
+    /// Splits `extent` into at most two partial edges and one complete aligned interior.
+    pub(super) fn new(extent: Extent, page_size: FileSpacePageSize) -> Self {
+        if let Some(interior) = extent.aligned_interior(page_size.get()) {
+            return Self {
+                leading: Extent::between(extent.start(), interior.start()),
+                interior: Some(interior),
+                trailing: Extent::between(interior.end(), extent.end()),
+            };
+        }
+        let boundary = extent
+            .start()
+            .checked_add(page_size.get() - extent.start().get() % page_size.get())
+            .unwrap_or(extent.end())
+            .min(extent.end());
+        Self {
+            leading: Extent::between(extent.start(), boundary),
+            interior: None,
+            trailing: Extent::between(boundary, extent.end()),
+        }
+    }
+
+    /// Returns the number of nonempty pieces.
+    pub(super) fn count(&self) -> usize {
+        usize::from(self.leading.is_some())
+            + usize::from(self.interior.is_some())
+            + usize::from(self.trailing.is_some())
     }
 }
 
@@ -159,6 +189,8 @@ pub const TRAILING_RESERVE_TAILS: u64 = 4;
 mod tests {
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
+
+    use rstest::rstest;
 
     use super::*;
     use crate::paged::{PageType, PagedEdit};
@@ -209,22 +241,134 @@ mod tests {
         );
     }
 
-    #[test]
-    fn paged_multi_page_runs_become_whole_generic_pages() {
+    #[rstest]
+    #[case::one_page(1)]
+    #[case::three_pages(3)]
+    #[case::many_pages(1 << 32)]
+    fn paged_multi_page_runs_remain_one_generic_record(#[case] pages: u64) {
         let page_size = FileSpacePageSize::DEFAULT;
+        let run = extent(0, pages * page_size.get());
         let mut paged = PagedEdit::new(page_size);
-        paged.seed(extent(0, 3 * page_size.get()), Some(PageType::Raw));
+        paged.seed(run, Some(PageType::Raw));
         let sections = paged.sections();
 
         let managers = ManagerSections::paged(&sections, page_size);
         assert_eq!(managers.len(), 1);
         assert_eq!(managers[0].kind(), ManagerKind::PagedLargeGeneric);
+        assert_eq!(managers[0].sections(), [run]);
+    }
+
+    #[rstest]
+    #[case::aligned(4_096, 12_288, None, Some((4_096, 12_288)), None)]
+    #[case::both_edges(4_000, 8_400, Some((4_000, 96)), Some((4_096, 8_192)), Some((12_288, 112)))]
+    #[case::leading_edge(4_000, 8_288, Some((4_000, 96)), Some((4_096, 8_192)), None)]
+    #[case::trailing_edge(4_096, 8_304, None, Some((4_096, 8_192)), Some((12_288, 112)))]
+    #[case::one_partial_page(100, 100, Some((100, 100)), None, None)]
+    #[case::aligned_partial_page(4_096, 100, Some((4_096, 100)), None, None)]
+    #[case::crossing_partial_pages(4_000, 200, Some((4_000, 96)), None, Some((4_096, 104)))]
+    #[case::last_partial_page(u64::MAX - 4_095, 4_095, Some((u64::MAX - 4_095, 4_095)), None, None)]
+    #[case::last_two_partial_pages(u64::MAX - 4_100, 4_100, Some((u64::MAX - 4_100, 5)), None, Some((u64::MAX - 4_095, 4_095)))]
+    fn page_parts_preserve_exact_ordered_coverage(
+        #[case] start: u64,
+        #[case] length: u64,
+        #[case] leading: Option<(u64, u64)>,
+        #[case] interior: Option<(u64, u64)>,
+        #[case] trailing: Option<(u64, u64)>,
+    ) {
+        let original = extent(start, length);
+        let parts = PageParts::new(original, FileSpacePageSize::DEFAULT);
+        assert_eq!(
+            parts.leading,
+            leading.map(|(start, length)| extent(start, length))
+        );
+        assert_eq!(
+            parts.interior,
+            interior.map(|(start, length)| extent(start, length))
+        );
+        assert_eq!(
+            parts.trailing,
+            trailing.map(|(start, length)| extent(start, length))
+        );
+        let pieces: Vec<_> = [parts.leading, parts.interior, parts.trailing]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(parts.count(), pieces.len());
+        assert_eq!(pieces.first().unwrap().start(), original.start());
+        assert_eq!(pieces.last().unwrap().end(), original.end());
+        assert!(
+            pieces
+                .windows(2)
+                .all(|pair| pair[0].end() == pair[1].start())
+        );
+        assert_eq!(pieces.iter().map(|piece| piece.len()).sum::<u64>(), length);
+        for partial in [parts.leading, parts.trailing].into_iter().flatten() {
+            assert_eq!(
+                partial.start().get() / 4_096,
+                (partial.end().get() - 1) / 4_096
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::metadata(PageType::Meta, ManagerKind::PagedSmallMetadata)]
+    #[case::raw(PageType::Raw, ManagerKind::PagedSmallRaw)]
+    fn typed_edges_remain_separate_from_the_generic_interior(
+        #[case] ty: PageType,
+        #[case] kind: ManagerKind,
+    ) {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.seed(extent(4_000, 8_400), Some(ty));
+        let managers = ManagerSections::from_snapshot(paged.admitted_snapshot());
+        assert_eq!(managers.len(), 2);
+        assert_eq!(managers[0].kind(), kind);
+        assert_eq!(
+            managers[0].sections(),
+            [extent(4_000, 96), extent(12_288, 112)]
+        );
+        assert_eq!(managers[1].kind(), ManagerKind::PagedLargeGeneric);
+        assert_eq!(managers[1].sections(), [extent(4_096, 8_192)]);
+    }
+
+    #[rstest]
+    #[case::minimum(FileSpacePageSize::MIN)]
+    #[case::non_power_of_two(FileSpacePageSize::try_from(1_000).unwrap())]
+    #[case::default(FileSpacePageSize::DEFAULT)]
+    #[case::maximum(FileSpacePageSize::MAX)]
+    fn typed_extent_geometry_preserves_arbitrary_supported_page_sizes(
+        #[case] page_size: FileSpacePageSize,
+    ) {
+        let page = page_size.get();
+        let mut paged = PagedEdit::new(page_size);
+        paged.seed(extent(page - 1, 3 * page + 2), Some(PageType::Raw));
+        let managers = ManagerSections::from_snapshot(paged.admitted_snapshot());
+        assert_eq!(managers.len(), 2);
+        assert_eq!(managers[0].kind(), ManagerKind::PagedSmallRaw);
+        assert_eq!(
+            managers[0].sections(),
+            [extent(page - 1, 1), extent(4 * page, 1)]
+        );
+        assert_eq!(managers[1].kind(), ManagerKind::PagedLargeGeneric);
+        assert_eq!(managers[1].sections(), [extent(page, 3 * page)]);
+    }
+
+    #[test]
+    fn generic_runs_preserve_live_gaps_and_unclassified_edges() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.seed(extent(0, 8_192), Some(PageType::Meta));
+        paged.seed(extent(8_192, 200), None);
+        paged.seed(extent(8_400, 100), None);
+        paged.seed(extent(12_288, 8_192), Some(PageType::Raw));
+        let managers = ManagerSections::from_snapshot(paged.admitted_snapshot());
+        assert_eq!(managers.len(), 1);
+        assert_eq!(managers[0].kind(), ManagerKind::PagedLargeGeneric);
         assert_eq!(
             managers[0].sections(),
             [
-                extent(0, page_size.get()),
-                extent(page_size.get(), page_size.get()),
-                extent(2 * page_size.get(), page_size.get()),
+                extent(0, 8_192),
+                extent(8_192, 200),
+                extent(8_400, 100),
+                extent(12_288, 8_192)
             ]
         );
     }

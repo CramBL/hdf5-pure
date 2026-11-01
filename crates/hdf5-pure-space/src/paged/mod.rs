@@ -10,7 +10,7 @@ use hdf5_pure_core::StoredAddress;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
-use super::persistence::{ManagerKind, TRAILING_RESERVE_TAILS};
+use super::persistence::{ManagerKind, PageParts, TRAILING_RESERVE_TAILS};
 use super::reservation::ReservationBatch;
 use super::snapshot::AdmittedFreeSnapshot;
 
@@ -401,9 +401,10 @@ impl PagedEdit {
         *self = snapshot.paged;
     }
 
-    /// Bounds the section count after page splitting and tail reservation.
+    /// Bounds the section count after PAGE classification and tail reservation.
     ///
-    /// Includes pending padding, dead extents, and `extents` in the count.
+    /// Counts each aligned interior as one section. Includes pending padding, dead and
+    /// unclassified extents, and `extents` in the count.
     ///
     /// # Errors
     ///
@@ -412,24 +413,22 @@ impl PagedEdit {
         &self,
         extents: impl IntoIterator<Item = Extent>,
     ) -> Result<usize, FormatError> {
-        let page = self.page_size.get();
         self.meta
             .extents()
             .iter()
             .chain(self.raw.extents())
             .chain(self.dead.extents())
-            .chain(self.unclassified.extents())
             .chain(&self.meta_pad)
             .chain(&self.raw_pad)
             .copied()
             .chain(extents)
-            .try_fold(3usize, |count, extent| {
-                let pieces = (extent.end().get() - 1) / page - extent.start().get() / page + 1;
-                usize::try_from(pieces)
-                    .ok()
-                    .and_then(|pieces| count.checked_add(pieces))
+            .map(|extent| PageParts::new(extent, self.page_size).count())
+            .chain(self.unclassified.extents().iter().map(|_| 1))
+            .try_fold(3usize, |count, pieces| {
+                count
+                    .checked_add(pieces)
                     .ok_or(FormatError::ValueTooLargeForPlatform {
-                        value: pieces,
+                        value: (count as u64).saturating_add(pieces as u64),
                         target: "PAGE persistence section count",
                     })
             })
@@ -1211,6 +1210,40 @@ mod tests {
         paged.track(extent(4_000, 5_000), FreeClass::Dead);
         paged.meta_pad.push(extent(100, 50));
         assert_eq!(paged.tail_section_limit([extent(12_000, 500)]).unwrap(), 9);
+    }
+
+    #[rstest]
+    #[case::one_page(1)]
+    #[case::hole(256)]
+    #[case::many_pages(1 << 32)]
+    fn tail_section_limit_counts_semantic_pieces_in_every_input_class(#[case] pages: u64) {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.meta.free(extent(0, pages * PAGE));
+        paged.raw.free(extent((pages + 1) * PAGE, pages * PAGE));
+        paged
+            .dead
+            .free(extent((2 * pages + 2) * PAGE, pages * PAGE));
+        paged
+            .unclassified
+            .free(extent((3 * pages + 3) * PAGE + 100, pages * PAGE));
+        let padding_start = (4 * pages + 4) * PAGE;
+        paged.meta_pad.push(extent(padding_start + 4_000, 200));
+        paged
+            .raw_pad
+            .push(extent(padding_start + 2 * PAGE + 100, 100));
+        let returned = extent(padding_start + 3 * PAGE + 4_000, pages * PAGE + 200);
+        assert_eq!(paged.tail_section_limit([returned]).unwrap(), 13);
+    }
+
+    #[rstest]
+    #[case::one(1)]
+    #[case::several(16)]
+    fn tail_section_limit_grows_with_distinct_runs(#[case] count: usize) {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        for index in 0..count {
+            paged.raw.free(extent(index as u64 * 2 * PAGE, PAGE));
+        }
+        assert_eq!(paged.tail_section_limit([]).unwrap(), 3 + count);
     }
 
     #[test]
