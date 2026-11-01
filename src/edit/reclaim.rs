@@ -34,6 +34,7 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
 use crate::link_message::LinkTarget;
 use crate::message_type::MessageType;
+use crate::object_graph::{ObjectId, ObjectTraversal, TraversalBudget};
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::source::PhysicalSource;
@@ -1082,17 +1083,15 @@ impl WriteEngine {
         mut visit: impl FnMut(u64, &ObjectHeader, &mut dyn FnMut(u64)) -> Result<bool, Error>,
     ) -> Result<bool, Error> {
         let mut complete = true;
-        let mut visited = HashSet::new();
-        let mut pending: Vec<(u64, u32)> = roots.into_iter().map(|root| (root, 0)).collect();
-        while let Some((addr, depth)) = pending.pop() {
-            if visited.contains(&addr) {
-                continue;
-            }
-            if depth >= MAX_LINK_WALK_DEPTH || visited.len() >= MAX_LINK_GRAPH_NODES as usize {
-                complete = false;
-                continue;
-            }
-            visited.insert(addr);
+        let mut traversal = ObjectTraversal::new(
+            roots
+                .into_iter()
+                .map(|root| ObjectId::new(PhysicalAddress::new(root))),
+            TraversalBudget::new(MAX_LINK_GRAPH_NODES as usize, usize::MAX),
+            MAX_LINK_WALK_DEPTH,
+        );
+        while let Some((id, depth)) = traversal.next() {
+            let addr = id.header_address().get();
             let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
@@ -1100,9 +1099,11 @@ impl WriteEngine {
                 self.widths(),
                 self.context.addresses().effective_base(),
             )?;
-            complete &= visit(addr, &header, &mut |child| pending.push((child, depth + 1)))?;
+            complete &= visit(addr, &header, &mut |child| {
+                traversal.push_child(ObjectId::new(PhysicalAddress::new(child)), depth);
+            })?;
         }
-        Ok(complete)
+        Ok(complete && traversal.complete())
     }
 
     /// Appends storage identified in the header and passes hard-link targets to `child`.
