@@ -1,7 +1,9 @@
 use std::fs::{self, OpenOptions};
 
 use rstest::rstest;
+use test_util::snapshot::{Report, Value};
 
+use super::ImageWork;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::source::MetadataCacheConfig;
 
@@ -61,13 +63,78 @@ fn foundation_buffering_observations_preserve_clean_gaps(
     assert!(flushed.flush_peak_bytes > 8);
     assert!(flushed.flush_peak_capacity >= flushed.flush_peak_bytes);
     assert_eq!(flushed.copied_bytes, 6);
-    let report = format!(
-        "pending budget: 8\npending:\n{pending:#?}\nflushed:\n{flushed:#?}\nfile growth: 0"
+    let mut report = Report::new();
+    report.metrics(
+        "Buffering configuration",
+        "Bytes",
+        [("Pending budget", 8), ("File growth", 0)],
     );
+    let pending = pending.values();
+    let flushed = flushed.values();
+    let metrics = [
+        "Pending runs (count)",
+        "Pending bytes",
+        "Pending capacity (bytes)",
+        "Flush peak (bytes)",
+        "Flush peak capacity (bytes)",
+        "Clean-gap reads (calls)",
+        "Clean-gap reads (bytes)",
+        "Explicit buffer copies (bytes)",
+        "Issued writes (calls)",
+        "Issued writes (bytes)",
+        "Mirror bytes",
+        "Mirror capacity (bytes)",
+    ];
+    report.table(
+        "Buffering observations",
+        ["Metric", "Pending", "Flushed"],
+        metrics.into_iter().enumerate().map(|(index, metric)| {
+            [
+                Value::text(metric),
+                Value::Number(pending[index]),
+                Value::Number(flushed[index]),
+            ]
+        }),
+    );
+    let report = report.finish();
     drop(image);
     let mut expected = initial;
     expected[2..4].copy_from_slice(&[201, 202]);
     expected[42..44].copy_from_slice(&[203, 204]);
     assert_eq!(fs::read(&path).unwrap(), expected);
     insta::assert_snapshot!(snapshot, report);
+}
+
+impl ImageWork {
+    /// Returns values in the order of the report's metric rows.
+    fn values(self) -> [u64; 12] {
+        let Self {
+            pending_runs,
+            pending_bytes,
+            pending_capacity,
+            flush_peak_bytes,
+            flush_peak_capacity,
+            clean_gap_calls,
+            clean_gap_bytes,
+            copied_bytes,
+            write_calls,
+            write_bytes,
+            mirror_bytes,
+            mirror_capacity,
+        } = self;
+        [
+            pending_runs,
+            pending_bytes,
+            pending_capacity,
+            flush_peak_bytes,
+            flush_peak_capacity,
+            clean_gap_calls,
+            clean_gap_bytes,
+            copied_bytes,
+            write_calls,
+            write_bytes,
+            mirror_bytes,
+            mirror_capacity,
+        ]
+    }
 }

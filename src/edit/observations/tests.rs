@@ -1,17 +1,17 @@
 use core::num::NonZeroU64;
-use std::fmt::Write;
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{
-    AllocationClass, Extent, PageType, ReservationRequest, SessionSpace,
+    AllocationClass, Extent, PageType, ReservationRequest, ReservationWork, SessionSpace,
 };
 use rstest::rstest;
+use test_util::snapshot::{Report, Value};
 
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
-use crate::free_space_manager::ManagerProjection;
+use crate::free_space_manager::{ManagerProjection, ManagerWork};
 use crate::image::WriteBuffering;
 use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
@@ -197,34 +197,128 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         .sections()
         .map(|(extent, class)| (extent.start().get(), extent.len(), class))
         .collect();
-    let mut report = format!(
-        "base: {base}\noriginal image: {original_len}\nplanned end: {end}\nplacements (stored, physical, allocation, encoding, page):\n{placements:#?}\nreservation work:\n{work:#?}\nfree sections:\n{sections:#?}\nmanager projection:\n{manager_work:#?}\nencoded metadata bytes: {encoded_len}\nencoded metadata capacity: {encoded_capacity}\nzero generation:\n{zeros:#?}\n"
+    let mut report = Report::new();
+    report.metrics(
+        "File geometry",
+        "Bytes",
+        [
+            ("Address base", base),
+            ("Original image", original_len),
+            ("Planned end", end),
+            ("File growth", end - original_len),
+        ],
     );
-    writeln!(
-        report,
-        "issued writes: {}",
-        after.write_calls - before.write_calls
-    )
-    .unwrap();
-    writeln!(
-        report,
-        "issued bytes: {}",
-        after.write_bytes - before.write_bytes
-    )
-    .unwrap();
-    writeln!(
-        report,
-        "clean-gap read bytes: {}",
-        after.clean_gap_bytes - before.clean_gap_bytes
-    )
-    .unwrap();
-    writeln!(
-        report,
-        "explicit buffer copy bytes: {}",
-        after.copied_bytes - before.copied_bytes
-    )
-    .unwrap();
-    writeln!(report, "file growth: {}", end - original_len).unwrap();
+    report.table(
+        "Reservations",
+        [
+            "Stored address",
+            "Physical address",
+            "Allocation bytes",
+            "Encoding bytes",
+            "PAGE type",
+        ],
+        placements
+            .iter()
+            .map(|&(stored, physical, allocation, encoding, page)| {
+                [
+                    Value::Number(stored),
+                    Value::Number(physical),
+                    Value::Number(allocation),
+                    Value::Number(encoding),
+                    Value::text(format!("{page:?}")),
+                ]
+            }),
+    );
+    let ReservationWork {
+        indexed_extents,
+        lookups,
+        removed_extents,
+        inserted_extents,
+        restored_extents,
+    } = work;
+    report.metrics(
+        "Reservation work",
+        "Count",
+        [
+            ("Indexed extents", indexed_extents),
+            ("Lookups", lookups),
+            ("Removed extents", removed_extents),
+            ("Inserted extents", inserted_extents),
+            ("Restored extents", restored_extents),
+        ],
+    );
+    report.table(
+        "Free sections",
+        ["Stored address", "Bytes", "Class"],
+        sections.iter().map(|&(address, length, class)| {
+            [
+                Value::Number(address),
+                Value::Number(length),
+                Value::text(format!("{class:?}")),
+            ]
+        }),
+    );
+    let ManagerWork {
+        managers,
+        sections,
+        section_capacity,
+        encoded_bytes,
+    } = manager_work;
+    report.metrics(
+        "Manager projection",
+        "Value",
+        [
+            ("Managers (count)", managers),
+            ("Sections (count)", sections),
+            ("Section capacity (elements)", section_capacity),
+            ("Measured encoding (bytes)", encoded_bytes),
+            (
+                "Encoded metadata (bytes)",
+                u64::try_from(encoded_len).unwrap(),
+            ),
+            (
+                "Encoded metadata capacity (bytes)",
+                u64::try_from(encoded_capacity).unwrap(),
+            ),
+        ],
+    );
+    let ZeroWork {
+        calls,
+        bytes,
+        scratch_peak,
+    } = zeros;
+    report.metrics(
+        "Zero generation",
+        "Value",
+        [
+            ("Requests (count)", calls),
+            ("Requested bytes", bytes),
+            ("Scratch peak (bytes)", scratch_peak),
+        ],
+    );
+    report.metrics(
+        "Image I/O",
+        "Value",
+        [
+            (
+                "Issued writes (calls)",
+                after.write_calls - before.write_calls,
+            ),
+            (
+                "Issued writes (bytes)",
+                after.write_bytes - before.write_bytes,
+            ),
+            (
+                "Clean-gap reads (bytes)",
+                after.clean_gap_bytes - before.clean_gap_bytes,
+            ),
+            (
+                "Explicit buffer copies (bytes)",
+                after.copied_bytes - before.copied_bytes,
+            ),
+        ],
+    );
+    let report = report.finish();
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), expected);
     insta::assert_snapshot!(snapshot, report);

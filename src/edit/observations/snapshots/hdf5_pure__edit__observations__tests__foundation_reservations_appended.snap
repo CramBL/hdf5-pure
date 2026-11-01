@@ -2,60 +2,56 @@
 source: src/edit/observations/tests.rs
 expression: report
 ---
-base: 0
-original image: 131
-planned end: 323
-placements (stored, physical, allocation, encoding, page):
-[
-    (
-        131,
-        131,
-        64,
-        16,
-        Raw,
-    ),
-    (
-        195,
-        195,
-        48,
-        48,
-        Meta,
-    ),
-    (
-        243,
-        243,
-        80,
-        32,
-        Raw,
-    ),
-]
-reservation work:
-ReservationWork {
-    indexed_extents: 0,
-    lookups: 0,
-    removed_extents: 0,
-    inserted_extents: 0,
-    restored_extents: 0,
-}
-free sections:
-[]
-manager projection:
-ManagerWork {
-    managers: 0,
-    sections: 0,
-    section_capacity: 0,
-    encoded_bytes: 0,
-}
-encoded metadata bytes: 0
-encoded metadata capacity: 0
-zero generation:
-ZeroWork {
-    calls: 2,
-    bytes: 96,
-    scratch_peak: 48,
-}
-issued writes: 1
-issued bytes: 192
-clean-gap read bytes: 0
-explicit buffer copy bytes: 192
-file growth: 192
+File geometry
+  Metric          Bytes
+  --------------  -----
+  Address base        0
+  Original image    131
+  Planned end       323
+  File growth       192
+
+Reservations
+  Stored address  Physical address  Allocation bytes  Encoding bytes  PAGE type
+  --------------  ----------------  ----------------  --------------  ---------
+             131               131                64              16  Raw
+             195               195                48              48  Meta
+             243               243                80              32  Raw
+
+Reservation work
+  Metric            Count
+  ----------------  -----
+  Indexed extents       0
+  Lookups               0
+  Removed extents       0
+  Inserted extents      0
+  Restored extents      0
+
+Free sections
+  Stored address  Bytes  Class
+  --------------  -----  -----
+  (none)
+
+Manager projection
+  Metric                             Value
+  ---------------------------------  -----
+  Managers (count)                       0
+  Sections (count)                       0
+  Section capacity (elements)            0
+  Measured encoding (bytes)              0
+  Encoded metadata (bytes)               0
+  Encoded metadata capacity (bytes)      0
+
+Zero generation
+  Metric                Value
+  --------------------  -----
+  Requests (count)          2
+  Requested bytes          96
+  Scratch peak (bytes)     48
+
+Image I/O
+  Metric                          Value
+  ------------------------------  -----
+  Issued writes (calls)               1
+  Issued writes (bytes)             192
+  Clean-gap reads (bytes)             0
+  Explicit buffer copies (bytes)    192
