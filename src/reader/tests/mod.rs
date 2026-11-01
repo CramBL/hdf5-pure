@@ -22,6 +22,7 @@ use crate::source::PhysicalBytes;
 use crate::message_flags::MessageFlags;
 use crate::{DatatypeByteOrder, FileBuilder};
 
+mod opening;
 mod storage;
 
 #[rstest]
