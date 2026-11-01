@@ -1,6 +1,43 @@
 use test_util::snapshot::text::{Report, Value};
 
 #[test]
+fn report_aligns_signed_totals_and_hexadecimal_geometry_with_missing_values() {
+    let mut report = Report::new();
+    report.table(
+        "Paired geometry",
+        ["Delta", "Address", "Present"],
+        [
+            [
+                Value::Signed(-1_234),
+                Value::Hexadecimal {
+                    value: 16,
+                    digits: 8,
+                },
+                Value::text("<missing>"),
+            ],
+            [
+                Value::Signed(0),
+                Value::Hexadecimal {
+                    value: 0x1000_0000,
+                    digits: 8,
+                },
+                Value::text("yes"),
+            ],
+        ],
+    );
+    assert_eq!(
+        report.finish(),
+        concat!(
+            "Paired geometry\n",
+            "   Delta     Address  Present\n",
+            "  ------  ----------  ---------\n",
+            "  -1,234  0x00000010  <missing>\n",
+            "       0  0x10000000  yes",
+        )
+    );
+}
+
+#[test]
 fn report_aligns_columns_and_groups_decimal_values() {
     let mut report = Report::new();
     report.table(
