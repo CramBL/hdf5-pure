@@ -2,7 +2,10 @@
 
 use alloc::vec::Vec;
 
-use hdf5_pure_core::{AddressRange, MetadataBytes, StoredAddress};
+use hdf5_pure_core::AddressRange;
+use hdf5_pure_core::MetadataBytes;
+use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::StoredAddress;
 
 use crate::error::FormatError;
 use crate::source::{RangeReader, Source};
@@ -19,6 +22,20 @@ pub(crate) trait StoredRead:
 {
     /// Returns the usable byte length in the stored-coordinate frame.
     fn len(&self) -> u64;
+    /// Returns the physical metadata position corresponding to stored address zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the effective base plus the backend's metadata
+    /// origin exceeds [`u64::MAX`], and errors from [`Source::metadata_origin`].
+    fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError>;
+    /// Resolves `address` to a position relative to the original source's start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if `address` plus the effective base exceeds
+    /// [`u64::MAX`].
+    fn source_address(&self, address: StoredAddress) -> Result<PhysicalAddress, FormatError>;
     /// Reads at a stored position into the caller's buffer.
     ///
     /// # Errors
@@ -65,6 +82,12 @@ pub(crate) trait StoredRead:
 impl<S: Source + ?Sized> StoredRead for StoredSource<'_, S> {
     fn len(&self) -> u64 {
         Self::len(self)
+    }
+    fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError> {
+        Self::metadata_origin(self)
+    }
+    fn source_address(&self, address: StoredAddress) -> Result<PhysicalAddress, FormatError> {
+        self.physical.addresses.resolve(address)
     }
     fn read_at(&self, address: StoredAddress, buffer: &mut [u8]) -> Result<(), FormatError> {
         Self::read_at(self, address, buffer)

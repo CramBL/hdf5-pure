@@ -584,7 +584,7 @@ fn find_noncompact_link(
             heap.read(file_data, layout.parse(id)?)
         });
     }
-    let records = btree_v2::collect_btree_v2_records(file_data, &btree, widths.offsets)?;
+    let records = btree_v2::legacy_collect_btree_v2_records(file_data, &btree, widths.offsets)?;
     let mut found = None;
     for record in &records {
         let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
@@ -660,7 +660,8 @@ fn find_noncompact_link_from_source<S: Source + ?Sized>(
             heap.read_from_source(&source, layout.parse(id)?)
         });
     }
-    let records = btree_v2::collect_btree_v2_records_from_source(&source, &btree, widths.offsets)?;
+    let records =
+        btree_v2::legacy_collect_btree_v2_records_from_source(&source, &btree, widths.offsets)?;
     let mut found = None;
     for record in &records {
         let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
@@ -695,7 +696,7 @@ fn find_indexed_dense_link(
 ) -> Result<Option<LinkTarget>, FormatError> {
     let wanted_hash = checksum::jenkins_lookup3(name.as_str().as_bytes());
     let mut matched = None;
-    let record = btree_v2::search_btree_v2(reader, index.nodes(), addresses, |record| {
+    let record = btree_v2::legacy_search_btree_v2(reader, index.nodes(), addresses, |record| {
         let (hash, id) = index.record(record)?;
         if hash != wanted_hash {
             return Ok(hash.cmp(&wanted_hash));
@@ -739,7 +740,7 @@ fn resolve_dense_entries(
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree_hdr =
         BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
-    let records = btree_v2::collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
+    let records = btree_v2::legacy_collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
@@ -1038,7 +1039,7 @@ pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
         widths,
     )?;
     let records =
-        btree_v2::collect_btree_v2_records_from_source(source, &btree_hdr, widths.offsets)?;
+        btree_v2::legacy_collect_btree_v2_records_from_source(source, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);

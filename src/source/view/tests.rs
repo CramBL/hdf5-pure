@@ -28,7 +28,7 @@ fn stored_reads_apply_the_effective_base_once(
     let stored = PhysicalSource::for_test(&source, image.addresses()).stored();
     assert_eq!(stored.len(), 1024 - effective_base);
     assert_eq!(
-        stored.metadata_origin().unwrap(),
+        StoredRead::metadata_origin(&stored).unwrap(),
         PhysicalAddress::new(effective_base)
     );
     let address = StoredAddress::new(4);
@@ -130,7 +130,7 @@ fn metadata_retains_the_original_source_origin(
     assert_eq!(metadata.offset(), origin + base + offset);
     assert_eq!(source.last_read.get(), Some((base + offset, 3)));
     assert_eq!(
-        stored.metadata_origin().unwrap(),
+        StoredRead::metadata_origin(&stored).unwrap(),
         PhysicalAddress::new(origin + base)
     );
     assert_eq!(

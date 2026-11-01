@@ -4,7 +4,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::{FileRange, MetadataFrame};
-use hdf5_pure_core::{AddressRange, MetadataBytes, StoredAddress};
+use hdf5_pure_core::AddressRange;
+use hdf5_pure_core::MetadataBytes;
+use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::StoredAddress;
 
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::convert::{self, Narrow};
@@ -63,7 +66,7 @@ impl<'a> StoredBytes<'a> {
         address: StoredAddress,
         length: usize,
     ) -> Result<FileRange, FormatError> {
-        let start = BaseAddress::new(self.frame.origin().get()).resolve(address)?;
+        let start = self.source_address(address)?;
         let range = FileRange::new(start, length.to_u64())?;
         if range.end() > self.frame.range().end() {
             return Err(FormatError::UnexpectedSourceEof {
@@ -78,6 +81,12 @@ impl<'a> StoredBytes<'a> {
 impl StoredRead for StoredBytes<'_> {
     fn len(&self) -> u64 {
         self.frame.bytes().len().to_u64()
+    }
+    fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError> {
+        Ok(self.frame.origin())
+    }
+    fn source_address(&self, address: StoredAddress) -> Result<PhysicalAddress, FormatError> {
+        BaseAddress::new(self.metadata_origin()?.get()).resolve(address)
     }
     fn read_at(&self, address: StoredAddress, buffer: &mut [u8]) -> Result<(), FormatError> {
         self.physical_range(address, buffer.len())?;

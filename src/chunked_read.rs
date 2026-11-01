@@ -26,7 +26,6 @@ use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::PhysicalAddress;
 #[cfg(test)]
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
-use hdf5_pure_format::__private::MetadataSource;
 
 use hdf5_pure_format::__private::BTreeV1ChunkNode;
 use hdf5_pure_format::__private::BTreeV1ChunkNodeBytes;
@@ -34,12 +33,15 @@ use hdf5_pure_format::__private::BTreeV2ChunkRecordContext;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::MetadataSource;
 #[cfg(feature = "std")]
 use hdf5_pure_space::__private::Extent;
 
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
+use crate::btree_v2;
+use crate::btree_v2::BTreeV2Source;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid;
 use crate::chunk_grid::ChunkGrid;
@@ -69,7 +71,11 @@ use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
 #[cfg(any(doc, test))]
 use crate::source::Source;
-use crate::source::{SourceMetadata, StoredBytes, StoredMetadata, StoredRead};
+#[cfg(test)]
+use crate::source::SourceMetadata;
+use crate::source::StoredBytes;
+use crate::source::StoredMetadata;
+use crate::source::StoredRead;
 use crate::width::{FormatWidths, OffsetWidth};
 #[cfg(test)]
 use crate::{FixedPointType, FloatingPointType};
@@ -1617,8 +1623,8 @@ pub(crate) fn collect_chunks_for_layout_from_source(
             )?;
             Ok(chunks)
         }
-        ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks_from_source(
-            source,
+        ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks(
+            &BTreeV2Source::new(source),
             addr,
             spatial_dims,
             dataspace,
@@ -1629,26 +1635,8 @@ pub(crate) fn collect_chunks_for_layout_from_source(
 }
 
 /// Decodes every allocated chunk record in a version 2 B-tree.
-fn collect_btree_v2_chunks_from_source<S: StoredRead + ?Sized>(
-    source: &S,
-    header_address: StoredAddress,
-    chunk_dims: &[u64],
-    dataspace: &Dataspace,
-    elem_size: u64,
-    widths: FormatWidths,
-) -> Result<Vec<ChunkInfo>, FormatError> {
-    collect_btree_v2_chunks_from_metadata(
-        &StoredMetadata(source),
-        header_address,
-        chunk_dims,
-        dataspace,
-        elem_size,
-        widths,
-    )
-}
-
-fn collect_btree_v2_chunks_from_metadata<S: MetadataSource + ?Sized>(
-    source: &S,
+fn collect_btree_v2_chunks(
+    source: &BTreeV2Source<'_, impl StoredRead + ?Sized>,
     header_address: StoredAddress,
     chunk_dims: &[u64],
     dataspace: &Dataspace,
@@ -1683,8 +1671,7 @@ fn collect_btree_v2_chunks_from_metadata<S: MetadataSource + ?Sized>(
     )?;
     context.require_record_size(header.record_size)?;
 
-    let records =
-        crate::btree_v2::collect_btree_v2_records_from_metadata(source, &header, widths.offsets)?;
+    let records = btree_v2::collect_btree_v2_records_from_source(source, &header, widths.offsets)?;
     let expected_records = header.total_records.to_usize()?;
     if records.len() != expected_records {
         return Err(FormatError::ChunkedReadError(format!(
@@ -2104,12 +2091,8 @@ fn collect_chunk_index_spans(
             extensible_array::index_spans(source, widths, index_addr)
         }
         ChunkIndexLayout::BTreeV2 { .. } => {
-            crate::btree_v2::collect_btree_v2_storage_extents_from_metadata(
-                &StoredMetadata(source),
-                index_addr,
-                widths,
-            )
-            .map(|extents| extents.into_iter().map(Extent::range).collect())
+            crate::btree_v2::collect_btree_v2_storage_extents(source, index_addr, widths)
+                .map(|extents| extents.into_iter().map(Extent::range).collect())
         }
     }
 }
@@ -2352,8 +2335,8 @@ fn collect_chunks_for_layout(
             )?;
             chunks
         }
-        ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks_from_metadata(
-            &SourceMetadata(&file_data),
+        ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks(
+            &BTreeV2Source::resident(source),
             addr,
             spatial_dims,
             dataspace,
@@ -2932,12 +2915,16 @@ mod tests {
 
     use super::*;
     use crate::FillTime;
+    use crate::address::AddressContext;
+    use crate::address::BaseAddress;
+    use crate::address::BaseAddressExt;
     #[cfg(feature = "std")]
-    use crate::address::{AddressContext, BaseAddress, BaseAddressExt, OpenedImageContext};
+    use crate::address::OpenedImageContext;
     use crate::chunked_write::ChunkArrayKind;
     use crate::convert;
     use crate::dataspace::MaxExtent;
     use crate::filter_pipeline::FilterDescription;
+    use crate::source::PhysicalBytes;
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
     #[cfg(feature = "std")]
@@ -4206,6 +4193,72 @@ mod tests {
             dimensions: dimensions.to_vec(),
             max_dimensions: Some(vec![MaxExtent::Unlimited; dimensions.len()]),
         }
+    }
+
+    #[rstest]
+    #[case::header(33, 32, false)]
+    #[case::child(1025, 1024, true)]
+    fn resident_btree_v2_metadata_bounds_use_stored_coordinates(
+        #[case] invalid_address: u64,
+        #[case] available: usize,
+        #[case] child: bool,
+    ) {
+        let mut stored = vec![0; available];
+        if child {
+            let tree_type = hdf5_pure_format::__private::BTREE_V2_CHUNK;
+            let record = btree_v2_chunk_record(tree_type, 0, &[0, 0], None, 4, Widths::EIGHT);
+            let root_at = 128;
+            let root = btree_v2::internal(
+                tree_type,
+                core::slice::from_ref(&record),
+                &[
+                    btree_v2::Child {
+                        address: invalid_address,
+                        records: 1,
+                        records_width: 1,
+                        subtree: None,
+                    },
+                    btree_v2::Child {
+                        address: 768,
+                        records: 1,
+                        records_width: 1,
+                        subtree: None,
+                    },
+                ],
+                Widths::EIGHT,
+            );
+            let header = btree_v2::Header::new(
+                tree_type,
+                u16::try_from(record.len()).unwrap(),
+                root_at.to_u64(),
+                1,
+            )
+            .depth(1)
+            .total_records(3)
+            .build(Widths::EIGHT);
+            stored[..header.len()].copy_from_slice(&header);
+            stored[root_at..root_at + root.len()].copy_from_slice(&root);
+        }
+        let mut image = vec![0; 512];
+        image.extend_from_slice(&stored);
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(512));
+        assert_eq!(
+            collect_chunks_for_layout(
+                PhysicalBytes::for_test(&image, addresses).stored().unwrap(),
+                ChunkIndexLayout::BTreeV2 {
+                    address: Some(StoredAddress::new(if child { 0 } else { invalid_address })),
+                },
+                &[1, 1, 4],
+                &btree_v2_dataspace(&[1, 1]),
+                4,
+                FORMAT_WIDTHS,
+            )
+            .unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected: invalid_address,
+                available: available.to_u64(),
+            },
+        );
     }
 
     #[cfg(feature = "std")]

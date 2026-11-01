@@ -120,7 +120,6 @@ impl<'a, S: Source + ?Sized> PhysicalSource<'a, S> {
     /// # Errors
     ///
     /// Returns errors from [`Source::metadata_origin`].
-    #[cfg(any(test, doc))]
     pub(crate) fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError> {
         self.inner.metadata_origin().map(PhysicalAddress::new)
     }
@@ -270,7 +269,6 @@ impl<'a, S: Source + ?Sized> StoredSource<'a, S> {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the original source's metadata origin plus the
     /// effective base exceeds [`u64::MAX`], and errors from [`Source::metadata_origin`].
-    #[cfg(any(test, doc))]
     pub(crate) fn metadata_origin(&self) -> Result<PhysicalAddress, FormatError> {
         self.physical
             .metadata_origin()?

@@ -325,7 +325,8 @@ fn extract_dense_attributes(
         })?;
     let btree_hdr =
         BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
-    let records = crate::btree_v2::collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
+    let records =
+        crate::btree_v2::legacy_collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
 
     let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
@@ -442,8 +443,11 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
         btree_addr.get(),
         widths,
     )?;
-    let records =
-        crate::btree_v2::collect_btree_v2_records_from_source(source, &btree_hdr, widths.offsets)?;
+    let records = crate::btree_v2::legacy_collect_btree_v2_records_from_source(
+        source,
+        &btree_hdr,
+        widths.offsets,
+    )?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);

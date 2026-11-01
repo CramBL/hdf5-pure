@@ -72,7 +72,7 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
                 widths,
             )?;
             check_btree_type(&header)?;
-            let records = crate::btree_v2::collect_btree_v2_records_from_source(
+            let records = crate::btree_v2::legacy_collect_btree_v2_records_from_source(
                 source,
                 &header,
                 widths.offsets,
