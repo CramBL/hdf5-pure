@@ -490,6 +490,7 @@ pub(crate) mod layout_info;
 pub(crate) mod libver;
 pub(crate) mod link_info;
 pub(crate) mod link_message;
+mod link_phase_change;
 pub(crate) mod message_flags;
 pub(crate) mod message_type;
 pub(crate) mod object_graph;
@@ -673,6 +674,10 @@ pub use hdf5_pure_core::FileSpaceStrategy;
 pub use hdf5_pure_core::UserblockSize;
 #[cfg(feature = "zfp")]
 pub use hdf5_pure_core::ZfpRate;
+pub use link_phase_change::{
+    CompactReversion, LinkPhaseChange, LinkPhaseChangeBuilder, LinkThresholds,
+    LinkThresholdsBuilder,
+};
 
 pub use compound::{CompoundField, CompoundType};
 #[doc(inline)]
