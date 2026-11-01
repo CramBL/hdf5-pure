@@ -9,6 +9,10 @@ passthrough = [
 
 [target.i686-unknown-linux-gnu]
 image = "ghcr.io/crambl/hdf5-pure-cross-i686:latest"
+# Runs the test harness and fixture children through QEMU.
+runner = "qemu-user"
 
 [target.s390x-unknown-linux-gnu]
 image = "ghcr.io/crambl/hdf5-pure-cross-s390x:latest"
+# Runs the test harness and fixture children through QEMU.
+runner = "qemu-user"
