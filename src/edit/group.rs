@@ -1,5 +1,7 @@
 //! Group-link inspection, storage selection, and placement for staged edits.
 
+use std::borrow::Cow;
+
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
@@ -17,6 +19,7 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::file_writer::{self, OFFSET_WIDTH};
+use crate::filter_pipeline;
 use crate::group_v1;
 use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
@@ -41,9 +44,9 @@ impl WriteEngine {
     ///
     /// For a symbol-table group, the region is compact and holds one Link message per symbol
     /// table entry, hard or soft. For a group that stores its links in Link Info, Group Info, and
-    /// Link messages, the region holds those messages, see [`link_message_region`]. Attribute
-    /// bodies are copied in both cases, with shared-message references re-encoded. Other
-    /// messages, including the symbol table, are omitted.
+    /// Link messages, the region retains those messages and any Filter Pipeline, see
+    /// [`link_message_region`]. Attribute bodies are copied in both cases, with shared-message
+    /// references re-encoded. Other messages, including the symbol table, are omitted.
     ///
     /// # Errors
     ///
@@ -238,11 +241,12 @@ impl WriteEngine {
     ///
     /// Reads phase-change thresholds from Group Info, using the defaults when omitted.
     /// Uses the minimum dense count if `was_dense` is `true` and the maximum compact count
-    /// otherwise.
+    /// otherwise. Checks Filter Pipeline messages before planning dense storage.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if link metadata, thresholds, or the selected dense
+    /// Returns [`Error::EditUnsupported`] if a shared or nonempty Filter Pipeline is present when
+    /// dense storage is selected, or if link metadata, thresholds, or the selected dense
     /// representation cannot be reproduced. Returns parsing and source-read errors from inspection.
     pub(super) fn plan_group_links(
         &self,
@@ -252,12 +256,21 @@ impl WriteEngine {
         let links = group_links::inspect(&self.opened_source(), self.context.widths(), region)?;
         let mut pos = 0;
         let mut thresholds = group_links::phase_change(&GROUP_INFO_BODY)?;
-        while let Some((kind, body, end)) = region.next_message(pos)? {
-            if kind == MessageType::GROUP_INFO {
-                thresholds = group_links::phase_change(&region[body..end])?;
-                break;
+        let mut filtered = false;
+        while let Some(record) = region.layout().next_message(region, pos)? {
+            match record.msg_type {
+                MessageType::GROUP_INFO => {
+                    thresholds = group_links::phase_change(record.body)?;
+                }
+                MessageType::FILTER_PIPELINE => {
+                    filtered |= record.flags.is_shared()
+                        || !filter_pipeline::parse_filter_pipeline(record.body)?
+                            .filters
+                            .is_empty();
+                }
+                _ => {}
             }
-            pos = end;
+            pos = record.body_range.end;
         }
         let count = links.links().len();
         let dense = if was_dense {
@@ -266,6 +279,11 @@ impl WriteEngine {
             count > usize::from(thresholds.max_compact())
         };
         if dense {
+            if filtered {
+                return Err(Error::EditUnsupported(
+                    "a group's link filters cannot be reproduced in dense storage",
+                ));
+            }
             dense_link_plan(links, self.context.widths().lengths)?;
         }
         Ok(dense)
@@ -344,13 +362,15 @@ pub(super) fn fresh_group_region() -> OhRegion {
 /// Returns a region with the link storage messages of the version 1 header `object_header`, and a
 /// Group Info message if the header has none.
 ///
-/// Each message is copied with its type and flags, and with its body stripped of the padding of
-/// the version 1 header, see [`unpadded_body`].
+/// Retains Link Info, Group Info, Link, and Filter Pipeline messages with their types and flags.
+/// Parses and serializes Filter Pipeline bodies to remove header padding. Removes padding from
+/// the other bodies through [`unpadded_body`].
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if a link storage message has a flag other than the
-/// constant flag, and the errors of [`unpadded_body`] and of [`ensure_group_info`].
+/// constant flag. Propagates Filter Pipeline parsing and serialization errors, and the errors of
+/// [`unpadded_body`] and [`ensure_group_info`].
 pub(super) fn link_message_region(
     object_header: &ObjectHeader,
     offset_width: OffsetWidth,
@@ -366,14 +386,21 @@ pub(super) fn link_message_region(
                 "a group's link metadata has object-header flags this editor cannot reproduce",
             ));
         }
-        // A version 1 header stores each message size in two bytes, so no body exceeds
-        // `OBJECT_HEADER_MESSAGE_MAX` and the record encoder cannot panic.
-        let record = region.layout().record_with_creation_index(
-            message.msg_type,
-            message.flags,
-            0,
-            unpadded_body(message, offset_width)?,
-        );
+        let body = if message.msg_type == MessageType::FILTER_PIPELINE {
+            Cow::Owned(
+                filter_pipeline::parse_filter_pipeline(&message.data)?
+                    .serialize()
+                    .map_err(filter_pipeline::map_filter_pipeline_error)?,
+            )
+        } else {
+            Cow::Borrowed(unpadded_body(message, offset_width)?)
+        };
+        // Filter serialization does not increase the parsed lengths. A version 1 header stores
+        // each message size in two bytes, so every body fits `OBJECT_HEADER_MESSAGE_MAX`.
+        let record =
+            region
+                .layout()
+                .record_with_creation_index(message.msg_type, message.flags, 0, &body);
         region.push_bytes(&record);
     }
     ensure_group_info(&mut region)?;
@@ -390,7 +417,7 @@ pub(super) fn link_message_region(
 /// # Errors
 ///
 /// Returns the parse errors of the Link Info, Group Info, or Link message, and
-/// [`FormatError::Internal`] if `message` is not a link storage message.
+/// [`FormatError::Internal`] for any other message type.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&[u8], Error> {
@@ -422,7 +449,10 @@ fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&
 fn is_link_storage_message(msg_type: MessageType) -> bool {
     matches!(
         msg_type,
-        MessageType::LINK_INFO | MessageType::GROUP_INFO | MessageType::LINK
+        MessageType::LINK_INFO
+            | MessageType::GROUP_INFO
+            | MessageType::LINK
+            | MessageType::FILTER_PIPELINE
     )
 }
 
@@ -680,5 +710,76 @@ impl OhRegion {
             ))?;
         *self = self.with_bytes(splice.replace_body(&info.serialize(OFFSET_WIDTH))?);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hdf5_pure_format::__private::ObjectHeaderPrefix;
+    use rstest::rstest;
+    use test_util::filter_pipeline;
+
+    use super::OhRegion;
+    use crate::Error;
+    use crate::FileBuilder;
+    use crate::LinkPhaseChange;
+    use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
+    use crate::edit::test_util as edit_test_util;
+    use crate::file_writer;
+    use crate::message_flags::MessageFlags;
+    use crate::message_type::MessageType;
+
+    #[rstest]
+    #[case::empty(filter_pipeline::empty(), MessageFlags::CONSTANT, false)]
+    #[case::empty_unshareable(filter_pipeline::empty(), MessageFlags::FORBID_SHARING, false)]
+    #[case::user_filter(filter_pipeline::user_filter(true), MessageFlags::NONE, true)]
+    #[case::shared(Vec::new(), MessageFlags::SHARED, true)]
+    fn dense_link_planning_checks_effective_filters(
+        #[case] pipeline: Vec<u8>,
+        #[case] flags: MessageFlags,
+        #[case] unsupported: bool,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("filters.h5");
+        FileBuilder::new().write(&path).unwrap();
+        let engine = edit_test_util::open_engine(&path);
+        let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+        region.push(
+            MessageType::LINK_INFO,
+            &file_writer::COMPACT_LINK_INFO.serialize(file_writer::OFFSET_WIDTH),
+        );
+        region.push(
+            MessageType::GROUP_INFO,
+            &LinkPhaseChange::AlwaysDense
+                .group_info()
+                .unwrap()
+                .serialize(),
+        );
+        region.push_link("child", StoredAddress::new(100), None);
+        let record = region.layout().record_with_creation_index(
+            MessageType::FILTER_PIPELINE,
+            flags,
+            0,
+            &pipeline,
+        );
+        region.push_bytes(&record);
+        let result = engine.plan_group_links(&region, false);
+        if unsupported {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Error::EditUnsupported(
+                        "a group's link filters cannot be reproduced in dense storage"
+                    )
+                ),
+                "{error:?}"
+            );
+        } else {
+            assert!(result.unwrap());
+        }
+        drop(engine);
+        directory.close().unwrap();
     }
 }

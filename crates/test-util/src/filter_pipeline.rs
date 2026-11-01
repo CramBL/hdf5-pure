@@ -1,5 +1,10 @@
 //! Independent filter pipeline message bodies.
 
+/// Builds a version 2 pipeline with zero filters.
+pub fn empty() -> Vec<u8> {
+    vec![VERSION_TWO, 0]
+}
+
 /// Builds a version 2 pipeline with filter 40,500, named `custom`.
 ///
 /// The client data values are 7 and the maximum 32-bit unsigned integer. The message is defined in
