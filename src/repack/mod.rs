@@ -55,7 +55,8 @@
 //!   dataset's filter message is copied verbatim, including lossy and unsupported
 //!   filters. A resizable destination with zero elements can retain a deferred Extensible
 //!   Array index, while nonempty resizable output receives an allocated chunk index for in-place appends.
-//! - Group hierarchy up to 128 levels deep.
+//! - Group hierarchy up to 128 levels deep, with encoded link names, soft and external targets,
+//!   character sets, and link creation-order metadata preserved.
 //! - Attributes, on datasets, groups, and root, carried across with the
 //!   encoding the source gave them rather than rebuilt from an [`AttrValue`],
 //!   which is a decoded view and cannot express a byte order, a sub-width
@@ -112,7 +113,6 @@
 //! Cached headers are consumed during planning, and remaining cache storage is released before
 //! final layout checks and emission. [`File::open_streaming`] reads the source on demand.
 
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
@@ -140,12 +140,14 @@ use crate::error::{Error, FormatError};
 use crate::file_writer::source::Object;
 use crate::file_writer::source::ObjectSource;
 use crate::file_writer::source::Plan;
+use crate::file_writer::source::SourceLink;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     FilterPipeline,
 };
 use crate::libver::LibVer;
 use crate::object_graph::TraversalBudget;
+use crate::object_path::ObjectTarget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::Dataset;
 use crate::reader::File;
@@ -360,6 +362,7 @@ impl RepackOptions {
 ///
 /// Preserves the source's recorded effective file-space settings by default, including
 /// persistence. [`RepackOptions::with_file_space_settings`] selects a different output policy.
+/// Retains each group's link thresholds and stored entry estimates when reconstructing its header.
 ///
 /// Fidelity checks and destination layout planning run before output. An
 /// [`Error::RepackUnsupported`] for an object or drop path is reported before bytes are written
@@ -395,6 +398,8 @@ impl RepackOptions {
 /// path, through an alias or a cycle, since a repack writes each object at one path. Returns
 /// [`Error::TraversalLimitExceeded`] if `src` reaches more than 16,777,216 objects or hard links,
 /// or if, after the drop paths, `src` nests groups more than 128 levels deep.
+/// Returns [`Error::RepackUnsupported`] for group link filters, including those configured on
+/// compact groups before dense storage is allocated.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,
@@ -561,9 +566,13 @@ impl ObjectSource for RepackSource {
             }
             ObjectClass::Group => {
                 let mut builder = GroupBuilder::new("repack");
+                let (attributes, group_info) = file.attr_messages_and_group_info_at(
+                    object.id.header_address(),
+                    objects.take_header(index)?,
+                )?;
                 copy_attrs(
                     &mut builder,
-                    file.attr_messages_at(object.id.header_address(), objects.take_header(index)?)?,
+                    attributes,
                     || {
                         file.group_at(object.id.header_address(), path.clone())
                             .attrs()
@@ -571,7 +580,11 @@ impl ObjectSource for RepackSource {
                     &group_owner(&path),
                     objects,
                 )?;
-                Ok(Object::group(&builder.finish().attrs)?)
+                Ok(Object::group(
+                    &builder.finish().attrs,
+                    group_info,
+                    object.creation_order,
+                )?)
             }
             ObjectClass::NamedDatatype => {
                 let datatype = file
@@ -593,11 +606,8 @@ impl ObjectSource for RepackSource {
     fn links(
         &self,
         index: usize,
-    ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
-        Ok(self
-            .objects
-            .links(index)?
-            .map(|(name, index)| (Cow::Borrowed(name), index)))
+    ) -> Result<impl ExactSizeIterator<Item = Result<SourceLink<'_>, Error>>, Error> {
+        self.objects.links(index)
     }
 
     fn finish_planning(&self) {
@@ -616,7 +626,7 @@ trait AttrSink {
     fn sink_set_attr_verbatim(
         &mut self,
         message: AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     );
     /// Attaches variable-length strings with the datatype and dataspace of `message`.
     ///
@@ -628,7 +638,7 @@ trait AttrSink {
         &mut self,
         message: AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError>;
 }
 
@@ -639,17 +649,17 @@ impl AttrSink for FileBuilder {
     fn sink_set_attr_verbatim(
         &mut self,
         message: AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
-        self.set_attr_verbatim(message, committed_datatype_path);
+        self.set_attr_verbatim(message, committed_datatype_target);
     }
     fn sink_set_attr_var_len_verbatim(
         &mut self,
         message: AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
-        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_target)?;
         Ok(())
     }
 }
@@ -661,17 +671,17 @@ impl AttrSink for GroupBuilder {
     fn sink_set_attr_verbatim(
         &mut self,
         message: AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
-        self.set_attr_verbatim(message, committed_datatype_path);
+        self.set_attr_verbatim(message, committed_datatype_target);
     }
     fn sink_set_attr_var_len_verbatim(
         &mut self,
         message: AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
-        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_target)?;
         Ok(())
     }
 }
@@ -683,17 +693,17 @@ impl AttrSink for DatasetBuilder {
     fn sink_set_attr_verbatim(
         &mut self,
         message: AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
-        self.set_attr_verbatim(message, committed_datatype_path);
+        self.set_attr_verbatim(message, committed_datatype_target);
     }
     fn sink_set_attr_var_len_verbatim(
         &mut self,
         message: AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
-        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_target)?;
         Ok(())
     }
 }
@@ -721,8 +731,8 @@ fn emit_dataset(
     // it, which would read back correctly and still lose the name every C-library
     // reader reports.
     if let Some(address) = ds.committed_datatype_address()? {
-        let type_path = committed_type_path(address, &format!("dataset {path}"), objects)?;
-        db.with_committed_datatype_path(type_path);
+        let type_target = committed_type_target(address, &format!("dataset {path}"), objects)?;
+        db.with_committed_datatype_target(type_target);
     }
 
     let datatype = ds.datatype()?;
@@ -1136,8 +1146,8 @@ fn emit_vlen_sequence_dataset(
 /// The element bytes are read as they stand; each embedded variable-length
 /// reference is resolved against the source's global heap and its payload
 /// re-staged into the destination's own, and each embedded object address is
-/// resolved to the path it names so the writer can fill in the target's *new*
-/// location. Copying the element bytes verbatim instead would leave every
+/// resolved to its source object index so the writer can fill in the target's destination
+/// address. Copying the element bytes verbatim instead would leave every
 /// address pointing into the source file, which the destination never
 /// reproduces — a file that reads back plausibly here and not at all in the
 /// reference C library.
@@ -1447,10 +1457,10 @@ where
     let messages = messages
         .into_iter()
         .map(|message| {
-            let committed_datatype_path = match message.datatype_location {
+            let committed_datatype_target = match message.datatype_location {
                 DatatypeLocation::Committed(address) => {
                     let name = &message.name;
-                    Some(committed_type_path(
+                    Some(committed_type_target(
                         address,
                         &format!("{owner} attribute {name:?}"),
                         objects,
@@ -1458,7 +1468,7 @@ where
                 }
                 DatatypeLocation::Inline => None,
             };
-            Ok((message, committed_datatype_path))
+            Ok((message, committed_datatype_target))
         })
         .collect::<Result<Vec<_>, Error>>()?;
     let any_needs_decoding = messages
@@ -1470,9 +1480,9 @@ where
         std::collections::HashMap::new()
     };
 
-    for (message, committed_datatype_path) in messages {
+    for (message, committed_datatype_target) in messages {
         if attr_bytes_are_position_independent(&message.datatype) {
-            sink.sink_set_attr_verbatim(message, committed_datatype_path);
+            sink.sink_set_attr_verbatim(message, committed_datatype_target);
         } else if let Some(value) = decoded.get(&message.name) {
             // A variable-length datatype the decode resolved into strings is
             // exactly the case that keeps its datatype and dataspace but restages
@@ -1481,7 +1491,11 @@ where
             match (&message.datatype, value.as_strings()) {
                 (Datatype::VariableLength(_), Some(strings)) => {
                     let strings = strings.to_vec();
-                    sink.sink_set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+                    sink.sink_set_attr_var_len_verbatim(
+                        message,
+                        strings,
+                        committed_datatype_target,
+                    )?;
                 }
                 _ => sink.sink_set_attr(&message.name, value.clone()),
             }
@@ -1624,20 +1638,19 @@ fn link_name_in(parent: &ObjectPathBuf, name: &str) -> Result<LinkNameBuf, Error
     })
 }
 
-/// The destination path of the committed datatype at source `address`.
+/// Returns the indexed destination target of the committed datatype at source `address`.
 ///
-/// Refused by name, rather than resolved to something else, in the two cases
-/// where naming it would be wrong: the type was dropped from the output, or it
-/// sits outside the hard-link hierarchy this walk covers (so nothing in the
-/// output holds it). Both would otherwise surface as a dataset pointing at an
-/// object that is not there.
-fn committed_type_path(
+/// # Errors
+///
+/// Returns [`Error::RepackUnsupported`] if the datatype is dropped or lies outside the retained
+/// hard-link hierarchy. Propagates source address resolution errors.
+fn committed_type_target(
     address: StoredAddress,
     user: &str,
     objects: &SourceObjects,
-) -> Result<ObjectPathBuf, Error> {
+) -> Result<ObjectTarget, Error> {
     match objects.placement(address)? {
-        Some(Placement::Kept(path)) => Ok(path),
+        Some(Placement::Kept(index)) => Ok(ObjectTarget::SourceIndex(index)),
         Some(Placement::Dropped(path)) => Err(Error::RepackUnsupported(format!(
             "{user}: names the committed datatype {}, which this repack drops",
             dropped_object(path.as_ref(), address)
@@ -1776,7 +1789,7 @@ fn resolve_reference_address(
         return Ok(ObjectRefTarget::Raw(address));
     }
     match objects.placement(address)? {
-        Some(Placement::Kept(target_path)) => Ok(ObjectRefTarget::Path(target_path)),
+        Some(Placement::Kept(index)) => Ok(ObjectRefTarget::SourceIndex(index)),
         Some(Placement::Dropped(target_path)) => Err(Error::RepackUnsupported(format!(
             "dataset {path}: object reference to dropped object {} cannot be repacked",
             dropped_object(target_path.as_ref(), address)

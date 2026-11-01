@@ -2,10 +2,13 @@
 
 use core::num::NonZeroU16;
 
-use hdf5_pure_format::__private::{GroupInfoError, GroupPhaseChange};
+use hdf5_pure_format::__private::GroupInfo;
+use hdf5_pure_format::__private::GroupInfoError;
+use hdf5_pure_format::__private::GroupPhaseChange;
 
+use crate::FormatError;
 #[cfg(feature = "std")]
-use crate::{FormatError, MessageType};
+use crate::MessageType;
 
 /// The thresholds for transitions between compact and dense group link storage.
 ///
@@ -48,7 +51,9 @@ impl LinkPhaseChange {
         LinkPhaseChangeBuilder { _private: () }
     }
 
-    /// Parses Group Info thresholds, excluding version 1 object header padding.
+    /// Parses Group Info, excluding version 1 object header padding.
+    ///
+    /// Retains stored entry estimates independently of the link thresholds.
     ///
     /// # Errors
     ///
@@ -57,7 +62,10 @@ impl LinkPhaseChange {
     /// for malformed metadata. Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `bytes`
     /// exceeds the message length range.
     #[cfg(feature = "std")]
-    pub(crate) fn from_group_info(bytes: &[u8], header_version: u8) -> Result<Self, FormatError> {
+    pub(crate) fn stored_group_info(
+        bytes: &[u8],
+        header_version: u8,
+    ) -> Result<GroupInfo, FormatError> {
         let body = if header_version == PADDED_HEADER_VERSION {
             let length = GroupPhaseChange::encoded_len(bytes)
                 .map_err(|error| group_info_error(error, bytes.len()))?;
@@ -70,10 +78,20 @@ impl LinkPhaseChange {
         } else {
             bytes
         };
-        Self::try_from(
-            GroupPhaseChange::parse(body).map_err(|error| group_info_error(error, body.len()))?,
-        )
-        .map_err(|error| group_info_error(error, body.len()))
+        GroupInfo::parse(body).map_err(|error| group_info_error(error, body.len()))
+    }
+
+    /// Converts the policy to Group Info with default entry estimates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a library bug violates the checked threshold ordering.
+    pub(crate) fn group_info(self) -> Result<GroupInfo, FormatError> {
+        GroupPhaseChange::new(self.max_compact(), self.min_dense())
+            .map(GroupInfo::new)
+            .map_err(|_error| {
+                FormatError::Internal("a checked link policy has inverted thresholds".into())
+            })
     }
 
     /// Returns the maximum compact link count, or zero for [`Self::AlwaysDense`].
@@ -96,6 +114,12 @@ impl LinkPhaseChange {
             },
         }
     }
+
+    /// The default maximum compact count of eight and minimum dense count of six.
+    pub(crate) const DEFAULT: Self = Self::builder()
+        .max_compact::<DEFAULT_MAX_COMPACT>()
+        .min_dense::<DEFAULT_MIN_DENSE>()
+        .build();
 }
 
 impl TryFrom<GroupPhaseChange> for LinkPhaseChange {
@@ -131,10 +155,7 @@ impl TryFrom<GroupPhaseChange> for LinkPhaseChange {
 
 impl Default for LinkPhaseChange {
     fn default() -> Self {
-        Self::builder()
-            .max_compact::<DEFAULT_MAX_COMPACT>()
-            .min_dense::<DEFAULT_MIN_DENSE>()
-            .build()
+        Self::DEFAULT
     }
 }
 
@@ -342,7 +363,7 @@ mod tests {
     #[test]
     fn oversized_group_info_reports_the_object_message_limit() {
         assert_eq!(
-            LinkPhaseChange::from_group_info(&vec![0; 65_536], 2).unwrap_err(),
+            LinkPhaseChange::stored_group_info(&vec![0; 65_536], 2).unwrap_err(),
             FormatError::ObjectHeaderMessageTooLarge {
                 message_type: MessageType::GROUP_INFO.to_u16(),
                 size: 65_536,

@@ -1055,7 +1055,8 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] if a target is deleted, has an invalidated address,
     /// or requires placement later in the commit. Returns the address-conversion error if
-    /// a resolved address cannot be stored.
+    /// a resolved address cannot be stored. Returns [`Error::Format`] with
+    /// [`FormatError::Internal`] if a source-index target is passed to the editor.
     pub(in crate::edit) fn resolve_reference_target(
         target: &ObjectRefTarget,
         path_addr: &BTreeMap<ObjectPathBuf, u64>,
@@ -1075,6 +1076,12 @@ impl WriteEngine {
                 return Ok(*addr);
             }
             ObjectRefTarget::Path(path) => path,
+            ObjectRefTarget::SourceIndex(_) => {
+                return Err(FormatError::Internal(
+                    "a source object index reaches an edit reference writer".into(),
+                )
+                .into());
+            }
         };
         let base = src.addresses();
         if let Some(&addr) = path_addr.get(path) {

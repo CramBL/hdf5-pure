@@ -22,7 +22,7 @@ use crate::file_create_properties::FileCreateProperties;
 #[cfg(test)]
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
-use crate::object_path::ObjectPathBuf;
+use crate::object_path::ObjectTarget;
 
 /// Builder for creating a new HDF5 file.
 ///
@@ -151,7 +151,7 @@ impl FileBuilder {
         self.writer.set_root_attr_committed(name, value, path);
     }
 
-    /// Replaces the userblock size, library-version bounds, and file-space settings.
+    /// Replaces every file-creation property, including the root group's link policy.
     ///
     /// The writer resets properties left unset in `properties` to their defaults, including
     /// library-version bounds. Apply a shared [`FileCreateProperties`] first, then override
@@ -321,18 +321,18 @@ impl FileBuilder {
     ///
     /// See [`Self::set_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See
     /// [`AttrSpec::Verbatim`](crate::type_builders::AttrSpec::Verbatim) for
     /// what this preserves that [`set_attr`](Self::set_attr) cannot, and for the
     /// datatypes it must not be used with.
     pub(crate) fn set_attr_verbatim(
         &mut self,
         message: crate::attribute::AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
         self.writer
-            .set_root_attr_verbatim(message, committed_datatype_path);
+            .set_root_attr_verbatim(message, committed_datatype_target);
     }
 
     /// Attaches a variable-length string attribute to the root group with the datatype and
@@ -340,8 +340,8 @@ impl FileBuilder {
     ///
     /// See [`Self::set_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See
     /// [`AttrSpec::VerbatimVarLen`](crate::type_builders::AttrSpec::VerbatimVarLen).
     ///
     /// # Errors
@@ -352,10 +352,10 @@ impl FileBuilder {
         &mut self,
         message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
         self.writer
-            .set_root_attr_var_len_verbatim(message, strings, committed_datatype_path)
+            .set_root_attr_var_len_verbatim(message, strings, committed_datatype_target)
     }
 
     /// Serializes the staged file into memory.

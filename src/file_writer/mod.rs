@@ -27,7 +27,9 @@ use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::FractalHeapHeader;
 #[cfg(test)]
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
+use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
@@ -40,6 +42,7 @@ use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
 use crate::FillTime;
+use crate::LinkPhaseChange;
 use crate::PhysicalAddress;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
@@ -77,6 +80,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
+use crate::object_path::ObjectTarget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
@@ -301,7 +305,7 @@ pub(crate) fn build_committed_datatype_oh(
 ///
 /// Writes `links` into the header when `link_info` is [`None`]. Otherwise, writes
 /// `link_info` and omits the inline links. Writes `attr_info` in place of compact attributes
-/// when supplied.
+/// when supplied. Writes the thresholds and estimates from `group_info`.
 ///
 /// # Errors
 ///
@@ -313,24 +317,32 @@ pub(crate) fn build_group_oh(
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
     link_info: Option<&LinkInfoMessage>,
+    group_info: GroupInfo,
+) -> Result<Vec<u8>, FormatError> {
+    group_header(
+        links.iter().map(|link| Ok(link.serialize(OFFSET_WIDTH))),
+        attrs,
+        attr_info,
+        link_info.unwrap_or(&COMPACT_LINK_INFO),
+        group_info,
+    )
+}
+
+fn group_header(
+    links: impl IntoIterator<Item = Result<Vec<u8>, FormatError>>,
+    attrs: &[AttributeMessage],
+    attr_info: Option<&[u8]>,
+    link_info: &LinkInfoMessage,
+    group_info: GroupInfo,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
-    w.add_message(
-        MessageType::LINK_INFO,
-        link_info
-            .unwrap_or(&COMPACT_LINK_INFO)
-            .serialize(OFFSET_WIDTH),
-    );
-    // A new-style group (one with a Link Info message) must also carry a Group
-    // Info message, or the HDF5 C library refuses to insert links into it:
-    // `H5G_obj_insert` reads the Group Info message unconditionally and fails
-    // with "message type not found", so the file is readable but not writable by
-    // the C library. The minimal body (version 0, no optional fields) leaves the
-    // C library to use its defaults (max compact = 8, min dense = 6).
-    w.add_message(MessageType::GROUP_INFO, vec![0, 0]);
-    if link_info.is_none() {
+    w.add_message(MessageType::LINK_INFO, link_info.serialize(OFFSET_WIDTH));
+    // libhdf5 requires Group Info when inserting a link into a group with Link Info
+    // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
+    w.add_message(MessageType::GROUP_INFO, group_info.serialize());
+    if link_info.fractal_heap_address.is_none() {
         for link in links {
-            w.add_message(MessageType::LINK, link.serialize(OFFSET_WIDTH));
+            w.add_message(MessageType::LINK, link?);
         }
     }
     add_attributes(&mut w, attrs, attr_info)?;
@@ -347,8 +359,9 @@ pub(crate) fn build_group_oh(
 fn dense_links_image(
     links: &[LinkMessage],
     (address, reserved): (StoredAddress, usize),
+    phase_change: GroupPhaseChange,
 ) -> Result<DenseLinkImage, FormatError> {
-    let plan = dense_links_plan(links)?
+    let plan = dense_links_plan(links, phase_change)?
         .ok_or_else(|| FormatError::Internal("a reserved dense group has compact links".into()))?;
     let image = plan.serialize(address).map_err(dense_link_error)?;
     if image.bytes.len() != reserved {
@@ -359,7 +372,7 @@ fn dense_links_image(
     Ok(image)
 }
 
-/// Plans a group's dense link storage when its link count exceeds [`MAX_COMPACT_LINKS`].
+/// Plans a group's dense link storage from its phase-change thresholds.
 ///
 /// Returns [`None`] for compact storage. Plans a managed fractal heap and a name index
 /// without creation-order tracking.
@@ -370,8 +383,11 @@ fn dense_links_image(
 /// managed-object size limit, [`FormatError::DenseLinkStorageTooLarge`] if the heap or
 /// indexes exceed their supported size, or [`FormatError::DuplicateLinkName`] if link names
 /// repeat. Propagates errors from link parsing and heap planning.
-fn dense_links_plan(links: &[LinkMessage]) -> Result<Option<DenseLinkPlan>, FormatError> {
-    if links.len() <= MAX_COMPACT_LINKS {
+fn dense_links_plan(
+    links: &[LinkMessage],
+    phase_change: GroupPhaseChange,
+) -> Result<Option<DenseLinkPlan>, FormatError> {
+    if links.len() <= usize::from(phase_change.max_compact()) {
         return Ok(None);
     }
     let links = links
@@ -427,6 +443,7 @@ fn link_storage_error(error: LinkStorageError) -> FormatError {
 }
 
 // `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, is the default compact link limit.
+#[cfg(test)]
 const MAX_COMPACT_LINKS: usize = 8;
 
 /// Add an object's attribute storage to its header: either the Attribute Info
@@ -630,6 +647,7 @@ pub struct FileWriter {
     root_datasets: Vec<DatasetBuilder>,
     root_attrs: AttributeSpecs,
     root_committed: Vec<CommittedDatatype>,
+    root_link_phase_change: LinkPhaseChange,
     groups: Vec<FinishedGroup>,
     userblock_size: UserblockSize,
     /// Bytes written at the start of the prefix, from
@@ -654,6 +672,7 @@ impl FileWriter {
             root_datasets: Vec::new(),
             root_attrs: AttributeSpecs::default(),
             root_committed: Vec::new(),
+            root_link_phase_change: LinkPhaseChange::default(),
             groups: Vec::new(),
             userblock_size: UserblockSize::NONE,
             userblock_content: Vec::new(),
@@ -708,6 +727,7 @@ impl FileWriter {
         self.userblock_size = properties.userblock();
         self.libver_bounds = properties.libver_bounds();
         self.file_space_settings = properties.file_space_settings();
+        self.root_link_phase_change = properties.root_group_link_phase_change();
     }
 
     /// The format to write, being the newest this crate produces that the
@@ -825,19 +845,19 @@ impl FileWriter {
     ///
     /// See [`Self::set_root_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::Verbatim`] for what this preserves that
     /// `set_root_attr` cannot, and for the datatypes it must not be used with.
     pub(crate) fn set_root_attr_verbatim(
         &mut self,
         message: crate::attribute::AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
         self.root_attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
     }
@@ -847,8 +867,8 @@ impl FileWriter {
     ///
     /// See [`Self::set_root_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::VerbatimVarLen`].
     ///
     /// # Errors
     ///
@@ -858,7 +878,7 @@ impl FileWriter {
         &mut self,
         mut message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
         message.raw_data = crate::type_builders::vl_string_reference_bytes(&strings)?;
         self.root_attrs.insert(
@@ -866,7 +886,7 @@ impl FileWriter {
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
         Ok(())
@@ -970,9 +990,10 @@ impl FileWriter {
         struct GrpFlat {
             /// Link name in the owning group.
             name: LinkNameBuf,
+            link_phase_change: LinkPhaseChange,
             attrs: Vec<AttributeMessage>,
-            /// Attribute indices paired with committed datatype paths for address resolution.
-            attr_committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
+            /// Attribute indices paired with committed datatype targets for address resolution.
+            attr_committed_datatype_targets: Vec<(usize, ObjectTarget)>,
             ds_indices: Vec<usize>,
             sub_group_indices: Vec<usize>,
             committed_indices: Vec<usize>,
@@ -1048,26 +1069,35 @@ impl FileWriter {
             grp_vl: &mut Vec<Vec<VlPatch>>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
-            let name = g.name?;
+            let FinishedGroup {
+                name,
+                link_phase_change,
+                datasets,
+                sub_groups,
+                attrs,
+                committed: group_committed,
+            } = g;
+            let name = name?;
             let PreparedAttributes {
                 messages: gattrs,
-                committed_datatype_paths: attr_committed_datatype_paths,
+                committed_datatype_targets: attr_committed_datatype_targets,
                 heaps: patches,
-            } = PreparedAttributes::new(&g.attrs)?;
-            let committed_idx = flatten_committed(g.committed, committed)?;
+            } = PreparedAttributes::new(&attrs)?;
+            let committed_idx = flatten_committed(group_committed, committed)?;
             let mut ds_idx = Vec::new();
-            for db in g.datasets {
+            for db in datasets {
                 ds_idx.push(flatten_dataset(db, all_ds, ds_vl)?);
             }
             let mut sub_grp_idx = Vec::new();
-            for sg in g.sub_groups {
+            for sg in sub_groups {
                 sub_grp_idx.push(flatten_group(sg, all_ds, groups, committed, grp_vl, ds_vl)?);
             }
             let gi = groups.len();
             groups.push(GrpFlat {
                 name,
+                link_phase_change,
                 attrs: gattrs,
-                attr_committed_datatype_paths,
+                attr_committed_datatype_targets,
                 ds_indices: ds_idx,
                 sub_group_indices: sub_grp_idx,
                 committed_indices: committed_idx,
@@ -1126,7 +1156,7 @@ impl FileWriter {
 
         let PreparedAttributes {
             messages: mut root_attrs,
-            committed_datatype_paths: root_attr_committed_datatype_paths,
+            committed_datatype_targets: root_attr_committed_datatype_targets,
             heaps: vl_root,
         } = PreparedAttributes::new(&self.root_attrs)?;
 
@@ -1183,10 +1213,11 @@ impl FileWriter {
         fn register_committed_use(
             committed: &mut [CtFlat],
             by_path: &HashMap<ObjectPathBuf, usize>,
-            path: &ObjectPathBuf,
+            target: &ObjectTarget,
             dt: &Datatype,
             user: impl FnOnce() -> String,
         ) -> Result<(), FormatError> {
+            let path = target.path()?;
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
@@ -1202,40 +1233,40 @@ impl FileWriter {
             Ok(())
         }
 
-        for (index, path) in &root_attr_committed_datatype_paths {
+        for (index, target) in &root_attr_committed_datatype_targets {
             let attr = &root_attrs[*index];
             register_committed_use(
                 &mut committed,
                 &committed_by_path,
-                path,
+                target,
                 &attr.datatype,
                 || format!("root attribute {:?}", attr.name),
             )?;
         }
         for g in &groups {
-            for (index, path) in &g.attr_committed_datatype_paths {
+            for (index, target) in &g.attr_committed_datatype_targets {
                 let attr = &g.attrs[*index];
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
-                    path,
+                    target,
                     &attr.datatype,
                     || format!("attribute {:?} of group {:?}", attr.name, g.name.as_str()),
                 )?;
             }
         }
         for d in &all_ds {
-            if let Some(path) = &d.committed_datatype_path {
-                register_committed_use(&mut committed, &committed_by_path, path, &d.dt, || {
+            if let Some(target) = &d.committed_datatype_target {
+                register_committed_use(&mut committed, &committed_by_path, target, &d.dt, || {
                     format!("dataset {:?}", d.name.as_str())
                 })?;
             }
-            for (index, path) in &d.attr_committed_datatype_paths {
+            for (index, target) in &d.attr_committed_datatype_targets {
                 let attr = &d.attrs[*index];
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
-                    path,
+                    target,
                     &attr.datatype,
                     || format!("attribute {:?} of dataset {:?}", attr.name, d.name.as_str()),
                 )?;
@@ -1645,7 +1676,10 @@ impl FileWriter {
         for (gi, g) in groups.iter().enumerate() {
             let dummy_links =
                 dummy_tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
-            let link_plan = dense_links_plan(&dummy_links)?;
+            let link_plan = dense_links_plan(
+                &dummy_links,
+                g.link_phase_change.group_info()?.phase_change(),
+            )?;
             let link_info = link_plan
                 .as_ref()
                 .map(|plan| plan.link_info(DUMMY_DENSE_BASE))
@@ -1666,6 +1700,7 @@ impl FileWriter {
                 &g.attrs,
                 attr_info.as_deref(),
                 link_info.as_ref(),
+                g.link_phase_change.group_info()?,
             )?;
             group_oh_sizes.push(oh.len());
         }
@@ -1675,7 +1710,10 @@ impl FileWriter {
             &root_committed_indices,
             &root_group_indices,
         );
-        let root_link_plan = dense_links_plan(&root_dummy_links)?;
+        let root_link_plan = dense_links_plan(
+            &root_dummy_links,
+            self.root_link_phase_change.group_info()?.phase_change(),
+        )?;
         let root_link_info = root_link_plan
             .as_ref()
             .map(|plan| plan.link_info(DUMMY_DENSE_BASE))
@@ -1694,6 +1732,7 @@ impl FileWriter {
             &root_attrs,
             root_attr_info.as_deref(),
             root_link_info.as_ref(),
+            self.root_link_phase_change.group_info()?,
         )?
         .len();
 
@@ -1904,6 +1943,13 @@ impl FileWriter {
                             path_map.get(path).copied().unwrap_or(UNDEF_ADDRESS)
                         }
                         crate::type_builders::ObjectRefTarget::Raw(addr) => *addr,
+                        crate::type_builders::ObjectRefTarget::SourceIndex(_) => {
+                            return Err(FormatError::Internal(
+                                "a source object index reaches a whole-file reference writer"
+                                    .into(),
+                            )
+                            .into());
+                        }
                     };
                     type_builders::write_reference_address(
                         d.storage.raw_mut()?,
@@ -1929,28 +1975,32 @@ impl FileWriter {
         // below cover every dataset and every attribute in the file, which is
         // exactly the set `register_committed_use` walked to validate the paths.
         {
-            let committed_location = |path: &ObjectPathBuf| {
-                let ci = *committed_by_path.get(path).expect(
-                    "every committed-datatype path was resolved against this same map \
+            let committed_location =
+                |target: &ObjectTarget| -> Result<DatatypeLocation, FormatError> {
+                    let path = target.path()?;
+                    let ci = *committed_by_path.get(path).expect(
+                        "every committed-datatype path was resolved against this same map \
                      before any header was sized",
-                );
-                DatatypeLocation::Committed(committed_addrs[ci])
-            };
+                    );
+                    Ok(DatatypeLocation::Committed(committed_addrs[ci]))
+                };
             let resolve_attrs = |attrs: &mut [AttributeMessage],
-                                 paths: &[(usize, ObjectPathBuf)]| {
-                for (index, path) in paths {
-                    attrs[*index].datatype_location = committed_location(path);
+                                 targets: &[(usize, ObjectTarget)]|
+             -> Result<(), FormatError> {
+                for (index, target) in targets {
+                    attrs[*index].datatype_location = committed_location(target)?;
                 }
+                Ok(())
             };
-            resolve_attrs(&mut root_attrs, &root_attr_committed_datatype_paths);
+            resolve_attrs(&mut root_attrs, &root_attr_committed_datatype_targets)?;
             for g in &mut groups {
-                resolve_attrs(&mut g.attrs, &g.attr_committed_datatype_paths);
+                resolve_attrs(&mut g.attrs, &g.attr_committed_datatype_targets)?;
             }
             for d in &mut all_ds {
-                if let Some(path) = &d.committed_datatype_path {
-                    d.dt_location = committed_location(path);
+                if let Some(target) = &d.committed_datatype_target {
+                    d.dt_location = committed_location(target)?;
                 }
-                resolve_attrs(&mut d.attrs, &d.attr_committed_datatype_paths);
+                resolve_attrs(&mut d.attrs, &d.attr_committed_datatype_targets)?;
             }
         }
 
@@ -2006,6 +2056,7 @@ impl FileWriter {
                         &root_group_indices,
                     ),
                     span,
+                    self.root_link_phase_change.group_info()?.phase_change(),
                 )
             })
             .transpose()?;
@@ -2021,6 +2072,7 @@ impl FileWriter {
                             &group.sub_group_indices,
                         ),
                         span,
+                        group.link_phase_change.group_info()?.phase_change(),
                     )
                 })
                 .transpose()
@@ -2214,6 +2266,7 @@ impl FileWriter {
                     .as_ref()
                     .map(|b| b.attr_info_message.as_slice()),
                 root_link_image.as_ref().map(|image| &image.info),
+                self.root_link_phase_change.group_info()?,
             )?;
             if root_oh.len() != root_oh_size {
                 return Err(FormatError::Internal(
@@ -2238,6 +2291,7 @@ impl FileWriter {
                         .as_ref()
                         .map(|b| b.attr_info_message.as_slice()),
                     group_link_images[gi].as_ref().map(|image| &image.info),
+                    g.link_phase_change.group_info()?,
                 )?;
                 if oh.len() != group_oh_sizes[gi] {
                     return Err(FormatError::Internal(
@@ -2607,6 +2661,7 @@ impl FileWriter {
                 .as_ref()
                 .map(|b| b.attr_info_message.as_slice()),
             root_link_image.as_ref().map(|image| &image.info),
+            self.root_link_phase_change.group_info()?,
         )?;
         if root_oh.len() != root_oh_size {
             return Err(FormatError::Internal(
@@ -2784,6 +2839,7 @@ impl FileWriter {
                         .as_ref()
                         .map(|b| b.attr_info_message.as_slice()),
                     group_link_images[gi].as_ref().map(|image| &image.info),
+                    g.link_phase_change.group_info()?,
                 )?;
                 if oh.len() != group_oh_sizes[gi] {
                     return Err(FormatError::Internal(

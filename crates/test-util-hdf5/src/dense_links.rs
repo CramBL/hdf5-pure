@@ -7,11 +7,17 @@ use std::path::Path;
 use hdf5::File;
 use hdf5::Group;
 use hdf5::GroupStorageType;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::IndexType;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::IterationOrder;
 use hdf5::datatype::ByteOrder as CByteOrder;
 use hdf5::file::LibraryVersion;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::GroupCreate;
 use hdf5::plist::group_create::LinkCreationOrder;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::group_create::LinkPhaseChange;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::Datatype;
@@ -452,6 +458,39 @@ pub fn added_group_link_count(path: &Path, parent: &str) -> u64 {
     count
 }
 
+/// Writes the `filtered` group with deflate link filtering and `count` soft links.
+///
+/// The link names are `link_0000`, `link_0001`, and so on. Each target is `/absent`.
+/// Applies `thresholds` as the maximum compact and minimum dense counts.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, configure, populate, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_filtered_link_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
+    let file = crate::file::libhdf5_create_v18(path);
+    let properties = GroupCreate::build()
+        .link_phase_change(LinkPhaseChange {
+            max_compact: thresholds.0,
+            min_dense: thresholds.1,
+        })
+        .finish()
+        .unwrap();
+    assert_eq!(crate::group_filter::set_deflate(&properties, 6), 0);
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&properties)
+        .create("filtered")
+        .unwrap();
+    for index in 0..count {
+        group
+            .link_soft("/absent", &format!("link_{index:04}"))
+            .unwrap();
+    }
+    drop(group);
+    file.close().unwrap();
+}
+
 /// Writes a group with links stored as huge fractal-heap objects.
 ///
 /// The `g` group contains twelve datasets with link names longer than 5000 bytes.
@@ -541,11 +580,23 @@ pub fn write_edit_fixture(
 
 #[cfg(feature = "__hdf5-1.10")]
 fn write_edit_root_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
+    let reference = create_with_root_link_properties(path, thresholds, GroupOrder::Untracked, 0);
+    populate_edit_group(&reference, count);
+    reference.close().unwrap();
+}
+
+#[cfg(feature = "__hdf5-1.10")]
+fn create_with_root_link_properties(
+    path: &Path,
+    thresholds: (u32, u32),
+    order: GroupOrder,
+    userblock: u64,
+) -> File {
     let mut builder = hdf5::FileBuilder::new();
     builder.with_fapl(|properties| {
         properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
     });
-    let properties = builder.fcpl().finish().unwrap();
+    let properties = builder.fcpl().userblock(userblock).finish().unwrap();
     hdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The library lock serializes access and `properties` owns the live list.
@@ -554,10 +605,20 @@ fn write_edit_root_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
             },
             0
         );
+        assert_eq!(
+            // SAFETY: The library lock serializes access and `properties` owns the live list.
+            unsafe {
+                hdf5_sys::h5p::H5Pset_link_creation_order(
+                    properties.id(),
+                    order.creation_order().into(),
+                )
+            },
+            0
+        );
     });
     let access = builder.fapl().finish().unwrap();
     let filename = CString::new(path.to_str().unwrap()).unwrap();
-    let reference = hdf5::sync::sync(|| {
+    hdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access. The filename and property lists remain
         // live during creation, and `from_id` takes ownership of the newly created file handle.
         unsafe {
@@ -569,8 +630,160 @@ fn write_edit_root_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
             ))
             .unwrap()
         }
+    })
+}
+
+/// Renames a link through libhdf5 using raw name bytes.
+///
+/// # Panics
+///
+/// Panics if a name contains a null byte or libhdf5 cannot move the link.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn rename_link_bytes(group: &Group, old_name: &[u8], new_name: &[u8]) {
+    let old_name = CString::new(old_name).unwrap();
+    let new_name = CString::new(new_name).unwrap();
+    hdf5::sync::sync(|| {
+        assert_eq!(
+            // SAFETY: The library lock serializes access. The group and both terminated names
+            // remain live, and the default property lists need no owned handles.
+            unsafe {
+                hdf5_sys::h5l::H5Lmove(
+                    group.id(),
+                    old_name.as_ptr(),
+                    group.id(),
+                    new_name.as_ptr(),
+                    hdf5_sys::h5p::H5P_DEFAULT,
+                    hdf5_sys::h5p::H5P_DEFAULT,
+                )
+            },
+            0
+        );
     });
-    populate_edit_group(&reference, count);
+}
+
+/// Returns group member names in increasing creation order through libhdf5.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot enumerate the group.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn creation_order_names(group: &Group) -> Vec<String> {
+    let mut names = Vec::new();
+    group
+        .iter_visit(
+            IndexType::CreationOrder,
+            IterationOrder::Increasing,
+            |name, _| {
+                names.push(name.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+    names
+}
+
+/// Writes a native group with mixed link kinds and a creation-index gap.
+///
+/// Uses link thresholds 12/8 and a 512-byte userblock. Applies `order` to `group_path`. Creates
+/// six live links and extra groups for each index in `6..count`, after deleting an earlier link.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, configure, populate, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_repack_link_fixture(path: &Path, order: GroupOrder, group_path: &str, count: usize) {
+    let file = create_with_root_link_properties(
+        path,
+        (12, 8),
+        if group_path == "/" {
+            order
+        } else {
+            GroupOrder::Untracked
+        },
+        512,
+    );
+    let group = if group_path == "/" {
+        file.group("/").unwrap()
+    } else {
+        file.create_group_builder()
+            .with_gcpl(|properties| {
+                properties
+                    .link_creation_order(order.creation_order())
+                    .link_phase_change(LinkPhaseChange {
+                        max_compact: 12,
+                        min_dense: 8,
+                    })
+            })
+            .create(group_path)
+            .unwrap()
+    };
+    group.link_soft("/value", "removed").unwrap();
+    group
+        .new_dataset_builder()
+        .with_data(&[7_i32, 17])
+        .create("value")
+        .unwrap();
+    group.create_group("child").unwrap();
+    group
+        .commit_datatype("type", &hdf5::Datatype::from_type::<i32>().unwrap())
+        .unwrap();
+    group.link_soft("value", "soft").unwrap();
+    group.link_external("外部.h5", "/目标", "external").unwrap();
+    group
+        .create_group_builder()
+        .char_encoding(CharEncoding::Utf8)
+        .create("λ")
+        .unwrap();
+    for index in 6..count {
+        group.create_group(&format!("extra_{index:04}")).unwrap();
+    }
+    group.unlink("removed").unwrap();
+    drop(group);
+    file.close().unwrap();
+}
+
+/// Writes a native group with configurable link thresholds and entry estimates.
+///
+/// Creates `group` with `thresholds` and `estimates`, then populates it with `count` datasets
+/// through [`populate_edit_group`].
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create or configure the file or group, or if populating the group fails.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_group_info_fixture(
+    path: &Path,
+    thresholds: (u32, u32),
+    estimates: (u32, u32),
+    count: usize,
+) {
+    let reference = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .create(path)
+        .unwrap();
+    let properties = GroupCreate::build()
+        .link_phase_change(LinkPhaseChange {
+            max_compact: thresholds.0,
+            min_dense: thresholds.1,
+        })
+        .finish()
+        .unwrap();
+    hdf5::sync::sync(|| {
+        assert_eq!(
+            // SAFETY: The library lock serializes access and `properties` owns the live list.
+            unsafe {
+                hdf5_sys::h5p::H5Pset_est_link_info(properties.id(), estimates.0, estimates.1)
+            },
+            0
+        );
+    });
+    let group = reference
+        .create_group_builder()
+        .set_gcpl(&properties)
+        .create("group")
+        .unwrap();
+    populate_edit_group(&group, count);
+    drop(group);
     reference.close().unwrap();
 }
 

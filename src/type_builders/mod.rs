@@ -15,6 +15,7 @@ use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::DeflateLevel;
+use crate::LinkPhaseChange;
 use crate::VariableLengthType;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
@@ -33,6 +34,7 @@ use crate::error::FormatError;
 use crate::object_path::LinkName;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
+use crate::object_path::ObjectTarget;
 use crate::primitive_bytes::PrimitiveBytes;
 use crate::scaleoffset::ScaleOffset;
 use crate::shared_message::DatatypeLocation;
@@ -627,13 +629,13 @@ impl AttributeSpecs {
         }
     }
 
-    /// Copies committed datatype paths with their attribute indices, in insertion order.
-    pub(crate) fn committed_datatype_paths(&self) -> Vec<(usize, ObjectPathBuf)> {
+    /// Copies committed datatype targets with their attribute indices, in insertion order.
+    pub(crate) fn committed_datatype_targets(&self) -> Vec<(usize, ObjectTarget)> {
         self.iter()
             .enumerate()
             .filter_map(|(index, (_, spec))| {
-                spec.committed_datatype_path()
-                    .map(|path| (index, path.clone()))
+                spec.committed_datatype_target()
+                    .map(|target| (index, target.clone()))
             })
             .collect()
     }
@@ -680,20 +682,19 @@ impl<'a> IntoIterator for &'a AttributeSpecs {
 /// those addresses point into the *source*. Repack decides that with
 /// `attr_bytes_are_position_independent`.
 pub(crate) enum AttrSpec {
-    /// A decoded value whose attribute refers to the committed datatype at `path`.
+    /// A decoded value whose attribute refers to a committed datatype.
     CommittedValue {
         value: AttrValue,
-        path: ObjectPathBuf,
+        target: ObjectTarget,
     },
     /// A decoded value the writer encodes with [`build_attr_message`].
     Value(AttrValue),
     /// An already-encoded message, written as given except for its datatype location.
     Verbatim {
         message: AttributeMessage,
-        /// The path of a committed datatype in the file under construction, which the written
-        /// message refers to for its datatype, or `None` to keep the datatype location of
-        /// `message`.
-        committed_datatype_path: Option<ObjectPathBuf>,
+        /// The committed datatype target for the written message, or `None` to keep the datatype
+        /// location of `message`.
+        committed_datatype_target: Option<ObjectTarget>,
     },
     /// A message whose datatype and dataspace are given, but whose element bytes
     /// are global-heap references the writer builds and patches from `strings`.
@@ -713,16 +714,16 @@ pub(crate) enum AttrSpec {
     VerbatimVarLen {
         message: AttributeMessage,
         strings: Vec<String>,
-        /// The path of a committed datatype, as in [`Verbatim`](AttrSpec::Verbatim).
-        committed_datatype_path: Option<ObjectPathBuf>,
+        /// The committed datatype target, as in [`Verbatim`](AttrSpec::Verbatim).
+        committed_datatype_target: Option<ObjectTarget>,
     },
 }
 
 impl AttrSpec {
     /// Encodes a decoded value or copies an already-encoded attribute message.
     ///
-    /// A copy with a committed datatype path refers to the undefined address, which the writer
-    /// replaces once it places the committed datatype at that path.
+    /// A copy with a committed datatype target refers to the undefined address, which the writer
+    /// replaces after placing that datatype.
     ///
     /// # Errors
     ///
@@ -739,15 +740,15 @@ impl AttrSpec {
             Self::Value(v) => build_attr_message(name, v),
             Self::Verbatim {
                 message,
-                committed_datatype_path,
+                committed_datatype_target,
             }
             | Self::VerbatimVarLen {
                 message,
-                committed_datatype_path,
+                committed_datatype_target,
                 ..
             } => {
                 let mut message = message.clone();
-                if committed_datatype_path.is_some() {
+                if committed_datatype_target.is_some() {
                     message.datatype_location =
                         DatatypeLocation::Committed(crate::file_writer::UNDEF_ADDRESS);
                 }
@@ -756,20 +757,20 @@ impl AttrSpec {
         }
     }
 
-    /// Returns the path of the committed datatype the written message refers to, or `None` if
-    /// the message keeps its own datatype location.
-    pub(crate) fn committed_datatype_path(&self) -> Option<&ObjectPathBuf> {
+    /// Returns the committed datatype target, or `None` if the message keeps its own datatype
+    /// location.
+    pub(crate) fn committed_datatype_target(&self) -> Option<&ObjectTarget> {
         match self {
-            Self::CommittedValue { path, .. } => Some(path),
+            Self::CommittedValue { target, .. } => Some(target),
             Self::Value(_) => None,
             Self::Verbatim {
-                committed_datatype_path,
+                committed_datatype_target,
                 ..
             }
             | Self::VerbatimVarLen {
-                committed_datatype_path,
+                committed_datatype_target,
                 ..
-            } => committed_datatype_path.as_ref(),
+            } => committed_datatype_target.as_ref(),
         }
     }
 
@@ -2218,8 +2219,8 @@ pub(crate) struct ProducedPayload {
 
 /// One element of an object-reference dataset written through the builder.
 ///
-/// A reference either names an object by path (resolved to that object's
-/// destination address during serialization) or carries a raw address verbatim.
+/// A reference identifies an object by path or source index, resolved to its destination
+/// address during serialization, or stores a raw address verbatim.
 /// The raw form preserves a null reference (address 0) or an undefined reference
 /// (`HADDR_UNDEF`, all-ones) exactly, which a faithful rewrite (repack) needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2229,6 +2230,8 @@ pub(crate) enum ObjectRefTarget {
     /// The address written into the element verbatim: zero for a null
     /// reference, and the undefined address for a reference to no object.
     Raw(StoredAddress),
+    /// Resolves the destination address of the indexed source object during repacking.
+    SourceIndex(usize),
 }
 
 /// One object-reference address to resolve during serialization, and where in
@@ -2370,9 +2373,9 @@ pub struct DatasetBuilder {
     /// preserves a never-written dataset through a rewrite rather than
     /// materializing a grid of fill values (issue #293).
     pub(crate) allocation: StorageAllocation,
-    /// The path of the committed datatype this dataset's header refers to for its element type,
-    /// or `None` to encode the type in the header.
-    pub(crate) committed_datatype_path: Option<ObjectPathBuf>,
+    /// The committed datatype target for this dataset's element type, or `None` to encode the
+    /// type in the header.
+    pub(crate) committed_datatype_target: Option<ObjectTarget>,
     #[cfg(feature = "provenance")]
     pub(crate) provenance: Option<ProvenanceConfig>,
 }
@@ -2394,7 +2397,7 @@ impl DatasetBuilder {
             fill: None,
             fill_time: None,
             allocation: StorageAllocation::Allocated,
-            committed_datatype_path: None,
+            committed_datatype_target: None,
             #[cfg(feature = "provenance")]
             provenance: None,
         }
@@ -2414,15 +2417,15 @@ impl DatasetBuilder {
     /// [`GroupBuilder::commit_datatype`], and identifies it whichever way it is spelled, as it
     /// does for [`Group::dataset`](crate::Group::dataset).
     pub fn with_committed_datatype(&mut self, path: &str) -> &mut Self {
-        self.with_committed_datatype_path(ObjectPathBuf::parse(path))
+        self.with_committed_datatype_target(ObjectTarget::Path(ObjectPathBuf::parse(path)))
     }
 
-    /// Refers to the committed datatype at `path`, which
-    /// [`with_committed_datatype`](Self::with_committed_datatype) takes as a spelling.
+    /// Selects a committed datatype by path or source object index.
     ///
-    /// A repack resolves a source's committed type to a path of the output and passes it here.
-    pub(crate) fn with_committed_datatype_path(&mut self, path: ObjectPathBuf) -> &mut Self {
-        self.committed_datatype_path = Some(path);
+    /// [`Self::with_committed_datatype`] parses a path. Repacking identifies the source datatype
+    /// by index, independently of its decoded link name.
+    pub(crate) fn with_committed_datatype_target(&mut self, target: ObjectTarget) -> &mut Self {
+        self.committed_datatype_target = Some(target);
         self
     }
 
@@ -3394,19 +3397,19 @@ impl DatasetBuilder {
     ///
     /// See [`Self::set_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that `set_attr`
-    /// cannot, and for the datatypes it must not be used with.
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::Verbatim`] for preserved metadata and supported
+    /// datatypes.
     pub(crate) fn set_attr_verbatim(
         &mut self,
         message: AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> &mut Self {
         self.attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
         self
@@ -3417,8 +3420,8 @@ impl DatasetBuilder {
     ///
     /// See [`Self::set_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::VerbatimVarLen`].
     ///
     /// # Errors
     ///
@@ -3428,7 +3431,7 @@ impl DatasetBuilder {
         &mut self,
         mut message: AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<&mut Self, FormatError> {
         message.raw_data = vl_string_reference_bytes(&strings)?;
         self.attrs.insert(
@@ -3436,7 +3439,7 @@ impl DatasetBuilder {
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
         Ok(self)
@@ -3571,6 +3574,7 @@ impl DatasetBuilder {
 pub struct GroupBuilder {
     /// The parsed link name, or the error to return when writing a detached group.
     name: Result<LinkNameBuf, FormatError>,
+    link_phase_change: LinkPhaseChange,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
     pub(crate) attrs: AttributeSpecs,
@@ -3611,11 +3615,43 @@ impl GroupBuilder {
     fn from_name(name: Result<LinkNameBuf, FormatError>) -> Self {
         Self {
             name,
+            link_phase_change: LinkPhaseChange::default(),
             datasets: Vec::new(),
             sub_groups: Vec::new(),
             attrs: AttributeSpecs::default(),
             committed: Vec::new(),
         }
+    }
+
+    /// Sets this group's compact and dense link storage thresholds.
+    ///
+    /// The writer stores links compactly through the policy's maximum and uses dense storage
+    /// above it. Empty groups use compact storage, including under
+    /// [`LinkPhaseChange::AlwaysDense`].
+    /// Each new group has the default policy until configured independently.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, LinkPhaseChange};
+    ///
+    /// let policy = LinkPhaseChange::builder().max_compact::<2>().min_dense::<1>().build();
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_group_with("records", |group| {
+    ///     group.with_link_phase_change(policy);
+    ///     for index in 0..3 {
+    ///         group.create_dataset(&format!("value_{index}")).with_i32_data(&[index]);
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.group("records")?.link_phase_change()?, policy);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    #[doc(alias = "H5Pset_link_phase_change")]
+    pub fn with_link_phase_change(&mut self, policy: LinkPhaseChange) -> &mut Self {
+        self.link_phase_change = policy;
+        self
     }
 
     /// Creates a dataset in this group under `name`, and returns the builder that configures
@@ -3682,19 +3718,19 @@ impl GroupBuilder {
     ///
     /// See [`Self::set_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that `set_attr`
-    /// cannot, and for the datatypes it must not be used with.
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::Verbatim`] for preserved metadata and supported
+    /// datatypes.
     pub(crate) fn set_attr_verbatim(
         &mut self,
         message: AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
         self.attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
     }
@@ -3713,8 +3749,8 @@ impl GroupBuilder {
     ///
     /// See [`Self::set_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::VerbatimVarLen`].
     ///
     /// # Errors
     ///
@@ -3724,7 +3760,7 @@ impl GroupBuilder {
         &mut self,
         mut message: AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
         message.raw_data = vl_string_reference_bytes(&strings)?;
         self.attrs.insert(
@@ -3732,7 +3768,7 @@ impl GroupBuilder {
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
         Ok(())
@@ -3755,12 +3791,21 @@ impl GroupBuilder {
 
     /// Consume the builder, returning a FinishedGroup to add to FileWriter.
     pub fn finish(self) -> FinishedGroup {
+        let Self {
+            name,
+            link_phase_change,
+            datasets,
+            sub_groups,
+            attrs,
+            committed,
+        } = self;
         FinishedGroup {
-            name: self.name,
-            datasets: self.datasets,
-            sub_groups: self.sub_groups,
-            attrs: self.attrs,
-            committed: self.committed,
+            name,
+            link_phase_change,
+            datasets,
+            sub_groups,
+            attrs,
+            committed,
         }
     }
 }
@@ -3770,6 +3815,7 @@ impl GroupBuilder {
 pub struct FinishedGroup {
     /// The parsed link name, or the error to return when writing a detached group.
     pub(crate) name: Result<LinkNameBuf, FormatError>,
+    pub(crate) link_phase_change: LinkPhaseChange,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
     pub(crate) attrs: AttributeSpecs,
@@ -3791,7 +3837,7 @@ pub(crate) struct CommittedDatatype {
 pub(crate) fn committed_attr_spec(value: AttrValue, path: &str) -> AttrSpec {
     AttrSpec::CommittedValue {
         value,
-        path: ObjectPathBuf::parse(path),
+        target: ObjectTarget::Path(ObjectPathBuf::parse(path)),
     }
 }
 

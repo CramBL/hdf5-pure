@@ -16,7 +16,7 @@ use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_writer::{MAX_DATASET_RANK, UNLIMITED_DIMENSION};
-use crate::object_path::ObjectPathBuf;
+use crate::object_path::ObjectTarget;
 #[cfg(feature = "provenance")]
 use crate::provenance::Provenance;
 use crate::type_builders::{
@@ -69,7 +69,7 @@ impl PreparedDataset {
             fill,
             fill_time,
             allocation,
-            committed_datatype_path,
+            committed_datatype_target,
             #[cfg(feature = "provenance")]
             provenance,
         } = builder;
@@ -156,7 +156,7 @@ impl PreparedDataset {
                 chunk_options,
                 fill,
                 fill_time,
-                committed_datatype_path,
+                committed_datatype_target,
                 #[cfg(feature = "provenance")]
                 provenance: provenance.map(|p| Provenance {
                     creator: p.creator,
@@ -169,7 +169,7 @@ impl PreparedDataset {
         })
     }
 
-    /// Prepares creation with providers and committed datatype paths available to the writer.
+    /// Prepares creation with providers and committed datatype targets available to the writer.
     ///
     /// # Errors
     ///
@@ -180,7 +180,7 @@ impl PreparedDataset {
             .chunk_options
             .validate_partial_edge_filtering(self.metadata.ds.max_dimensions.as_deref())?;
         Ok(WholeFileDataset {
-            committed_datatype_paths: self.attribute_specs.committed_datatype_paths(),
+            committed_datatype_targets: self.attribute_specs.committed_datatype_targets(),
             metadata: self.metadata,
             storage: self.storage,
         })
@@ -310,7 +310,7 @@ impl PreparedDataset {
                 "chunked or extensible object-reference datasets cannot be added in place yet",
             ));
         }
-        if metadata.committed_datatype_path.is_some()
+        if metadata.committed_datatype_target.is_some()
             || metadata
                 .attrs
                 .messages
@@ -339,19 +339,19 @@ pub(crate) struct DatasetMetadata {
     pub(crate) fill: Option<Vec<u8>>,
     /// The explicitly supplied fill policy, before default normalization.
     pub(crate) fill_time: Option<FillTime>,
-    /// The committed datatype path awaiting address resolution, if supplied.
-    pub(crate) committed_datatype_path: Option<ObjectPathBuf>,
+    /// The committed datatype target awaiting address resolution, if supplied.
+    pub(crate) committed_datatype_target: Option<ObjectTarget>,
     /// Inputs for attributes generated from the prepared element bytes.
     #[cfg(feature = "provenance")]
     pub(crate) provenance: Option<Provenance>,
 }
 
-/// A creation request with providers and committed attribute paths available for file placement.
+/// A creation request with providers and committed attribute targets available for file placement.
 pub(crate) struct WholeFileDataset {
     pub(crate) metadata: DatasetMetadata,
     pub(crate) storage: PreparedStorage,
-    /// Attribute indices paired with committed datatype paths awaiting address resolution.
-    pub(crate) committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
+    /// Attribute indices paired with committed datatype targets awaiting address resolution.
+    pub(crate) committed_datatype_targets: Vec<(usize, ObjectTarget)>,
 }
 
 /// A creation request with inline datatypes and storage without providers.

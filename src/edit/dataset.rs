@@ -1515,7 +1515,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         chunk_options,
         fill,
         fill_time,
-        committed_datatype_path: _,
+        committed_datatype_target: _,
         #[cfg(feature = "provenance")]
         provenance,
     } = metadata;

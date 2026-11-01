@@ -212,7 +212,10 @@ mod tests {
         for (index, address) in addresses.into_iter().enumerate() {
             let header = cache.take(ObjectId::new(address));
             assert_eq!(header.is_some(), index < retained);
-            let attributes = file.attr_messages_at(address, header).unwrap();
+            let attributes = file
+                .attr_messages_and_group_info_at(address, header)
+                .unwrap()
+                .0;
             assert_eq!(attributes.len(), 1);
             assert_eq!(attributes[0].name, "index");
             assert_eq!(
