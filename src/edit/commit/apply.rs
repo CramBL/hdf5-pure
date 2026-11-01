@@ -16,6 +16,7 @@ use super::plan::{
     ReferenceTarget, RelocatedDataset, ReplacedHeader,
 };
 use super::publish::AppliedTree;
+use crate::edit::analysis::AnalysisPhase;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
 use crate::edit::group::{self, LinkCreationOrder};
 use crate::edit::object_header;
@@ -259,7 +260,10 @@ impl WriteEngine {
             }
         }
         let new_root = path_addr[&ObjectPathBuf::root()];
-        to_free.extend(self.unreferenced_collection_spans(new_root, deleted_collections));
+        to_free.extend(
+            AnalysisPhase::prospective(self, PhysicalAddress::new(new_root))
+                .unreferenced_collection_spans(deleted_collections),
+        );
         to_free.extend(
             self.superseded_heaps
                 .drain(..)

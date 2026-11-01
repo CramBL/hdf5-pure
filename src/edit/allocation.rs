@@ -35,6 +35,11 @@ impl AllocationPublication {
         }
     }
 
+    /// Returns an identity shared with this session's allocation permissions.
+    pub(super) fn session(&self) -> AllocationSession {
+        AllocationSession(Arc::clone(&self.session))
+    }
+
     /// Records `range` in the pending batch without granting reference permission.
     ///
     /// # Errors
@@ -226,6 +231,19 @@ impl AllocationPublication {
             return Err(mismatched_publication());
         }
         Ok(allocation.range)
+    }
+}
+
+/// The identity of one editing session, shared with its allocation permissions.
+///
+/// Source freshness and publication confirmation require separate evidence.
+#[derive(Clone)]
+pub(super) struct AllocationSession(Arc<SessionIdentity>);
+
+impl AllocationSession {
+    /// Returns whether both identities refer to the same editing session.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 

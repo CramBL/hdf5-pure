@@ -14,12 +14,12 @@ use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
 use crate::dataset_request::ValueOverwrite;
 use crate::datatype;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::CollectionCandidates;
 use crate::edit::attributes::{self, AttrOp, EditedAttrs};
 use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
 use crate::edit::dataset::{ChunkPayload, FlatDataset, MovingWrite, OverwriteBytes, WritePlan};
 use crate::edit::group;
-use crate::edit::reclaim::DeletedCollections;
 use crate::edit::staging::{StagedApply, StagedEdits, StagedScope};
 use crate::edit::{self, OhRegion};
 use crate::edit::{MAX_LINK_GRAPH_NODES, UNDEF, WriteEngine};
@@ -186,7 +186,8 @@ pub(super) struct PreparedTree {
     pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
     pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
-    pub(super) deleted_collections: DeletedCollections,
+    /// Collection candidates parsed before writes, awaiting prospective-root reference analysis.
+    pub(super) deleted_collections: CollectionCandidates,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
 }
@@ -238,7 +239,7 @@ pub(super) enum ChildLink {
 /// Stores screened reference targets and storage affected by deletions.
 struct TreeReferences {
     deleted_free: Vec<(FileRange, FreeClass)>,
-    deleted_collections: DeletedCollections,
+    deleted_collections: CollectionCandidates,
     references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
     invalidates_reference_proof: bool,
 }
@@ -831,7 +832,7 @@ impl WriteEngine {
                 }
             }
         }
-        let deleted_collections = self.deleted_collections(deleted_addrs);
+        let deleted_collections = analysis.deleted_collections(deleted_addrs);
         let for_copied = InvalidatedAddresses {
             removed: deleted_free.iter().map(|&(range, _)| range).collect(),
             moved: Vec::new(),
