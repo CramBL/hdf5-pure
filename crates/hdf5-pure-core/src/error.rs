@@ -86,6 +86,13 @@ pub enum FormatError {
         /// Name of the dataset or attribute that named it.
         user: String,
     },
+    /// A version 1 compound member's array size exceeds [`u32::MAX`].
+    CompoundArraySizeOverflow {
+        /// The accumulated byte size before multiplying by `extent`.
+        size: u32,
+        /// The dimension size that causes the overflow.
+        extent: u32,
+    },
     /// A named compound field was not present.
     CompoundFieldMissing(String),
     /// A compound field extends past the declared compound size.
@@ -387,6 +394,15 @@ pub enum FormatError {
     InvalidChunkIndexType(u8),
     /// A compound datatype has a zero total size.
     InvalidCompoundSize,
+    /// A version 1 compound member has a zero extent in an active dimension.
+    InvalidCompoundV1Extent {
+        /// The zero-based dimension index.
+        dimension: u8,
+    },
+    /// A version 1 compound member declares more than four dimensions.
+    ///
+    /// Contains the declared dimensionality.
+    InvalidCompoundV1Rank(u8),
     /// A custom filter identifier has a named filter variant.
     InvalidCustomFilterId {
         /// The identifier of the named filter.
@@ -1085,6 +1101,10 @@ pub enum FormatError {
     ///
     /// Contains the raw type ID of the referenced message.
     UnresolvedSharedMessage(u16),
+    /// A version 1 compound member has a nonzero dimension permutation.
+    ///
+    /// Contains the raw permutation field.
+    UnsupportedCompoundV1Permutation(u32),
     /// A dataset's element bytes live in files outside this one
     /// (`H5Pset_external`, the External Data Files header message). Its layout
     /// message is contiguous with an undefined data address, the same encoding
@@ -1482,6 +1502,21 @@ impl fmt::Display for FormatError {
                      {size}-byte base type"
                 )
             }
+            Self::CompoundArraySizeOverflow { size, extent } => write!(
+                f,
+                "compound member array size {size} times extent {extent} exceeds u32"
+            ),
+            Self::InvalidCompoundV1Extent { dimension } => write!(
+                f,
+                "version 1 compound member dimension {dimension} has zero extent"
+            ),
+            Self::InvalidCompoundV1Rank(rank) => {
+                write!(f, "version 1 compound member rank {rank} exceeds four")
+            }
+            Self::UnsupportedCompoundV1Permutation(permutation) => write!(
+                f,
+                "version 1 compound member has unsupported permutation {permutation:#x}"
+            ),
             Self::InvalidCompoundSize => {
                 write!(f, "compound datatype size must be greater than zero")
             }

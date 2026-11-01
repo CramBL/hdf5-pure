@@ -82,6 +82,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::datatype` reporting version 1 compound array members as scalars, omitting their dimensions and full byte sizes ([#1027](https://github.com/CramBL/hdf5-pure/pull/1027)).
+
 - Fixed `File::copy` and cross-file copies rejecting a compact group with soft or external links, and marking the UTF-8 names of a copied group's hard links as ASCII ([#1006](https://github.com/CramBL/hdf5-pure/pull/1006)).
 - Fixed `Group::delete` leaving a compact group with soft or external links and the objects below it unreclaimed ([#1006](https://github.com/CramBL/hdf5-pure/pull/1006)).
 - Fixed `File::open_rw` edits dropping the soft links, external links, and link creation order of a group in a version 1 object header without a symbol table ([#1001](https://github.com/CramBL/hdf5-pure/pull/1001)).

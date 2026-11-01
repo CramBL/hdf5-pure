@@ -553,6 +553,223 @@ fn test_compound_v1_complex_matlab_layout() {
     }
 }
 
+#[rstest]
+#[case::rank_one(1, [4, 0, 0, 0], 0, 16)]
+#[case::rank_two(2, [2, 3, 0, 0], 4, 24)]
+#[case::largest_i32_array(1, [u32::MAX / 4, 0, 0, 0], 0, u32::MAX - 3)]
+#[case::rank_three(3, [2, 3, 4, 0], 0, 96)]
+#[case::rank_four(4, [2, 3, 4, 5], 0, 480)]
+#[case::unused_dimensions(1, [4, u32::MAX, 7, 0], 0, 16)]
+fn compound_v1_array_dimensions(
+    #[case] rank: u8,
+    #[case] dimensions: [u32; 4],
+    #[case] offset: u32,
+    #[case] footprint: u32,
+) {
+    let base = build_fixed_point(4, false, true, 0, 32);
+    let buf = test_util::legacy_compound::raw_member(
+        footprint + offset,
+        offset,
+        rank,
+        0,
+        dimensions,
+        &base,
+    );
+    let (datatype, consumed) = parse_datatype(&buf).unwrap();
+    assert_eq!(consumed, buf.len());
+    let Datatype::Compound { size, members } = &datatype else {
+        panic!("expected compound, got {datatype:?}");
+    };
+    assert_eq!(*size, footprint + offset);
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].name, "arr");
+    assert_eq!(members[0].byte_offset, u64::from(offset));
+    assert_eq!(members[0].datatype.type_size(), footprint);
+    let Datatype::Array {
+        base_type,
+        dimensions: parsed,
+    } = &members[0].datatype
+    else {
+        panic!("expected array, got {:?}", members[0].datatype);
+    };
+    assert_eq!(parsed, &dimensions[..usize::from(rank)]);
+    assert_eq!(
+        **base_type,
+        Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap()
+        )
+    );
+    let encoded = serialize_datatype(&datatype);
+    let (reparsed, consumed) = parse_datatype(&encoded).unwrap();
+    assert_eq!(consumed, encoded.len());
+    assert_eq!(reparsed, datatype);
+}
+
+#[test]
+fn compound_v1_scalar_ignores_dimension_slots() {
+    let base = build_fixed_point(4, false, true, 0, 32);
+    let buf = test_util::legacy_compound::raw_member(8, 4, 0, 0, [9, 0, 7, 6], &base);
+    let (datatype, consumed) = parse_datatype(&buf).unwrap();
+    assert_eq!(consumed, buf.len());
+    assert_eq!(
+        datatype,
+        Datatype::Compound {
+            size: 8,
+            members: vec![__private::compound_member(
+                "arr".into(),
+                4,
+                parse_datatype(&base).unwrap().0
+            )],
+        }
+    );
+}
+
+#[rstest]
+#[case::unsupported_rank(5, [1; 4], 0, FormatError::InvalidCompoundV1Rank(5))]
+#[case::zero_first_extent(1, [0; 4], 0, FormatError::InvalidCompoundV1Extent { dimension: 0 })]
+#[case::zero_later_extent(4, [1, 1, 1, 0], 0, FormatError::InvalidCompoundV1Extent { dimension: 3 })]
+#[case::overflow(2, [65_536, 65_536, 0, 0], 0, FormatError::CompoundArraySizeOverflow { size: 262_144, extent: 65_536 })]
+#[case::nonzero_permutation(1, [4, 0, 0, 0], 1, FormatError::UnsupportedCompoundV1Permutation(1))]
+#[case::scalar_permutation(0, [0; 4], 0x0102_0304, FormatError::UnsupportedCompoundV1Permutation(0x0102_0304))]
+fn compound_v1_rejects_invalid_dimensions(
+    #[case] rank: u8,
+    #[case] dimensions: [u32; 4],
+    #[case] permutation: u32,
+    #[case] expected: FormatError,
+) {
+    let buf = test_util::legacy_compound::raw_member(
+        u32::MAX,
+        0,
+        rank,
+        permutation,
+        dimensions,
+        &build_fixed_point(4, false, true, 0, 32),
+    );
+    assert_eq!(parse_datatype(&buf).unwrap_err(), expected);
+}
+
+#[rstest]
+#[case::array(1, [4, 0, 0, 0], 4, 16, 16)]
+#[case::scalar(0, [0; 4], 5, 8, 4)]
+#[case::offset_addition_exceeds_u32(1, [1, 0, 0, 0], u32::MAX, u32::MAX, 4)]
+fn compound_v1_rejects_member_outside_declared_size(
+    #[case] rank: u8,
+    #[case] dimensions: [u32; 4],
+    #[case] offset: u32,
+    #[case] size: u32,
+    #[case] footprint: u32,
+) {
+    let buf = test_util::legacy_compound::raw_member(
+        size,
+        offset,
+        rank,
+        0,
+        dimensions,
+        &build_fixed_point(4, false, true, 0, 32),
+    );
+    assert_eq!(
+        parse_datatype(&buf).unwrap_err(),
+        FormatError::CompoundFieldOutOfBounds {
+            name: "arr".into(),
+            offset: u64::from(offset),
+            field_size: footprint,
+            compound_size: size,
+        }
+    );
+}
+
+#[rstest]
+#[case::missing_block(0)]
+#[case::missing_permutation(4)]
+#[case::missing_extents(12)]
+#[case::partial_last_extent(27)]
+fn compound_v1_rejects_truncated_dimensions(#[case] available: usize) {
+    let mut buf = test_util::legacy_compound::array_member();
+    let block_start = 20;
+    buf.truncate(block_start + available);
+    assert_eq!(
+        parse_datatype(&buf).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: block_start + 28,
+            available: buf.len(),
+        }
+    );
+}
+
+#[test]
+fn compound_v1_retains_nested_array_shape() {
+    let inner = test_util::legacy_compound::array_member();
+    let buf = test_util::legacy_compound::raw_member(32, 0, 1, 0, [2, 0, 0, 0], &inner);
+    let (datatype, consumed) = parse_datatype(&buf).unwrap();
+    assert_eq!(consumed, buf.len());
+    let expected = Datatype::Compound {
+        size: 32,
+        members: vec![__private::compound_member(
+            "arr".into(),
+            0,
+            Datatype::Array {
+                base_type: Box::new(parse_datatype(&inner).unwrap().0),
+                dimensions: vec![2],
+            },
+        )],
+    };
+    assert_eq!(datatype, expected);
+    assert_eq!(
+        parse_datatype(&serialize_datatype(&datatype)).unwrap().0,
+        expected
+    );
+}
+
+#[test]
+fn compound_v1_rejects_overflow_in_base_array() {
+    let mut base = build_dt_header(ARRAY_CLASS, DATATYPE_VERSION_THREE, [0; 3], u32::MAX);
+    base.push(1);
+    base.extend_from_slice(&u32::MAX.to_le_bytes());
+    base.extend_from_slice(&build_fixed_point(4, false, true, 0, 32));
+    let buf = test_util::legacy_compound::raw_member(u32::MAX, 0, 1, 0, [1, 0, 0, 0], &base);
+    assert_eq!(
+        parse_datatype(&buf).unwrap_err(),
+        FormatError::CompoundArraySizeOverflow {
+            size: 4,
+            extent: u32::MAX,
+        }
+    );
+}
+
+#[rstest]
+#[case::version_two(DATATYPE_VERSION_TWO)]
+#[case::version_three(DATATYPE_VERSION_THREE)]
+#[case::version_five(DATATYPE_VERSION_FIVE)]
+fn modern_compound_array_members_keep_their_layout(#[case] version: u8) {
+    let array = Datatype::Array {
+        base_type: Box::new(
+            parse_datatype(&build_fixed_point(4, false, true, 0, 32))
+                .unwrap()
+                .0,
+        ),
+        dimensions: vec![2, 3],
+    };
+    let mut buf = build_dt_header(COMPOUND_CLASS, version, [1, 0, 0], 28);
+    buf.extend_from_slice(b"arr\0");
+    if version == DATATYPE_VERSION_TWO {
+        buf.extend_from_slice(&[0; 4]);
+        buf.extend_from_slice(&4u32.to_le_bytes());
+    } else {
+        buf.push(4);
+    }
+    buf.extend_from_slice(&serialize_datatype(&array));
+    assert_eq!(
+        parse_datatype(&buf).unwrap(),
+        (
+            Datatype::Compound {
+                size: 28,
+                members: vec![__private::compound_member("arr".into(), 4, array)],
+            },
+            buf.len()
+        )
+    );
+}
+
 #[test]
 fn test_reference_object() {
     let buf = build_dt_header(7, DATATYPE_VERSION_ONE, [0, 0, 0], 8);

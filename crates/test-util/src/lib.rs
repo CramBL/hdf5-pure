@@ -32,6 +32,7 @@ pub mod image;
 pub mod legacy;
 pub mod legacy_attributes;
 pub mod legacy_chunked;
+pub mod legacy_compound;
 pub mod link_message;
 pub mod local_heap;
 pub mod mat_struct_array;

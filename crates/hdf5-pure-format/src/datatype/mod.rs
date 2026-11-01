@@ -28,6 +28,7 @@ use crate::error::FormatError;
 
 pub(crate) mod byte_order;
 pub(crate) mod layout;
+mod legacy_member;
 
 /// Returns the datatype's element size as a nonzero host-sized integer.
 ///
@@ -69,6 +70,13 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 /// class bit field has reserved bits set, or
 /// [`FormatError::InvalidVariableLengthSequenceMetadata`] if a sequence has nonzero string
 /// padding or character-set metadata.
+///
+/// Returns [`FormatError::InvalidCompoundV1Rank`] if a version 1 compound member declares more
+/// than four dimensions, [`FormatError::InvalidCompoundV1Extent`] if an active dimension is
+/// zero, or [`FormatError::UnsupportedCompoundV1Permutation`] if its permutation field is nonzero.
+/// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's array size exceeds
+/// [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if its byte range exceeds the
+/// compound's declared size.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     // Minimum header: 4 bytes (`class_and_version` + 3 bytes bit field) + 4 bytes size = 8
     bytes::ensure_len(data, 0, 8)?;
@@ -246,12 +254,19 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                     bytes::ensure_len(data, pos, 4)?;
                     let byte_offset = LittleEndian::read_u32(&data[pos..pos + 4]) as u64;
                     pos += 4;
-                    if version == DATATYPE_VERSION_ONE {
-                        bytes::ensure_len(data, pos, 28)?;
-                        pos += 28;
-                    }
+                    let shape = if version == DATATYPE_VERSION_ONE {
+                        let (shape, consumed) = legacy_member::MemberShape::parse(data, pos)?;
+                        pos += consumed;
+                        Some(shape)
+                    } else {
+                        None
+                    };
                     let (member_dt, consumed) = parse_datatype(&data[pos..])?;
                     pos += consumed;
+                    let member_dt = match shape {
+                        Some(shape) => shape.into_datatype(member_dt, &name, byte_offset, size)?,
+                        None => member_dt,
+                    };
                     members.push(__private::compound_member(name, byte_offset, member_dt));
                 }
             } else {
