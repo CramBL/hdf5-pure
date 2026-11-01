@@ -1,5 +1,6 @@
 use hdf5_pure_space::__private::{ManagerKind, ManagerSections, PageType};
 use rstest::rstest;
+use test_util::snapshot::text::{Report, Value};
 
 use crate::AddressRange;
 use crate::address::{StoredAddress, StoredAddressExt};
@@ -233,6 +234,321 @@ fn padded_managers_preserve_unclassified_generic_fragments() {
     assert!(plan.tail.appended);
     assert_eq!(plan.tail.post.sections().unclassified(), [fragment]);
     assert_complete_capacity(&plan, widths, 160);
+}
+
+#[rstest]
+#[case::two_pages(2)]
+#[case::hole(256)]
+#[case::many_pages(1 << 32)]
+fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] pages: u64) {
+    let page = FileSpacePageSize::DEFAULT.get();
+    let durable = extent(100, 2_048);
+    let run = extent(4 * page, pages * page);
+    let space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::DEFAULT,
+        [
+            (Some(ManagerKind::PagedSmallMetadata), durable),
+            (Some(ManagerKind::PagedLargeGeneric), run),
+        ],
+    )
+    .unwrap();
+    let before: Vec<_> = space.admitted_snapshot().sections().collect();
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let admitted = ManagerProjection::new(space.admitted_snapshot(), widths)
+        .unwrap()
+        .work();
+    let semantic = space.paged_tail_section_limit([]).unwrap();
+    assert_eq!(semantic, 2);
+    assert_eq!((admitted.managers, admitted.sections), (2, 2));
+    let plan = PagedPersistencePlan::new(
+        &space,
+        StoredAddress::new((pages + 5) * page),
+        &[],
+        &[],
+        160,
+        widths,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!plan.tail.appended);
+    assert_eq!(plan.tail.post.sections().raw(), [run]);
+    assert_eq!(
+        space.admitted_snapshot().sections().collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        plan.tail.post.admitted_snapshot().reusable_bytes().unwrap() + plan.tail.allocation.len(),
+        durable.len() + run.len()
+    );
+    assert!(plan.tail.allocation.len() < page);
+    assert_complete_capacity(&plan, widths, 160);
+    let reserved = ManagerProjection::new(plan.tail.post.admitted_snapshot(), widths)
+        .unwrap()
+        .work();
+    assert_eq!((reserved.managers, reserved.sections), (2, 2));
+    let mut report = Report::new();
+    report.table(
+        "projection",
+        [
+            "phase",
+            "managers",
+            "records",
+            "vector capacity",
+            "encoded bytes",
+        ],
+        [
+            [
+                Value::text("admitted"),
+                Value::Number(admitted.managers),
+                Value::Number(admitted.sections),
+                Value::Number(admitted.section_capacity),
+                Value::Number(admitted.encoded_bytes),
+            ],
+            [
+                Value::text("reserved"),
+                Value::Number(reserved.managers),
+                Value::Number(reserved.sections),
+                Value::Number(reserved.section_capacity),
+                Value::Number(reserved.encoded_bytes),
+            ],
+        ],
+    );
+    report.metrics(
+        "capacity contributions",
+        "records",
+        [
+            ("semantic extents", semantic as u64),
+            ("reservation effects", RESERVATION_SECTION_LIMIT as u64),
+            ("total bound", (semantic + RESERVATION_SECTION_LIMIT) as u64),
+        ],
+    );
+    report.metrics(
+        "owned storage",
+        "bytes",
+        [
+            ("extension", 160),
+            ("manager encoding", reserved.encoded_bytes),
+            ("manager allocations", plan.tail.allocation.len() - 160),
+            ("complete reservation", plan.tail.allocation.len()),
+        ],
+    );
+    insta::assert_snapshot!("compact_page_capacity", report.finish());
+}
+
+#[rstest]
+#[case::metadata(Managers::Metadata, 1)]
+#[case::all_managers(Managers::All, 8)]
+#[case::raw_count_one_byte(Managers::All, 255)]
+#[case::raw_count_two_bytes(Managers::All, 256)]
+fn compact_capacity_contains_size_groups_and_reservation_effects(
+    #[case] managers: Managers,
+    #[case] count: u64,
+    #[values(4, 8)] width: u8,
+) {
+    let page = FileSpacePageSize::DEFAULT.get();
+    let mut sections = Vec::new();
+    for index in 0..count {
+        sections.push((
+            Some(ManagerKind::PagedSmallMetadata),
+            extent((2 * index + 1) * page + 128, index + 1),
+        ));
+        if matches!(managers, Managers::All) {
+            sections.push((
+                Some(ManagerKind::PagedSmallRaw),
+                extent((2 * index + 2) * page + 128, index + 1),
+            ));
+        }
+    }
+    let space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::DEFAULT,
+        sections,
+    )
+    .unwrap();
+    let before: Vec<_> = space.admitted_snapshot().sections().collect();
+    let mut freed = vec![(
+        extent((2 * count + 21) * page + 4_000, 200),
+        FreeClass::Page(PageType::Meta),
+    )];
+    if matches!(managers, Managers::All) {
+        freed.push((extent((2 * count + 3) * page, 16 * page), FreeClass::Dead));
+    }
+    let old_blocks = [extent((2 * count + 20) * page + 128, 64)];
+    let limit = space
+        .paged_tail_section_limit(freed.iter().map(|&(extent, _)| extent).chain(old_blocks))
+        .unwrap();
+    let widths = FormatWidths::from_sizes(width, width).unwrap();
+    let plan = PagedPersistencePlan::new(
+        &space,
+        StoredAddress::new((2 * count + 24) * page),
+        &freed,
+        &old_blocks,
+        160,
+        widths,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan.tail.appended);
+    assert_complete_capacity(&plan, widths, 160);
+    let projected = ManagerProjection::new(plan.tail.post.admitted_snapshot(), widths)
+        .unwrap()
+        .work();
+    assert!(projected.sections <= (limit + RESERVATION_SECTION_LIMIT) as u64);
+    assert_eq!(
+        projected.managers,
+        match managers {
+            Managers::Metadata => 1,
+            Managers::All => 3,
+        }
+    );
+    assert_eq!(
+        space.admitted_snapshot().sections().collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[rstest]
+#[case::two_pages(2)]
+#[case::hole(256)]
+fn a_reservation_preserves_a_compact_remaining_run(#[case] pages: u64) {
+    let page = FileSpacePageSize::DEFAULT.get();
+    let run = extent(page, pages * page);
+    let space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::DEFAULT,
+        [(Some(ManagerKind::PagedLargeGeneric), run)],
+    )
+    .unwrap();
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let semantic = space.paged_tail_section_limit([]).unwrap();
+    assert_eq!(semantic, 1);
+    let plan = PagedPersistencePlan::new(
+        &space,
+        StoredAddress::new((pages + 2) * page),
+        &[],
+        &[],
+        160,
+        widths,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!plan.tail.appended);
+    assert_eq!(plan.tail.allocation.start(), run.start());
+    assert_complete_capacity(&plan, widths, 160);
+    let post = plan.tail.post.admitted_snapshot();
+    assert_eq!(
+        post.reusable_bytes().unwrap() + plan.tail.allocation.len(),
+        run.len()
+    );
+    let managers = ManagerSections::from_snapshot(post);
+    let generic = managers
+        .iter()
+        .find(|manager| manager.kind() == ManagerKind::PagedLargeGeneric)
+        .unwrap();
+    assert_eq!(generic.sections(), [extent(2 * page, (pages - 1) * page)]);
+    assert!(
+        managers
+            .iter()
+            .map(|manager| manager.sections().len())
+            .sum::<usize>()
+            <= semantic + RESERVATION_SECTION_LIMIT
+    );
+    assert_eq!(
+        space
+            .admitted_snapshot()
+            .reusable_sections()
+            .collect::<Vec<_>>(),
+        [run]
+    );
+}
+
+#[test]
+fn legacy_per_page_input_is_persisted_as_a_complete_run() {
+    let page = FileSpacePageSize::DEFAULT.get();
+    let space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::DEFAULT,
+        [
+            (Some(ManagerKind::PagedSmallMetadata), extent(100, 2_048)),
+            (Some(ManagerKind::PagedLargeGeneric), extent(4 * page, page)),
+            (Some(ManagerKind::PagedLargeGeneric), extent(5 * page, page)),
+            (Some(ManagerKind::PagedLargeGeneric), extent(6 * page, page)),
+        ],
+    )
+    .unwrap();
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let plan = PagedPersistencePlan::new(
+        &space,
+        StoredAddress::new(8 * page),
+        &[],
+        &[],
+        160,
+        widths,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        plan.tail.post.sections().raw(),
+        [extent(4 * page, 3 * page)]
+    );
+    let (slot, _) = free_space_manager::manager_wire(ManagerKind::PagedLargeGeneric);
+    let generic = plan
+        .blocks
+        .iter()
+        .find(|block| block.header_address == plan.slots[slot])
+        .unwrap();
+    let header = format::FreeSpaceManagerHeader::parse(widths, &generic.header).unwrap();
+    let sections = format::parse_section_info(
+        widths,
+        &generic.section_list,
+        generic.header_address,
+        &header,
+    )
+    .unwrap();
+    assert_eq!(
+        sections,
+        [format::FreeSection {
+            addr: StoredAddress::new(4 * page),
+            size: 3 * page
+        }]
+    );
+    assert_complete_capacity(&plan, widths, 160);
+}
+
+#[test]
+fn a_capacity_rejects_overflowing_combined_section_counts() {
+    let error = ManagerCapacity::new(
+        usize::MAX,
+        RESERVATION_SECTION_LIMIT,
+        160,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        FormatError::ValueTooLargeForPlatform {
+            value: (usize::MAX as u64).saturating_add(RESERVATION_SECTION_LIMIT as u64),
+            target: "PAGE persistence section count",
+        }
+    );
+}
+
+enum Managers {
+    All,
+    Metadata,
+}
+
+fn extent(start: u64, length: u64) -> Extent {
+    Extent::new(StoredAddress::new(start), length).unwrap()
 }
 
 fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, extension: u64) {

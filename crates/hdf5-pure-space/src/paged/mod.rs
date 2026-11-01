@@ -401,10 +401,11 @@ impl PagedEdit {
         *self = snapshot.paged;
     }
 
-    /// Bounds the section count after PAGE classification and tail reservation.
+    /// Bounds the PAGE section count before metadata reservation.
     ///
     /// Counts each aligned interior as one section. Includes pending padding, dead and
-    /// unclassified extents, and `extents` in the count.
+    /// unclassified extents, and `extents` in the count. The caller adds a separate bound for
+    /// reservation effects.
     ///
     /// # Errors
     ///
@@ -424,7 +425,7 @@ impl PagedEdit {
             .chain(extents)
             .map(|extent| PageParts::new(extent, self.page_size).count())
             .chain(self.unclassified.extents().iter().map(|_| 1))
-            .try_fold(3usize, |count, pieces| {
+            .try_fold(0usize, |count, pieces| {
                 count
                     .checked_add(pieces)
                     .ok_or(FormatError::ValueTooLargeForPlatform {
@@ -1209,7 +1210,7 @@ mod tests {
         let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
         paged.track(extent(4_000, 5_000), FreeClass::Dead);
         paged.meta_pad.push(extent(100, 50));
-        assert_eq!(paged.tail_section_limit([extent(12_000, 500)]).unwrap(), 9);
+        assert_eq!(paged.tail_section_limit([extent(12_000, 500)]).unwrap(), 6);
     }
 
     #[rstest]
@@ -1232,7 +1233,7 @@ mod tests {
             .raw_pad
             .push(extent(padding_start + 2 * PAGE + 100, 100));
         let returned = extent(padding_start + 3 * PAGE + 4_000, pages * PAGE + 200);
-        assert_eq!(paged.tail_section_limit([returned]).unwrap(), 13);
+        assert_eq!(paged.tail_section_limit([returned]).unwrap(), 10);
     }
 
     #[rstest]
@@ -1243,7 +1244,7 @@ mod tests {
         for index in 0..count {
             paged.raw.free(extent(index as u64 * 2 * PAGE, PAGE));
         }
-        assert_eq!(paged.tail_section_limit([]).unwrap(), 3 + count);
+        assert_eq!(paged.tail_section_limit([]).unwrap(), count);
     }
 
     #[test]

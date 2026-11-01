@@ -1,5 +1,7 @@
 //! Pure placement and encoding of the managers for a persistent PAGE edit.
 
+use core::num::NonZeroU64;
+
 use hdf5_pure_format::__private as format;
 use hdf5_pure_space::__private::{Extent, FreeClass, PagedTail, SessionSpace};
 
@@ -22,8 +24,9 @@ pub(super) struct PagedPersistencePlan {
 impl PagedPersistencePlan {
     /// Plans placement using only durable free space or appended metadata pages.
     ///
-    /// Bounds section-list capacity before placement, including the known metadata-page tail.
-    /// Encodes surplus capacity as section-list padding, so allocation does not depend on exact
+    /// Bounds section-list capacity from semantic sections and reservation effects before
+    /// placement. Retains each candidate's projection for measurement and encoding. Encodes
+    /// surplus capacity as section-list padding, so allocation does not depend on exact
     /// serialized-size convergence. Returns `None` when `reuse_only` is set and no reservation fits.
     ///
     /// # Errors
@@ -45,7 +48,7 @@ impl PagedPersistencePlan {
             FormatError::Internal("PAGE persistence requires PAGE session space".into())
         })?;
         if let Some(tail) = space.plan_paged_tail(eoa, freed, old_blocks, extension_len, false)? {
-            if ManagerProjection::new(tail.post.admitted_snapshot(), widths)?.is_empty() {
+            if tail.post.admitted_snapshot().sections().next().is_none() {
                 return Ok(Some(Self {
                     tail,
                     slots: [StoredAddress::undefined(widths.offsets); NUM_FILE_FSM_MANAGERS],
@@ -59,22 +62,14 @@ impl PagedPersistencePlan {
                 .map(|&(extent, _)| extent)
                 .chain(old_blocks.iter().copied()),
         )?;
-        let prefixes = format::section_info_capacity(widths, 0)? * (PAGED_MANAGERS - 1);
-        let fixed = format::free_space_manager_header_len(widths) * PAGED_MANAGERS + prefixes;
-        let fixed = fixed
-            .checked_add(extension_len)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: extension_len,
-                length: fixed,
-            })?;
-        let mut capacity = format::section_info_capacity(widths, section_limit)?
-            .checked_add(fixed)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: fixed,
-                length: section_limit as u64,
-            })?;
+        let mut capacity = ManagerCapacity::new(
+            section_limit,
+            RESERVATION_SECTION_LIMIT,
+            extension_len,
+            widths,
+        )?;
         let reused = space
-            .plan_paged_tail(eoa, freed, old_blocks, capacity, false)?
+            .plan_paged_tail(eoa, freed, old_blocks, capacity.get(), false)?
             .map(|tail| ProjectedTail::new(tail, widths))
             .transpose()?;
         let mut projected = match reused {
@@ -82,7 +77,7 @@ impl PagedPersistencePlan {
             _ if reuse_only => return Ok(None),
             _ => ProjectedTail::new(
                 space
-                    .plan_paged_tail(eoa, freed, old_blocks, capacity, true)?
+                    .plan_paged_tail(eoa, freed, old_blocks, capacity.get(), true)?
                     .ok_or_else(|| {
                         FormatError::Internal(
                             "an appended PAGE tail requires no reusable extent".into(),
@@ -92,13 +87,10 @@ impl PagedPersistencePlan {
             )?,
         };
         if projected.managers.is_empty() {
-            capacity = capacity.checked_add(1).ok_or(FormatError::OffsetOverflow {
-                offset: capacity,
-                length: 1,
-            })?;
+            capacity = capacity.with_spare_byte()?;
             projected = ProjectedTail::new(
                 space
-                    .plan_paged_tail(eoa, freed, old_blocks, capacity, true)?
+                    .plan_paged_tail(eoa, freed, old_blocks, capacity.get(), true)?
                     .ok_or_else(|| {
                         FormatError::Internal(
                             "an appended PAGE tail requires no reusable extent".into(),
@@ -115,7 +107,7 @@ impl PagedPersistencePlan {
                 offset: extension_len,
                 length: measured,
             })?;
-        if used > capacity || managers.is_empty() {
+        if used > capacity.get() || managers.is_empty() {
             return Err(FormatError::Internal(
                 "the PAGE manager capacity does not contain the final manager set".into(),
             ));
@@ -147,7 +139,80 @@ impl ProjectedTail {
     }
 }
 
+/// Holds a positive byte bound for PAGE managers and the superblock extension.
+#[derive(Debug)]
+struct ManagerCapacity {
+    bytes: NonZeroU64,
+}
+
+impl ManagerCapacity {
+    /// Combines semantic and reservation section bounds using the output field widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the combined count exceeds
+    /// [`usize::MAX`], [`FormatError::OffsetOverflow`] if the byte bound exceeds [`u64::MAX`],
+    /// or [`FormatError::Internal`] if the calculated capacity is zero.
+    fn new(
+        semantic_sections: usize,
+        reservation_sections: usize,
+        extension_len: u64,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
+        let section_limit = semantic_sections.checked_add(reservation_sections).ok_or(
+            FormatError::ValueTooLargeForPlatform {
+                value: (semantic_sections as u64).saturating_add(reservation_sections as u64),
+                target: "PAGE persistence section count",
+            },
+        )?;
+        let prefixes = format::section_info_capacity(widths, 0)? * (PAGED_MANAGERS - 1);
+        let fixed = format::free_space_manager_header_len(widths) * PAGED_MANAGERS + prefixes;
+        let fixed = fixed
+            .checked_add(extension_len)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: extension_len,
+                length: fixed,
+            })?;
+        let bytes = format::section_info_capacity(widths, section_limit)?
+            .checked_add(fixed)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: fixed,
+                length: section_limit as u64,
+            })?;
+        Ok(Self {
+            bytes: NonZeroU64::new(bytes).ok_or_else(|| {
+                FormatError::Internal("PAGE manager capacity contains no headers".into())
+            })?,
+        })
+    }
+
+    /// Adds one byte for the appended-tail fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the capacity is [`u64::MAX`].
+    fn with_spare_byte(self) -> Result<Self, FormatError> {
+        Ok(Self {
+            bytes: self
+                .bytes
+                .checked_add(1)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: self.bytes.get(),
+                    length: 1,
+                })?,
+        })
+    }
+
+    /// Returns the complete reservation length, in bytes.
+    fn get(&self) -> u64 {
+        self.bytes.get()
+    }
+}
+
 const PAGED_MANAGERS: u64 = 3;
+// Removing one reservation can add two partial edges and split one aligned interior.
+// Appending instead restores at most one aligned run and adds one metadata-page tail.
+const RESERVATION_SECTION_LIMIT: usize = 3;
 
 #[cfg(test)]
 mod tests;

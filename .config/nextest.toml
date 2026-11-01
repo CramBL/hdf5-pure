@@ -65,6 +65,7 @@ filter = '''
 package(hdf5-pure-crosscheck) & (
     test(/^classic_aggregation::/) |
     test(/^file_space::/) |
+    test(/^file_space_compact_runs::/) |
     test(/^file_space_fragmentation::/) |
     test(/^file_space_properties::/) |
     test(/^file_space_oracle::/) |
