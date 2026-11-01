@@ -1,6 +1,8 @@
+use core::num::NonZeroU64;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
+use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
 
 use crate::FileLocking;
@@ -10,7 +12,7 @@ use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::UserblockSize;
-use crate::address::{StoredAddress, StoredAddressExt};
+use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
@@ -23,8 +25,8 @@ use crate::source::Source;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
 
-use super::AllocationClass;
 use super::WriteEngine;
+use super::{AggregateSpace, AllocationClass, Placement};
 
 mod fsm;
 mod immediate;
@@ -487,4 +489,39 @@ enum PublicationFailure {
     Barrier,
     WriteAfter,
     WriteBefore,
+}
+
+impl AggregateSpace {
+    pub(in crate::edit) fn reserve(
+        &mut self,
+        addresses: AddressContext,
+        space: &mut SessionSpace,
+        size: NonZeroU64,
+        class: AllocationClass,
+    ) -> Result<Placement, Error> {
+        self.reserve_with(addresses, size, class, |eoa, released| {
+            if let Some((post, _)) = space.flat_post_free(eoa, [released]) {
+                space.adopt_flat_post_free(post);
+                true
+            } else {
+                false
+            }
+        })
+    }
+}
+
+impl WriteEngine {
+    pub(in crate::edit) fn reserve_aggregated(
+        &mut self,
+        len: u64,
+        class: AllocationClass,
+    ) -> Result<Option<Placement>, Error> {
+        let (Some(aggregation), Some(size)) = (self.aggregation.as_mut(), NonZeroU64::new(len))
+        else {
+            return Ok(None);
+        };
+        aggregation
+            .reserve(self.context.addresses(), &mut self.space, size, class)
+            .map(Some)
+    }
 }

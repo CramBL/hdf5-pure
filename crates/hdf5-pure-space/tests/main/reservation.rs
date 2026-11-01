@@ -378,6 +378,75 @@ fn batch_coalesces_claimed_page_remainders_before_later_reservations() {
     assert_eq!(space.reusable_bytes().unwrap(), 60);
 }
 
+#[rstest]
+#[case::adjacent(164, 32, Some((100, 96)), &[(300, 64)])]
+#[case::seedless(200, 32, None, &[(100, 64), (300, 64)])]
+#[case::eligible(500, 100, Some((500, 96)), &[(100, 64), (300, 64), (596, 4)])]
+fn aggregate_returns_keep_current_threshold_admission_inside_a_batch(
+    #[case] start: u64,
+    #[case] length: u64,
+    #[case] chosen: Option<(u64, u64)>,
+    #[case] remaining: &[(u64, u64)],
+    #[values(1, 4)] count: usize,
+) {
+    let mut space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::FsmAggr),
+        100,
+        FileSpacePageSize::DEFAULT,
+        [(None, extent(100, 64)), (None, extent(300, 64))],
+    )
+    .unwrap();
+    let mut batch = space.reservation_batch(count);
+    assert!(batch.release_aggregate(StoredAddress::new(1000), extent(start, length)));
+    assert_eq!(
+        batch
+            .reserve(request(96, PageType::Raw))
+            .map(|reservation| reservation.extent()),
+        chosen.map(|(start, length)| extent(start, length))
+    );
+    batch.finish();
+    assert_eq!(
+        space.reusable_sections().collect::<Vec<_>>(),
+        remaining
+            .iter()
+            .map(|&(start, length)| extent(start, length))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::single(&[(10, 8)])]
+fn returning_batches_keep_one_index_as_free_space_grows(#[case] initial: &[(u64, u64)]) {
+    let mut space = flat(initial);
+    let mut batch = space.reservation_batch_with_returns(3);
+    assert!(batch.release_aggregate(StoredAddress::new(1000), extent(100, 32)));
+    assert!(batch.release_aggregate(StoredAddress::new(1000), extent(200, 64)));
+    assert_eq!(
+        batch.reserve(request(16, PageType::Raw)).unwrap().extent(),
+        extent(100, 16)
+    );
+    let work = batch.finish();
+    assert_eq!(work.indexed_extents, u64::try_from(initial.len()).unwrap());
+    assert_eq!(
+        work.inserted_extents,
+        u64::try_from(initial.len()).unwrap() + 3
+    );
+    assert_eq!(work.removed_extents, 1);
+    assert_eq!(
+        work.restored_extents,
+        u64::try_from(initial.len()).unwrap() + 2
+    );
+    assert_eq!(
+        space.reusable_sections().collect::<Vec<_>>(),
+        initial
+            .iter()
+            .map(|&(start, length)| extent(start, length))
+            .chain([extent(116, 16), extent(200, 64)])
+            .collect::<Vec<_>>()
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(

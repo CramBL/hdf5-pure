@@ -333,8 +333,45 @@ impl SessionSpace {
         }
         match self {
             Self::Disabled => ReservationBatch::disabled(),
-            Self::Flat(space) => ReservationBatch::flat(&mut space.free),
+            Self::Flat(space) => ReservationBatch::flat(&mut space.free, space.threshold),
             Self::Paged(space) => space.paged.reservation_batch(),
+        }
+    }
+
+    /// Borrows reusable space for reservations interleaved with aggregate returns.
+    ///
+    /// Flat batches with more than one expected request use an index even when initially empty or
+    /// contiguous. Other cases use [`Self::reservation_batch`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroU64;
+    ///
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+    /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest, SessionSpace};
+    ///
+    /// let mut space = SessionSpace::from_strategy(
+    ///     Some(FileSpaceStrategy::FsmAggr), 1, FileSpacePageSize::DEFAULT,
+    /// );
+    /// let spare = Extent::new(StoredAddress::new(100), 32).unwrap();
+    /// let mut batch = space.reservation_batch_with_returns(2);
+    /// assert!(batch.release_aggregate(StoredAddress::new(1_000), spare));
+    /// let request = ReservationRequest::new(NonZeroU64::new(16).unwrap(), AllocationClass::Raw);
+    /// assert_eq!(batch.reserve(request).unwrap().extent(),
+    ///     Extent::new(StoredAddress::new(100), 16).unwrap());
+    /// batch.finish();
+    /// assert_eq!(space.reusable_sections().collect::<Vec<_>>(),
+    ///     [Extent::new(StoredAddress::new(116), 16).unwrap()]);
+    /// ```
+    pub fn reservation_batch_with_returns(&mut self, requests: usize) -> ReservationBatch<'_> {
+        if requests <= 1 {
+            return self.reservation_batch(requests);
+        }
+        match self {
+            Self::Flat(space) => ReservationBatch::flat(&mut space.free, space.threshold),
+            _ => self.reservation_batch(requests),
         }
     }
 

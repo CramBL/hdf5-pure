@@ -9,6 +9,7 @@ use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
 
 use super::FreeList;
+use crate::admission::TrackedSpace;
 use crate::extent::Extent;
 use crate::reservation::ReservationWork;
 
@@ -212,5 +213,21 @@ impl<'a> IndexedFreeList<'a> {
         }
         work.removed_extents = work.removed_extents.saturating_add(1);
         extent
+    }
+}
+
+impl TrackedSpace for IndexedFreeList<'_> {
+    type Class = ();
+
+    fn merges(&self, extent: Extent) -> bool {
+        self.regions
+            .range(..extent.start())
+            .next_back()
+            .is_some_and(|(_, previous)| previous.end() == extent.start())
+            || self.regions.contains_key(&extent.end())
+    }
+
+    fn track(&mut self, extent: Extent, (): ()) {
+        self.free(extent);
     }
 }

@@ -3,12 +3,14 @@
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::FileSpacePageSize;
+use hdf5_pure_core::StoredAddress;
 
+use crate::admission::TrackedSpace;
 use crate::allocation::AllocationClass;
 use crate::extent::Extent;
 use crate::list::FreeList;
 use crate::list::indexed::IndexedFreeList;
-use crate::paged::PageType;
+use crate::paged::{FreeClass, PageType};
 use crate::session::SessionSpace;
 
 /// A nonempty allocation request with its purpose and effective PAGE type.
@@ -113,9 +115,12 @@ impl<'a> ReservationBatch<'a> {
         }
     }
 
-    pub(crate) fn flat(free: &'a mut FreeList) -> Self {
+    pub(crate) fn flat(free: &'a mut FreeList, threshold: u64) -> Self {
         Self {
-            state: ReservationState::Flat(IndexedFreeList::new(free, None)),
+            state: ReservationState::Flat {
+                free: IndexedFreeList::new(free, None),
+                threshold,
+            },
         }
     }
 
@@ -151,7 +156,7 @@ impl<'a> ReservationBatch<'a> {
             ReservationState::Scalar(space) => {
                 space.allocate_with_page_type(size.get(), class, page_type)
             }
-            ReservationState::Flat(free) => free.allocate(size),
+            ReservationState::Flat { free, threshold: _ } => free.allocate(size),
             ReservationState::Paged {
                 meta,
                 raw,
@@ -182,6 +187,32 @@ impl<'a> ReservationBatch<'a> {
         })
     }
 
+    /// Returns abandoned aggregate spare through ordinary threshold admission.
+    ///
+    /// Returns `true` for a flat reusable allocator, including when `extent` is below the threshold
+    /// and cannot be merged. Returns `false` for PAGE or disabled allocation. The caller supplies a
+    /// stored EOA and an allocation disjoint from recorded free space.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an admitted extent overlaps an indexed free region. Scalar batches panic in debug
+    /// builds for admitted overlaps.
+    pub fn release_aggregate(&mut self, eoa: StoredAddress, extent: Extent) -> bool {
+        match &mut self.state {
+            ReservationState::Flat { free, threshold } => {
+                free.release(*threshold, extent, ());
+                true
+            }
+            ReservationState::Scalar(space) if !space.is_paged() && space.is_enabled() => {
+                space.record_freed(eoa, extent, FreeClass::Dead);
+                true
+            }
+            ReservationState::Disabled
+            | ReservationState::Paged { .. }
+            | ReservationState::Scalar(_) => false,
+        }
+    }
+
     /// Restores unused free space and returns the final indexed-work counts.
     pub fn finish(mut self) -> ReservationWork {
         self.restore();
@@ -194,7 +225,7 @@ impl<'a> ReservationBatch<'a> {
     pub fn work(&self) -> ReservationWork {
         match &self.state {
             ReservationState::Disabled | ReservationState::Scalar(_) => ReservationWork::default(),
-            ReservationState::Flat(free) => free.work(),
+            ReservationState::Flat { free, threshold: _ } => free.work(),
             ReservationState::Paged {
                 meta,
                 raw,
@@ -206,7 +237,7 @@ impl<'a> ReservationBatch<'a> {
     fn restore(&mut self) {
         match &mut self.state {
             ReservationState::Disabled | ReservationState::Scalar(_) => {}
-            ReservationState::Flat(free) => free.restore(),
+            ReservationState::Flat { free, threshold: _ } => free.restore(),
             ReservationState::Paged {
                 meta,
                 raw,
@@ -227,7 +258,10 @@ impl Drop for ReservationBatch<'_> {
 
 enum ReservationState<'a> {
     Disabled,
-    Flat(IndexedFreeList<'a>),
+    Flat {
+        free: IndexedFreeList<'a>,
+        threshold: u64,
+    },
     Paged {
         meta: IndexedFreeList<'a>,
         raw: IndexedFreeList<'a>,

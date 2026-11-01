@@ -273,6 +273,7 @@
 
 #![allow(clippy::self_named_module_files)]
 
+use core::num::NonZeroU64;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -284,6 +285,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::ReservationRequest;
 use hdf5_pure_space::__private::{
     Extent as FreeExtent, FreeClass, FreeList, ManagerKind, PageTransition, PageType, SessionSpace,
 };
@@ -370,6 +372,7 @@ mod group_links;
 pub(crate) mod object_header;
 mod paged_persistence;
 mod reclaim;
+mod reservation;
 pub(crate) mod retirement;
 mod root_reclamation;
 mod staging;
@@ -2805,7 +2808,8 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if address resolution, aggregate planning, or PAGE transition
-    /// planning fails. Returns the write error if writing PAGE padding fails.
+    /// planning fails. Returns [`Error::AllocationPublicationUncertain`] if a nonempty reservation
+    /// follows uncertain publication. Returns the write error if writing PAGE padding fails.
     fn reserve(&mut self, len: u64, class: AllocationClass) -> Result<Placement, Error> {
         self.reserve_with_page_type(len, class, class.into())
     }
@@ -2817,33 +2821,19 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if address resolution, aggregate planning, or PAGE transition
-    /// planning fails. Returns the write error if writing PAGE padding fails.
+    /// planning fails. Returns [`Error::AllocationPublicationUncertain`] if a nonempty reservation
+    /// follows uncertain publication. Returns the write error if writing PAGE padding fails.
     fn reserve_with_page_type(
         &mut self,
         len: u64,
         class: AllocationClass,
         page_type: PageType,
     ) -> Result<Placement, Error> {
-        if self.fresh_page_boundary.is_none()
-            && let Some(extent) = self.space.allocate_with_page_type(len, class, page_type)
-        {
-            return Ok(Placement::Reused {
-                addr: self.context.addresses().resolve(extent.start())?.get(),
-                len,
-            });
-        }
-        if let Some(placement) = self.reserve_aggregated(len, class)? {
-            return Ok(placement);
+        if let Some(size) = NonZeroU64::new(len) {
+            return self
+                .reserve_request(ReservationRequest::with_page_type(size, class, page_type));
         }
         self.begin_page(page_type)?;
-        if let Some(boundary) = self.fresh_page_boundary
-            && self.end_of_allocation()? < boundary
-        {
-            return Err(FormatError::Internal(
-                "PAGE allocation precedes its fresh-page boundary".into(),
-            )
-            .into());
-        }
         Ok(Placement::Appended {
             addr: self.image.len(),
             len,
