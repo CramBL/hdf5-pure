@@ -424,7 +424,7 @@ fn an_extension_over_the_chunk_budget_stops_before_publication() {
     engine
         .set_write_buffering(WriteBuffering::Unbuffered)
         .unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = engine.image.disk_bytes().unwrap();
     let free = engine.space.admitted_snapshot().reusable_bytes().unwrap();
     assert_eq!(free, 1_600_000);
     let blocks = engine.persist.as_ref().unwrap().old_blocks.clone();
@@ -447,7 +447,7 @@ fn an_extension_over_the_chunk_budget_stops_before_publication() {
         free
     );
     assert_eq!(engine.persist.as_ref().unwrap().old_blocks, blocks);
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(engine.image.disk_bytes().unwrap(), before);
 }
 
 #[rstest]
