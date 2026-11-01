@@ -2,7 +2,6 @@
 //! control.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs;
 use std::path::Path;
@@ -23,6 +22,10 @@ use test_util::temp;
 
 use crate::file_space;
 use crate::session;
+
+use self::report::EnduranceReport;
+
+mod report;
 
 /// Replaces groups repeatedly and reports creation settings and free-space measurements.
 ///
@@ -284,53 +287,25 @@ impl<'a> Context<'a> {
         let reusable = self.unwrap(file.reusable_free_sections());
         assert_eq!(stats.reusable_free_bytes(), reusable.free_bytes(), "{self}");
         let logical_size = stats.logical_size();
-        let mut out = String::new();
-        writeln!(out, "small-file free-space endurance").unwrap();
-        writeln!(out, "===============================").unwrap();
-        writeln!(out).unwrap();
-        writeln!(out, "state: final reopen after {iteration} cycles").unwrap();
-        writeln!(out).unwrap();
-        writeln!(out, "creation settings").unwrap();
-        writeln!(out, "  strategy          : {strategy:?}").unwrap();
-        writeln!(out, "  persistence       : {persist}").unwrap();
-        writeln!(out, "  threshold (bytes) : {threshold}").unwrap();
-        if strategy == FileSpaceStrategy::Page {
-            writeln!(out, "  page size (bytes) : {}", page_size.get()).unwrap();
-        }
-        writeln!(out).unwrap();
-        writeln!(out, "file").unwrap();
-        writeln!(out, "  physical size     : {physical} bytes").unwrap();
-        writeln!(out, "  logical EOF       : {logical_size} bytes").unwrap();
-        writeln!(
-            out,
-            "  top-level groups  : {}",
-            self.unwrap(file.root().groups()).len()
-        )
-        .unwrap();
-        writeln!(out).unwrap();
-        writeln!(out, "reusable space (writable session)").unwrap();
-        writeln!(out, "  bytes             : {}", reusable.free_bytes()).unwrap();
-        writeln!(out, "  sections          : {}", reusable.section_count()).unwrap();
-        writeln!(out).unwrap();
-        writeln!(out, "persisted space (last close)").unwrap();
-        match persisted_free {
-            Some(report) => {
-                writeln!(
-                    out,
-                    "  bytes             : {}",
-                    report.free_sections().free_bytes()
+        EnduranceReport {
+            iteration: *iteration,
+            strategy,
+            persist,
+            threshold,
+            page_size: (strategy == FileSpaceStrategy::Page).then_some(page_size.get()),
+            physical: *physical,
+            logical_size,
+            groups: self.unwrap(file.root().groups()).len(),
+            reusable_bytes: reusable.free_bytes(),
+            reusable_sections: reusable.section_count(),
+            persisted: persisted_free.map(|report| {
+                (
+                    report.free_sections().free_bytes(),
+                    report.free_sections().section_count(),
                 )
-                .unwrap();
-                writeln!(
-                    out,
-                    "  sections          : {}",
-                    report.free_sections().section_count()
-                )
-                .unwrap();
-            }
-            None => writeln!(out, "  persistence not configured").unwrap(),
+            }),
         }
-        out
+        .render()
     }
 }
 

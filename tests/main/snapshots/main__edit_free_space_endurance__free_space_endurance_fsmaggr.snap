@@ -3,24 +3,33 @@ source: tests/main/edit_free_space_endurance.rs
 expression: "free_space_endurance::run_endurance(strategy)"
 ---
 small-file free-space endurance
-===============================
-
-state: final reopen after 1024 cycles
+  measurement         value
+  -----------  ------------
+  state        final reopen
+  cycles              1,024
 
 creation settings
-  strategy          : FsmAggr
-  persistence       : true
-  threshold (bytes) : 1
+  property             value
+  -----------------  -------
+  strategy           FsmAggr
+  persistence           true
+  threshold (bytes)        1
 
 file
-  physical size     : 89807 bytes
-  logical EOF       : 89807 bytes
-  top-level groups  : 16
+  Metric                     value
+  ------------------------  ------
+  physical size (bytes)     89,807
+  logical EOF (bytes)       89,807
+  top-level groups (count)      16
 
 reusable space (writable session)
-  bytes             : 20198
-  sections          : 51
+  Metric             value
+  ----------------  ------
+  bytes             20,198
+  sections (count)      51
 
 persisted space (last close)
-  bytes             : 20198
-  sections          : 51
+  Metric             value
+  ----------------  ------
+  bytes             20,198
+  sections (count)      51
