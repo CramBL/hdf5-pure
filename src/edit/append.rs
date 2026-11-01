@@ -11,6 +11,7 @@ use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 
 use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::ReservationRequest;
 use hdf5_pure_space::__private::{PageTransition, PageType};
 
 use hdf5_pure_core::__private::FileRange;
@@ -40,7 +41,8 @@ use super::allocation::{AllocationPublication, ConfirmedPublication, Provisional
 use super::dataset;
 use super::staging::StagedOp;
 
-use super::{AggregateSpace, Placement, SyncPolicy, WriteEngine};
+use super::reservation::ReservationFailure;
+use super::{SyncPolicy, WriteEngine};
 
 /// Options for immediate, staged, or buffered appends.
 ///
@@ -855,51 +857,25 @@ impl EditStore<'_> {
     ///
     /// # Errors
     ///
-    /// Returns the placement, preparation, address-conversion, or I/O error.
+    /// Returns [`Error::AllocationPublicationUncertain`] if a nonempty allocation follows uncertain
+    /// publication. Returns the placement, preparation, address-conversion, or I/O error.
     fn allocate_bytes<B: AsRef<[u8]>>(
         &mut self,
         length: u64,
         class: AllocationClass,
         prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
     ) -> Result<u64, Error> {
-        let extent = if self.engine.immediate_reuse_allowed() {
-            self.engine
-                .space
-                .allocate_with_page_type(length, class, PageType::Raw)
-        } else {
-            None
+        let Some(size) = NonZeroU64::new(length) else {
+            return self.append_into_raw_page(length, prepare);
         };
-        if let Some(extent) = extent {
-            let at = self.engine.context.addresses().resolve(extent.start())?;
-            let bytes = Self::prepare_allocation_bytes(length, at, prepare)?;
-            self.engine.image.write_at(at.get(), bytes.as_ref())?;
-            return Ok(at.get());
-        }
-        if let (Some(aggregation), Some(size)) = (
-            self.engine
-                .aggregation
-                .as_mut()
-                .filter(|_| self.engine.persist.is_none()),
-            NonZeroU64::new(length),
-        ) {
-            let Placement::Aggregated { addr, end, .. } = aggregation.reserve(
-                self.engine.context.addresses(),
-                &mut self.engine.space,
-                size,
-                class,
-            )?
-            else {
-                return Err(FormatError::Internal(
-                    "aggregate reservation is not aggregated".into(),
-                )
-                .into());
-            };
-            let bytes =
-                Self::prepare_allocation_bytes(length, PhysicalAddress::new(addr), prepare)?;
-            AggregateSpace::place(self.engine.image.as_mut(), addr, bytes.as_ref(), end)?;
-            return Ok(addr);
-        }
-        self.append_into_raw_page(length, prepare)
+        let request = ReservationRequest::with_page_type(size, class, PageType::Raw);
+        let mut plan = self
+            .engine
+            .plan_immediate_reservation(request)
+            .map_err(ReservationFailure::into_error)?;
+        let address = plan.reservations()[0].range().start();
+        let bytes = Self::prepare_allocation_bytes(length, address, prepare)?;
+        plan.write_next(bytes.as_ref()).map(PhysicalAddress::get)
     }
 
     /// Prepares bytes for the chosen physical address and checks their complete allocation length.

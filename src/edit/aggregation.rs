@@ -70,19 +70,20 @@ impl AggregateSpace {
 
     /// Reserves an allocation for `class` and resolves its physical positions.
     ///
-    /// The caller writes the reservation through [`place`](Self::place). On error, the
-    /// aggregate and reusable-space states are unchanged. In a flat session, tracks abandoned
-    /// aggregate spare subject to the free-section threshold.
+    /// Calls `release` with the stored EOA and complete abandoned spare, marking manager state dirty
+    /// if the callback returns `true`. The caller applies threshold admission in that callback and
+    /// writes the reservation through [`place`](Self::place). On error, aggregate state is unchanged
+    /// and the callback has not been called.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if aggregate planning or physical address resolution fails.
-    pub(super) fn reserve(
+    pub(super) fn reserve_with(
         &mut self,
         addresses: AddressContext,
-        space: &mut SessionSpace,
         size: NonZeroU64,
         class: AllocationClass,
+        mut release: impl FnMut(StoredAddress, Extent) -> bool,
     ) -> Result<Placement, Error> {
         let len = size.get();
         let mut next = *self;
@@ -107,9 +108,8 @@ impl AggregateSpace {
         // H5MF__aggr_alloc in H5MFaggr.c, HDF5 2.2.0, returns abandoned spare through
         // H5MF_xfree, whose threshold applies to newly tracked free sections.
         if let Some(released) = allocation.released()
-            && let Some((post, _)) = space.flat_post_free(next.eoa, [released])
+            && release(next.eoa, released)
         {
-            space.adopt_flat_post_free(post);
             next.manager_dirty = true;
         }
         *self = next;
@@ -347,29 +347,6 @@ impl WriteEngine {
             aggregation.eoa = aggregation.eoa.max(eoa);
         }
         Ok(())
-    }
-
-    /// Reserves bytes from the aggregate for `class`, if aggregation is enabled.
-    ///
-    /// Returns `None` for an empty request or a session without classic aggregation. The caller
-    /// writes the reserved bytes through [`AggregateSpace::place`] before making another
-    /// reservation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Format`] if aggregate planning or physical address resolution fails.
-    pub(super) fn reserve_aggregated(
-        &mut self,
-        len: u64,
-        class: AllocationClass,
-    ) -> Result<Option<Placement>, Error> {
-        let (Some(aggregation), Some(size)) = (self.aggregation.as_mut(), NonZeroU64::new(len))
-        else {
-            return Ok(None);
-        };
-        aggregation
-            .reserve(self.context.addresses(), &mut self.space, size, class)
-            .map(Some)
     }
 
     /// Releases unused aggregate tails at EOA while retaining the published root.

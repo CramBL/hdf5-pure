@@ -4,7 +4,7 @@
 //! Application consumes the matching replacement buffers and resolves variable-length heap
 //! addresses before writing.
 
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU64, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::AddressRange;
@@ -15,6 +15,7 @@ use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::{DenseAttrFixup, PreparedDenseAttrs};
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::PageType;
+use hdf5_pure_space::__private::ReservationRequest;
 
 use crate::FillTime;
 use crate::PhysicalAddress;
@@ -59,6 +60,7 @@ use super::LossyTailReencoding;
 use super::append;
 use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
+use super::reservation::ReservationFailure;
 use super::retirement::ChunkAllocation;
 use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
@@ -929,23 +931,55 @@ impl WriteEngine {
                 }
             }
             None => {
+                let requests = new_chunks
+                    .iter()
+                    .map(|chunk| {
+                        NonZeroU64::new(chunk.stored_size())
+                            .map(|size| ReservationRequest::new(size, AllocationClass::Raw))
+                            .ok_or(FormatError::InvalidChunkGeometry(
+                                "chunk allocation is empty",
+                            ))
+                    })
+                    .chain(core::iter::once(
+                        NonZeroU64::new(ea_len)
+                            .map(|size| {
+                                ReservationRequest::with_page_type(
+                                    size,
+                                    AllocationClass::Metadata,
+                                    PageType::Raw,
+                                )
+                            })
+                            .ok_or_else(|| {
+                                FormatError::Internal("extensible-array allocation is empty".into())
+                            }),
+                    ))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut plan = self
+                    .plan_reservations(&requests)
+                    .map_err(ReservationFailure::into_error)?;
                 let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
-                for chunk in new_chunks {
-                    let abs = self.alloc_or_append_typed(chunk.bytes(), AllocationClass::Raw)?;
+                for (chunk, reservation) in new_chunks.iter().zip(plan.reservations()) {
                     combined.push(ChunkRecord {
-                        address: base.relative(PhysicalAddress::new(abs))?,
+                        address: base.relative(reservation.range().start())?,
                         stored_size: chunk.stored_size(),
                         filter_mask: chunk.filter_mask(),
                     });
                 }
-                let at =
-                    self.reserve_with_page_type(ea_len, AllocationClass::Metadata, PageType::Raw)?;
-                let bytes = ea(
-                    &IndexSlots::dense(&combined),
-                    base.relative(PhysicalAddress::new(at.address()))?,
-                )?;
-                let ea_addr = self.place(at, &bytes)?;
-                base.relative(PhysicalAddress::new(ea_addr))?
+                for chunk in new_chunks {
+                    plan.write_next(chunk.bytes())?;
+                }
+                let index_address = plan
+                    .reservations()
+                    .last()
+                    .ok_or_else(|| {
+                        FormatError::Internal("extensible-array reservation is absent".into())
+                    })?
+                    .range()
+                    .start();
+                let bytes = ea(&IndexSlots::dense(&combined), base.relative(index_address)?)?;
+                let ea_addr = plan.write_next(&bytes)?;
+                plan.finish()?;
+                base.relative(ea_addr)?
             }
         };
 
