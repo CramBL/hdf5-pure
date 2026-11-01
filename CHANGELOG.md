@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- `File::commit` reduces temporary memory and source reads when reconstructing padded PAGE superblock extensions ([#1043](https://github.com/CramBL/hdf5-pure/pull/1043)).
 - Staged appends through `File::commit` share free-space lookup state across chunk and index reservations ([#1035](https://github.com/CramBL/hdf5-pure/pull/1035)). Persistent metadata writes reuse measured manager projections through placement and encoding ([#1036](https://github.com/CramBL/hdf5-pure/pull/1036)).
 - `File::commit` reuses lazy hard-link topology for relocation checks and deletion planning. Collection reclamation reuses per-object reference summaries for candidate collections ([#1034](https://github.com/CramBL/hdf5-pure/pull/1034)).
 - Writable free-space recovery through `File::open_rw` builds free lists in bulk. PAGE normalization, completed-page coverage, and range subtraction use bounded passes over extents ([#1018](https://github.com/CramBL/hdf5-pure/pull/1018)).

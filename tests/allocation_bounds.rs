@@ -2600,3 +2600,128 @@ fn repack_resource_values(index: usize) -> Vec<i32> {
         Vec::new()
     }
 }
+
+#[rstest]
+#[case::small(4)]
+#[case::large(64)]
+fn page_commit_memory_accounts_for_extension_reads_and_mirrored_storage(
+    #[case] chunks: usize,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] backing: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("padded-extension.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
+    builder.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
+    builder.write(&path).unwrap();
+    let capacity = pad_page_extension(&path, chunks);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(backing)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    let mut dataset = file.dataset("keep").unwrap();
+    dataset.set_attr("audit", AttrValue::I32(7)).unwrap();
+    let name = format!("padded_page_commit_{chunks}_{backing:?}");
+    let ((), measured) = allocation::measure(&name, || file.commit().unwrap());
+    assert!(measured.blocks > 0, "{measured}");
+    assert!(measured.bytes >= capacity, "{measured}");
+    let mirrored_capacity = if backing == MemoryStrategy::Mirrored {
+        2 * capacity
+    } else {
+        0
+    };
+    assert!(
+        measured.bytes < 2 * capacity + mirrored_capacity + 350_000,
+        "{measured}"
+    );
+    assert!(
+        measured.peak_bytes < mirrored_capacity + 350_000,
+        "{measured}"
+    );
+    assert!(
+        measured.live_bytes < mirrored_capacity + 32_768,
+        "{measured}"
+    );
+    assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4]);
+    drop(dataset);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("keep").unwrap().read_i32().unwrap(),
+        [1, 2, 3, 4]
+    );
+    assert_eq!(
+        file.dataset("keep").unwrap().attrs().unwrap(),
+        std::collections::HashMap::from([("audit".to_string(), AttrValue::I32(7))]),
+    );
+    file.close().unwrap();
+}
+
+fn pad_page_extension(path: &Path, chunks: usize) -> u64 {
+    let file = File::open(path).unwrap();
+    let mut superblock = file.superblock().clone();
+    let mut info = file.file_space_info().unwrap().unwrap();
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
+    file.close().unwrap();
+    let mut bytes = std::fs::read(path).unwrap();
+    let start = bytes.len();
+    let flags = v2::HeaderFlags::CHUNK_SIZE_WIDTH;
+    let nil = Message::nil(60_000);
+    let piece = v2::continuation_chunk(std::slice::from_ref(&nil), flags);
+    let mut header = Header::new()
+        .flags(flags)
+        .message(Message::new(
+            MessageType::FILE_SPACE_INFO,
+            &hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info).unwrap(),
+        ))
+        .message(
+            Message::new(MessageType::UNKNOWN, &[0xA5; 13])
+                .with_flags(test_util::object_header::MessageFlags::MARK_IF_UNKNOWN),
+        )
+        .message(nil);
+    for _ in 1..chunks {
+        header = header.continuation(0, &piece, Widths::EIGHT);
+    }
+    let header_len = header.build().len();
+    let capacity = header_len + (chunks - 1) * piece.len();
+    let end = (start + capacity).div_ceil(4_096) * 4_096;
+    superblock.eof_address = u64::try_from(end).unwrap();
+    superblock.superblock_extension_address =
+        Some(StoredAddress::new(u64::try_from(start).unwrap()));
+    info.eoa_pre_fsm = Some(hdf5_pure::DecodedStoredAddress::Defined(
+        StoredAddress::new(u64::try_from(end).unwrap()),
+    ));
+    let mut header = Header::new()
+        .flags(flags)
+        .message(Message::new(
+            MessageType::FILE_SPACE_INFO,
+            &hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info).unwrap(),
+        ))
+        .message(
+            Message::new(MessageType::UNKNOWN, &[0xA5; 13])
+                .with_flags(test_util::object_header::MessageFlags::MARK_IF_UNKNOWN),
+        )
+        .message(Message::nil(60_000));
+    let mut at = start + header_len;
+    for _ in 1..chunks {
+        header = header.continuation(at, &piece, Widths::EIGHT);
+        at += piece.len();
+    }
+    bytes.extend(header.build());
+    for _ in 1..chunks {
+        bytes.extend_from_slice(&piece);
+    }
+    bytes.resize(end, 0);
+    let encoded = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+    bytes[..encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(path, bytes).unwrap();
+    u64::try_from(capacity).unwrap()
+}

@@ -798,12 +798,11 @@ impl WriteEngine {
             [DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
             StoredAddress::ZERO,
         );
-        let ext_len = object_header::build_v2_object_header(
-            &self
-                .rewrite_extension_region(old_ext_addr, &placeholder)?
-                .without_nil()?,
-        )?
-        .len() as u64;
+        let source = self.image();
+        let predecessor = object_header::ExtensionReconstruction::read(source, old_ext_addr, base)?;
+        let ext_len =
+            object_header::build_v2_object_header(&predecessor.rewrite(widths, &placeholder)?)?
+                .len() as u64;
 
         let current_eoa = self.end_of_allocation()?;
         let Some(plan) = paged_persistence::PagedPersistencePlan::new(
@@ -852,7 +851,7 @@ impl WriteEngine {
             )
         };
         let ext_oh = object_header::build_v2_object_header_allocation(
-            &self.rewrite_extension_region(old_ext_addr, &info)?,
+            &predecessor.rewrite(widths, &info)?,
             widths,
             extension,
         )?;
