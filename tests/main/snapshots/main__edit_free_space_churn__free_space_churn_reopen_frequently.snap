@@ -3,119 +3,151 @@ source: tests/main/edit_free_space_churn.rs
 expression: report.render()
 ---
 free-space churn
-================
-
-scenario: reopen-frequently
+  property  value
+  --------  -----------------
+  scenario  reopen-frequently
 
 limits
-  maximum file size : 33554432
-  high-water        : 29360128
-  low-water         : 25165824
-  headroom          : 4194304
+  Metric                  bytes
+  -----------------  ----------
+  maximum file size  33,554,432
+  high-water         29,360,128
+  low-water          25,165,824
+  headroom            4,194,304
 
 workload
-  epochs written             : 91
-  epochs deleted             : 66
-  epochs still live          : 25
-  epochs before first delete : 27
-  churn epochs               : 64
-  deletion waves             : 16
-  max deleted in one wave    : 5
+  Metric                      count
+  --------------------------  -----
+  epochs written                 91
+  epochs deleted                 66
+  epochs still live              25
+  epochs before first delete     27
+  churn epochs                   64
+  deletion waves                 16
+  max deleted in one wave         5
 
 lifecycle
-  writable opens : 20
-  closes         : 20
-  reopens        : 19
+  Metric          count
+  --------------  -----
+  writable opens     20
+  closes             20
+  reopens            19
 
 high water
-  physical file : 30754782
-  logical file  : 30754782
-  pressure      : 30492819
-  reusable free : 5852717
+  Metric              bytes
+  -------------  ----------
+  physical file  30,754,782
+  logical file   30,754,782
+  pressure       30,492,819
+  reusable free   5,852,717
 
 reuse
-  epoch writes growing physical file   : 31
-  epoch writes without physical growth : 60
-  post-churn writes without growth      : 60
+  Metric                                count
+  ------------------------------------  -----
+  epoch writes growing physical file       31
+  epoch writes without physical growth     60
+  post-churn writes without growth         60
 
 deletion waves
-  wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable pressure
-     1           26           27        5          22  30320858  30320858   5558278  24762580
-     2           31           27        5          22  30754782  30754782   5851987  24902795
-     3           35           26        4          22  30754782  30754782   5851015  24903767
-     4           39           26        4          22  30754782  30754782   5850945  24903837
-     5           43           26        4          22  30754782  30754782   5852044  24902738
-     6           47           26        4          22  30754782  30754782   5852717  24902065
-     7           51           26        4          22  30754782  30754782   5852239  24902543
-     8           55           26        4          22  29178188  29178188   4274513  24903675
-     9           59           26        4          22  29735990  29735990   4830094  24905896
-    10           63           26        4          22  29735990  29735990   4828510  24907480
-    11           67           26        4          22  29735990  29735990   4826981  24909009
-    12           71           26        4          22  29735990  29735990   4825890  24910100
-    13           75           26        4          22  29735990  29735990   4824785  24911205
-    14           79           26        4          22  29898161  29898161   4986488  24911673
-    15           83           26        4          22  30060852  30060852   5149190  24911662
-    16           87           26        4          22  30060852  30060852   5149085  24911767
+  wave  after-epoch  live-before  deleted  live-after    physical     logical   reusable    pressure
+  ----  -----------  -----------  -------  ----------  ----------  ----------  ---------  ----------
+     1           26           27        5          22  30,320,858  30,320,858  5,558,278  24,762,580
+     2           31           27        5          22  30,754,782  30,754,782  5,851,987  24,902,795
+     3           35           26        4          22  30,754,782  30,754,782  5,851,015  24,903,767
+     4           39           26        4          22  30,754,782  30,754,782  5,850,945  24,903,837
+     5           43           26        4          22  30,754,782  30,754,782  5,852,044  24,902,738
+     6           47           26        4          22  30,754,782  30,754,782  5,852,717  24,902,065
+     7           51           26        4          22  30,754,782  30,754,782  5,852,239  24,902,543
+     8           55           26        4          22  29,178,188  29,178,188  4,274,513  24,903,675
+     9           59           26        4          22  29,735,990  29,735,990  4,830,094  24,905,896
+    10           63           26        4          22  29,735,990  29,735,990  4,828,510  24,907,480
+    11           67           26        4          22  29,735,990  29,735,990  4,826,981  24,909,009
+    12           71           26        4          22  29,735,990  29,735,990  4,825,890  24,910,100
+    13           75           26        4          22  29,735,990  29,735,990  4,824,785  24,911,205
+    14           79           26        4          22  29,898,161  29,898,161  4,986,488  24,911,673
+    15           83           26        4          22  30,060,852  30,060,852  5,149,190  24,911,662
+    16           87           26        4          22  30,060,852  30,060,852  5,149,085  24,911,767
 
 reopen checkpoints
-  #  reason          after-epoch  physical  persisted-free  recovered-free
-  1  initial-fill              7   9010515            4273            4273
-  2  initial-fill             15  18023019            4102            4102
-  3  initial-fill             23  27038570            4690            4690
-  4  deletion-wave            26  30320858         5558260         5558260
-  5  deletion-wave            31  30754782         5851987         5851987
-  6  deletion-wave            35  30754782         5851015         5851015
-  7  deletion-wave            39  30754782         5850945         5850945
-  8  deletion-wave            43  30754782         5852044         5852044
-  9  deletion-wave            47  30754782         5852717         5852717
-  10  deletion-wave            51  30754782         5852239         5852239
-  11  deletion-wave            55  29178188         4274513         4274513
-  12  deletion-wave            59  29735990         4830094         4830094
-  13  deletion-wave            63  29735990         4828510         4828510
-  14  deletion-wave            67  29735990         4826981         4826981
-  15  deletion-wave            71  29735990         4825890         4825890
-  16  deletion-wave            75  29735990         4824785         4824785
-  17  deletion-wave            79  29898161         4986488         4986488
-  18  deletion-wave            83  30060852         5149190         5149190
-  19  deletion-wave            87  30060852         5149085         5149085
+   #  reason         after-epoch    physical  persisted-free  recovered-free
+  --  -------------  -----------  ----------  --------------  --------------
+   1  initial-fill             7   9,010,515           4,273           4,273
+   2  initial-fill            15  18,023,019           4,102           4,102
+   3  initial-fill            23  27,038,570           4,690           4,690
+   4  deletion-wave           26  30,320,858       5,558,260       5,558,260
+   5  deletion-wave           31  30,754,782       5,851,987       5,851,987
+   6  deletion-wave           35  30,754,782       5,851,015       5,851,015
+   7  deletion-wave           39  30,754,782       5,850,945       5,850,945
+   8  deletion-wave           43  30,754,782       5,852,044       5,852,044
+   9  deletion-wave           47  30,754,782       5,852,717       5,852,717
+  10  deletion-wave           51  30,754,782       5,852,239       5,852,239
+  11  deletion-wave           55  29,178,188       4,274,513       4,274,513
+  12  deletion-wave           59  29,735,990       4,830,094       4,830,094
+  13  deletion-wave           63  29,735,990       4,828,510       4,828,510
+  14  deletion-wave           67  29,735,990       4,826,981       4,826,981
+  15  deletion-wave           71  29,735,990       4,825,890       4,825,890
+  16  deletion-wave           75  29,735,990       4,824,785       4,824,785
+  17  deletion-wave           79  29,898,161       4,986,488       4,986,488
+  18  deletion-wave           83  30,060,852       5,149,190       5,149,190
+  19  deletion-wave           87  30,060,852       5,149,085       5,149,085
 
 final
-  physical file size         : 30060852
-  logical size               : 30060852
-  reusable free              : 1866725
-  reusable free regions      : 69
-  pressure                   : 28194127
-  live epochs                : 25
+  Metric                              value
+  -----------------------------  ----------
+  physical file size (bytes)     30,060,852
+  logical size (bytes)           30,060,852
+  reusable free (bytes)           1,866,725
+  reusable free regions (count)          69
+  pressure (bytes)               28,194,127
+  live epochs (count)                    25
 
-coverage
-  object/group layout
-    nested epoch groups              : 12
-    compact attribute objects        : 44
-    dense attribute objects          : 12
-    compact-link groups              : 37
-    high-fanout compact-link groups  : 6
-    dense-link groups                : 0 (writer unsupported)
-  chunk indices
-    single chunk                     : 6
-    fixed array                      : 106
-    extensible array                 : 7
-  ranks
-    rank 1 datasets                  : 144
-    rank 2 datasets                  : 6
-  chunk grids
-    aligned                          : 58
-    partial-edge                     : 61
-  filters
-    none                             : 69
-    deflate                          : 25
-    shuffle + deflate                : 25
-    integer scale-offset             : 31
-  filtered contents
-    compressible                     : 25
-    incompressible                   : 25
+coverage: object/group layout
+  Metric                                  count
+  --------------------------------------  -----
+  nested epoch groups                        12
+  compact attribute objects                  44
+  dense attribute objects                    12
+  compact-link groups                        37
+  high-fanout compact-link groups             6
+  dense-link groups (writer unsupported)      0
+
+coverage: chunk indices
+  Metric            count
+  ----------------  -----
+  single chunk          6
+  fixed array         106
+  extensible array      7
+
+coverage: ranks
+  Metric           count
+  ---------------  -----
+  rank 1 datasets    144
+  rank 2 datasets      6
+
+coverage: chunk grids
+  Metric        count
+  ------------  -----
+  aligned          58
+  partial-edge     61
+
+coverage: filters
+  Metric                count
+  --------------------  -----
+  none                     69
+  deflate                  25
+  shuffle + deflate        25
+  integer scale-offset     31
+
+coverage: filtered contents
+  Metric          count
+  --------------  -----
+  compressible       25
+  incompressible     25
 
 persisted space after writer close
-  physical file size : 30060852
-  logical EOF        : 30060852
-  free bytes         : 1866725
-  sections           : 69
+  Metric                           value
+  --------------------------  ----------
+  physical file size (bytes)  30,060,852
+  logical EOF (bytes)         30,060,852
+  free bytes                   1,866,725
+  sections (count)                    69
