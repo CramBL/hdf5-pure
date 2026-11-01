@@ -156,6 +156,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^mat_streaming::/) |
     test(/^mat_struct_array::/) |
     test(/^native_complex::/) |
+    test(/^opaque_tags::/) |
     test(/^ndarray_roundtrip::/) |
     test(/^serde::/)
 )
