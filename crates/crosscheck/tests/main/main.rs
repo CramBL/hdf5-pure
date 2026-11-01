@@ -101,6 +101,7 @@ mod numeric_padding;
 mod object_header_padding;
 mod object_header_v1_malformed;
 mod object_path;
+mod opaque_tags;
 mod owned_append;
 mod owned_swmr;
 mod page_buffer;
