@@ -71,7 +71,7 @@ free-space sections (stored addresses, byte lengths)
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x00000030        0x0000012f       0x00000030      0x0000012f  yes
       1         0x0000026b        0x0000010c       0x0000026b      0x0000010c  yes
-      2         0x000008d5        0x0000072b       0x000008d5      0x0000072b  yes
+      2         0x0000089f        0x00000761       0x0000089f      0x00000761  yes
       3         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
       4         0x00002000        0x00001000       0x00002000      0x00001000  yes
 
@@ -79,8 +79,8 @@ free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
   section count                     5        5
-  section bytes                 9,798    9,798
-  H5Fget_freespace                  -    9,798
+  section bytes                 9,852    9,852
+  H5Fget_freespace                  -    9,852
   reported - section bytes          -        0
 
 comparison
@@ -116,8 +116,8 @@ free-space sections (stored addresses, byte lengths)
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x00000030        0x0000012f       0x00000030      0x0000012f  yes
       1         0x0000034f        0x00000028       0x0000034f      0x00000028  yes
-      2         0x0000056d        0x00000368       0x0000056d      0x00000368  yes
-      3         0x00000bcc        0x00000434       0x00000bcc      0x00000434  yes
+      2         0x0000056d        0x00000332       0x0000056d      0x00000332  yes
+      3         0x00000b96        0x0000046a       0x00000b96      0x0000046a  yes
       4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
       5         0x00002000        0x00001000       0x00002000      0x00001000  yes
       6         0x00005ee0        0x00000120       0x00005ee0      0x00000120  yes
@@ -163,16 +163,17 @@ free-space sections (stored addresses, byte lengths)
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x000000b3        0x000000ac       0x000000b3      0x000000ac  yes
       1         0x0000026b        0x0000010c       0x0000026b      0x0000010c  yes
-      2         0x000008be        0x00000742       0x000008be      0x00000742  yes
-      3         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
-      4         0x00002000        0x00001000       0x00002000      0x00001000  yes
+      2         0x0000056d        0x00000629       0x0000056d      0x00000629  yes
+      3         0x00000ed5        0x0000012b       0x00000ed5      0x0000012b  yes
+      4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
+      5         0x00002000        0x00001000       0x00002000      0x00001000  yes
 
 free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
-  section count                     5        5
-  section bytes                 9,690    9,690
-  H5Fget_freespace                  -    9,690
+  section count                     6        6
+  section bytes                 9,708    9,708
+  H5Fget_freespace                  -    9,708
   reported - section bytes          -        0
 
 comparison
@@ -209,18 +210,17 @@ free-space sections (stored addresses, byte lengths)
       0         0x00000030        0x00000083       0x00000030      0x00000083  yes
       1         0x000000fa        0x00000065       0x000000fa      0x00000065  yes
       2         0x00000308        0x0000006f       0x00000308      0x0000006f  yes
-      3         0x0000056d        0x00000351       0x0000056d      0x00000351  yes
-      4         0x00000bb5        0x0000044b       0x00000bb5      0x0000044b  yes
-      5         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
-      6         0x00002000        0x00001000       0x00002000      0x00001000  yes
-      7         0x00006070        0x00000f90       0x00006070      0x00000f90  yes
+      3         0x00000876        0x0000078a       0x00000876      0x0000078a  yes
+      4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
+      5         0x00002000        0x00001000       0x00002000      0x00001000  yes
+      6         0x00006070        0x00000f90       0x00006070      0x00000f90  yes
 
 free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
-  section count                     8        8
-  section bytes                13,667   13,667
-  H5Fget_freespace                  -   13,667
+  section count                     7        7
+  section bytes                13,649   13,649
+  H5Fget_freespace                  -   13,649
   reported - section bytes          -        0
 
 comparison
@@ -256,8 +256,8 @@ free-space sections (stored addresses, byte lengths)
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x000000b3        0x000000ac       0x000000b3      0x000000ac  yes
       1         0x0000026b        0x0000010c       0x0000026b      0x0000010c  yes
-      2         0x0000056d        0x00000648       0x0000056d      0x00000648  yes
-      3         0x00000f18        0x000000e8       0x00000f18      0x000000e8  yes
+      2         0x0000056d        0x00000309       0x0000056d      0x00000309  yes
+      3         0x00000ba3        0x0000045d       0x00000ba3      0x0000045d  yes
       4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
       5         0x00002000        0x00001000       0x00002000      0x00001000  yes
 
@@ -265,8 +265,8 @@ free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
   section count                     6        6
-  section bytes                 9,672    9,672
-  H5Fget_freespace                  -    9,672
+  section bytes                 9,726    9,726
+  H5Fget_freespace                  -    9,726
   reported - section bytes          -        0
 
 comparison
@@ -302,17 +302,16 @@ free-space sections (stored addresses, byte lengths)
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x00000030        0x00000083       0x00000030      0x00000083  yes
       1         0x000000fa        0x00000065       0x000000fa      0x00000065  yes
-      2         0x0000026b        0x0000010c       0x0000026b      0x0000010c  yes
-      3         0x00000876        0x000006a2       0x00000876      0x000006a2  yes
-      4         0x00000fb5        0x0000004b       0x00000fb5      0x0000004b  yes
-      5         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
-      6         0x00002000        0x00001000       0x00002000      0x00001000  yes
-      7         0x00006200        0x00000e00       0x00006200      0x00000e00  yes
+      2         0x00000308        0x0000006f       0x00000308      0x0000006f  yes
+      3         0x00000876        0x0000078a       0x00000876      0x0000078a  yes
+      4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
+      5         0x00002000        0x00001000       0x00002000      0x00001000  yes
+      6         0x00006200        0x00000e00       0x00006200      0x00000e00  yes
 
 free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
-  section count                     8        8
+  section count                     7        7
   section bytes                13,249   13,249
   H5Fget_freespace                  -   13,249
   reported - section bytes          -        0
@@ -351,7 +350,7 @@ free-space sections (stored addresses, byte lengths)
       0         0x000000b3        0x000000ac       0x000000b3      0x000000ac  yes
       1         0x0000026b        0x0000010c       0x0000026b      0x0000010c  yes
       2         0x0000056d        0x00000309       0x0000056d      0x00000309  yes
-      3         0x00000bd9        0x00000427       0x00000bd9      0x00000427  yes
+      3         0x00000ba3        0x0000045d       0x00000ba3      0x0000045d  yes
       4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
       5         0x00002000        0x00001000       0x00002000      0x00001000  yes
 
@@ -359,8 +358,8 @@ free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
   section count                     6        6
-  section bytes                 9,672    9,672
-  H5Fget_freespace                  -    9,672
+  section bytes                 9,726    9,726
+  H5Fget_freespace                  -    9,726
   reported - section bytes          -        0
 
 comparison

@@ -86,6 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` splitting contiguous PAGE free runs into page-sized records, preventing reuse for larger allocations and inflating manager storage.
 - Fixed native complex datatype messages being decoded as compounds. `Datatype::Complex` preserves homogeneous rectangular complex metadata and its floating-point component type ([#1039](https://github.com/CramBL/hdf5-pure/pull/1039)).
 - Fixed `Dataset::datatype` reporting version 1 compound array members as scalars, omitting their dimensions and full byte sizes ([#1027](https://github.com/CramBL/hdf5-pure/pull/1027)).
 
