@@ -733,7 +733,7 @@ impl WriteEngine {
     ///
     /// Plans the complete metadata reservation before writing. The serialized managers and the
     /// adopted session state include the same page tails and exclude the complete reservation,
-    /// including owned section-list padding. Placement uses appended pages or space already free
+    /// including owned extension padding. Placement uses appended pages or space already free
     /// before this publication. Pending object frees and superseded managers cannot fund it.
     ///
     /// Writes the planned blocks before publishing their addresses in the superblock. Publishes
@@ -799,7 +799,9 @@ impl WriteEngine {
             StoredAddress::ZERO,
         );
         let ext_len = object_header::build_v2_object_header(
-            &self.rewrite_extension_region(old_ext_addr, &placeholder)?,
+            &self
+                .rewrite_extension_region(old_ext_addr, &placeholder)?
+                .without_nil()?,
         )?
         .len() as u64;
 
@@ -818,6 +820,7 @@ impl WriteEngine {
         };
         let paged_persistence::PagedPersistencePlan {
             tail,
+            extension,
             slots,
             blocks,
         } = plan;
@@ -825,19 +828,6 @@ impl WriteEngine {
         let blocks_len = tail.allocation.len();
         let final_eoa = tail.final_eoa;
         let reused = !tail.appended;
-        if reused {
-            let reserved = self.space.allocate(blocks_len, AllocationClass::Metadata);
-            if reserved != Some(tail.allocation) {
-                return Err(FormatError::Internal(
-                    "a PAGE tail reservation differs from its pure plan".into(),
-                )
-                .into());
-            }
-        } else {
-            self.begin_page(PageType::Meta)?;
-        }
-        let final_eof = self.context.addresses().resolve(final_eoa)?;
-
         let info = if blocks.is_empty() {
             file_space_info::persistent_empty(
                 offset_width,
@@ -861,16 +851,31 @@ impl WriteEngine {
                 final_eoa,
             )
         };
-        let ext_oh = object_header::build_v2_object_header(
+        let ext_oh = object_header::build_v2_object_header_allocation(
             &self.rewrite_extension_region(old_ext_addr, &info)?,
+            widths,
+            extension,
         )?;
         debug_assert_eq!(
             ext_oh.len() as u64,
-            ext_len,
-            "extension length must be stable across the placeholder and real messages"
+            extension.len(),
+            "an encoded extension fills its planned allocation"
         );
 
-        // Include section-list padding in the allocation recorded for future reclamation.
+        if reused {
+            let reserved = self.space.allocate(blocks_len, AllocationClass::Metadata);
+            if reserved != Some(tail.allocation) {
+                return Err(FormatError::Internal(
+                    "a PAGE tail reservation differs from its pure plan".into(),
+                )
+                .into());
+            }
+        } else {
+            self.begin_page(PageType::Meta)?;
+        }
+        let final_eof = self.context.addresses().resolve(final_eoa)?;
+
+        // Include extension padding in the allocation recorded for future reclamation.
         let region = FreeExtent::new(ext_addr, blocks_len).ok_or(Error::Format(
             FormatError::OffsetOverflow {
                 offset: ext_addr.get(),

@@ -44,6 +44,7 @@ use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
@@ -554,7 +555,8 @@ fn paged_manager_capacity_survives_reference_library_mutation(
     }
     let reusable = file.reusable_free_sections().unwrap();
     file.close().unwrap();
-    assert!(file_space::serialized_manager_padding(&path) > 0);
+    assert_eq!(file_space::serialized_manager_padding(&path), 0);
+    assert!(extension_padding_bytes(&path) > 0);
     let total = reusable.free_bytes();
     let file = hdf5::File::open_rw(&path).unwrap();
     assert_eq!(file.free_space(), total);
@@ -606,6 +608,38 @@ fn paged_manager_capacity_survives_reference_library_mutation(
     );
     assert!(file.file_space_info().unwrap().unwrap().persist);
     file.close().unwrap();
+}
+
+fn extension_padding_bytes(path: &Path) -> u64 {
+    let bytes = std::fs::read(path).unwrap();
+    let file = File::open_streaming(path).unwrap();
+    let address = file
+        .resolve_address(file.superblock().superblock_extension_address.unwrap())
+        .unwrap();
+    let at = usize::try_from(address.get()).unwrap();
+    let prefix = ObjectHeaderPrefix::parse(&bytes[at..]).unwrap();
+    let mut padding = 0;
+    for extent in storage::header_extents(&file, &bytes, address) {
+        let start = usize::try_from(extent.start().get()).unwrap();
+        let end = usize::try_from(extent.end().get()).unwrap();
+        let chunk = &bytes[start..end];
+        let range = if extent.start() == address {
+            prefix.len..prefix.len + usize::try_from(prefix.chunk0_size).unwrap()
+        } else {
+            format::continuation_block_messages(chunk).unwrap()
+        };
+        let records = &chunk[range];
+        let mut start = 0;
+        while let Some(record) = prefix.prefix.layout.next_message(records, start).unwrap() {
+            let end = record.body_range.end;
+            if record.msg_type == MessageType::NIL {
+                padding += u64::try_from(end - start).unwrap();
+            }
+            start = end;
+        }
+    }
+    file.close().unwrap();
+    padding
 }
 
 #[derive(Clone, Copy, Debug)]

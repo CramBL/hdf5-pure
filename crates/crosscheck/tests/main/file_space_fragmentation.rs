@@ -47,7 +47,7 @@ fn native_fragmentation_preserves_managers_survivors_and_publication(
         .unwrap();
     file.commit().unwrap();
     file.close().unwrap();
-    let native = NativeFile::open(&path).unwrap();
+    let native = NativeFile::open_rw(&path).unwrap();
     assert_eq!(
         native
             .dataset("replacement")
@@ -64,6 +64,7 @@ fn native_fragmentation_preserves_managers_survivors_and_publication(
             .unwrap(),
         7
     );
+    native.flush().unwrap();
     native.close().unwrap();
     scale.assert_native_survivors(&path);
     file_space_oracle::assert_persisted_sections(&path);
@@ -76,8 +77,9 @@ fn native_fragmentation_preserves_managers_survivors_and_publication(
     file.commit().unwrap();
     file.close().unwrap();
     scale.assert_native_survivors(&path);
-    let native = NativeFile::open(&path).unwrap();
+    let native = NativeFile::open_rw(&path).unwrap();
     assert!(!native.link_exists("replacement"));
+    native.flush().unwrap();
     native.close().unwrap();
     file_space_oracle::assert_persisted_sections(&path);
 }

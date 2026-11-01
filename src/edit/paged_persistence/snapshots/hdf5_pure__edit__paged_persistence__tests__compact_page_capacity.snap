@@ -18,7 +18,8 @@ capacity contributions
 owned storage
   Metric                bytes
   --------------------  -----
-  extension               160
+  extension encoding      160
+  extension allocation    313
   manager encoding        234
-  manager allocations     387
+  manager allocations     234
   complete reservation    547

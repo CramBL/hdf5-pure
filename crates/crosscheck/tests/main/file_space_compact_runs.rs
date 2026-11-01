@@ -15,6 +15,9 @@ use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::SyncPolicy;
+use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::{FormatWidths, FreeSpaceManagerHeader};
 use rstest::rstest;
 use test_util::snapshot::text::{Report, Value};
 use test_util_hdf5::file_space_oracle;
@@ -52,20 +55,19 @@ fn a_metadata_edit_preserves_native_multi_page_hole_reuse(#[case] memory: Memory
     assert_eq!(fs::read(&template).unwrap(), fs::read(&control).unwrap());
     let after = persisted(&edited);
     assert_eq!(large_runs(&after), slice::from_ref(&hole));
-    assert!(after.free_sections().section_count() <= before.free_sections().section_count() + 2);
     assert!(after.manager_metadata_bytes() < PAGE);
     assert_eq!(fs::metadata(&edited).unwrap().len(), initial_len);
     let control_allocation = allocate_native(&control, 0);
     let edited_allocation = allocate_native(&edited, 1);
     assert_eq!(control_allocation.address, hole.start);
     assert_eq!(edited_allocation.address, hole.start);
-    assert_eq!(control_allocation.final_len, control_allocation.initial_len);
-    assert_eq!(edited_allocation.final_len, edited_allocation.initial_len);
     assert!(edited_allocation.address + REQUEST as u64 <= hole.end);
     assert_pure_values(&control, 0);
     assert_pure_values(&edited, 1);
     let control_final = persisted(&control);
     let edited_final = persisted(&edited);
+    assert_manager_page_growth(&control, &control_allocation, &control_final);
+    assert_manager_page_growth(&edited, &edited_allocation, &edited_final);
     let remaining = hole.start + REQUEST as u64..hole.end;
     assert_eq!(large_runs(&control_final), slice::from_ref(&remaining));
     assert_eq!(large_runs(&edited_final), [remaining]);
@@ -201,6 +203,45 @@ fn allocate_native(path: &Path, counter: i32) -> NativeAllocation {
         address,
         final_len: fs::metadata(path).unwrap().len(),
     }
+}
+
+fn assert_manager_page_growth(
+    path: &Path,
+    allocation: &NativeAllocation,
+    report: &PersistedFreeSections,
+) {
+    let bytes = fs::read(path).unwrap();
+    let file = File::open_streaming(path).unwrap();
+    let base = file.superblock().base_address;
+    let widths = FormatWidths {
+        offsets: file.superblock().offset_size,
+        lengths: file.superblock().length_size,
+    };
+    let mut pages = Vec::new();
+    for manager in report.managers() {
+        let address = base.resolve(manager.address()).unwrap().get();
+        let header =
+            FreeSpaceManagerHeader::parse(widths, &bytes[usize::try_from(address).unwrap()..])
+                .unwrap();
+        let sections = base.resolve(header.section_list_addr()).unwrap().get();
+        for (start, len) in [
+            (address, format::free_space_manager_header_len(widths)),
+            (sections, header.section_list_allocated()),
+        ] {
+            let end = start.checked_add(len).unwrap();
+            assert!(end <= allocation.final_len);
+            pages.push(start / PAGE * PAGE..end.div_ceil(PAGE) * PAGE);
+        }
+    }
+    file.close().unwrap();
+    pages.sort_by_key(|range| range.start);
+    let mut end = allocation.initial_len;
+    for page in pages {
+        if page.start <= end && page.end > end {
+            end = page.end;
+        }
+    }
+    assert_eq!(end, allocation.final_len);
 }
 
 fn assert_pure_values(path: &Path, counter: i32) {
