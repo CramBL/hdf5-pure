@@ -59,6 +59,7 @@ use crate::width::FormatWidths;
 use super::LossyTailReencoding;
 use super::append;
 use super::attributes::{DenseAttrSet, EditedAttrs};
+use super::block::{BlockRequest, EncodingDependency};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
 use super::reservation::ReservationFailure;
 use super::retirement::ChunkAllocation;
@@ -935,7 +936,12 @@ impl WriteEngine {
                     .iter()
                     .map(|chunk| {
                         NonZeroU64::new(chunk.stored_size())
-                            .map(|size| ReservationRequest::new(size, AllocationClass::Raw))
+                            .map(|size| {
+                                BlockRequest::complete(
+                                    ReservationRequest::new(size, AllocationClass::Raw),
+                                    EncodingDependency::Independent,
+                                )
+                            })
                             .ok_or(FormatError::InvalidChunkGeometry(
                                 "chunk allocation is empty",
                             ))
@@ -943,10 +949,13 @@ impl WriteEngine {
                     .chain(core::iter::once(
                         NonZeroU64::new(ea_len)
                             .map(|size| {
-                                ReservationRequest::with_page_type(
-                                    size,
-                                    AllocationClass::Metadata,
-                                    PageType::Raw,
+                                BlockRequest::complete(
+                                    ReservationRequest::with_page_type(
+                                        size,
+                                        AllocationClass::Metadata,
+                                        PageType::Raw,
+                                    ),
+                                    EncodingDependency::Reservations,
                                 )
                             })
                             .ok_or_else(|| {
@@ -955,7 +964,7 @@ impl WriteEngine {
                     ))
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut plan = self
-                    .plan_reservations(&requests)
+                    .plan_blocks(&requests)
                     .map_err(ReservationFailure::into_error)?;
                 let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
                 for (chunk, reservation) in new_chunks.iter().zip(plan.reservations()) {
@@ -968,14 +977,14 @@ impl WriteEngine {
                 for chunk in new_chunks {
                     plan.write_next(chunk.bytes())?;
                 }
-                let index_address = plan
-                    .reservations()
-                    .last()
-                    .ok_or_else(|| {
-                        FormatError::Internal("extensible-array reservation is absent".into())
-                    })?
-                    .range()
-                    .start();
+                let index = plan.reservations().last().ok_or_else(|| {
+                    FormatError::Internal("extensible-array reservation is absent".into())
+                })?;
+                debug_assert_eq!(
+                    index.encoding_dependency(),
+                    EncodingDependency::Reservations
+                );
+                let index_address = index.range().start();
                 let bytes = ea(&IndexSlots::dense(&combined), base.relative(index_address)?)?;
                 let ea_addr = plan.write_next(&bytes)?;
                 plan.finish()?;

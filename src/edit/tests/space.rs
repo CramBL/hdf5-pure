@@ -1235,7 +1235,7 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         );
         let free_before = free_total(&s);
         let eoa = s.end_of_allocation().unwrap().get();
-        let (post, at, tail_len, _) = s
+        let (post, _, at, tail_len, _) = s
             .flat_tail_layout(
                 StoredAddress::new(eoa),
                 &ReturnedExtents::default(),
@@ -1245,7 +1245,8 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
                 None,
                 PublicationPurpose::Commit,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         let free_after = free_total(&s);
         let managers = ManagerSections::flat(post.extents().iter().copied());
         let written = EXT_LEN + free_space_manager::manager_blocks_len(&managers, widths).unwrap();

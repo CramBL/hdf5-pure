@@ -280,14 +280,15 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
+#[cfg(doc)]
+use hdf5_pure_space::__private::FreeList;
 use hdf5_pure_space::__private::ReservationRequest;
 use hdf5_pure_space::__private::{
-    Extent as FreeExtent, FreeClass, FreeList, ManagerKind, PageTransition, PageType, SessionSpace,
+    Extent as FreeExtent, FreeClass, ManagerKind, PageTransition, PageType, SessionSpace,
 };
 
 use crate::SuperblockStatusFlags;
@@ -350,11 +351,14 @@ use self::staging::StagedEdits;
 
 pub(crate) use self::staging::{StagedChild, StagedKind, StagedMeta, StagedObject};
 
+use self::block::{BlockRequest, EncodingDependency, PlannedBlock};
+
 mod aggregation;
 pub(crate) mod allocation;
 mod analysis;
 mod append;
 pub(crate) mod attributes;
+mod block;
 mod commit;
 mod context;
 mod copy;
@@ -2684,27 +2688,30 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`FormatError::SerializationError`] if the block extends outside `region`,
-    /// [`FormatError::OffsetOverflow`] if `addr` plus the base address exceeds [`u64::MAX`], and
-    /// the write's error if the write fails.
+    /// [`FormatError::OffsetOverflow`] if stored or physical allocation geometry exceeds
+    /// [`u64::MAX`], and the write's error if the write fails.
     fn write_tail_block(
         &mut self,
         region: FreeExtent,
         addr: StoredAddress,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        let block = AddressRange::new(addr, bytes.len() as u64)?;
-        if !region.range().contains(block) {
-            let stored = addr.get();
-            let start = region.start().get();
-            return Err(Error::Format(FormatError::SerializationError(format!(
-                "a commit's tail reserved [{start}, {}) but placed {} bytes at {stored}",
-                region.end().get(),
-                bytes.len()
-            ))));
-        }
-        let at = self.context.addresses().resolve(addr)?;
+        let size = NonZeroU64::new(region.len())
+            .ok_or_else(|| FormatError::Internal("a tail reservation is empty".into()))?;
+        let request = BlockRequest::new(
+            ReservationRequest::new(size, AllocationClass::Metadata),
+            bytes.len() as u64,
+            EncodingDependency::Allocation,
+        )?;
+        let block = PlannedBlock::within(self.context.addresses(), region, addr, request)?;
+        self.write_planned_block(&block, bytes)
+    }
+
+    fn write_planned_block(&mut self, block: &PlannedBlock, bytes: &[u8]) -> Result<(), Error> {
+        let region = block.region(bytes)?;
+        let at = region.range().start();
         if at == PhysicalAddress::new(self.image.len()) {
-            let written = self.append(bytes)?;
+            let written = self.append(region.bytes())?;
             debug_assert_eq!(
                 written,
                 at.get(),
@@ -2712,7 +2719,7 @@ impl WriteEngine {
             );
             return Ok(());
         }
-        self.write_at(at.get(), bytes)
+        self.write_at(at.get(), region.bytes())
     }
 
     /// Extend the file with zeros up to `target` (>= the current length), used by

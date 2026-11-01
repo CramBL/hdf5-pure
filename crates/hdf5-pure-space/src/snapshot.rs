@@ -35,7 +35,8 @@ impl<'a> AdmittedFreeSnapshot<'a> {
         }
     }
 
-    pub(crate) fn flat(free: &'a FreeList) -> Self {
+    /// Borrows admitted extents and the cached total from one flat free list.
+    pub fn flat(free: &'a FreeList) -> Self {
         Self {
             lists: [Some(free), None, None],
             page_size: None,
@@ -169,6 +170,19 @@ impl<'a> AdmittedFreeSnapshot<'a> {
             (first, free.into_extents())
         };
         MergeExtents::new(first.iter().copied(), second.into_iter())
+    }
+
+    pub(crate) fn lists(self) -> (&'a [Extent], &'a [Extent], &'a [Extent]) {
+        let Self {
+            lists: [metadata, raw, unclassified],
+            page_size: _,
+            enabled: _,
+        } = self;
+        (
+            metadata.map_or(&[][..], FreeList::extents),
+            raw.map_or(&[][..], FreeList::extents),
+            unclassified.map_or(&[][..], FreeList::extents),
+        )
     }
 
     fn reusable_lists(self) -> (&'a [Extent], &'a [Extent]) {

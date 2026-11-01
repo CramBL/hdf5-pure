@@ -639,6 +639,11 @@ pub struct PagedPostFree {
 }
 
 impl PagedPostFree {
+    /// Borrows admitted extents and cached totals from the proposed post-publication state.
+    pub fn admitted_snapshot(&self) -> AdmittedFreeSnapshot<'_> {
+        AdmittedFreeSnapshot::paged(self.page_size, &self.meta, &self.raw, &self.unclassified)
+    }
+
     /// Returns read-only sections for persistence planning.
     pub fn sections(&self) -> PagedSections {
         PagedSections {

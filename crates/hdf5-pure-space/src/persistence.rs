@@ -5,6 +5,7 @@ use hdf5_pure_core::FileSpacePageSize;
 
 use super::extent::Extent;
 use super::paged::PagedSections;
+use super::snapshot::AdmittedFreeSnapshot;
 
 /// Identifies the free-space manager semantics the writer persists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,12 +47,66 @@ impl ManagerSections {
     /// manager. Unclassified sections stay in the generic-large manager without splitting because
     /// their page type is deliberately unknown.
     pub fn paged(sections: &PagedSections, page_size: FileSpacePageSize) -> Vec<Self> {
+        Self::paged_lists(
+            sections.metadata(),
+            sections.raw(),
+            sections.unclassified(),
+            page_size,
+        )
+    }
+
+    /// Projects admitted extents into the semantic managers used for persistence.
+    ///
+    /// Uses the snapshot's page size and classes for PAGE splitting. Returns one generic manager
+    /// for a nonempty flat snapshot, or no managers for disabled allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_space::__private::{
+    ///     AdmittedFreeSnapshot, Extent, FreeList, ManagerKind, ManagerSections,
+    /// };
+    ///
+    /// let extent = Extent::new(StoredAddress::new(100), 32).unwrap();
+    /// let free = FreeList::from_sorted([extent])?;
+    /// let managers = ManagerSections::from_snapshot(AdmittedFreeSnapshot::flat(&free));
+    /// assert_eq!(managers.len(), 1);
+    /// assert_eq!(managers[0].kind(), ManagerKind::Flat);
+    /// assert_eq!(managers[0].sections(), [extent]);
+    /// # Ok::<(), hdf5_pure_space::__private::FreeListError>(())
+    /// ```
+    pub fn from_snapshot(snapshot: AdmittedFreeSnapshot<'_>) -> Vec<Self> {
+        let (metadata, raw, unclassified) = snapshot.lists();
+        match snapshot.page_size() {
+            Some(page_size) => Self::paged_lists(metadata, raw, unclassified, page_size),
+            None => Self::flat(metadata.iter().copied()),
+        }
+    }
+
+    /// Returns the semantic kind of this manager.
+    pub fn kind(&self) -> ManagerKind {
+        self.kind
+    }
+
+    /// Returns the sections this manager should persist.
+    pub fn sections(&self) -> &[Extent] {
+        &self.sections
+    }
+
+    fn paged_lists(
+        metadata_extents: &[Extent],
+        raw_extents: &[Extent],
+        unclassified: &[Extent],
+        page_size: FileSpacePageSize,
+    ) -> Vec<Self> {
         let mut metadata = Vec::new();
         let mut raw = Vec::new();
         let mut generic = Vec::new();
-        Self::split_typed(sections.metadata(), page_size, &mut metadata, &mut generic);
-        Self::split_typed(sections.raw(), page_size, &mut raw, &mut generic);
-        generic.extend_from_slice(sections.unclassified());
+        Self::split_typed(metadata_extents, page_size, &mut metadata, &mut generic);
+        Self::split_typed(raw_extents, page_size, &mut raw, &mut generic);
+        generic.extend_from_slice(unclassified);
         generic.sort_unstable_by_key(|extent| extent.start());
         debug_assert!(
             generic.windows(2).all(|w| w[0].start() < w[1].start()),
@@ -67,16 +122,6 @@ impl ManagerSections {
         .into_iter()
         .filter_map(|(kind, sections)| (!sections.is_empty()).then_some(Self { kind, sections }))
         .collect()
-    }
-
-    /// Returns the semantic kind of this manager.
-    pub fn kind(&self) -> ManagerKind {
-        self.kind
-    }
-
-    /// Returns the sections this manager should persist.
-    pub fn sections(&self) -> &[Extent] {
-        &self.sections
     }
 
     fn split_typed(
