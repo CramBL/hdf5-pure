@@ -20,6 +20,40 @@ use core::fmt;
 
 use crate::error::FormatError;
 
+/// A writer target identified by a parsed path or an indexed source object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectTarget {
+    /// Resolves the path in the file under construction.
+    Path(ObjectPathBuf),
+    /// Resolves an object by its source index during repacking.
+    SourceIndex(usize),
+}
+
+impl ObjectTarget {
+    /// Returns the parsed path for a writer that requires path-based targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] for a source-index target.
+    pub(crate) fn path(&self) -> Result<&ObjectPathBuf, FormatError> {
+        match self {
+            Self::Path(path) => Ok(path),
+            Self::SourceIndex(_) => Err(FormatError::Internal(
+                "a source object index reaches a path writer".into(),
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ObjectTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(path) => path.fmt(formatter),
+            Self::SourceIndex(index) => write!(formatter, "source object {index}"),
+        }
+    }
+}
+
 /// An owned soft link target with an absolute or relative starting point.
 ///
 /// The target spelling is nonempty and contains no null bytes. Components follow

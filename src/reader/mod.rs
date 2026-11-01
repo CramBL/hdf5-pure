@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GroupInfo;
+use hdf5_pure_format::__private::GroupLinkStorage;
+use hdf5_pure_format::__private::LinkStorageError;
+use hdf5_pure_format::__private::OwnedLink;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::MetadataBytes;
@@ -75,6 +78,7 @@ use crate::group_v1::GroupEntry;
 use crate::group_v2::{self, ChildLookup};
 use crate::layout_info::{Chunk, ChunkIndex, Filter, FilterId, Layout};
 use crate::libver::LibVer;
+use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
 use crate::object_header::HeaderMessage;
 use crate::object_header::MessageFilter;
@@ -101,6 +105,7 @@ use crate::superblock;
 use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
 use crate::superblock::SuperblockSource;
+use crate::symbol_table::SymbolTableMessage;
 use crate::types::{self, AttrValue, DType};
 use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
@@ -2164,6 +2169,122 @@ impl FileInner {
         )?)
     }
 
+    /// Reads encoded group links and their creation-order policy for reconstruction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepackUnsupported`] for mixed or unsupported storage, repeated Link Info,
+    /// or inconsistent link metadata. Propagates source, address, and parsing errors.
+    fn group_link_storage(&self, header: &ObjectHeader) -> Result<GroupLinkStorage, Error> {
+        let widths = self.widths;
+        let mut info = LinkInfoMessage {
+            max_creation_order: None,
+            fractal_heap_address: None,
+            btree_name_index_address: None,
+            btree_creation_order_address: None,
+        };
+        if let Some(message) = header
+            .messages
+            .iter()
+            .find(|message| message.msg_type == MessageType::SYMBOL_TABLE)
+        {
+            if header.messages.iter().any(|message| {
+                matches!(
+                    message.msg_type,
+                    MessageType::LINK | MessageType::LINK_INFO | MessageType::GROUP_INFO
+                )
+            }) {
+                return Err(Error::RepackUnsupported(
+                    "a group mixes symbol-table storage with modern link storage".into(),
+                ));
+            }
+            let symbol_table = SymbolTableMessage::parse_with_offset_width(
+                &self.message_body(message)?,
+                widths.offsets,
+            )?;
+            let links = self
+                .with_opened_source(|source| {
+                    let physical = PhysicalSource::new(source);
+                    let k = group_v1::group_leaf_node_k(&self.superblock);
+                    match physical.resident() {
+                        Some(bytes) => {
+                            group_v1::resolve_v1_group_links(bytes, &symbol_table, widths, k)
+                        }
+                        None => group_v1::resolve_v1_group_links_from_source(
+                            physical,
+                            &symbol_table,
+                            widths,
+                            k,
+                        ),
+                    }
+                })
+                .map_err(repack_link_error)?;
+            return GroupLinkStorage::new(&info, links, widths.offsets).map_err(repack_link_error);
+        }
+        let mut links = Vec::new();
+        let mut has_info = false;
+        for message in &header.messages {
+            match message.msg_type {
+                MessageType::LINK_INFO => {
+                    if has_info {
+                        return Err(Error::RepackUnsupported(
+                            "a group has repeated link-info messages".into(),
+                        ));
+                    }
+                    has_info = true;
+                    let bytes = self.message_body(message)?;
+                    let parsed = LinkInfoMessage::parse_with_offset_width(&bytes, widths.offsets)?;
+                    let bytes = if header.version == PADDED_HEADER_VERSION {
+                        bytes
+                            .get(..parsed.serialize(widths.offsets).len())
+                            .ok_or_else(|| {
+                                Error::RepackUnsupported(
+                                    "a group's link-info message is truncated".into(),
+                                )
+                            })?
+                    } else {
+                        &bytes
+                    };
+                    info = GroupLinkStorage::parse(bytes, Vec::new(), widths.offsets)
+                        .map_err(repack_link_error)?
+                        .info();
+                }
+                MessageType::LINK => {
+                    let bytes = self.message_body(message)?;
+                    let link = if header.version == PADDED_HEADER_VERSION {
+                        OwnedLink::parse_padded(&bytes, widths.offsets).map(|(link, _)| link)
+                    } else {
+                        OwnedLink::parse(&bytes, widths.offsets)
+                    }
+                    .map_err(repack_link_error)?;
+                    links.push(link);
+                }
+                _ => {}
+            }
+        }
+        if let Some(heap) = info.fractal_heap_address {
+            if !links.is_empty() {
+                return Err(Error::RepackUnsupported(
+                    "a group mixes compact and dense links".into(),
+                ));
+            }
+            links = self
+                .with_opened_source(|source| {
+                    group_v2::storage::read_dense(
+                        &PhysicalSource::new(source).stored(),
+                        widths,
+                        &info,
+                        heap,
+                    )
+                })
+                .map_err(|error| match error {
+                    Error::EditUnsupported(reason) => Error::RepackUnsupported(reason.into()),
+                    error => error,
+                })?;
+        }
+        GroupLinkStorage::new(&info, links, widths.offsets).map_err(repack_link_error)
+    }
+
     /// Returns the absolute file address of the object header `entry` names.
     ///
     /// # Errors
@@ -3997,6 +4118,35 @@ impl File {
         let links = match class {
             ObjectClass::Group => self.inner.group_children(&parsed)?,
             ObjectClass::Dataset | ObjectClass::NamedDatatype | ObjectClass::Unknown => Vec::new(),
+        };
+        Ok((
+            class,
+            links,
+            ParsedHeader {
+                file: Arc::clone(&self.inner),
+                address: header,
+                revision,
+                header: parsed,
+            },
+        ))
+    }
+
+    /// Reads an object's class, optional group link storage, and checked discovery header.
+    ///
+    /// # Errors
+    ///
+    /// Propagates object-header parsing and group link inspection errors.
+    pub(crate) fn repack_links_at(
+        &self,
+        header: PhysicalAddress,
+    ) -> Result<(ObjectClass, Option<GroupLinkStorage>, ParsedHeader), Error> {
+        let revision = self.inner.content_revision();
+        let parsed = self.inner.parse_header(header.get())?;
+        let class = ObjectClass::of(&parsed);
+        let links = if class == ObjectClass::Group {
+            Some(self.inner.group_link_storage(&parsed)?)
+        } else {
+            None
         };
         Ok((
             class,
@@ -8187,6 +8337,19 @@ fn child_path_of(parent: Option<&ObjectPathBuf>, name: LinkName<'_>) -> Option<O
     Some(parent?.join(&LinkNameBuf::from(name)))
 }
 
+fn repack_link_error(error: LinkStorageError) -> Error {
+    match error {
+        LinkStorageError::InvalidName(name) => Error::RepackUnsupported(format!(
+            "a group has an invalid link name {:?}",
+            String::from_utf8_lossy(&name)
+        )),
+        error => match group_v2::storage::storage_error(error) {
+            Error::EditUnsupported(reason) => Error::RepackUnsupported(reason.into()),
+            error => error,
+        },
+    }
+}
+
 /// Returns the root-relative path an error reports an object by, and the empty string for a
 /// handle reached by object reference, which has no path.
 fn reported_path(path: Option<&ObjectPathBuf>) -> String {
@@ -8199,6 +8362,10 @@ const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds n
 // H5F__super_read in src/H5Fsuper.c, HDF5 1.14.6, exempts initial SWMR reads from the EOF
 // completeness check for superblock version 3 and later.
 const SWMR_SUPERBLOCK_VERSION: SuperblockVersion = SuperblockVersion::Three;
+
+// "Version 1 Data Object Header Prefix" in the format specification, version 4.0, defines
+// version one with padded message bodies.
+const PADDED_HEADER_VERSION: u8 = 1;
 
 #[cfg(test)]
 mod tests;

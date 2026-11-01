@@ -13,8 +13,13 @@ use std::path::Path;
 use hdf5_pure_core::__private::SuperblockFields;
 use hdf5_pure_format::__private::DenseAttrCreationOrder;
 use hdf5_pure_format::__private::DenseAttrFixup;
+use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::GroupInfo;
+use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
+use hdf5_pure_format::__private::LinkCreationPolicy;
+use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_space::__private::AllocationClass;
 
@@ -48,8 +53,8 @@ use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
-use crate::link_message::LinkMessage;
 use crate::object_path::ObjectPathBuf;
+use crate::object_path::ObjectTarget;
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders;
 use crate::type_builders::AttributeSpecs;
@@ -58,7 +63,7 @@ use crate::type_builders::ObjectRefTarget;
 use crate::writer::LazyFile;
 use crate::writer::WriteSink;
 
-/// An indexed source of reproducible object metadata and hard links.
+/// An indexed source of reproducible object metadata and encoded links.
 ///
 /// The final index identifies the root group. Indices, links, and object contents must remain
 /// consistent across calls during planning and emission.
@@ -79,9 +84,11 @@ pub(crate) trait ObjectSource {
     /// The default implementation is empty.
     fn finish_planning(&self) {}
 
-    /// Returns each hard link of the object at `index`, with its target's index.
+    /// Returns the encoded links of the object at `index`.
     ///
-    /// Link names may borrow from the source.
+    /// Link records may borrow from the source. Hard links include the target object's source
+    /// index. Soft and external links retain their encoded targets. The reader reports errors for
+    /// individual links.
     ///
     /// # Errors
     ///
@@ -89,7 +96,21 @@ pub(crate) trait ObjectSource {
     fn links(
         &self,
         index: usize,
-    ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error>;
+    ) -> Result<impl ExactSizeIterator<Item = Result<SourceLink<'_>, Error>>, Error>;
+
+    /// Resolves a committed datatype target to its source object index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a source index is outside the source. Propagates
+    /// path resolution errors.
+    fn datatype_index(&self, target: &ObjectTarget) -> Result<usize, Error> {
+        match target {
+            ObjectTarget::Path(path) => self.resolve(path),
+            ObjectTarget::SourceIndex(index) if *index < self.len() => Ok(*index),
+            ObjectTarget::SourceIndex(_) => Err(inconsistent().into()),
+        }
+    }
 
     /// Returns the index of the object at `path` under the root group.
     ///
@@ -97,6 +118,14 @@ pub(crate) trait ObjectSource {
     ///
     /// Propagates path resolution errors.
     fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error>;
+}
+
+/// An encoded link and the source object index for a hard target.
+pub(crate) struct SourceLink<'a> {
+    /// The stored name, target, character set, and creation index.
+    pub(crate) link: Cow<'a, OwnedLink>,
+    /// The hard target's source index, or [`None`] for a soft or external link.
+    pub(crate) target: Option<usize>,
 }
 
 /// A prepared object and its variable-length attribute heap collections.
@@ -120,7 +149,7 @@ impl Object {
         Self::new(Kind::Dataset(Box::new(dataset)), heaps)
     }
 
-    /// Prepares a group's attributes, link thresholds, and entry estimates.
+    /// Prepares a group's attributes, link thresholds, entry estimates, and creation-order policy.
     ///
     /// Hard links are supplied separately through [`ObjectSource::links`].
     ///
@@ -130,17 +159,19 @@ impl Object {
     pub(crate) fn group(
         attributes: &AttributeSpecs,
         group_info: GroupInfo,
+        creation_order: LinkCreationPolicy,
     ) -> Result<Self, FormatError> {
         let PreparedAttributes {
             messages,
-            committed_datatype_paths,
+            committed_datatype_targets,
             heaps,
         } = PreparedAttributes::new(attributes)?;
         Self::new(
             Kind::Group {
                 attributes: messages,
                 group_info,
-                paths: committed_datatype_paths,
+                creation_order,
+                targets: committed_datatype_targets,
             },
             heaps,
         )
@@ -190,31 +221,31 @@ impl Object {
     /// [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte. Propagates source
     /// loading and path resolution errors.
     fn count_uses(&self, source: &impl ObjectSource, references: &mut [u32]) -> Result<(), Error> {
-        let mut use_type = |path: &ObjectPathBuf, datatype: &Datatype| -> Result<(), Error> {
-            let target = source.resolve(path)?;
-            let Kind::Committed(committed) = source.load(target)?.kind else {
+        let mut use_type = |target: &ObjectTarget, datatype: &Datatype| -> Result<(), Error> {
+            let index = source.datatype_index(target)?;
+            let Kind::Committed(committed) = source.load(index)?.kind else {
                 return Err(inconsistent().into());
             };
             if hdf5_pure_format::__private::serialize_datatype(&committed)?
                 != hdf5_pure_format::__private::serialize_datatype(datatype)?
             {
                 return Err(FormatError::CommittedDatatypeMismatch {
-                    path: path.to_string(),
+                    path: target.to_string(),
                     user: "a repacked object".into(),
                 }
                 .into());
             }
-            let count = references.get_mut(target).ok_or_else(inconsistent)?;
+            let count = references.get_mut(index).ok_or_else(inconsistent)?;
             *count = count.saturating_add(1);
             Ok(())
         };
-        for (index, path) in self.paths() {
+        for (index, target) in self.targets() {
             let attribute = self.attributes().get(*index).ok_or_else(inconsistent)?;
-            use_type(path, &attribute.datatype)?;
+            use_type(target, &attribute.datatype)?;
         }
         if let Kind::Dataset(dataset) = &self.kind {
-            if let Some(path) = &dataset.committed_datatype_path {
-                use_type(path, &dataset.dt)?;
+            if let Some(target) = &dataset.committed_datatype_target {
+                use_type(target, &dataset.dt)?;
             }
         }
         Ok(())
@@ -266,20 +297,35 @@ impl Object {
             Kind::Group {
                 attributes,
                 group_info,
+                creation_order,
                 ..
             } => {
                 let links = links_at(source, index, None)?;
-                let plan = super::dense_links_plan(&links, group_info.phase_change())?;
+                let dense = links.len() > usize::from(group_info.phase_change().max_compact());
+                let storage = link_storage(links, *creation_order)?;
+                let (links, plan) = if dense {
+                    (
+                        Vec::new(),
+                        Some(
+                            DenseLinkPlan::new(storage, super::LENGTH_WIDTH)
+                                .map_err(super::dense_link_error)?,
+                        ),
+                    )
+                } else {
+                    (storage.into_links(), None)
+                };
                 let link_info = plan
                     .as_ref()
                     .map(|plan| plan.link_info(StoredAddress::ZERO))
                     .transpose()
                     .map_err(super::dense_link_error)?;
-                let header = super::build_group_oh(
+                let header = group_header(
                     &links,
                     attributes,
                     info.as_deref(),
-                    link_info.as_ref(),
+                    link_info
+                        .as_ref()
+                        .unwrap_or(&compact_link_info(*creation_order)),
                     *group_info,
                 )?;
                 (
@@ -301,8 +347,8 @@ impl Object {
         };
         let preflight = !heaps.is_empty()
             || dense.is_some()
-            || !self.paths().is_empty()
-            || matches!(&self.kind, Kind::Dataset(dataset) if dataset.storage.reference_targets().is_some() || dataset.committed_datatype_path.is_some());
+            || !self.targets().is_empty()
+            || matches!(&self.kind, Kind::Dataset(dataset) if dataset.storage.reference_targets().is_some() || dataset.committed_datatype_target.is_some());
         Ok(Record {
             metadata: ObjectAllocation {
                 header: Allocation {
@@ -341,11 +387,11 @@ impl Object {
         }
     }
 
-    /// Returns attribute indices paired with committed datatype paths.
-    fn paths(&self) -> &[(usize, ObjectPathBuf)] {
+    /// Returns attribute indices paired with committed datatype targets.
+    fn targets(&self) -> &[(usize, ObjectTarget)] {
         match &self.kind {
-            Kind::Dataset(dataset) => &dataset.attr_committed_datatype_paths,
-            Kind::Group { paths, .. } => paths,
+            Kind::Dataset(dataset) => &dataset.attr_committed_datatype_targets,
+            Kind::Group { targets, .. } => targets,
             Kind::Committed(_) => &[],
         }
     }
@@ -513,8 +559,9 @@ enum Kind {
     Group {
         attributes: Vec<AttributeMessage>,
         group_info: GroupInfo,
-        /// Indices in `attributes` paired with the paths of their committed datatypes.
-        paths: Vec<(usize, ObjectPathBuf)>,
+        creation_order: LinkCreationPolicy,
+        /// Indices in `attributes` paired with their committed datatype targets.
+        targets: Vec<(usize, ObjectTarget)>,
     },
 }
 
@@ -858,9 +905,9 @@ impl<S: ObjectSource> Plan<S> {
         let record = self.records.get(index).ok_or_else(inconsistent)?;
         object.patch_heaps(&record.heaps)?;
         let locations = object
-            .paths()
+            .targets()
             .iter()
-            .map(|(index, path)| self.address(path).map(|address| (*index, address)))
+            .map(|(index, target)| self.target_address(target).map(|address| (*index, address)))
             .collect::<Result<Vec<_>, Error>>()?;
         for (index, location) in locations {
             object
@@ -870,14 +917,15 @@ impl<S: ObjectSource> Plan<S> {
                 .datatype_location = DatatypeLocation::Committed(location);
         }
         if let Kind::Dataset(dataset) = &mut object.kind {
-            if let Some(path) = &dataset.committed_datatype_path {
-                dataset.dt_location = DatatypeLocation::Committed(self.address(path)?);
+            if let Some(target) = &dataset.committed_datatype_target {
+                dataset.dt_location = DatatypeLocation::Committed(self.target_address(target)?);
             }
             if let Some(patches) = dataset.storage.take_reference_targets() {
                 for patch in patches {
                     let address = match patch.target {
                         ObjectRefTarget::Path(path) => self.address(&path)?,
                         ObjectRefTarget::Raw(address) => address,
+                        ObjectRefTarget::SourceIndex(index) => self.address_at(index)?,
                     };
                     type_builders::write_reference_address(
                         dataset.storage.raw_mut()?,
@@ -892,6 +940,30 @@ impl<S: ObjectSource> Plan<S> {
             }
         }
         Ok(object)
+    }
+
+    /// Returns the destination header address for a source object index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `index` is outside the plan.
+    fn address_at(&self, index: usize) -> Result<StoredAddress, Error> {
+        Ok(self
+            .records
+            .get(index)
+            .ok_or_else(inconsistent)?
+            .metadata
+            .header
+            .address)
+    }
+
+    /// Returns the destination address of a committed datatype target.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`ObjectSource::datatype_index`] and [`Self::address_at`].
+    fn target_address(&self, target: &ObjectTarget) -> Result<StoredAddress, Error> {
+        self.address_at(self.source.datatype_index(target)?)
     }
 
     /// Returns the destination header address for a source object path.
@@ -945,21 +1017,18 @@ impl<S: ObjectSource> Plan<S> {
             Kind::Group {
                 attributes,
                 group_info,
+                creation_order,
                 ..
             } => {
-                let link_info = record.link_info()?;
-                let links = if link_info.is_some() {
+                let link_info = record
+                    .link_info()?
+                    .unwrap_or_else(|| compact_link_info(*creation_order));
+                let links = if link_info.fractal_heap_address.is_some() {
                     Vec::new()
                 } else {
                     links_at(&self.source, index, Some(&self.records))?
                 };
-                super::build_group_oh(
-                    &links,
-                    attributes,
-                    info.as_deref(),
-                    link_info.as_ref(),
-                    *group_info,
-                )?
+                group_header(&links, attributes, info.as_deref(), &link_info, *group_info)?
             }
             Kind::Committed(datatype) => {
                 super::build_committed_datatype_oh(datatype, record.references)?
@@ -984,51 +1053,72 @@ impl<S: ObjectSource> Plan<S> {
     ///
     /// # Errors
     ///
-    /// Propagates source link, allocation length conversion, and dense link serialization errors.
+    /// Returns [`FormatError::Internal`] for inconsistent plan geometry or a serialized length
+    /// different from the reservation. Propagates source link and dense-link planning or
+    /// serialization errors.
     fn links(&self, index: usize, span: Allocation) -> Result<Vec<u8>, Error> {
-        Ok(super::dense_links_image(
-            &links_at(&self.source, index, Some(&self.records))?,
-            (span.address, span.length.to_usize()?),
-            self.records
-                .get(index)
-                .and_then(|record| record.dense_links)
-                .ok_or_else(inconsistent)?
-                .phase_change,
-        )?
-        .bytes)
+        let geometry = self
+            .records
+            .get(index)
+            .and_then(|record| record.dense_links)
+            .ok_or_else(inconsistent)?;
+        let links = links_at(&self.source, index, Some(&self.records))?;
+        if links.len() <= usize::from(geometry.phase_change.max_compact()) {
+            return Err(inconsistent().into());
+        }
+        let plan = DenseLinkPlan::new(
+            link_storage(links, geometry.creation_order)?,
+            super::LENGTH_WIDTH,
+        )
+        .map_err(super::dense_link_error)?;
+        let image = plan
+            .serialize(span.address)
+            .map_err(super::dense_link_error)?;
+        if image.bytes.len().to_u64() != span.length {
+            return Err(inconsistent().into());
+        }
+        Ok(image.bytes)
     }
 }
 
-/// The thresholds and name-index offset for untracked dense link storage.
+/// The thresholds, creation-order policy, and index offsets for dense link storage.
 #[derive(Clone, Copy)]
 struct DenseLinks {
     phase_change: GroupPhaseChange,
+    creation_order: LinkCreationPolicy,
+    creation_index_offset: Option<NonZeroU64>,
     /// Relative to the stored address of the fractal heap.
     name_index_offset: NonZeroU64,
 }
 
 impl DenseLinks {
-    /// Records thresholds and relative name-index geometry measured with the heap at address zero.
+    /// Records thresholds and index geometry measured with the heap at address zero.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if creation-order metadata is present, the heap
-    /// address is absent or nonzero, or the name-index address is absent or zero.
+    /// Returns [`FormatError::Internal`] if the creation-order policy is inconsistent, the heap
+    /// address is absent or nonzero, or a required index address is absent or zero.
     fn new(info: &LinkInfoMessage, phase_change: GroupPhaseChange) -> Result<Self, FormatError> {
         let LinkInfoMessage {
-            max_creation_order,
+            max_creation_order: _,
             fractal_heap_address,
             btree_name_index_address,
             btree_creation_order_address,
         } = info;
-        if max_creation_order.is_some()
-            || *fractal_heap_address != Some(StoredAddress::ZERO)
-            || btree_creation_order_address.is_some()
-        {
+        let creation_order =
+            LinkCreationPolicy::from_info(info).map_err(|_error| inconsistent())?;
+        if *fractal_heap_address != Some(StoredAddress::ZERO) {
             return Err(inconsistent());
         }
+        let creation_index_offset = btree_creation_order_address
+            .map(|address| {
+                NonZeroU64::new(address.ok_or_else(inconsistent)?.get()).ok_or_else(inconsistent)
+            })
+            .transpose()?;
         Ok(Self {
             phase_change,
+            creation_order,
+            creation_index_offset,
             name_index_offset: NonZeroU64::new(
                 btree_name_index_address.ok_or_else(inconsistent)?.get(),
             )
@@ -1036,16 +1126,18 @@ impl DenseLinks {
         })
     }
 
-    /// Returns stored heap and name-index addresses for `span`.
+    /// Returns stored heap and index addresses for `span`, retaining the creation-order policy.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::AddressTooLarge`] if `span` starts at the undefined address,
     /// [`FormatError::OffsetOverflow`] if its end exceeds [`u64::MAX`], or
-    /// [`FormatError::Internal`] if the name-index offset is outside the allocation.
+    /// [`FormatError::Internal`] if an index offset is outside the allocation.
     fn link_info(self, span: Allocation) -> Result<LinkInfoMessage, FormatError> {
         let Self {
             name_index_offset,
+            creation_order,
+            creation_index_offset,
             phase_change: _,
         } = self;
         let Allocation { address, length } = span;
@@ -1056,15 +1148,24 @@ impl DenseLinks {
             });
         }
         address.checked_add(length)?;
-        if name_index_offset.get() >= length {
+        if name_index_offset.get() >= length
+            || creation_index_offset.is_some_and(|offset| offset.get() >= length)
+        {
             return Err(inconsistent());
         }
         let name_index = address.checked_add(name_index_offset.get())?;
         Ok(LinkInfoMessage {
-            max_creation_order: None,
+            max_creation_order: creation_order.next_index(),
             fractal_heap_address: Some(address),
             btree_name_index_address: Some(name_index),
-            btree_creation_order_address: None,
+            btree_creation_order_address: creation_order
+                .is_indexed()
+                .then(|| {
+                    creation_index_offset
+                        .map(|offset| address.checked_add(offset.get()))
+                        .transpose()
+                })
+                .transpose()?,
         })
     }
 }
@@ -1317,37 +1418,81 @@ impl FileLayout {
     }
 }
 
-/// Builds hard-link messages with planned header addresses, or zero placeholders.
+/// Copies encoded links, resolving hard targets to planned addresses or zero placeholders.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::Internal`] if a target index is outside `records`. Propagates source link
-/// errors.
+/// Returns [`FormatError::Internal`] if a target index is outside the source or `records`, or
+/// a target index disagrees with the encoded link kind. Propagates source and link-storage errors.
 fn links_at(
     source: &impl ObjectSource,
     index: usize,
     records: Option<&[Record]>,
-) -> Result<Vec<LinkMessage>, Error> {
+) -> Result<Vec<OwnedLink>, Error> {
     source
         .links(index)?
-        .map(|(name, index)| {
-            Ok(super::make_link(
-                &name,
-                match records {
-                    Some(records) => {
-                        records
-                            .get(index)
-                            .ok_or_else(inconsistent)?
-                            .metadata
-                            .header
-                            .address
-                    }
-                    None if index < source.len() => StoredAddress::ZERO,
-                    None => return Err(inconsistent().into()),
-                },
-            ))
+        .map(|link| {
+            let SourceLink { link, target } = link?;
+            let mut link = link.into_owned();
+            match (target, link.target()) {
+                (Some(index), OwnedLinkTarget::Hard { .. }) => {
+                    let address = match records {
+                        Some(records) => {
+                            records
+                                .get(index)
+                                .ok_or_else(inconsistent)?
+                                .metadata
+                                .header
+                                .address
+                        }
+                        None if index < source.len() => StoredAddress::ZERO,
+                        None => return Err(inconsistent().into()),
+                    };
+                    link.set_hard_target(address, super::OFFSET_WIDTH)
+                        .map_err(super::link_storage_error)?;
+                }
+                (None, OwnedLinkTarget::Indirect(_)) => {}
+                _ => return Err(inconsistent().into()),
+            }
+            Ok(link)
         })
         .collect()
+}
+
+fn compact_link_info(creation: LinkCreationPolicy) -> LinkInfoMessage {
+    LinkInfoMessage {
+        max_creation_order: creation.next_index(),
+        fractal_heap_address: None,
+        btree_name_index_address: None,
+        btree_creation_order_address: creation.is_indexed().then_some(None),
+    }
+}
+
+fn link_storage(
+    links: Vec<OwnedLink>,
+    creation: LinkCreationPolicy,
+) -> Result<GroupLinkStorage, FormatError> {
+    GroupLinkStorage::new(&compact_link_info(creation), links, super::OFFSET_WIDTH)
+        .map_err(super::link_storage_error)
+}
+
+fn group_header(
+    links: &[OwnedLink],
+    attributes: &[AttributeMessage],
+    attribute_info: Option<&[u8]>,
+    link_info: &LinkInfoMessage,
+    group_info: GroupInfo,
+) -> Result<Vec<u8>, FormatError> {
+    super::group_header(
+        links.iter().map(|link| {
+            link.serialize(super::OFFSET_WIDTH)
+                .map_err(super::link_storage_error)
+        }),
+        attributes,
+        attribute_info,
+        link_info,
+        group_info,
+    )
 }
 
 /// Writes zero padding in bounded blocks up to the absolute output position `end`.
@@ -1399,6 +1544,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use hdf5_pure_format::__private::LinkCreationPolicy;
+    use hdf5_pure_format::__private::OwnedLink;
+    use hdf5_pure_format::__private::OwnedLinkTarget;
     use rstest::rstest;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use test_util::allocation;
@@ -1410,6 +1558,7 @@ mod tests {
     use super::Plan;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use super::Record;
+    use super::SourceLink;
     use crate::AttrValue;
     use crate::DeflateLevel;
     use crate::File;
@@ -1426,6 +1575,7 @@ mod tests {
     use crate::data_layout::ChunkIndexLayout;
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::data_layout::DataLayout;
+    use crate::datatype::CharacterSet;
     use crate::error::Error;
     use crate::error::FormatError;
     use crate::file_writer;
@@ -1637,6 +1787,7 @@ mod tests {
                 return Ok(Object::group(
                     &GroupBuilder::new("root").finish().attrs,
                     LinkPhaseChange::default().group_info()?,
+                    LinkCreationPolicy::Untracked,
                 )?);
             }
             let mut builder = DatasetBuilder::new(&format!("d{index:04}"));
@@ -1658,9 +1809,9 @@ mod tests {
         fn links(
             &self,
             index: usize,
-        ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
+        ) -> Result<impl ExactSizeIterator<Item = Result<SourceLink<'_>, Error>>, Error> {
             Ok((0..if index == self.count { self.count } else { 0 })
-                .map(|index| (Cow::Owned(format!("d{index:04}")), index)))
+                .map(|index| Ok(source_link(format!("d{index:04}"), index))))
         }
 
         fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
@@ -1789,6 +1940,7 @@ mod tests {
                 return Ok(Object::group(
                     &GroupBuilder::new("root").finish().attrs,
                     LinkPhaseChange::default().group_info()?,
+                    LinkCreationPolicy::Untracked,
                 )?);
             }
             let mut builder = DatasetBuilder::new("values");
@@ -1817,8 +1969,8 @@ mod tests {
         fn links(
             &self,
             index: usize,
-        ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
-            Ok((0..usize::from(index == 1)).map(|_| (Cow::Borrowed("values"), 0)))
+        ) -> Result<impl ExactSizeIterator<Item = Result<SourceLink<'_>, Error>>, Error> {
+            Ok((0..usize::from(index == 1)).map(|_| Ok(source_link("values".into(), 0))))
         }
 
         fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
@@ -1868,19 +2020,36 @@ mod tests {
             Ok(Object::group(
                 &group.finish().attrs,
                 LinkPhaseChange::default().group_info()?,
+                LinkCreationPolicy::Untracked,
             )?)
         }
 
         fn links(
             &self,
             index: usize,
-        ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
+        ) -> Result<impl ExactSizeIterator<Item = Result<SourceLink<'_>, Error>>, Error> {
             Ok((0..if index == self.count { self.count } else { 0 })
-                .map(|index| (Cow::Owned(format!("g{index:04}")), index)))
+                .map(|index| Ok(source_link(format!("g{index:04}"), index))))
         }
 
         fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
             Err(FormatError::UnknownCommittedDatatype(path.to_string()).into())
+        }
+    }
+    fn source_link(name: String, target: usize) -> SourceLink<'static> {
+        SourceLink {
+            link: Cow::Owned(
+                OwnedLink::new(
+                    name.into_bytes(),
+                    CharacterSet::Ascii,
+                    OwnedLinkTarget::Hard {
+                        object_header_address: StoredAddress::ZERO,
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+            target: Some(target),
         }
     }
 }

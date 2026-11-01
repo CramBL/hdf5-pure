@@ -8,6 +8,7 @@ use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
+use crate::object_path::ObjectTarget;
 use crate::source;
 use crate::source::PhysicalBytes;
 use crate::superblock::Superblock;
@@ -373,7 +374,7 @@ impl AttributeOwner<'_> {
             AttributeForm::CommittedVerbatim | AttributeForm::Verbatim => {
                 let message = type_builders::build_attr_message(name, &value).unwrap();
                 let path = matches!(form, AttributeForm::CommittedVerbatim)
-                    .then(|| ObjectPathBuf::parse("integer_type"));
+                    .then(|| ObjectTarget::Path(ObjectPathBuf::parse("integer_type")));
                 match self {
                     Self::Dataset(owner) => {
                         owner.set_attr_verbatim(message, path);
@@ -386,7 +387,7 @@ impl AttributeOwner<'_> {
                 let message = type_builders::build_attr_message(name, &value).unwrap();
                 let strings = value.var_len_strings().unwrap().to_vec();
                 let path = matches!(form, AttributeForm::CommittedVarLenVerbatim)
-                    .then(|| ObjectPathBuf::parse("string_type"));
+                    .then(|| ObjectTarget::Path(ObjectPathBuf::parse("string_type")));
                 match self {
                     Self::Dataset(owner) => {
                         owner

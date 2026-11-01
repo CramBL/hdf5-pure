@@ -1,9 +1,194 @@
 //! Native observations of private verbatim attributes before and after repacking.
 
+use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::GroupLinkStorage;
+use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::OwnedLinkTarget;
+use rstest::rstest;
+use test_util_hdf5::dense_links;
+use test_util_hdf5::dense_links::GroupOrder;
 use test_util_hdf5::exotic_attributes;
+use test_util_hdf5::file;
+
+use crate::File;
+use crate::FileSpaceSettings;
+use crate::FileSpaceStrategy;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
+use crate::width::OffsetWidth;
 
 use super::test_util::ExoticAttributes;
 use crate::RepackOptions;
+
+#[rstest]
+#[case::compact(6)]
+#[case::dense(13)]
+fn repack_preserves_complete_link_metadata(
+    #[case] count: usize,
+    #[values(GroupOrder::Untracked, GroupOrder::Tracked, GroupOrder::Indexed)] order: GroupOrder,
+    #[values("/", "group")] group_path: &str,
+    #[values(false, true)] drop_child: bool,
+    #[values(false, true)] streaming: bool,
+    #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    dense_links::write_repack_link_fixture(&source_path, order, group_path, count);
+    let source = if streaming {
+        File::open_streaming(&source_path)
+    } else {
+        File::open(&source_path)
+    }
+    .unwrap();
+    let before = read_links(&source, group_path);
+    let expected_policy = source
+        .group(group_path)
+        .unwrap()
+        .link_phase_change()
+        .unwrap();
+    let expected_creation = before.creation_order();
+    assert_eq!(
+        expected_creation.next_index(),
+        if matches!(order, GroupOrder::Untracked) {
+            None
+        } else {
+            Some(u64::try_from(count + 1).unwrap())
+        }
+    );
+    assert_eq!(before.info().fractal_heap_address.is_some(), count > 12);
+    let mut expected = normalized_links(before);
+    if drop_child {
+        expected.retain(|link| link.name() != b"child");
+    }
+    let options = RepackOptions::new()
+        .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
+    let options = if drop_child {
+        options.drop_path(&format!("{group_path}/child"))
+    } else {
+        options
+    };
+    super::repack_to_path(&source, &destination, &options).unwrap();
+    source.close().unwrap();
+    let file = File::open(&destination).unwrap();
+    let after = read_links(&file, group_path);
+    assert_eq!(after.creation_order(), expected_creation);
+    let dense = count - usize::from(drop_child) > 12;
+    assert_eq!(after.info().fractal_heap_address.is_some(), dense);
+    assert_eq!(after.info().btree_name_index_address.is_some(), dense);
+    assert_eq!(
+        after.info().btree_creation_order_address.is_some(),
+        matches!(order, GroupOrder::Indexed)
+    );
+    assert_eq!(
+        after
+            .info()
+            .btree_creation_order_address
+            .flatten()
+            .is_some(),
+        dense && matches!(order, GroupOrder::Indexed)
+    );
+    assert_eq!(normalized_links(after), expected);
+    assert_eq!(
+        file.group(group_path).unwrap().link_phase_change().unwrap(),
+        expected_policy
+    );
+    assert_eq!(
+        file.group(group_path)
+            .unwrap()
+            .dataset("soft")
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        [7, 17]
+    );
+    file.close().unwrap();
+    let native = file::libhdf5_open(&destination);
+    let group = native.group(group_path).unwrap();
+    assert_eq!(
+        group.gcpl().unwrap().get_link_creation_order().unwrap(),
+        order.creation_order()
+    );
+    assert_eq!(
+        group
+            .gcpl()
+            .unwrap()
+            .get_link_phase_change()
+            .unwrap()
+            .max_compact,
+        12
+    );
+    assert_eq!(
+        group.info().unwrap().nlinks,
+        u64::try_from(count - usize::from(drop_child)).unwrap()
+    );
+    assert_eq!(
+        group.dataset("value").unwrap().read_raw::<i32>().unwrap(),
+        [7, 17]
+    );
+    assert_eq!(
+        group.dataset("soft").unwrap().read_raw::<i32>().unwrap(),
+        [7, 17]
+    );
+    let mut names = group.member_names().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        expected
+            .iter()
+            .map(|link| String::from_utf8(link.name().to_vec()).unwrap())
+            .collect::<Vec<_>>()
+    );
+    let mut observed = Vec::new();
+    group
+        .iter_visit_default(|name, info| {
+            observed.push((name.to_owned(), info.creation_order));
+            Ok(())
+        })
+        .unwrap();
+    observed.sort();
+    assert_eq!(
+        observed,
+        expected
+            .iter()
+            .map(|link| (
+                String::from_utf8(link.name().to_vec()).unwrap(),
+                link.creation_order()
+                    .map(|index| i64::try_from(index).unwrap())
+            ))
+            .collect::<Vec<_>>()
+    );
+    if let Some(next) = expected_creation.next_index() {
+        assert_eq!(
+            group.info().unwrap().max_corder,
+            i64::try_from(next).unwrap()
+        );
+        let mut creation = expected.iter().collect::<Vec<_>>();
+        creation.sort_by_key(|link| link.creation_order());
+        assert_eq!(
+            dense_links::creation_order_names(&group),
+            creation
+                .iter()
+                .map(|link| String::from_utf8(link.name().to_vec()).unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
+    let mut identities = Vec::new();
+    for link in &expected {
+        if matches!(link.target(), OwnedLinkTarget::Hard { .. }) {
+            let name = std::str::from_utf8(link.name()).unwrap();
+            let identity = group.loc_info_by_name(name).unwrap().token;
+            assert!(
+                !identities.contains(&identity),
+                "duplicate object identity for {name:?}"
+            );
+            identities.push(identity);
+        }
+    }
+    drop(group);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
 
 #[test]
 fn the_c_library_reads_fresh_exotic_attributes_before_and_after_repack() {
@@ -16,4 +201,21 @@ fn the_c_library_reads_fresh_exotic_attributes_before_and_after_repack() {
     super::repack(&src, &dst, &RepackOptions::new()).unwrap();
     exotic.assert_repacked(&src, &dst);
     exotic_attributes::assert_libhdf5_contents(&dst);
+}
+
+fn read_links(file: &File, path: &str) -> GroupLinkStorage {
+    let address = PhysicalAddress::new(file.group(path).unwrap().header_address().unwrap());
+    file.repack_links_at(address).unwrap().1.unwrap()
+}
+
+fn normalized_links(storage: GroupLinkStorage) -> Vec<OwnedLink> {
+    let mut links = storage.into_links();
+    for link in &mut links {
+        if matches!(link.target(), OwnedLinkTarget::Hard { .. }) {
+            link.set_hard_target(StoredAddress::ZERO, OffsetWidth::Eight)
+                .unwrap();
+        }
+    }
+    links.sort_by(|a, b| a.name().cmp(b.name()));
+    links
 }
