@@ -20,6 +20,7 @@ use hdf5_pure_space::__private::ManagerKind;
 use hdf5_pure_space::__private::ManagerSections;
 use hdf5_pure_space::__private::PageType;
 use hdf5_pure_space::__private::PagedSections;
+use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
 #[cfg(feature = "deflate")]
@@ -1172,7 +1173,7 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
     let len_before = s.image.len();
     let ext_before = s.context.superblock().superblock_extension_address;
 
-    s.commit_persisting(root, Vec::new(), TailPlacement::ReuseOnly)
+    s.commit_persisting(root, ReturnedExtents::default(), TailPlacement::ReuseOnly)
         .unwrap();
     assert_eq!(
         s.image.len(),
@@ -1185,7 +1186,7 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
         "and must not have published a new extension either"
     );
 
-    s.commit_persisting(root, Vec::new(), TailPlacement::Anywhere)
+    s.commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
         .unwrap();
     assert!(
         s.image.len() > len_before,
@@ -1237,7 +1238,7 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         let (post, at, tail_len, _) = s
             .flat_tail_layout(
                 StoredAddress::new(eoa),
-                &[],
+                &ReturnedExtents::default(),
                 &[],
                 EXT_LEN,
                 widths,

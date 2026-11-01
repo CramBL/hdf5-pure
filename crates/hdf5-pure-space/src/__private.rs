@@ -3,6 +3,7 @@
 //! This module is outside the crate's compatibility guarantee and may change in any release.
 
 pub use crate::admission::Release;
+pub use crate::admission::ReturnedExtents;
 pub use crate::admission::TrackedSpace;
 pub use crate::aggregator::AGGREGATE_BLOCK_SIZE;
 pub use crate::aggregator::AggregationAllocation;
