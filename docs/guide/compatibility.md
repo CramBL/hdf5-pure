@@ -141,7 +141,7 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 | Array | ✅ | ✅ | |
 | Object reference | ✅ | ✅ | 8-byte object references. |
 | Dataset-region reference | ❌ | ❌ | |
-| Complex class | ❌ | ❌ | HDF5 2.0 complex datatypes are unsupported. Complex helpers use compound `{real, imag}` values. |
+| Native complex (class 11) | 🟡 | 🟡 | Homogeneous rectangular form. Metadata inspection and raw dataset access only. |
 
 #### Fixed-point layouts
 
@@ -163,6 +163,19 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 | Little-endian byte order | ✅ | ✅ | |
 | Big-endian byte order | ✅ | ✅ | |
 | Arbitrary HDF5 floating-point layouts | 🟡 | 🟡 | Raw access only. No numeric conversion. |
+
+#### Native complex datatypes
+
+`Datatype::Complex` represents the homogeneous rectangular form introduced in HDF5 2.0.
+Dataset and attribute inspection preserve the floating-point component layout and byte order.
+The parser returns a structured format error for other complex forms.
+
+Dataset raw reads and writes preserve both components. Scalar numeric readers return
+`TypeMismatch`. Fixed-size datasets and attributes can be repacked, including complex types
+nested in arrays or compounds. Raw append requires little-endian components. Repacking
+variable-length complex attributes returns `RepackUnsupported`.
+
+The MATLAB complex helpers use the class-6 compound `{real, imag}` convention.
 
 ### Compound datatypes
 
