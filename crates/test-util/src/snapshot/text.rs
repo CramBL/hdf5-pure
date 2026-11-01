@@ -63,9 +63,10 @@ impl Report {
 
     /// Appends a titled table with column widths fitted to its headings and rendered values.
     ///
-    /// Columns containing at least one [`Value::Number`] are right-aligned. Other columns are
-    /// left-aligned. Newlines, carriage returns, and tabs in titles, headings, and text cells are
-    /// escaped. Empty tables display "(none)" below the column headings.
+    /// Columns containing at least one [`Value::Number`], [`Value::Signed`], or [`Value::Hexadecimal`]
+    /// are right-aligned. Other columns are left-aligned. Newlines, carriage returns, and tabs in
+    /// titles, headings, and text cells are escaped. Empty tables display "(none)" below the column
+    /// headings.
     ///
     /// # Panics
     ///
@@ -79,8 +80,12 @@ impl Report {
         assert!(N > 0, "a snapshot table has at least one column");
         let rows: Vec<_> = rows.into_iter().collect();
         let numeric = core::array::from_fn(|column| {
-            rows.iter()
-                .any(|row| matches!(row[column], Value::Number(_)))
+            rows.iter().any(|row| {
+                matches!(
+                    row[column],
+                    Value::Hexadecimal { .. } | Value::Number(_) | Value::Signed(_)
+                )
+            })
         });
         let headers = headers.map(single_line);
         let rows: Vec<_> = rows.into_iter().map(|row| row.map(Value::render)).collect();
@@ -140,10 +145,40 @@ impl Report {
     }
 }
 
-/// A text cell or an unsigned number in a report table.
+/// A text or numeric cell in a report table.
+///
+/// # Examples
+///
+/// ```
+/// use test_util::snapshot::text::{Report, Value};
+///
+/// let mut report = Report::new();
+/// report.table(
+///     "Geometry",
+///     ["Delta", "Address"],
+///     [[Value::Signed(-1_234), Value::Hexadecimal { value: 16, digits: 8 }]],
+/// );
+/// assert_eq!(
+///     report.finish(),
+///     concat!(
+///         "Geometry\n",
+///         "   Delta     Address\n",
+///         "  ------  ----------\n",
+///         "  -1,234  0x00000010",
+///     ),
+/// );
+/// ```
 pub enum Value {
+    /// An unsigned integer in lowercase hexadecimal with a `0x` prefix.
+    Hexadecimal {
+        value: u64,
+        /// The minimum digit count, excluding the prefix.
+        digits: usize,
+    },
     /// An unsigned integer formatted with comma-separated decimal groups.
     Number(u64),
+    /// A signed integer formatted with comma-separated decimal groups.
+    Signed(i128),
     /// Text with newlines, carriage returns, and tabs escaped.
     Text(String),
 }
@@ -156,7 +191,9 @@ impl Value {
 
     fn render(self) -> String {
         match self {
+            Self::Hexadecimal { value, digits } => number::hexadecimal(value, digits),
             Self::Number(value) => number::grouped_decimal(value),
+            Self::Signed(value) => number::grouped_signed(value),
             Self::Text(value) => single_line(&value),
         }
     }
