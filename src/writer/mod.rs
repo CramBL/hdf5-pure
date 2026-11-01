@@ -151,7 +151,7 @@ impl FileBuilder {
         self.writer.set_root_attr_committed(name, value, path);
     }
 
-    /// Replaces the userblock size, library-version bounds, and file-space settings.
+    /// Replaces every file-creation property, including the root group's link policy.
     ///
     /// The writer resets properties left unset in `properties` to their defaults, including
     /// library-version bounds. Apply a shared [`FileCreateProperties`] first, then override

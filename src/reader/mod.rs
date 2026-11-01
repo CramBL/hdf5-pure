@@ -2962,7 +2962,7 @@ impl File {
     ///
     /// Mirrors `H5Fcreate(name, flags, fcpl_id, fapl_id)`: `create` carries the
     /// creation properties recorded in the new file (userblock, file-space
-    /// strategy, library-version bounds), and `access` the properties governing
+    /// strategy, library-version bounds, root link policy), and `access` the properties governing
     /// the handle returned (locking policy, `fsync` cadence, chunk cache). Both are values, so a
     /// layout defined once can be reused across every file an application writes.
     ///

@@ -2,10 +2,13 @@
 
 use core::num::NonZeroU16;
 
-use hdf5_pure_format::__private::{GroupInfoError, GroupPhaseChange};
+use hdf5_pure_format::__private::GroupInfo;
+use hdf5_pure_format::__private::GroupInfoError;
+use hdf5_pure_format::__private::GroupPhaseChange;
 
+use crate::FormatError;
 #[cfg(feature = "std")]
-use crate::{FormatError, MessageType};
+use crate::MessageType;
 
 /// The thresholds for transitions between compact and dense group link storage.
 ///
@@ -76,6 +79,19 @@ impl LinkPhaseChange {
         .map_err(|error| group_info_error(error, body.len()))
     }
 
+    /// Converts the policy to Group Info with default entry estimates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a library bug violates the checked threshold ordering.
+    pub(crate) fn group_info(self) -> Result<GroupInfo, FormatError> {
+        GroupPhaseChange::new(self.max_compact(), self.min_dense())
+            .map(GroupInfo::new)
+            .map_err(|_error| {
+                FormatError::Internal("a checked link policy has inverted thresholds".into())
+            })
+    }
+
     /// Returns the maximum compact link count, or zero for [`Self::AlwaysDense`].
     pub const fn max_compact(self) -> u16 {
         match self {
@@ -96,6 +112,12 @@ impl LinkPhaseChange {
             },
         }
     }
+
+    /// The default maximum compact count of eight and minimum dense count of six.
+    pub(crate) const DEFAULT: Self = Self::builder()
+        .max_compact::<DEFAULT_MAX_COMPACT>()
+        .min_dense::<DEFAULT_MIN_DENSE>()
+        .build();
 }
 
 impl TryFrom<GroupPhaseChange> for LinkPhaseChange {
@@ -131,10 +153,7 @@ impl TryFrom<GroupPhaseChange> for LinkPhaseChange {
 
 impl Default for LinkPhaseChange {
     fn default() -> Self {
-        Self::builder()
-            .max_compact::<DEFAULT_MAX_COMPACT>()
-            .min_dense::<DEFAULT_MIN_DENSE>()
-            .build()
+        Self::DEFAULT
     }
 }
 

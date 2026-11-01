@@ -15,6 +15,7 @@ use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::DeflateLevel;
+use crate::LinkPhaseChange;
 use crate::VariableLengthType;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
@@ -3571,6 +3572,7 @@ impl DatasetBuilder {
 pub struct GroupBuilder {
     /// The parsed link name, or the error to return when writing a detached group.
     name: Result<LinkNameBuf, FormatError>,
+    link_phase_change: LinkPhaseChange,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
     pub(crate) attrs: AttributeSpecs,
@@ -3611,11 +3613,43 @@ impl GroupBuilder {
     fn from_name(name: Result<LinkNameBuf, FormatError>) -> Self {
         Self {
             name,
+            link_phase_change: LinkPhaseChange::default(),
             datasets: Vec::new(),
             sub_groups: Vec::new(),
             attrs: AttributeSpecs::default(),
             committed: Vec::new(),
         }
+    }
+
+    /// Sets this group's compact and dense link storage thresholds.
+    ///
+    /// The writer stores links compactly through the policy's maximum and uses dense storage
+    /// above it. Empty groups use compact storage, including under
+    /// [`LinkPhaseChange::AlwaysDense`].
+    /// Each new group has the default policy until configured independently.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, LinkPhaseChange};
+    ///
+    /// let policy = LinkPhaseChange::builder().max_compact::<2>().min_dense::<1>().build();
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_group_with("records", |group| {
+    ///     group.with_link_phase_change(policy);
+    ///     for index in 0..3 {
+    ///         group.create_dataset(&format!("value_{index}")).with_i32_data(&[index]);
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.group("records")?.link_phase_change()?, policy);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    #[doc(alias = "H5Pset_link_phase_change")]
+    pub fn with_link_phase_change(&mut self, policy: LinkPhaseChange) -> &mut Self {
+        self.link_phase_change = policy;
+        self
     }
 
     /// Creates a dataset in this group under `name`, and returns the builder that configures
@@ -3755,12 +3789,21 @@ impl GroupBuilder {
 
     /// Consume the builder, returning a FinishedGroup to add to FileWriter.
     pub fn finish(self) -> FinishedGroup {
+        let Self {
+            name,
+            link_phase_change,
+            datasets,
+            sub_groups,
+            attrs,
+            committed,
+        } = self;
         FinishedGroup {
-            name: self.name,
-            datasets: self.datasets,
-            sub_groups: self.sub_groups,
-            attrs: self.attrs,
-            committed: self.committed,
+            name,
+            link_phase_change,
+            datasets,
+            sub_groups,
+            attrs,
+            committed,
         }
     }
 }
@@ -3770,6 +3813,7 @@ impl GroupBuilder {
 pub struct FinishedGroup {
     /// The parsed link name, or the error to return when writing a detached group.
     pub(crate) name: Result<LinkNameBuf, FormatError>,
+    pub(crate) link_phase_change: LinkPhaseChange,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
     pub(crate) attrs: AttributeSpecs,
