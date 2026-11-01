@@ -32,7 +32,6 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
-      miri-image: ${{ steps.filter.outputs.miri-image }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -53,27 +52,15 @@ jobs:
               - tests/baselines/**
               - justfile
               - scripts/constants.just
-              - scripts/nightly.txt
               - scripts/soundness.just
               - .github/workflows/soundness.yml
-              - ci/miri.env
-              - docker/ci/miri/**
-              - scripts/ci/miri-image.sh
-              - scripts/ci/run-miri.sh
-              - .github/workflows/ci-images.yml
-            miri-image:
-              - ci/miri.env
-              - scripts/nightly.txt
-              - docker/ci/miri/**
-              - scripts/ci/miri-image.sh
-              - .github/workflows/ci-images.yml
 
   # Undefined behaviour in the selected unsafe and high-risk paths `just soundness::miri` runs.
+  # Too slow for pull requests, so it runs on `main`, by schedule and on dispatch.
   miri:
     name: miri / ubuntu-latest
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.run == 'true'
+    if: github.event_name != 'pull_request'
 
     env:
       MIRIFLAGS: -Zmiri-strict-provenance
@@ -86,12 +73,10 @@ jobs:
 
       - name: Select the Miri image
         id: image
-        env:
-          CONSTRUCTION_CHANGED: ${{ needs.changes.outputs.miri-image }}
         run: |
           candidate=false
           image=$(bash scripts/ci/miri-image.sh reference)
-          if [[ "$CONSTRUCTION_CHANGED" == true ]] || ! docker pull "$image"; then
+          if ! docker pull "$image"; then
             candidate=true
             image="hdf5-pure-miri:candidate"
             bash scripts/ci/miri-image.sh build "$image"
@@ -164,5 +149,6 @@ jobs:
       - name: Fail if any dependency failed
         if: >-
           contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-          || (needs.changes.outputs.run == 'true' && contains(needs.*.result, 'skipped'))
+          || (needs.changes.outputs.run == 'true' && needs.heap-baseline.result == 'skipped')
+          || (github.event_name != 'pull_request' && needs.miri.result == 'skipped')
         run: exit 1
