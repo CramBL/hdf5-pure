@@ -894,7 +894,7 @@ impl MetadataReadCache {
         // Entries before this bound end before `offset`. The bound is at most `offset`,
         // and `end` is at least `offset`, as required by `BTreeMap::range`.
         let first = offset.saturating_sub(self.longest_entry as u64);
-        let doomed: Vec<(u64, usize)> = self
+        let overlapping_keys: Vec<(u64, usize)> = self
             .entries
             .range((first, 0)..(end, 0))
             // The range checks `entry_offset < end`. Also require `entry_end > offset`.
@@ -903,8 +903,8 @@ impl MetadataReadCache {
             })
             .map(|(key, _)| *key)
             .collect();
-        self.invalidations += doomed.len() as u64;
-        for key in doomed {
+        self.invalidations += overlapping_keys.len() as u64;
+        for key in overlapping_keys {
             self.remove(key);
         }
     }
