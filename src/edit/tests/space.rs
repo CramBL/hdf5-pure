@@ -314,7 +314,7 @@ fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(
 
         let incoming = session.count_incoming_hard_links().unwrap();
         let mut planned = Vec::new();
-        session.collect_free_spans(addr, 0, &incoming, &mut planned);
+        incoming.collect_free_spans(addr, 0, &mut planned);
         for span in &storage {
             assert!(planned.contains(span), "{span:?} is not in {planned:?}");
         }
@@ -750,7 +750,7 @@ fn deleting_a_compact_group_with_symbolic_links_reclaims_its_hard_linked_subtree
     expected.sort_unstable_by_key(|&(range, _)| range.start());
     let incoming = session.count_incoming_hard_links().unwrap();
     let mut planned = Vec::new();
-    session.collect_free_spans(group, 0, &incoming, &mut planned);
+    incoming.collect_free_spans(group, 0, &mut planned);
     planned.sort_unstable_by_key(|&(range, _)| range.start());
     assert_eq!(planned, expected);
 

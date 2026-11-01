@@ -76,7 +76,7 @@ impl WriteEngine {
         let Some(incoming) = self.count_incoming_hard_links() else {
             return Ok(None);
         };
-        if incoming.contains_key(&old_root.get()) {
+        if incoming.incoming(old_root.get()).is_some() {
             return Ok(None);
         }
         let Some(target) = self.stored_extent(*target_range) else {

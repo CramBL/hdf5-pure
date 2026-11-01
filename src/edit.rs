@@ -350,6 +350,7 @@ pub(crate) use self::staging::{StagedChild, StagedKind, StagedMeta, StagedObject
 
 mod aggregation;
 pub(crate) mod allocation;
+mod analysis;
 mod append;
 pub(crate) mod attributes;
 mod commit;

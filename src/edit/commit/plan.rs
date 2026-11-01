@@ -13,6 +13,7 @@ use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
 use crate::dataset_request::ValueOverwrite;
 use crate::datatype;
+use crate::edit::analysis::AnalysisPhase;
 use crate::edit::attributes::{self, AttrOp, EditedAttrs};
 use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
@@ -142,7 +143,6 @@ struct DatasetEdits {
     inplace_writes: Vec<InPlaceWrite>,
     moving_writes: Vec<DatasetRelocation>,
     write_targets: Vec<ObjectPathBuf>,
-    incoming_links: Option<Option<HashMap<u64, u32>>>,
 }
 
 /// Associates a relocating dataset edit with its parent group.
@@ -240,6 +240,7 @@ struct TreeReferences {
     deleted_free: Vec<(FileRange, FreeClass)>,
     deleted_collections: DeletedCollections,
     references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
+    invalidates_reference_proof: bool,
 }
 
 /// Stores a checked destination for a staged cross-file copy.
@@ -271,20 +272,19 @@ impl WriteEngine {
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
     fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
+        let mut analysis = AnalysisPhase::new(self);
         let mut edits = DatasetEdits {
             inplace_writes: Vec::new(),
             moving_writes: Vec::new(),
             write_targets: Vec::new(),
-            incoming_links: None,
         };
-        self.prepare_value_writes(staged, &mut edits)?;
-        self.prepare_appends(staged, &mut edits)?;
-        self.prepare_dataset_attributes(staged, &mut edits)?;
+        self.prepare_value_writes(staged, &mut edits, &mut analysis)?;
+        self.prepare_appends(staged, &mut edits, &mut analysis)?;
+        self.prepare_dataset_attributes(staged, &mut edits, &mut analysis)?;
         let DatasetEdits {
             inplace_writes,
             moving_writes,
             write_targets,
-            mut incoming_links,
         } = edits;
         if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
             return Ok(CommitPlan::InPlace(inplace_writes));
@@ -298,8 +298,8 @@ impl WriteEngine {
             add_targets,
             mut deleted_addrs,
             cross_copies,
-        } = self.plan_dirty_groups(staged, moving_writes, &write_targets)?;
-        let headers = self.prepare_group_headers(staged, &mut nodes, &mut incoming_links)?;
+        } = self.plan_dirty_groups(staged, moving_writes, &write_targets, &mut analysis)?;
+        let headers = self.prepare_group_headers(staged, &mut nodes, &mut analysis)?;
         moved_headers.extend(
             headers
                 .superseded_addrs
@@ -310,6 +310,7 @@ impl WriteEngine {
             deleted_free,
             deleted_collections,
             references,
+            invalidates_reference_proof,
         } = self.prepare_tree_references(
             staged,
             &mut nodes,
@@ -318,7 +319,11 @@ impl WriteEngine {
             &mut deleted_addrs,
             &headers,
             moved_headers,
+            &mut analysis,
         )?;
+        if invalidates_reference_proof {
+            self.proved_free_of_references = false;
+        }
         let mut headers = headers;
         headers
             .keys
@@ -334,9 +339,10 @@ impl WriteEngine {
         }))
     }
     fn prepare_value_writes(
-        &mut self,
+        &self,
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
+        analysis: &mut AnalysisPhase<'_>,
     ) -> Result<(), Error> {
         for (index, (full, fd)) in staged.writes().iter().enumerate() {
             if edits.write_targets.contains(full) {
@@ -365,12 +371,11 @@ impl WriteEngine {
                     })
                 }
                 WritePlan::Moving(mw) => {
-                    let counts = edits
-                        .incoming_links
-                        .get_or_insert_with(|| self.count_incoming_hard_links())
-                        .as_ref();
-                    match counts.and_then(|c| c.get(&addr)) {
-                        Some(&1) => {}
+                    match analysis
+                        .topology()
+                        .and_then(|topology| topology.incoming(addr))
+                    {
+                        Some(1) => {}
                         _ => {
                             return Err(Error::EditUnsupported(
                                 "overwriting a dataset that resizes or relocates its header is \
@@ -397,9 +402,10 @@ impl WriteEngine {
         Ok(())
     }
     fn prepare_appends(
-        &mut self,
+        &self,
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
+        analysis: &mut AnalysisPhase<'_>,
     ) -> Result<(), Error> {
         for (full, ab) in staged.appends() {
             let Some((parent, leaf)) = full.split_leaf() else {
@@ -421,12 +427,11 @@ impl WriteEngine {
                 &full.as_path(),
             )?;
             let mw = Self::prepare_append(&self.opened_source(), addr, ab, self.context.widths())?;
-            let counts = edits
-                .incoming_links
-                .get_or_insert_with(|| self.count_incoming_hard_links())
-                .as_ref();
-            match counts.and_then(|c| c.get(&addr)) {
-                Some(&1) => {}
+            match analysis
+                .topology()
+                .and_then(|topology| topology.incoming(addr))
+            {
+                Some(1) => {}
                 _ => {
                     return Err(Error::AppendUnsupported(
                         "appending relocates the dataset header; only supported when it \
@@ -448,9 +453,10 @@ impl WriteEngine {
         Ok(())
     }
     fn prepare_dataset_attributes(
-        &mut self,
+        &self,
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
+        analysis: &mut AnalysisPhase<'_>,
     ) -> Result<(), Error> {
         let base = self.context.addresses();
         if !staged.dataset_attrs().is_empty() {
@@ -483,12 +489,11 @@ impl WriteEngine {
                     self.context.widths(),
                     &full.as_path(),
                 )?;
-                let counts = edits
-                    .incoming_links
-                    .get_or_insert_with(|| self.count_incoming_hard_links())
-                    .as_ref();
-                match counts.and_then(|c| c.get(&addr)) {
-                    Some(&1) => {}
+                match analysis
+                    .topology()
+                    .and_then(|topology| topology.incoming(addr))
+                {
+                    Some(1) => {}
                     _ => {
                         return Err(Error::EditUnsupported(
                             "editing a dataset attribute relocates its header; only supported \
@@ -523,6 +528,7 @@ impl WriteEngine {
         staged: &StagedEdits,
         moving_writes: Vec<DatasetRelocation>,
         write_targets: &[ObjectPathBuf],
+        analysis: &mut AnalysisPhase<'_>,
     ) -> Result<DirtyGroups, Error> {
         let mut nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
         nodes.entry(ObjectPathBuf::root()).or_default(); // root is always dirty
@@ -611,13 +617,19 @@ impl WriteEngine {
             let Some((parent, leaf)) = d.split_leaf() else {
                 return Err(Error::EditUnsupported("cannot delete the root group"));
             };
-            let del_addr = crate::group_v2::resolve_path_any_from_source(
-                &self.opened_source(),
-                AccessMode::ReadWrite,
-                self.context.superblock(),
-                self.context.widths(),
-                &d.as_path(),
-            )?;
+            let del_addr = match analysis
+                .topology()
+                .and_then(|topology| topology.find_link(d))
+            {
+                Some((_, id)) => id.header_address().get(),
+                None => crate::group_v2::resolve_path_any_from_source(
+                    &self.opened_source(),
+                    AccessMode::ReadWrite,
+                    self.context.superblock(),
+                    self.context.widths(),
+                    &d.as_path(),
+                )?,
+            };
             deleted_addrs.push(del_addr);
             let recreated = add_targets.iter().any(|t| t == d);
             if recreated
@@ -692,7 +704,7 @@ impl WriteEngine {
         &self,
         staged: &StagedEdits,
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
-        incoming_links: &mut Option<Option<HashMap<u64, u32>>>,
+        analysis: &mut AnalysisPhase<'_>,
     ) -> Result<GroupHeaders, Error> {
         let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
         let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
@@ -708,10 +720,10 @@ impl WriteEngine {
                     &key.as_path(),
                 )?;
                 if !key.is_empty() {
-                    let counts = incoming_links
-                        .get_or_insert_with(|| self.count_incoming_hard_links())
-                        .as_ref();
-                    match counts.and_then(|c| c.get(&addr).copied()) {
+                    match analysis
+                        .topology()
+                        .and_then(|topology| topology.incoming(addr))
+                    {
                         Some(1) => {}
                         Some(_) => {
                             return Err(Error::EditUnsupported(
@@ -785,7 +797,7 @@ impl WriteEngine {
         })
     }
     fn prepare_tree_references(
-        &mut self,
+        &self,
         staged: &StagedEdits,
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         add_targets: &[ObjectPathBuf],
@@ -793,6 +805,7 @@ impl WriteEngine {
         deleted_addrs: &mut Vec<u64>,
         headers: &GroupHeaders,
         moved_headers: Vec<PhysicalAddress>,
+        analysis: &mut AnalysisPhase<'_>,
     ) -> Result<TreeReferences, Error> {
         let GroupHeaders {
             keys,
@@ -812,9 +825,9 @@ impl WriteEngine {
         deleted_addrs.sort_unstable();
         deleted_addrs.dedup();
         if !deleted_addrs.is_empty() {
-            if let Some(incoming) = self.count_incoming_hard_links() {
-                for &a in deleted_addrs.iter() {
-                    self.collect_free_spans(a, 0, &incoming, &mut deleted_free);
+            if let Some(topology) = analysis.topology() {
+                for &address in deleted_addrs.iter() {
+                    topology.collect_free_spans(address, 0, &mut deleted_free);
                 }
             }
         }
@@ -852,7 +865,7 @@ impl WriteEngine {
             edit::screen_resolved_references(&values.dt, values.raw(), &for_supplied)?;
         }
 
-        if staged.datasets().iter().any(|(_, fd)| {
+        let invalidates_reference_proof = staged.datasets().iter().any(|(_, fd)| {
             datatype::datatype_holds_object_address(&fd.dt)
                 || fd
                     .attrs
@@ -863,10 +876,7 @@ impl WriteEngine {
             .iter()
             .any(|(_, values)| datatype::datatype_holds_object_address(&values.dt))
             || !staged.copies().is_empty()
-            || !staged.cross_copies().is_empty()
-        {
-            self.proved_free_of_references = false;
-        }
+            || !staged.cross_copies().is_empty();
 
         let references = Self::prepare_reference_targets(
             keys,
@@ -888,6 +898,7 @@ impl WriteEngine {
             deleted_free,
             deleted_collections,
             references,
+            invalidates_reference_proof,
         })
     }
     /// Checks link additions and selects storage for each final link set.

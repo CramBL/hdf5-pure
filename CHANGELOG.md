@@ -67,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- `File::commit` reuses lazy hard-link topology for relocation checks and deletion planning.
 - Writable free-space recovery through `File::open_rw` builds free lists in bulk. PAGE normalization, completed-page coverage, and range subtraction use bounded passes over extents ([#1018](https://github.com/CramBL/hdf5-pure/pull/1018)).
 - Chunked reads through `Dataset::read_raw` and related writes reuse intermediate allocations for shuffle and LZF, avoid intermediate Fletcher32 copies, and preserve scale-offset pass-through and raw-payload views. Deflate decoding reuses initialized output within each chunk's limit, and final chunk buffers remain independently owned ([#983](https://github.com/CramBL/hdf5-pure/pull/983), [#990](https://github.com/CramBL/hdf5-pure/pull/990)).
 - `File::dataset` and related group operations use less memory for hard-link targets. Soft and external targets require a separate target allocation.

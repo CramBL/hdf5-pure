@@ -47,8 +47,25 @@ impl<T, L> ObjectGraph<T, L> {
     pub(crate) fn discover<E>(
         budget: TraversalBudget,
         root: ObjectId,
-        mut expand: impl FnMut(ObjectId) -> Result<Expansion<T, L>, E>,
+        expand: impl FnMut(ObjectId) -> Result<Expansion<T, L>, E>,
     ) -> Result<Self, TraversalError<E>> {
+        Self::discover_indexed(budget, root, expand).map(|(graph, _)| graph)
+    }
+
+    /// Discovers reachable objects and returns their indices keyed by identity.
+    ///
+    /// Uses the traversal order and budgets of [`Self::discover`]. The returned indices refer to
+    /// the graph before any removal through [`Self::remove_links`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraversalError::LimitExceeded`] if discovery exceeds `budget`, or
+    /// [`TraversalError::Expand`] with the first error `expand` returns.
+    pub(crate) fn discover_indexed<E>(
+        budget: TraversalBudget,
+        root: ObjectId,
+        mut expand: impl FnMut(ObjectId) -> Result<Expansion<T, L>, E>,
+    ) -> Result<(Self, BTreeMap<ObjectId, ObjectIndex>), TraversalError<E>> {
         let mut worklist = Worklist::new(budget.objects);
         worklist.admit(root)?;
         let mut link_count = 0_usize;
@@ -72,9 +89,21 @@ impl<T, L> ObjectGraph<T, L> {
                 .collect::<Result<_, TraversalError<E>>>()?;
             worklist.expanded.push(GraphObject { value, links });
         }
-        Ok(Self {
-            objects: worklist.expanded,
-        })
+        Ok((
+            Self {
+                objects: worklist.expanded,
+            },
+            worklist.indices,
+        ))
+    }
+
+    /// Returns the object at its position in this graph.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds for this graph.
+    pub(crate) fn object(&self, index: ObjectIndex) -> &GraphObject<T, L> {
+        &self.objects[index.get()]
     }
 
     /// Removes `links`, then the objects the root does not reach.
@@ -340,7 +369,7 @@ pub(crate) struct ObjectIndex(usize);
 
 impl ObjectIndex {
     /// The root of an [`ObjectGraph`], which [`ObjectGraph::discover`] admits first.
-    const ROOT: Self = Self(0);
+    pub(crate) const ROOT: Self = Self(0);
 
     pub(crate) const fn get(self) -> usize {
         self.0
@@ -355,6 +384,17 @@ pub(crate) struct LinkIndex {
     position: usize,
 }
 
+impl LinkIndex {
+    /// Identifies a link by its owner and position in that owner's link vector.
+    pub(crate) const fn new(object: ObjectIndex, position: usize) -> Self {
+        Self { object, position }
+    }
+}
+
+/// A bounded depth-first walk over object identities, with each included object returned once.
+///
+/// The caller reads each returned object and schedules its children with [`Self::push_child`].
+/// The traversal retains identities and pending depths, without object contents.
 pub(crate) struct ObjectTraversal {
     pending: Vec<(ObjectId, u32)>,
     visited: BTreeSet<ObjectId>,
