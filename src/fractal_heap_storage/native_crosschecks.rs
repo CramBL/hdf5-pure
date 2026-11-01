@@ -10,9 +10,12 @@ use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
 };
 use crate::convert::Narrow;
+use crate::fractal_heap;
 use crate::fractal_heap::HeapObjectReader;
+use crate::fractal_heap::HeapSource;
 use crate::fractal_heap_storage::{self, FractalHeapAllocation};
 use crate::source::BytesSource;
+use crate::source::PhysicalSource;
 use crate::width::{LengthWidth, OffsetWidth};
 
 #[cfg(feature = "deflate")]
@@ -64,40 +67,49 @@ fn c_written_filtered_huge_objects_have_exact_storage_and_contents(#[case] direc
     let expected: Vec<_> = (0..12_000)
         .map(|index| u8::try_from(index % 251).unwrap())
         .collect();
-    let mut reader = HeapObjectReader::new(
-        &header,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
-        StoredAddress::new(address),
-        AccessMode::ReadOnly,
-        widths,
-    );
-    assert_eq!(
-        reader
-            .read(
-                &bytes,
-                FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                    .parse(&id)
-                    .unwrap()
+    file.with_opened_source(|opened| {
+        let physical = PhysicalSource::new(opened);
+        let stored = physical.stored();
+        let (actual, range) = fractal_heap::read_header_and_range_from_source(
+            &HeapSource::new(&stored),
+            StoredAddress::new(address),
+            widths,
+        )
+        .unwrap();
+        assert_eq!(actual, header);
+        assert_eq!(range.start().get(), address);
+        let id = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+            .parse(&id)
+            .unwrap();
+        assert_eq!(
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
+                &header,
+                StoredAddress::new(address),
+                AccessMode::ReadOnly,
+                widths,
             )
+            .read(id)
             .unwrap(),
-        expected
-    );
-    let mut reader = HeapObjectReader::new(
-        &header,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
-        StoredAddress::new(address),
-        AccessMode::ReadOnly,
-        widths,
-    );
-    assert_eq!(
-        reader
-            .read_from_source(
-                &BytesSource::new(&bytes),
-                FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                    .parse(&id)
-                    .unwrap()
+            expected,
+        );
+        let resident = PhysicalSource::new(opened)
+            .resident()
+            .unwrap()
+            .stored()
+            .unwrap();
+        assert_eq!(
+            HeapObjectReader::new(
+                HeapSource::resident(resident),
+                &header,
+                StoredAddress::new(address),
+                AccessMode::ReadOnly,
+                widths,
             )
+            .read(id)
             .unwrap(),
-        expected
-    );
+            expected,
+        );
+    });
+    file.close().unwrap();
 }

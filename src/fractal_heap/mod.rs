@@ -1,6 +1,7 @@
 //! Resolves managed, huge, and tiny objects stored in a fractal heap.
 //!
-//! [`HeapObjectReader`] reads from either an in-memory file image or a [`Source`].
+//! [`HeapObjectReader`] binds its validation caches to one [`HeapSource`].
+//! [`LegacyHeapObjectReader`] reads from either an in-memory file image or a [`Source`].
 
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
@@ -19,7 +20,11 @@ use hdf5_pure_format::__private::{
 };
 
 use crate::access_mode::AccessMode;
-use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
+use crate::address::AddressContext;
+use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::{FILTER_SHUFFLE, FilterPipeline};
@@ -31,13 +36,23 @@ use crate::width::FormatWidths;
 #[cfg(test)]
 use crate::width::{LengthWidth, OffsetWidth};
 
+#[cfg(any(test, doc))]
+mod stored;
+
+#[cfg(any(test, doc))]
+pub(crate) use stored::HeapObjectReader;
+#[cfg(any(test, doc))]
+pub(crate) use stored::HeapSource;
+#[cfg(any(test, doc))]
+pub(crate) use stored::read_header_and_range_from_source;
+
 /// Parses a heap header using validated file widths.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::InsufficientRegion`] if the image is truncated, and the address and header
-/// parsing errors of [`read_header_from_source`].
-pub(crate) fn parse_header(
+/// parsing errors of [`legacy_read_header_from_source`].
+pub(crate) fn legacy_parse_header(
     bytes: &[u8],
     addresses: AddressContext,
     address: StoredAddress,
@@ -68,13 +83,14 @@ pub(crate) fn parse_header(
 /// the parsing errors of [`FractalHeapHeaderLocator::parse`] and
 /// [`FractalHeapHeaderRef::parse`](hdf5_pure_format::__private::FractalHeapHeaderRef::parse).
 /// Returns the source error if a read fails.
-pub(crate) fn read_header_from_source(
+pub(crate) fn legacy_read_header_from_source(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<FractalHeapHeader, FormatError> {
-    read_header_and_range_from_source(source, addresses, address, widths).map(|(header, _)| header)
+    legacy_read_header_and_range_from_source(source, addresses, address, widths)
+        .map(|(header, _)| header)
 }
 
 /// Reads a fractal heap header from a source, with the physical range of its encoded bytes.
@@ -83,8 +99,8 @@ pub(crate) fn read_header_from_source(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`read_header_from_source`].
-pub(crate) fn read_header_and_range_from_source(
+/// Returns the errors of [`legacy_read_header_from_source`].
+pub(crate) fn legacy_read_header_and_range_from_source(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     address: StoredAddress,
@@ -93,10 +109,10 @@ pub(crate) fn read_header_and_range_from_source(
     let locator =
         FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
     let prefix_range = locator.parse_range()?;
-    let prefix = read_header_range(source, addresses, prefix_range)?;
+    let prefix = legacy_read_header_range(source, addresses, prefix_range)?;
     let header_ref = locator.parse(FileRegion::new(prefix_range, &prefix)?)?;
     let range = header_ref.parse_range();
-    let bytes = read_header_range(source, addresses, range)?;
+    let bytes = legacy_read_header_range(source, addresses, range)?;
     Ok((
         header_ref.parse(FileRegion::new(range, &bytes)?)?,
         header_ref.range(),
@@ -110,7 +126,7 @@ pub(crate) fn read_header_and_range_from_source(
 /// Returns [`FormatError::AddressBelowBase`] if the range starts below the effective base,
 /// [`FormatError::ValueTooLargeForPlatform`] if the read length exceeds [`usize::MAX`], and the
 /// source error if a read fails.
-pub(crate) fn read_header_range(
+pub(crate) fn legacy_read_header_range(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     range: FileRange,
@@ -244,7 +260,7 @@ pub(crate) fn huge_index_decodes() -> usize {
 impl HugeObjectIndex {
     fn decode<'bytes>(
         read: &impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
-        addresses: AddressContext,
+        origin: BaseAddress,
         layout: &FractalHeapHugeObjectLayout,
         widths: FormatWidths,
         limits: HugeObjectReadLimits,
@@ -267,7 +283,7 @@ impl HugeObjectIndex {
             }
             HugeObjectReadLimits::require(limits.index_nodes, visited.len().to_u64())?;
             let range = FileRange::new(
-                addresses.resolve(node.address())?,
+                origin.resolve(node.address())?,
                 node.encoded_len()?.to_u64(),
             )?;
             metadata_bytes =
@@ -354,10 +370,11 @@ impl HugeObjectIndex {
 /// active filters, and checks the declared decoded size. Huge-object payloads are independent of
 /// managed blocks. For indirect huge objects, the reader checks tracker metadata checksums when
 /// checksum support is enabled.
-pub struct HeapObjectReader<'h> {
+pub struct LegacyHeapObjectReader<'h> {
     header: &'h FractalHeapHeader,
     widths: FormatWidths,
-    addresses: AddressContext,
+    /// The physical metadata origin, or the error returned when obtaining it.
+    origin: Result<BaseAddress, FormatError>,
     access_mode: AccessMode,
     /// Direct blocks whose complete checksums were validated against this reader's image.
     validated_direct: BTreeSet<StoredAddress>,
@@ -383,7 +400,7 @@ enum Backend {
     Streaming,
 }
 
-impl<'h> HeapObjectReader<'h> {
+impl<'h> LegacyHeapObjectReader<'h> {
     /// Returns a reader of the objects of the heap `header` describes.
     ///
     /// `owner` is the header's stored address. `addresses` resolves addresses against the image's
@@ -420,10 +437,28 @@ impl<'h> HeapObjectReader<'h> {
         widths: FormatWidths,
         huge_limits: HugeObjectReadLimits,
     ) -> Self {
+        Self::with_origin(
+            header,
+            Ok(addresses.effective_base()),
+            owner,
+            access_mode,
+            widths,
+            huge_limits,
+        )
+    }
+
+    fn with_origin(
+        header: &'h FractalHeapHeader,
+        origin: Result<BaseAddress, FormatError>,
+        owner: StoredAddress,
+        access_mode: AccessMode,
+        widths: FormatWidths,
+        huge_limits: HugeObjectReadLimits,
+    ) -> Self {
         Self {
             header,
             widths,
-            addresses,
+            origin,
             access_mode,
             validated_direct: BTreeSet::new(),
             validated_backend: None,
@@ -511,13 +546,13 @@ impl<'h> HeapObjectReader<'h> {
         file_data: &[u8],
         id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
-        let addresses = self.addresses;
+        let origin = *self.origin.as_ref().map_err(Clone::clone)?;
         self.read_huge_with(
             |range| {
                 source::bytes_in(
                     file_data,
                     FileRange::new(
-                        PhysicalAddress::new(addresses.relative(range.start())?.get()),
+                        PhysicalAddress::new(origin.relative(range.start())?.get()),
                         range.length(),
                     )?,
                 )
@@ -533,9 +568,14 @@ impl<'h> HeapObjectReader<'h> {
         source: &(impl Source + ?Sized),
         id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
-        let addresses = self.addresses;
+        let origin = *self.origin.as_ref().map_err(Clone::clone)?;
         self.read_huge_with(
-            |range| read_header_range(source, addresses, range),
+            |range| {
+                source.read_metadata(
+                    origin.relative(range.start())?.get(),
+                    range.length().to_usize()?,
+                )
+            },
             Backend::Streaming,
             id,
         )
@@ -551,7 +591,7 @@ impl<'h> HeapObjectReader<'h> {
             self.huge_layout = Some(FractalHeapHugeObjectLayout::new(
                 self.header,
                 self.widths,
-                self.addresses.effective_base(),
+                *self.origin.as_ref().map_err(Clone::clone)?,
                 HugeIndirectKeyEncoding::Libhdf5,
             )?);
         }
@@ -564,7 +604,7 @@ impl<'h> HeapObjectReader<'h> {
                 if self.huge.is_none() {
                     self.huge = Some(HugeObjectIndex::decode(
                         &read,
-                        self.addresses,
+                        *self.origin.as_ref().map_err(Clone::clone)?,
                         layout,
                         self.widths,
                         self.huge_limits,
@@ -646,7 +686,10 @@ impl<'h> HeapObjectReader<'h> {
     ) -> Result<Vec<u8>, FormatError> {
         let image = FileRegion::new(
             FileRange::new(
-                self.addresses.resolve(StoredAddress::ZERO)?,
+                self.origin
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .resolve(StoredAddress::ZERO)?,
                 file_data.len() as u64,
             )?,
             file_data,
@@ -669,9 +712,14 @@ impl<'h> HeapObjectReader<'h> {
         heap_offset: u64,
         object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        let addresses = self.addresses;
+        let origin = *self.origin.as_ref().map_err(Clone::clone)?;
         self.read_managed_object_with(
-            |range| read_header_range(source, addresses, range),
+            |range| {
+                source.read_metadata(
+                    origin.relative(range.start())?.get(),
+                    range.length().to_usize()?,
+                )
+            },
             Backend::Streaming,
             heap_offset,
             object_length,
@@ -701,7 +749,11 @@ impl<'h> HeapObjectReader<'h> {
         for _depth in 0..64 {
             match block {
                 FractalHeapBlock::Direct(direct) => {
-                    let reference = direct.at(self.addresses.resolve(direct.address())?)?;
+                    let reference = direct.at(self
+                        .origin
+                        .as_ref()
+                        .map_err(Clone::clone)?
+                        .resolve(direct.address())?)?;
                     let require_checksum = self.access_mode == AccessMode::ReadWrite
                         && self.header.flags
                             & hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED
@@ -742,7 +794,11 @@ impl<'h> HeapObjectReader<'h> {
                     return Ok(read(object.range())?.into_vec());
                 }
                 FractalHeapBlock::Indirect(indirect) => {
-                    let reference = indirect.at(self.addresses.resolve(indirect.address())?)?;
+                    let reference = indirect.at(self
+                        .origin
+                        .as_ref()
+                        .map_err(Clone::clone)?
+                        .resolve(indirect.address())?)?;
                     let range = reference.parse_range();
                     let bytes = read(range)?;
                     let view = reference.parse(FileRegion::new(range, &bytes)?)?;
@@ -794,7 +850,9 @@ mod tests {
     use test_util_hdf5::reader::ReadBackend;
 
     use crate::address::{BaseAddress, BaseAddressExt, OpenedImageContext};
-    use crate::source::{BaseOffsetSource, BytesSource};
+    use crate::source::BytesSource;
+    use crate::source::PhysicalBytes;
+    use crate::source::PhysicalSource;
     use crate::test_data;
 
     use super::*;
@@ -817,6 +875,8 @@ mod tests {
         #[case] effective_base: u64,
         #[values(0, 3)] root_rows: u16,
         #[values(0, 2)] huge_objects: u64,
+        #[values(false, true)] resident: bool,
+        #[values(0, 37)] origin: u64,
     ) {
         let mut header = FractalHeapHeader::parse_bytes(
             &fractal_heap::Header::new(256).build(Widths::EIGHT),
@@ -833,8 +893,9 @@ mod tests {
         let header_address = 13;
         let mut image = vec![0xFF; usize::try_from(effective_base + header_address).unwrap()];
         image.extend_from_slice(&bytes);
-        let source = HeaderSource {
+        let source = OriginSource {
             bytes: &image,
+            origin,
             reads: RefCell::new(Vec::new()),
         };
         let addresses = OpenedImageContext::reconcile(
@@ -844,20 +905,29 @@ mod tests {
         )
         .unwrap()
         .addresses();
-        let framed = BaseOffsetSource {
-            inner: &source,
-            base: addresses.effective_base(),
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let resident_bytes = PhysicalBytes::for_test(&image, addresses).stored().unwrap();
+        let source_view = if resident {
+            HeapSource::resident(resident_bytes)
+        } else {
+            HeapSource::new(&stored)
         };
+        let (actual, range) = read_header_and_range_from_source(
+            &source_view,
+            StoredAddress::new(header_address),
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
+        assert_eq!(actual, header);
+        assert_eq!(range.length(), bytes.len().to_u64());
         assert_eq!(
-            read_header_from_source(
-                &framed,
-                addresses,
-                StoredAddress::new(header_address),
-                FORMAT_WIDTHS,
-            )
-            .unwrap(),
-            header
+            range.start().get(),
+            effective_base + header_address + if resident { 0 } else { origin }
         );
+        if resident {
+            assert_eq!(*source.reads.borrow(), vec![]);
+            return;
+        }
         assert_eq!(
             *source.reads.borrow(),
             vec![
@@ -879,10 +949,15 @@ mod tests {
     ) {
         let mut bytes = fractal_heap::Header::new(256).build(Widths::EIGHT);
         bytes.truncate(available);
+        let source = BytesSource::new(&bytes);
+        let stored = PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+        )
+        .stored();
         assert_eq!(
-            read_header_from_source(
-                &BytesSource::new(&bytes),
-                AddressContext::from_effective_base(BaseAddress::ZERO),
+            read_header_and_range_from_source(
+                &HeapSource::new(&stored),
                 StoredAddress::ZERO,
                 FORMAT_WIDTHS,
             )
@@ -915,10 +990,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tiny_objects_do_not_require_a_representable_physical_origin() {
+        let header = FractalHeapHeader::parse_bytes(
+            &fractal_heap::Header::new(256).build(Widths::EIGHT),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        let source = OriginSource {
+            bytes: &[],
+            origin: u64::MAX,
+            reads: RefCell::new(vec![]),
+        };
+        let stored = PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::new(512)),
+        )
+        .stored();
+        let id = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight);
+        assert_eq!(
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
+                &header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+            )
+            .read(
+                id.parse(&[TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0])
+                    .unwrap()
+            )
+            .unwrap(),
+            b"abc",
+        );
+    }
+
+    #[test]
+    fn a_missing_managed_block_precedes_physical_origin_overflow() {
+        let header = FractalHeapHeader::parse_bytes(
+            &fractal_heap::Header::new(u64::MAX).build(Widths::EIGHT),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        let source = OriginSource {
+            bytes: &[],
+            origin: u64::MAX,
+            reads: RefCell::new(vec![]),
+        };
+        let stored = PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::new(512)),
+        )
+        .stored();
+        assert_eq!(
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
+                &header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+            )
+            .read(parse_id(&header, &[0, 15, 0, 3, 0, 0, 0]))
+            .unwrap_err(),
+            FormatError::MissingFractalHeapBlock {
+                heap_offset: 15,
+                object_length: 3
+            },
+        );
+        assert_eq!(*source.reads.borrow(), vec![]);
+    }
+
+    struct OriginSource<'a> {
+        bytes: &'a [u8],
+        origin: u64,
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl Source for OriginSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len().to_u64()
+        }
+        fn metadata_origin(&self) -> Result<u64, FormatError> {
+            Ok(self.origin)
+        }
+        fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.borrow_mut().push((offset, buffer.len()));
+            BytesSource::new(self.bytes).read_at(offset, buffer)
+        }
+    }
+
     #[rstest]
-    #[case::read_only(AccessMode::ReadOnly)]
-    #[case::read_write(AccessMode::ReadWrite)]
-    fn checksummed_object_reads_follow_the_access_mode(#[case] mode: AccessMode) {
+    #[case::zero_base(0, 0)]
+    #[case::userblock(512, 512)]
+    #[case::forward_relocated(0, 512)]
+    #[case::backward_relocated(512, 0)]
+    fn checksummed_object_reads_follow_the_access_mode(
+        #[case] encoded_base: u64,
+        #[case] base: u64,
+        #[values(AccessMode::ReadOnly, AccessMode::ReadWrite)] mode: AccessMode,
+        #[values(0, 37)] origin: u64,
+        #[values(false, true)] resident: bool,
+    ) {
         let mut image = fractal_heap::heap_with_one_object(b"abc", Widths::EIGHT);
         let mut header = FractalHeapHeader::parse(&image, 0, 8, 8).unwrap();
         header.flags = hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
@@ -928,41 +1102,48 @@ mod tests {
         image[at + 19..at + 22].copy_from_slice(b"abc");
         let checksum = crate::checksum::jenkins_lookup3(&image[at..at + 128]);
         image[at + 15..at + 19].copy_from_slice(&checksum.to_le_bytes());
-        let source = HeaderSource {
-            bytes: &image,
+        let mut relocated = vec![0; base.to_usize().unwrap()];
+        relocated.extend_from_slice(&image);
+        let source = OriginSource {
+            bytes: &relocated,
+            origin,
             reads: RefCell::new(Vec::new()),
         };
         let id = [0, 19, 0, 3, 0, 0, 0];
+        let addresses = OpenedImageContext::reconcile(
+            BaseAddress::new(encoded_base),
+            encoded_base + image.len().to_u64(),
+            base,
+        )
+        .unwrap()
+        .addresses();
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let bytes = PhysicalBytes::for_test(&relocated, addresses)
+            .stored()
+            .unwrap();
+        let source_view = if resident {
+            HeapSource::resident(bytes)
+        } else {
+            HeapSource::new(&stored)
+        };
         let mut reader = HeapObjectReader::new(
+            source_view,
             &header,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             mode,
             FORMAT_WIDTHS,
         );
-        assert_eq!(
-            reader
-                .read_from_source(&source, parse_id(&header, &id))
-                .unwrap(),
-            b"abc"
-        );
-        assert_eq!(
-            reader
-                .read_from_source(&source, parse_id(&header, &id))
-                .unwrap(),
-            b"abc"
-        );
+        assert_eq!(reader.read(parse_id(&header, &id)).unwrap(), b"abc");
+        assert_eq!(reader.read(parse_id(&header, &id)).unwrap(), b"abc");
+        let at = base + at.to_u64();
         assert_eq!(
             *source.reads.borrow(),
-            if mode == AccessMode::ReadWrite {
-                vec![(at as u64, 128), (at as u64, 19), (at as u64 + 19, 3)]
+            if resident {
+                vec![]
+            } else if mode == AccessMode::ReadWrite {
+                vec![(at, 128), (at, 19), (at + 19, 3)]
             } else {
-                vec![
-                    (at as u64, 19),
-                    (at as u64 + 19, 3),
-                    (at as u64, 19),
-                    (at as u64 + 19, 3),
-                ]
+                vec![(at, 19), (at + 19, 3), (at, 19), (at + 19, 3)]
             }
         );
     }
@@ -1003,7 +1184,7 @@ mod tests {
         let source = BytesSource::new(&image[..supplied.end().get() as usize]);
         let id = [0, 15, 0, 3, 0, 0, 0];
         assert_eq!(
-            HeapObjectReader::new(
+            LegacyHeapObjectReader::new(
                 &header,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
@@ -1058,21 +1239,31 @@ mod tests {
         let id = parse_id(&header, &bytes);
         let mut image = vec![0; 64];
         image[0x20..0x23].copy_from_slice(b"abc");
-        let mut reader = HeapObjectReader::new(
-            &header,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-            StoredAddress::ZERO,
-            AccessMode::ReadOnly,
-            FORMAT_WIDTHS,
-        );
         let source = HeaderSource {
             bytes: &image,
             reads: RefCell::new(Vec::new()),
         };
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let resident = PhysicalBytes::for_test(&image, addresses).stored().unwrap();
         let object = if streaming {
-            reader.read_from_source(&source, id)
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
+                &header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+            )
+            .read(id)
         } else {
-            reader.read(&image, id)
+            HeapObjectReader::new(
+                HeapSource::resident(resident),
+                &header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+            )
+            .read(id)
         }
         .unwrap();
         assert_eq!(object, expected);
@@ -1102,7 +1293,7 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let obj = HeapObjectReader::new(
+        let obj = LegacyHeapObjectReader::new(
             &hdr,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
@@ -1168,7 +1359,7 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let buffered = HeapObjectReader::new(
+        let buffered = LegacyHeapObjectReader::new(
             &hdr,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
@@ -1180,14 +1371,14 @@ mod tests {
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
-        let hdr_mem = read_header_from_source(
+        let hdr_mem = legacy_read_header_from_source(
             &mem,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             FORMAT_WIDTHS,
         )
         .unwrap();
-        let from_mem = HeapObjectReader::new(
+        let from_mem = LegacyHeapObjectReader::new(
             &hdr_mem,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
@@ -1198,14 +1389,14 @@ mod tests {
         .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
-        let hdr_seek = read_header_from_source(
+        let hdr_seek = legacy_read_header_from_source(
             &seek,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             FORMAT_WIDTHS,
         )
         .unwrap();
-        let from_seek = HeapObjectReader::new(
+        let from_seek = LegacyHeapObjectReader::new(
             &hdr_seek,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
@@ -1226,6 +1417,8 @@ mod tests {
     #[case::indirect_root(true)]
     fn filtered_managed_objects_are_read_from_their_decoded_block(
         #[case] indirect: bool,
+        #[values(0, 512)] base: u64,
+        #[values(0, 37)] origin: u64,
         #[values(AccessMode::ReadOnly, AccessMode::ReadWrite)] mode: AccessMode,
         #[values(
             test_data::deflate_pipeline(),
@@ -1237,22 +1430,27 @@ mod tests {
         pipeline: FilterPipeline,
     ) {
         let heap = FilteredHeap::new(indirect, pipeline, |_block| {});
-        let source = HeaderSource {
-            bytes: &heap.image,
+        let mut relocated = vec![0; base.to_usize().unwrap()];
+        relocated.extend_from_slice(&heap.image);
+        let source = OriginSource {
+            bytes: &relocated,
+            origin,
             reads: RefCell::new(Vec::new()),
         };
         let id = heap.object_id();
-        let mut reader = heap.reader(mode);
-        for _ in 0..2 {
-            assert_eq!(
-                reader
-                    .read_from_source(&source, parse_id(&heap.header, &id))
-                    .unwrap(),
-                b"abc"
-            );
-        }
-        let block = (FILTERED_BLOCK_AT, heap.encoded_len);
-        let root = (FILTERED_ROOT_AT, heap.indirect_len);
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let mut reader = HeapObjectReader::new(
+            HeapSource::new(&stored),
+            &heap.header,
+            StoredAddress::ZERO,
+            mode,
+            FORMAT_WIDTHS,
+        );
+        assert_eq!(reader.read(parse_id(&heap.header, &id)).unwrap(), b"abc");
+        assert_eq!(reader.read(parse_id(&heap.header, &id)).unwrap(), b"abc");
+        let block = (base + FILTERED_BLOCK_AT, heap.encoded_len);
+        let root = (base + FILTERED_ROOT_AT, heap.indirect_len);
         // The reader reuses the decoded block on the second read and reads only the root indirect
         // block again.
         assert_eq!(
@@ -1264,9 +1462,19 @@ mod tests {
             }
         );
         assert_eq!(
-            heap.reader(mode)
-                .read(&heap.image, parse_id(&heap.header, &id))
-                .unwrap(),
+            HeapObjectReader::new(
+                HeapSource::resident(
+                    PhysicalBytes::for_test(&relocated, addresses)
+                        .stored()
+                        .unwrap()
+                ),
+                &heap.header,
+                StoredAddress::ZERO,
+                mode,
+                FORMAT_WIDTHS,
+            )
+            .read(parse_id(&heap.header, &id))
+            .unwrap(),
             b"abc"
         );
     }
@@ -1490,8 +1698,8 @@ mod tests {
             id
         }
 
-        fn reader(&self, mode: AccessMode) -> HeapObjectReader<'_> {
-            HeapObjectReader::new(
+        fn reader(&self, mode: AccessMode) -> LegacyHeapObjectReader<'_> {
+            LegacyHeapObjectReader::new(
                 &self.header,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
@@ -1543,7 +1751,7 @@ mod tests {
         let ids: Vec<Vec<u8>> = (1..=COUNT).map(heap_id).collect();
 
         reset_huge_index_decodes();
-        let mut reader = HeapObjectReader::new(
+        let mut reader = LegacyHeapObjectReader::new(
             &heap,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(frhp as u64),
@@ -1562,7 +1770,7 @@ mod tests {
 
         reset_huge_index_decodes();
         let source = BytesSource::new(bytes.clone());
-        let mut reader = HeapObjectReader::new(
+        let mut reader = LegacyHeapObjectReader::new(
             &heap,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(frhp as u64),
@@ -1951,22 +2159,25 @@ mod tests {
             bytes: &heap.image,
             reads: RefCell::new(Vec::new()),
         };
-        let framed = BaseOffsetSource {
-            inner: &source,
-            base: BaseAddress::new(base),
-        };
-        let mut reader = heap.reader(HugeObjectReadLimits::UNLIMITED);
+        let stored = PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::new(base)),
+        )
+        .stored();
+        let mut reader = HeapObjectReader::new(
+            HeapSource::new(&stored),
+            &heap.header,
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
+        );
         reset_huge_index_decodes();
         assert_eq!(
-            reader
-                .read_from_source(&framed, parse_id(&heap.header, &heap.id))
-                .unwrap(),
+            reader.read(parse_id(&heap.header, &heap.id)).unwrap(),
             heap.decoded
         );
         assert_eq!(
-            reader
-                .read_from_source(&framed, parse_id(&heap.header, &heap.id))
-                .unwrap(),
+            reader.read(parse_id(&heap.header, &heap.id)).unwrap(),
             heap.decoded
         );
         assert_eq!(huge_index_decodes(), 1);
@@ -2231,12 +2442,15 @@ mod tests {
     }
 
     #[rstest]
+    #[case::zero(0, 0)]
+    #[case::userblock(512, 512)]
     #[case::forward(512, 1024)]
     #[case::backward(512, 0)]
     fn huge_object_reads_use_relocated_physical_positions(
         #[case] encoded_base: u64,
         #[case] signature: u64,
         #[values(false, true)] direct: bool,
+        #[values(0, 37)] origin: u64,
         #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let heap = HugeHeap::new(
@@ -2251,26 +2465,33 @@ mod tests {
         )
         .unwrap()
         .addresses();
-        let mut reader = HeapObjectReader::new(
-            &heap.header,
-            addresses,
-            StoredAddress::ZERO,
-            AccessMode::ReadOnly,
-            FORMAT_WIDTHS,
-        );
+        let source = OriginSource {
+            bytes: &heap.image,
+            origin,
+            reads: RefCell::new(vec![]),
+        };
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
         let result = if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
-            reader.read_from_source(
-                &BaseOffsetSource {
-                    inner: &BytesSource::new(&heap.image),
-                    base: addresses.effective_base(),
-                },
-                parse_id(&heap.header, &heap.id),
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
+                &heap.header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
             )
+            .read(parse_id(&heap.header, &heap.id))
         } else {
-            reader.read(
-                &heap.image[signature as usize..],
-                parse_id(&heap.header, &heap.id),
+            let resident = PhysicalBytes::for_test(&heap.image, addresses)
+                .stored()
+                .unwrap();
+            HeapObjectReader::new(
+                HeapSource::resident(resident),
+                &heap.header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
             )
+            .read(parse_id(&heap.header, &heap.id))
         };
         assert_eq!(result.unwrap(), heap.decoded);
     }
@@ -2419,8 +2640,8 @@ mod tests {
             self.write_tracker(vec![self.record.clone()]);
         }
 
-        fn reader(&self, limits: HugeObjectReadLimits) -> HeapObjectReader<'_> {
-            HeapObjectReader::with_huge_limits(
+        fn reader(&self, limits: HugeObjectReadLimits) -> LegacyHeapObjectReader<'_> {
+            LegacyHeapObjectReader::with_huge_limits(
                 &self.header,
                 AddressContext::from_effective_base(BaseAddress::new(self.base)),
                 StoredAddress::ZERO,
@@ -2435,20 +2656,32 @@ mod tests {
             backend: ReadBackend,
             limits: HugeObjectReadLimits,
         ) -> Result<Vec<u8>, FormatError> {
-            if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
-                self.reader(limits).read_from_source(
-                    &BaseOffsetSource {
-                        inner: &BytesSource::new(&self.image),
-                        base: BaseAddress::new(self.base),
-                    },
-                    parse_id(&self.header, &self.id),
-                )
+            let addresses = AddressContext::from_effective_base(BaseAddress::new(self.base));
+            let source = BytesSource::new(&self.image);
+            let stored = PhysicalSource::for_test(&source, addresses).stored();
+            let source = if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
+                HeapSource::new(&stored)
             } else {
-                self.reader(limits).read(
-                    &self.image[self.base as usize..],
-                    parse_id(&self.header, &self.id),
+                let resident = PhysicalBytes::for_test(&self.image, addresses).stored()?;
+                return HeapObjectReader::with_huge_limits(
+                    HeapSource::resident(resident),
+                    &self.header,
+                    StoredAddress::ZERO,
+                    AccessMode::ReadOnly,
+                    FORMAT_WIDTHS,
+                    limits,
                 )
-            }
+                .read(parse_id(&self.header, &self.id));
+            };
+            HeapObjectReader::with_huge_limits(
+                source,
+                &self.header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+                limits,
+            )
+            .read(parse_id(&self.header, &self.id))
         }
 
         #[cfg(feature = "deflate")]

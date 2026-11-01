@@ -27,7 +27,7 @@ use crate::btree_v2::BTreeV2Header;
 use crate::error::FormatError;
 #[cfg(any(test, doc))]
 use crate::fractal_heap::FractalHeapHeader;
-use crate::fractal_heap::HeapObjectReader;
+use crate::fractal_heap::LegacyHeapObjectReader;
 use crate::message_type::MessageType;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::source::Source;
@@ -123,8 +123,8 @@ fn index_for_read(
 /// Returns [`FormatError::SohmIndexMissing`] if `table` has no allocated heap for `message_type`,
 /// [`FormatError::InvalidFractalHeapIdLength`] if the heap's declared ID length differs from
 /// [`FHEAP_ID_LEN`], and the errors of
-/// [`parse_header`](crate::fractal_heap::parse_header),
-/// [`FractalHeapIdLayout::parse`], and [`HeapObjectReader::read`] if parsing or resolution fails.
+/// [`legacy_parse_header`](crate::fractal_heap::legacy_parse_header),
+/// [`FractalHeapIdLayout::parse`], and [`LegacyHeapObjectReader::read`] if parsing or resolution fails.
 pub fn read_heap_message(
     file_data: &[u8],
     access_mode: AccessMode,
@@ -135,10 +135,12 @@ pub fn read_heap_message(
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap = crate::fractal_heap::parse_header(file_data, addresses, heap_address, widths)?;
+    let heap =
+        crate::fractal_heap::legacy_parse_header(file_data, addresses, heap_address, widths)?;
     let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
     let id = layout.parse(heap_id)?;
-    HeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths).read(file_data, id)
+    LegacyHeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths)
+        .read(file_data, id)
 }
 
 /// Reads the body of a message identified by an eight-byte shared-message heap ID through a
@@ -160,11 +162,15 @@ pub fn read_heap_message_from_source<S: Source + ?Sized>(
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
     let (_, heap_address) = index_for_read(table, message_type)?;
-    let heap =
-        crate::fractal_heap::read_header_from_source(source, addresses, heap_address, widths)?;
+    let heap = crate::fractal_heap::legacy_read_header_from_source(
+        source,
+        addresses,
+        heap_address,
+        widths,
+    )?;
     let layout = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths);
     let id = layout.parse(heap_id)?;
-    HeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths)
+    LegacyHeapObjectReader::new(&heap, addresses, heap_address, access_mode, widths)
         .read_from_source(source, id)
 }
 
