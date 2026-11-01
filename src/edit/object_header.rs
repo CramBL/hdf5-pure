@@ -8,6 +8,7 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
+use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::RecordSplice;
@@ -198,6 +199,139 @@ pub(crate) fn rewrite_extension_region_bytes(
         .ok_or(Error::EditUnsupported(
             "a persisting file's superblock extension has no File Space Info message",
         ))
+}
+
+/// Extension chunk geometry collected under the editor's record and traversal rules.
+///
+/// Retains the first error while the source parser completes the header. The caller must finish
+/// that parse before calling [`finish`](Self::finish). Recorded ranges use physical coordinates.
+pub(super) struct ExtensionAllocations {
+    ranges: ExtensionRanges,
+    count: usize,
+    error: Option<Error>,
+}
+
+impl ExtensionAllocations {
+    /// Creates an empty collector with the root counted toward the traversal budget.
+    pub(super) fn new() -> Self {
+        Self {
+            ranges: ExtensionRanges::Empty,
+            count: 1,
+            error: None,
+        }
+    }
+
+    /// Records a chunk's complete physical range or the first geometry error.
+    ///
+    /// Later observations are ignored after an error. Stored continuation addresses are resolved
+    /// through `base`, with their complete allocations bounded by `file_len`.
+    pub(super) fn observe(
+        &mut self,
+        chunk: ObjectHeaderChunk<'_>,
+        base: AddressContext,
+        file_len: u64,
+    ) {
+        if self.error.is_none() {
+            self.error = self.ingest(chunk, base, file_len).err();
+        }
+    }
+
+    /// Materializes the observed ranges for a completed persistent consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error recorded by [`observe`](Self::observe).
+    pub(super) fn finish(self) -> Result<Vec<FileRange>, Error> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        Ok(self.ranges.to_vec())
+    }
+
+    /// Checks one observed chunk and appends its complete range on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for a version 1 header or an exhausted chunk budget.
+    /// Returns errors from [`next_record`], [`ContinuationChunk::parse_span`], and
+    /// [`ExtensionRanges::push`].
+    fn ingest(
+        &mut self,
+        chunk: ObjectHeaderChunk<'_>,
+        base: AddressContext,
+        file_len: u64,
+    ) -> Result<(), Error> {
+        let layout = chunk.v2_layout().ok_or(Error::EditUnsupported(
+            "an object does not use a version 2 object header",
+        ))?;
+        let region = chunk.records().bytes();
+        let mut start = 0;
+        while let Some((kind, body, end)) = next_record(layout, region, start)? {
+            if kind == MessageType::OBJECT_HEADER_CONTINUATION {
+                ContinuationChunk::parse_span(&region[body..end], base, file_len)?;
+                self.count += 1;
+                if self.count > MAX_OH_CHUNKS {
+                    return Err(Error::EditUnsupported(
+                        "object header has too many continuation chunks",
+                    ));
+                }
+            }
+            start = end;
+        }
+        self.ranges.push(chunk.allocation())
+    }
+}
+
+/// Inline chunk ranges with capacity reserved in every variant.
+///
+/// The fixed array is initialized when the second range is stored. A persistent consumer
+/// materializes only the observed ranges as a vector.
+#[expect(
+    clippy::large_enum_variant,
+    variant_size_differences,
+    reason = "continuation geometry stays inline within the editor chunk limit until persistence requires a vector"
+)]
+enum ExtensionRanges {
+    Empty,
+    Many {
+        slots: [FileRange; MAX_OH_CHUNKS],
+        len: usize,
+    },
+    Single(FileRange),
+}
+
+impl ExtensionRanges {
+    /// Appends one range within the editor's chunk limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the inline array is full.
+    fn push(&mut self, range: FileRange) -> Result<(), Error> {
+        match self {
+            Self::Empty => *self = Self::Single(range),
+            Self::Single(first) => {
+                let mut slots = [*first; MAX_OH_CHUNKS];
+                slots[1] = range;
+                *self = Self::Many { slots, len: 2 };
+            }
+            Self::Many { slots, len } => {
+                *slots.get_mut(*len).ok_or(Error::EditUnsupported(
+                    "object header has too many continuation chunks",
+                ))? = range;
+                *len += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies the observed ranges into an owned vector.
+    fn to_vec(&self) -> Vec<FileRange> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Many { slots, len } => slots.iter().take(*len).copied().collect(),
+            Self::Single(range) => vec![*range],
+        }
+    }
 }
 
 /// A source region whose record boundaries have been checked before rewriting.
@@ -450,6 +584,19 @@ impl ContinuationChunk {
         props: ObjectHeaderPrefix,
         file_len: u64,
     ) -> Result<Self, Error> {
+        Ok(Self {
+            span: Self::parse_span(body, base, file_len)?,
+            props,
+        })
+    }
+
+    /// Resolves a continuation's complete physical range within `file_len`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if `body` is truncated or the block is out of bounds.
+    /// Returns [`Error::Format`] for an undefined address or address-conversion overflow.
+    fn parse_span(body: &[u8], base: AddressContext, file_len: u64) -> Result<FileRange, Error> {
         let continuation = match ObjectHeaderContinuation::parse(body, OFFSET_SIZE, LENGTH_SIZE) {
             Ok(continuation) => continuation,
             Err(FormatError::UnexpectedEof { .. }) => {
@@ -463,10 +610,7 @@ impl ContinuationChunk {
             .checked_add(len)
             .filter(|&end| end <= file_len && len >= 8)
             .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
-        Ok(Self {
-            span: FileRange::new(off, len)?,
-            props,
-        })
+        FileRange::new(off, len).map_err(Error::from)
     }
 
     /// Reads the complete block and excludes its checksum from the message buffer.

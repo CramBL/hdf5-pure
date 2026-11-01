@@ -5,6 +5,23 @@ use crate::bytes;
 use crate::checksum;
 use crate::widths::Widths;
 
+/// Encodes a version 0 Shared Message Table body with a stored table address.
+///
+/// The fields are defined in "The Shared Message Table Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// # Panics
+///
+/// Panics if `widths.offset` is outside 1 through 8, or `table_address` does not fit that width.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_shared
+pub fn table_message(table_address: u64, index_count: u8, widths: Widths) -> Vec<u8> {
+    let mut message = vec![VERSION];
+    bytes::push_uint(&mut message, table_address, widths.offset);
+    message.push(index_count);
+    message
+}
+
 /// The bytes of the master table, one header per index, checksum included.
 pub fn table(indexes: &[Index], widths: Widths) -> Vec<u8> {
     let mut table = TABLE_SIGNATURE.to_vec();

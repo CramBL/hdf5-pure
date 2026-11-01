@@ -6,9 +6,9 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{FreeClass, ReturnedExtents, SessionAppendSnapshot};
 
+use super::OpeningExtension;
 use super::aggregation::AggregateSpace;
 use super::commit::{PublicationPurpose, PublicationState};
-use super::object_header;
 use super::{SyncPolicy, TailPlacement, WriteEngine};
 use crate::free_sections::PersistedManagerSet;
 use crate::source::Source;
@@ -542,9 +542,13 @@ impl WriteEngine {
     /// Returns [`FormatError::InvalidFreeSpaceManager`] if a free section overlaps published
     /// manager or extension storage. Propagates metadata read, parse, and address-range errors.
     fn read_append_manager_authority(&self) -> Result<ManagerAuthority, Error> {
-        let (extension, info) = Self::extension_fsinfo(&self.image(), &self.context)?.ok_or(
-            Error::EditUnsupported("persistent allocation requires File Space Info"),
-        )?;
+        let OpeningExtension {
+            info,
+            allocations: extension,
+        } = OpeningExtension::read(self.image(), &self.context)?;
+        let (_, info) = info.ok_or(Error::EditUnsupported(
+            "persistent allocation requires File Space Info",
+        ))?;
         let addresses = self.context.addresses();
         let eof =
             addresses.relative(PhysicalAddress::new(self.context.superblock().eof_address))?;
@@ -556,9 +560,7 @@ impl WriteEngine {
             &info,
         )?
         .into_parts();
-        for chunk in object_header::read_oh_chunks(&self.image(), extension, addresses)? {
-            allocations.push(chunk.span);
-        }
+        allocations.extend(extension?);
         for section in report.free_sections().sections() {
             let range = FileRange::new(
                 addresses.resolve(section.address())?,

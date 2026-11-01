@@ -2,6 +2,9 @@ use std::path::Path;
 
 use hdf5_pure_space::__private::Extent;
 use rstest::rstest;
+use test_util::object_header::Message as WireMessage;
+use test_util::object_header::MessageType as WireType;
+use test_util::object_header::v1;
 use test_util::temp;
 use test_util_hdf5::file_space::persisted::{
     EOF, HEADER, HEADER_LEN, ManagerSlot, PersistedImage, PersistedStrategy, SECTION, STRIDE,
@@ -66,6 +69,99 @@ fn strict_persisted_later_failure_precedes_allocator_construction() {
         )
     );
     assert!(!built.get());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[rstest]
+#[case::strict_manager_error(PersistedFreeSpacePolicy::Strict, true)]
+#[case::strict_allocation_error(PersistedFreeSpacePolicy::Strict, false)]
+#[case::tolerant_allocations(PersistedFreeSpacePolicy::Tolerant, false)]
+fn legacy_extension_allocation_errors_preserve_recovery_policy(
+    #[case] policy: PersistedFreeSpacePolicy,
+    #[case] invalid_manager: bool,
+) {
+    let path = temp::temp_path("legacy-extension-recovery.h5");
+    let mut fixture = PersistedImage::new(&path, PersistedStrategy::FsmAggr, 1);
+    let section = if invalid_manager { EOF - 16 } else { SECTION };
+    fixture.manager(ManagerSlot::Metadata, &[(section, 32)]);
+    let info = fixture.info.clone();
+    let mut bytes = fixture.write(&path);
+    let located = crate::superblock::read(&bytes[..]).unwrap();
+    let mut superblock = located.superblock;
+    let mut body =
+        hdf5_pure_format::__private::serialize_file_space_info_v1(located.widths, &info).unwrap();
+    body.resize(
+        body.len().div_ceil(v1::MESSAGE_ALIGNMENT) * v1::MESSAGE_ALIGNMENT,
+        0,
+    );
+    let header = v1::Header::new()
+        .message(WireMessage::new(WireType::FILE_SPACE_INFO, &body))
+        .build();
+    let address = 4_096;
+    bytes[address..address + header.len()].copy_from_slice(&header);
+    superblock.superblock_extension_address =
+        Some(StoredAddress::new(u64::try_from(address).unwrap()));
+    let block = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+    bytes[..block.len()].copy_from_slice(&block);
+    std::fs::write(&path, &bytes).unwrap();
+    let opened = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        MemoryStrategy::Bounded,
+        policy,
+    );
+    if policy == PersistedFreeSpacePolicy::Tolerant {
+        let engine = opened.unwrap();
+        assert_eq!(
+            engine.space.reusable_sections().collect::<Vec<_>>(),
+            [extent(SECTION, 32)]
+        );
+        assert_eq!(engine.persist.as_ref().unwrap().old_blocks.len(), 2);
+        assert!(
+            engine
+                .persist
+                .as_ref()
+                .unwrap()
+                .old_blocks
+                .iter()
+                .all(|block| block.start().get() != 4_096)
+        );
+        drop(engine);
+    } else {
+        let error = opened.err().unwrap();
+        if invalid_manager {
+            let Error::PersistedFreeSpace {
+                manager_slot,
+                header_address,
+                source,
+                ..
+            } = error
+            else {
+                panic!("{error:?}")
+            };
+            assert_eq!(manager_slot, ManagerSlot::Metadata.index());
+            assert_eq!(
+                header_address,
+                StoredAddress::new(HEADER + u64::try_from(manager_slot).unwrap() * STRIDE)
+            );
+            let Error::Format(FormatError::InvalidFreeSpaceManager(reason)) = *source else {
+                panic!("{source:?}")
+            };
+            assert_eq!(
+                reason,
+                format!(
+                    "the free section at {}, 32 bytes long, exceeds the file allocation",
+                    EOF - 16
+                )
+            );
+        } else {
+            let Error::EditUnsupported(reason) = error else {
+                panic!("{error:?}")
+            };
+            assert_eq!(reason, "an object does not use a version 2 object header");
+        }
+    }
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
