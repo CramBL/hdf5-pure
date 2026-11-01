@@ -9,7 +9,7 @@ use hdf5_pure_core::StoredAddress;
 use super::admission::TrackedSpace;
 use super::allocation::AllocationClass;
 use super::extent::Extent;
-use super::list::{self, FreeList};
+use super::list::{self, FreeList, FreeListError};
 use super::paged::{
     FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedAppendSnapshot, PagedEdit,
     PagedPostFree, PagedSections, PagedTail,
@@ -138,6 +138,66 @@ impl SessionSpace {
             }),
             Some(FileSpaceStrategy::Aggr) | Some(FileSpaceStrategy::None) | None => Self::Disabled,
         }
+    }
+
+    /// Constructs canonical reusable space from admitted sections in ascending address order.
+    ///
+    /// Coalesces adjacent sections within each allocation class. Under `FSM_AGGR`, all sections
+    /// share one free list. Under PAGE, sections from small managers retain their page type, and
+    /// complete pages covered by classified sections become reusable raw space. Generic-large
+    /// aligned interiors are raw space. Their partial edges and sections from other manager kinds
+    /// remain unclassified.
+    ///
+    /// Records all admitted sections regardless of `threshold`, which applies to subsequent
+    /// frees. For disabled strategies, returns [`Self::Disabled`] without consuming `sections`.
+    /// Runs in linear time in the number of sections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FreeListError::Unsorted`] if a section starts before the preceding section, or
+    /// [`FreeListError::Overlap`] if their starts are ordered but their ranges overlap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+    /// use hdf5_pure_space::__private::{AllocationClass, Extent, ManagerKind, SessionSpace};
+    ///
+    /// let metadata = Extent::new(StoredAddress::new(4_096), 1_024).unwrap();
+    /// let raw = Extent::new(metadata.end(), 3_072).unwrap();
+    /// let mut space = SessionSpace::from_persisted(
+    ///     Some(FileSpaceStrategy::Page),
+    ///     8_192,
+    ///     FileSpacePageSize::DEFAULT,
+    ///     [
+    ///         (Some(ManagerKind::PagedSmallMetadata), metadata),
+    ///         (Some(ManagerKind::PagedSmallRaw), raw),
+    ///     ],
+    /// )?;
+    /// let page = Extent::new(metadata.start(), 4_096).unwrap();
+    /// assert_eq!(space.paged_sections().unwrap().raw(), [page]);
+    /// assert_eq!(space.reusable_bytes().unwrap(), 4_096);
+    /// assert_eq!(space.allocate(4_096, AllocationClass::Metadata), Some(page));
+    /// # Ok::<(), hdf5_pure_space::__private::FreeListError>(())
+    /// ```
+    pub fn from_persisted(
+        strategy: Option<FileSpaceStrategy>,
+        threshold: u64,
+        page_size: FileSpacePageSize,
+        sections: impl IntoIterator<Item = (Option<ManagerKind>, Extent)>,
+    ) -> Result<Self, FreeListError> {
+        Ok(match strategy {
+            Some(FileSpaceStrategy::FsmAggr) => Self::Flat(FlatSpace {
+                free: FreeList::from_sorted(sections.into_iter().map(|(_, extent)| extent))?,
+                threshold,
+            }),
+            Some(FileSpaceStrategy::Page) => Self::Paged(PagedSpace {
+                paged: PagedEdit::from_persisted(page_size, sections)?,
+                threshold,
+            }),
+            Some(FileSpaceStrategy::Aggr) | Some(FileSpaceStrategy::None) | None => Self::Disabled,
+        })
     }
 
     /// Returns whether this strategy maintains reusable free space.

@@ -9,7 +9,7 @@ use hdf5_pure_core::StoredAddress;
 
 use super::admission::TrackedSpace;
 use super::extent::Extent;
-use super::list::{self, FreeList};
+use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, TRAILING_RESERVE_TAILS};
 
 /// Identifies whether an allocation belongs to metadata or raw-data pages.
@@ -115,6 +115,60 @@ impl PagedEdit {
         }
     }
 
+    /// Constructs canonical PAGE lists from admitted sections in ascending address order.
+    ///
+    /// Retains partial-page classifications and promotes complete pages covered by metadata and
+    /// raw sections. Runs in linear time in the number of sections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FreeListError::Unsorted`] if a section starts before the preceding section, or
+    /// [`FreeListError::Overlap`] if their starts are ordered but their ranges overlap.
+    pub(crate) fn from_persisted(
+        page_size: FileSpacePageSize,
+        sections: impl IntoIterator<Item = (Option<ManagerKind>, Extent)>,
+    ) -> Result<Self, FreeListError> {
+        let mut metadata = Vec::new();
+        let mut raw = Vec::new();
+        let mut unclassified = Vec::new();
+        let mut previous: Option<Extent> = None;
+        for (kind, extent) in sections {
+            if let Some(previous) = previous {
+                if extent.start() < previous.start() {
+                    return Err(FreeListError::Unsorted {
+                        previous,
+                        next: extent,
+                    });
+                }
+                if extent.start() < previous.end() {
+                    return Err(FreeListError::Overlap {
+                        previous,
+                        next: extent,
+                    });
+                }
+            }
+            for (part, ty) in Self::persisted_parts(page_size, kind, extent)
+                .into_iter()
+                .flatten()
+            {
+                match ty {
+                    Some(PageType::Meta) => metadata.push(part),
+                    Some(PageType::Raw) => raw.push(part),
+                    None => unclassified.push(part),
+                }
+            }
+            previous = Some(extent);
+        }
+        let mut paged = Self {
+            meta: FreeList::from_sorted(metadata)?,
+            raw: FreeList::from_sorted(raw)?,
+            unclassified: FreeList::from_sorted(unclassified)?,
+            ..Self::new(page_size)
+        };
+        paged.finish_seed();
+        Ok(paged)
+    }
+
     pub(crate) fn page_size(&self) -> FileSpacePageSize {
         self.page_size
     }
@@ -213,26 +267,40 @@ impl PagedEdit {
     /// [`allocate`](Self::allocate). Partial edges and sections from other manager kinds remain
     /// unclassified.
     pub(crate) fn seed_persisted(&mut self, kind: Option<ManagerKind>, extent: Extent) {
-        let ty = match kind {
-            Some(ManagerKind::PagedSmallMetadata) => Some(PageType::Meta),
-            Some(ManagerKind::PagedSmallRaw) => Some(PageType::Raw),
-            Some(ManagerKind::PagedLargeGeneric) => {
-                let Some(pages) = extent.aligned_interior(self.page_size.get()) else {
-                    self.seed(extent, None);
-                    return;
-                };
-                self.seed(pages, Some(PageType::Raw));
-                if let Some(head) = Extent::between(extent.start(), pages.start()) {
-                    self.seed(head, None);
-                }
-                if let Some(tail) = Extent::between(pages.end(), extent.end()) {
-                    self.seed(tail, None);
-                }
-                return;
+        for (part, ty) in Self::persisted_parts(self.page_size, kind, extent)
+            .into_iter()
+            .flatten()
+        {
+            self.seed(part, ty);
+        }
+    }
+
+    /// Splits a persisted extent into address-ordered parts with their established page type.
+    ///
+    /// Generic-large aligned interiors are raw space. Partial edges and sections from other
+    /// manager kinds are unclassified.
+    fn persisted_parts(
+        page_size: FileSpacePageSize,
+        kind: Option<ManagerKind>,
+        extent: Extent,
+    ) -> [Option<(Extent, Option<PageType>)>; 3] {
+        match kind {
+            Some(ManagerKind::PagedSmallMetadata) => {
+                [Some((extent, Some(PageType::Meta))), None, None]
             }
-            Some(ManagerKind::Flat) | None => None,
-        };
-        self.seed(extent, ty);
+            Some(ManagerKind::PagedSmallRaw) => [Some((extent, Some(PageType::Raw))), None, None],
+            Some(ManagerKind::PagedLargeGeneric) => {
+                let Some(pages) = extent.aligned_interior(page_size.get()) else {
+                    return [Some((extent, None)), None, None];
+                };
+                [
+                    Extent::between(extent.start(), pages.start()).map(|head| (head, None)),
+                    Some((pages, Some(PageType::Raw))),
+                    Extent::between(pages.end(), extent.end()).map(|tail| (tail, None)),
+                ]
+            }
+            Some(ManagerKind::Flat) | None => [Some((extent, None)), None, None],
+        }
     }
 
     /// Seeds one extent with its established page type.
