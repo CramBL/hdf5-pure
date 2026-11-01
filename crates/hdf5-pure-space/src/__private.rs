@@ -31,3 +31,5 @@ pub use crate::session::PagedSpace;
 pub use crate::session::SessionAppendSnapshot;
 pub use crate::session::SessionSpace;
 pub use crate::session::SessionSpaceSnapshot;
+
+pub use crate::snapshot::AdmittedFreeSnapshot;

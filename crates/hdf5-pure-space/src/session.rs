@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use core::iter::Peekable;
 
 use hdf5_pure_core::FileSpacePageSize;
@@ -15,8 +14,7 @@ use super::paged::{
     PagedPostFree, PagedSections, PagedTail,
 };
 use super::persistence::ManagerKind;
-
-const EMPTY_EXTENTS: &[Extent] = &[];
+use super::snapshot::AdmittedFreeSnapshot;
 
 /// The reusable-space strategy active for one editing session.
 ///
@@ -63,7 +61,7 @@ pub enum SessionAppendSnapshot {
 }
 
 /// Merges two address-sorted extent iterators without allocating another snapshot.
-struct MergeExtents<I, J>
+pub(super) struct MergeExtents<I, J>
 where
     I: Iterator<Item = Extent>,
     J: Iterator<Item = Extent>,
@@ -77,7 +75,7 @@ where
     I: Iterator<Item = Extent>,
     J: Iterator<Item = Extent>,
 {
-    fn new(first: I, second: J) -> Self {
+    pub(super) fn new(first: I, second: J) -> Self {
         Self {
             first: first.peekable(),
             second: second.peekable(),
@@ -396,21 +394,12 @@ impl SessionSpace {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the paged free-list total exceeds [`u64::MAX`].
     pub fn reusable_bytes(&self) -> Result<u64, FormatError> {
-        match self {
-            Self::Disabled => Ok(0),
-            Self::Flat(space) => Ok(space.free.total_bytes()),
-            Self::Paged(space) => space.paged.reusable_bytes(),
-        }
+        self.admitted_snapshot().reusable_bytes()
     }
 
     /// Returns reusable extents in ascending address order.
     pub fn reusable_sections(&self) -> impl Iterator<Item = Extent> + '_ {
-        let (first, second) = match self {
-            Self::Disabled => (EMPTY_EXTENTS, EMPTY_EXTENTS),
-            Self::Flat(space) => (space.free.extents(), EMPTY_EXTENTS),
-            Self::Paged(space) => space.paged.reusable_extents(),
-        };
-        MergeExtents::new(first.iter().copied(), second.iter().copied())
+        self.admitted_snapshot().reusable_sections()
     }
 
     /// Returns reusable extents with extra raw allocations folded back into the snapshot.
@@ -418,21 +407,41 @@ impl SessionSpace {
         &self,
         raw_extents: impl IntoIterator<Item = Extent>,
     ) -> impl Iterator<Item = Extent> + '_ {
-        let (first, second) = match self {
-            Self::Disabled => (EMPTY_EXTENTS, Vec::new()),
-            Self::Flat(space) => {
-                let mut free = space.free.clone();
-                for extent in raw_extents {
-                    free.free(extent);
-                }
-                (EMPTY_EXTENTS, free.into_extents())
-            }
-            Self::Paged(space) => {
-                let (metadata, _) = space.paged.reusable_extents();
-                (metadata, space.paged.reusable_raw_with(raw_extents))
-            }
-        };
-        MergeExtents::new(first.iter().copied(), second.into_iter())
+        self.admitted_snapshot()
+            .reusable_sections_with_raw(raw_extents)
+    }
+
+    /// Borrows admitted free extents, their classes, and their cached byte totals.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+    /// use hdf5_pure_space::__private::{AllocationClass, Extent, FreeClass, SessionSpace};
+    ///
+    /// let free = Extent::new(StoredAddress::new(4_096), 64).unwrap();
+    /// let mut space = SessionSpace::from_persisted(
+    ///     Some(FileSpaceStrategy::FsmAggr),
+    ///     1,
+    ///     FileSpacePageSize::DEFAULT,
+    ///     [(None, free)],
+    /// )?;
+    /// let snapshot = space.admitted_snapshot();
+    /// assert_eq!(snapshot.reusable_bytes()?, 64);
+    /// assert_eq!(snapshot.sections().collect::<Vec<_>>(), [(free, FreeClass::Dead)]);
+    /// assert_eq!(
+    ///     space.allocate(32, AllocationClass::Raw),
+    ///     Extent::new(free.start(), 32),
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn admitted_snapshot(&self) -> AdmittedFreeSnapshot<'_> {
+        match self {
+            Self::Disabled => AdmittedFreeSnapshot::disabled(),
+            Self::Flat(space) => AdmittedFreeSnapshot::flat(&space.free),
+            Self::Paged(space) => space.paged.admitted_snapshot(),
+        }
     }
 
     /// Returns the start of the free run reaching `eoa` under this strategy.
@@ -806,6 +815,8 @@ impl SessionSpace {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;

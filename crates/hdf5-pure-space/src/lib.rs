@@ -26,3 +26,4 @@ mod list;
 mod paged;
 mod persistence;
 mod session;
+mod snapshot;

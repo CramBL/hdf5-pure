@@ -266,8 +266,8 @@ fn assert_same_state(actual: &PagedEdit, expected: &PagedEdit) {
     };
     assert_eq!(lists(actual), lists(expected));
     assert_eq!(
-        actual.reusable_bytes().unwrap(),
-        expected.reusable_bytes().unwrap()
+        actual.admitted_snapshot().reusable_bytes().unwrap(),
+        expected.admitted_snapshot().reusable_bytes().unwrap()
     );
     let mut all = Vec::new();
     for list in [
