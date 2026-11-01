@@ -51,6 +51,9 @@ use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::{FormatWidths, OffsetWidth};
 
+#[cfg(feature = "std")]
+pub(crate) mod storage;
+
 #[cfg(test)]
 mod test_util;
 
