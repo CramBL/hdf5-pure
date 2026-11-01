@@ -54,6 +54,7 @@ mod extensible_array;
 mod extensible_array_chunks;
 mod external_storage;
 mod file_space;
+mod file_space_fragmentation;
 mod file_space_oracle;
 mod file_space_properties;
 mod file_writer_dense_links;

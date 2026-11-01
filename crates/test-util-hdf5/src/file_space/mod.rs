@@ -30,6 +30,8 @@ use crate::file_space_oracle::OracleError;
 #[cfg(feature = "__hdf5-1.10")]
 use self::persisted::PersistedStrategy;
 
+#[cfg(feature = "__hdf5-1.10")]
+pub mod fragmentation;
 pub mod persisted;
 pub mod publication;
 
