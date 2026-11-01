@@ -29,7 +29,7 @@ use crate::convert::Narrow;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::fractal_heap;
-use crate::fractal_heap::HeapObjectReader;
+use crate::fractal_heap::LegacyHeapObjectReader;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::BaseOffsetSource;
@@ -131,7 +131,8 @@ fn read_dense(
         inner: source,
         base: addresses.effective_base(),
     };
-    let header = fractal_heap::read_header_from_source(&framed, addresses, heap_address, widths)?;
+    let header =
+        fractal_heap::legacy_read_header_from_source(&framed, addresses, heap_address, widths)?;
     if header.filtering.is_filtered()
         || header.huge_objects_count != 0
         || header.tiny_objects_count != 0
@@ -167,7 +168,7 @@ fn read_dense(
         ));
     }
     let ids = FractalHeapIdLayout::new(&header, widths.offsets, widths.lengths);
-    let mut heap = HeapObjectReader::new(
+    let mut heap = LegacyHeapObjectReader::new(
         &header,
         addresses,
         heap_address,

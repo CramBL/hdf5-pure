@@ -202,7 +202,7 @@ pub(crate) fn collect_fractal_heap_storage_from_source<S: Source + ?Sized>(
     heap_header_address: StoredAddress,
     widths: FormatWidths,
 ) -> Result<FractalHeapStorage, FractalHeapStorageError> {
-    let (header, header_range) = crate::fractal_heap::read_header_and_range_from_source(
+    let (header, header_range) = crate::fractal_heap::legacy_read_header_and_range_from_source(
         source,
         addresses,
         heap_header_address,
@@ -328,8 +328,11 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
                     let reference = block.at(self.addresses.resolve(address)?)?;
                     let range = reference.parse_range();
                     let extent = extent_in_source(self.source, address, range.length())?;
-                    let bytes =
-                        crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
+                    let bytes = crate::fractal_heap::legacy_read_header_range(
+                        self.source,
+                        self.addresses,
+                        range,
+                    )?;
                     let view = reference.parse(FileRegion::new(range, &bytes)?)?;
                     self.allocations
                         .push((extent, FractalHeapAllocation::IndirectBlock));
@@ -363,7 +366,8 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
         } else {
             reference.prefix_range()?
         };
-        let bytes = crate::fractal_heap::read_header_range(self.source, self.addresses, range)?;
+        let bytes =
+            crate::fractal_heap::legacy_read_header_range(self.source, self.addresses, range)?;
         let region = FileRegion::new(range, &bytes)?;
         if checksummed {
             reference.parse_checked(region)?;
@@ -387,8 +391,11 @@ impl<'a, 'e, S: Source + ?Sized> ManagedStorageWalk<'a, 'e, S> {
         reference: FractalHeapDirectBlockRef<'_>,
         filters: FractalHeapBlockFilters<'_>,
     ) -> Result<(), FractalHeapStorageError> {
-        let encoded =
-            crate::fractal_heap::read_header_range(self.source, self.addresses, reference.range())?;
+        let encoded = crate::fractal_heap::legacy_read_header_range(
+            self.source,
+            self.addresses,
+            reference.range(),
+        )?;
         let decoded =
             crate::fractal_heap::decode_direct_block(&encoded, filters, block.decoded_size())
                 .map_err(|error| match error {
@@ -425,7 +432,7 @@ fn collect_managed_fsm_storage(
     let reference = FreeSpaceManagerHeaderRef::new(widths, addresses.resolve(address)?)?;
     let extent = extent_in_source(source, address, reference.range().length())?;
     let range = reference.parse_range();
-    let bytes = crate::fractal_heap::read_header_range(source, addresses, range)?;
+    let bytes = crate::fractal_heap::legacy_read_header_range(source, addresses, range)?;
     let frame = reference.parse_checked(FileRegion::new(range, &bytes)?)?;
     let manager = frame.fractal_heap_header(heap)?;
     allocations.push((extent, FractalHeapAllocation::ManagedFsmHeader));
@@ -441,7 +448,7 @@ fn collect_managed_fsm_storage(
     let reference = manager.section_list_ref(address, addresses.resolve(list_address)?)?;
     let extent = extent_in_source(source, list_address, reference.range().length())?;
     let range = reference.parse_range();
-    let bytes = crate::fractal_heap::read_header_range(source, addresses, range)?;
+    let bytes = crate::fractal_heap::legacy_read_header_range(source, addresses, range)?;
     reference.parse_checked(FileRegion::new(range, &bytes)?)?;
     allocations.push((extent, FractalHeapAllocation::ManagedFsmSectionList));
     Ok(())
@@ -668,7 +675,7 @@ mod tests {
 
     use crate::access_mode::AccessMode;
     use crate::address::OpenedImageContext;
-    use crate::fractal_heap::HeapObjectReader;
+    use crate::fractal_heap::LegacyHeapObjectReader;
     use crate::source::BaseOffsetSource;
     use crate::test_data;
     use crate::{AttrValue, FileBuilder};
@@ -982,7 +989,7 @@ mod tests {
         )
         .unwrap()
         .addresses();
-        let buffered = HeapObjectReader::new(
+        let buffered = LegacyHeapObjectReader::new(
             &header,
             addresses,
             StoredAddress::new(STORAGE_HEAP_AT),
@@ -998,7 +1005,7 @@ mod tests {
             inner: &source,
             base: addresses.effective_base(),
         };
-        let streamed = HeapObjectReader::new(
+        let streamed = LegacyHeapObjectReader::new(
             &header,
             addresses,
             StoredAddress::new(STORAGE_HEAP_AT),

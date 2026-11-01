@@ -30,7 +30,7 @@ use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;
 #[cfg(test)]
 use crate::fractal_heap::FractalHeapHeader;
-use crate::fractal_heap::HeapObjectReader;
+use crate::fractal_heap::LegacyHeapObjectReader;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -314,7 +314,7 @@ fn extract_dense_attributes(
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<AttributeMessage>, FormatError> {
     // Parse fractal heap
-    let fh = crate::fractal_heap::parse_header(file_data, addresses, fh_addr, widths)?;
+    let fh = crate::fractal_heap::legacy_parse_header(file_data, addresses, fh_addr, widths)?;
 
     // Parse B-tree v2 for name index (type 8)
     let btree_addr = attr_info
@@ -330,7 +330,7 @@ fn extract_dense_attributes(
 
     let resolver = BufferedResolver::new(file_data, addresses, access_mode, widths, sohm);
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
-    let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
+    let mut heap = LegacyHeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     let mut attrs = Vec::new();
     for record in &records {
         let record =
@@ -430,7 +430,8 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     mut select: impl FnMut(MessageFlags) -> bool,
     mut visit: impl FnMut(&[u8], Option<u16>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
-    let fh = crate::fractal_heap::read_header_from_source(source, addresses, fh_addr, widths)?;
+    let fh =
+        crate::fractal_heap::legacy_read_header_from_source(source, addresses, fh_addr, widths)?;
 
     let btree_addr = attr_info
         .btree_name_index_address
@@ -450,7 +451,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     )?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
-    let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
+    let mut heap = LegacyHeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
     for record in &records {
         let record =
             DenseAttributeRecord::parse(&record.data, btree_hdr.tree_type, fh.heap_id_length)?;
