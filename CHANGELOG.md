@@ -84,6 +84,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed native complex datatype messages being decoded as compounds. `Datatype::Complex` preserves homogeneous rectangular complex metadata and its floating-point component type.
 - Fixed `Dataset::datatype` reporting version 1 compound array members as scalars, omitting their dimensions and full byte sizes ([#1027](https://github.com/CramBL/hdf5-pure/pull/1027)).
 
 - Fixed `File::copy` and cross-file copies rejecting a compact group with soft or external links, and marking the UTF-8 names of a copied group's hard links as ASCII ([#1006](https://github.com/CramBL/hdf5-pure/pull/1006)).

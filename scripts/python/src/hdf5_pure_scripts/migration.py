@@ -190,13 +190,14 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     core_items = public_root_items(core)
     moved = root_paths(core)
     failures = []
-    # The FormatError variants that 0.47.0 does not define, which the comparison removes from the
-    # moved shape.
+    # The allowed variant additions, excluded when comparing moved type shapes.
     allowed_added_variants = {
+        "Datatype": {"Complex"},
         "FormatError": {
             "AddressTooLarge",
             "ChunkElementSizeMismatch",
             "SuperblockStatusFlagsTooWide",
+            "ComplexSizeOverflow",
             "CompoundArraySizeOverflow",
             "ConflictingDatasetStorage",
             "DanglingSoftLink",
@@ -225,6 +226,10 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidAscii",
             "InvalidAttributeCreationCounter",
             "InvalidAttributeName",
+            "InvalidComplexFlags",
+            "InvalidComplexParent",
+            "InvalidComplexParentFlags",
+            "InvalidComplexSize",
             "InvalidCompoundV1Extent",
             "InvalidCompoundV1Rank",
             "InvalidDeflateLevel",
@@ -301,6 +306,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "UndefinedContinuationAddress",
             "UndefinedLocalHeapDataSegment",
             "UnexpectedSourceEof",
+            "UnsupportedComplexForm",
             "UnsupportedCompoundV1Permutation",
             "UnsupportedFloatingPointLayout",
             "UnsupportedFractalHeapIdVersion",
@@ -309,7 +315,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "ValueTooLargeForRepresentation",
             "WrongLayout",
             "UnterminatedLocalHeapName",
-        }
+        },
     }
     # The FormatError variants whose fields differ from 0.47.0's, which the comparison removes from
     # both shapes.
@@ -322,6 +328,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "AddressRange",
         "BitFieldType",
         "BitFieldTypeBuilder",
+        "ComplexType",
         "FixedPointType",
         "FixedPointTypeBuilder",
         "FloatingPointType",

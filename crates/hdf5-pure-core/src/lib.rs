@@ -39,6 +39,7 @@ pub use address::StoredAddress;
 pub use address_range::AddressRange;
 pub use dataspace::MaxExtent;
 pub use datatype::CharacterSet;
+pub use datatype::ComplexType;
 pub use datatype::CompoundMember;
 pub use datatype::Datatype;
 pub use datatype::EnumMember;
