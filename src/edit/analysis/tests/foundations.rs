@@ -7,6 +7,7 @@ use hdf5_pure_space::__private::{FreeClass, PageType};
 use rstest::rstest;
 use test_util::global_heap::Object;
 use test_util::object_header::{Message, MessageType};
+use test_util::snapshot::{Report, Value};
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::super::{
@@ -128,12 +129,110 @@ fn foundation_analysis_preserves_candidate_origins_and_completeness(
         }
     );
     assert_eq!(COLLECTION_WORK.with(Cell::get), parsed);
-    let report = format!(
-        "unique candidates: {candidate_count}\nrecorded origins: {origin_count}\npredecessor captured state:\n{captured:#?}\nprospective topology:\n{topology:#?}\nprospective references:\n{first:#?}\nparsed links/references: {parsed:?}\nreference analysis complete: {}\nretired allocations:\n{retired:#?}\nlater candidate observations:\n{later_work:#?}\nlater candidates reuse result: true",
-        !partial
+    let mut report = Report::new();
+    report.table(
+        "Collection analysis",
+        ["Metric", "Value"],
+        [
+            [
+                Value::text("Unique candidates (count)"),
+                Value::Number(u64::try_from(candidate_count).unwrap()),
+            ],
+            [
+                Value::text("Recorded origins (count)"),
+                Value::Number(u64::try_from(origin_count).unwrap()),
+            ],
+            [
+                Value::text("Objects parsed for links"),
+                Value::Number(u64::try_from(parsed.0).unwrap()),
+            ],
+            [
+                Value::text("Objects parsed for references"),
+                Value::Number(u64::try_from(parsed.1).unwrap()),
+            ],
+            [
+                Value::text("Reference analysis complete"),
+                Value::text(!partial),
+            ],
+            [
+                Value::text("Later candidates reuse result"),
+                Value::text(true),
+            ],
+        ],
     );
+    let stages = [captured, topology, first, later_work].map(AnalysisWork::values);
+    let metrics = [
+        "Topology objects (count)",
+        "Topology edges (count)",
+        "Indexed link names (bytes)",
+        "Cached link objects (count)",
+        "Reference objects (count)",
+        "Collection references (count)",
+        "Allocation results (count)",
+        "Root reference results (count)",
+        "Candidate lookups (count)",
+    ];
+    report.table(
+        "Retained phase observations",
+        ["Metric", "Predecessor", "Topology", "References", "Later"],
+        metrics.into_iter().enumerate().map(|(index, metric)| {
+            [
+                Value::text(metric),
+                Value::Number(stages[0][index]),
+                Value::Number(stages[1][index]),
+                Value::Number(stages[2][index]),
+                Value::Number(stages[3][index]),
+            ]
+        }),
+    );
+    report.table(
+        "Retired allocations",
+        [
+            "Physical start",
+            "Physical end",
+            "Allocation bytes",
+            "Class",
+        ],
+        retired.iter().map(|&(range, class)| {
+            [
+                Value::Number(range.start().get()),
+                Value::Number(range.end().get()),
+                Value::Number(range.length()),
+                Value::text(format!("{class:?}")),
+            ]
+        }),
+    );
+    let report = report.finish();
     drop(prospective);
     drop(predecessor);
     drop(engine);
     insta::assert_snapshot!(snapshot, report);
+}
+
+impl AnalysisWork {
+    /// Returns values in the order of the report's metric rows.
+    fn values(self) -> [u64; 9] {
+        let Self {
+            topology_objects,
+            topology_edges,
+            link_name_bytes,
+            cached_link_objects,
+            reference_objects,
+            collection_references,
+            allocation_results,
+            liveness_results,
+            candidate_lookups,
+        } = self;
+        [
+            topology_objects,
+            topology_edges,
+            link_name_bytes,
+            cached_link_objects,
+            reference_objects,
+            collection_references,
+            allocation_results,
+            liveness_results,
+            candidate_lookups,
+        ]
+    }
 }

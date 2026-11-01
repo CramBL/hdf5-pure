@@ -2,71 +2,57 @@
 source: src/edit/observations/tests.rs
 expression: report
 ---
-base: 0
-original image: 643
-planned end: 643
-placements (stored, physical, allocation, encoding, page):
-[
-    (
-        131,
-        131,
-        64,
-        16,
-        Raw,
-    ),
-    (
-        195,
-        195,
-        48,
-        48,
-        Meta,
-    ),
-    (
-        387,
-        387,
-        80,
-        32,
-        Raw,
-    ),
-]
-reservation work:
-ReservationWork {
-    indexed_extents: 2,
-    lookups: 3,
-    removed_extents: 3,
-    inserted_extents: 5,
-    restored_extents: 2,
-}
-free sections:
-[
-    (
-        243,
-        16,
-        Dead,
-    ),
-    (
-        467,
-        48,
-        Dead,
-    ),
-]
-manager projection:
-ManagerWork {
-    managers: 1,
-    sections: 2,
-    section_capacity: 2,
-    encoded_bytes: 135,
-}
-encoded metadata bytes: 135
-encoded metadata capacity: 146
-zero generation:
-ZeroWork {
-    calls: 0,
-    bytes: 0,
-    scratch_peak: 0,
-}
-issued writes: 2
-issued bytes: 144
-clean-gap read bytes: 48
-explicit buffer copy bytes: 144
-file growth: 0
+File geometry
+  Metric          Bytes
+  --------------  -----
+  Address base        0
+  Original image    643
+  Planned end       643
+  File growth         0
+
+Reservations
+  Stored address  Physical address  Allocation bytes  Encoding bytes  PAGE type
+  --------------  ----------------  ----------------  --------------  ---------
+             131               131                64              16  Raw
+             195               195                48              48  Meta
+             387               387                80              32  Raw
+
+Reservation work
+  Metric            Count
+  ----------------  -----
+  Indexed extents       2
+  Lookups               3
+  Removed extents       3
+  Inserted extents      5
+  Restored extents      2
+
+Free sections
+  Stored address  Bytes  Class
+  --------------  -----  -----
+             243     16  Dead
+             467     48  Dead
+
+Manager projection
+  Metric                             Value
+  ---------------------------------  -----
+  Managers (count)                       1
+  Sections (count)                       2
+  Section capacity (elements)            2
+  Measured encoding (bytes)            135
+  Encoded metadata (bytes)             135
+  Encoded metadata capacity (bytes)    146
+
+Zero generation
+  Metric                Value
+  --------------------  -----
+  Requests (count)          0
+  Requested bytes           0
+  Scratch peak (bytes)      0
+
+Image I/O
+  Metric                          Value
+  ------------------------------  -----
+  Issued writes (calls)               2
+  Issued writes (bytes)             144
+  Clean-gap reads (bytes)            48
+  Explicit buffer copies (bytes)    144

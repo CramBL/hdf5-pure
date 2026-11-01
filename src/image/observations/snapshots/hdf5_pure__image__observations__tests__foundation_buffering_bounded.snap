@@ -2,35 +2,24 @@
 source: src/image/observations/tests.rs
 expression: report
 ---
-pending budget: 8
-pending:
-ImageWork {
-    pending_runs: 2,
-    pending_bytes: 4,
-    pending_capacity: 4,
-    flush_peak_bytes: 0,
-    flush_peak_capacity: 0,
-    clean_gap_calls: 0,
-    clean_gap_bytes: 0,
-    copied_bytes: 4,
-    write_calls: 0,
-    write_bytes: 0,
-    mirror_bytes: 0,
-    mirror_capacity: 0,
-}
-flushed:
-ImageWork {
-    pending_runs: 0,
-    pending_bytes: 0,
-    pending_capacity: 0,
-    flush_peak_bytes: 44,
-    flush_peak_capacity: 82,
-    clean_gap_calls: 1,
-    clean_gap_bytes: 38,
-    copied_bytes: 6,
-    write_calls: 1,
-    write_bytes: 42,
-    mirror_bytes: 0,
-    mirror_capacity: 0,
-}
-file growth: 0
+Buffering configuration
+  Metric          Bytes
+  --------------  -----
+  Pending budget      8
+  File growth         0
+
+Buffering observations
+  Metric                          Pending  Flushed
+  ------------------------------  -------  -------
+  Pending runs (count)                  2        0
+  Pending bytes                         4        0
+  Pending capacity (bytes)              4        0
+  Flush peak (bytes)                    0       44
+  Flush peak capacity (bytes)           0       82
+  Clean-gap reads (calls)               0        1
+  Clean-gap reads (bytes)               0       38
+  Explicit buffer copies (bytes)        4        6
+  Issued writes (calls)                 0        1
+  Issued writes (bytes)                 0       42
+  Mirror bytes                          0        0
+  Mirror capacity (bytes)               0        0
