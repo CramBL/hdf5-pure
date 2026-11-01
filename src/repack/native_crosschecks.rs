@@ -14,15 +14,95 @@ use test_util_hdf5::dense_links::GroupOrder;
 use test_util_hdf5::exotic_attributes;
 use test_util_hdf5::file;
 
+use crate::Error;
 use crate::File;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::object_header::ObjectHeader;
 use crate::width::OffsetWidth;
 
 use super::test_util::ExoticAttributes;
 use crate::RepackOptions;
+
+#[rstest]
+#[case::compact_empty(0, false, "a compact group's link filters cannot be reproduced")]
+#[case::compact(6, false, "a compact group's link filters cannot be reproduced")]
+#[case::dense(
+    16,
+    false,
+    "a group's fractal heap uses filters, huge objects, or tiny objects"
+)]
+#[case::huge(
+    12,
+    true,
+    "a group's fractal heap uses filters, huge objects, or tiny objects"
+)]
+fn repack_rejects_unsupported_link_storage_before_publication_and_can_drop_it(
+    #[case] count: usize,
+    #[case] huge: bool,
+    #[case] reason: &str,
+    #[values(false, true)] streaming: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    let group_path = if huge {
+        dense_links::write_huge_inspection_fixture(&path);
+        "g"
+    } else {
+        dense_links::write_filtered_link_fixture(&path, count);
+        "filtered"
+    };
+    let source = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let header = source.group(group_path).unwrap().header_address().unwrap();
+    let header = ObjectHeader::parse(
+        &std::fs::read(&path).unwrap(),
+        source.access_mode(),
+        usize::try_from(header).unwrap(),
+        8,
+        8,
+    )
+    .unwrap();
+    assert_eq!(
+        header
+            .messages
+            .iter()
+            .any(|message| message.msg_type == crate::MessageType::LINK),
+        !huge && count != 0 && count <= 8
+    );
+    let mut sink = Vec::new();
+    let error = super::repack_into(&source, &mut sink, &RepackOptions::new()).unwrap_err();
+    assert!(
+        matches!(error, Error::RepackUnsupported(ref message) if message == reason),
+        "{error:?}"
+    );
+    assert!(sink.is_empty());
+    let error = super::repack_to_path(&source, &destination, &RepackOptions::new()).unwrap_err();
+    assert!(
+        matches!(error, Error::RepackUnsupported(ref message) if message == reason),
+        "{error:?}"
+    );
+    assert!(!destination.exists());
+    super::repack_to_path(
+        &source,
+        &destination,
+        &RepackOptions::new().drop_path(group_path),
+    )
+    .unwrap();
+    source.close().unwrap();
+    let native = file::libhdf5_open(&destination);
+    assert_eq!(native.member_names().unwrap(), Vec::<String>::new());
+    assert_eq!(native.info().unwrap().nlinks, 0);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
 
 #[rstest]
 #[case::ordinary((12, 8))]
