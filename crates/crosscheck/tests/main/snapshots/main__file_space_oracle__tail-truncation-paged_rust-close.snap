@@ -2,39 +2,46 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-case:       tail-truncation-paged
-checkpoint: rust-close
+checkpoint
+  measurement  value
+  -----------  ---------------------
+  case         tail-truncation-paged
+  checkpoint   rust-close
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               PAGE           PAGE
-  persistence                            true           true
-  threshold (bytes)                         0              0
-  page size (bytes)                     16384          16384
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       PAGE     PAGE
+  persistence                    true     true
+  threshold (bytes)                 0        0
+  page size (bytes)            16,384   16,384
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  65536
-  libhdf5 H5Fget_filesize               65536
-  physical file                         65536
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     65,536
+  libhdf5 H5Fget_filesize  65,536
+  physical file            65,536
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x000000b1, 0x00000544) | (0x000000b1, 0x00000544) | yes
-      1 | (0x00001dc8, 0x00002238) | (0x00001dc8, 0x00002238) | yes
-      2 | (0x00004010, 0x00003ff0) | (0x00004010, 0x00003ff0) | yes
-      3 | (0x00008000, 0x00004000) | (0x00008000, 0x00004000) | yes
-      4 | (0x0000c000, 0x00004000) | (0x0000c000, 0x00004000) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000000b1        0x00000544       0x000000b1      0x00000544  yes
+      1         0x00001dc8        0x00002238       0x00001dc8      0x00002238  yes
+      2         0x00004010        0x00003ff0       0x00004010      0x00003ff0  yes
+      3         0x00008000        0x00004000       0x00008000      0x00004000  yes
+      4         0x0000c000        0x00004000       0x0000c000      0x00004000  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             5              5
-  section bytes                         59244          59244
-  H5Fget_freespace                          -          59244
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     5        5
+  section bytes                59,244   59,244
+  H5Fget_freespace                  -   59,244
+  reported - section bytes          -        0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

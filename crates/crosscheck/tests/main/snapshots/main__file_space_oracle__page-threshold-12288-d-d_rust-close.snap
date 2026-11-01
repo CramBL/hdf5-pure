@@ -2,36 +2,43 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-case:       page-threshold-12288-d-d
-checkpoint: rust-close
+checkpoint
+  measurement  value
+  -----------  ------------------------
+  case         page-threshold-12288-d-d
+  checkpoint   rust-close
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               PAGE           PAGE
-  persistence                            true           true
-  threshold (bytes)                     12288          12288
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       PAGE     PAGE
+  persistence                    true     true
+  threshold (bytes)            12,288   12,288
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  32768
-  libhdf5 H5Fget_filesize               32768
-  physical file                         32768
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     32,768
+  libhdf5 H5Fget_filesize  32,768
+  physical file            32,768
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x00000a59, 0x000005a7) | (0x00000a59, 0x000005a7) | yes
-      1 | (0x00001190, 0x00000e70) | (0x00001190, 0x00000e70) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x00000a59        0x000005a7       0x00000a59      0x000005a7  yes
+      1         0x00001190        0x00000e70       0x00001190      0x00000e70  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             2              2
-  section bytes                          5143           5143
-  H5Fget_freespace                          -           5143
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     2        2
+  section bytes                 5,143    5,143
+  H5Fget_freespace                  -    5,143
+  reported - section bytes          -        0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

@@ -2,40 +2,47 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-case:       stored-eof/FsmAggr/base=4096
-checkpoint: trailing-bytes
+checkpoint
+  measurement  value
+  -----------  ----------------------------
+  case         stored-eof/FsmAggr/base=4096
+  checkpoint   trailing-bytes
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                           FSM_AGGR       FSM_AGGR
-  persistence                            true           true
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)               4096           4096
+  property                  hdf5-pure   libhdf5
+  ------------------------  ---------  --------
+  strategy                   FSM_AGGR  FSM_AGGR
+  persistence                    true      true
+  threshold (bytes)                 1         1
+  page size (bytes)             4,096     4,096
+  base / userblock (bytes)      4,096     4,096
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                  11205
-  libhdf5 H5Fget_filesize               11462
-  physical file                         11462
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     11,205
+  libhdf5 H5Fget_filesize  11,462
+  physical file            11,462
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-      0 | (0x00000030, 0x00000057) | (0x00000030, 0x00000057) | yes
-      1 | (0x000000ce, 0x00000047) | (0x000000ce, 0x00000047) | yes
-      2 | (0x0000015c, 0x0000008c) | (0x0000015c, 0x0000008c) | yes
-      3 | (0x0000038a, 0x000004a6) | (0x0000038a, 0x000004a6) | yes
-      4 | (0x000009c0, 0x00001000) | (0x000009c0, 0x00001000) | yes
-      5 | (0x00001b50, 0x00000075) | (0x00001b50, 0x00000075) | yes
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x00000030        0x00000057       0x00000030      0x00000057  yes
+      1         0x000000ce        0x00000047       0x000000ce      0x00000047  yes
+      2         0x0000015c        0x0000008c       0x0000015c      0x0000008c  yes
+      3         0x0000038a        0x000004a6       0x0000038a      0x000004a6  yes
+      4         0x000009c0        0x00001000       0x000009c0      0x00001000  yes
+      5         0x00001b50        0x00000075       0x00001b50      0x00000075  yes
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             6              6
-  section bytes                          5701           5701
-  H5Fget_freespace                          -           5701
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     6        6
+  section bytes                 5,701    5,701
+  H5Fget_freespace                  -    5,701
+  reported - section bytes          -        0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

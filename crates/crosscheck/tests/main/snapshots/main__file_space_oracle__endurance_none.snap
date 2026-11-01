@@ -2,579 +2,698 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-64
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-64
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                 417151
-  libhdf5 H5Fget_filesize              417151
-  physical file                        417151
+  Metric                     bytes
+  -----------------------  -------
+  hdf5-pure stored EOF     417,151
+  libhdf5 H5Fget_filesize  417,151
+  physical file            417,151
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-128
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-128
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                 765731
-  libhdf5 H5Fget_filesize              765731
-  physical file                        765731
+  Metric                     bytes
+  -----------------------  -------
+  hdf5-pure stored EOF     765,731
+  libhdf5 H5Fget_filesize  765,731
+  physical file            765,731
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-192
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-192
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                1114311
-  libhdf5 H5Fget_filesize             1114311
-  physical file                       1114311
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     1,114,311
+  libhdf5 H5Fget_filesize  1,114,311
+  physical file            1,114,311
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-256
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-256
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                1462891
-  libhdf5 H5Fget_filesize             1462891
-  physical file                       1462891
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     1,462,891
+  libhdf5 H5Fget_filesize  1,462,891
+  physical file            1,462,891
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-320
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-320
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                1811471
-  libhdf5 H5Fget_filesize             1811471
-  physical file                       1811471
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     1,811,471
+  libhdf5 H5Fget_filesize  1,811,471
+  physical file            1,811,471
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-384
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-384
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                2160051
-  libhdf5 H5Fget_filesize             2160051
-  physical file                       2160051
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     2,160,051
+  libhdf5 H5Fget_filesize  2,160,051
+  physical file            2,160,051
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-448
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-448
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                2508631
-  libhdf5 H5Fget_filesize             2508631
-  physical file                       2508631
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     2,508,631
+  libhdf5 H5Fget_filesize  2,508,631
+  physical file            2,508,631
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-512
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-512
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                2857211
-  libhdf5 H5Fget_filesize             2857211
-  physical file                       2857211
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     2,857,211
+  libhdf5 H5Fget_filesize  2,857,211
+  physical file            2,857,211
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-576
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-576
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                3205791
-  libhdf5 H5Fget_filesize             3205791
-  physical file                       3205791
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     3,205,791
+  libhdf5 H5Fget_filesize  3,205,791
+  physical file            3,205,791
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-640
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-640
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                3554371
-  libhdf5 H5Fget_filesize             3554371
-  physical file                       3554371
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     3,554,371
+  libhdf5 H5Fget_filesize  3,554,371
+  physical file            3,554,371
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-704
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-704
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                3902951
-  libhdf5 H5Fget_filesize             3902951
-  physical file                       3902951
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     3,902,951
+  libhdf5 H5Fget_filesize  3,902,951
+  physical file            3,902,951
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-768
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-768
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                4251531
-  libhdf5 H5Fget_filesize             4251531
-  physical file                       4251531
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     4,251,531
+  libhdf5 H5Fget_filesize  4,251,531
+  physical file            4,251,531
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-832
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-832
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                4600111
-  libhdf5 H5Fget_filesize             4600111
-  physical file                       4600111
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     4,600,111
+  libhdf5 H5Fget_filesize  4,600,111
+  physical file            4,600,111
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-896
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-896
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                4948691
-  libhdf5 H5Fget_filesize             4948691
-  physical file                       4948691
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     4,948,691
+  libhdf5 H5Fget_filesize  4,948,691
+  physical file            4,948,691
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-960
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-960
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                5297271
-  libhdf5 H5Fget_filesize             5297271
-  physical file                       5297271
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     5,297,271
+  libhdf5 H5Fget_filesize  5,297,271
+  physical file            5,297,271
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: reopen-1024
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   reopen-1024
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                5645851
-  libhdf5 H5Fget_filesize             5645851
-  physical file                       5645851
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     5,645,851
+  libhdf5 H5Fget_filesize  5,645,851
+  physical file            5,645,851
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true
 
 
-exact section map equal: true
-
-
-case:       endurance/None/persist=false/page=4096/threshold=1/base=0
-checkpoint: final-close
+checkpoint
+  measurement  value
+  -----------  ---------------------------------------------------------
+  case         endurance/None/persist=false/page=4096/threshold=1/base=0
+  checkpoint   final-close
 
 file-space properties
-  property                          hdf5-pure        libhdf5
-  strategy                               NONE           NONE
-  persistence                           false          false
-  threshold (bytes)                         1              1
-  page size (bytes)                      4096           4096
-  base / userblock (bytes)                  0              0
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       NONE     NONE
+  persistence                   false    false
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
 
 file sizes (absolute bytes)
-  measurement                           bytes
-  hdf5-pure stored EOF                5645851
-  libhdf5 H5Fget_filesize             5645851
-  physical file                       5645851
+  Metric                       bytes
+  -----------------------  ---------
+  hdf5-pure stored EOF     5,645,851
+  libhdf5 H5Fget_filesize  5,645,851
+  physical file            5,645,851
 
 free-space sections (stored addresses, byte lengths)
-  index |        hdf5-pure         |         libhdf5          | match
-        |     address      length  |     address      length  |
-  ------+--------------------------+--------------------------+------
-  (no sections)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+  (none)
 
 free-space totals
-  measurement                       hdf5-pure        libhdf5
-  section count                             0              0
-  section bytes                             0              0
-  H5Fget_freespace                          -              0
-  reported - section bytes                  -              0
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     0        0
+  section bytes                     0        0
+  H5Fget_freespace                  -        0
+  reported - section bytes          -        0
 
-
-exact section map equal: true
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

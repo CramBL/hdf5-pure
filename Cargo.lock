@@ -1287,6 +1287,7 @@ dependencies = [
  "hdf5-pure-core",
  "hdf5-pure-format",
  "ndarray",
+ "rstest",
  "tempfile",
  "test-util",
 ]
