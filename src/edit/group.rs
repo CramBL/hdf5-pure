@@ -25,6 +25,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
+use crate::source::PhysicalSource;
 use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::LengthWidth;
@@ -159,19 +160,12 @@ impl WriteEngine {
     /// the parsing and source-read errors of the group readers.
     fn symbol_table_region(&self, symbol_table: &SymbolTableMessage) -> Result<OhRegion, Error> {
         let widths = self.context.widths();
-        let addresses = self.context.addresses();
         let k = group_v1::group_leaf_node_k(self.context.superblock());
-        let links = match self.image_slice() {
-            Some(bytes) => {
-                group_v1::resolve_v1_group_links(bytes, symbol_table, widths, addresses, k)
-            }
-            None => group_v1::resolve_v1_group_links_from_source(
-                self.image(),
-                symbol_table,
-                widths,
-                addresses,
-                k,
-            ),
+        let source = self.opened_source();
+        let physical = PhysicalSource::new(&source);
+        let links = match physical.resident() {
+            Some(bytes) => group_v1::resolve_v1_group_links(bytes, symbol_table, widths, k),
+            None => group_v1::resolve_v1_group_links_from_source(physical, symbol_table, widths, k),
         }
         .map_err(group_links::storage_error)?;
         let mut region = fresh_group_region();

@@ -574,30 +574,13 @@ fn find_noncompact_link(
     group_leaf_node_k: Option<NonZeroU16>,
     name: LinkName<'_>,
 ) -> Result<Option<LinkTarget>, FormatError> {
-    let file_data = physical.bytes();
-    let addresses = physical.addresses();
     if let Some(message) = header
         .messages
         .iter()
         .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
     {
         let table = SymbolTableMessage::parse_with_offset_width(&message.data, widths.offsets)?;
-        return group_v1::find_link(
-            file_data,
-            &table,
-            widths,
-            addresses,
-            group_leaf_node_k,
-            name,
-            || {
-                crate::btree_v1::collect_symbol_table_nodes(
-                    file_data,
-                    table.btree_address,
-                    widths,
-                    addresses,
-                )
-            },
-        );
+        return group_v1::find_link(physical, &table, widths, group_leaf_node_k, name);
     }
     let info = find_link_info(header, widths.offsets)?;
     let Some(heap_address) = info.fractal_heap_address else {
@@ -653,28 +636,18 @@ fn find_noncompact_link_from_source(
     group_leaf_node_k: Option<NonZeroU16>,
     name: LinkName<'_>,
 ) -> Result<Option<LinkTarget>, FormatError> {
-    let addresses = source.addresses();
     if let Some(message) = header
         .messages
         .iter()
         .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
     {
         let table = SymbolTableMessage::parse_with_offset_width(&message.data, widths.offsets)?;
-        return group_v1::find_link(
-            source,
+        return group_v1::find_link_from_source(
+            PhysicalSource::new(source),
             &table,
             widths,
-            addresses,
             group_leaf_node_k,
             name,
-            || {
-                crate::btree_v1::collect_symbol_table_nodes_from_source(
-                    source,
-                    table.btree_address,
-                    widths,
-                    addresses,
-                )
-            },
         );
     }
     let info = find_link_info(header, widths.offsets)?;
@@ -917,8 +890,6 @@ pub fn resolve_group_entries(
     widths: FormatWidths,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let file_data = physical.bytes();
-    let addresses = physical.addresses();
     if is_v1_group(object_header) {
         let sym_msg = object_header
             .messages
@@ -926,7 +897,7 @@ pub fn resolve_group_entries(
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
-        group_v1::resolve_v1_group_entries(file_data, &stm, widths, addresses, group_leaf_node_k)
+        group_v1::resolve_v1_group_entries(physical, &stm, widths, group_leaf_node_k)
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries(physical, access_mode, object_header, widths)
     } else {
@@ -994,7 +965,6 @@ pub fn resolve_group_entries_from_source(
     widths: FormatWidths,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
-    let addresses = source.addresses();
     if is_v1_group(object_header) {
         let sym_msg = object_header
             .messages
@@ -1003,10 +973,9 @@ pub fn resolve_group_entries_from_source(
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
         group_v1::resolve_v1_group_entries_from_source(
-            source,
+            PhysicalSource::new(source),
             &stm,
             widths,
-            addresses,
             group_leaf_node_k,
         )
     } else if is_v2_group(object_header) {

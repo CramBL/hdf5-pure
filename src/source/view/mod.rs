@@ -21,6 +21,7 @@ pub(crate) use read::StoredRead;
 /// Construction requires an [`OriginalSource`] and captures its opened address context. Reads
 /// delegate to the original [`Source`]. Metadata retains that source's ownership and physical
 /// metadata ranges, including any [`Source::metadata_origin`].
+/// Copies contain the same backend reference and captured context.
 pub(crate) struct PhysicalSource<'a, S: Source + ?Sized> {
     inner: &'a S,
     addresses: AddressContext,
@@ -56,6 +57,11 @@ impl<'a, S: Source + ?Sized> PhysicalSource<'a, S> {
     /// The reader adds the effective base to each stored position before reading the backend.
     pub(crate) const fn stored(self) -> StoredSource<'a, S> {
         StoredSource { physical: self }
+    }
+
+    /// Returns the effective address context captured from the opened backend.
+    pub(crate) const fn addresses(&self) -> AddressContext {
+        self.addresses
     }
 
     /// Returns the original source's byte length.
@@ -140,6 +146,14 @@ impl<S: Source + ?Sized> RangeReader for PhysicalSource<'_, S> {
         self.read_metadata(range.start(), range.length().to_usize()?)
     }
 }
+
+impl<S: Source + ?Sized> Clone for PhysicalSource<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S: Source + ?Sized> Copy for PhysicalSource<'_, S> {}
 
 /// A complete resident image paired with its opened address context.
 ///
