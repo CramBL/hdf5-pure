@@ -3,6 +3,8 @@
 
 use alloc::vec::Vec;
 
+use hdf5_pure_core::PhysicalAddress;
+
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -13,8 +15,11 @@ use crate::message_type::MessageType;
 use crate::metadata_source::MetadataSource;
 use crate::width::FormatWidths;
 
+mod observation;
 mod v1;
 mod v2;
+
+pub use observation::ObjectHeaderChunk;
 
 pub use v2::AttributePhaseChange;
 pub use v2::MessageRecord;
@@ -278,10 +283,10 @@ impl ObjectHeader {
     /// Parses an object header from a [`MetadataSource`] using bounded reads for each
     /// header and continuation chunk.
     ///
-    /// `base_address` is added to v1 continuation offsets as in
-    /// [`Self::parse_with_base`]. The parser holds at most one chunk at a time, so
-    /// it supports files larger than the address space on a 32-bit host. Every
-    /// message record is tested against `access_mode` as in [`parse`](Self::parse).
+    /// Continuation offsets are resolved through `base_address` as in
+    /// [`Self::parse_with_base`]. The parser reads individual chunks. Version 1 retains recursive
+    /// ancestor buffers, and version 2 retains chunk 0 alongside the current continuation.
+    /// Every message record is tested against `access_mode` as in [`parse`](Self::parse).
     ///
     /// # Errors
     ///
@@ -368,19 +373,111 @@ impl ObjectHeader {
         address: u64,
         widths: FormatWidths,
         base_address: BaseAddress,
-        mut filter: MessageFilter<'_>,
+        filter: MessageFilter<'_>,
     ) -> Result<ObjectHeader, FormatError> {
-        let context = ParseContext {
-            access_mode,
-            widths,
-            base_address,
-        };
+        Self::parse_from_source_observed(
+            source,
+            ParseContext {
+                access_mode,
+                widths,
+                base_address,
+            },
+            address,
+            filter,
+            &mut None,
+        )
+    }
+
+    /// Parses an object header and observes each chunk's borrowed message region.
+    ///
+    /// `source` positions and `address` use physical file coordinates. Stored continuation
+    /// addresses are resolved through `base_address`. Calls `observer` after reading each chunk's
+    /// local framing, before checking message compatibility and applying `filter`. Version 1
+    /// continuations are visited depth-first, and version 2 continuations breadth-first.
+    ///
+    /// The observer borrows bytes from the active source buffer. The returned header retains
+    /// only the messages selected by `filter`.
+    /// The observer may have been called if parsing returns an error. The caller establishes
+    /// allocation ownership and source freshness separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parsing and source-read errors from
+    /// [`parse_from_source_filtered_with_widths`](Self::parse_from_source_filtered_with_widths),
+    /// and [`FormatError::OffsetOverflow`] if an observed physical range overflows.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::PhysicalAddress;
+    /// use hdf5_pure_core::__private::BaseAddressExt;
+    /// use hdf5_pure_format::BaseAddress;
+    /// use hdf5_pure_format::__private::{
+    ///     AccessMode, FormatWidths, MessageFilter, ObjectHeader, ObjectHeaderPrefix,
+    /// };
+    ///
+    /// let bytes = ObjectHeaderPrefix::PLAIN.encode_header(&[]);
+    /// let mut allocations = Vec::new();
+    /// let header = ObjectHeader::parse_from_source_with_chunk_observer(
+    ///     bytes.as_slice(),
+    ///     AccessMode::ReadOnly,
+    ///     PhysicalAddress::new(0),
+    ///     FormatWidths::from_sizes(8, 8)?,
+    ///     BaseAddress::ZERO,
+    ///     MessageFilter::All,
+    ///     &mut |chunk| {
+    ///         assert!(chunk.records().bytes().is_empty());
+    ///         allocations.push(chunk.allocation());
+    ///     },
+    /// )?;
+    /// assert_eq!(header.version, 2);
+    /// assert!(header.messages.is_empty());
+    /// assert_eq!(allocations.len(), 1);
+    /// assert_eq!(allocations[0].start(), PhysicalAddress::new(0));
+    /// assert_eq!(allocations[0].length(), u64::try_from(bytes.len())?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn parse_from_source_with_chunk_observer<S: MetadataSource + ?Sized>(
+        source: &S,
+        access_mode: AccessMode,
+        address: PhysicalAddress,
+        widths: FormatWidths,
+        base_address: BaseAddress,
+        filter: MessageFilter<'_>,
+        observer: &mut dyn FnMut(ObjectHeaderChunk<'_>),
+    ) -> Result<ObjectHeader, FormatError> {
+        Self::parse_from_source_observed(
+            source,
+            ParseContext {
+                access_mode,
+                widths,
+                base_address,
+            },
+            address.get(),
+            filter,
+            &mut Some(observer),
+        )
+    }
+
+    /// Dispatches the source parser with optional borrowed chunk observations.
+    ///
+    /// # Errors
+    ///
+    /// Returns source-read errors from [`MetadataSource::read_at`] and the errors from
+    /// [`Self::parse_v1_from_source`] or [`Self::parse_v2_from_source`].
+    fn parse_from_source_observed<S: MetadataSource + ?Sized>(
+        source: &S,
+        context: ParseContext,
+        address: u64,
+        mut filter: MessageFilter<'_>,
+        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+    ) -> Result<ObjectHeader, FormatError> {
         let mut sig = [0u8; 4];
         source.read_at(address, &mut sig)?;
         if sig == OHDR_SIGNATURE {
-            Self::parse_v2_from_source(source, context, address, filter)
+            Self::parse_v2_from_source(source, context, address, filter, observer)
         } else {
-            Self::parse_v1_from_source(source, context, address, &mut filter)
+            Self::parse_v1_from_source(source, context, address, &mut filter, observer)
         }
     }
 }
