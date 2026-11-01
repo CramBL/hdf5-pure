@@ -1,0 +1,24 @@
+---
+source: src/edit/paged_persistence/tests.rs
+expression: report.finish()
+---
+projection
+  phase     managers  records  vector capacity  encoded bytes
+  --------  --------  -------  ---------------  -------------
+  admitted         2        2                2            234
+  reserved         2        2                2            234
+
+capacity contributions
+  Metric               records
+  -------------------  -------
+  semantic extents           2
+  reservation effects        3
+  total bound                5
+
+owned storage
+  Metric                bytes
+  --------------------  -----
+  extension               160
+  manager encoding        234
+  manager allocations     387
+  complete reservation    547

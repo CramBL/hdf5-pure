@@ -643,10 +643,11 @@ impl SessionSpace {
         )
     }
 
-    /// Bounds the PAGE section count after adding `extents` and reserving a metadata tail.
+    /// Bounds the PAGE section count after adding `extents`, before metadata reservation.
     ///
     /// Includes tracked free space, pending page padding, and dead extents that may form whole
-    /// free pages. Counts every page crossed by an extent separately.
+    /// free pages. Counts each aligned interior as one section and typed partial edges separately.
+    /// The caller adds a separate bound for reservation effects.
     ///
     /// # Errors
     ///

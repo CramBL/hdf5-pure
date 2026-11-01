@@ -1,0 +1,17 @@
+---
+source: crates/crosscheck/tests/main/test_util/file_space.rs
+expression: report
+---
+persisted managers
+  phase                      records  metadata bytes  free bytes  large run bytes
+  -------------------------  -------  --------------  ----------  ---------------
+  native fixture                   3             252   1,051,746        1,048,576
+  pure metadata edit               4             531   1,051,496        1,048,576
+  native control allocation        3             252     985,942          983,040
+  native edited allocation         4             270     985,923          983,040
+
+native allocation
+  file     initial bytes  data address  final bytes  growth bytes
+  -------  -------------  ------------  -----------  ------------
+  control      1,060,864    0x00001000    1,060,864             0
+  edited       1,060,864    0x00001000    1,060,864             0
