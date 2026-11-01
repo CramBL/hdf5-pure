@@ -39,12 +39,11 @@ use crate::source::PhysicalSource;
 use crate::source::{Source, SourceMetadata};
 
 use super::GlobalHeapLiveness;
+#[cfg(doc)]
+use super::analysis::AnalysisPhase;
 use super::analysis::CompleteTopology;
 use super::copy::ObjModel;
 use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
-
-/// Physical ranges of the global heap collections referenced by deleted objects.
-pub(super) struct DeletedCollections(Vec<FileRange>);
 
 struct ChunkedStorageParts {
     data: Vec<FileRange>,
@@ -216,7 +215,7 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the errors of [`global_heap::walk_collection`].
-    fn collection_span(&self, address: u64) -> Result<FileRange, FormatError> {
+    pub(super) fn collection_span(&self, address: u64) -> Result<FileRange, FormatError> {
         global_heap::walk_collection(
             self.image(),
             self.widths().lengths,
@@ -425,7 +424,7 @@ impl WriteEngine {
     /// proven. A group's link storage and the objects its links reach are separate: either can be
     /// reclaimed without the other. The walk excludes the global heap collections the objects
     /// refer to, since objects can share a collection, and the commit frees those it leaves
-    /// unreferenced through [`unreferenced_collection_spans`](Self::unreferenced_collection_spans).
+    /// unreferenced through [`AnalysisPhase::unreferenced_collection_spans`].
     /// The walk stops at [`MAX_LINK_WALK_DEPTH`] against a hard-link cycle.
     ///
     /// `incoming` holds the file-wide hard-link count of each object header address, from
@@ -638,64 +637,6 @@ impl WriteEngine {
         let link_info = link_info?;
         link_info.fractal_heap_address?;
         Some(link_info)
-    }
-
-    /// Returns the global heap collections that the objects at `deleted`, and the objects
-    /// reachable from them, refer to.
-    ///
-    /// `deleted` holds the absolute addresses of the object headers whose links a commit deletes.
-    /// The result is empty if [`collections_reachable_from`](Self::collections_reachable_from)
-    /// returns an error or an incomplete analysis for them, and leaves out a collection that
-    /// cannot be parsed, so the commit keeps that collection allocated.
-    pub(super) fn deleted_collections(&self, deleted: &[u64]) -> DeletedCollections {
-        let Ok(GlobalHeapLiveness {
-            referenced_collections,
-            analysis_complete: true,
-        }) = self.collections_reachable_from(deleted.iter().copied())
-        else {
-            return DeletedCollections(Vec::new());
-        };
-        DeletedCollections(
-            referenced_collections
-                .into_iter()
-                .filter_map(|address| self.collection_span(address).ok())
-                .collect(),
-        )
-    }
-
-    /// Returns the span and free class of each of the deleted `collections` that is unreferenced
-    /// by the objects reachable from the object header at `root`.
-    ///
-    /// `root` is the absolute address of the root group header that the commit publishes. The
-    /// result is empty if [`collections_reachable_from`](Self::collections_reachable_from) returns
-    /// an error or an incomplete analysis for `root`, since an object the analysis cannot read may
-    /// refer to any collection. Each span has the free class [`collection_free_class`] returns.
-    pub(super) fn unreferenced_collection_spans(
-        &self,
-        root: u64,
-        DeletedCollections(collections): DeletedCollections,
-    ) -> Vec<(FileRange, FreeClass)> {
-        if collections.is_empty() {
-            return Vec::new();
-        }
-        let Ok(GlobalHeapLiveness {
-            referenced_collections,
-            analysis_complete: true,
-        }) = self.collections_reachable_from([root])
-        else {
-            return Vec::new();
-        };
-        collections
-            .into_iter()
-            .filter(|range| !referenced_collections.contains(&range.start().get()))
-            .filter_map(|range| {
-                let stored = self.context.addresses().relative(range.start()).ok()?;
-                Some((
-                    range,
-                    collection_free_class(self.space.page_size(), stored, range.length()),
-                ))
-            })
-            .collect()
     }
 
     /// Returns every on-disk block a *chunked* dataset at `addr` owns: its
@@ -1372,7 +1313,7 @@ fn physical_ranges_disjoint_in_bounds(ranges: &mut [FileRange], length: u64) -> 
 /// (`H5FDdevelop.h`) files with raw data. On a paged file, `H5MF_xfree` (`H5MF.c`, libhdf5 2.2.0)
 /// files freed space of a page or more in the generic large manager by its size alone, whatever
 /// its type.
-fn collection_free_class(
+pub(super) fn collection_free_class(
     page_size: Option<FileSpacePageSize>,
     stored: StoredAddress,
     len: u64,
@@ -1527,7 +1468,7 @@ pub(super) fn meta_spans(spans: Vec<FileRange>) -> impl Iterator<Item = (FileRan
 const OWNED_HEADER_VERSION: u8 = 2;
 
 /// The depth, in hard links from a root, at which a reclaim walk stops descending.
-const MAX_LINK_WALK_DEPTH: u32 = 1000;
+pub(super) const MAX_LINK_WALK_DEPTH: u32 = 1000;
 
 #[cfg(test)]
 mod tests {

@@ -27,6 +27,7 @@ use crate::vl_data::EmbeddedVlSlot;
 use crate::vl_data::VlElement;
 
 use super::WriteEngine;
+use super::analysis::AnalysisPhase;
 
 /// The global heap collections that the objects reachable from a set of object headers, such as
 /// the root group's, refer to.
@@ -80,17 +81,10 @@ impl WriteEngine {
         &self,
         roots: impl IntoIterator<Item = u64>,
     ) -> Result<GlobalHeapLiveness, Error> {
-        let mut referenced_collections = BTreeSet::new();
-        let analysis_complete = self.walk_reachable_objects(roots, |_, header, child| {
-            self.collect_object_collections(header, child, &mut referenced_collections)
-        })?;
-        Ok(GlobalHeapLiveness {
-            referenced_collections,
-            analysis_complete,
-        })
+        AnalysisPhase::new(self).collections_reachable_from(roots)
     }
 
-    /// Adds the collections an object refers to, and passes the children of a group to `child`.
+    /// Adds the collections an object refers to.
     ///
     /// Returns `false` if the object has a shared message, a message of a type the analysis does
     /// not recognize, or an attribute or a dataset that the analysis does not read in full.
@@ -98,33 +92,11 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the errors of [`global_heap_liveness`](Self::global_heap_liveness).
-    fn collect_object_collections(
+    pub(super) fn collect_object_collections(
         &self,
         header: &ObjectHeader,
-        child: &mut dyn FnMut(u64),
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, Error> {
-        if crate::group_v2::is_group(header) {
-            for entry in crate::group_v2::resolve_group_entries_from_source(
-                &self.opened_source(),
-                AccessMode::ReadWrite,
-                header,
-                self.widths(),
-                crate::group_v1::group_leaf_node_k(self.context.superblock()),
-            )? {
-                if !entry
-                    .object_header_address
-                    .is_undefined(self.widths().offsets)
-                {
-                    child(
-                        self.context
-                            .addresses()
-                            .resolve(entry.object_header_address)?
-                            .get(),
-                    );
-                }
-            }
-        }
         let mut complete = true;
         for HeaderMessage {
             msg_type,

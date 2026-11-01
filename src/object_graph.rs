@@ -326,7 +326,7 @@ pub(crate) struct Expansion<T, L> {
 }
 
 /// A hard link of a group, which has a label of type `L` and targets an object by `Target`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct HardLink<L, Target> {
     /// The label the `expand` callback of [`ObjectGraph::discover`] returns for the link, such as
     /// its name.

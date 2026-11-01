@@ -17,6 +17,8 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 use crate::{AttrValue, File, FileBuilder};
 
+mod collections;
+
 #[rstest]
 #[case::compact(4, false)]
 #[case::dense(64, true)]
