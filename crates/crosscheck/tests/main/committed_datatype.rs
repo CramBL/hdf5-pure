@@ -18,6 +18,8 @@
 
 use std::path::Path;
 
+#[cfg(target_endian = "little")]
+use hdf5::File as NativeFile;
 use hdf5::Location;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::attribute_create::CharEncoding;
@@ -38,6 +40,8 @@ use rstest::rstest;
 
 use test_util_hdf5::assertion;
 use test_util_hdf5::file;
+#[cfg(target_endian = "little")]
+use test_util_hdf5::reader::ReadBackend;
 
 /// What a fixture puts in the file, so every assertion below names one constant
 /// rather than repeating a literal the fixture could drift away from.
@@ -237,50 +241,87 @@ fn a_committed_dataset_datatype_resolves_and_its_data_reads() {
     assert_eq!(typed.read_i32().unwrap(), DATASET_VALUES);
 }
 
-/// Dense attribute storage decodes committed datatypes the same way. The bytes
-/// come out of a fractal heap rather than the object header, which is a second
-/// decode path — and each reader backend walks that heap with its own code, so
-/// both are checked here rather than one standing in for the other.
-#[test]
+#[rstest]
+#[case::zero_base(0, 0)]
+#[case::userblock(512, 512)]
+#[case::forward_relocated(0, 512)]
+#[case::backward_relocated(512, 0)]
 #[cfg(target_endian = "little")]
-fn committed_datatypes_resolve_in_dense_attribute_storage() {
+fn committed_datatypes_resolve_in_dense_attribute_storage(
+    #[case] encoded_base: usize,
+    #[case] effective_base: usize,
+    #[values(3, 5_000)] elements: usize,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense.h5");
-    // Comfortably past the eight-attribute threshold that moves storage to a heap.
     const DENSE: usize = 40;
-    write_committed_fixture(
-        &path,
+    let file = NativeFile::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| properties.userblock(encoded_base as u64))
+        .create(&path)
+        .unwrap();
+    fill_committed_fixture(
+        &file,
         Fixture {
             dense_attrs: DENSE,
             ..EVERYTHING
         },
     );
-
-    for (backend, file) in [
-        ("buffered", File::open(&path).unwrap()),
-        ("streaming", File::open_streaming(&path).unwrap()),
-    ] {
-        let datatypes = file.root().attr_datatypes().unwrap();
-        let attrs = file.root().attrs().unwrap();
+    let datatype = file.dataset("typed").unwrap().dtype().unwrap();
+    let expected = vec![ATTR_VALUE; elements];
+    let attribute = file
+        .new_attr_builder()
+        .empty_as(&datatype)
+        .shape([elements])
+        .create("large")
+        .unwrap();
+    attribute.write(&expected).unwrap();
+    assert!(attribute.dtype().unwrap().is_committed());
+    assert_eq!(attribute.read_raw::<i32>().unwrap(), expected);
+    drop(attribute);
+    drop(datatype);
+    file.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        test_util::fractal_heap::huge_object_count(&bytes),
+        u64::from(elements == 5_000)
+    );
+    let mut relocated = vec![0; effective_base];
+    relocated.extend_from_slice(&bytes[encoded_base..]);
+    std::fs::write(&path, relocated).unwrap();
+    let file = backend.open(&path).unwrap();
+    let datatypes = file.root().attr_datatypes().unwrap();
+    let attrs = file.root().attrs().unwrap();
+    assert_eq!(datatypes.len(), DENSE + 3);
+    assert_eq!(attrs.len(), DENSE + 3);
+    assert_eq!(datatypes.get("large"), Some(&committed_i32()));
+    assert_eq!(attrs.get("large"), Some(&AttrValue::I32Array(expected)));
+    for i in 0..DENSE {
+        let name = format!("dense{i:02}");
+        assert_eq!(datatypes.get(&name), Some(&committed_i32()));
         assert_eq!(
-            datatypes.len(),
-            DENSE + 2,
-            "{backend}: every attribute must still be reported"
+            attrs.get(&name),
+            Some(&AttrValue::I32Array(vec![i32::try_from(i).unwrap()]))
         );
-        for i in 0..DENSE {
-            let name = format!("dense{i:02}");
-            assert_eq!(
-                datatypes.get(&name),
-                Some(&committed_i32()),
-                "{backend}/{name}: a committed datatype was not resolved in dense storage"
-            );
-            assert_eq!(
-                attrs.get(&name),
-                Some(&AttrValue::I32Array(vec![i32::try_from(i).unwrap()])),
-                "{backend}/{name}: a dense committed attribute's value was dropped"
-            );
-        }
     }
+    assert_eq!(
+        attrs.get("shared_attr"),
+        Some(&AttrValue::I32Array(vec![ATTR_VALUE]))
+    );
+    assert_eq!(
+        attrs.get("plain"),
+        Some(&AttrValue::I32Array(vec![-ATTR_VALUE]))
+    );
+    file.close().unwrap();
 }
 
 /// An in-place edit of an object that carries a committed attribute leaves that

@@ -10,7 +10,10 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree_v2::{self, BTreeV2Header};
 use crate::error::FormatError;
-use crate::source::{Source, SourceMetadata};
+use crate::source::Source;
+use crate::source::SourceMetadata;
+use crate::source::StoredMetadata;
+use crate::source::StoredRead;
 use crate::width::FormatWidths;
 #[cfg(test)]
 use crate::width::{LengthWidth, OffsetWidth};
@@ -44,21 +47,72 @@ pub(crate) fn collect_dense_index_storage_extents<S: Source + ?Sized>(
     indexes: impl IntoIterator<Item = DenseIndex>,
     widths: FormatWidths,
 ) -> Result<Vec<Extent>, FormatError> {
-    let mut extents = Vec::new();
-    for index in indexes {
+    collect_index_storage(heap_header, indexes, |index| {
+        let DenseIndex {
+            address,
+            expected_tree_type,
+        } = index;
         let header = BTreeV2Header::parse_from_source_with_widths(
             &SourceMetadata(source),
-            index.address.get(),
+            address.get(),
             widths,
         )?;
-        if header.tree_type != index.expected_tree_type {
+        if header.tree_type != expected_tree_type {
             return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
         }
-        extents.extend(btree_v2::legacy_collect_btree_v2_storage_extents(
-            source,
-            index.address,
+        btree_v2::legacy_collect_btree_v2_storage_extents(source, address, widths)
+    })
+}
+
+/// Returns disjoint index allocations in stored-address order.
+///
+/// Reads each index through [`StoredRead::read_metadata`] and checks its client type.
+/// Rejects allocations that contain `heap_header`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeNodeType`] if an index has the wrong client type, and
+/// [`FormatError::InvalidBTreeV2Signature`] if allocations overlap or contain `heap_header`.
+/// Returns errors from metadata reads, allocation bounds, or B-tree parsing.
+pub(crate) fn collect_dense_index_storage_extents_from_source(
+    source: &(impl StoredRead + ?Sized),
+    heap_header: StoredAddress,
+    indexes: impl IntoIterator<Item = DenseIndex>,
+    widths: FormatWidths,
+) -> Result<Vec<Extent>, FormatError> {
+    collect_index_storage(heap_header, indexes, |index| {
+        let DenseIndex {
+            address,
+            expected_tree_type,
+        } = index;
+        let header = BTreeV2Header::parse_from_source_with_widths(
+            &StoredMetadata(source),
+            address.get(),
             widths,
-        )?);
+        )?;
+        if header.tree_type != expected_tree_type {
+            return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
+        }
+        btree_v2::collect_btree_v2_storage_extents(source, address, widths)
+    })
+}
+
+/// Returns disjoint index allocations in stored-address order.
+///
+/// Rejects allocations that contain `heap_header`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeV2Signature`] if allocations overlap or contain
+/// `heap_header`, and errors from `collect`.
+fn collect_index_storage(
+    heap_header: StoredAddress,
+    indexes: impl IntoIterator<Item = DenseIndex>,
+    mut collect: impl FnMut(DenseIndex) -> Result<Vec<Extent>, FormatError>,
+) -> Result<Vec<Extent>, FormatError> {
+    let mut extents = Vec::new();
+    for index in indexes {
+        extents.extend(collect(index)?);
     }
 
     extents.sort_unstable();

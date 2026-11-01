@@ -605,6 +605,21 @@ fn write_shared_committed_file(path: &Path, base: usize) {
         .create(path)
         .unwrap();
     write_shared_objects(&file, 2);
+    let group = file.group("g0").unwrap();
+    for index in 0..9i64 {
+        group
+            .new_attr::<i64>()
+            .shape(())
+            .create(format!("dense{index}").as_str())
+            .unwrap()
+            .write_scalar(&index)
+            .unwrap();
+    }
+    assert_eq!(
+        group.attr("dense8").unwrap().read_scalar::<i64>().unwrap(),
+        8
+    );
+    drop(group);
     let datatype = hdf5::Datatype::from_type::<i32>().unwrap();
     file.commit_datatype("integer_type", &datatype).unwrap();
     let dataset = file
@@ -628,6 +643,22 @@ fn write_shared_committed_file(path: &Path, base: usize) {
 
 #[cfg(target_endian = "little")]
 fn assert_shared_committed_messages(file: &File) {
+    let expected: BTreeMap<_, _> = (0..9i64)
+        .map(|index| (format!("dense{index}"), AttrValue::I64(index)))
+        .chain([
+            (SHARED_ATTR.into(), AttrValue::I64(SHARED_ATTR_VALUE)),
+            (PRIVATE_ATTR.into(), AttrValue::I64(PRIVATE_ATTR_VALUE)),
+        ])
+        .collect();
+    assert_eq!(
+        file.group("g0")
+            .unwrap()
+            .attrs()
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        expected
+    );
     let shared = file.dataset("d1").unwrap();
     assert_eq!(shared.datatype().unwrap(), i32_type());
     assert_eq!(shared.shape().unwrap(), [ROWS as u64]);

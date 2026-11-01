@@ -21,7 +21,6 @@ use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::read_spec::RawReadSpec;
 use crate::read_spec::RawReadStorage;
-use crate::source::BaseOffsetSource;
 use crate::source::PhysicalSource;
 use crate::vl_data;
 use crate::vl_data::EmbeddedVlSlot;
@@ -362,13 +361,11 @@ impl WriteEngine {
         };
         let mut shared_records = false;
         let mut complete = true;
+        let opened = self.opened_source();
+        let stored = PhysicalSource::new(&opened).stored();
         crate::attribute::visit_dense_attribute_messages_from_source(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            },
+            &stored,
             AccessMode::ReadWrite,
-            self.context.addresses(),
             &info,
             heap,
             self.widths(),

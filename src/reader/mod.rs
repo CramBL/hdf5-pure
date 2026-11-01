@@ -24,7 +24,6 @@ use crate::VariableLengthType;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
-use crate::address::BaseAddressExt;
 use crate::address::OpenedImageContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -86,11 +85,15 @@ use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message;
 use crate::shared_message::SharedResolver;
 use crate::shared_message::SourceResolver;
+use crate::source;
+use crate::source::BytesSource;
+use crate::source::MetadataCacheConfig;
+use crate::source::MetadataCacheStats;
+use crate::source::MetadataCachingSource;
+use crate::source::ReadSeekSource;
+use crate::source::Source;
 use crate::source::SourceMetadata;
-use crate::source::{
-    self, BaseOffsetSource, BytesSource, MetadataCacheConfig, MetadataCacheStats,
-    MetadataCachingSource, ReadSeekSource, Source, ValidatedSource,
-};
+use crate::source::ValidatedSource;
 use crate::source::{PhysicalSource, StoredRead};
 use crate::superblock;
 use crate::superblock::LocatedSuperblock;
@@ -2266,92 +2269,38 @@ impl FileInner {
         }
     }
 
-    /// Extract every attribute message attached to an object header (compact,
-    /// shared, and dense storage), dispatching on the backend.
+    /// Reads an object's compact and dense attributes, resolving shared messages.
+    ///
+    /// Borrows resident metadata when available and uses the original source's metadata
+    /// interface otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address resolution, a metadata read, or parsing fails.
     pub(crate) fn attr_messages_of(
         &self,
         hdr: &ObjectHeader,
     ) -> Result<Vec<crate::attribute::AttributeMessage>, Error> {
-        let widths = self.widths;
-        // Compact attributes come out of `hdr`, but the two addresses this walk
-        // follows are read from message bodies and so are stored relative to the
-        // base address: the Attribute Info message's fractal-heap address, and a
-        // shared attribute's message address. Frame the file at `base` exactly as
-        // [`Self::read_dataset_raw`] does, so both index it directly. For a plain
-        // file (`base == 0`) this is the identity; without it, a userblock file's
-        // dense attributes are looked for one userblock too early.
-        let base = self.addresses().effective_base();
-        let access = self.access_mode();
-        let sohm = self.sohm_table.as_deref();
-        match &self.backend {
-            Backend::InMemory(v) => Ok(attribute::extract_attributes_full(
-                source::frame(v, base)?,
-                access,
-                self.addresses(),
-                hdr,
-                widths,
-                sohm,
-            )?),
-            Backend::Streaming(s) if base.is_zero() => {
-                Ok(attribute::extract_attributes_full_from_source(
-                    s.as_ref(),
-                    self.addresses(),
-                    access,
+        self.with_opened_source(|source| {
+            let physical = PhysicalSource::new(source);
+            match physical.resident() {
+                Some(bytes) => attribute::extract_attributes_full(
+                    bytes.stored()?,
+                    self.access_mode(),
                     hdr,
-                    widths,
-                    sohm,
-                )?)
-            }
-            Backend::Streaming(s) => {
-                let framed = BaseOffsetSource {
-                    inner: s.as_ref(),
-                    base,
-                };
-                Ok(attribute::extract_attributes_full_from_source(
-                    &framed,
-                    self.addresses(),
-                    access,
+                    self.widths,
+                    self.sohm_table.as_deref(),
+                ),
+                None => attribute::extract_attributes_full_from_source(
+                    source,
+                    self.access_mode(),
                     hdr,
-                    widths,
-                    sohm,
-                )?)
+                    self.widths,
+                    self.sohm_table.as_deref(),
+                ),
             }
-            Backend::Edit(m) => Self::with_engine(
-                m,
-                |d| {
-                    Ok(attribute::extract_attributes_full(
-                        source::frame(d, base)?,
-                        access,
-                        self.addresses(),
-                        hdr,
-                        widths,
-                        sohm,
-                    )?)
-                },
-                |s| {
-                    if base.is_zero() {
-                        Ok(attribute::extract_attributes_full_from_source(
-                            s,
-                            self.addresses(),
-                            access,
-                            hdr,
-                            widths,
-                            sohm,
-                        )?)
-                    } else {
-                        let framed = BaseOffsetSource { inner: s, base };
-                        Ok(attribute::extract_attributes_full_from_source(
-                            &framed,
-                            self.addresses(),
-                            access,
-                            hdr,
-                            widths,
-                            sohm,
-                        )?)
-                    }
-                },
-            ),
-        }
+        })
+        .map_err(Error::Format)
     }
 
     /// Read a dataset's raw bytes for the given layout, dispatching on the backend.

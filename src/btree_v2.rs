@@ -352,6 +352,21 @@ fn extent_in_source<S: MetadataSource + ?Sized>(
     Ok(extent)
 }
 
+/// Reads all records in tree order from the resident image at stored addresses.
+///
+/// Uses the node parsing and empty-tree handling of [`legacy_collect_btree_v2_records`].
+///
+/// # Errors
+///
+/// Returns errors from address conversion or B-tree parsing.
+pub(crate) fn collect_btree_v2_records(
+    source: StoredBytes<'_>,
+    header: &BTreeV2Header,
+    offset_width: OffsetWidth,
+) -> Result<Vec<BTreeV2Record>, FormatError> {
+    legacy_collect_btree_v2_records(source.metadata_frame().bytes(), header, offset_width)
+}
+
 /// Returns all records from a version 2 B-tree in tree order.
 ///
 /// Returns an empty list when either record count in `header` is zero. Each visited node is
