@@ -6,8 +6,6 @@
 //! only once it accounts for every allocation of the structure the span belongs to, and leaves a
 //! structure it cannot account for in full allocated.
 
-use std::collections::{HashMap, HashSet};
-
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_space::__private::Extent;
@@ -28,7 +26,7 @@ use crate::fractal_heap_storage;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::global_heap;
-use crate::group_v1;
+#[cfg(doc)]
 use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
@@ -41,6 +39,7 @@ use crate::source::PhysicalSource;
 use crate::source::{Source, SourceMetadata};
 
 use super::GlobalHeapLiveness;
+use super::analysis::CompleteTopology;
 use super::copy::ObjModel;
 use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
 
@@ -403,74 +402,13 @@ impl WriteEngine {
             .collect()
     }
 
-    /// Count, for every object-header address reachable from the root, how many
-    /// hard links in the *pre-commit* file point to it. The result drives the
-    /// last-hard-link reclaim guard in [`collect_free_spans`](Self::collect_free_spans):
-    /// an object is freed only when its count is 1.
+    /// Discovers the current root's hard-link topology for incoming-link checks.
     ///
-    /// Walks the whole link graph from the root, following hard links through
-    /// groups of any on-disk format (v0/v1 symbol-table, v2 compact, v2 dense)
-    /// via [`group_v2::resolve_group_entries_from_source`], tallying each hard-link edge. Datasets and
-    /// other leaves contribute no edges. Returns `None` if the graph cannot be walked in full:
-    /// an unparseable header, a group whose links cannot be enumerated, or
-    /// more than [`MAX_LINK_GRAPH_NODES`] objects. Cycles are handled by visiting
-    /// each object once. Base-aware: stored child addresses are shifted by the
-    /// userblock base, so the returned keys are absolute file offsets.
-    pub(super) fn count_incoming_hard_links(&self) -> Option<HashMap<u64, u32>> {
-        let base = self.context.addresses();
-        let mut counts: HashMap<u64, u32> = HashMap::new();
-        let mut visited: HashSet<u64> = HashSet::new();
-        let mut stack: Vec<u64> = vec![
-            self.context
-                .addresses()
-                .resolve(self.context.superblock().root_group_address)
-                .ok()?
-                .get(),
-        ];
-        let mut budget = MAX_LINK_GRAPH_NODES;
-        while let Some(addr) = stack.pop() {
-            if !visited.insert(addr) {
-                continue; // already expanded (also breaks hard-link cycles)
-            }
-            if budget == 0 {
-                return None; // graph exceeds the walk limit, so leak conservatively
-            }
-            budget -= 1;
-            let header = ObjectHeader::parse_from_source_with_widths(
-                &SourceMetadata(&self.image()),
-                AccessMode::ReadWrite,
-                addr,
-                self.widths(),
-                base.effective_base(),
-            )
-            .ok()?;
-            // Datasets and other leaves are not groups and own no links.
-            let is_group = header.messages.iter().any(|m| {
-                matches!(
-                    m.msg_type,
-                    MessageType::SYMBOL_TABLE | MessageType::LINK | MessageType::LINK_INFO
-                )
-            });
-            if !is_group {
-                continue;
-            }
-            // A group we cannot enumerate fully would undercount incoming links
-            // and risk over-reclaim. Return the safe-leak fallback.
-            let entries = group_v2::resolve_group_entries_from_source(
-                &self.opened_source(),
-                AccessMode::ReadWrite,
-                &header,
-                self.widths(),
-                group_v1::group_leaf_node_k(self.context.superblock()),
-            )
-            .ok()?;
-            for e in entries {
-                let child = base.resolve(e.object_header_address).ok()?.get();
-                *counts.entry(child).or_insert(0) += 1;
-                stack.push(child);
-            }
-        }
-        Some(counts)
+    /// Enumerates group links through [`group_v2::resolve_group_entries_from_source`]. Returns
+    /// `None` if complete discovery fails. The caller supplies the topology to
+    /// [`Self::collect_free_spans`] to require one incoming hard link before reclamation.
+    pub(super) fn count_incoming_hard_links(&self) -> Option<CompleteTopology<'_>> {
+        CompleteTopology::discover(self).ok()
     }
 
     /// Appends to `out` the span and free class of every block the object at `addr` owns, and for
@@ -498,18 +436,16 @@ impl WriteEngine {
         &self,
         addr: u64,
         depth: u32,
-        incoming: &HashMap<u64, u32>,
+        incoming: &CompleteTopology<'_>,
         out: &mut Vec<(FileRange, FreeClass)>,
     ) {
         // `addr` is an absolute file offset (the caller resolves it from the live
-        // file, and the group recursion below re-absolutizes each child). `incoming`
+        // file, and the topology retains each child's physical address). `incoming`
         // is keyed by absolute offset, and `oh_chunk_spans`/`chunked_storage_spans`
         // both take an absolute address and return absolute spans, so the whole
-        // walk works in absolute file offsets. The one shift this method must apply
-        // itself is on the stored addresses `read_object` returns for a contiguous
-        // data block and a group's child links: each is converted to an absolute
-        // offset (a no-op on a base-0 file) before it is bounds-checked, recorded,
-        // or descended into.
+        // walk works in absolute file offsets. The stored address `read_object`
+        // returns for a contiguous data block is converted to an absolute offset
+        // before it is bounds-checked or recorded.
         let base = self.context.addresses();
         let file_len = self.image().len();
         if depth >= MAX_LINK_WALK_DEPTH {
@@ -519,7 +455,7 @@ impl WriteEngine {
         // count other than 1 (it has surviving links, or the graph walk could
         // not account for it) means the object and a group's whole subtree stay live and must
         // not be freed.
-        if incoming.get(&addr) != Some(&1) {
+        if incoming.incoming(addr) != Some(1) {
             return;
         }
         // The header's own chunks. If they cannot be mapped, account for nothing.
@@ -531,9 +467,9 @@ impl WriteEngine {
         let attribute_storage = region
             .as_ref()
             .and_then(|region| self.dense_attribute_storage_spans(region, &spans));
-        if let Some((link_info, children)) = region
+        if let Some(link_info) = region
             .as_ref()
-            .and_then(|region| self.dense_group_children(region))
+            .and_then(|region| self.dense_group_info(region))
         {
             let link_storage =
                 self.dense_group_storage_spans(&spans, attribute_storage.as_deref(), &link_info);
@@ -543,7 +479,7 @@ impl WriteEngine {
                 &spans,
                 attribute_storage.as_deref(),
                 link_storage.as_deref(),
-                children,
+                incoming.children(addr),
                 out,
             );
             return;
@@ -572,14 +508,14 @@ impl WriteEngine {
                     }
                 }
             }
-            Ok(ObjModel::Group { links, .. }) => {
+            Ok(ObjModel::Group { .. }) => {
                 self.collect_group_spans(
                     depth,
                     incoming,
                     &spans,
                     attribute_storage.as_deref(),
                     None,
-                    links.into_iter().map(|link| link.target),
+                    incoming.children(addr),
                     out,
                 );
             }
@@ -620,22 +556,19 @@ impl WriteEngine {
     fn collect_group_spans(
         &self,
         depth: u32,
-        incoming: &HashMap<u64, u32>,
+        incoming: &CompleteTopology<'_>,
         header_spans: &[FileRange],
         attribute_storage: Option<&[(FileRange, FreeClass)]>,
         link_storage: Option<&[(FileRange, FreeClass)]>,
-        children: impl IntoIterator<Item = StoredAddress>,
+        children: impl IntoIterator<Item = u64>,
         out: &mut Vec<(FileRange, FreeClass)>,
     ) {
         self.append_object_metadata_spans(out, header_spans, attribute_storage);
         out.extend(link_storage.into_iter().flatten().copied());
         // The recursion works in absolute offsets, matching `incoming`'s
         // keys and `oh_chunk_spans`.
-        let base = self.context.addresses();
         for child in children {
-            if let Ok(c) = base.resolve(child).map(PhysicalAddress::get) {
-                self.collect_free_spans(c, depth + 1, incoming, out);
-            }
+            self.collect_free_spans(child, depth + 1, incoming, out);
         }
     }
 
@@ -680,15 +613,11 @@ impl WriteEngine {
             .collect()
     }
 
-    /// Returns the Link Info message in `region` and the object header address of each hard link
-    /// it indexes, for a group with dense link storage.
+    /// Returns a dense group's Link Info message from `region`.
     ///
-    /// Returns `None` if `region` lacks a Link Info message or holds more than one, if the group
-    /// stores its links compactly, or if the links cannot be read.
-    fn dense_group_children(
-        &self,
-        region: &OhRegion,
-    ) -> Option<(LinkInfoMessage, Vec<StoredAddress>)> {
+    /// Returns `None` for malformed message records, absent or repeated Link Info messages, or
+    /// an undefined fractal-heap address.
+    fn dense_group_info(&self, region: &OhRegion) -> Option<LinkInfoMessage> {
         let mut link_info = None;
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p).ok()? {
@@ -707,22 +636,8 @@ impl WriteEngine {
             p = body_end;
         }
         let link_info = link_info?;
-        let heap_address = link_info.fractal_heap_address?;
-        let entries = crate::group_v2::resolve_dense_entries_from_source(
-            &PhysicalSource::new(&self.opened_source()).stored(),
-            AccessMode::ReadWrite,
-            &link_info,
-            heap_address,
-            self.widths(),
-        )
-        .ok()?;
-        Some((
-            link_info,
-            entries
-                .into_iter()
-                .map(|entry| entry.object_header_address)
-                .collect(),
-        ))
+        link_info.fractal_heap_address?;
+        Some(link_info)
     }
 
     /// Returns the global heap collections that the objects at `deleted`, and the objects

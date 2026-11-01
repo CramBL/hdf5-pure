@@ -241,7 +241,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     expected.sort_unstable_by_key(|&(range, _)| range.start());
     let incoming = session.count_incoming_hard_links().unwrap();
     let mut planned = Vec::new();
-    session.collect_free_spans(addr, 0, &incoming, &mut planned);
+    incoming.collect_free_spans(addr, 0, &mut planned);
     planned.sort_unstable_by_key(|&(range, _)| range.start());
     assert_eq!(planned, expected);
 
