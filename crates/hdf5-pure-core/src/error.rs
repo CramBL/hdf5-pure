@@ -224,6 +224,8 @@ pub enum FormatError {
         /// The index of the second object.
         index: u16,
     },
+    /// An object header contains more than one Group Info message.
+    DuplicateGroupInfo,
     /// A group contains the same link name more than once.
     DuplicateLinkName(String),
     /// A compound datatype contains no fields.
@@ -646,6 +648,28 @@ pub enum FormatError {
     InvalidGlobalHeapSignature,
     /// Invalid global heap version.
     InvalidGlobalHeapVersion(u8),
+    /// Reserved bits are set in a Group Info message's flags byte.
+    ///
+    /// Contains the stored flags byte.
+    InvalidGroupInfoFlags(u8),
+    /// A Group Info message's byte count differs from the length required by its flags.
+    InvalidGroupInfoLength {
+        /// The required message length, in bytes.
+        expected: usize,
+        /// The supplied message length, in bytes.
+        actual: usize,
+    },
+    /// A Group Info message's minimum dense link count exceeds its maximum compact count.
+    InvalidGroupInfoThresholds {
+        /// The stored maximum compact link count.
+        max_compact: u16,
+        /// The stored minimum dense link count.
+        min_dense: u16,
+    },
+    /// A Group Info message has a version other than zero.
+    ///
+    /// Contains the stored version byte.
+    InvalidGroupInfoVersion(u8),
     /// A version 0 or 1 superblock stores 0 in its "Group Leaf Node K" field. The field is
     /// defined in "Format Signature and Superblock" of the [format specification, version
     /// 4.0][spec], which requires a value greater than zero.
@@ -1710,6 +1734,28 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidSymbolTableNodeSignature => {
                 write!(f, "invalid symbol table node signature")
+            }
+            Self::DuplicateGroupInfo => write!(f, "duplicate Group Info message"),
+            Self::InvalidGroupInfoFlags(flags) => {
+                write!(f, "reserved bits in Group Info flags: {flags:#04x}")
+            }
+            Self::InvalidGroupInfoLength { expected, actual } => {
+                write!(
+                    f,
+                    "Group Info message has {actual} bytes, expected {expected}"
+                )
+            }
+            Self::InvalidGroupInfoThresholds {
+                max_compact,
+                min_dense,
+            } => {
+                write!(
+                    f,
+                    "Group Info minimum dense count {min_dense} exceeds maximum compact count {max_compact}"
+                )
+            }
+            Self::InvalidGroupInfoVersion(version) => {
+                write!(f, "unsupported Group Info version: {version}")
             }
             Self::InvalidGroupLeafNodeK => {
                 write!(
