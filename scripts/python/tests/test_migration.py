@@ -240,25 +240,34 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
 
 
 @pytest.mark.parametrize(
-    ("variant", "expected"),
+    ("type_name", "variant", "expected"),
     [
-        ("CompoundArraySizeOverflow", []),
-        ("ConflictingDatasetStorage", []),
-        ("InvalidCompoundV1Extent", []),
-        ("InvalidCompoundV1Rank", []),
-        ("UnsupportedCompoundV1Permutation", []),
-        ("InvalidAscii", []),
-        ("MissingNumericDatatypeProperty", []),
-        ("UnalignedGlobalHeapCollection", []),
+        ("Datatype", "Complex", []),
+        ("Datatype", "Unknown", ["Datatype: variants changed", "Datatype: variant_order changed"]),
+        ("FormatError", "ComplexSizeOverflow", []),
+        ("FormatError", "InvalidComplexFlags", []),
+        ("FormatError", "InvalidComplexParent", []),
+        ("FormatError", "InvalidComplexParentFlags", []),
+        ("FormatError", "InvalidComplexSize", []),
+        ("FormatError", "UnsupportedComplexForm", []),
+        ("FormatError", "CompoundArraySizeOverflow", []),
+        ("FormatError", "ConflictingDatasetStorage", []),
+        ("FormatError", "InvalidCompoundV1Extent", []),
+        ("FormatError", "InvalidCompoundV1Rank", []),
+        ("FormatError", "UnsupportedCompoundV1Permutation", []),
+        ("FormatError", "InvalidAscii", []),
+        ("FormatError", "MissingNumericDatatypeProperty", []),
+        ("FormatError", "UnalignedGlobalHeapCollection", []),
         (
+            "FormatError",
             "UnrecognizedHeapError",
             ["FormatError: variants changed", "FormatError: variant_order changed"],
         ),
     ],
 )
-def test_migration_shape_admits_only_the_allowed_error_additions(variant, expected):
+def test_migration_shape_admits_only_the_allowed_variant_additions(type_name, variant, expected):
     baseline = core_shape_fixture()
-    baseline["index"]["1"]["name"] = "FormatError"
+    baseline["index"]["1"]["name"] = type_name
     baseline["index"]["1"]["inner"] = {
         "enum": {
             "generics": {"params": [], "where_predicates": []},
@@ -344,6 +353,7 @@ def test_migration_builds_core_with_the_profile_core_features():
     [
         ("DeflateLevel", []),
         ("VariableLengthType", []),
+        ("ComplexType", []),
         ("PhysicalAddress", []),
         ("AddressRange", []),
         ("BitFieldTypeBuilder", []),

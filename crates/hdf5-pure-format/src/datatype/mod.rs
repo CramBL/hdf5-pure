@@ -11,6 +11,7 @@ use byteorder::LittleEndian;
 
 use hdf5_pure_core::__private;
 pub(crate) use hdf5_pure_core::CharacterSet;
+use hdf5_pure_core::ComplexType;
 pub(crate) use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
 
@@ -53,8 +54,8 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 ///
 /// Returns [`FormatError::UnexpectedEof`] if the body ends within a field,
 /// [`FormatError::InvalidDatatypeClass`] if the class is unsupported, or
-/// [`FormatError::InvalidDatatypeVersion`] if a compound or array datatype has an unsupported
-/// version. Returns
+/// [`FormatError::InvalidDatatypeVersion`] if a compound, array, complex datatype, or complex
+/// parent has an unsupported version. Returns
 /// [`FormatError::InvalidReferenceType`] for an unknown reference kind,
 /// [`FormatError::InvalidStringPadding`] for an unknown string padding code, or
 /// [`FormatError::InvalidCharacterSet`] for an unknown character set code. Returns
@@ -77,6 +78,13 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 /// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's array size exceeds
 /// [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if its byte range exceeds the
 /// compound's declared size.
+///
+/// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
+/// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
+/// or [`FormatError::InvalidComplexParent`] if its parent is not floating point. Returns
+/// [`FormatError::InvalidComplexParentFlags`] if the parent has reserved bits or byte order,
+/// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
+/// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     // Minimum header: 4 bytes (`class_and_version` + 3 bytes bit field) + 4 bytes size = 8
     bytes::ensure_len(data, 0, 8)?;
@@ -388,23 +396,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 })
             }
         }
-        COMPLEX_CLASS => {
-            // Version 4.0 defines the Complex class with one parent floating-point datatype.
-            // This decoder reads a compound-style member list from its bytes.
-            let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
-            let mut members = Vec::with_capacity(num_members as usize);
-            let ob = offset_bytes_for_size(size);
-            for _ in 0..num_members {
-                let (name, name_len) = read_null_terminated_string(data, pos)?;
-                pos += name_len;
-                let byte_offset = read_uint(data, pos, ob)?;
-                pos += ob;
-                let (member_dt, consumed) = parse_datatype(&data[pos..])?;
-                pos += consumed;
-                members.push(__private::compound_member(name, byte_offset, member_dt));
-            }
-            Ok((Datatype::Compound { size, members }, pos))
-        }
+        COMPLEX_CLASS => parse_complex(data, version, [bf0, bf1, bf2], size),
         _ => Err(FormatError::InvalidDatatypeClass(class_id)),
     };
 
@@ -416,6 +408,9 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 }
 
 /// Serializes a datatype into an HDF5 Datatype message body.
+///
+/// Writes [`Datatype::Complex`] as class 11 in version 5, with one floating-point parent.
+/// Writes each containing datatype at a message version at least as high as its children's.
 pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
     match datatype {
         Datatype::FixedPoint(datatype) => {
@@ -475,6 +470,16 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             buf.extend_from_slice(&layout.exponent_bias().to_le_bytes());
             buf
         }
+        Datatype::Complex(complex) => {
+            let mut buf = build_header(
+                COMPLEX_CLASS,
+                DATATYPE_VERSION_FIVE,
+                [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
+                complex.size().get(),
+            );
+            append_datatype(&mut buf, &Datatype::FloatingPoint(complex.component()));
+            buf
+        }
         Datatype::String {
             size,
             padding,
@@ -517,7 +522,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 [bf0, bf1, 0],
                 16,
             );
-            buf.extend_from_slice(&serialize_datatype(kind.base_type()));
+            append_datatype(&mut buf, kind.base_type());
             buf
         }
         Datatype::Compound { size, members } => {
@@ -538,7 +543,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 // Byte offset (variable-width)
                 buf.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
                 // Recursively serialize member datatype
-                buf.extend_from_slice(&serialize_datatype(&m.datatype));
+                append_datatype(&mut buf, &m.datatype);
             }
             buf
         }
@@ -561,7 +566,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 *size,
             );
             // Base type
-            buf.extend_from_slice(&serialize_datatype(base_type));
+            append_datatype(&mut buf, base_type);
             // All names (null-terminated)
             for m in members {
                 buf.extend_from_slice(m.name.as_bytes());
@@ -591,7 +596,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             for &d in dimensions {
                 buf.extend_from_slice(&d.to_le_bytes());
             }
-            buf.extend_from_slice(&serialize_datatype(base_type));
+            append_datatype(&mut buf, base_type);
             buf
         }
         Datatype::Reference { size, ref_type } => {
@@ -651,6 +656,134 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
         _ => unreachable!("core datatype variant lacks an HDF5 encoder"),
     }
 }
+
+// `H5O__dtype_decode_helper` checks that a container's datatype version is at least its
+// highest child version (H5Odtype.c, HDF5 2.2.0).
+fn append_datatype(buf: &mut Vec<u8>, datatype: &Datatype) {
+    let encoded = serialize_datatype(datatype);
+    let version = (buf[0] >> DATATYPE_VERSION_SHIFT).max(encoded[0] >> DATATYPE_VERSION_SHIFT);
+    buf[0] = (buf[0] & DATATYPE_CLASS_MASK) | (version << DATATYPE_VERSION_SHIFT);
+    buf.extend_from_slice(&encoded);
+}
+
+fn parse_complex(
+    data: &[u8],
+    version: u8,
+    flags: [u8; 3],
+    size: u32,
+) -> Result<(Datatype, usize), FormatError> {
+    if version != DATATYPE_VERSION_FIVE {
+        return Err(FormatError::InvalidDatatypeVersion {
+            class: COMPLEX_CLASS,
+            version,
+        });
+    }
+    let homogeneous = flags[0] & COMPLEX_HOMOGENEOUS_BIT != 0;
+    let form = (flags[0] & COMPLEX_FORM_MASK) >> COMPLEX_FORM_SHIFT;
+    let flags = u32::from(flags[0]) | (u32::from(flags[1]) << 8) | (u32::from(flags[2]) << 16);
+    if flags & COMPLEX_RESERVED_MASK != 0 {
+        return Err(FormatError::InvalidComplexFlags(flags));
+    }
+    if !homogeneous || form != COMPLEX_RECTANGULAR_FORM {
+        return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
+    }
+    bytes::ensure_len(data, DATATYPE_HEADER_SIZE, DATATYPE_HEADER_SIZE)?;
+    let parent = &data[DATATYPE_HEADER_SIZE..];
+    let class = parent[0] & DATATYPE_CLASS_MASK;
+    if class != FLOATING_POINT_CLASS {
+        return Err(FormatError::InvalidComplexParent { class });
+    }
+    let version = parent[0] >> DATATYPE_VERSION_SHIFT;
+    if !(DATATYPE_VERSION_ONE..=DATATYPE_VERSION_FIVE).contains(&version) {
+        return Err(FormatError::InvalidDatatypeVersion { class, version });
+    }
+    let flags = u32::from(parent[1]) | (u32::from(parent[2]) << 8) | (u32::from(parent[3]) << 16);
+    let has_extended_order = flags & u32::from(FLOAT_BYTE_ORDER_HIGH_BIT) != 0;
+    if flags & FLOAT_RESERVED_MASK != 0
+        || (has_extended_order
+            && (version < DATATYPE_VERSION_THREE
+                || flags & u32::from(FLOAT_BYTE_ORDER_LOW_BIT) == 0))
+    {
+        return Err(FormatError::InvalidComplexParentFlags { version, flags });
+    }
+    let (parent, consumed) = parse_datatype(parent)?;
+    bytes::ensure_len(data, DATATYPE_HEADER_SIZE, consumed)?;
+    let Datatype::FloatingPoint(component) = parent else {
+        return Err(FormatError::InvalidComplexParent { class });
+    };
+    let complex = ComplexType::new(component)?;
+    if size != complex.size().get() {
+        return Err(FormatError::InvalidComplexSize {
+            size,
+            component_size: component.size().get(),
+        });
+    }
+    Ok((Datatype::Complex(complex), DATATYPE_HEADER_SIZE + consumed))
+}
+
+/// The byte length of the common datatype message header.
+///
+/// The header for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const DATATYPE_HEADER_SIZE: usize = 8;
+/// The mask for the class code in the common datatype message header.
+///
+/// The class field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const DATATYPE_CLASS_MASK: u8 = 0x0F;
+/// The bit position of the version in the common datatype message header.
+///
+/// The version field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const DATATYPE_VERSION_SHIFT: u8 = 4;
+/// The homogeneous flag in a native complex datatype's class bit field.
+///
+/// The flag for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_HOMOGENEOUS_BIT: u8 = 0x01;
+/// The mask for the form in a native complex datatype's class bit field.
+///
+/// The field for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_FORM_MASK: u8 = 0x06;
+/// The bit position of the form in a native complex datatype's class bit field.
+///
+/// The field for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_FORM_SHIFT: u8 = 1;
+/// The rectangular form code of a native complex datatype.
+///
+/// The code for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_RECTANGULAR_FORM: u8 = 0;
+/// The mask for reserved bits 3 through 23 of a complex class bit field.
+///
+/// The bits for datatype message version 5 are defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_RESERVED_MASK: u32 = 0xFF_FFF8;
+/// The mask for reserved bits 7 and 16 through 23 of a floating-point class bit field.
+///
+/// The bits for datatype message versions 1 through 5 are defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_RESERVED_MASK: u32 = 0xFF_0080;
 
 fn padding_bits(low: bool, high: bool) -> u8 {
     (if low { LOW_PADDING_BIT } else { 0 }) | (if high { HIGH_PADDING_BIT } else { 0 })
@@ -967,6 +1100,7 @@ pub fn datatype_holds_object_address(dt: &Datatype) -> bool {
             datatype_holds_object_address(base_type)
         }
         Datatype::VariableLength(kind) => datatype_holds_object_address(kind.base_type()),
+        Datatype::Complex(_) => false,
         _ => false,
     }
 }
@@ -989,6 +1123,7 @@ pub fn datatype_holds_file_address(dt: &Datatype) -> bool {
         Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
             datatype_holds_file_address(base_type)
         }
+        Datatype::Complex(_) => false,
         _ => false,
     }
 }
@@ -1082,6 +1217,7 @@ pub fn embedded_reference_slots(datatype: &Datatype) -> Option<Vec<usize>> {
                 }
                 true
             }
+            Datatype::Complex(_) => true,
             // The walker maps none of these variants. A datatype here can still contain
             // an object reference, through a width other than 8, an enumeration over one,
             // or a variable-length sequence of them. Its addresses exist with no location

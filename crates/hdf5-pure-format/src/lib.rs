@@ -80,6 +80,7 @@ pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 
 pub use hdf5_pure_core::BitFieldType;
 pub use hdf5_pure_core::CharacterSet;
+pub use hdf5_pure_core::ComplexType;
 pub use hdf5_pure_core::CompoundMember;
 pub use hdf5_pure_core::Datatype;
 pub use hdf5_pure_core::DatatypeByteOrder;

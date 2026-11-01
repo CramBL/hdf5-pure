@@ -3,6 +3,8 @@ use rstest::rstest;
 
 use super::*;
 
+mod complex;
+
 #[cfg(feature = "std")]
 mod display;
 
@@ -450,7 +452,6 @@ fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width:
 #[case::compound_v3(COMPOUND_CLASS, DATATYPE_VERSION_THREE)]
 #[case::compound_v4(COMPOUND_CLASS, DATATYPE_VERSION_FOUR)]
 #[case::compound_v5(COMPOUND_CLASS, DATATYPE_VERSION_FIVE)]
-#[case::complex_v5(COMPLEX_CLASS, DATATYPE_VERSION_FIVE)]
 fn three_byte_member_offsets_preserve_the_next_datatype(#[case] class: u8, #[case] version: u8) {
     let member = byte_member_type();
     let mut encoded = build_dt_header(class, version, [2, 0, 0], 70_000);

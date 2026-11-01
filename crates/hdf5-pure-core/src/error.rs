@@ -86,6 +86,11 @@ pub enum FormatError {
         /// Name of the dataset or attribute that named it.
         user: String,
     },
+    /// Twice a complex component's byte size exceeds [`u32::MAX`].
+    ComplexSizeOverflow {
+        /// The byte size of one floating-point component.
+        component_size: u32,
+    },
     /// A version 1 compound member's array size exceeds [`u32::MAX`].
     CompoundArraySizeOverflow {
         /// The accumulated byte size before multiplying by `extent`.
@@ -392,6 +397,29 @@ pub enum FormatError {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     InvalidChunkIndexType(u8),
+    /// A native complex datatype has nonzero reserved bits in its class bit field.
+    ///
+    /// Contains the complete 24-bit class bit field.
+    InvalidComplexFlags(u32),
+    /// A native complex datatype's parent is not a floating-point datatype.
+    InvalidComplexParent {
+        /// The parent's datatype class code.
+        class: u8,
+    },
+    /// A native complex datatype's floating-point parent has reserved class bits or byte order.
+    InvalidComplexParentFlags {
+        /// The parent's datatype message version.
+        version: u8,
+        /// The parent's complete 24-bit class bit field.
+        flags: u32,
+    },
+    /// A native complex datatype's declared size differs from twice its component size.
+    InvalidComplexSize {
+        /// The declared complex element size, in bytes.
+        size: u32,
+        /// The byte size of one floating-point component.
+        component_size: u32,
+    },
     /// A compound datatype has a zero total size.
     InvalidCompoundSize,
     /// A version 1 compound member has a zero extent in an active dimension.
@@ -1101,6 +1129,13 @@ pub enum FormatError {
     ///
     /// Contains the raw type ID of the referenced message.
     UnresolvedSharedMessage(u16),
+    /// A native complex datatype is heterogeneous or uses a form other than rectangular.
+    UnsupportedComplexForm {
+        /// Whether the homogeneous flag is set.
+        homogeneous: bool,
+        /// The encoded form: rectangular (0), polar (1), exponential (2), or reserved (3).
+        form: u8,
+    },
     /// A version 1 compound member has a nonzero dimension permutation.
     ///
     /// Contains the raw permutation field.
@@ -1397,6 +1432,42 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidDatatypeClass(c) => {
                 write!(f, "invalid datatype class: {c}")
+            }
+            Self::ComplexSizeOverflow { component_size } => {
+                write!(
+                    f,
+                    "complex component size {component_size} exceeds half the datatype size limit"
+                )
+            }
+            Self::InvalidComplexFlags(flags) => {
+                write!(f, "complex datatype has reserved flags {flags:#08x}")
+            }
+            Self::InvalidComplexParent { class } => {
+                write!(
+                    f,
+                    "complex parent datatype has class {class}, expected floating point"
+                )
+            }
+            Self::InvalidComplexParentFlags { version, flags } => {
+                write!(
+                    f,
+                    "complex parent datatype version {version} has reserved flags {flags:#08x}"
+                )
+            }
+            Self::InvalidComplexSize {
+                size,
+                component_size,
+            } => {
+                write!(
+                    f,
+                    "complex datatype size {size} differs from twice its component size {component_size}"
+                )
+            }
+            Self::UnsupportedComplexForm { homogeneous, form } => {
+                write!(
+                    f,
+                    "unsupported complex datatype form {form} with homogeneous={homogeneous}"
+                )
             }
             Self::InvalidDatatypeVersion { class, version } => {
                 write!(f, "invalid datatype version {version} for class {class}")

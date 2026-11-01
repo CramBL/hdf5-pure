@@ -681,6 +681,7 @@ pub use hdf5_pure_core::BitFieldTypeBuilder;
 #[doc(inline)]
 pub use hdf5_pure_core::CharacterSet;
 #[doc(inline)]
+pub use hdf5_pure_core::ComplexType;
 pub use hdf5_pure_core::CompoundMember;
 #[doc(inline)]
 pub use hdf5_pure_core::Datatype;
