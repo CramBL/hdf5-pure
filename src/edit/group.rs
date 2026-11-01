@@ -7,7 +7,6 @@ use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
-use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::OwnedLink;
 
@@ -18,7 +17,7 @@ use crate::address::StoredAddress;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
-use crate::file_writer::{self, OFFSET_WIDTH};
+use crate::file_writer::OFFSET_WIDTH;
 use crate::filter_pipeline;
 use crate::group_v1;
 use crate::group_v2;
@@ -28,6 +27,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
+use crate::object_path::LinkNameBuf;
 use crate::source::PhysicalSource;
 use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
@@ -37,6 +37,10 @@ use crate::width::OffsetWidth;
 use super::WriteEngine;
 use super::group_links;
 use super::object_header::{self, OhRegion};
+
+mod hard_link;
+
+pub(super) use hard_link::PreparedHardLinkRecord;
 
 impl WriteEngine {
     /// Converts the group whose version 1 object header is at `addr` to a version 2 message
@@ -473,26 +477,6 @@ pub(super) fn ensure_group_info(region: &mut OhRegion) -> Result<(), Error> {
     Ok(())
 }
 
-/// Serializes a hard link using the caller's message-record layout.
-///
-/// `creation_order` is the link's creation index, separate from the header record's attribute
-/// creation index.
-///
-/// # Panics
-///
-/// Panics if the serialized Link body is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
-pub(super) fn encode_link_message(
-    layout: MessageRecordLayout,
-    name: &str,
-    addr: StoredAddress,
-    creation_order: Option<u64>,
-) -> Vec<u8> {
-    let mut link = file_writer::make_link(name, addr);
-    link.creation_order = creation_order;
-    let body = link.serialize(crate::file_writer::OFFSET_WIDTH);
-    layout.record(MessageType::LINK, &body)
-}
-
 /// Replaces the address of the hard link named `name`, preserving its other fields.
 ///
 /// # Errors
@@ -689,17 +673,23 @@ impl OhRegion {
     ///
     /// The caller obtains `creation_order` from [`LinkCreationOrder`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the serialized Link body is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
+    /// Returns [`FormatError::InvalidLinkName`] if `name` is not a valid path component.
+    /// Returns [`Error::EditUnsupported`] if the encoded Link body exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`]. Propagates address-encoding errors.
     pub(super) fn push_link(
         &mut self,
         name: &str,
         addr: StoredAddress,
         creation_order: Option<u64>,
-    ) {
-        let record = encode_link_message(self.layout(), name, addr, creation_order);
-        self.push_bytes(&record);
+    ) -> Result<(), Error> {
+        let name =
+            LinkNameBuf::new(name).ok_or_else(|| FormatError::InvalidLinkName(name.to_string()))?;
+        let mut record = PreparedHardLinkRecord::new(self.layout(), name, creation_order)?;
+        record.patch_target(addr)?;
+        self.push_bytes(record.as_bytes());
+        Ok(())
     }
 
     fn replace_link_info(&mut self, info: &LinkInfoMessage) -> Result<(), Error> {
@@ -756,7 +746,9 @@ mod tests {
                 .unwrap()
                 .serialize(),
         );
-        region.push_link("child", StoredAddress::new(100), None);
+        region
+            .push_link("child", StoredAddress::new(100), None)
+            .unwrap();
         let record = region.layout().record_with_creation_index(
             MessageType::FILTER_PIPELINE,
             flags,

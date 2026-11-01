@@ -910,9 +910,9 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] for duplicate link names, unsupported creation-order
-    /// policies, counter exhaustion, or a final link set that cannot be encoded. Returns parsing
-    /// and source-read errors from group inspection.
+    /// Returns [`Error::EditUnsupported`] for duplicate link names, oversized Link bodies,
+    /// unsupported creation-order policies, counter exhaustion, or a final link set that cannot
+    /// be encoded. Propagates parsing and source-read errors from group inspection.
     fn check_group_additions(
         &self,
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
@@ -972,7 +972,7 @@ impl WriteEngine {
             }
             let mut order = group::LinkCreationOrder::for_region(&result)?;
             for name in adding {
-                result.push_link(name, StoredAddress::new(0), order.take()?);
+                result.push_link(name, StoredAddress::new(0), order.take()?)?;
             }
             order.record(&mut result)?;
             node.prepared.dense_links =

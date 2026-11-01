@@ -227,14 +227,16 @@ impl WriteEngine {
         let mut region =
             WriteEngine::gather_oh_messages(&self.image(), old_root, self.context.addresses())
                 .unwrap();
-        region.push_link(
-            "added",
-            self.context
-                .addresses()
-                .relative(PhysicalAddress::new(header))
-                .unwrap(),
-            None,
-        );
+        region
+            .push_link(
+                "added",
+                self.context
+                    .addresses()
+                    .relative(PhysicalAddress::new(header))
+                    .unwrap(),
+                None,
+            )
+            .unwrap();
         let root = self
             .alloc_or_append_typed(
                 &edit::object_header::build_v2_object_header(&region).unwrap(),
