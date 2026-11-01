@@ -82,15 +82,17 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
     let table = SymbolTableMessage::parse_with_offset_width(&message.data, widths.offsets).unwrap();
     let k = group_leaf_node_k(&superblock);
     let source = ReadSeekSource::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let physical = PhysicalBytes::for_test(&bytes, addresses);
+    let source = PhysicalSource::for_test(&source, addresses);
 
     let mut buffered = Vec::new();
-    visit_v1_group_links(&bytes, &table, widths, addresses, k, |link| {
+    visit_v1_group_links(physical, &table, widths, k, |link| {
         buffered.push(native_link(addresses, link));
         Ok::<_, FormatError>(())
     })
     .unwrap();
     let mut streaming = Vec::new();
-    visit_v1_group_links_from_source(&source, &table, widths, addresses, k, |link| {
+    visit_v1_group_links_from_source(source, &table, widths, k, |link| {
         streaming.push(native_link(addresses, link));
         Ok::<_, FormatError>(())
     })
@@ -109,13 +111,11 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
     };
     let expected = vec![(String::from("value"), value)];
     assert_eq!(
-        listed(resolve_v1_group_entries(&bytes, &table, widths, addresses, k).unwrap()),
+        listed(resolve_v1_group_entries(physical, &table, widths, k).unwrap()),
         expected
     );
     assert_eq!(
-        listed(
-            resolve_v1_group_entries_from_source(&source, &table, widths, addresses, k).unwrap()
-        ),
+        listed(resolve_v1_group_entries_from_source(source, &table, widths, k).unwrap()),
         expected
     );
     for (name, link) in &native {
@@ -130,17 +130,8 @@ fn both_readers_read_the_links_libhdf5_writes_in_a_symbol_table_group() {
             } => LinkTarget::external(filename.clone(), object_path.clone()),
         });
         let name = LinkName::new(name).unwrap();
-        let buffered = find_link(bytes.as_slice(), &table, widths, addresses, k, name, || {
-            btree_v1::collect_symbol_table_nodes(&bytes, table.btree_address, widths, addresses)
-        });
-        let streaming = find_link(&source, &table, widths, addresses, k, name, || {
-            btree_v1::collect_symbol_table_nodes_from_source(
-                &source,
-                table.btree_address,
-                widths,
-                addresses,
-            )
-        });
+        let buffered = find_link(physical, &table, widths, k, name);
+        let streaming = find_link_from_source(source, &table, widths, k, name);
         assert_eq!([buffered, streaming], [Ok(expected.clone()), Ok(expected)]);
     }
 }

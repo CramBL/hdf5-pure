@@ -126,7 +126,7 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
 #[case::userblock(512, 512)]
 #[case::forward_relocated(0, 512)]
 #[case::backward_relocated(512, 0)]
-fn dense_group_lookup_and_listing_follow_relocated_native_images(
+fn group_lookup_and_listing_follow_relocated_native_images(
     #[case] encoded_base: usize,
     #[case] effective_base: usize,
     #[values(
@@ -136,13 +136,25 @@ fn dense_group_lookup_and_listing_follow_relocated_native_images(
         ReadBackend::Source
     )]
     backend: ReadBackend,
+    #[values(false, true)] symbol_table: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let original_path = directory.path().join("original.h5");
     let relocated_path = directory.path().join("relocated.h5");
+    let storage_type = if symbol_table {
+        hdf5::GroupStorageType::SymbolTable
+    } else {
+        hdf5::GroupStorageType::Dense
+    };
     let native = hdf5::File::with_options()
         .with_fcpl(|properties| properties.userblock(encoded_base as u64))
-        .with_fapl(|properties| properties.libver_v110())
+        .with_fapl(|properties| {
+            if symbol_table {
+                properties.libver_earliest()
+            } else {
+                properties.libver_v110()
+            }
+        })
         .create(&original_path)
         .unwrap();
     {
@@ -157,10 +169,7 @@ fn dense_group_lookup_and_listing_follow_relocated_native_images(
                 .unwrap();
         }
         group.link_soft("dataset_015", "alias").unwrap();
-        assert_eq!(
-            group.info().unwrap().storage_type,
-            hdf5::GroupStorageType::Dense
-        );
+        assert_eq!(group.info().unwrap().storage_type, storage_type);
         assert_eq!(
             group.dataset("alias").unwrap().read_raw::<i32>().unwrap(),
             [15]
@@ -175,10 +184,7 @@ fn dense_group_lookup_and_listing_follow_relocated_native_images(
     {
         let oracle = hdf5::File::open(&relocated_path).unwrap();
         let group = oracle.group("dense").unwrap();
-        assert_eq!(
-            group.info().unwrap().storage_type,
-            hdf5::GroupStorageType::Dense
-        );
+        assert_eq!(group.info().unwrap().storage_type, storage_type);
         assert_eq!(
             group
                 .dataset("dataset_015")
@@ -192,7 +198,16 @@ fn dense_group_lookup_and_listing_follow_relocated_native_images(
             [15]
         );
     }
-    let file = backend.open(&relocated_path).unwrap();
+    let metadata_reads = Arc::new(AtomicU64::new(0));
+    let file = if matches!(backend, ReadBackend::Source) {
+        File::from_source(BorrowedMetadataSource {
+            bytes: std::fs::read(&relocated_path).unwrap(),
+            metadata_reads: Arc::clone(&metadata_reads),
+        })
+    } else {
+        backend.open(&relocated_path)
+    }
+    .unwrap();
     assert_eq!(file.superblock().base_address.get(), encoded_base as u64);
     assert_eq!(file.root().groups().unwrap(), ["dense"]);
     {
@@ -214,6 +229,9 @@ fn dense_group_lookup_and_listing_follow_relocated_native_images(
             error,
             FormatError::PathNotFound(String::from("dense/absent"))
         );
+    }
+    if matches!(backend, ReadBackend::Source) {
+        assert!(metadata_reads.load(Ordering::Relaxed) > 0);
     }
     file.close().unwrap();
 }

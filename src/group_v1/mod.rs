@@ -1,4 +1,7 @@
-//! V1 group traversal: resolve group children and navigate paths.
+//! Link lookup and hard-link listings for version 1 symbol-table groups.
+//!
+//! Readers resolve stored addresses using the context captured in the physical source or
+//! resident image. Local heaps and symbol table nodes are parsed in physical coordinates.
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
@@ -25,6 +28,8 @@ use crate::error::FormatError;
 use crate::link_message::LinkTarget;
 use crate::object_path::LinkName;
 use crate::source;
+use crate::source::PhysicalBytes;
+use crate::source::PhysicalSource;
 use crate::source::RangeReader;
 use crate::source::Source;
 use crate::superblock::Superblock;
@@ -49,159 +54,151 @@ pub struct GroupEntry {
 
 /// Returns one entry per child using validated file widths.
 ///
+/// Reads the group through [`visit_v1_group_links`] using the context captured in `physical`.
 /// A symbolic link ([`SYMBOLIC_LINK`]) identifies no object header in this file and is passed
 /// over once its value parses, as a version 2 group's soft links are. `group_leaf_node_k` is the
 /// value [`group_leaf_node_k`] returns for the file's superblock.
 ///
 /// # Errors
 ///
-/// Returns the [`FormatError`] of the first group structure that does not parse, such as
-/// [`FormatError::InvalidSymbolTableCacheType`] for an entry whose cache type is not 0, 1, or 2.
+/// Returns [`FormatError::InvalidSymbolTableCacheType`] if an entry's cache type is not 0, 1, or
+/// 2. Returns errors from address resolution, group metadata parsing, and B-tree traversal.
 pub fn resolve_v1_group_entries(
-    file_data: &[u8],
+    physical: PhysicalBytes<'_>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let mut entries = Vec::new();
-    visit_v1_group_links(
-        file_data,
-        sym_table_msg,
-        widths,
-        addresses,
-        group_leaf_node_k,
-        |link| {
-            entries.extend(link.into_group_entry()?);
-            Ok(())
-        },
-    )
+    visit_v1_group_links(physical, sym_table_msg, widths, group_leaf_node_k, |link| {
+        entries.extend(link.into_group_entry()?);
+        Ok(())
+    })
     .map(|()| entries)
 }
 
 /// Returns one entry per child from `source` using validated file widths.
 ///
+/// Reads the group through [`visit_v1_group_links_from_source`] using the source's captured
+/// context. Each entry holds the child's stored object-header address.
+///
 /// # Errors
 ///
 /// Returns the errors of [`resolve_v1_group_entries`], and the error `source` reports
 /// for a structure it cannot read.
-pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
-    source: &S,
+pub fn resolve_v1_group_entries_from_source(
+    source: PhysicalSource<'_, impl Source + ?Sized>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let mut entries = Vec::new();
-    visit_v1_group_links_from_source(
-        source,
-        sym_table_msg,
-        widths,
-        addresses,
-        group_leaf_node_k,
-        |link| {
-            entries.extend(link.into_group_entry()?);
-            Ok(())
-        },
-    )
+    visit_v1_group_links_from_source(source, sym_table_msg, widths, group_leaf_node_k, |link| {
+        entries.extend(link.into_group_entry()?);
+        Ok(())
+    })
     .map(|()| entries)
 }
 
 /// Returns one link per entry of the version 1 group `sym_table_msg` describes, hard or soft.
 ///
+/// Reads the group through [`visit_v1_group_links`] using the context captured in `physical`.
 /// Each link has the ASCII character set and no creation index. `group_leaf_node_k` is the value
 /// [`group_leaf_node_k`] returns for the file's superblock.
 ///
 /// # Errors
 ///
-/// Returns [`LinkStorageError::Format`] with the [`FormatError`] of the first group structure
-/// that does not parse, [`LinkStorageError::UndefinedAddress`] for a hard link to the undefined
-/// address, and the errors of [`OwnedLink::new`] for a name or a target it rejects.
+/// Returns [`LinkStorageError::Format`] for address-resolution, group-parsing, or B-tree traversal
+/// errors, [`LinkStorageError::UndefinedAddress`] for a hard link to the undefined address, and
+/// the errors of [`OwnedLink::new`] for a name or a target it rejects.
 pub(crate) fn resolve_v1_group_links(
-    file_data: &[u8],
+    physical: PhysicalBytes<'_>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<OwnedLink>, LinkStorageError> {
     let mut links = Vec::new();
-    visit_v1_group_links(
-        file_data,
-        sym_table_msg,
-        widths,
-        addresses,
-        group_leaf_node_k,
-        |link| {
-            links.push(link.into_owned_link(widths.offsets)?);
-            Ok(())
-        },
-    )
+    visit_v1_group_links(physical, sym_table_msg, widths, group_leaf_node_k, |link| {
+        links.push(link.into_owned_link(widths.offsets)?);
+        Ok(())
+    })
     .map(|()| links)
 }
 
 /// Returns one link per entry of the version 1 group `sym_table_msg` describes, read from
 /// `source`.
 ///
+/// Reads through [`visit_v1_group_links_from_source`] using the source's captured context.
+/// Each link has the ASCII character set and no creation index.
+///
 /// # Errors
 ///
 /// Returns the errors of [`resolve_v1_group_links`], and the error `source` reports for a
 /// structure it cannot read.
-pub(crate) fn resolve_v1_group_links_from_source<S: Source + ?Sized>(
-    source: &S,
+pub(crate) fn resolve_v1_group_links_from_source(
+    source: PhysicalSource<'_, impl Source + ?Sized>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<OwnedLink>, LinkStorageError> {
     let mut links = Vec::new();
-    visit_v1_group_links_from_source(
-        source,
-        sym_table_msg,
-        widths,
-        addresses,
-        group_leaf_node_k,
-        |link| {
-            links.push(link.into_owned_link(widths.offsets)?);
-            Ok(())
-        },
-    )
+    visit_v1_group_links_from_source(source, sym_table_msg, widths, group_leaf_node_k, |link| {
+        links.push(link.into_owned_link(widths.offsets)?);
+        Ok(())
+    })
     .map(|()| links)
 }
 
-/// Returns the target of the version 1 group link named `name`.
+/// Returns the target of the version 1 group link named `name`, or [`None`] if absent.
 ///
-/// The name and the cache type of every entry are parsed, and the value of a symbolic link only
-/// for the link named `name`.
+/// Reads the group using the context captured in `physical`. Parses every entry's name and
+/// cache type, and parses a symbolic target only for the first matching link.
 ///
 /// # Errors
 ///
-/// Returns the [`FormatError`] of the first group structure that does not parse, such as
-/// [`FormatError::InvalidSymbolTableCacheType`] for an entry whose cache type is not 0, 1, or 2,
-/// the error `symbol_table_nodes` returns, and the errors of [`RangeReader::read_range`].
+/// Returns the errors of [`visit_v1_group_links`] and, for a matching symbolic link, of
+/// [`SoftValue::path`].
 pub(crate) fn find_link(
-    file: &(impl RangeReader + ?Sized),
+    physical: PhysicalBytes<'_>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
     name: LinkName<'_>,
-    symbol_table_nodes: impl FnOnce() -> Result<Vec<StoredAddress>, FormatError>,
 ) -> Result<Option<LinkTarget>, FormatError> {
     let mut found = None;
-    visit_links(
-        file,
-        sym_table_msg,
-        widths,
-        addresses,
-        group_leaf_node_k,
-        symbol_table_nodes,
-        |link| {
-            if found.is_none() && link.name == name.as_str() {
-                found = Some(link.target.to_link_target()?);
-            }
-            Ok(())
-        },
-    )
+    visit_v1_group_links(physical, sym_table_msg, widths, group_leaf_node_k, |link| {
+        if found.is_none() && link.name == name.as_str() {
+            found = Some(link.target.to_link_target()?);
+        }
+        Ok(())
+    })
+    .map(|()| found)
+}
+
+/// Returns the target of the version 1 group link named `name` through `source`.
+///
+/// Returns [`None`] if the link is absent. Reads the group using the source's captured context.
+/// Parses every entry's name and cache type, and parses a symbolic target only for the first
+/// matching link.
+///
+/// # Errors
+///
+/// Returns the errors of [`visit_v1_group_links_from_source`] and, for a matching symbolic link,
+/// of [`SoftValue::path`].
+pub(crate) fn find_link_from_source(
+    source: PhysicalSource<'_, impl Source + ?Sized>,
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    group_leaf_node_k: Option<NonZeroU16>,
+    name: LinkName<'_>,
+) -> Result<Option<LinkTarget>, FormatError> {
+    let mut found = None;
+    visit_v1_group_links_from_source(source, sym_table_msg, widths, group_leaf_node_k, |link| {
+        if found.is_none() && link.name == name.as_str() {
+            found = Some(link.target.to_link_target()?);
+        }
+        Ok(())
+    })
     .map(|()| found)
 }
 
@@ -212,34 +209,29 @@ pub(crate) fn group_leaf_node_k(superblock: &Superblock) -> Option<NonZeroU16> {
     superblock.group_leaf_node_k.and_then(NonZeroU16::new)
 }
 
-/// Calls `visit` with each link of the version 1 group `sym_table_msg` describes, read from
-/// `file_data` through the group's B-tree.
+/// Calls `visit` with each link in a resident version 1 group.
+///
+/// Resolves B-tree, local-heap, and symbol-table addresses with the context captured in
+/// `physical`. Parses B-tree nodes in the complete original image, and the local heap and symbol
+/// table nodes in physical ranges.
 ///
 /// # Errors
 ///
 /// Returns the errors of [`visit_links`] and of [`btree_v1::collect_symbol_table_nodes`].
 fn visit_v1_group_links<E: From<FormatError>>(
-    file_data: &[u8],
+    physical: PhysicalBytes<'_>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
     visit: impl FnMut(LinkRef<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
     visit_links(
-        file_data,
+        physical.bytes(),
         sym_table_msg,
         widths,
-        addresses,
+        physical.addresses(),
         group_leaf_node_k,
-        || {
-            btree_v1::collect_symbol_table_nodes(
-                file_data,
-                sym_table_msg.btree_address,
-                widths,
-                addresses,
-            )
-        },
+        || btree_v1::collect_symbol_table_nodes(physical, sym_table_msg.btree_address, widths),
         visit,
     )
 }
@@ -247,30 +239,33 @@ fn visit_v1_group_links<E: From<FormatError>>(
 /// Calls `visit` with each link of the version 1 group `sym_table_msg` describes, read from
 /// `source` through the group's B-tree.
 ///
+/// Reads B-tree nodes through the stored view from [`PhysicalSource::stored`] and parses the
+/// local heap and symbol table nodes in physical coordinates. Uses the source's captured context
+/// for both. Metadata reads preserve the original source's ownership, physical ranges, and cache
+/// behavior.
+///
 /// # Errors
 ///
 /// Returns the errors of [`visit_links`] and of
 /// [`btree_v1::collect_symbol_table_nodes_from_source`].
-fn visit_v1_group_links_from_source<S: Source + ?Sized, E: From<FormatError>>(
-    source: &S,
+fn visit_v1_group_links_from_source<E: From<FormatError>>(
+    source: PhysicalSource<'_, impl Source + ?Sized>,
     sym_table_msg: &SymbolTableMessage,
     widths: FormatWidths,
-    addresses: AddressContext,
     group_leaf_node_k: Option<NonZeroU16>,
     visit: impl FnMut(LinkRef<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
     visit_links(
-        source,
+        &source,
         sym_table_msg,
         widths,
-        addresses,
+        source.addresses(),
         group_leaf_node_k,
         || {
             btree_v1::collect_symbol_table_nodes_from_source(
-                source,
+                &source.stored(),
                 sym_table_msg.btree_address,
                 widths,
-                addresses,
             )
         },
         visit,
@@ -776,18 +771,19 @@ mod tests {
         let widths = format_widths(widths);
         [
             resolve_v1_group_entries(
-                &group.file(base),
+                PhysicalBytes::for_test(&group.file(base), addresses(base)),
                 &group.message,
                 widths,
-                addresses(base),
                 group_leaf_node_k,
             )
             .map(listed),
             resolve_v1_group_entries_from_source(
-                &PlacedSource::new(base, group.bytes.clone()),
+                PhysicalSource::for_test(
+                    &PlacedSource::new(base, group.bytes.clone()),
+                    addresses(base),
+                ),
                 &group.message,
                 widths,
-                addresses(base),
                 group_leaf_node_k,
             )
             .map(listed),
@@ -804,10 +800,9 @@ mod tests {
         let mut streaming = Vec::new();
         [
             visit_v1_group_links(
-                &group.file(base),
+                PhysicalBytes::for_test(&group.file(base), addresses(base)),
                 &group.message,
                 widths,
-                addresses(base),
                 k(2),
                 |link| {
                     buffered.push(owned(link)?);
@@ -816,10 +811,12 @@ mod tests {
             )
             .map(|()| buffered),
             visit_v1_group_links_from_source(
-                &PlacedSource::new(base, group.bytes.clone()),
+                PhysicalSource::for_test(
+                    &PlacedSource::new(base, group.bytes.clone()),
+                    addresses(base),
+                ),
                 &group.message,
                 widths,
-                addresses(base),
                 k(2),
                 |link| {
                     streaming.push(owned(link)?);
@@ -842,31 +839,23 @@ mod tests {
     ) -> [Result<Option<LinkTarget>, FormatError>; 2] {
         let widths = format_widths(widths);
         let name = LinkName::new(name).unwrap();
-        let nodes = || {
-            Ok(group
-                .nodes
-                .iter()
-                .map(|&(address, _)| StoredAddress::new(address))
-                .collect())
-        };
         [
             find_link(
-                group.file(base).as_slice(),
+                PhysicalBytes::for_test(&group.file(base), addresses(base)),
                 &group.message,
                 widths,
-                addresses(base),
                 k(2),
                 name,
-                nodes,
             ),
-            find_link(
-                &PlacedSource::new(base, group.bytes.clone()),
+            find_link_from_source(
+                PhysicalSource::for_test(
+                    &PlacedSource::new(base, group.bytes.clone()),
+                    addresses(base),
+                ),
                 &group.message,
                 widths,
-                addresses(base),
                 k(2),
                 name,
-                nodes,
             ),
         ]
     }
@@ -879,20 +868,108 @@ mod tests {
         let widths = format_widths(widths);
         [
             resolve_v1_group_links(
-                &group.file(base),
+                PhysicalBytes::for_test(&group.file(base), addresses(base)),
                 &group.message,
                 widths,
-                addresses(base),
                 k(2),
             ),
             resolve_v1_group_links_from_source(
-                &PlacedSource::new(base, group.bytes.clone()),
+                PhysicalSource::for_test(
+                    &PlacedSource::new(base, group.bytes.clone()),
+                    addresses(base),
+                ),
                 &group.message,
                 widths,
-                addresses(base),
                 k(2),
             ),
         ]
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::borrowed(false)]
+    #[case::owned(true)]
+    fn group_reads_preserve_metadata_ownership_and_cache_admission(
+        #[case] owned: bool,
+        #[values(0, 512)] base: u64,
+    ) {
+        use core::cell::Cell;
+
+        use crate::source::BytesSource;
+        use crate::source::MetadataCacheConfig;
+        use crate::source::MetadataCachingSource;
+
+        struct CountingSource {
+            inner: BytesSource<Vec<u8>>,
+            reads: Cell<u64>,
+        }
+
+        impl Source for CountingSource {
+            fn len(&self) -> u64 {
+                self.inner.len()
+            }
+            fn metadata_origin(&self) -> Result<u64, FormatError> {
+                Ok(37)
+            }
+            fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+                self.reads.set(self.reads.get() + 1);
+                self.inner.read_at(offset, buffer)
+            }
+        }
+
+        let group = group(&[CHILDREN], Widths::EIGHT, DataSegment::AtTheEnd);
+        let image = group.file(base);
+        let borrowed = BytesSource::new(&image);
+        let allocating = CountingSource {
+            inner: BytesSource::new(image.clone()),
+            reads: Cell::new(0),
+        };
+        let source: &dyn Source = if owned { &allocating } else { &borrowed };
+        let cached = MetadataCachingSource::new(source, MetadataCacheConfig::new(8192));
+        let physical = PhysicalSource::for_test(&cached, addresses(base));
+        let widths = format_widths(Widths::EIGHT);
+        let first =
+            resolve_v1_group_links_from_source(physical, &group.message, widths, k(2)).unwrap();
+        assert_eq!(first, owned_links(&[CHILDREN]));
+        let before = cached.metadata_cache_stats().unwrap();
+        let reads = allocating.reads.get();
+        let second =
+            resolve_v1_group_links_from_source(physical, &group.message, widths, k(2)).unwrap();
+        assert_eq!(second, first);
+        let after = cached.metadata_cache_stats().unwrap();
+        if owned {
+            assert!(before.entries() > 0);
+            assert!(after.hits() > before.hits());
+            assert_eq!(after.misses(), before.misses());
+            assert_eq!(allocating.reads.get(), reads);
+        } else {
+            assert_eq!((after.hits(), after.entries(), after.bytes()), (0, 0, 0));
+            assert_eq!(after.misses(), 2 * before.misses());
+        }
+        let stored = physical.stored();
+        let address = group.message.btree_address;
+        let metadata = stored
+            .read_metadata(address, btree_v1::SIGNATURE.len())
+            .unwrap();
+        assert_eq!(metadata.as_ref(), btree_v1::SIGNATURE);
+        assert_eq!(
+            metadata.offset(),
+            base + address.get() + if owned { 37 } else { 0 }
+        );
+        assert_eq!(metadata.shared().is_some(), owned);
+        if !owned {
+            assert_eq!(
+                metadata.as_ptr(),
+                image[(base + address.get()).to_usize().unwrap()..].as_ptr()
+            );
+        }
+        let retained = metadata.shared();
+        drop(metadata);
+        drop(cached);
+        if let Some(retained) = retained {
+            assert_eq!(retained.as_ref(), btree_v1::SIGNATURE);
+            assert_eq!(retained.offset(), base + address.get() + 37);
+        }
     }
 
     fn owned_links(nodes: &[&[Child]]) -> Vec<OwnedLink> {
@@ -1129,10 +1206,9 @@ mod tests {
         let group = group(THREE_NODES, Widths::EIGHT, data_segment);
         let source = PlacedSource::new(base, group.bytes.clone());
         let entries = resolve_v1_group_entries_from_source(
-            &source,
+            PhysicalSource::for_test(&source, addresses(base)),
             &group.message,
             format_widths(Widths::EIGHT),
-            addresses(base),
             k(2),
         )
         .unwrap();
@@ -1250,10 +1326,9 @@ mod tests {
         };
         assert_eq!(
             resolve_v1_group_entries_from_source(
-                &source,
+                PhysicalSource::for_test(&source, addresses(512)),
                 &group.message,
                 format_widths(Widths::EIGHT),
-                addresses(512),
                 k(2),
             )
             .unwrap_err(),
@@ -1378,13 +1453,12 @@ mod tests {
         let root_sym = get_root_sym_table(file_data, &sb);
 
         let entries = resolve_v1_group_entries(
-            file_data,
+            PhysicalBytes::for_test(file_data, addresses(0)),
             &root_sym,
             FormatWidths {
                 offsets: sb.offset_size,
                 lengths: sb.length_size,
             },
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             group_leaf_node_k(&sb),
         )
         .unwrap();

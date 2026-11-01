@@ -6,51 +6,61 @@ use alloc::vec::Vec;
 use hdf5_pure_format::__private::BTreeV1Node;
 
 #[cfg(test)]
+use crate::address::AddressContext;
+use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::source::Source;
-use crate::source::SourceMetadata;
+use crate::source::PhysicalBytes;
+use crate::source::StoredMetadata;
+use crate::source::StoredRead;
 use crate::width::FormatWidths;
 
-/// Recursion-depth cap for the symbol-table (group) B-tree walk, guarding
-/// against a stack overflow on a cyclic or pathological internal node in a
-/// foreign file. A real group B-tree is only a few levels deep, so this is far
-/// beyond any valid tree. Mirrors `MAX_CHUNK_BTREE_DEPTH` in `chunked_read`.
+/// The recursion-depth limit for cyclic or deeply nested group B-trees.
 const MAX_SYMBOL_TABLE_BTREE_DEPTH: u32 = 64;
 
-/// Returns the symbol table node addresses reachable from a B-tree using validated file widths.
+/// Returns the stored symbol table node addresses in B-tree traversal order.
+///
+/// Resolves node addresses using the context captured in `physical` and parses nodes in the
+/// complete original image. Reports [`FormatError::UnexpectedEof`] with physical positions and
+/// the complete image's byte length.
 ///
 /// # Errors
 ///
-/// Returns the [`FormatError`] of the first B-tree node that does not parse.
+/// Returns [`FormatError::InvalidBTreeNodeType`] if a node's type is not 0, and
+/// [`FormatError::NestingDepthExceeded`] if traversal exceeds [`MAX_SYMBOL_TABLE_BTREE_DEPTH`].
+/// Returns errors from address resolution and [`BTreeV1Node::parse_with_widths`].
 pub fn collect_symbol_table_nodes(
-    file_data: &[u8],
+    physical: PhysicalBytes<'_>,
     btree_address: StoredAddress,
     widths: FormatWidths,
-    addresses: AddressContext,
 ) -> Result<Vec<StoredAddress>, FormatError> {
-    collect_symbol_table_nodes_inner(file_data, btree_address, widths, addresses, 0)
+    collect_symbol_table_nodes_inner(physical, btree_address, widths, 0)
 }
 
-/// Depth-tracking core of [`collect_symbol_table_nodes`]. The `depth` guard
-/// stops a cyclic or pathologically deep internal node from recursing until the
-/// stack overflows (an uncatchable process abort) when listing a v1 group.
+/// Collects stored symbol table node addresses while checking the recursion depth.
+///
+/// # Errors
+///
+/// Returns the errors of [`collect_symbol_table_nodes`].
 fn collect_symbol_table_nodes_inner(
-    file_data: &[u8],
+    physical: PhysicalBytes<'_>,
     btree_address: StoredAddress,
     widths: FormatWidths,
-    addresses: AddressContext,
     depth: u32,
 ) -> Result<Vec<StoredAddress>, FormatError> {
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = addresses.resolve(btree_address)?.get().to_usize()?;
-    let node = BTreeV1Node::parse_with_widths(file_data, node_offset, widths)?;
+    let node_offset = physical
+        .addresses()
+        .resolve(btree_address)?
+        .get()
+        .to_usize()?;
+    let node = BTreeV1Node::parse_with_widths(physical.bytes(), node_offset, widths)?;
 
     if node.node_type != 0 {
         return Err(FormatError::InvalidBTreeNodeType(node.node_type));
@@ -63,50 +73,52 @@ fn collect_symbol_table_nodes_inner(
         // An internal node's children are B-tree nodes one level down.
         let mut result = Vec::new();
         for &child_addr in &node.children {
-            let child_snods = collect_symbol_table_nodes_inner(
-                file_data,
-                child_addr,
-                widths,
-                addresses,
-                depth + 1,
-            )?;
+            let child_snods =
+                collect_symbol_table_nodes_inner(physical, child_addr, widths, depth + 1)?;
             result.extend(child_snods);
         }
         Ok(result)
     }
 }
 
-/// Returns the symbol table node addresses from `source` using validated file widths.
+/// Returns the stored symbol table node addresses in B-tree traversal order from `source`.
+///
+/// Reads each node's eight-byte prefix, then its header, entries in use, and trailing key,
+/// through [`StoredRead::read_metadata`]. Uses the source's captured effective base and preserves its
+/// metadata ownership, physical ranges, and cache behavior.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`collect_symbol_table_nodes`], and the error `source`
-/// reports for a node it cannot read.
-pub fn collect_symbol_table_nodes_from_source<S: Source + ?Sized>(
-    source: &S,
+/// Returns [`FormatError::InvalidBTreeNodeType`] if a node's type is not 0, and
+/// [`FormatError::NestingDepthExceeded`] if traversal exceeds [`MAX_SYMBOL_TABLE_BTREE_DEPTH`].
+/// Returns errors from address resolution, node parsing, and source metadata reads.
+pub fn collect_symbol_table_nodes_from_source(
+    source: &(impl StoredRead + ?Sized),
     btree_address: StoredAddress,
     widths: FormatWidths,
-    addresses: AddressContext,
 ) -> Result<Vec<StoredAddress>, FormatError> {
-    collect_symbol_table_nodes_from_source_inner(source, btree_address, widths, addresses, 0)
+    collect_symbol_table_nodes_from_source_inner(source, btree_address, widths, 0)
 }
 
-/// Tracks recursion depth for [`collect_symbol_table_nodes_from_source`].
+/// Reads B-tree nodes through stored metadata reads while checking the recursion depth.
 ///
-/// See [`collect_symbol_table_nodes_inner`] for why the bound is required.
-fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
-    source: &S,
+/// # Errors
+///
+/// Returns the errors of [`collect_symbol_table_nodes_from_source`].
+fn collect_symbol_table_nodes_from_source_inner(
+    source: &(impl StoredRead + ?Sized),
     btree_address: StoredAddress,
     widths: FormatWidths,
-    addresses: AddressContext,
     depth: u32,
 ) -> Result<Vec<StoredAddress>, FormatError> {
     if depth > MAX_SYMBOL_TABLE_BTREE_DEPTH {
         return Err(FormatError::NestingDepthExceeded);
     }
-    let node_offset = addresses.resolve(btree_address)?.get();
-    let node =
-        BTreeV1Node::parse_from_source_with_widths(&SourceMetadata(source), node_offset, widths)?;
+    let node = BTreeV1Node::parse_from_source_with_widths(
+        &StoredMetadata(source),
+        btree_address.get(),
+        widths,
+    )?;
 
     if node.node_type != 0 {
         return Err(FormatError::InvalidBTreeNodeType(node.node_type));
@@ -121,7 +133,6 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
                 source,
                 child_addr,
                 widths,
-                addresses,
                 depth + 1,
             )?;
             result.extend(child_snods);
@@ -132,14 +143,20 @@ fn collect_symbol_table_nodes_from_source_inner<S: Source + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use test_util::btree_v1;
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::placed_source::PlacedSource;
+    use crate::source::BytesSource;
+    use crate::source::PhysicalSource;
 
-    #[test]
-    fn parse_internal_node_and_collect() {
-        // Build a 2-level tree: one internal node pointing to two leaf nodes
+    #[rstest]
+    #[case::zero_base(0)]
+    #[case::userblock(512)]
+    fn collect_symbol_table_nodes_in_tree_order(#[case] base: u64) {
+        // One internal node points to two leaf nodes.
         let os: u8 = 8;
         let ls: u8 = 8;
         let leaf1_offset: usize = 0;
@@ -168,11 +185,36 @@ mod tests {
         file[leaf2_offset..leaf2_offset + leaf2.len()].copy_from_slice(&leaf2);
         file[internal_offset..internal_offset + internal.len()].copy_from_slice(&internal);
 
+        let source = PlacedSource::new(base, file.clone());
+        let expected = vec![StoredAddress::new(0xA00), StoredAddress::new(0xB00)];
+        assert_eq!(
+            collect_symbol_table_nodes_from_source(
+                &source.framed(),
+                StoredAddress::new(internal_offset as u64),
+                FormatWidths::from_sizes(os, ls).unwrap(),
+            )
+            .unwrap(),
+            expected,
+        );
+        assert_eq!(
+            source.reads.into_inner(),
+            vec![
+                (base + 512, 8),
+                (base + 512, internal.len()),
+                (base, 8),
+                (base, leaf1.len()),
+                (base + 256, 8),
+                (base + 256, leaf2.len())
+            ],
+        );
+        file.splice(..0, vec![0; base.to_usize().unwrap()]);
         let snods = collect_symbol_table_nodes(
-            &file,
+            PhysicalBytes::for_test(
+                &file,
+                AddressContext::from_effective_base(BaseAddress::new(base)),
+            ),
             StoredAddress::new(internal_offset as u64),
             FormatWidths::from_sizes(os, ls).unwrap(),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap();
         assert_eq!(
@@ -181,27 +223,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn collect_wrong_node_type() {
+    #[rstest]
+    #[case::zero_base(0)]
+    #[case::userblock(512)]
+    fn collect_rejects_wrong_node_type(#[case] base: u64) {
         let data =
             btree_v1::node_with_group_keys(btree_v1::NodeType::CHUNK, 0, &[0, 1], &[0x100], WIDTHS);
         let mut file = vec![0u8; 512];
         file[..data.len()].copy_from_slice(&data);
+        assert_eq!(
+            collect_symbol_table_nodes_from_source(
+                &PlacedSource::new(base, file.clone()).framed(),
+                StoredAddress::new(0),
+                FormatWidths::from_sizes(8, 8).unwrap(),
+            )
+            .unwrap_err(),
+            FormatError::InvalidBTreeNodeType(1),
+        );
+        file.splice(..0, vec![0; base.to_usize().unwrap()]);
         let err = collect_symbol_table_nodes(
-            &file,
+            PhysicalBytes::for_test(
+                &file,
+                AddressContext::from_effective_base(BaseAddress::new(base)),
+            ),
             StoredAddress::new(0),
             FormatWidths::from_sizes(8, 8).unwrap(),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeNodeType(1));
     }
 
-    #[test]
-    fn collect_symbol_table_nodes_rejects_cyclic_btree() {
+    #[rstest]
+    #[case::zero_base(0)]
+    #[case::userblock(512)]
+    fn collect_symbol_table_nodes_rejects_cyclic_btree(#[case] base: u64) {
         // An internal node (level 1) whose only child points back at itself.
-        // Listing a malicious v1 group must error via the depth guard rather
-        // than recurse until the stack overflows (an uncatchable abort).
         let os: u8 = 8;
         let ls: u8 = 8;
         let node =
@@ -209,14 +265,92 @@ mod tests {
         let mut file = vec![0u8; 1024];
         file[..node.len()].copy_from_slice(&node);
 
+        assert_eq!(
+            collect_symbol_table_nodes_from_source(
+                &PlacedSource::new(base, file.clone()).framed(),
+                StoredAddress::new(0),
+                FormatWidths::from_sizes(os, ls).unwrap(),
+            )
+            .unwrap_err(),
+            FormatError::NestingDepthExceeded,
+        );
+        file.splice(..0, vec![0; base.to_usize().unwrap()]);
         let err = collect_symbol_table_nodes(
-            &file,
+            PhysicalBytes::for_test(
+                &file,
+                AddressContext::from_effective_base(BaseAddress::new(base)),
+            ),
             StoredAddress::new(0),
             FormatWidths::from_sizes(os, ls).unwrap(),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
         )
         .unwrap_err();
         assert_eq!(err, FormatError::NestingDepthExceeded);
+    }
+
+    #[rstest]
+    #[case::short_header(7, 24, btree_v1::NodeType::GROUP)]
+    #[case::short_body(47, 48, btree_v1::NodeType::GROUP)]
+    #[case::short_body_before_node_type(47, 48, btree_v1::NodeType::CHUNK)]
+    fn collect_preserves_physical_eof_coordinates(
+        #[case] available: usize,
+        #[case] required: usize,
+        #[case] node_type: btree_v1::NodeType,
+        #[values(0, 512)] base: usize,
+    ) {
+        let mut image = vec![0; base];
+        let node = btree_v1::node_with_group_keys(node_type, 0, &[0, 1], &[0x100], WIDTHS);
+        assert_eq!(node.len(), 48);
+        image.extend_from_slice(&node[..available]);
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base.to_u64()));
+        let widths = FormatWidths::from_sizes(8, 8).unwrap();
+        assert_eq!(
+            collect_symbol_table_nodes(
+                PhysicalBytes::for_test(&image, addresses),
+                StoredAddress::ZERO,
+                widths
+            )
+            .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: base + required,
+                available: image.len()
+            },
+        );
+        let source = BytesSource::new(&image);
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        assert_eq!(
+            collect_symbol_table_nodes_from_source(&stored, StoredAddress::ZERO, widths)
+                .unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected: (base + if available < 8 { 8 } else { required }).to_u64(),
+                available: image.len().to_u64(),
+            },
+        );
+    }
+
+    #[test]
+    fn collect_preserves_address_overflow() {
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(512));
+        let widths = FormatWidths::from_sizes(8, 8).unwrap();
+        let source = BytesSource::new(&[]);
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let expected = FormatError::OffsetOverflow {
+            offset: u64::MAX,
+            length: 512,
+        };
+        assert_eq!(
+            collect_symbol_table_nodes(
+                PhysicalBytes::for_test(&[], addresses),
+                StoredAddress::new(u64::MAX),
+                widths
+            )
+            .unwrap_err(),
+            expected,
+        );
+        assert_eq!(
+            collect_symbol_table_nodes_from_source(&stored, StoredAddress::new(u64::MAX), widths)
+                .unwrap_err(),
+            expected,
+        );
     }
 
     const WIDTHS: Widths = Widths::EIGHT;
