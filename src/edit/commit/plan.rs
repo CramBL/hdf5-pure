@@ -26,7 +26,7 @@ use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, REFERENCE_TO_A_MOVED_OBJECT};
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::source::Source;
+use crate::source::OriginalSource;
 use crate::type_builders::ObjectRefTarget;
 
 #[cfg(test)]
@@ -345,11 +345,10 @@ impl WriteEngine {
                 ));
             }
             let addr = crate::group_v2::resolve_path_any_from_source(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 &full.as_path(),
             )?;
             match self.prepare_write(addr, fd, OverwriteId { index })? {
@@ -415,11 +414,10 @@ impl WriteEngine {
                 ));
             }
             let addr = crate::group_v2::resolve_path_any_from_source(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 &full.as_path(),
             )?;
             let mw = Self::prepare_append(&self.opened_source(), addr, ab, self.context.widths())?;
@@ -479,11 +477,10 @@ impl WriteEngine {
                     ));
                 }
                 let addr = crate::group_v2::resolve_path_any_from_source(
-                    &self.image(),
+                    &self.opened_source(),
                     AccessMode::ReadWrite,
                     self.context.superblock(),
                     self.context.widths(),
-                    self.context.addresses(),
                     &full.as_path(),
                 )?;
                 let counts = edits
@@ -570,11 +567,10 @@ impl WriteEngine {
                 ));
             }
             let src_addr = crate::group_v2::resolve_path_any_from_source(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 &src.as_path(),
             )?;
             let tree = Self::read_copy_subtree(
@@ -616,11 +612,10 @@ impl WriteEngine {
                 return Err(Error::EditUnsupported("cannot delete the root group"));
             };
             let del_addr = crate::group_v2::resolve_path_any_from_source(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 &d.as_path(),
             )?;
             deleted_addrs.push(del_addr);
@@ -706,11 +701,10 @@ impl WriteEngine {
                 node.prepared.region = group::fresh_group_region();
             } else {
                 let addr = crate::group_v2::resolve_path_any_from_source(
-                    &self.image(),
+                    &self.opened_source(),
                     AccessMode::ReadWrite,
                     self.context.superblock(),
                     self.context.widths(),
-                    self.context.addresses(),
                     &key.as_path(),
                 )?;
                 if !key.is_empty() {
@@ -882,7 +876,7 @@ impl WriteEngine {
             write_targets,
             delete_targets,
             &for_supplied,
-            &self.image(),
+            &self.opened_source(),
             &self.context,
         )?;
 
@@ -1058,7 +1052,7 @@ impl WriteEngine {
         write_targets: &[ObjectPathBuf],
         delete_targets: &[ObjectPathBuf],
         invalidated: &InvalidatedAddresses,
-        src: &(impl Source + ?Sized),
+        src: &(impl OriginalSource + ?Sized),
         context: &FileContext,
     ) -> Result<StoredAddress, Error> {
         let path = match target {
@@ -1070,7 +1064,7 @@ impl WriteEngine {
             }
             ObjectRefTarget::Path(path) => path,
         };
-        let base = context.addresses();
+        let base = src.addresses();
         if let Some(&addr) = path_addr.get(path) {
             return Ok(base.relative(PhysicalAddress::new(addr))?);
         }
@@ -1098,7 +1092,6 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 context.superblock(),
                 context.widths(),
-                context.addresses(),
                 &path.as_path(),
             ) {
                 Ok(addr) => base.relative(PhysicalAddress::new(addr))?,
@@ -1115,7 +1108,7 @@ impl WriteEngine {
         write_targets: &[ObjectPathBuf],
         delete_targets: &[ObjectPathBuf],
         invalidated: &InvalidatedAddresses,
-        src: &(impl Source + ?Sized),
+        src: &(impl OriginalSource + ?Sized),
         context: &FileContext,
     ) -> Result<BTreeMap<ObjectPathBuf, Vec<PreparedReference>>, Error> {
         let mut prepared = BTreeMap::new();

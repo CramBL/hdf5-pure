@@ -9,6 +9,7 @@ use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::source;
+use crate::source::PhysicalBytes;
 use crate::superblock::Superblock;
 use crate::type_builders;
 
@@ -668,11 +669,10 @@ fn an_unreferenced_committed_type_stores_no_count() {
 fn committed_reference_count(bytes: &[u8], path: &str) -> Option<u32> {
     let sb = crate::superblock::read(bytes).unwrap().superblock;
     let addr = group_v2::resolve_path_any(
-        bytes,
+        PhysicalBytes::for_test(bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse(path),
     )
     .unwrap();
@@ -707,20 +707,18 @@ fn a_dataset_naming_a_committed_type_stores_a_reference_to_it() {
         .unwrap()
         .superblock;
     let type_addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("mytype"),
     )
     .unwrap();
     let ds_addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("typed"),
     )
     .unwrap();
@@ -774,11 +772,10 @@ fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
 fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
     let sb = crate::superblock::read(bytes).unwrap().superblock;
     let addr = group_v2::resolve_path_any(
-        bytes,
+        PhysicalBytes::for_test(bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse(path),
     )
     .unwrap();
@@ -845,11 +842,10 @@ fn file_with_dataset_attrs() {
         .unwrap()
         .superblock;
     let addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("data"),
     )
     .unwrap();
@@ -901,11 +897,10 @@ fn sub_group_carries_no_timestamps() {
         .unwrap()
         .superblock;
     let addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("grp"),
     )
     .unwrap();
@@ -952,11 +947,10 @@ fn group_link_representation_matches_child_count(
     assert_eq!(sb.eof_address, bytes.len().to_u64());
     let path = if nested { "parent/group" } else { "/" };
     let address = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse(path),
     )
     .unwrap();
@@ -1129,11 +1123,10 @@ fn dense_attrs_self_roundtrip() {
         .unwrap()
         .superblock;
     let addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("data"),
     )
     .unwrap();
@@ -1217,11 +1210,10 @@ fn inline_attrs_below_threshold() {
         .unwrap()
         .superblock;
     let addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("data"),
     )
     .unwrap();
@@ -1705,11 +1697,10 @@ fn attributes_survive_a_heap_with_nested_indirect_blocks() {
         .unwrap()
         .superblock;
     let addr = group_v2::resolve_path_any(
-        &bytes,
+        PhysicalBytes::for_test(&bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("data"),
     )
     .unwrap();
@@ -2158,11 +2149,10 @@ fn write_bounded(bounds: Option<(LibVer, LibVer)>) -> Result<Vec<u8>, FormatErro
 fn layout_message_version(bytes: &[u8], path: &str) -> u8 {
     let sb = crate::superblock::read(bytes).unwrap().superblock;
     let addr = group_v2::resolve_path_any(
-        bytes,
+        PhysicalBytes::for_test(bytes, AddressContext::from_effective_base(sb.base_address)),
         AccessMode::ReadOnly,
         &sb,
         WIDTHS,
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse(path),
     )
     .unwrap();

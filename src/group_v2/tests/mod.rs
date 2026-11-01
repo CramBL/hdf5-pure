@@ -12,12 +12,18 @@ use crate::datatype::{CharacterSet, Datatype};
 use crate::message_flags::MessageFlags;
 #[cfg(feature = "std")]
 use crate::reader::File;
+#[cfg(feature = "std")]
+use crate::reader::OpenedSource;
+use crate::source;
 use crate::source::BytesSource;
+use crate::source::PhysicalBytes;
 #[cfg(feature = "std")]
 use crate::writer::FileBuilder;
 
 /// Dense-link walks over indexed huge heap objects.
 mod huge_links;
+#[cfg(feature = "std")]
+mod stored;
 
 #[rstest::rstest]
 #[case::present(true)]
@@ -70,9 +76,8 @@ fn indexed_hash_collisions_compare_names_before_link_targets(#[case] present: bo
     let messages = [hard, soft];
     let mut reads = Vec::new();
     let target = find_indexed_dense_link(
-        bytes.as_slice(),
+        &source::zero_base_bytes(&bytes),
         &index,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
         OffsetWidth::Eight,
         LinkName::new(names[0]).unwrap(),
         |id| {
@@ -213,20 +218,18 @@ fn path_navigation_uses_the_opened_image_context(#[case] source_backed: bool) {
 
     let object_at = if source_backed {
         resolve_path_any_from_source(
-            &BytesSource::new(&bytes[..]),
+            &OpenedSource::for_test(&BytesSource::new(&bytes[..]), addresses),
             AccessMode::ReadOnly,
             &superblock,
             test_widths(&superblock),
-            addresses,
             &path,
         )
     } else {
         resolve_path_any(
-            &bytes,
+            PhysicalBytes::for_test(&bytes, addresses),
             AccessMode::ReadOnly,
             &superblock,
             test_widths(&superblock),
-            addresses,
             &path,
         )
     }
@@ -296,7 +299,7 @@ fn dense_group_storage_walk_does_not_infer_an_index_from_tracking() {
     };
 
     let extents = collect_dense_group_index_storage_extents(
-        &BytesSource::new(file),
+        &source::zero_base_source(&BytesSource::new(file)),
         &info,
         crate::file_writer::WIDTHS,
     )
@@ -317,7 +320,7 @@ fn dense_group_storage_walk_omits_an_undefined_indexed_creation_order_tree() {
     };
 
     let extents = collect_dense_group_index_storage_extents(
-        &BytesSource::new(file),
+        &source::zero_base_source(&BytesSource::new(file)),
         &info,
         crate::file_writer::WIDTHS,
     )
@@ -402,11 +405,13 @@ fn compact_storage_link_messages() {
     };
 
     let entries = resolve_v2_group_entries(
-        &[],
+        PhysicalBytes::for_test(
+            &[],
+            AddressContext::from_effective_base(BaseAddress::new(0)),
+        ),
         AccessMode::ReadOnly,
         &oh,
         FormatWidths::from_sizes(8, 8).unwrap(),
-        AddressContext::from_effective_base(BaseAddress::new(0)),
     )
     .unwrap();
     assert_eq!(entries.len(), 1);
@@ -535,11 +540,13 @@ fn integration_v2_groups_temperature() {
     ));
 
     let addr = resolve_path_any(
-        file_data,
+        PhysicalBytes::for_test(
+            file_data,
+            AddressContext::from_effective_base(sb.base_address),
+        ),
         AccessMode::ReadOnly,
         &sb,
         test_widths(&sb),
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("sensors/temperature"),
     )
     .unwrap();
@@ -573,11 +580,13 @@ fn integration_v2_groups_humidity() {
     let sb = crate::superblock::read(file_data).unwrap().superblock;
 
     let addr = resolve_path_any(
-        file_data,
+        PhysicalBytes::for_test(
+            file_data,
+            AddressContext::from_effective_base(sb.base_address),
+        ),
         AccessMode::ReadOnly,
         &sb,
         test_widths(&sb),
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("sensors/humidity"),
     )
     .unwrap();
@@ -611,11 +620,13 @@ fn integration_v2_many_links() {
     let sb = crate::superblock::read(file_data).unwrap().superblock;
 
     let addr = resolve_path_any(
-        file_data,
+        PhysicalBytes::for_test(
+            file_data,
+            AddressContext::from_effective_base(sb.base_address),
+        ),
         AccessMode::ReadOnly,
         &sb,
         test_widths(&sb),
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("dataset_015"),
     )
     .unwrap();
@@ -649,11 +660,13 @@ fn integration_resolve_path_any_v1() {
     let sb = crate::superblock::read(file_data).unwrap().superblock;
 
     let addr = resolve_path_any(
-        file_data,
+        PhysicalBytes::for_test(
+            file_data,
+            AddressContext::from_effective_base(sb.base_address),
+        ),
         AccessMode::ReadOnly,
         &sb,
         test_widths(&sb),
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("group1/values"),
     )
     .unwrap();
@@ -687,11 +700,13 @@ fn integration_resolve_path_any_v2() {
     let sb = crate::superblock::read(file_data).unwrap().superblock;
 
     let addr = resolve_path_any(
-        file_data,
+        PhysicalBytes::for_test(
+            file_data,
+            AddressContext::from_effective_base(sb.base_address),
+        ),
         AccessMode::ReadOnly,
         &sb,
         test_widths(&sb),
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("sensors/temperature"),
     )
     .unwrap();
@@ -725,11 +740,13 @@ fn path_not_found_v2() {
     let sb = crate::superblock::read(file_data).unwrap().superblock;
 
     let err = resolve_path_any(
-        file_data,
+        PhysicalBytes::for_test(
+            file_data,
+            AddressContext::from_effective_base(sb.base_address),
+        ),
         AccessMode::ReadOnly,
         &sb,
         test_widths(&sb),
-        AddressContext::from_effective_base(sb.base_address),
         &ObjectPath::parse("nonexistent"),
     )
     .unwrap_err();

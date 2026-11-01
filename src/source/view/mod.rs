@@ -152,6 +152,16 @@ pub(crate) struct PhysicalBytes<'a> {
 }
 
 impl<'a> PhysicalBytes<'a> {
+    /// Borrows the complete original image, including any userblock prefix.
+    pub(crate) const fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Returns the effective address context captured from the opened backend.
+    pub(crate) const fn addresses(self) -> AddressContext {
+        self.addresses
+    }
+
     /// Associates a test image with the supplied effective address context.
     #[cfg(test)]
     pub(crate) fn for_test(bytes: &'a [u8], addresses: AddressContext) -> Self {

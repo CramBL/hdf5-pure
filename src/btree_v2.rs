@@ -26,14 +26,15 @@ pub use hdf5_pure_format::__private::BTreeV2Record;
 use hdf5_pure_format::__private::MetadataSource;
 use hdf5_pure_space::__private::Extent;
 
+#[cfg(any(test, doc))]
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::source::RangeReader;
 use crate::source::Source;
+#[cfg(any(test, doc))]
 use crate::source::SourceMetadata;
 use crate::source::StoredBytes;
 use crate::source::StoredMetadata;
@@ -109,35 +110,6 @@ enum BTreeV2Backing<'a, R: StoredRead + ?Sized> {
     Stored(StoredMetadata<'a, R>),
 }
 
-/// Returns a copy of the matching record by binary-searching each node along one search path.
-///
-/// `compare` orders each borrowed record relative to the sought key. The tree's records must be
-/// ordered consistently with `compare`. An equal record in an internal node is a match. The
-/// reader resolves stored addresses through `addresses` and reads the encoded contents of each
-/// visited node before calling `compare`.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidBTreeV2Signature`] for a repeated node address, and the first
-/// error from address resolution, a node read, node parsing, or `compare`.
-pub(crate) fn legacy_search_btree_v2(
-    reader: &(impl RangeReader + ?Sized),
-    layout: &BTreeV2Layout,
-    addresses: AddressContext,
-    compare: impl FnMut(&[u8]) -> Result<Ordering, FormatError>,
-) -> Result<Option<Vec<u8>>, FormatError> {
-    search_nodes(
-        layout,
-        |node| {
-            reader.read_range(FileRange::new(
-                addresses.resolve(node.address())?,
-                node.encoded_len()?.to_u64(),
-            )?)
-        },
-        compare,
-    )
-}
-
 /// Returns a copy of the matching record along one binary-search path.
 ///
 /// `compare` orders each borrowed record relative to the sought key. Records must be ordered
@@ -149,7 +121,6 @@ pub(crate) fn legacy_search_btree_v2(
 ///
 /// Returns [`FormatError::InvalidBTreeV2Signature`] for a repeated node address, and errors from
 /// address resolution, metadata reads, node parsing, or `compare`.
-#[cfg(any(test, doc))]
 pub(crate) fn search_btree_v2(
     reader: &(impl StoredRead + ?Sized),
     layout: &BTreeV2Layout,
@@ -204,6 +175,7 @@ fn search_nodes<'layout, 'reader>(
 /// # Errors
 ///
 /// Returns the structural error of the first B-tree header or node that does not parse.
+#[cfg(any(test, doc))]
 pub(crate) fn legacy_collect_btree_v2_storage_extents<S: Source + ?Sized>(
     source: &S,
     header_address: StoredAddress,
@@ -414,22 +386,6 @@ fn collect_node_records(
         }
     }
     Ok(())
-}
-
-/// Returns all records from a version 2 B-tree source using a validated address width.
-///
-/// Uses the node parsing and empty-tree handling of [`legacy_collect_btree_v2_records`].
-///
-/// # Errors
-///
-/// Returns the [`FormatError`] of the first B-tree node that does not parse, or the error `source`
-/// reports for a node it cannot read.
-pub(crate) fn legacy_collect_btree_v2_records_from_source<S: Source + ?Sized>(
-    source: &S,
-    header: &BTreeV2Header,
-    offset_width: OffsetWidth,
-) -> Result<Vec<BTreeV2Record>, FormatError> {
-    collect_records_from_metadata(&SourceMetadata(source), header, offset_width)
 }
 
 /// Reads all records in tree order through a stored-coordinate view.

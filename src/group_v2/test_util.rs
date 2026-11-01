@@ -13,6 +13,8 @@ use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::source::BytesSource;
+use crate::source::PhysicalBytes;
+use crate::source::PhysicalSource;
 use crate::superblock::Superblock;
 use crate::width::FormatWidths;
 
@@ -28,9 +30,13 @@ pub(super) fn assert_dense_walk(bytes: Vec<u8>) {
 
     fractal_heap::reset_huge_index_decodes();
     let buffered = group_v2::resolve_dense_entries(
-        &bytes,
+        PhysicalBytes::for_test(
+            &bytes,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
+        )
+        .stored()
+        .unwrap(),
         AccessMode::ReadOnly,
-        AddressContext::from_effective_base(BaseAddress::new(0)),
         &link_info,
         fh_addr,
         widths,
@@ -46,9 +52,12 @@ pub(super) fn assert_dense_walk(bytes: Vec<u8>) {
     fractal_heap::reset_huge_index_decodes();
     let source = BytesSource::new(bytes);
     let streamed = group_v2::resolve_dense_entries_from_source(
-        &source,
+        &PhysicalSource::for_test(
+            &source,
+            AddressContext::from_effective_base(BaseAddress::new(0)),
+        )
+        .stored(),
         AccessMode::ReadOnly,
-        AddressContext::from_effective_base(BaseAddress::new(0)),
         &link_info,
         fh_addr,
         widths,
@@ -76,11 +85,13 @@ fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, FormatWidth
     let superblock = crate::superblock::read(bytes).unwrap().superblock;
     let widths = test_widths(&superblock);
     let group_addr = group_v2::resolve_path_any(
-        bytes,
+        PhysicalBytes::for_test(
+            bytes,
+            AddressContext::from_effective_base(superblock.base_address),
+        ),
         AccessMode::ReadOnly,
         &superblock,
         widths,
-        AddressContext::from_effective_base(superblock.base_address),
         &ObjectPath::parse("g"),
     )
     .unwrap();

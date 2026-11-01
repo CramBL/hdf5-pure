@@ -626,11 +626,10 @@ impl WriteEngine {
                 Some(&addr) => addr,
                 None => {
                     let addr = crate::group_v2::resolve_path_any_from_source(
-                        &self.image(),
+                        &self.opened_source(),
                         AccessMode::ReadWrite,
                         self.context.superblock(),
                         self.context.widths(),
-                        self.context.addresses(),
                         &dataset.as_path(),
                     )?;
                     self.resolved.insert(dataset.clone(), addr);
@@ -679,11 +678,10 @@ impl WriteEngine {
     /// Returns `false` if any required metadata cannot be resolved or parsed.
     pub(super) fn appends_onto_a_lossy_partial_tail(&self, path: &ObjectPathBuf) -> bool {
         let Ok(addr) = crate::group_v2::resolve_path_any_from_source(
-            &self.image(),
+            &self.opened_source(),
             AccessMode::ReadWrite,
             self.context.superblock(),
             self.context.widths(),
-            self.context.addresses(),
             &path.as_path(),
         ) else {
             return false;

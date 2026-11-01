@@ -17,6 +17,7 @@ use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 use crate::dataspace::DataspaceType;
 use crate::image::WriteBuffering;
 use crate::source;
+use crate::source::PhysicalBytes;
 
 use crate::message_flags::MessageFlags;
 use crate::{DatatypeByteOrder, FileBuilder};
@@ -1609,7 +1610,7 @@ fn the_streaming_walk_names_the_object_that_stopped_it_too() {
 }
 
 #[test]
-fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
+fn a_root_that_is_not_a_group_reports_an_empty_path() {
     let mut bytes = nested_dataset_bytes();
     let LocatedSuperblock {
         address,
@@ -1622,14 +1623,16 @@ fn a_root_that_is_not_a_group_refuses_rather_than_being_searched() {
     sb.root_group_address = addresses
         .relative(PhysicalAddress::new(
             group_v2::resolve_read_path_any(
-                &bytes,
+                PhysicalBytes::for_test(
+                    &bytes,
+                    AddressContext::from_effective_base(sb.base_address),
+                ),
                 AccessMode::ReadOnly,
                 &sb,
                 FormatWidths {
                     offsets: sb.offset_size,
                     lengths: sb.length_size,
                 },
-                AddressContext::from_effective_base(sb.base_address),
                 &ObjectPath::parse("plain"),
             )
             .unwrap(),

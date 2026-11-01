@@ -12,6 +12,7 @@ use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::layout_info::FilterId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
+use crate::source::PhysicalSource;
 
 impl WriteEngine {
     /// Rolls back the additions made by `f` if it returns an error.
@@ -273,22 +274,22 @@ impl WriteEngine {
     /// Resolution uses a borrowed slice when the backing provides one. Read or resolution
     /// errors are reported as `false`.
     fn path_in_file(&self, path: &ObjectPathBuf) -> bool {
-        match self.image.as_slice() {
-            Some(data) => crate::group_v2::resolve_path_any(
-                data,
+        let source = self.opened_source();
+        let physical = PhysicalSource::new(&source);
+        match physical.resident() {
+            Some(bytes) => crate::group_v2::resolve_path_any(
+                bytes,
                 AccessMode::ReadWrite,
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 &path.as_path(),
             )
             .is_ok(),
             None => crate::group_v2::resolve_path_any_from_source(
-                &self.image(),
+                &source,
                 AccessMode::ReadWrite,
                 self.context.superblock(),
                 self.context.widths(),
-                self.context.addresses(),
                 &path.as_path(),
             )
             .is_ok(),

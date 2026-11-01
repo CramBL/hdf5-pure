@@ -373,7 +373,6 @@ fn walk(
             AccessMode::ReadWrite,
             &header,
             widths,
-            addresses,
             group_v1::group_leaf_node_k(superblock),
         ) else {
             complete = false;

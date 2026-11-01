@@ -42,6 +42,7 @@ use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
 use crate::source::MetadataCacheConfig;
+use crate::source::PhysicalBytes;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::superblock;
@@ -167,11 +168,10 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     let mut session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     let resolve = |object_path: &ObjectPathBuf| {
         crate::group_v2::resolve_path_any_from_source(
-            &session.image(),
+            &session.opened_source(),
             AccessMode::ReadWrite,
             session.superblock(),
             session.widths(),
-            session.addresses(),
             &object_path.as_path(),
         )
         .unwrap()
@@ -487,11 +487,13 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByte
     let page_size = s.space.page_size().expect("a paged file has a page size");
     assert_eq!(page_size.get(), PAGE);
     let victim_addr = crate::group_v2::resolve_path_any(
-        s.image.as_slice().unwrap(),
+        PhysicalBytes::for_test(
+            s.image.as_slice().unwrap(),
+            AddressContext::from_effective_base(s.context.superblock().base_address),
+        ),
         AccessMode::ReadWrite,
         s.context.superblock(),
         s.context.widths(),
-        AddressContext::from_effective_base(s.context.superblock().base_address),
         &ObjectPath::parse("victim"),
     )
     .unwrap();

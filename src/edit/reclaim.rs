@@ -315,10 +315,7 @@ impl WriteEngine {
             return Some(Vec::new());
         };
         let index = crate::group_v2::collect_dense_group_index_storage_extents(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            },
+            &PhysicalSource::new(&self.opened_source()).stored(),
             link_info,
             self.widths(),
         )
@@ -463,11 +460,10 @@ impl WriteEngine {
             // A group we cannot enumerate fully would undercount incoming links
             // and risk over-reclaim. Return the safe-leak fallback.
             let entries = group_v2::resolve_group_entries_from_source(
-                &self.image(),
+                &self.opened_source(),
                 AccessMode::ReadWrite,
                 &header,
                 self.widths(),
-                self.context.addresses(),
                 group_v1::group_leaf_node_k(self.context.superblock()),
             )
             .ok()?;
@@ -716,12 +712,8 @@ impl WriteEngine {
         let link_info = link_info?;
         let heap_address = link_info.fractal_heap_address?;
         let entries = crate::group_v2::resolve_dense_entries_from_source(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            },
+            &PhysicalSource::new(&self.opened_source()).stored(),
             AccessMode::ReadWrite,
-            self.context.addresses(),
             &link_info,
             heap_address,
             self.widths(),
@@ -1272,10 +1264,8 @@ impl WriteEngine {
     ) -> Result<bool, Error> {
         let info = LinkInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         if let Some(heap) = info.fractal_heap_address {
-            let source = BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            };
+            let opened = self.opened_source();
+            let source = PhysicalSource::new(&opened).stored();
             let index = crate::group_v2::collect_dense_group_index_storage_extents(
                 &source,
                 &info,
@@ -1292,7 +1282,6 @@ impl WriteEngine {
             let entries = crate::group_v2::resolve_dense_entries_from_source(
                 &source,
                 AccessMode::ReadWrite,
-                self.context.addresses(),
                 &info,
                 heap,
                 self.widths(),

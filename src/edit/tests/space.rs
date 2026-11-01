@@ -730,11 +730,10 @@ fn deleting_a_compact_group_with_symbolic_links_reclaims_its_hard_linked_subtree
     let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let header_spans = |object_path: &str| {
         let addr = crate::group_v2::resolve_path_any_from_source(
-            &session.image(),
+            &session.opened_source(),
             AccessMode::ReadWrite,
             session.superblock(),
             session.widths(),
-            session.addresses(),
             &ObjectPathBuf::parse(object_path).as_path(),
         )
         .unwrap();
@@ -1732,11 +1731,10 @@ fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
         "an in-place append switched page type: meta_pad={meta_padding:?} raw_pad={raw_padding:?}"
     );
     let addr = crate::group_v2::resolve_path_any_from_source(
-        &engine.image(),
+        &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.superblock(),
         engine.widths(),
-        engine.addresses(),
         &ObjectPath::parse("d"),
     )
     .unwrap();
@@ -1831,11 +1829,10 @@ struct DenseAttributeOwner {
 
 fn dense_attribute_owner(session: &WriteEngine, object: &ObjectPathBuf) -> DenseAttributeOwner {
     let addr = crate::group_v2::resolve_path_any_from_source(
-        &session.image(),
+        &session.opened_source(),
         AccessMode::ReadWrite,
         session.superblock(),
         session.widths(),
-        session.addresses(),
         &object.as_path(),
     )
     .unwrap();

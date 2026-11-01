@@ -10,6 +10,7 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::MetadataBytes;
+#[cfg(any(test, doc))]
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
@@ -24,12 +25,14 @@ use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
+#[cfg(any(test, doc))]
 use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::{FILTER_SHUFFLE, FilterPipeline};
 use crate::filters;
 use crate::filters::ChunkContext;
+#[cfg(any(test, doc))]
 use crate::source;
 use crate::source::Source;
 use crate::width::FormatWidths;
@@ -41,32 +44,6 @@ mod stored;
 pub(crate) use stored::HeapObjectReader;
 pub(crate) use stored::HeapSource;
 pub(crate) use stored::read_header_and_range_from_source;
-
-/// Parses a heap header using validated file widths.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InsufficientRegion`] if the image is truncated, and the address and header
-/// parsing errors of [`legacy_read_header_from_source`].
-pub(crate) fn legacy_parse_header(
-    bytes: &[u8],
-    addresses: AddressContext,
-    address: StoredAddress,
-    widths: FormatWidths,
-) -> Result<FractalHeapHeader, FormatError> {
-    let image = FileRegion::new(
-        FileRange::new(
-            addresses.resolve(StoredAddress::new(0))?,
-            bytes.len() as u64,
-        )?,
-        bytes,
-    )?;
-    let locator =
-        FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
-    let prefix = image.subregion(locator.parse_range()?)?;
-    let reference = locator.parse(prefix)?;
-    reference.parse(image.subregion(reference.parse_range())?)
-}
 
 /// Reads a fractal heap header from a source using validated file widths.
 ///
@@ -391,6 +368,7 @@ pub struct LegacyHeapObjectReader<'h> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Backend {
     /// An in-memory image of the whole file.
+    #[cfg(any(test, doc))]
     Buffered,
     /// A [`Source`], read from on demand.
     Streaming,
@@ -496,6 +474,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
     ///
     /// Panics in debug builds if cached checksum validation or a cached huge-object index is reused
     /// through both this method and [`read_from_source`](Self::read_from_source).
+    #[cfg(any(test, doc))]
     pub fn read(
         &mut self,
         file_data: &[u8],
@@ -537,6 +516,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
         }
     }
 
+    #[cfg(any(test, doc))]
     fn read_huge(
         &mut self,
         file_data: &[u8],
@@ -674,6 +654,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
         Ok(decoded)
     }
 
+    #[cfg(any(test, doc))]
     fn read_managed_object(
         &mut self,
         file_data: &[u8],
