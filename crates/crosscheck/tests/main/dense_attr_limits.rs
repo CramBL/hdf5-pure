@@ -1,6 +1,4 @@
 #![cfg(feature = "__hdf5-1.10")]
-// Fails identically under `cross` on i686 and s390x, and passes natively.
-#![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
 //! Native interoperability for dense attribute storage and name indexes.
 //!
 //! Native operations run in the explicit `dense-attributes` fixture binary.
@@ -177,38 +175,68 @@ fn counting_sum(first: i64, len: usize) -> i64 {
         .unwrap_or(0)
 }
 
-/// A single large attribute, with no others to push the object over the compact
-/// count. This is the shape the capability exists for, and it reaches dense
-/// storage only because one oversized attribute selects it on its own.
-///
-/// Worth crosschecking separately rather than assuming it follows from the
-/// nine-attribute case: an object carrying dense storage for *one* attribute is
-/// well below the count at which the C library would have converted, and nothing
-/// but the library itself settles whether it minds.
-#[test]
-fn c_reads_a_lone_huge_attribute() {
+#[derive(Clone, Copy)]
+enum Producer {
+    Native,
+    Pure,
+}
+
+// The native producer forces dense storage even below the attribute-count threshold.
+#[rstest]
+#[case::pure_lone(Producer::Pure, 0)]
+#[case::pure_mixed(Producer::Pure, 2)]
+#[case::native_lone(Producer::Native, 0)]
+#[case::native_mixed(Producer::Native, 2)]
+fn c_reads_a_lone_huge_attribute(#[case] producer: Producer, #[case] others: usize) {
     let dir = tempfile::tempdir().unwrap();
     let len = 12_000usize;
-
-    for others in [0usize, 2] {
-        let path = dir.path().join(format!("lone{others}.h5"));
-        let mut builder = FileBuilder::new();
-        builder.set_attr("big", counting_attr(0, len));
-        for i in 0..others {
-            builder.set_attr(&format!("a{i}"), AttrValue::I64(i as i64));
+    let path = dir.path().join("lone.h5");
+    match producer {
+        Producer::Pure => {
+            let mut builder = FileBuilder::new();
+            builder.set_attr("big", counting_attr(0, len));
+            for i in 0..others {
+                builder.set_attr(&format!("a{i}"), AttrValue::I64(i as i64));
+            }
+            builder.create_dataset("x").with_f64_data(&[1.0]);
+            builder.write(&path).unwrap();
         }
-        builder.create_dataset("x").with_f64_data(&[1.0]);
-        builder.write(&path).unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(fractal_heap::huge_object_count(&bytes), 1);
-        assert_eq!(fractal_heap::managed_object_count(&bytes), others as u64);
-
-        let detail = c_reads_in_detail(&path);
-        assert_eq!(detail.verdict, CReads::Attrs(others + 1));
-        assert_eq!(detail.size_of("big"), Some(len * 8));
-        assert_eq!(detail.sum_of("big"), Some(counting_sum(0, len)));
+        Producer::Native => {
+            let file = hdf5::File::with_options()
+                .with_fapl(|properties| properties.libver_latest())
+                .with_fcpl(|properties| properties.attr_phase_change(0, 0))
+                .create(&path)
+                .unwrap();
+            file.new_attr::<i64>()
+                .shape([len])
+                .create("big")
+                .unwrap()
+                .write(&(0..len as i64).collect::<Vec<_>>())
+                .unwrap();
+            for i in 0..others {
+                file.new_attr::<i64>()
+                    .create(format!("a{i}").as_str())
+                    .unwrap()
+                    .write_scalar(&(i as i64))
+                    .unwrap();
+            }
+            file.close().unwrap();
+        }
     }
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(fractal_heap::huge_object_count(&bytes), 1);
+    assert_eq!(fractal_heap::managed_object_count(&bytes), others as u64);
+
+    let detail = c_reads_in_detail(&path);
+    assert_eq!(detail.verdict, CReads::Attrs(others + 1));
+    let mut sizes = BTreeMap::from([("big".to_string(), len * size_of::<i64>())]);
+    let mut sums = BTreeMap::from([("big".to_string(), counting_sum(0, len))]);
+    for i in 0..others {
+        sizes.insert(format!("a{i}"), size_of::<i64>());
+        sums.insert(format!("a{i}"), i as i64);
+    }
+    assert_eq!(detail.sizes.into_iter().collect::<BTreeMap<_, _>>(), sizes);
+    assert_eq!(detail.sums.into_iter().collect::<BTreeMap<_, _>>(), sums);
 }
 
 /// The heap header's `next_huge_object_id` holds the *last* ID assigned, not the

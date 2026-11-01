@@ -5,6 +5,7 @@ use std::error::Error as StdError;
 use std::io::{self, Write};
 use std::path::Path;
 
+use hdf5::types::{IntSize, TypeDescriptor};
 use test_util_hdf5::absence;
 
 use protocol::{Attribute, Frame, Lookup, Operation, Rejection, Response, Stage};
@@ -83,14 +84,13 @@ fn execute(path: &Path, operation: Operation) -> Result<Response, Failure> {
                     .size()
                     .checked_mul(attribute.size())
                     .ok_or_else(|| Failure::Infrastructure("attribute size overflows".into()))?;
-                attributes.push(if dtype.is::<i64>() {
-                    Attribute::Integer {
+                attributes.push(match native(Stage::AttributeType, dtype.to_descriptor())? {
+                    TypeDescriptor::Integer(IntSize::U8) => Attribute::Integer {
                         name,
                         size,
                         sum: sum(&native(Stage::AttributeRead, attribute.read_raw::<i64>())?),
-                    }
-                } else {
-                    Attribute::Other { name, size }
+                    },
+                    _ => Attribute::Other { name, size },
                 });
             }
             Response::Details(attributes)
