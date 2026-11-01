@@ -1,0 +1,13 @@
+---
+source: src/edit/tests/page_manager_tail.rs
+expression: report.finish()
+---
+owned PAGE metadata
+  commit  extension chunks  extension bytes  complete tail bytes         EOA
+  ------  ----------------  ---------------  -------------------  ----------
+       0                 2           80,306              152,589  16,949,248
+       1                 2           80,478              152,779  17,104,896
+       2                 2           80,497              152,798  17,104,896
+       3                 2           80,497              152,798  17,104,896
+       4                 2           80,497              152,798  17,104,896
+       5                 2           80,497              152,798  17,104,896

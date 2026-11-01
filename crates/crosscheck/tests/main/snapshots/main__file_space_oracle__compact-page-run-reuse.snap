@@ -6,7 +6,7 @@ persisted managers
   phase                      records  metadata bytes  free bytes  large run bytes
   -------------------------  -------  --------------  ----------  ---------------
   native fixture                   3             252   1,051,746        1,048,576
-  pure metadata edit               4             531   1,051,496        1,048,576
+  pure metadata edit               4             270   1,051,496        1,048,576
   native control allocation        3             252     985,942          983,040
   native edited allocation         4             270     985,923          983,040
 

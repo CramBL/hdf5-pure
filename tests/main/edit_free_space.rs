@@ -1515,7 +1515,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         let (before, before_capacity) = {
             let bytes = std::fs::read(&path).unwrap();
             let file = File::open_rw(&path).unwrap();
-            let capacity: u64 = storage::manager_extents(&file, &bytes)
+            let capacity: u64 = storage::manager_and_extension_extents(&file, &bytes)
                 .iter()
                 .map(|range| range.length())
                 .sum();
@@ -1528,7 +1528,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
 
         let bytes = std::fs::read(&path).unwrap();
         let f = File::open_rw(&path).unwrap();
-        let after_capacity: u64 = storage::manager_extents(&f, &bytes)
+        let after_capacity: u64 = storage::manager_and_extension_extents(&f, &bytes)
             .iter()
             .map(|range| range.length())
             .sum();
@@ -1564,7 +1564,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             start_len,
             "commit {i}: rewriting the tail must not grow the file"
         );
-        // Free bytes plus complete manager capacity stay constant when the file does not grow.
+        // Free bytes plus manager and extension allocations stay constant when the file does not grow.
         if i > 0 {
             let before_total = before.free_bytes();
             let after_total: u64 = f.reusable_space_stats().unwrap().reusable_free_bytes();
@@ -2919,11 +2919,11 @@ fn occupied_storage(path: &std::path::Path) -> (File, u64) {
     let bytes = std::fs::read(path).unwrap();
     let file = open_rw_on_close(path);
     let stats = file.reusable_space_stats().unwrap();
-    let managers: u64 = storage::manager_extents(&file, &bytes)
+    let persistence_bytes: u64 = storage::manager_and_extension_extents(&file, &bytes)
         .iter()
         .map(|range| range.length())
         .sum();
-    let occupied = stats.logical_size() - stats.reusable_free_bytes() - managers;
+    let occupied = stats.logical_size() - stats.reusable_free_bytes() - persistence_bytes;
     (file, occupied)
 }
 

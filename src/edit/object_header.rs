@@ -5,9 +5,11 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
+use hdf5_pure_format::__private::ObjectHeaderAllocation;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::RecordSplice;
+use hdf5_pure_space::__private::Extent;
 
 use crate::address::AddressContext;
 use crate::convert::Narrow;
@@ -458,6 +460,25 @@ impl OhRegion {
         Self::new(bytes, self.props)
     }
 
+    /// Returns a copy containing complete non-NIL records and the same prefix properties.
+    ///
+    /// Omits any trailing gap after the last complete record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a record extends past the region.
+    pub(crate) fn without_nil(&self) -> Result<Self, Error> {
+        let mut bytes = Vec::new();
+        let mut start = 0;
+        while let Some((kind, _, end)) = self.next_message(start)? {
+            if kind != MessageType::NIL {
+                bytes.extend_from_slice(&self[start..end]);
+            }
+            start = end;
+        }
+        Ok(self.with_bytes(bytes))
+    }
+
     /// Returns the layout used to parse and serialize this region.
     pub(crate) fn layout(&self) -> MessageRecordLayout {
         self.props.layout
@@ -577,9 +598,48 @@ pub(super) fn modernize_shared_reference(
 /// Returns [`Error::EditUnsupported`] if a record extends past the region. Propagates other
 /// errors from [`super::attributes::ensure_attribute_info`].
 pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error> {
+    Ok(build_v2_object_header_verbatim(&normalized_header(region)?))
+}
+
+/// Builds a normalized version 2 header that fills `allocation`.
+///
+/// The allocation uses stored, base-relative coordinates and includes all chunk framing and
+/// padding. Uses [`ObjectHeaderAllocation`] to encode its checksummed chunks. Preserves optional
+/// prefix fields and updates existing modification and change times when the system clock is
+/// available.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if compact attribute metadata cannot be normalized, or
+/// [`Error::Format`] for an allocation-planning error from [`ObjectHeaderAllocation::new`].
+pub(crate) fn build_v2_object_header_allocation(
+    region: &OhRegion,
+    widths: FormatWidths,
+    allocation: Extent,
+) -> Result<Vec<u8>, Error> {
+    let owned = normalized_header(region)?;
+    Ok(ObjectHeaderAllocation::new(
+        stamped_prefix(&owned),
+        widths,
+        allocation.start(),
+        allocation.len(),
+        &owned,
+    )?
+    .encode())
+}
+
+/// Returns a copy with compact Attribute Info metadata present where required.
+///
+/// Preserves existing Attribute Info messages, including those naming dense storage.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if a record extends past the region or the next attribute
+/// creation index cannot be represented.
+fn normalized_header(region: &OhRegion) -> Result<OhRegion, Error> {
     let mut owned = region.clone();
     super::attributes::ensure_attribute_info(&mut owned)?;
-    Ok(build_v2_object_header_verbatim(&owned))
+    Ok(owned)
 }
 
 /// Serializes a normalized region and updates existing modification and change times.
@@ -587,15 +647,21 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 /// Preserves access and birth times, and the optional attribute phase-change thresholds.
 /// Preserves all timestamps if the system clock is unavailable.
 fn build_v2_object_header_verbatim(region: &OhRegion) -> Vec<u8> {
+    stamped_prefix(region).encode_header(region)
+}
+
+/// Returns prefix properties with existing modification and change times updated.
+///
+/// Preserves access and birth times, and all timestamps if the system clock is unavailable.
+fn stamped_prefix(region: &OhRegion) -> ObjectHeaderPrefix {
     let prefix = region.props();
-    let stamped = ObjectHeaderPrefix {
+    ObjectHeaderPrefix {
         times: prefix.times.map(|times| match unix_time_now() {
             Some(now) => times.touched(now),
             None => times,
         }),
         ..prefix
-    };
-    stamped.encode_header(region)
+    }
 }
 
 /// Returns the current Unix time, saturated to the timestamp field's maximum.
@@ -629,9 +695,12 @@ mod tests {
     use test_util::object_header::v2::HeaderFlags;
     use test_util::widths::Widths;
 
+    use crate::address::{BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt};
+    use crate::attribute_request::AttributeName;
     use crate::file_space_info::{self, FileSpacePageSize, FileSpaceStrategy};
     use crate::file_writer::WIDTHS;
     use crate::source::BytesSource;
+    use crate::type_builders::AttrValue;
 
     use super::*;
 
@@ -704,6 +773,82 @@ mod tests {
 
         assert_eq!(rewritten.props(), props);
         assert_eq!(&rewritten[..], &region_bytes(&body));
+
+        let allocation = Extent::new(StoredAddress::new(1_024), 131_123).unwrap();
+        let encoded = build_v2_object_header_allocation(&rewritten, WIDTHS, allocation).unwrap();
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(4_096));
+        let physical = addresses.resolve(allocation.start()).unwrap();
+        let mut image = vec![0; usize::try_from(physical.get()).unwrap()];
+        image.extend(encoded);
+        let src = BytesSource::new(&image);
+        let chunks = read_oh_chunks(&src, physical.get(), addresses).unwrap();
+        assert!(chunks.len() > 1);
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>(),
+            allocation.len()
+        );
+        let actual = WriteEngine::gather_oh_messages(&src, physical.get(), addresses)
+            .unwrap()
+            .without_nil()
+            .unwrap();
+        assert_eq!(&actual[..], &rewritten.without_nil().unwrap()[..]);
+        assert_eq!(actual.props().layout, props.layout);
+        assert_eq!(
+            actual.props().attribute_phase_change,
+            props.attribute_phase_change
+        );
+        let times = actual.props().times.unwrap();
+        assert_eq!((times.access, times.birth), (1, 4));
+        assert!(times.modification >= 2);
+        assert!(times.change >= 3);
+    }
+
+    #[rstest]
+    #[case::plain(MessageRecordLayout::PLAIN)]
+    #[case::tracked(TRACKED)]
+    fn allocated_headers_keep_compact_attribute_normalization(#[case] layout: MessageRecordLayout) {
+        let body = AttributeName::try_from("audit_counter")
+            .unwrap()
+            .build_value(&AttrValue::U32(7))
+            .unwrap()
+            .serialize(WIDTHS.offsets, WIDTHS.lengths.get())
+            .unwrap();
+        let region = OhRegion::new(
+            layout.record_with_creation_index(
+                MessageType::ATTRIBUTE,
+                MessageFlags::NONE,
+                17,
+                &body,
+            ),
+            ObjectHeaderPrefix::with_layout(layout),
+        );
+        assert!(
+            region
+                .splice_first(MessageType::ATTRIBUTE_INFO)
+                .unwrap()
+                .is_none()
+        );
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        let expected = build_v2_object_header(&region).unwrap();
+        let expected =
+            WriteEngine::gather_oh_messages(&BytesSource::new(expected), 0, addresses).unwrap();
+        let bytes = build_v2_object_header_allocation(
+            &region,
+            WIDTHS,
+            Extent::new(StoredAddress::ZERO, 8_192).unwrap(),
+        )
+        .unwrap();
+        let actual = WriteEngine::gather_oh_messages(&BytesSource::new(bytes), 0, addresses)
+            .unwrap()
+            .without_nil()
+            .unwrap();
+        assert_eq!(&actual[..], &expected[..]);
+        assert!(
+            actual
+                .splice_first(MessageType::ATTRIBUTE_INFO)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

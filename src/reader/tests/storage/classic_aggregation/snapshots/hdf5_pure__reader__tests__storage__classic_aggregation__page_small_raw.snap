@@ -22,12 +22,12 @@ Allocation extents (bytes, exclusive end)
   Live metadata            0     48      48
   Live metadata          344    415      71
   Live metadata          415    471      56
-  Live metadata          471    611     140
+  Live metadata          471    818     347
   Live raw data        4,096  4,160      64
-  Free-space managers    611    693      82
-  Free-space managers    693    746      53
-  Free-space managers    746    828      82
-  Free-space managers    828  1,070     242
+  Free-space managers    818    900      82
+  Free-space managers    900    953      53
+  Free-space managers    953  1,035      82
+  Free-space managers  1,035  1,070      35
   Reusable free space     48    344     296
   Reusable free space  1,070  4,096   3,026
   Reusable free space  4,160  8,192   4,032
@@ -56,13 +56,13 @@ Allocation extents (bytes, exclusive end)
   Live metadata           48    119      71
   Live metadata          119    192      73
   Live metadata          344    415      71
-  Live metadata        1,070  1,210     140
+  Live metadata        1,070  1,381     311
   Live raw data        4,096  4,160      64
   Live raw data        4,160  4,224      64
-  Free-space managers  1,210  1,292      82
-  Free-space managers  1,292  1,363      71
-  Free-space managers  1,363  1,445      82
-  Free-space managers  1,445  1,651     206
+  Free-space managers  1,381  1,463      82
+  Free-space managers  1,463  1,534      71
+  Free-space managers  1,534  1,616      82
+  Free-space managers  1,616  1,651      35
   Reusable free space    192    344     152
   Reusable free space    415  1,070     655
   Reusable free space  1,651  4,096   2,445
@@ -93,14 +93,14 @@ Allocation extents (bytes, exclusive end)
   Live metadata          192    263      71
   Live metadata          344    415      71
   Live metadata          415    505      90
-  Live metadata        1,651  1,791     140
+  Live metadata        1,651  1,962     311
   Live raw data        4,096  4,160      64
   Live raw data        4,160  4,224      64
   Live raw data        4,224  4,288      64
-  Free-space managers  1,791  1,873      82
-  Free-space managers  1,873  1,962      89
   Free-space managers  1,962  2,044      82
-  Free-space managers  2,044  2,250     206
+  Free-space managers  2,044  2,133      89
+  Free-space managers  2,133  2,215      82
+  Free-space managers  2,215  2,250      35
   Reusable free space    119    192      73
   Reusable free space    263    344      81
   Reusable free space    505  1,651   1,146
@@ -133,15 +133,15 @@ Allocation extents (bytes, exclusive end)
   Live metadata          192    263      71
   Live metadata          344    415      71
   Live metadata          505    612     107
-  Live metadata          612    752     140
+  Live metadata          612    941     329
   Live raw data        4,096  4,160      64
   Live raw data        4,160  4,224      64
   Live raw data        4,224  4,288      64
   Live raw data        4,288  4,352      64
-  Free-space managers    752    834      82
-  Free-space managers    834    923      89
-  Free-space managers    923  1,005      82
-  Free-space managers  1,005  1,229     224
+  Free-space managers    941  1,023      82
+  Free-space managers  1,023  1,112      89
+  Free-space managers  1,112  1,194      82
+  Free-space managers  1,194  1,229      35
   Reusable free space    190    192       2
   Reusable free space    263    344      81
   Reusable free space    415    505      90
@@ -175,16 +175,16 @@ Allocation extents (bytes, exclusive end)
   Live metadata          263    334      71
   Live metadata          344    415      71
   Live metadata        1,229  1,353     124
-  Live metadata        1,353  1,493     140
+  Live metadata        1,353  1,682     329
   Live raw data        4,096  4,160      64
   Live raw data        4,160  4,224      64
   Live raw data        4,224  4,288      64
   Live raw data        4,288  4,352      64
   Live raw data        4,352  4,416      64
-  Free-space managers  1,493  1,575      82
-  Free-space managers  1,575  1,664      89
-  Free-space managers  1,664  1,746      82
-  Free-space managers  1,746  1,970     224
+  Free-space managers  1,682  1,764      82
+  Free-space managers  1,764  1,853      89
+  Free-space managers  1,853  1,935      82
+  Free-space managers  1,935  1,970      35
   Reusable free space    190    192       2
   Reusable free space    334    344      10
   Reusable free space    415  1,229     814
@@ -219,17 +219,17 @@ Allocation extents (bytes, exclusive end)
   Live metadata          344    415      71
   Live metadata          415    486      71
   Live metadata          486    627     141
-  Live metadata        1,970  2,110     140
+  Live metadata        1,970  2,299     329
   Live raw data        4,096  4,160      64
   Live raw data        4,160  4,224      64
   Live raw data        4,224  4,288      64
   Live raw data        4,288  4,352      64
   Live raw data        4,352  4,416      64
   Live raw data        4,416  4,480      64
-  Free-space managers  2,110  2,192      82
-  Free-space managers  2,192  2,281      89
-  Free-space managers  2,281  2,363      82
-  Free-space managers  2,363  2,587     224
+  Free-space managers  2,299  2,381      82
+  Free-space managers  2,381  2,470      89
+  Free-space managers  2,470  2,552      82
+  Free-space managers  2,552  2,587      35
   Reusable free space    190    192       2
   Reusable free space    334    344      10
   Reusable free space    627  1,970   1,343

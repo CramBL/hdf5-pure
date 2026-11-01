@@ -329,9 +329,13 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
         "owned storage",
         "bytes",
         [
-            ("extension", 160),
+            ("extension encoding", 160),
+            ("extension allocation", plan.extension.len()),
             ("manager encoding", reserved.encoded_bytes),
-            ("manager allocations", plan.tail.allocation.len() - 160),
+            (
+                "manager allocations",
+                plan.tail.allocation.len() - plan.extension.len(),
+            ),
             ("complete reservation", plan.tail.allocation.len()),
         ],
     );
@@ -552,8 +556,9 @@ fn extent(start: u64, length: u64) -> Extent {
 }
 
 fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, extension: u64) {
-    let mut cursor = plan.tail.allocation.start().checked_add(extension).unwrap();
-    let mut padded = false;
+    assert_eq!(plan.extension.start(), plan.tail.allocation.start());
+    assert!(plan.extension.len() > extension);
+    let mut cursor = plan.extension.end();
     for block in &plan.blocks {
         assert_eq!(block.header_address, cursor);
         cursor = cursor.checked_add(block.header.len() as u64).unwrap();
@@ -568,8 +573,10 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
         let sections =
             format::parse_section_info(widths, &block.section_list, block.header_address, &header)
                 .unwrap();
-        padded |= format::free_space_manager_len(widths, &sections)
-            < (block.header.len() + block.section_list.len()) as u64;
+        assert_eq!(
+            format::free_space_manager_len(widths, &sections),
+            (block.header.len() + block.section_list.len()) as u64
+        );
         assert!(sections.iter().all(|section| {
             !AddressRange::new(section.addr, section.size)
                 .unwrap()
@@ -577,5 +584,4 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
         }));
     }
     assert_eq!(cursor, plan.tail.allocation.end());
-    assert!(padded);
 }

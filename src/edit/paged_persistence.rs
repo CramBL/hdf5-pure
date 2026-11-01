@@ -15,9 +15,11 @@ use crate::width::FormatWidths;
 pub(super) struct PagedPersistencePlan {
     /// The complete reservation, final EOA, and free-space state to adopt.
     pub tail: PagedTail,
+    /// The complete superblock-extension allocation, including surplus capacity.
+    pub extension: Extent,
     /// The manager addresses to record in File Space Info, undefined for inactive managers.
     pub slots: [StoredAddress; NUM_FILE_FSM_MANAGERS],
-    /// The encoded managers, with surplus capacity owned by the final section list.
+    /// The manager headers and section lists at their measured lengths.
     pub blocks: Vec<EncodedManager>,
 }
 
@@ -25,8 +27,8 @@ impl PagedPersistencePlan {
     /// Plans placement using only durable free space or appended metadata pages.
     ///
     /// Bounds section-list capacity from semantic sections and reservation effects before
-    /// placement. Retains each candidate's projection for measurement and encoding. Encodes
-    /// surplus capacity as section-list padding, so allocation does not depend on exact
+    /// placement. Retains each candidate's projection for measurement and encoding. Assigns
+    /// surplus capacity to the superblock extension, so allocation does not depend on exact
     /// serialized-size convergence. Returns `None` when `reuse_only` is set and no reservation fits.
     ///
     /// # Errors
@@ -50,6 +52,7 @@ impl PagedPersistencePlan {
         if let Some(tail) = space.plan_paged_tail(eoa, freed, old_blocks, extension_len, false)? {
             if tail.post.admitted_snapshot().sections().next().is_none() {
                 return Ok(Some(Self {
+                    extension: tail.allocation,
                     tail,
                     slots: [StoredAddress::undefined(widths.offsets); NUM_FILE_FSM_MANAGERS],
                     blocks: Vec::new(),
@@ -112,7 +115,15 @@ impl PagedPersistencePlan {
                 "the PAGE manager capacity does not contain the final manager set".into(),
             ));
         }
-        let start = tail.allocation.start().checked_add(extension_len)?;
+        let extension = tail
+            .allocation
+            .len()
+            .checked_sub(measured)
+            .and_then(|len| Extent::new(tail.allocation.start(), len))
+            .ok_or_else(|| {
+                FormatError::Internal("the PAGE extension allocation is empty".into())
+            })?;
+        let start = extension.end();
         let plan = managers.into_plan(start)?;
         let slots = plan.slots;
         let blocks = plan
@@ -120,6 +131,7 @@ impl PagedPersistencePlan {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(Self {
             tail,
+            extension,
             slots,
             blocks,
         }))

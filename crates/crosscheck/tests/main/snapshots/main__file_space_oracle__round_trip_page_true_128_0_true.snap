@@ -1,5 +1,5 @@
 ---
-source: crates/crosscheck/tests/main/file_space_oracle.rs
+source: crates/crosscheck/tests/main/test_util/file_space.rs
 expression: report
 ---
 checkpoint
@@ -394,8 +394,8 @@ free-space sections (stored addresses, byte lengths)
   index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x0000014f        0x00000010       0x0000014f      0x00000010  yes
-      1         0x00000702        0x00000210       0x00000702      0x00000210  yes
-      2         0x00000a32        0x000005ce       0x00000a32      0x000005ce  yes
+      1         0x00000702        0x0000030c       0x00000702      0x0000030c  yes
+      2         0x00000b2e        0x000004d2       0x00000b2e      0x000004d2  yes
       3         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
       4         0x00002000        0x00001000       0x00002000      0x00001000  yes
       5         0x00005ee0        0x00000120       0x00005ee0      0x00000120  yes
@@ -441,8 +441,8 @@ free-space sections (stored addresses, byte lengths)
   -----  -----------------  ----------------  ---------------  --------------  -----
       0         0x0000014f        0x00000010       0x0000014f      0x00000010  yes
       1         0x00000332        0x00000045       0x00000332      0x00000045  yes
-      2         0x000006d4        0x0000023e       0x000006d4      0x0000023e  yes
-      3         0x00000a32        0x000005ce       0x00000a32      0x000005ce  yes
+      2         0x000006d4        0x0000033a       0x000006d4      0x0000033a  yes
+      3         0x00000b2e        0x000004d2       0x00000b2e      0x000004d2  yes
       4         0x00001320        0x00000ce0       0x00001320      0x00000ce0  yes
 
 free-space totals

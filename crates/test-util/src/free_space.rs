@@ -94,11 +94,12 @@ pub fn oversized_section_list() -> Vec<u8> {
 ///
 /// Sections are `(stored_address, length)` pairs, grouped by length in the section list. The
 /// fixed header fields and section-list prefix are copied from [`single_section_header`] and
-/// [`single_section_info`]. Section extents may be invalid.
+/// [`single_section_info`]. Encodes group counts using the fewest bytes that hold the total
+/// section count, with a one-byte minimum. Section extents may be invalid.
 ///
 /// # Panics
 ///
-/// Panics if the section count exceeds [`u8::MAX`] or their lengths sum to more than [`u64::MAX`].
+/// Panics if section lengths sum to more than [`u64::MAX`].
 ///
 /// # Examples
 ///
@@ -121,7 +122,13 @@ pub fn raw_manager_eight(
     /// HDF5 2.2.0.
     const SECTION_CLASS_SIMPLE: u8 = 0;
 
-    let count = u8::try_from(sections.len()).unwrap();
+    let count = u64::try_from(sections.len()).unwrap();
+    let count_width = usize::try_from(
+        (u64::BITS - count.leading_zeros())
+            .div_ceil(u8::BITS)
+            .max(1),
+    )
+    .unwrap();
     let mut sets: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for &(address, length) in sections {
         sets.entry(length).or_default().push(address);
@@ -129,7 +136,11 @@ pub fn raw_manager_eight(
     let mut list = single_section_info()[..13].to_vec();
     list[5..13].copy_from_slice(&header_address.to_le_bytes());
     for (length, addresses) in sets {
-        list.push(u8::try_from(addresses.len()).unwrap());
+        crate::bytes::push_uint(
+            &mut list,
+            u64::try_from(addresses.len()).unwrap(),
+            count_width,
+        );
         list.extend_from_slice(&length.to_le_bytes());
         for address in addresses {
             list.extend_from_slice(&address.to_le_bytes());
@@ -144,8 +155,8 @@ pub fn raw_manager_eight(
         .unwrap();
     for (at, value) in [
         (6, total),
-        (14, u64::from(count)),
-        (22, u64::from(count)),
+        (14, count),
+        (22, count),
         (54, list_address),
         (62, u64::try_from(list.len()).unwrap()),
         (70, u64::try_from(list.len()).unwrap()),
@@ -163,4 +174,34 @@ fn hex(digits: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&digits[i..i + 2], 16).unwrap())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::one_byte(255, 1)]
+    #[case::two_bytes(256, 2)]
+    #[case::last_two_bytes(65_535, 2)]
+    #[case::three_bytes(65_536, 3)]
+    fn section_sets_use_the_total_count_width(#[case] count: u64, #[case] width: usize) {
+        let sections = (0..count)
+            .map(|index| (index * 4, index % 2 + 1))
+            .collect::<Vec<_>>();
+        let (_, list) = raw_manager_eight(619, 701, &sections);
+        let prefix = SECTIONS_SIGNATURE.len() + size_of::<u8>() + size_of::<u64>();
+        let record = size_of::<u64>() + size_of::<u8>();
+        let fields = width + size_of::<u64>();
+        let first = count.div_ceil(2);
+        assert_eq!(crate::bytes::uint_at(&list, prefix, width), first);
+        let second = prefix + fields + usize::try_from(first).unwrap() * record;
+        assert_eq!(crate::bytes::uint_at(&list, second, width), count / 2);
+        assert_eq!(
+            list.len(),
+            prefix + 2 * fields + usize::try_from(count).unwrap() * record + size_of::<u32>()
+        );
+    }
 }

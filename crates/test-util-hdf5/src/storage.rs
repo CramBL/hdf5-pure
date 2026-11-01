@@ -48,16 +48,43 @@ pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<AddressRange<Phys
         bytes,
         file.resolve_address(sb.root_group_address).unwrap(),
     ));
+    extents.extend(extension_extents(file, bytes));
+    extents
+}
+
+/// Returns manager allocations and all chunks of the superblock extension.
+///
+/// Includes complete section-list capacity. Extension headers must use version 2.
+///
+/// # Panics
+///
+/// Panics if metadata cannot be read from `bytes`, a continuation address is repeated, or an
+/// address or allocation size cannot be represented.
+pub fn manager_and_extension_extents(
+    file: &File,
+    bytes: &[u8],
+) -> Vec<AddressRange<PhysicalAddress>> {
+    let mut extents = manager_extents(file, bytes);
+    extents.extend(extension_extents(file, bytes));
+    extents
+}
+
+/// Returns all chunks of a present version 2 superblock extension.
+///
+/// Returns an empty vector if the extension address is absent or undefined.
+///
+/// # Panics
+///
+/// Panics if the extension cannot be read from `bytes`, a continuation address is repeated, or
+/// an address or allocation size cannot be represented.
+fn extension_extents(file: &File, bytes: &[u8]) -> Vec<AddressRange<PhysicalAddress>> {
+    let sb = file.superblock();
     if let Some(extension) = sb.superblock_extension_address
         && !extension.is_undefined(sb.offset_size)
     {
-        extents.extend(header_extents(
-            file,
-            bytes,
-            file.resolve_address(extension).unwrap(),
-        ));
+        return header_extents(file, bytes, file.resolve_address(extension).unwrap());
     }
-    extents
+    Vec::new()
 }
 
 /// Returns each persisted manager's header and complete section-list allocation.

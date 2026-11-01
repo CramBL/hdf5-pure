@@ -134,12 +134,13 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     for i in 0..3 {
         let (before, before_capacity) = {
             let file = File::open_rw(&path).unwrap();
-            let capacity: u64 = reader_test_util::ownership(&file)
-                .unwrap()
-                .free_space_manager_space
+            let ownership = reader_test_util::ownership(&file).unwrap();
+            let capacity = ownership
+                .live_metadata_space
                 .iter()
+                .chain(&ownership.free_space_manager_space)
                 .map(|&(_, len)| len)
-                .sum();
+                .sum::<u64>();
             (file.reusable_free_sections().unwrap(), capacity)
         };
         let f = File::open_rw(&path).unwrap();
@@ -180,18 +181,19 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             start_len,
             "commit {i}: rewriting the tail must not grow the file"
         );
-        // Free bytes plus complete manager capacity stay constant when the file does not grow.
+        // Free bytes plus complete metadata capacity stay constant when the file does not grow.
         if i > 0 {
             let before_total = before.free_bytes();
             let after_total: u64 = f.reusable_space_stats().unwrap().reusable_free_bytes();
+            let ownership = reader_test_util::ownership(&f).unwrap();
+            let metadata = ownership
+                .live_metadata_space
+                .iter()
+                .chain(&ownership.free_space_manager_space)
+                .map(|&(_, len)| len)
+                .sum::<u64>();
             assert_eq!(
-                after_total
-                    + reader_test_util::ownership(&f)
-                        .unwrap()
-                        .free_space_manager_space
-                        .iter()
-                        .map(|&(_, len)| len)
-                        .sum::<u64>(),
+                after_total + metadata,
                 before_total + before_capacity,
                 "commit {i}: rewriting the tail must conserve free space"
             );
