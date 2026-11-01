@@ -243,6 +243,8 @@ pub use crate::global_heap::GlobalHeapObject;
 pub use crate::global_heap::GlobalHeapPayloadRef;
 pub use crate::global_heap::GlobalHeapWalk;
 pub use crate::global_heap::encode_global_heap_collection;
+pub use crate::group_info::GroupEstimates;
+pub use crate::group_info::GroupInfo;
 pub use crate::group_info::GroupInfoError;
 pub use crate::group_info::GroupPhaseChange;
 pub use crate::link_info::LinkInfoMessage;
