@@ -7,7 +7,6 @@ use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
-use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -142,12 +141,12 @@ impl WriteEngine {
     ///
     /// [layout]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     /// [links]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
-    pub(super) fn read_object<S: Source + ?Sized>(
-        src: &S,
+    pub(super) fn read_object(
+        src: &(impl OriginalSource + ?Sized),
         access_mode: AccessMode,
         addr: u64,
-        base: AddressContext,
     ) -> Result<ObjModel, Error> {
+        let base = src.addresses();
         let region = Self::gather_oh_messages(src, addr, base)?;
 
         reject_external_storage(&region)?;
@@ -169,7 +168,7 @@ impl WriteEngine {
 
         // Read dense attributes into owned messages and check that they can be serialized.
         let dense_attrs = if dense {
-            let stored = attributes::read_object_attrs(src, access_mode, addr, base)?;
+            let stored = attributes::read_object_attrs(src, access_mode, addr)?;
             let set = attributes::dense_attr_set(&region, stored)?;
             DenseAttrSet::new(set.attrs, set.creation, [])?
         } else {
@@ -840,7 +839,6 @@ impl CopyReader<'_> {
             &src,
             access_mode,
             id.header_address().get(),
-            src.addresses(),
         )?);
         if cross_file {
             let (region, dense_attrs) = source.header();

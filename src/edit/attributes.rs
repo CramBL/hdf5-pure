@@ -6,7 +6,6 @@ use hdf5_pure_format::__private::{
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
-use crate::address::AddressContext;
 use crate::attribute::{AttributeMessage, StoredAttribute};
 use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_request::AttributeName;
@@ -17,7 +16,8 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
-use crate::source::{BaseOffsetSource, Source, SourceMetadata};
+use crate::source::OriginalSource;
+use crate::source::SourceMetadata;
 use crate::type_builders::{self, AttrValue};
 
 use super::WriteEngine;
@@ -401,9 +401,8 @@ pub(super) struct DenseAttrEdit {
 /// Returns [`Error::EditUnsupported`] if an edit cannot be reproduced, a required attribute is
 /// absent, creation indexes are exhausted, or conversion to dense storage would prevent
 /// reference patching. Propagates source-read, parsing, and storage-planning errors.
-pub(super) fn plan_attr_ops<S: Source + ?Sized>(
-    src: &S,
-    base: AddressContext,
+pub(super) fn plan_attr_ops(
+    src: &(impl OriginalSource + ?Sized),
     addr: Option<u64>,
     region: &OhRegion,
     ops: &[&AttrOp],
@@ -442,7 +441,7 @@ pub(super) fn plan_attr_ops<S: Source + ?Sized>(
 
     // Read the full stored set before applying dense edits. New groups have no stored set.
     let existing = match addr {
-        Some(addr) => read_object_attrs(src, AccessMode::ReadWrite, addr, base)?,
+        Some(addr) => read_object_attrs(src, AccessMode::ReadWrite, addr)?,
         None => Vec::new(),
     };
     // Keep each attribute with its creation index and pending collections during editing.
@@ -636,19 +635,19 @@ fn strip_attr_messages(region: &OhRegion) -> Result<OhRegion, Error> {
 
 /// Reads an object's compact or dense attributes into owned messages.
 ///
-/// Frames heap reads relative to the file's effective base address. The caller checks whether
-/// the resulting set can be rebuilt after applying any edits.
+/// Resolves heap addresses using the opened source's effective address context. The caller
+/// checks whether the resulting set can be rebuilt after applying any edits.
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if the effective base exceeds the source length.
 /// Propagates header parsing, attribute parsing, and source-read errors.
-pub(super) fn read_object_attrs<S: Source + ?Sized>(
-    src: &S,
+pub(super) fn read_object_attrs(
+    src: &(impl OriginalSource + ?Sized),
     access_mode: AccessMode,
     addr: u64,
-    base: AddressContext,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
+    let base = src.addresses();
     let header = ObjectHeader::parse_from_source_with_widths(
         &SourceMetadata(src),
         access_mode,
@@ -661,14 +660,8 @@ pub(super) fn read_object_attrs<S: Source + ?Sized>(
             "this file's userblock is larger than the file itself",
         ));
     }
-    // Read heap addresses through the source framed at the effective base.
-    let framed = BaseOffsetSource {
-        inner: src,
-        base: base.effective_base(),
-    };
     crate::attribute::extract_stored_attributes_from_source(
-        &framed,
-        base,
+        src,
         access_mode,
         &header,
         crate::file_writer::WIDTHS,

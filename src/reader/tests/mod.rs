@@ -11,6 +11,7 @@ use test_util::widths::Widths;
 
 use super::*;
 use crate::PhysicalAddress;
+use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 use crate::dataspace::DataspaceType;

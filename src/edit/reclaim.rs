@@ -284,11 +284,10 @@ impl WriteEngine {
             return Some(Vec::new());
         };
 
+        let opened = self.opened_source();
+        let stored = PhysicalSource::new(&opened).stored();
         let index = crate::attribute::collect_dense_attribute_index_storage_extents(
-            &BaseOffsetSource {
-                inner: &self.image(),
-                base: self.context.addresses().effective_base(),
-            },
+            &stored,
             &attr_info,
             self.widths(),
         )
@@ -556,12 +555,7 @@ impl WriteEngine {
             );
             return;
         }
-        match Self::read_object(
-            &self.image(),
-            AccessMode::ReadWrite,
-            addr,
-            self.context.addresses(),
-        ) {
+        match Self::read_object(&self.opened_source(), AccessMode::ReadWrite, addr) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
                 self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
             }
@@ -1334,10 +1328,8 @@ impl WriteEngine {
         let Some(heap) = info.fractal_heap_address else {
             return Ok(true);
         };
-        let source = BaseOffsetSource {
-            inner: &self.image(),
-            base: self.context.addresses().effective_base(),
-        };
+        let opened = self.opened_source();
+        let source = PhysicalSource::new(&opened).stored();
         let index = crate::attribute::collect_dense_attribute_index_storage_extents(
             &source,
             &info,
@@ -1353,7 +1345,6 @@ impl WriteEngine {
         crate::attribute::visit_dense_attribute_messages_from_source(
             &source,
             AccessMode::ReadWrite,
-            self.context.addresses(),
             &info,
             heap,
             self.widths(),

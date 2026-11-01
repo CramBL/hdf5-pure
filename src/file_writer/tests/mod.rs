@@ -8,6 +8,7 @@ use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
+use crate::source;
 use crate::superblock::Superblock;
 use crate::type_builders;
 
@@ -1147,9 +1148,8 @@ fn dense_attrs_self_roundtrip() {
     )
     .unwrap();
     let attrs = crate::attribute::extract_attributes_full(
-        &bytes,
+        source::zero_base_bytes(&bytes),
         AccessMode::ReadOnly,
-        AddressContext::from_effective_base(BaseAddress::new(0)),
         &hdr,
         WIDTHS,
         None,
@@ -1194,9 +1194,8 @@ fn dense_attrs_root_group_self_roundtrip() {
     )
     .unwrap();
     let attrs = crate::attribute::extract_attributes_full(
-        &bytes,
+        source::zero_base_bytes(&bytes),
         AccessMode::ReadOnly,
-        AddressContext::from_effective_base(BaseAddress::new(0)),
         &oh,
         WIDTHS,
         None,
@@ -1725,9 +1724,8 @@ fn attributes_survive_a_heap_with_nested_indirect_blocks() {
     )
     .unwrap();
     let attrs = crate::attribute::extract_attributes_full(
-        &bytes,
+        source::zero_base_bytes(&bytes),
         AccessMode::ReadOnly,
-        AddressContext::from_effective_base(BaseAddress::new(0)),
         &hdr,
         WIDTHS,
         None,

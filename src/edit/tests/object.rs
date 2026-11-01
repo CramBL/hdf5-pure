@@ -510,7 +510,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
             let base = engine.addresses();
             for _ in 0..DEEP_NESTING {
                 let object =
-                    WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
+                    WriteEngine::read_object(&engine.opened_source(), AccessMode::ReadWrite, addr)
                         .unwrap();
                 let ObjModel::Group {
                     region,
@@ -530,8 +530,9 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                 );
                 addr = base.resolve(link.target).unwrap().get();
             }
-            let leaf = WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
-                .unwrap();
+            let leaf =
+                WriteEngine::read_object(&engine.opened_source(), AccessMode::ReadWrite, addr)
+                    .unwrap();
             let ObjModel::Group {
                 region,
                 links,
@@ -580,13 +581,9 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
     FileBuilder::new().write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let addr = engine.write_copy_subtree(&tree).unwrap();
-    let ObjModel::Group { region, links, .. } = WriteEngine::read_object(
-        engine.image(),
-        AccessMode::ReadWrite,
-        addr,
-        engine.addresses(),
-    )
-    .unwrap() else {
+    let ObjModel::Group { region, links, .. } =
+        WriteEngine::read_object(&engine.opened_source(), AccessMode::ReadWrite, addr).unwrap()
+    else {
         panic!("expected a group at {addr}");
     };
     assert_eq!(
@@ -663,10 +660,12 @@ fn read_object_with_messages(
 ) -> Result<ObjModel, Error> {
     let header = v2_bytes::Header::new().messages(messages).build();
     WriteEngine::read_object(
-        &BytesSource::new(header.as_slice()),
+        &OpenedSource::for_test(
+            &BytesSource::new(header.as_slice()),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+        ),
         AccessMode::ReadWrite,
         0,
-        AddressContext::from_effective_base(BaseAddress::ZERO),
     )
 }
 

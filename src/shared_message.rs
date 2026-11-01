@@ -18,9 +18,11 @@ pub use hdf5_pure_format::__private::encode_sohm_ref;
 pub use hdf5_pure_format::__private::parse_shared_ref_with_widths;
 
 use crate::access_mode::AccessMode;
+#[cfg(test)]
 use crate::address::AddressContext;
-use crate::address::BaseAddressExt;
-use crate::address::{BaseAddress, StoredAddress};
+#[cfg(test)]
+use crate::address::BaseAddress;
+use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
@@ -28,101 +30,32 @@ use crate::object_header::ObjectHeader;
 use crate::sohm::SohmTable;
 use crate::source::OriginalSource;
 use crate::source::PhysicalSource;
-use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::source::StoredBytes;
 use crate::width::FormatWidths;
 
-/// Resolves references against a whole-file slice, already framed at the file's
-/// base address (shared-message addresses are stored relative to it).
-pub struct LegacyBufferedResolver<'a> {
-    file_data: &'a [u8],
-    addresses: AddressContext,
+/// Resolves shared messages by borrowing the resident image at stored addresses.
+pub(crate) struct StoredResolver<'a> {
+    source: StoredBytes<'a>,
     access_mode: AccessMode,
     widths: FormatWidths,
     sohm: Option<&'a SohmTable>,
 }
 
-impl<'a> LegacyBufferedResolver<'a> {
-    /// Creates a resolver for an image framed at the effective base in `addresses`.
+impl<'a> StoredResolver<'a> {
+    /// Creates a resolver that borrows resident object headers and heap metadata.
     ///
     /// `sohm` is the file's shared-message table. A heap reference requires this table.
-    /// Read-write access requires complete direct-block checksum validation for heap messages.
+    /// Read-write access requires complete validation of checksummed direct blocks for managed
+    /// heap objects.
     pub fn new(
-        file_data: &'a [u8],
-        addresses: AddressContext,
-        access_mode: AccessMode,
-        widths: FormatWidths,
-        sohm: Option<&'a SohmTable>,
-    ) -> Self {
-        Self {
-            file_data,
-            addresses,
-            access_mode,
-            widths,
-            sohm,
-        }
-    }
-}
-
-impl SharedResolver for LegacyBufferedResolver<'_> {
-    fn resolve(&self, reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError> {
-        let parsed = parse_shared_ref_with_widths(reference, self.widths)?;
-        let addr = match parsed.location {
-            SharedLocation::SohmHeap(id) => {
-                let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
-                return crate::sohm::legacy_read_heap_message(
-                    self.file_data,
-                    self.access_mode,
-                    self.addresses,
-                    table,
-                    target,
-                    &id,
-                    self.widths,
-                );
-            }
-            SharedLocation::ObjectHeader(addr) => addr,
-        };
-        let header = ObjectHeader::parse_with_widths(
-            self.file_data,
-            self.access_mode,
-            addr.get().to_usize()?,
-            self.widths,
-        )?;
-        select_shared_message(&header, target, addr.get())
-    }
-
-    fn committed_address(&self, reference: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
-        committed_address_in_with_widths(reference, self.widths)
-    }
-}
-
-/// Resolves shared messages by reading object headers and heap objects through a [`Source`].
-///
-/// The source is framed at the effective base in [`AddressContext`].
-pub struct LegacySourceResolver<'a, S: Source + ?Sized> {
-    source: &'a S,
-    addresses: AddressContext,
-    access_mode: AccessMode,
-    widths: FormatWidths,
-    sohm: Option<&'a SohmTable>,
-}
-
-impl<'a, S: Source + ?Sized> LegacySourceResolver<'a, S> {
-    /// Creates a resolver for a source framed at the effective base in `addresses`.
-    ///
-    /// `sohm` is the file's shared-message table. A heap reference requires this table.
-    /// Read-write access requires complete direct-block checksum validation for heap messages.
-    pub fn new(
-        source: &'a S,
-        addresses: AddressContext,
+        source: StoredBytes<'a>,
         access_mode: AccessMode,
         widths: FormatWidths,
         sohm: Option<&'a SohmTable>,
     ) -> Self {
         Self {
             source,
-            addresses,
             access_mode,
             widths,
             sohm,
@@ -130,32 +63,34 @@ impl<'a, S: Source + ?Sized> LegacySourceResolver<'a, S> {
     }
 }
 
-impl<S: Source + ?Sized> SharedResolver for LegacySourceResolver<'_, S> {
+impl SharedResolver for StoredResolver<'_> {
     fn resolve(&self, reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError> {
-        let parsed = parse_shared_ref_with_widths(reference, self.widths)?;
+        let Self {
+            source,
+            access_mode,
+            widths,
+            sohm,
+        } = *self;
+        let parsed = parse_shared_ref_with_widths(reference, widths)?;
         let addr = match parsed.location {
             SharedLocation::SohmHeap(id) => {
-                let table = self.sohm.ok_or(FormatError::UnsupportedSohmReference)?;
-                return crate::sohm::legacy_read_heap_message_from_source(
-                    self.source,
-                    self.access_mode,
-                    self.addresses,
+                let table = sohm.ok_or(FormatError::UnsupportedSohmReference)?;
+                return crate::sohm::read_heap_message(
+                    source,
+                    access_mode,
                     table,
                     target,
                     &id,
-                    self.widths,
+                    widths,
                 );
             }
             SharedLocation::ObjectHeader(addr) => addr,
         };
-        // base_address 0 matches the buffered path, whose slice is already framed
-        // at the base address, so both treat the reference as absolute within it.
-        let header = ObjectHeader::parse_from_source_with_widths(
-            &SourceMetadata(self.source),
-            self.access_mode,
-            addr.get(),
-            self.widths,
-            BaseAddress::ZERO,
+        let header = ObjectHeader::parse_with_widths(
+            source.metadata_frame().bytes(),
+            access_mode,
+            addr.get().to_usize()?,
+            widths,
         )?;
         select_shared_message(&header, target, addr.get())
     }
@@ -228,50 +163,34 @@ impl<S: OriginalSource + ?Sized> SharedResolver for SourceResolver<'_, S> {
             widths,
             sohm,
         } = *self;
+        if let Some(resident) = resident {
+            return StoredResolver::new(resident, access_mode, widths, sohm)
+                .resolve(reference, target);
+        }
         let physical = PhysicalSource::new(source);
         let parsed = parse_shared_ref_with_widths(reference, widths)?;
         let address = match parsed.location {
             SharedLocation::SohmHeap(id) => {
                 let table = sohm.ok_or(FormatError::UnsupportedSohmReference)?;
-                return match resident {
-                    Some(resident) => crate::sohm::read_heap_message(
-                        resident,
-                        access_mode,
-                        table,
-                        target,
-                        &id,
-                        widths,
-                    ),
-                    None => crate::sohm::read_heap_message_from_source(
-                        &physical.stored(),
-                        access_mode,
-                        table,
-                        target,
-                        &id,
-                        widths,
-                    ),
-                };
+                return crate::sohm::read_heap_message_from_source(
+                    &physical.stored(),
+                    access_mode,
+                    table,
+                    target,
+                    &id,
+                    widths,
+                );
             }
             SharedLocation::ObjectHeader(address) => address,
         };
-        let header = match resident {
-            Some(resident) => ObjectHeader::parse_with_widths(
-                resident.metadata_frame().bytes(),
-                access_mode,
-                address.get().to_usize()?,
-                widths,
-            )?,
-            None => {
-                let addresses = source.addresses();
-                ObjectHeader::parse_from_source_with_widths(
-                    &SourceMetadata(source),
-                    access_mode,
-                    addresses.resolve(address)?.get(),
-                    widths,
-                    addresses.effective_base(),
-                )?
-            }
-        };
+        let addresses = source.addresses();
+        let header = ObjectHeader::parse_from_source_with_widths(
+            &SourceMetadata(source),
+            access_mode,
+            addresses.resolve(address)?.get(),
+            widths,
+            addresses.effective_base(),
+        )?;
         select_shared_message(&header, target, address.get())
     }
 
@@ -321,11 +240,14 @@ mod tests {
     #[cfg(feature = "std")]
     use crate::UserblockSize;
     #[cfg(feature = "std")]
+    use crate::address::BaseAddressExt;
+    #[cfg(feature = "std")]
     use crate::address::StoredAddressExt;
     use crate::message_flags::MessageFlags;
     use crate::object_header::HeaderMessage;
     #[cfg(feature = "std")]
     use crate::reader::OpenedSource;
+    use crate::source;
     #[cfg(feature = "std")]
     use crate::source::BytesSource;
 
@@ -468,11 +390,10 @@ mod tests {
     }
 
     #[test]
-    fn a_sohm_reference_without_a_table_is_refused_rather_than_followed() {
+    fn a_heap_reference_without_a_table_is_rejected() {
         let reference = encode_sohm_ref(&[0xFF; 8]);
-        let resolver = LegacyBufferedResolver::new(
-            &[],
-            AddressContext::from_effective_base(BaseAddress::new(0)),
+        let resolver = StoredResolver::new(
+            source::zero_base_bytes(&[]),
             AccessMode::ReadOnly,
             FormatWidths {
                 offsets: crate::width::OffsetWidth::Eight,

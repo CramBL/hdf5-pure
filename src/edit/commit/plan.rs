@@ -501,7 +501,7 @@ impl WriteEngine {
                 }
                 let region = Self::gather_oh_messages(&self.image(), addr, base)?;
                 let attributes =
-                    attributes::plan_attr_ops(&self.image(), base, Some(addr), &region, &ops)?;
+                    attributes::plan_attr_ops(&self.opened_source(), Some(addr), &region, &ops)?;
 
                 edits.moving_writes.push(DatasetRelocation {
                     parent,
@@ -699,7 +699,6 @@ impl WriteEngine {
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         incoming_links: &mut Option<Option<HashMap<u64, u32>>>,
     ) -> Result<GroupHeaders, Error> {
-        let base = self.context.addresses();
         let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
         let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
         for (key, node) in nodes.iter_mut() {
@@ -752,8 +751,7 @@ impl WriteEngine {
             if let Some(ops) = attrs_by_group.get(key) {
                 let region = std::mem::take(&mut node.prepared.region);
                 let edits = attributes::plan_attr_ops(
-                    &self.image(),
-                    base,
+                    &self.opened_source(),
                     existing_group_addrs.get(key).copied(),
                     &region,
                     ops,
