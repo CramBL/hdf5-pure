@@ -333,6 +333,25 @@ impl ManagerProjection {
         self.blocks.is_empty()
     }
 
+    /// Returns projected manager counts, section capacity, and measured encoding length.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> ManagerWork {
+        let Self {
+            blocks,
+            widths: _,
+            encoded_len,
+        } = self;
+        ManagerWork {
+            managers: blocks.len() as u64,
+            sections: blocks.iter().map(|block| block.sections.len() as u64).sum(),
+            section_capacity: blocks
+                .iter()
+                .map(|block| block.sections.capacity() as u64)
+                .sum(),
+            encoded_bytes: *encoded_len,
+        }
+    }
+
     /// Returns the combined header and section-list length before allocation padding.
     pub(crate) fn encoded_len(&self) -> u64 {
         self.encoded_len
@@ -387,6 +406,20 @@ impl ManagerProjection {
             end_of_managers: cursor,
         })
     }
+}
+
+/// Manager projection counts and measured encoding length.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ManagerWork {
+    /// Projected semantic managers.
+    pub(crate) managers: u64,
+    /// Wire sections in the projected managers.
+    pub(crate) sections: u64,
+    /// Combined section-vector capacity in elements.
+    pub(crate) section_capacity: u64,
+    /// Combined header and section-list length before allocation padding, in bytes.
+    pub(crate) encoded_bytes: u64,
 }
 
 /// One manager's semantic sections, wire class, slot, and measured section-list length.

@@ -198,7 +198,10 @@ impl<'a> ReservationPlan<'a> {
                     )
                     .into());
                 }
-                engine.append(&vec![0; extent.len().to_usize()?])?;
+                let length = extent.len().to_usize()?;
+                #[cfg(test)]
+                super::observations::record_zeros(length, length);
+                engine.append(&vec![0; length])?;
             }
             engine.space.record_transition(page_type, transition);
         }

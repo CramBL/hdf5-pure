@@ -8,6 +8,7 @@ use test_util::disk_log;
 use crate::Error;
 use crate::FormatError;
 use crate::image::FileImage;
+use crate::image::ImageWork;
 use crate::image::MirrorImage;
 use crate::image::WriteBuffering;
 use crate::source::Source;
@@ -139,6 +140,10 @@ impl PublicationFailureImage {
 }
 
 impl FileImage for PublicationFailureImage {
+    fn buffering_work(&self) -> ImageWork {
+        self.inner.buffering_work()
+    }
+
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.inner.disk_bytes()
     }

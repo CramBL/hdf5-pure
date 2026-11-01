@@ -1,0 +1,36 @@
+---
+source: src/image/observations/tests.rs
+expression: report
+---
+pending budget: 8
+pending:
+ImageWork {
+    pending_runs: 2,
+    pending_bytes: 4,
+    pending_capacity: 4,
+    flush_peak_bytes: 0,
+    flush_peak_capacity: 0,
+    clean_gap_calls: 0,
+    clean_gap_bytes: 0,
+    copied_bytes: 4,
+    write_calls: 0,
+    write_bytes: 0,
+    mirror_bytes: 128,
+    mirror_capacity: 128,
+}
+flushed:
+ImageWork {
+    pending_runs: 0,
+    pending_bytes: 0,
+    pending_capacity: 0,
+    flush_peak_bytes: 44,
+    flush_peak_capacity: 82,
+    clean_gap_calls: 1,
+    clean_gap_bytes: 38,
+    copied_bytes: 6,
+    write_calls: 1,
+    write_bytes: 42,
+    mirror_bytes: 128,
+    mirror_capacity: 128,
+}
+file growth: 0

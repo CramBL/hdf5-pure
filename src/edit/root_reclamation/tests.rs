@@ -20,6 +20,7 @@ use crate::Object;
 use crate::UserblockSize;
 use crate::edit::WriteEngine;
 use crate::image::FileImage;
+use crate::image::ImageWork;
 use crate::image::MirrorImage;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
@@ -481,6 +482,10 @@ impl FailingImage {
 }
 
 impl FileImage for FailingImage {
+    fn buffering_work(&self) -> ImageWork {
+        self.inner.buffering_work()
+    }
+
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.inner.disk_bytes()
     }

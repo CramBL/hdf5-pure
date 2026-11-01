@@ -1,0 +1,75 @@
+---
+source: src/edit/analysis/tests/foundations.rs
+expression: report
+---
+unique candidates: 2
+recorded origins: 3
+predecessor captured state:
+AnalysisWork {
+    topology_objects: 0,
+    topology_edges: 0,
+    link_name_bytes: 0,
+    cached_link_objects: 0,
+    reference_objects: 0,
+    collection_references: 0,
+    allocation_results: 2,
+    liveness_results: 0,
+    candidate_lookups: 0,
+}
+prospective topology:
+AnalysisWork {
+    topology_objects: 2,
+    topology_edges: 2,
+    link_name_bytes: 12,
+    cached_link_objects: 0,
+    reference_objects: 0,
+    collection_references: 0,
+    allocation_results: 0,
+    liveness_results: 0,
+    candidate_lookups: 0,
+}
+prospective references:
+AnalysisWork {
+    topology_objects: 2,
+    topology_edges: 2,
+    link_name_bytes: 12,
+    cached_link_objects: 0,
+    reference_objects: 2,
+    collection_references: 1,
+    allocation_results: 0,
+    liveness_results: 1,
+    candidate_lookups: 2,
+}
+parsed links/references: (2, 2)
+reference analysis complete: true
+retired allocations:
+[
+    (
+        FileRange {
+            range: AddressRange {
+                start: PhysicalAddress(
+                    560,
+                ),
+                end: PhysicalAddress(
+                    4656,
+                ),
+            },
+        },
+        Page(
+            Raw,
+        ),
+    ),
+]
+later candidate observations:
+AnalysisWork {
+    topology_objects: 2,
+    topology_edges: 2,
+    link_name_bytes: 12,
+    cached_link_objects: 0,
+    reference_objects: 2,
+    collection_references: 1,
+    allocation_results: 0,
+    liveness_results: 1,
+    candidate_lookups: 3,
+}
+later candidates reuse result: true

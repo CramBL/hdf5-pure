@@ -1,0 +1,61 @@
+---
+source: src/edit/observations/tests.rs
+expression: report
+---
+base: 4096
+original image: 8192
+planned end: 16464
+placements (stored, physical, allocation, encoding, page):
+[
+    (
+        4096,
+        8192,
+        64,
+        16,
+        Raw,
+    ),
+    (
+        8192,
+        12288,
+        48,
+        48,
+        Meta,
+    ),
+    (
+        12288,
+        16384,
+        80,
+        32,
+        Raw,
+    ),
+]
+reservation work:
+ReservationWork {
+    indexed_extents: 0,
+    lookups: 6,
+    removed_extents: 0,
+    inserted_extents: 0,
+    restored_extents: 0,
+}
+free sections:
+[]
+manager projection:
+ManagerWork {
+    managers: 0,
+    sections: 0,
+    section_capacity: 0,
+    encoded_bytes: 0,
+}
+encoded metadata bytes: 0
+encoded metadata capacity: 0
+zero generation:
+ZeroWork {
+    calls: 4,
+    bytes: 8176,
+    scratch_peak: 4048,
+}
+issued writes: 5
+issued bytes: 8272
+clean-gap read bytes: 0
+explicit buffer copy bytes: 192
+file growth: 8272
