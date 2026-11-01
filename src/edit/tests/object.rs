@@ -21,6 +21,7 @@ use test_util::object_header::v2::HeaderFlags;
 use test_util::widths::Widths;
 
 use super::common;
+use crate::Layout;
 use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::VariableLengthType;
@@ -57,6 +58,7 @@ use crate::edit::copy::CopyTree;
 use crate::edit::copy::CopyTreeBuilder;
 use crate::edit::copy::ObjModel;
 use crate::edit::group::GROUP_INFO_BODY;
+use crate::edit::staging::StagedOp;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
@@ -74,6 +76,7 @@ use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::File;
 use crate::reader::OpenedSource;
 use crate::source::BytesSource;
 use crate::superblock::LocatedSuperblock;
@@ -1711,6 +1714,91 @@ fn group_of_three_datasets() -> (Vec<u8>, u64) {
 }
 
 #[rstest]
+#[case::zero(0, 0)]
+#[case::userblock(512, 512)]
+#[case::forward(512, 1024)]
+#[case::backward(512, 0)]
+#[case::inserted_userblock(0, 512)]
+fn copied_subtrees_use_the_opened_signature(#[case] encoded_base: usize, #[case] signature: usize) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("copy-context.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(UserblockSize::try_from(u64::try_from(encoded_base).unwrap()).unwrap());
+    let mut group = builder.create_group("source");
+    group
+        .create_dataset("contiguous")
+        .with_i32_data(&[17, 29, 41, 53]);
+    group
+        .create_dataset("chunked")
+        .with_i32_data(&[61, 73, 89, 97])
+        .with_chunks(&[2]);
+    builder.add_group(group.finish());
+    let bytes = builder.finish().unwrap();
+    let mut relocated = vec![0; signature];
+    relocated.extend_from_slice(&bytes[encoded_base..]);
+    let source = File::from_bytes(relocated).unwrap();
+    assert_eq!(
+        source.superblock().base_address.get(),
+        u64::try_from(encoded_base).unwrap()
+    );
+    assert_eq!(
+        source
+            .relative_address(PhysicalAddress::new(u64::try_from(signature).unwrap()))
+            .unwrap()
+            .get(),
+        0
+    );
+    let addr = source.group("source").unwrap().header_address().unwrap();
+    let tree = source
+        .with_opened_source(|src| {
+            WriteEngine::read_copy_subtree(src, AccessMode::ReadOnly, addr, false, source.widths())
+        })
+        .unwrap();
+    source.close().unwrap();
+
+    FileBuilder::new().write(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.staged.push(StagedOp::CopyObjectFrom(
+        ObjectPathBuf::parse("copied"),
+        tree,
+    ));
+    engine.commit().unwrap();
+    drop(engine);
+
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.group("copied").unwrap().datasets().unwrap(),
+        ["contiguous", "chunked"]
+    );
+    assert_eq!(
+        file.dataset("copied/contiguous")
+            .unwrap()
+            .read_i32()
+            .unwrap(),
+        [17, 29, 41, 53]
+    );
+    assert!(matches!(
+        file.dataset("copied/contiguous").unwrap().layout().unwrap(),
+        Layout::Contiguous {
+            address: Some(_),
+            size: 16
+        }
+    ));
+    assert_eq!(
+        file.dataset("copied/chunked").unwrap().read_i32().unwrap(),
+        [61, 73, 89, 97]
+    );
+    assert_eq!(
+        file.dataset("copied/chunked")
+            .unwrap()
+            .chunk_shape()
+            .unwrap(),
+        Some(vec![2])
+    );
+    file.close().unwrap();
+}
+
+#[rstest]
 #[case::crosses_end(252)]
 #[case::starts_at_end(256)]
 #[case::endpoint_overflow(u64::MAX - 4)]
@@ -1763,7 +1851,6 @@ fn copy_reader<'a>(src: &'a BytesSource<&'a [u8]>) -> CopyReader<'a> {
         src: OpenedSource::for_test(src, AddressContext::from_effective_base(BaseAddress::ZERO)),
         access_mode: AccessMode::ReadWrite,
         cross_file: true,
-        base: AddressContext::from_effective_base(BaseAddress::ZERO),
         widths: crate::file_writer::WIDTHS,
     }
 }

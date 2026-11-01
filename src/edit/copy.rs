@@ -322,7 +322,6 @@ impl WriteEngine {
             src: *src,
             access_mode,
             cross_file,
-            base: src.addresses(),
             widths,
         }
         .read(COPY_BUDGET, addr)
@@ -758,13 +757,13 @@ pub(super) struct CopyLink<T> {
 }
 
 /// Reads a source subtree into the nodes of a [`CopyTree`].
+///
+/// Resolves stored addresses with the effective address context of `src`.
 pub(super) struct CopyReader<'a> {
     pub(super) src: OpenedSource<'a>,
     pub(super) access_mode: AccessMode,
     /// Whether `src` is another file, whose references the reader rejects.
     pub(super) cross_file: bool,
-    /// The address context of `src`.
-    pub(super) base: AddressContext,
     pub(super) widths: FormatWidths,
 }
 
@@ -835,14 +834,13 @@ impl CopyReader<'_> {
             src,
             access_mode,
             cross_file,
-            base,
             ..
         } = *self;
         let (source, links) = CopySource::split(WriteEngine::read_object(
             &src,
             access_mode,
             id.header_address().get(),
-            base,
+            src.addresses(),
         )?);
         if cross_file {
             let (region, dense_attrs) = source.header();
@@ -854,7 +852,7 @@ impl CopyReader<'_> {
             .map(|CopyLink { addr_off, target }| {
                 Ok(HardLink {
                     label: addr_off,
-                    target: ObjectId::resolve(base, target)?,
+                    target: ObjectId::resolve(src.addresses(), target)?,
                 })
             })
             .collect::<Result<_, FormatError>>()?;
@@ -880,9 +878,7 @@ impl CopyReader<'_> {
         object: GraphObject<CopySource, usize>,
         ids: &[CopyNodeId],
     ) -> Result<CopyNode, Error> {
-        let Self {
-            src, base, widths, ..
-        } = *self;
+        let Self { src, widths, .. } = *self;
         let GraphObject { value, links } = object;
         Ok(match value {
             CopySource::DatasetVerbatim {
@@ -903,7 +899,7 @@ impl CopyReader<'_> {
                 let data = if data_addr.is_undefined(OFFSET_WIDTH) {
                     None
                 } else {
-                    let start = base.resolve(data_addr)?.get();
+                    let start = src.addresses().resolve(data_addr)?.get();
                     start
                         .checked_add(data_size)
                         .filter(|&e| e <= src.len())
