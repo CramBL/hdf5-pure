@@ -47,6 +47,7 @@ use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 #[cfg(any(doc, test))]
 use crate::FileSpaceStrategy;
 use crate::FillTime;
+use crate::LinkPhaseChange;
 use crate::SuperblockVersion;
 use crate::appender::{BufferedAppender, OwnedBufferedAppender};
 use crate::attribute;
@@ -4457,6 +4458,54 @@ impl Group {
             *state = Some(at);
         }
         Ok(at.address)
+    }
+
+    /// Returns the effective link storage thresholds from the group's stored metadata.
+    ///
+    /// Uses default thresholds of eight compact links and six dense links when Group Info is
+    /// absent, including for legacy groups. Reads the policy independently of the current storage
+    /// form.
+    /// libhdf5 reports these thresholds through `H5Pget_link_phase_change`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotCommitted`] for a staged group before [`File::commit`],
+    /// [`Error::StaleHandle`] for an invalidated handle reached by reference, or
+    /// [`Error::NotAGroup`] if the resolved object is not a group.
+    /// Returns [`Error::Format`] for malformed Group Info or object header metadata, or a source
+    /// read failure. Path resolution errors are propagated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, LinkPhaseChange};
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_group_with("records", |_| Ok(()))?;
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.root().link_phase_change()?, LinkPhaseChange::default());
+    /// assert_eq!(file.group("records")?.link_phase_change()?, LinkPhaseChange::default());
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn link_phase_change(&self) -> Result<LinkPhaseChange, Error> {
+        let header = self.file.parse_header(self.header_address()?)?;
+        if !group_v2::is_group(&header) {
+            return Err(Error::NotAGroup(reported_path(self.path.as_ref())));
+        }
+        let mut messages = header
+            .messages
+            .iter()
+            .filter(|message| message.msg_type == MessageType::GROUP_INFO);
+        let Some(message) = messages.next() else {
+            return Ok(LinkPhaseChange::default());
+        };
+        if messages.next().is_some() {
+            return Err(FormatError::DuplicateGroupInfo.into());
+        }
+        Ok(LinkPhaseChange::from_group_info(
+            &self.file.message_body(message)?,
+            header.version,
+        )?)
     }
 
     /// List the names of datasets in this group.

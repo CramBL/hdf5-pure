@@ -27,6 +27,7 @@ pub mod free_space_damage;
 pub mod fuzz;
 pub mod generic_large;
 pub mod global_heap;
+pub mod group_info;
 pub mod identity;
 pub mod image;
 pub mod legacy;

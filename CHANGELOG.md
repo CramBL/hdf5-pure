@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `LinkPhaseChange` provides constant construction of checked group link thresholds, including always-dense storage and disabled compact reversion.
+- `LinkPhaseChange` provides constant construction of checked group link thresholds, including always-dense storage and disabled compact reversion. Group inspection reports the effective policy for root and nested groups ([#1041](https://github.com/CramBL/hdf5-pure/pull/1041)).
 
 - `H5Element` supports fixed byte-array and fixed ASCII dataset creation, reads, and appends, preserving each datatype and element width ([#979](https://github.com/CramBL/hdf5-pure/pull/979)).
 - `Dataset::append` initializes eligible empty datasets with an unallocated Extensible Array index, including through buffered appenders. Empty operations leave index and element storage unallocated ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).

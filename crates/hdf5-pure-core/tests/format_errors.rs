@@ -47,3 +47,22 @@ fn attribute_creation_diagnostics_preserve_their_fields(
 ) {
     assert_eq!(error.to_string(), expected);
 }
+
+#[rstest::rstest]
+#[case::duplicate(FormatError::DuplicateGroupInfo, "duplicate Group Info message")]
+#[case::flags(
+    FormatError::InvalidGroupInfoFlags(0x80),
+    "reserved bits in Group Info flags: 0x80"
+)]
+#[case::length(FormatError::InvalidGroupInfoLength { expected: 6, actual: 4 }, "Group Info message has 4 bytes, expected 6")]
+#[case::thresholds(FormatError::InvalidGroupInfoThresholds { max_compact: 3, min_dense: 4 }, "Group Info minimum dense count 4 exceeds maximum compact count 3")]
+#[case::version(
+    FormatError::InvalidGroupInfoVersion(1),
+    "unsupported Group Info version: 1"
+)]
+fn group_info_diagnostics_preserve_their_fields(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}

@@ -4,6 +4,9 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_format::__private::{GroupInfoError, GroupPhaseChange};
 
+#[cfg(feature = "std")]
+use crate::{FormatError, MessageType};
+
 /// The thresholds for transitions between compact and dense group link storage.
 ///
 /// Compact storage holds links in the object header. Dense storage holds links in a fractal heap.
@@ -43,6 +46,34 @@ impl LinkPhaseChange {
     /// [`LinkThresholdsBuilder::disable_compact_reversion`].
     pub const fn builder() -> LinkPhaseChangeBuilder {
         LinkPhaseChangeBuilder { _private: () }
+    }
+
+    /// Parses Group Info thresholds, excluding version 1 object header padding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidGroupInfoVersion`], [`FormatError::InvalidGroupInfoFlags`],
+    /// [`FormatError::InvalidGroupInfoLength`], or [`FormatError::InvalidGroupInfoThresholds`]
+    /// for malformed metadata. Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `bytes`
+    /// exceeds the message length range.
+    #[cfg(feature = "std")]
+    pub(crate) fn from_group_info(bytes: &[u8], header_version: u8) -> Result<Self, FormatError> {
+        let body = if header_version == PADDED_HEADER_VERSION {
+            let length = GroupPhaseChange::encoded_len(bytes)
+                .map_err(|error| group_info_error(error, bytes.len()))?;
+            bytes
+                .get(..length)
+                .ok_or(FormatError::InvalidGroupInfoLength {
+                    expected: length,
+                    actual: bytes.len(),
+                })?
+        } else {
+            bytes
+        };
+        Self::try_from(
+            GroupPhaseChange::parse(body).map_err(|error| group_info_error(error, body.len()))?,
+        )
+        .map_err(|error| group_info_error(error, body.len()))
     }
 
     /// Returns the maximum compact link count, or zero for [`Self::AlwaysDense`].
@@ -268,6 +299,34 @@ impl<const MAX: u16> LinkThresholdsBuilder<MAX, true> {
     }
 }
 
+#[cfg(feature = "std")]
+fn group_info_error(error: GroupInfoError, actual_length: usize) -> FormatError {
+    match error {
+        GroupInfoError::Flags(flags) => FormatError::InvalidGroupInfoFlags(flags),
+        GroupInfoError::Length { expected, actual } => FormatError::InvalidGroupInfoLength {
+            expected: usize::from(expected),
+            actual: usize::from(actual),
+        },
+        GroupInfoError::Thresholds {
+            max_compact,
+            min_dense,
+        } => FormatError::InvalidGroupInfoThresholds {
+            max_compact,
+            min_dense,
+        },
+        GroupInfoError::TrailingBytes => FormatError::ObjectHeaderMessageTooLarge {
+            message_type: MessageType::GROUP_INFO.to_u16(),
+            size: actual_length,
+        },
+        GroupInfoError::Version(version) => FormatError::InvalidGroupInfoVersion(version),
+    }
+}
+
+// "Version 1 Data Object Header Prefix" in the format specification, version 4.0, defines
+// version one with padded message bodies.
+#[cfg(feature = "std")]
+const PADDED_HEADER_VERSION: u8 = 1;
+
 // `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, defines the default maximum.
 const DEFAULT_MAX_COMPACT: u16 = 8;
 // `H5G_CRT_GINFO_MIN_DENSE` in `H5Gprivate.h`, HDF5 2.2.0, defines the default minimum.
@@ -278,6 +337,18 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn oversized_group_info_reports_the_object_message_limit() {
+        assert_eq!(
+            LinkPhaseChange::from_group_info(&vec![0; 65_536], 2).unwrap_err(),
+            FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::GROUP_INFO.to_u16(),
+                size: 65_536,
+            }
+        );
+    }
 
     #[rstest]
     #[case::omitted(&[0, 0], LinkPhaseChange::default())]
