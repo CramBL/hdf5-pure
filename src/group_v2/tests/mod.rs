@@ -248,7 +248,11 @@ fn path_navigation_uses_the_opened_image_context(#[case] source_backed: bool) {
     .unwrap();
     let (datatype, dataspace, layout) = extract_dataset(&bytes, &header, test_widths(&superblock));
     let raw = data_read::read_raw_data(
-        source::frame(&bytes, addresses.effective_base()).unwrap(),
+        source::PhysicalBytes::for_test(&bytes, addresses)
+            .stored()
+            .unwrap()
+            .metadata_frame()
+            .bytes(),
         &layout,
         &dataspace,
         &datatype,

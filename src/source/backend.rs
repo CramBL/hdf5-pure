@@ -476,7 +476,7 @@ impl<S: Source> Source for ValidatedSource<S> {
 /// Read offsets are relative to `base` in the inner source. Metadata reads use its cache and
 /// retain its physical metadata ranges. Payload reads use [`Source::read_exact_at`] on the inner
 /// source after checking the base-relative extent.
-#[cfg(any(test, doc))]
+#[cfg(test)]
 pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
     pub(crate) inner: &'a S,
     pub(crate) base: BaseAddress,
@@ -487,7 +487,7 @@ pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedSourceEof`] if `base` exceeds the length of `bytes`.
-pub(crate) fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatError> {
+fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatError> {
     if base.is_zero() {
         return Ok(bytes);
     }
@@ -505,7 +505,7 @@ pub(crate) fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatErro
         })
 }
 
-#[cfg(any(test, doc))]
+#[cfg(test)]
 impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
     fn len(&self) -> u64 {
         self.inner.len().saturating_sub(self.base.get())
@@ -2112,9 +2112,6 @@ mod tests {
     fn base_offset_source_forwards_cache_statistics_and_resets() {
         let config = MetadataCacheConfig::new(4096);
         let source = MetadataCachingSource::new(ramp(4096), config);
-        // The base-relative view a userblock file reads through forwards its
-        // metadata reads to the inner source, so it must forward the account of
-        // them too.
         let framed = BaseOffsetSource {
             inner: &source,
             base: BaseAddress::new(512),

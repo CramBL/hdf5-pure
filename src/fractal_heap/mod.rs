@@ -9,13 +9,11 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::MetadataBytes;
-#[cfg(any(test, doc))]
+#[cfg(all(test, feature = "deflate"))]
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
-#[cfg(any(test, doc))]
-use hdf5_pure_format::__private::FractalHeapHeaderLocator;
-#[cfg(any(test, doc))]
+#[cfg(test)]
 use hdf5_pure_format::__private::FractalHeapIdKind;
 use hdf5_pure_format::__private::{
     BTreeV2Layout, FractalHeapBlock, FractalHeapBlockFilters, FractalHeapBlockLayout,
@@ -24,21 +22,21 @@ use hdf5_pure_format::__private::{
 };
 
 use crate::access_mode::AccessMode;
-#[cfg(any(test, doc))]
+#[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
-#[cfg(any(test, doc))]
+#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::{FILTER_SHUFFLE, FilterPipeline};
 use crate::filters;
 use crate::filters::ChunkContext;
-#[cfg(any(test, doc))]
+#[cfg(test)]
 use crate::source;
-#[cfg(any(test, doc))]
+#[cfg(test)]
 use crate::source::Source;
 use crate::width::FormatWidths;
 #[cfg(test)]
@@ -49,74 +47,6 @@ mod stored;
 pub(crate) use stored::HeapObjectReader;
 pub(crate) use stored::HeapSource;
 pub(crate) use stored::read_header_and_range_from_source;
-
-/// Reads a fractal heap header from a source using validated file widths.
-///
-/// `source` is framed at the effective base in `addresses`. The parser receives physical
-/// [`FileRegion`] coordinates, and each source read uses a base-relative offset.
-///
-/// # Errors
-///
-/// Returns [`FormatError::OffsetOverflow`] if an address or range end exceeds [`u64::MAX`], and
-/// the parsing errors of [`FractalHeapHeaderLocator::parse`] and
-/// [`FractalHeapHeaderRef::parse`](hdf5_pure_format::__private::FractalHeapHeaderRef::parse).
-/// Returns the source error if a read fails.
-#[cfg(any(test, doc))]
-pub(crate) fn legacy_read_header_from_source(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
-    address: StoredAddress,
-    widths: FormatWidths,
-) -> Result<FractalHeapHeader, FormatError> {
-    legacy_read_header_and_range_from_source(source, addresses, address, widths)
-        .map(|(header, _)| header)
-}
-
-/// Reads a fractal heap header from a source, with the physical range of its encoded bytes.
-///
-/// The range includes the header's filter fields when it stores them.
-///
-/// # Errors
-///
-/// Returns the errors of [`legacy_read_header_from_source`].
-#[cfg(any(test, doc))]
-pub(crate) fn legacy_read_header_and_range_from_source(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
-    address: StoredAddress,
-    widths: FormatWidths,
-) -> Result<(FractalHeapHeader, FileRange), FormatError> {
-    let locator =
-        FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
-    let prefix_range = locator.parse_range()?;
-    let prefix = legacy_read_header_range(source, addresses, prefix_range)?;
-    let header_ref = locator.parse(FileRegion::new(prefix_range, &prefix)?)?;
-    let range = header_ref.parse_range();
-    let bytes = legacy_read_header_range(source, addresses, range)?;
-    Ok((
-        header_ref.parse(FileRegion::new(range, &bytes)?)?,
-        header_ref.range(),
-    ))
-}
-
-/// Reads a physical header range through a source framed at `addresses`' effective base.
-///
-/// # Errors
-///
-/// Returns [`FormatError::AddressBelowBase`] if the range starts below the effective base,
-/// [`FormatError::ValueTooLargeForPlatform`] if the read length exceeds [`usize::MAX`], and the
-/// source error if a read fails.
-#[cfg(any(test, doc))]
-pub(crate) fn legacy_read_header_range(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
-    range: FileRange,
-) -> Result<MetadataBytes<'_>, FormatError> {
-    source.read_metadata(
-        addresses.relative(range.start())?.get(),
-        range.length().to_usize()?,
-    )
-}
 
 /// Reverses the active filters on a direct block's encoded bytes.
 ///
@@ -329,29 +259,8 @@ impl HugeObjectIndex {
     }
 }
 
-/// Reads objects from one fractal heap using parsed heap IDs.
-///
-/// The caller parses each [`FractalHeapIdView`] using the decoding parameters of the heap passed
-/// to [`new`](Self::new). The reader caches the huge-object B-tree records after the first indexed
-/// huge-object lookup. Inline huge objects and tiny objects are read directly from their parsed
-/// fields.
-///
-/// For read-only managed-object lookups, the reader validates the direct block's prefix and
-/// object bounds and reads only the object bytes. With read-write access, the reader
-/// validates a checksummed direct block in full before reading an object and caches successful
-/// validation for subsequent objects in that block. Validation caches require an unchanged image
-/// and one backend for the lifetime of the reader.
-///
-/// In a filtered heap, the reader reads and decodes the whole direct block that holds a managed
-/// object, then validates the block's prefix and the object bounds in the decoded bytes. It keeps
-/// the decoded block for the next lookup in that block, under the same requirements. With
-/// read-write access, it validates a checksummed block in full on its decoded bytes.
-///
-/// For a filtered huge object, the reader reads the complete encoded allocation, reverses the
-/// active filters, and checks the declared decoded size. Huge-object payloads are independent of
-/// managed blocks. For indirect huge objects, the reader checks tracker metadata checksums when
-/// checksum support is enabled.
-pub struct LegacyHeapObjectReader<'h> {
+/// Stores parsed layouts and caches for one [`HeapObjectReader`].
+struct HeapObjectState<'h> {
     header: &'h FractalHeapHeader,
     widths: FormatWidths,
     /// The physical metadata origin, or the error returned when obtaining it.
@@ -359,78 +268,16 @@ pub struct LegacyHeapObjectReader<'h> {
     access_mode: AccessMode,
     /// Direct blocks whose complete checksums were validated against this reader's image.
     validated_direct: BTreeSet<StoredAddress>,
-    validated_backend: Option<Backend>,
     /// The stored address and the decoded bytes of the filtered direct block read last.
     decoded_direct: Option<(StoredAddress, Vec<u8>)>,
     layout: Result<FractalHeapBlockLayout, FormatError>,
     /// Parsed on demand, since most heaps hold no huge object at all.
     huge: Option<HugeObjectIndex>,
-    /// Which backend the cached index was decoded from, once one has been.
-    huge_backend: Option<Backend>,
     huge_layout: Option<FractalHeapHugeObjectLayout>,
     huge_limits: HugeObjectReadLimits,
 }
 
-/// Which of the two ways of reading a file an object came through. Recorded
-/// only to hold a reader to one of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Backend {
-    /// An in-memory image of the whole file.
-    #[cfg(any(test, doc))]
-    Buffered,
-    /// A [`Source`], read from on demand.
-    Streaming,
-}
-
-impl<'h> LegacyHeapObjectReader<'h> {
-    /// Returns a reader of the objects of the heap `header` describes.
-    ///
-    /// `owner` is the header's stored address. `addresses` resolves addresses against the image's
-    /// effective base. The image or source must be framed at that base and stay unchanged for
-    /// the reader's lifetime. `access_mode` selects bounded read-only lookup or mandatory
-    /// read-write checksum validation. `widths` contains the validated address and length widths
-    /// of the file.
-    #[cfg(any(test, doc))]
-    pub(crate) fn new(
-        header: &'h FractalHeapHeader,
-        addresses: AddressContext,
-        owner: StoredAddress,
-        access_mode: AccessMode,
-        widths: FormatWidths,
-    ) -> Self {
-        Self::with_huge_limits(
-            header,
-            addresses,
-            owner,
-            access_mode,
-            widths,
-            HugeObjectReadLimits::UNLIMITED,
-        )
-    }
-
-    /// Creates a reader with caller-imposed huge-object payload and tracker limits.
-    ///
-    /// The file context and access requirements are those of [`new`](Self::new). The reader
-    /// checks payload sizes before reading their bytes and tracker limits during index traversal.
-    #[cfg(any(test, doc))]
-    pub(crate) fn with_huge_limits(
-        header: &'h FractalHeapHeader,
-        addresses: AddressContext,
-        owner: StoredAddress,
-        access_mode: AccessMode,
-        widths: FormatWidths,
-        huge_limits: HugeObjectReadLimits,
-    ) -> Self {
-        Self::with_origin(
-            header,
-            Ok(addresses.effective_base()),
-            owner,
-            access_mode,
-            widths,
-            huge_limits,
-        )
-    }
-
+impl<'h> HeapObjectState<'h> {
     fn with_origin(
         header: &'h FractalHeapHeader,
         origin: Result<BaseAddress, FormatError>,
@@ -445,134 +292,17 @@ impl<'h> LegacyHeapObjectReader<'h> {
             origin,
             access_mode,
             validated_direct: BTreeSet::new(),
-            validated_backend: None,
             decoded_direct: None,
             layout: FractalHeapBlockLayout::new(header, widths.offsets, widths.lengths, owner),
             huge: None,
-            huge_backend: None,
             huge_layout: None,
             huge_limits,
         }
     }
 
-    /// Reads the object identified by a parsed ID from a file image.
-    ///
-    /// Managed objects are read through the heap's doubling table. Indexed huge objects are
-    /// looked up in the cached huge-object index. Filtered huge-object payloads are decoded
-    /// using the heap's pipeline and the object's skipped-filter mask. Tiny-object bytes are
-    /// copied from `id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
-    /// [`FormatError::MissingFractalHeapBlock`] if a managed object has no allocated block.
-    /// Returns [`FormatError::InsufficientRegion`] if a managed object's required region extends
-    /// past the image, and [`FormatError::UnexpectedSourceEof`] if a huge object's data extends
-    /// past the image. Returns filter-specific errors for a managed block or huge payload, such as
-    /// [`FormatError::UnsupportedFilter`] if an active filter in its pipeline has no decoder.
-    /// Returns [`FormatError::ChunkedReadError`] if indirect-block traversal exceeds 64 levels,
-    /// [`FormatError::ValueTooLargeForPlatform`] if a value exceeds [`usize::MAX`] or a filtered
-    /// huge payload's encoded or decoded size exceeds [`isize::MAX`], and
-    /// [`FormatError::OffsetOverflow`] if a file offset overflows.
-    /// Returns [`FormatError::ResourceLimit`] if a huge-object read or index traversal exceeds
-    /// its configured limits, [`FormatError::DecodedSizeMismatch`] if a huge object's decoded
-    /// length differs from its declared size, or [`FormatError::DecodedSizeLimitExceeded`] if a
-    /// huge-object decoder exceeds the output bound derived from that size. Returns errors from
-    /// parsing heap blocks and huge-object index metadata.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if cached checksum validation or a cached huge-object index is reused
-    /// through both this method and [`read_from_source`](Self::read_from_source).
-    #[cfg(any(test, doc))]
-    pub fn read(
-        &mut self,
-        file_data: &[u8],
-        id: FractalHeapIdView<'_>,
-    ) -> Result<Vec<u8>, FormatError> {
-        match id.kind() {
-            FractalHeapIdKind::Managed {
-                heap_offset,
-                object_length,
-            } => self.read_managed_object(file_data, heap_offset, object_length),
-            FractalHeapIdKind::Huge(_) => self.read_huge(file_data, id),
-            FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
-        }
-    }
-
-    /// Reads the object identified by a parsed ID through a [`Source`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the resolution errors of [`read`](Self::read), and the error `source` returns if
-    /// a read fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if cached checksum validation or a cached huge-object index is reused
-    /// through both this method and [`read`](Self::read).
-    #[cfg(any(test, doc))]
-    pub fn read_from_source<S: Source + ?Sized>(
-        &mut self,
-        source: &S,
-        id: FractalHeapIdView<'_>,
-    ) -> Result<Vec<u8>, FormatError> {
-        match id.kind() {
-            FractalHeapIdKind::Managed {
-                heap_offset,
-                object_length,
-            } => self.read_managed_object_from_source(source, heap_offset, object_length),
-            FractalHeapIdKind::Huge(_) => self.read_huge_from_source(source, id),
-            FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
-        }
-    }
-
-    #[cfg(any(test, doc))]
-    fn read_huge(
-        &mut self,
-        file_data: &[u8],
-        id: FractalHeapIdView<'_>,
-    ) -> Result<Vec<u8>, FormatError> {
-        let origin = *self.origin.as_ref().map_err(Clone::clone)?;
-        self.read_huge_with(
-            |range| {
-                source::bytes_in(
-                    file_data,
-                    FileRange::new(
-                        PhysicalAddress::new(origin.relative(range.start())?.get()),
-                        range.length(),
-                    )?,
-                )
-                .and_then(|bytes| MetadataBytes::borrowed(range, bytes))
-            },
-            Backend::Buffered,
-            id,
-        )
-    }
-
-    #[cfg(any(test, doc))]
-    fn read_huge_from_source(
-        &mut self,
-        source: &(impl Source + ?Sized),
-        id: FractalHeapIdView<'_>,
-    ) -> Result<Vec<u8>, FormatError> {
-        let origin = *self.origin.as_ref().map_err(Clone::clone)?;
-        self.read_huge_with(
-            |range| {
-                source.read_metadata(
-                    origin.relative(range.start())?.get(),
-                    range.length().to_usize()?,
-                )
-            },
-            Backend::Streaming,
-            id,
-        )
-    }
-
     fn read_huge_with<'bytes>(
         &mut self,
         read: impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
-        backend: Backend,
         id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
         if self.huge_layout.is_none() {
@@ -597,13 +327,7 @@ impl<'h> LegacyHeapObjectReader<'h> {
                         self.widths,
                         self.huge_limits,
                     )?);
-                    self.huge_backend = Some(backend);
                 }
-                debug_assert_eq!(
-                    self.huge_backend,
-                    Some(backend),
-                    "a heap's huge-object index belongs to its reading backend"
-                );
                 self.huge
                     .as_ref()
                     .ok_or_else(|| {
@@ -666,71 +390,12 @@ impl<'h> LegacyHeapObjectReader<'h> {
         Ok(decoded)
     }
 
-    #[cfg(any(test, doc))]
-    fn read_managed_object(
-        &mut self,
-        file_data: &[u8],
-        heap_offset: u64,
-        object_length: u64,
-    ) -> Result<Vec<u8>, FormatError> {
-        let image = FileRegion::new(
-            FileRange::new(
-                self.origin
-                    .as_ref()
-                    .map_err(Clone::clone)?
-                    .resolve(StoredAddress::ZERO)?,
-                file_data.len() as u64,
-            )?,
-            file_data,
-        )?;
-        self.read_managed_object_with(
-            |range| {
-                image
-                    .subregion(range)
-                    .and_then(|region| MetadataBytes::borrowed(region.range(), region.bytes()))
-            },
-            Backend::Buffered,
-            heap_offset,
-            object_length,
-        )
-    }
-
-    #[cfg(any(test, doc))]
-    fn read_managed_object_from_source(
-        &mut self,
-        source: &(impl Source + ?Sized),
-        heap_offset: u64,
-        object_length: u64,
-    ) -> Result<Vec<u8>, FormatError> {
-        let origin = *self.origin.as_ref().map_err(Clone::clone)?;
-        self.read_managed_object_with(
-            |range| {
-                source.read_metadata(
-                    origin.relative(range.start())?.get(),
-                    range.length().to_usize()?,
-                )
-            },
-            Backend::Streaming,
-            heap_offset,
-            object_length,
-        )
-    }
-
     fn read_managed_object_with<'bytes>(
         &mut self,
         read: impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
-        backend: Backend,
         heap_offset: u64,
         object_length: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        if self.validated_direct.is_empty() && self.decoded_direct.is_none() {
-            self.validated_backend = Some(backend);
-        }
-        debug_assert_eq!(
-            self.validated_backend,
-            Some(backend),
-            "validated direct blocks belong to the backend that supplied their bytes"
-        );
         let blocks = self.layout.as_ref().map_err(Clone::clone)?;
         let mut block = blocks.root()?.ok_or(FormatError::MissingFractalHeapBlock {
             heap_offset,
@@ -1173,15 +838,16 @@ mod tests {
         );
         let source = BytesSource::new(&image[..supplied.end().get() as usize]);
         let id = [0, 15, 0, 3, 0, 0, 0];
+        let stored = source::zero_base_source(&source);
         assert_eq!(
-            LegacyHeapObjectReader::new(
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
                 &header,
-                AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
                 AccessMode::ReadOnly,
                 FORMAT_WIDTHS
             )
-            .read_from_source(&source, parse_id(&header, &id))
+            .read(parse_id(&header, &id))
             .unwrap_err(),
             FormatError::UnexpectedSourceEof {
                 expected: range.end().get(),
@@ -1283,14 +949,14 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let obj = LegacyHeapObjectReader::new(
+        let obj = HeapObjectReader::new(
+            HeapSource::resident(source::zero_base_bytes(&file_data)),
             &hdr,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         )
-        .read(&file_data, parse_id(&hdr, &id))
+        .read(parse_id(&hdr, &id))
         .unwrap();
         assert_eq!(&obj, b"Hello, World!");
     }
@@ -1314,12 +980,22 @@ mod tests {
             heap.header.root_block_address = StoredAddress::undefined(OffsetWidth::Eight);
             heap.header.current_rows_in_root_indirect_block = 0;
         }
-        let mut reader = heap.reader(AccessMode::ReadOnly);
-        let error = if streaming {
-            reader.read_managed_object_from_source(&BytesSource::new(&heap.image), 15, 3)
+        let source = BytesSource::new(&heap.image);
+        let stored = source::zero_base_source(&source);
+        let source = if streaming {
+            HeapSource::new(&stored)
         } else {
-            reader.read_managed_object(&heap.image, 15, 3)
-        }
+            HeapSource::resident(source::zero_base_bytes(&heap.image))
+        };
+        let id = [0, 15, 0, 3, 0, 0, 0];
+        let error = HeapObjectReader::new(
+            source,
+            &heap.header,
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
+        )
+        .read(parse_id(&heap.header, &id))
         .unwrap_err();
         assert_eq!(
             error,
@@ -1349,51 +1025,51 @@ mod tests {
             id[1 + i] = ((payload >> (i * 8)) & 0xFF) as u8;
         }
 
-        let buffered = LegacyHeapObjectReader::new(
+        let buffered = HeapObjectReader::new(
+            HeapSource::resident(source::zero_base_bytes(&file_data)),
             &hdr,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         )
-        .read(&file_data, parse_id(&hdr, &id))
+        .read(parse_id(&hdr, &id))
         .unwrap();
 
         // Header parsed from a source, then the object fetched from a source.
         let mem = BytesSource::new(&file_data);
-        let hdr_mem = legacy_read_header_from_source(
-            &mem,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+        let stored_mem = source::zero_base_source(&mem);
+        let (hdr_mem, _) = read_header_and_range_from_source(
+            &HeapSource::new(&stored_mem),
             StoredAddress::ZERO,
             FORMAT_WIDTHS,
         )
         .unwrap();
-        let from_mem = LegacyHeapObjectReader::new(
+        let from_mem = HeapObjectReader::new(
+            HeapSource::new(&stored_mem),
             &hdr_mem,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         )
-        .read_from_source(&mem, parse_id(&hdr_mem, &id))
+        .read(parse_id(&hdr_mem, &id))
         .unwrap();
 
         let seek = ReadSeekSource::new(std::io::Cursor::new(file_data)).unwrap();
-        let hdr_seek = legacy_read_header_from_source(
-            &seek,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+        let stored_seek = source::zero_base_source(&seek);
+        let (hdr_seek, _) = read_header_and_range_from_source(
+            &HeapSource::new(&stored_seek),
             StoredAddress::ZERO,
             FORMAT_WIDTHS,
         )
         .unwrap();
-        let from_seek = LegacyHeapObjectReader::new(
+        let from_seek = HeapObjectReader::new(
+            HeapSource::new(&stored_seek),
             &hdr_seek,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::ZERO,
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         )
-        .read_from_source(&seek, parse_id(&hdr_seek, &id))
+        .read(parse_id(&hdr_seek, &id))
         .unwrap();
 
         assert_eq!(buffered, from_mem);
@@ -1489,9 +1165,7 @@ mod tests {
             computed = crate::checksum::jenkins_lookup3(&zeroed);
         });
         let id = heap.object_id();
-        let result = heap
-            .reader(mode)
-            .read(&heap.image, parse_id(&heap.header, &id));
+        let result = heap.reader(mode).read(parse_id(&heap.header, &id));
         if validated {
             assert_eq!(
                 result.unwrap_err(),
@@ -1528,7 +1202,7 @@ mod tests {
         let id = heap.object_id();
         assert_eq!(
             heap.reader(AccessMode::ReadOnly)
-                .read(&heap.image, parse_id(&heap.header, &id))
+                .read(parse_id(&heap.header, &id))
                 .unwrap_err(),
             FormatError::UnsupportedFilter(unsupported)
         );
@@ -1550,7 +1224,7 @@ mod tests {
         let id = heap.object_id();
         assert_eq!(
             heap.reader(AccessMode::ReadOnly)
-                .read(&heap.image, parse_id(&heap.header, &id))
+                .read(parse_id(&heap.header, &id))
                 .unwrap(),
             b"abc"
         );
@@ -1575,7 +1249,7 @@ mod tests {
         let id = heap.object_id();
         assert_eq!(
             heap.reader(AccessMode::ReadOnly)
-                .read(&heap.image, parse_id(&heap.header, &id))
+                .read(parse_id(&heap.header, &id))
                 .unwrap_err(),
             FormatError::DataSizeMismatch {
                 expected: 128,
@@ -1688,10 +1362,10 @@ mod tests {
             id
         }
 
-        fn reader(&self, mode: AccessMode) -> LegacyHeapObjectReader<'_> {
-            LegacyHeapObjectReader::new(
+        fn reader(&self, mode: AccessMode) -> HeapObjectReader<'_, '_> {
+            HeapObjectReader::new(
+                HeapSource::resident(source::zero_base_bytes(&self.image)),
                 &self.header,
-                AddressContext::from_effective_base(BaseAddress::ZERO),
                 StoredAddress::ZERO,
                 mode,
                 FORMAT_WIDTHS,
@@ -1741,16 +1415,16 @@ mod tests {
         let ids: Vec<Vec<u8>> = (1..=COUNT).map(heap_id).collect();
 
         reset_huge_index_decodes();
-        let mut reader = LegacyHeapObjectReader::new(
+        let mut reader = HeapObjectReader::new(
+            HeapSource::resident(source::zero_base_bytes(&bytes)),
             &heap,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(frhp as u64),
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         );
         let buffered: Vec<Vec<u8>> = ids
             .iter()
-            .map(|id| reader.read(&bytes, parse_id(&heap, id)).unwrap())
+            .map(|id| reader.read(parse_id(&heap, id)).unwrap())
             .collect();
         assert_eq!(
             huge_index_decodes(),
@@ -1760,20 +1434,17 @@ mod tests {
 
         reset_huge_index_decodes();
         let source = BytesSource::new(bytes.clone());
-        let mut reader = LegacyHeapObjectReader::new(
+        let stored = source::zero_base_source(&source);
+        let mut reader = HeapObjectReader::new(
+            HeapSource::new(&stored),
             &heap,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
             StoredAddress::new(frhp as u64),
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         );
         let streamed: Vec<Vec<u8>> = ids
             .iter()
-            .map(|id| {
-                reader
-                    .read_from_source(&source, parse_id(&heap, id))
-                    .unwrap()
-            })
+            .map(|id| reader.read(parse_id(&heap, id)).unwrap())
             .collect();
         assert_eq!(
             huge_index_decodes(),
@@ -2049,12 +1720,21 @@ mod tests {
             bytes: &heap.image,
             reads: RefCell::new(Vec::new()),
         };
-        let mut reader = heap.reader(limits);
-        let result = if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
-            reader.read_from_source(&source, parse_id(&heap.header, &heap.id))
+        let stored = source::zero_base_source(&source);
+        let input = if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
+            HeapSource::new(&stored)
         } else {
-            reader.read(&heap.image, parse_id(&heap.header, &heap.id))
+            HeapSource::resident(source::zero_base_bytes(&heap.image))
         };
+        let result = HeapObjectReader::with_huge_limits(
+            input,
+            &heap.header,
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
+            limits,
+        )
+        .read(parse_id(&heap.header, &heap.id));
         let expected = if let Some(decoded_budget) = budget {
             FormatError::ResourceLimit {
                 limit: 0,
@@ -2254,36 +1934,55 @@ mod tests {
     }
 
     #[rstest]
-    #[cfg(debug_assertions)]
-    fn huge_index_cache_rejects_backend_changes(#[values(false, true)] filtered: bool) {
-        let heap = HugeHeap::new(
-            false,
-            filtered.then(|| HugeFilters::new(test_data::filter_pipeline(vec![]), 0)),
-            0,
+    #[case::unfiltered_resident(false, false)]
+    #[case::unfiltered_source(false, true)]
+    #[case::filtered_resident(true, false)]
+    #[case::filtered_source(true, true)]
+    fn huge_index_caches_belong_to_the_bound_sources(
+        #[case] filtered: bool,
+        #[case] streaming: bool,
+    ) {
+        let filters = || filtered.then(|| HugeFilters::new(test_data::filter_pipeline(vec![]), 0));
+        let first = HugeHeap::new(false, filters(), 0);
+        let mut second = HugeHeap::new(false, filters(), 0);
+        let payload_at = second.image.len().to_u64();
+        second.decoded.fill(b'z');
+        second.image.extend_from_slice(&second.decoded);
+        second.record[..8].copy_from_slice(&payload_at.to_le_bytes());
+        second.write_tracker(vec![second.record.clone()]);
+        let first_source = BytesSource::new(&first.image);
+        let second_source = BytesSource::new(&second.image);
+        let first_stored = source::zero_base_source(&first_source);
+        let second_stored = source::zero_base_source(&second_source);
+        let input = |resident, stored| {
+            if streaming {
+                HeapSource::new(stored)
+            } else {
+                HeapSource::resident(resident)
+            }
+        };
+        let mut first_reader = HeapObjectReader::new(
+            input(source::zero_base_bytes(&first.image), &first_stored),
+            &first.header,
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
         );
-        let mut reader = heap.reader(HugeObjectReadLimits::UNLIMITED);
-        assert_eq!(
-            reader
-                .read(&heap.image, parse_id(&heap.header, &heap.id))
-                .unwrap(),
-            heap.decoded
+        let mut second_reader = HeapObjectReader::new(
+            input(source::zero_base_bytes(&second.image), &second_stored),
+            &second.header,
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
         );
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            reader.read_from_source(
-                &BytesSource::new(&heap.image),
-                parse_id(&heap.header, &heap.id),
-            )
-        }));
-        let payload = panic.unwrap_err();
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(
-            message.contains("a heap's huge-object index belongs to its reading backend"),
-            "{message}"
-        );
+        let first_id = parse_id(&first.header, &first.id);
+        let second_id = parse_id(&second.header, &second.id);
+        reset_huge_index_decodes();
+        assert_eq!(first_reader.read(first_id).unwrap(), first.decoded);
+        assert_eq!(second_reader.read(second_id).unwrap(), second.decoded);
+        assert_eq!(first_reader.read(first_id).unwrap(), first.decoded);
+        assert_eq!(second_reader.read(second_id).unwrap(), second.decoded);
+        assert_eq!(huge_index_decodes(), 2);
     }
 
     #[rstest]
@@ -2628,17 +2327,6 @@ mod tests {
                 self.id[1..29].copy_from_slice(&self.record);
             }
             self.write_tracker(vec![self.record.clone()]);
-        }
-
-        fn reader(&self, limits: HugeObjectReadLimits) -> LegacyHeapObjectReader<'_> {
-            LegacyHeapObjectReader::with_huge_limits(
-                &self.header,
-                AddressContext::from_effective_base(BaseAddress::new(self.base)),
-                StoredAddress::ZERO,
-                AccessMode::ReadOnly,
-                FORMAT_WIDTHS,
-                limits,
-            )
         }
 
         fn read(

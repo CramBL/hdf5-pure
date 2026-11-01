@@ -21,10 +21,9 @@ use crate::source::StoredBytes;
 use crate::source::StoredRead;
 use crate::width::FormatWidths;
 
-use super::Backend;
 use super::FractalHeapHeader;
+use super::HeapObjectState;
 use super::HugeObjectReadLimits;
-use super::LegacyHeapObjectReader;
 
 /// A source for heap metadata and separately allocated huge-object bytes.
 ///
@@ -147,7 +146,7 @@ pub(crate) fn read_header_and_range_from_source(
 /// returning its bytes. Tiny-object bytes are copied from the parsed ID.
 pub(crate) struct HeapObjectReader<'a, 'h> {
     source: HeapSource<'a>,
-    reader: LegacyHeapObjectReader<'h>,
+    reader: HeapObjectState<'h>,
 }
 
 impl<'a, 'h> HeapObjectReader<'a, 'h> {
@@ -186,7 +185,7 @@ impl<'a, 'h> HeapObjectReader<'a, 'h> {
     ) -> Self {
         let origin = source.origin().map(|origin| BaseAddress::new(origin.get()));
         let reader =
-            LegacyHeapObjectReader::with_origin(header, origin, owner, access_mode, widths, limits);
+            HeapObjectState::with_origin(header, origin, owner, access_mode, widths, limits);
         Self { source, reader }
     }
 
@@ -198,9 +197,21 @@ impl<'a, 'h> HeapObjectReader<'a, 'h> {
     /// # Errors
     ///
     /// Returns [`FormatError::MissingFractalHeapBlock`] for an unallocated managed block,
-    /// [`FormatError::HugeObjectNotFound`] for an absent huge-object key, and address, parsing,
-    /// filter, and resource errors from [`LegacyHeapObjectReader::read`]. Returns the source
-    /// error if a metadata read fails.
+    /// [`FormatError::HugeObjectNotFound`] for an absent huge-object key, and
+    /// [`FormatError::ChunkedReadError`] if managed-block traversal exceeds its depth limit.
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if required resident managed-block bytes are
+    /// missing, and [`FormatError::UnexpectedSourceEof`] if a resident huge-object read is
+    /// incomplete. Propagates source errors for stored reads.
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a physical address or range end exceeds
+    /// [`u64::MAX`], and [`FormatError::ValueTooLargeForPlatform`] if a size or position cannot be
+    /// represented on the platform. Returns [`FormatError::ResourceLimit`] if a huge-object
+    /// payload or tracker limit is exceeded.
+    ///
+    /// Returns [`FormatError::DecodedSizeMismatch`] if a filtered huge object has the wrong
+    /// decoded size, and [`FormatError::DecodedSizeLimitExceeded`] if decoding exceeds its
+    /// output bound. Returns heap, B-tree, or filter errors if parsing or decoding fails.
     pub(crate) fn read(&mut self, id: FractalHeapIdView<'_>) -> Result<Vec<u8>, FormatError> {
         let Self { source, reader } = self;
         match id.kind() {
@@ -209,15 +220,12 @@ impl<'a, 'h> HeapObjectReader<'a, 'h> {
                 object_length,
             } => reader.read_managed_object_with(
                 |range| source.read_range(range),
-                Backend::Streaming,
                 heap_offset,
                 object_length,
             ),
-            FractalHeapIdKind::Huge(_) => reader.read_huge_with(
-                |range| source.read_huge_range(range),
-                Backend::Streaming,
-                id,
-            ),
+            FractalHeapIdKind::Huge(_) => {
+                reader.read_huge_with(|range| source.read_huge_range(range), id)
+            }
             FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
         }
     }

@@ -28,12 +28,10 @@ pub(crate) use view::PhysicalSource;
 pub(crate) use view::StoredSource;
 pub(crate) use view::{StoredBytes, StoredRead};
 
-#[cfg(any(test, doc))]
+#[cfg(test)]
 pub(crate) use backend::BaseOffsetSource;
 #[cfg(any(feature = "std", test, doc))]
 pub(crate) use backend::BytesSource;
-#[cfg(test)]
-pub(crate) use backend::frame;
 pub use backend::{MetadataCacheConfig, MetadataCacheStats, Source};
 #[cfg(feature = "std")]
 pub use backend::{MetadataCachingSource, ReadSeekSource};
