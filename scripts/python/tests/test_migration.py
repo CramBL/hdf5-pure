@@ -262,6 +262,11 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "InvalidGroupInfoVersion", []),
         ("FormatError", "InvalidAscii", []),
         ("FormatError", "MissingNumericDatatypeProperty", []),
+        ("FormatError", "InvalidOpaqueReservedBits", []),
+        ("FormatError", "InvalidOpaqueTagByte", []),
+        ("FormatError", "InvalidOpaqueTagLength", []),
+        ("FormatError", "InvalidOpaqueTagPadding", []),
+        ("FormatError", "OpaqueTagTooLong", []),
         ("FormatError", "UnalignedGlobalHeapCollection", []),
         (
             "FormatError",

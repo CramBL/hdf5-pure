@@ -363,7 +363,9 @@ impl AttributeMessage {
     ///
     /// Returns [`FormatError::AttributeFieldTooLong`] if the name with its null terminator, the
     /// datatype, or the dataspace is longer than the 65,535 bytes its 2-byte size field can
-    /// hold.
+    /// hold. Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque
+    /// tag longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains
+    /// a NUL byte.
     pub fn serialize(
         &self,
         offset_width: OffsetWidth,
@@ -381,7 +383,9 @@ impl AttributeMessage {
     ///
     /// Returns [`FormatError::AttributeFieldTooLong`] if the name with its null terminator, the
     /// datatype, or the dataspace is longer than the 65,535 bytes its 2-byte size field can
-    /// hold.
+    /// hold. Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque
+    /// tag longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains
+    /// a NUL byte.
     pub fn serialize_v3(
         &self,
         offset_width: OffsetWidth,
@@ -397,9 +401,14 @@ impl AttributeMessage {
     /// are going into, and not in the width of whatever file the message was read
     /// from. Re-serializing a message parsed from a file with a different width is
     /// therefore a re-encoding, not a copy.
-    fn datatype_field(&self, offset_width: OffsetWidth) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque tag
+    /// longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL.
+    fn datatype_field(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         match self.datatype_location.reference_bytes(offset_width) {
-            Some(reference) => reference,
+            Some(reference) => Ok(reference),
             None => datatype::serialize_datatype(&self.datatype),
         }
     }
@@ -425,7 +434,7 @@ impl AttributeMessage {
             n.push(0); // null terminator
             n
         };
-        let dt_bytes = self.datatype_field(offset_width);
+        let dt_bytes = self.datatype_field(offset_width)?;
         let ds_bytes = self.dataspace.serialize(length_size);
         let name_size = self.field_size("name", &name_bytes)?;
         let datatype_size = self.field_size("datatype", &dt_bytes)?;
@@ -653,7 +662,7 @@ mod tests {
         } else {
             message.serialize(OffsetWidth::Eight, 8).unwrap()
         };
-        let datatype = crate::datatype::serialize_datatype(&i32_datatype());
+        let datatype = crate::datatype::serialize_datatype(&i32_datatype()).unwrap();
         let dataspace = dataspace::scalar();
         let value = 7i32.to_le_bytes();
         let expected = attribute::Attribute::new(name, &datatype, &dataspace, &value);
@@ -945,7 +954,7 @@ mod tests {
     #[rstest]
     #[case::inline(
         DatatypeLocation::Inline,
-        crate::datatype::serialize_datatype(&i32_datatype()),
+        crate::datatype::serialize_datatype(&i32_datatype()).unwrap(),
         attribute::Flags::NONE
     )]
     #[case::committed(
@@ -1001,7 +1010,7 @@ mod tests {
 
     impl SharedResolver for CommittedI32 {
         fn resolve(&self, _reference: &[u8], _target: MessageType) -> Result<Vec<u8>, FormatError> {
-            Ok(crate::datatype::serialize_datatype(&i32_datatype()))
+            crate::datatype::serialize_datatype(&i32_datatype())
         }
 
         fn committed_address(

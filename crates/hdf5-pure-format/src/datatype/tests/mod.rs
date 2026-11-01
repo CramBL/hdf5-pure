@@ -82,7 +82,7 @@ fn the_class_gate_admits_every_reference_holding_datatype() {
             datatype_holds_object_address(&dt),
             "{what} holds an object address"
         );
-        let encoded = serialize_datatype(&dt);
+        let encoded = serialize_datatype(&dt).unwrap();
         assert!(
             class_may_hold_object_address(encoded[0]),
             "{what} encodes as class {}, which the gate rejects — a walk would \
@@ -111,7 +111,7 @@ fn the_class_gate_is_necessary_and_not_sufficient() {
     };
     assert!(!datatype_holds_object_address(&ints));
     assert!(
-        class_may_hold_object_address(serialize_datatype(&ints)[0]),
+        class_may_hold_object_address(serialize_datatype(&ints).unwrap()[0]),
         "a compound of integers is admitted by the class gate and holds no address"
     );
 }
@@ -182,7 +182,7 @@ fn preserves_low_and_high_padding(
         }
         other => panic!("expected an integer or bit-field datatype, got {other:?}"),
     }
-    assert_eq!(serialize_datatype(&datatype), bytes);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), bytes);
 }
 
 #[rstest]
@@ -210,7 +210,7 @@ fn preserves_floating_point_padding(
         ),
         (low, high, internal)
     );
-    assert_eq!(serialize_datatype(&datatype), bytes);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), bytes);
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn preserves_floating_point_class_fields(
         )
         .unwrap(),
     );
-    let bytes = serialize_datatype(&datatype);
+    let bytes = serialize_datatype(&datatype).unwrap();
     assert_eq!(
         (bytes[1] >> FLOAT_NORMALIZATION_SHIFT) & FLOAT_NORMALIZATION_MASK,
         normalization_bits
@@ -400,13 +400,11 @@ fn test_string_space_padded_utf8() {
 
 #[test]
 fn test_opaque() {
-    // `tag_len` = 4, `tag` = "BLOB"
-    let mut buf = build_dt_header(5, DATATYPE_VERSION_ONE, [4, 0, 0], 64);
+    let mut buf = build_dt_header(5, DATATYPE_VERSION_ONE, [8, 0, 0], 64);
     buf.extend_from_slice(b"BLOB");
-    // Pad to 8 bytes
     buf.extend_from_slice(&[0, 0, 0, 0]);
     let (dt, consumed) = parse_datatype(&buf).unwrap();
-    assert_eq!(consumed, 16); // 8 header + 8 padded tag
+    assert_eq!(consumed, 16);
     assert_eq!(
         dt,
         Datatype::Opaque {
@@ -438,10 +436,10 @@ fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width:
     let mut expected = build_dt_header(COMPOUND_CLASS, DATATYPE_VERSION_THREE, [1, 0, 0], size);
     expected.extend_from_slice(b"last\0");
     expected.extend_from_slice(&(size - 1).to_le_bytes()[..width]);
-    expected.extend_from_slice(&serialize_datatype(&byte_member_type()));
+    expected.extend_from_slice(&serialize_datatype(&byte_member_type()).unwrap());
 
     assert_eq!(offset_bytes_for_size(size), width);
-    assert_eq!(serialize_datatype(&datatype), expected);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), expected);
     assert_eq!(
         parse_datatype(&expected).unwrap(),
         (datatype, expected.len())
@@ -456,9 +454,9 @@ fn three_byte_member_offsets_preserve_the_next_datatype(#[case] class: u8, #[cas
     let member = byte_member_type();
     let mut encoded = build_dt_header(class, version, [2, 0, 0], 70_000);
     encoded.extend_from_slice(b"first\0\0\0\0");
-    encoded.extend_from_slice(&serialize_datatype(&member));
+    encoded.extend_from_slice(&serialize_datatype(&member).unwrap());
     encoded.extend_from_slice(b"last\0\x6f\x11\x01");
-    encoded.extend_from_slice(&serialize_datatype(&member));
+    encoded.extend_from_slice(&serialize_datatype(&member).unwrap());
     assert_eq!(
         parse_datatype(&encoded).unwrap(),
         (
@@ -600,7 +598,7 @@ fn compound_v1_array_dimensions(
             FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap()
         )
     );
-    let encoded = serialize_datatype(&datatype);
+    let encoded = serialize_datatype(&datatype).unwrap();
     let (reparsed, consumed) = parse_datatype(&encoded).unwrap();
     assert_eq!(consumed, encoded.len());
     assert_eq!(reparsed, datatype);
@@ -716,7 +714,9 @@ fn compound_v1_retains_nested_array_shape() {
     };
     assert_eq!(datatype, expected);
     assert_eq!(
-        parse_datatype(&serialize_datatype(&datatype)).unwrap().0,
+        parse_datatype(&serialize_datatype(&datatype).unwrap())
+            .unwrap()
+            .0,
         expected
     );
 }
@@ -758,7 +758,7 @@ fn modern_compound_array_members_keep_their_layout(#[case] version: u8) {
     } else {
         buf.push(4);
     }
-    buf.extend_from_slice(&serialize_datatype(&array));
+    buf.extend_from_slice(&serialize_datatype(&array).unwrap());
     assert_eq!(
         parse_datatype(&buf).unwrap(),
         (
@@ -1000,7 +1000,7 @@ fn variable_length_strings_preserve_metadata_and_base_byte_order(
             .unwrap()
         ))
     );
-    assert_eq!(serialize_datatype(&datatype), bytes);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), bytes);
 }
 
 #[test]
@@ -1023,7 +1023,7 @@ fn nested_variable_length_sequences_roundtrip() {
         16,
     ));
     expected.extend_from_slice(&build_fixed_point(4, false, true, 0, 32));
-    assert_eq!(serialize_datatype(&datatype), expected);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), expected);
     assert_eq!(
         parse_datatype(&expected).unwrap(),
         (datatype, expected.len())
@@ -1272,7 +1272,7 @@ fn test_time_byte_order_roundtrips() {
         let (dt, _) = parse_datatype(&buf).unwrap();
         assert_eq!(dt, Datatype::Time(TimeType::new(4, order, 32).unwrap()));
         // serialize -> parse must round-trip the byte order.
-        let (reparsed, _) = parse_datatype(&serialize_datatype(&dt)).unwrap();
+        let (reparsed, _) = parse_datatype(&serialize_datatype(&dt).unwrap()).unwrap();
         assert_eq!(reparsed, dt);
     }
 }
@@ -1406,7 +1406,7 @@ fn serialize_parse_compound_roundtrip() {
             ),
         ],
     };
-    let bytes = serialize_datatype(&dt);
+    let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
 }
@@ -1424,7 +1424,7 @@ fn serialize_parse_enum_roundtrip() {
             __private::enum_member("BLUE".to_string(), 2i32.to_le_bytes().to_vec()),
         ],
     };
-    let bytes = serialize_datatype(&dt);
+    let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
 }
@@ -1472,7 +1472,7 @@ fn serialize_parse_enum_base_type_variety() {
         enum_base_fp(8, false, true),  // i64
     ] {
         let dt = make_enum(base.clone(), &[("A", 0), ("B", 1), ("NEG", -1)]);
-        let bytes = serialize_datatype(&dt);
+        let bytes = serialize_datatype(&dt).unwrap();
         let (parsed, consumed) = parse_datatype(&bytes).unwrap();
         assert_eq!(parsed, dt, "round-trip failed for base {base:?}");
         assert_eq!(consumed, bytes.len());
@@ -1486,7 +1486,7 @@ fn serialize_parse_enum_large_member_count() {
     let owned: Vec<(String, i64)> = (0..300).map(|i| (format!("M{i}"), i)).collect();
     let members: Vec<(&str, i64)> = owned.iter().map(|(n, v)| (n.as_str(), *v)).collect();
     let dt = make_enum(enum_base_fp(4, false, true), &members);
-    let bytes = serialize_datatype(&dt);
+    let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
     match parsed {
@@ -1515,7 +1515,7 @@ fn enum_value_width_is_not_validated_against_base_size() {
             5i32.to_le_bytes().to_vec(),
         )],
     };
-    let bytes = serialize_datatype(&dt);
+    let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_ne!(
         parsed, dt,
@@ -1540,7 +1540,7 @@ fn serialize_parse_array_roundtrip() {
         )),
         dimensions: vec![3],
     };
-    let bytes = serialize_datatype(&dt);
+    let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
 }
@@ -1548,7 +1548,7 @@ fn serialize_parse_array_roundtrip() {
 #[test]
 fn serialize_parse_time_roundtrip() {
     let dt = Datatype::Time(TimeType::new(8, DatatypeByteOrder::LittleEndian, 64).unwrap());
-    let bytes = serialize_datatype(&dt);
+    let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, consumed) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
     assert_eq!(consumed, bytes.len());
@@ -1561,27 +1561,7 @@ fn serialize_parse_bitfield_roundtrip() {
         DatatypeByteOrder::BigEndian,
     ] {
         let dt = Datatype::BitField(BitFieldType::new(4, byte_order, 3, 17).unwrap());
-        let bytes = serialize_datatype(&dt);
-        let (parsed, consumed) = parse_datatype(&bytes).unwrap();
-        assert_eq!(parsed, dt);
-        assert_eq!(consumed, bytes.len());
-    }
-}
-
-#[test]
-fn serialize_parse_opaque_roundtrip() {
-    // Tag lengths that do and do not land on an 8-byte boundary, to exercise
-    // the zero padding both ways.
-    for tag in [
-        b"abc".to_vec(),         // 3 bytes -> padded to 8
-        b"12345678".to_vec(),    // 8 bytes -> no padding
-        b"sensor-id\0".to_vec(), // 10 bytes -> padded to 16, embedded NUL preserved
-    ] {
-        let dt = Datatype::Opaque { size: 16, tag };
-        let bytes = serialize_datatype(&dt);
-        // The property section (after the 8-byte header) must be a multiple
-        // of 8, matching what the reference library expects.
-        assert_eq!((bytes.len() - 8) % 8, 0);
+        let bytes = serialize_datatype(&dt).unwrap();
         let (parsed, consumed) = parse_datatype(&bytes).unwrap();
         assert_eq!(parsed, dt);
         assert_eq!(consumed, bytes.len());
@@ -1726,7 +1706,7 @@ fn rejects_overlapping_floating_point_metadata(
 )]
 fn preserves_ieee_bytes(#[case] numeric: FloatingPointType, #[case] expected: Vec<u8>) {
     let datatype = Datatype::FloatingPoint(numeric);
-    let encoded = serialize_datatype(&datatype);
+    let encoded = serialize_datatype(&datatype).unwrap();
     assert_eq!(encoded, expected);
     assert_eq!(parse_datatype(&encoded).unwrap(), (datatype, encoded.len()));
 }
@@ -1738,7 +1718,7 @@ fn parses_wide_numeric_metadata(#[case] size: u32) {
     let fixed = Datatype::FixedPoint(
         FixedPointType::new(size, DatatypeByteOrder::BigEndian, true, 1, 127).unwrap(),
     );
-    let encoded = serialize_datatype(&fixed);
+    let encoded = serialize_datatype(&fixed).unwrap();
     assert_eq!(parse_datatype(&encoded).unwrap().0, fixed);
     let floating = Datatype::FloatingPoint(
         FloatingPointType::from_layout(
@@ -1748,7 +1728,7 @@ fn parses_wide_numeric_metadata(#[case] size: u32) {
         )
         .unwrap(),
     );
-    let encoded = serialize_datatype(&floating);
+    let encoded = serialize_datatype(&floating).unwrap();
     assert_eq!(parse_datatype(&encoded).unwrap().0, floating);
 }
 #[rstest]

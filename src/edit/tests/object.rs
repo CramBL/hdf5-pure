@@ -187,7 +187,8 @@ fn a_copied_reference_dataset_without_layout_is_rejected() {
             MessageType::DATATYPE,
             &hdf5_pure_format::__private::serialize_datatype(
                 &crate::type_builders::make_object_reference_type(),
-            ),
+            )
+            .unwrap(),
         )),
         DenseAttrSet::default(),
     );
@@ -1932,7 +1933,8 @@ fn compact_reference_region(address: u64) -> OhRegion {
         MessageType::DATATYPE,
         &hdf5_pure_format::__private::serialize_datatype(
             &crate::type_builders::make_object_reference_type(),
-        ),
+        )
+        .unwrap(),
     );
     let mut layout = vec![3u8, 0];
     layout.extend_from_slice(&8u16.to_le_bytes());

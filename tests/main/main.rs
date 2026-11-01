@@ -93,6 +93,7 @@ mod named_datatypes;
 mod native_complex;
 mod object_header_continuation;
 mod object_path;
+mod opaque_tags;
 mod owned_append;
 mod owned_edit;
 mod owned_handles;

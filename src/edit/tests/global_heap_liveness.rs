@@ -222,7 +222,7 @@ fn a_message_the_analysis_cannot_read_is_incomplete(#[case] message: Message) {
     Message::new(MessageType::DATASPACE, &dataspace::scalar()),
 ])]
 #[case::shared_filter_pipeline(vec![
-    Message::new(MessageType::DATATYPE, &format::serialize_datatype(&global_heap_fixture::vlen_string())),
+    Message::new(MessageType::DATATYPE, &format::serialize_datatype(&global_heap_fixture::vlen_string()).unwrap()),
     Message::new(MessageType::DATASPACE, &dataspace::scalar()),
     Message::new(MessageType::FILTER_PIPELINE, &shared_message()).with_flags(MessageFlags::SHARED),
 ])]

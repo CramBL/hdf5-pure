@@ -113,7 +113,13 @@ pub enum Datatype {
     Opaque {
         /// Size of one element, in bytes.
         size: u32,
-        /// Application-defined tag bytes.
+        /// Application-defined logical tag bytes, excluding the terminator and padding.
+        ///
+        /// An empty tag denotes an untagged type. Writing accepts at most 247 bytes and rejects
+        /// embedded NULs. Non-ASCII bytes are preserved. Reading also accepts an aligned property
+        /// filled entirely by tag bytes. `H5O__dtype_encode_helper` writes that form for tags whose
+        /// logical length is a multiple of eight (H5Odtype.c, HDF5 2.2.0). A 248-byte tag can be read
+        /// but exceeds the writing limit.
         tag: Vec<u8>,
     },
     /// Class 6: Compound type.

@@ -57,7 +57,7 @@ fn native_complex_preserves_component_layout_and_message_extent(
         component_size * 2,
     );
     expected.extend_from_slice(&canonical_parent);
-    assert_eq!(serialize_datatype(&datatype), expected);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), expected);
     assert_eq!(
         parse_datatype(&expected).unwrap(),
         (datatype, expected.len())
@@ -217,7 +217,7 @@ fn native_complex_contains_no_file_addresses() {
         .unwrap(),
     );
     assert!(!class_may_hold_object_address(
-        serialize_datatype(&datatype)[0]
+        serialize_datatype(&datatype).unwrap()[0]
     ));
     assert!(!datatype_holds_object_address(&datatype));
     assert!(!datatype_holds_file_address(&datatype));
@@ -251,7 +251,7 @@ fn native_complex_preserves_vax_component_metadata() {
         ),
     );
     assert_eq!(consumed, encoded.len());
-    assert_eq!(serialize_datatype(&datatype), encoded);
+    assert_eq!(serialize_datatype(&datatype).unwrap(), encoded);
 }
 
 #[rstest]
@@ -278,7 +278,7 @@ fn native_complex_propagates_versions_through_containers(
         .fold((datatype, expected), |(datatype, encoded), container| {
             container.wrap(datatype, encoded)
         });
-    let encoded = serialize_datatype(&datatype);
+    let encoded = serialize_datatype(&datatype).unwrap();
     assert_eq!(encoded, expected);
     assert_eq!(parse_datatype(&encoded).unwrap(), (datatype, encoded.len()));
 }
