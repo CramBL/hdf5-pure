@@ -282,6 +282,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
 #[cfg(doc)]
@@ -303,6 +304,8 @@ use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError};
+use crate::extension::ExtensionSummary;
+use crate::extension::SharedTableSummary;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
 use crate::file_space_info::DEFAULT_THRESHOLD;
@@ -318,8 +321,6 @@ use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
-use crate::message_type::MessageType;
-use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
@@ -327,7 +328,6 @@ use crate::reader::{FileAccessProperties, OpenedSource, PersistedFreeSpacePolicy
 use crate::source::MetadataCacheConfig;
 use crate::source::PhysicalSource;
 use crate::source::Source;
-use crate::source::SourceMetadata;
 use crate::superblock;
 use crate::superblock::Superblock;
 #[cfg(doc)]
@@ -1076,6 +1076,51 @@ struct PersistState {
     old_blocks: Vec<FreeExtent>,
 }
 
+/// Decoded opening settings and a separate extension-allocation result.
+///
+/// Allocation errors are deferred until strict manager recovery has completed. The caller uses
+/// both results within the same unchanged source phase.
+struct OpeningExtension {
+    /// The physical extension address and first File Space Info message, if present.
+    info: Option<(u64, FileSpaceInfo)>,
+    /// Complete physical chunk ranges, or a deferred editor geometry error.
+    ///
+    /// Empty when persistence is absent or disabled.
+    allocations: Result<Vec<FileRange>, Error>,
+}
+
+impl OpeningExtension {
+    /// Prepares settings and allocation geometry during one extension traversal.
+    ///
+    /// Materializes allocation ranges only when the decoded settings enable persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`WriteEngine::extension_summary`] and
+    /// [`ExtensionSummary::into_file_space_info`]. Allocation errors remain in the result.
+    fn read(source: &(impl Source + ?Sized), context: &FileContext) -> Result<Self, FormatError> {
+        let mut allocations = self::object_header::ExtensionAllocations::new();
+        let summary = WriteEngine::extension_summary(
+            source,
+            context,
+            Some(&mut |chunk| {
+                allocations.observe(chunk, context.addresses(), source.len());
+            }),
+        )?;
+        let info = summary
+            .map(ExtensionSummary::into_file_space_info)
+            .transpose()?
+            .flatten()
+            .map(|(address, info)| (address.get(), info));
+        let allocations = if info.as_ref().is_some_and(|(_, info)| info.persist) {
+            allocations.finish()
+        } else {
+            Ok(Vec::new())
+        };
+        Ok(Self { info, allocations })
+    }
+}
+
 /// Parsed persistent managers and extension allocation ranges for allocator installation.
 struct PersistedRecovery {
     managers: PersistedManagerSet,
@@ -1083,18 +1128,22 @@ struct PersistedRecovery {
 }
 
 impl PersistedRecovery {
-    /// Reads the complete manager set and its physical extension allocation ranges.
+    /// Reads the complete manager set and adopts prepared physical extension ranges.
+    ///
+    /// Reports manager failures before the deferred extension-allocation result. Uses
+    /// [`BorrowedHandle::finish`](crate::image::BorrowedHandle::finish) to preserve captured I/O
+    /// errors when discharging that result.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::PersistedFreeSpace`] for a manager read or parse failure,
-    /// [`Error::Io`] for an extension read failure, or [`Error::Format`] for invalid extension
-    /// metadata, address arithmetic, or a source shorter than the logical end of file.
+    /// Returns [`Error::PersistedFreeSpace`] for a manager read or parse failure. Propagates
+    /// the extension error through the source adapter. Returns [`Error::Format`] for invalid
+    /// address arithmetic or a source shorter than the logical end of file.
     fn read(
         source: &crate::image::BorrowedHandle<'_>,
         context: &FileContext,
-        extension: u64,
         info: &FileSpaceInfo,
+        extension: Result<Vec<FileRange>, Error>,
     ) -> Result<Self, Error> {
         let addresses = context.addresses();
         let stored_eof =
@@ -1106,13 +1155,7 @@ impl PersistedRecovery {
             stored_eof.get(),
             info,
         )?;
-        let extension = source
-            .finish(self::object_header::read_oh_chunks(
-                source, extension, addresses,
-            ))?
-            .into_iter()
-            .map(|chunk| chunk.span)
-            .collect();
+        let extension = source.finish(extension)?;
         if context.superblock().eof_address > source.len() {
             return Err(FormatError::TruncatedFile {
                 expected_eof: context.superblock().eof_address,
@@ -1594,24 +1637,31 @@ impl WriteEngine {
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = match policy {
+        let OpeningExtension {
+            info: file_space_info,
+            allocations,
+        } = match policy {
             PersistedFreeSpacePolicy::Strict => {
-                probe.finish(Self::extension_fsinfo(&probe, &context))
+                probe.finish(OpeningExtension::read(&probe, &context))
             }
             PersistedFreeSpacePolicy::Tolerant => {
-                Self::extension_fsinfo(&probe, &context).map_err(Error::from)
+                OpeningExtension::read(&probe, &context).map_err(Error::from)
             }
         }?;
-        let recovered = if policy == PersistedFreeSpacePolicy::Strict {
-            file_space_info
-                .as_ref()
-                .filter(|(_, info)| info.persist)
-                .map(|(extension, info)| {
-                    PersistedRecovery::read(&probe, &context, *extension, info)
-                })
-                .transpose()?
+        let (recovered, extension_allocations) = if policy == PersistedFreeSpacePolicy::Strict
+            && let Some((_, info)) = file_space_info.as_ref().filter(|(_, info)| info.persist)
+        {
+            (
+                Some(PersistedRecovery::read(
+                    &probe,
+                    &context,
+                    info,
+                    allocations,
+                )?),
+                None,
+            )
         } else {
-            None
+            (None, allocations.ok())
         };
         let fresh_page_boundary = if let Some((_, info)) = &file_space_info
             && info.strategy == FileSpaceStrategy::Page
@@ -1691,7 +1741,7 @@ impl WriteEngine {
         };
         // If the file persists its free space, seed the free list from the
         // on-disk managers and arm persistence for future commits.
-        session.load_persisted_free_space(file_space_info, recovered)?;
+        session.load_persisted_free_space(file_space_info, recovered, extension_allocations)?;
         if session.fresh_page_boundary.is_some() {
             session.space_ownership()?;
         }
@@ -1838,9 +1888,10 @@ impl WriteEngine {
     ///
     /// Installs checked recovery when supplied. Otherwise, reads every defined manager tolerantly.
     /// Excludes the entire manager set from reusable space if any manager read fails. After
-    /// successful reads, omits invalid, overlapping, or out-of-bounds extents. A nonpersistent PAGE
-    /// session starts with empty free lists. Files without File Space Info use the default
-    /// `FSM_AGGR` strategy with separate metadata and raw aggregates.
+    /// successful reads, omits invalid, overlapping, or out-of-bounds extents. Uses prepared
+    /// extension ranges when available and omits unsupported extension allocations.
+    /// A nonpersistent PAGE session starts with empty free lists. Files without File Space Info
+    /// use the default `FSM_AGGR` strategy with separate metadata and raw aggregates.
     ///
     /// # Errors
     ///
@@ -1850,8 +1901,9 @@ impl WriteEngine {
         &mut self,
         file_space_info: Option<(u64, FileSpaceInfo)>,
         recovered: Option<PersistedRecovery>,
+        extension_allocations: Option<Vec<FileRange>>,
     ) -> Result<(), Error> {
-        let Some((ext_addr, info)) = file_space_info else {
+        let Some((_, info)) = file_space_info else {
             if let Ok(eoa) = self.end_of_allocation() {
                 self.aggregation = Some(AggregateSpace::new(eoa));
             }
@@ -1954,7 +2006,7 @@ impl WriteEngine {
         }
 
         let mut old_blocks = Vec::new();
-        if let Ok(spans) = self.oh_chunk_spans(ext_addr) {
+        if let Some(spans) = extension_allocations {
             old_blocks.extend(
                 spans
                     .into_iter()
@@ -2147,6 +2199,26 @@ impl WriteEngine {
         source: &(impl Source + ?Sized),
         context: &FileContext,
     ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
+        Ok(Self::extension_summary(source, context, None)?
+            .map(ExtensionSummary::into_file_space_info)
+            .transpose()?
+            .flatten()
+            .map(|(address, info)| (address.get(), info)))
+    }
+
+    /// Resolves the extension address and reads its selected facts under a source borrow.
+    ///
+    /// Returns `None` when the superblock has no defined extension address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if address resolution overflows, and header or
+    /// source-read errors from [`ExtensionSummary::read`].
+    fn extension_summary<'a, S: Source + ?Sized>(
+        source: &'a S,
+        context: &FileContext,
+        observer: Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+    ) -> Result<Option<ExtensionSummary<'a, S>>, FormatError> {
         let superblock = context.superblock();
         let widths = context.widths();
         let base = context.addresses();
@@ -2166,22 +2238,15 @@ impl WriteEngine {
         // address on a file without a userblock. The caller reads the strategy of a file with a
         // userblock as well, so the address is resolved here for both.
         let ext_addr = base.resolve(ext_rel)?.get();
-        let oh = ObjectHeader::parse_from_source_with_widths(
-            &SourceMetadata(source),
+        ExtensionSummary::read(
+            source,
             AccessMode::ReadWrite,
-            ext_addr,
+            PhysicalAddress::new(ext_addr),
             widths,
-            base.effective_base(),
-        )?;
-        let Some(msg) = oh
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)
-        else {
-            return Ok(None);
-        };
-        let info = hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data)?;
-        Ok(Some((ext_addr, info)))
+            base,
+            observer,
+        )
+        .map(Some)
     }
 
     /// Reserves exclusive appender access and returns its release token.
@@ -2357,26 +2422,18 @@ impl WriteEngine {
         let Ok(abs) = base.resolve(rel).map(PhysicalAddress::get) else {
             return Ok(None);
         };
-        let Ok(header) = ObjectHeader::parse_from_source_with_widths(
-            &SourceMetadata(&self.image()),
+        let Ok(summary) = SharedTableSummary::read(
+            self.image(),
             AccessMode::ReadWrite,
-            abs,
+            PhysicalAddress::new(abs),
             widths,
-            base.effective_base(),
+            base,
         ) else {
             return Ok(None);
         };
-        let Some(msg) = header
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)
-        else {
+        let Some(message) = summary.into_message()? else {
             return Ok(None);
         };
-        let message = crate::sohm::SharedMessageTableMessage::parse_with_offset_width(
-            &msg.data,
-            widths.offsets,
-        )?;
         let opened = self.opened_source();
         Ok(Some(crate::sohm::read_table_from_source(
             &PhysicalSource::new(&opened).stored(),

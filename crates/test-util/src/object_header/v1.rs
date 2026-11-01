@@ -273,6 +273,13 @@ pub const PREFIX: usize = 16;
 /// type(2) + size(2) + flags(1) + reserved(3).
 pub const RECORD_PREFIX: usize = 8;
 
+/// The message data alignment in bytes, including padding in the declared body size.
+///
+/// Defined in "Version 1 Data Object Header Prefix" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
+pub const MESSAGE_ALIGNMENT: usize = 8;
+
 const VERSION: u8 = 1;
 
 #[cfg(test)]
