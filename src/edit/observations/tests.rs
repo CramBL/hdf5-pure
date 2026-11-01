@@ -5,7 +5,7 @@ use hdf5_pure_space::__private::{
     AllocationClass, Extent, PageType, ReservationRequest, ReservationWork, SessionSpace,
 };
 use rstest::rstest;
-use test_util::snapshot::{Report, Value};
+use test_util::snapshot::text::{Report, Value};
 
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::block::{BlockRequest, EncodingDependency};

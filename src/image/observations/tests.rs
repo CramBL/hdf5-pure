@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 
 use rstest::rstest;
-use test_util::snapshot::{Report, Value};
+use test_util::snapshot::text::{Report, Value};
 
 use super::ImageWork;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
