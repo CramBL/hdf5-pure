@@ -1,5 +1,7 @@
 //! Object-header traversal and reconstruction for staged edits.
 
+use std::collections::VecDeque;
+
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
@@ -52,29 +54,84 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
-    /// parsing and source-read errors from [`read_oh_chunks`].
+    /// parsing and source-read errors from [`visit_oh_chunks`].
     pub(super) fn gather_oh_messages<S: Source + ?Sized>(
         src: &S,
         addr: u64,
         base: AddressContext,
     ) -> Result<OhRegion, Error> {
-        let chunks = read_oh_chunks(src, addr, base)?;
-        // Every chunk of one header shares what chunk 0's prefix declared, which
-        // is what makes concatenating their records into one region well defined,
-        // and what carries the prefix's optional blocks through to the rebuild.
-        let mut out = OhRegion::empty(chunks[0].props());
-        for chunk in &chunks {
-            let layout = chunk.layout();
-            let (region, mut p) = chunk.message_region();
-            while let Some((msg_type, _body, body_end)) = next_record(layout, region, p)? {
-                if msg_type != MessageType::OBJECT_HEADER_CONTINUATION {
-                    out.push_bytes(&region[p..body_end]);
-                }
-                p = body_end;
-            }
-        }
-        Ok(out)
+        gather_records(src, addr, base, HeaderRecords::All)
     }
+}
+
+/// Occupied extension records retained under an immutable source borrow.
+///
+/// NIL and continuation records are omitted. Record flags, creation indexes, and chunk 0 prefix
+/// properties are preserved. The caller borrows the source immutably while sizing and encoding
+/// replacement File Space Info bodies.
+pub(crate) struct ExtensionReconstruction<'a, S: Source + ?Sized> {
+    _source: &'a S,
+    region: OhRegion,
+}
+
+impl<'a, S: Source + ?Sized> ExtensionReconstruction<'a, S> {
+    /// Reads occupied version 2 extension records from the physical address `addr`.
+    ///
+    /// Reads each chunk into a temporary buffer and retains its occupied records in traversal
+    /// order. Continuation addresses are resolved through `base`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the traversal errors from [`visit_oh_chunks`].
+    pub(crate) fn read(src: &'a S, addr: u64, base: AddressContext) -> Result<Self, Error> {
+        Ok(Self {
+            _source: src,
+            region: gather_records(src, addr, base, HeaderRecords::Occupied)?,
+        })
+    }
+
+    /// Replaces every retained File Space Info body without reading the source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoding and missing-message errors from [`rewrite_extension_region_bytes`].
+    pub(crate) fn rewrite(
+        &self,
+        widths: FormatWidths,
+        info: &FileSpaceInfo,
+    ) -> Result<OhRegion, Error> {
+        rewrite_extension_region_bytes(&self.region, widths, info)
+    }
+}
+
+fn gather_records<S: Source + ?Sized>(
+    src: &S,
+    addr: u64,
+    base: AddressContext,
+    records: HeaderRecords,
+) -> Result<OhRegion, Error> {
+    let mut out = None;
+    visit_oh_chunks(src, addr, base, |chunk| {
+        let out = out.get_or_insert_with(|| OhRegion::empty(chunk.props()));
+        let layout = chunk.layout();
+        let (region, mut p) = chunk.message_region();
+        while let Some((msg_type, _body, body_end)) = next_record(layout, region, p)? {
+            if msg_type != MessageType::OBJECT_HEADER_CONTINUATION
+                && (records == HeaderRecords::All || msg_type != MessageType::NIL)
+            {
+                out.push_bytes(&region[p..body_end]);
+            }
+            p = body_end;
+        }
+        Ok(())
+    })?;
+    out.ok_or_else(|| FormatError::Internal("object header has no root chunk".into()).into())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HeaderRecords {
+    All,
+    Occupied,
 }
 
 /// Returns a copy of `region` whose first Data Layout message holds `raw` as its compact data.
@@ -299,104 +356,145 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
 
 /// Reads every chunk of a version 2 header, following continuation records.
 ///
-/// Returns chunk 0 first. Both [`WriteEngine::gather_oh_messages`] and
-/// [`WriteEngine::oh_chunk_spans`] use this traversal.
+/// Returns chunk 0 first, followed by continuation chunks in breadth-first order. Retains every
+/// chunk buffer and its complete physical range.
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if the header is not version 2, a chunk or record extends
 /// past its source bounds, or the traversal exceeds [`MAX_OH_CHUNKS`]. Returns errors from
-/// [`read_oh_chunk0`] and [`read_oh_continuation`].
+/// [`read_oh_chunk0`] and [`ContinuationChunk::read`].
 pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     src: &S,
     addr: u64,
     base: AddressContext,
 ) -> Result<Vec<OhChunk>, Error> {
-    let mut chunks = vec![read_oh_chunk0(src, addr)?];
-    let mut i = 0;
-    while i < chunks.len() {
-        if chunks.len() > MAX_OH_CHUNKS {
-            return Err(Error::EditUnsupported(
-                "object header has too many continuation chunks",
-            ));
-        }
-        // Collect this chunk's continuations before extending the list of chunks, so the
-        // borrow of `chunks[i]` ends first.
-        let mut found = Vec::new();
-        let props = chunks[i].props();
-        let layout = props.layout;
-        let (region, mut p) = chunks[i].message_region();
-        while let Some((msg_type, body, body_end)) = next_record(layout, region, p)? {
-            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
-                found.push(read_oh_continuation(
-                    src, region, body, body_end, base, props,
-                )?);
-            }
-            p = body_end;
-        }
-        i += 1;
-        chunks.extend(found);
-    }
+    let mut chunks = Vec::with_capacity(1);
+    visit_oh_chunks(src, addr, base, |chunk| {
+        chunks.push(chunk);
+        Ok(())
+    })?;
     Ok(chunks)
 }
 
-/// Reads the continuation block named by `region[body..body_end]`.
+/// Visits version 2 header chunks in breadth-first continuation order.
 ///
-/// Decodes the base-relative address before reading the block and excludes its checksum from
-/// the returned message buffer. The version 2 block fields are defined in "The Object Header
-/// Continuation Message" of the [format specification, version 4.0][spec].
+/// Reads the next chunk after the visitor consumes the current chunk. Pending continuations
+/// contain complete physical ranges and inherited prefix properties.
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] if the message is truncated, the block is out of bounds,
-/// or its signature is invalid. Returns [`Error::Format`] if the address is undefined, address
-/// conversion overflows, or a source read fails.
+/// Returns [`Error::EditUnsupported`] if a chunk or record is unsupported or truncated, or if
+/// the traversal exceeds [`MAX_OH_CHUNKS`]. Propagates source-read, address-conversion, parsing,
+/// and visitor errors.
+fn visit_oh_chunks<S: Source + ?Sized>(
+    src: &S,
+    addr: u64,
+    base: AddressContext,
+    mut visit: impl FnMut(OhChunk) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let mut chunk = read_oh_chunk0(src, addr)?;
+    let mut pending = VecDeque::new();
+    let mut count = 1;
+    loop {
+        let props = chunk.props();
+        let layout = props.layout;
+        let (region, mut p) = chunk.message_region();
+        while let Some((msg_type, body, body_end)) = next_record(layout, region, p)? {
+            if msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
+                pending.push_back(ContinuationChunk::parse(
+                    &region[body..body_end],
+                    base,
+                    props,
+                    src.len(),
+                )?);
+                count += 1;
+                if count > MAX_OH_CHUNKS {
+                    return Err(Error::EditUnsupported(
+                        "object header has too many continuation chunks",
+                    ));
+                }
+            }
+            p = body_end;
+        }
+        visit(chunk)?;
+        let Some(next) = pending.pop_front() else {
+            return Ok(());
+        };
+        chunk = next.read(src)?;
+    }
+}
+
+/// A continuation's complete physical range and inherited prefix properties.
+///
+/// The range is resolved from the stored address before reading. Version 2 block framing is
+/// defined in "The Object Header Continuation Message" of the [format specification,
+/// version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_continuation
-fn read_oh_continuation<S: Source + ?Sized>(
-    src: &S,
-    region: &[u8],
-    body: usize,
-    body_end: usize,
-    base: AddressContext,
+struct ContinuationChunk {
+    span: FileRange,
     props: ObjectHeaderPrefix,
-) -> Result<OhChunk, Error> {
-    let continuation =
-        match ObjectHeaderContinuation::parse(&region[body..body_end], OFFSET_SIZE, LENGTH_SIZE) {
+}
+
+impl ContinuationChunk {
+    /// Resolves a continuation's complete allocation within `file_len`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if `body` is truncated or the block is out of bounds.
+    /// Returns [`Error::Format`] for an undefined address or address-conversion overflow.
+    fn parse(
+        body: &[u8],
+        base: AddressContext,
+        props: ObjectHeaderPrefix,
+        file_len: u64,
+    ) -> Result<Self, Error> {
+        let continuation = match ObjectHeaderContinuation::parse(body, OFFSET_SIZE, LENGTH_SIZE) {
             Ok(continuation) => continuation,
             Err(FormatError::UnexpectedEof { .. }) => {
                 return Err(Error::EditUnsupported("malformed continuation message"));
             }
             Err(err) => return Err(Error::Format(err)),
         };
-    let len = continuation.length();
-    // The block address is stored relative to the base address. Shift it to an
-    // absolute file offset before reading.
-    let off = base.resolve(continuation.address())?.get();
-    // An OCHK block is signature(4) + messages + checksum(4).
-    let end = off
-        .checked_add(len)
-        .filter(|&e| e <= src.len() && len >= 8)
-        .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
-    let want = (end - off).to_usize()?;
-    let mut buf = src.read_metadata_at(off, want)?;
-    let messages = match hdf5_pure_format::__private::continuation_block_messages(&buf) {
-        Ok(messages) => messages,
-        Err(FormatError::InvalidObjectHeaderSignature) => {
-            return Err(Error::EditUnsupported(
-                "invalid continuation block signature",
-            ));
-        }
-        Err(err) => return Err(Error::Format(err)),
-    };
-    // Trim the trailing checksum so the message walk stops at the last message.
-    buf.truncate(messages.end);
-    Ok(OhChunk {
-        span: FileRange::new(PhysicalAddress::new(off), len)?,
-        buf,
-        messages_start: messages.start,
-        props,
-    })
+        let len = continuation.length();
+        let off = base.resolve(continuation.address())?;
+        off.get()
+            .checked_add(len)
+            .filter(|&end| end <= file_len && len >= 8)
+            .ok_or(Error::EditUnsupported("continuation block out of bounds"))?;
+        Ok(Self {
+            span: FileRange::new(off, len)?,
+            props,
+        })
+    }
+
+    /// Reads the complete block and excludes its checksum from the message buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the block signature is invalid. Propagates
+    /// source-read, size-conversion, and parsing errors.
+    fn read<S: Source + ?Sized>(self, src: &S) -> Result<OhChunk, Error> {
+        let mut buf =
+            src.read_metadata_at(self.span.start().get(), self.span.length().to_usize()?)?;
+        let messages = match hdf5_pure_format::__private::continuation_block_messages(&buf) {
+            Ok(messages) => messages,
+            Err(FormatError::InvalidObjectHeaderSignature) => {
+                return Err(Error::EditUnsupported(
+                    "invalid continuation block signature",
+                ));
+            }
+            Err(err) => return Err(Error::Format(err)),
+        };
+        buf.truncate(messages.end);
+        Ok(OhChunk {
+            span: self.span,
+            buf,
+            messages_start: messages.start,
+            props: self.props,
+        })
+    }
 }
 
 /// Returns the type and the body range of the message record at `msg_start` in `region`,
@@ -467,6 +565,7 @@ impl OhRegion {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if a record extends past the region.
+    #[cfg(test)]
     pub(crate) fn without_nil(&self) -> Result<Self, Error> {
         let mut bytes = Vec::new();
         let mut start = 0;
@@ -703,6 +802,8 @@ mod tests {
     use crate::type_builders::AttrValue;
 
     use super::*;
+
+    mod reconstruction;
 
     #[rstest]
     #[case::one_message(false, vec![1, 2, 3, 4])]

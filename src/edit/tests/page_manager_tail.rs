@@ -1,12 +1,15 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hdf5_pure_format::__private::HDF5_SIGNATURE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::{Extent, ManagerKind, ManagerSections};
 use rstest::rstest;
+use test_util::checksum;
 use test_util::disk_log::{self, DiskOp};
 use test_util::free_space;
 use test_util::object_header::v2 as object_header;
@@ -20,10 +23,11 @@ use crate::FormatError;
 use crate::UserblockSize;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
 use crate::chunk_index_inplace::Store;
+use crate::edit::commit::PublicationPurpose;
 use crate::edit::object_header as edit_header;
 use crate::edit::test_util as edit_test_util;
 use crate::edit::{TailPlacement, WriteEngine};
-use crate::image::WriteBuffering;
+use crate::image::{CountingImage, FileImage, HandleImage, WriteBuffering};
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 use crate::type_builders::DatasetBuilder;
@@ -590,6 +594,101 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         rows,
     );
     insta::assert_snapshot!("owned_page_extension", report.finish());
+}
+
+#[rstest]
+#[case::bounded(MemoryStrategy::Bounded)]
+#[case::mirrored(MemoryStrategy::Mirrored)]
+fn a_page_publication_reads_each_protected_extension_chunk_once(#[case] memory: MemoryStrategy) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("extension-read-cost.h5");
+    fragmented_page_file(&path, FragmentedSections::Continued);
+    let reads = Arc::new(AtomicU64::new(0));
+    let calls = Arc::new(AtomicU64::new(0));
+    let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, len| {
+        let image: Box<dyn FileImage> = match memory {
+            MemoryStrategy::Bounded => Box::new(HandleImage::new(
+                handle,
+                len,
+                MetadataCacheConfig::disabled(),
+            )),
+            MemoryStrategy::Mirrored => Box::new(WriteEngine::read_mirror(handle)?),
+            MemoryStrategy::Auto => panic!("read accounting requires an explicit backing"),
+        };
+        Ok(Box::new(
+            CountingImage::new(image, reads.clone(), Arc::default()).with_read_calls(calls.clone()),
+        ))
+    })
+    .unwrap();
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    let root = engine
+        .context
+        .addresses()
+        .resolve(engine.context.superblock().root_group_address)
+        .unwrap();
+    engine
+        .commit_persisting_paged(
+            root,
+            ReturnedExtents::default(),
+            TailPlacement::Anywhere,
+            PublicationPurpose::Commit,
+        )
+        .unwrap();
+    let extension = engine
+        .context
+        .addresses()
+        .resolve(
+            engine
+                .context
+                .superblock()
+                .superblock_extension_address
+                .unwrap(),
+        )
+        .unwrap();
+    let chunks =
+        edit_header::read_oh_chunks(engine.image(), extension.get(), engine.context.addresses())
+            .unwrap();
+    assert!(chunks.len() > 1);
+    let source_bytes = chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>()
+        - u64::try_from(checksum::CHECKSUM).unwrap()
+        + u64::try_from(hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN).unwrap();
+    reads.store(0, Ordering::Relaxed);
+    calls.store(0, Ordering::Relaxed);
+    engine
+        .commit_persisting_paged(
+            root,
+            ReturnedExtents::default(),
+            TailPlacement::Anywhere,
+            PublicationPurpose::Commit,
+        )
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        u64::try_from(chunks.len() + 1).unwrap()
+    );
+    assert_eq!(reads.load(Ordering::Relaxed), source_bytes);
+    eprintln!(
+        "{memory:?}: predecessor {} chunks, {} source calls, {} source bytes",
+        chunks.len(),
+        calls.load(Ordering::Relaxed),
+        source_bytes
+    );
+    assert_manager_allocations_owned(&engine);
+    engine.force_sync().unwrap();
+    drop(engine);
+    let reopened = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        memory,
+        PersistedFreeSpacePolicy::Strict,
+    )
+    .unwrap();
+    assert!(reopened.persist.as_ref().unwrap().old_blocks.len() > chunks.len());
+    assert_manager_allocations_owned(&reopened);
+    drop(reopened);
 }
 
 fn fragmented_page_file(path: &Path, scale: FragmentedSections) {
