@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::BTREE_V2_LINK_CREATION_ORDER;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::BTreeV2Layout;
@@ -22,25 +23,29 @@ use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::OwnedLink;
 
 use crate::access_mode::AccessMode;
-use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::fractal_heap;
-use crate::fractal_heap::LegacyHeapObjectReader;
+use crate::fractal_heap::HeapObjectReader;
+use crate::fractal_heap::HeapSource;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::source::BaseOffsetSource;
-use crate::source::RangeReader;
-use crate::source::Source;
-use crate::source::SourceMetadata;
+use crate::source::OriginalSource;
+use crate::source::PhysicalSource;
+use crate::source::StoredMetadata;
+use crate::source::StoredRead;
 use crate::width::FormatWidths;
 
 use super::object_header::OhRegion;
 
 /// Reads the group's links and checks their storage metadata for editing.
+///
+/// Derives dense-storage coordinates from the opened source's captured address context.
+/// Reads metadata through the original source's metadata operation, preserving ownership,
+/// physical ranges, and cache behavior.
 ///
 /// Dense storage is limited to unfiltered managed objects with seven-byte heap IDs and
 /// encoded links of at most 4096 bytes. Checks the name index and any creation-order index
@@ -52,8 +57,7 @@ use super::object_header::OhRegion;
 /// inconsistent or unsupported, or the Link Info message is absent. Returns parsing and
 /// source-read errors from the object-header, heap, and index readers.
 pub(super) fn inspect(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
+    source: &(impl OriginalSource + ?Sized),
     widths: FormatWidths,
     region: &OhRegion,
 ) -> Result<GroupLinkStorage, Error> {
@@ -115,24 +119,30 @@ pub(super) fn inspect(
                 "a group mixes compact and dense links",
             ));
         }
-        links = read_dense(source, addresses, widths, &info, heap)?;
+        links = read_dense(&PhysicalSource::new(source).stored(), widths, &info, heap)?;
     }
     GroupLinkStorage::new(&info, links, widths.offsets).map_err(storage_error)
 }
 
+/// Returns dense links after checking heap and index consistency.
+///
+/// Reads heap and index metadata through [`StoredRead::read_metadata`]. Checks name hashes,
+/// name-index order, the managed-object count, and any creation-order index.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] for unsupported storage encodings, inconsistent keys or
+/// counts, or links the editor cannot reproduce. Returns errors from address resolution,
+/// metadata reads, heap and link parsing, or index traversal.
 fn read_dense(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
+    source: &dyn StoredRead,
     widths: FormatWidths,
     info: &LinkInfoMessage,
     heap_address: StoredAddress,
 ) -> Result<Vec<OwnedLink>, Error> {
-    let framed = BaseOffsetSource {
-        inner: source,
-        base: addresses.effective_base(),
-    };
-    let header =
-        fractal_heap::legacy_read_header_from_source(&framed, addresses, heap_address, widths)?;
+    let heap_source = HeapSource::new(source);
+    let (header, _) =
+        fractal_heap::read_header_and_range_from_source(&heap_source, heap_address, widths)?;
     if header.filtering.is_filtered()
         || header.huge_objects_count != 0
         || header.tiny_objects_count != 0
@@ -157,7 +167,7 @@ fn read_dense(
         .btree_name_index_address
         .ok_or(Error::EditUnsupported("a dense group has no name index"))?;
     let name_header = BTreeV2Header::parse_from_source_with_widths(
-        &SourceMetadata(&framed),
+        &StoredMetadata(source),
         name_address.get(),
         widths,
     )?;
@@ -168,9 +178,9 @@ fn read_dense(
         ));
     }
     let ids = FractalHeapIdLayout::new(&header, widths.offsets, widths.lengths);
-    let mut heap = LegacyHeapObjectReader::new(
+    let mut heap = HeapObjectReader::new(
+        heap_source,
         &header,
-        addresses,
         heap_address,
         AccessMode::ReadWrite,
         widths,
@@ -178,7 +188,7 @@ fn read_dense(
     let mut links = Vec::new();
     let mut creation = BTreeMap::new();
     let mut previous_hash = None;
-    walk_index(source, addresses, index.nodes(), |record| {
+    walk_index(source, index.nodes(), |record| {
         let (hash, id) = index.record(record)?;
         let view = ids.parse(id)?;
         if id.first() != Some(&MANAGED_HEAP_ID_FLAGS)
@@ -188,7 +198,7 @@ fn read_dense(
                 "a group's link uses a non-managed heap ID",
             ));
         }
-        let bytes = heap.read_from_source(&framed, view)?;
+        let bytes = heap.read(view)?;
         let link = OwnedLink::parse(&bytes, widths.offsets).map_err(storage_error)?;
         if link.encoded_len(widths.offsets).map_err(storage_error)?
             > GROUP_HEAP_MAX_MANAGED_OBJECT.to_usize()?
@@ -225,24 +235,29 @@ fn read_dense(
         ));
     }
     if let Some(Some(address)) = info.btree_creation_order_address {
-        read_creation_index(source, addresses, widths, address, creation)?;
+        read_creation_index(source, widths, address, creation)?;
     }
     Ok(links)
 }
 
+/// Checks creation-order records against the name index's link IDs.
+///
+/// The caller passes each link's creation index and heap ID in `creation`. Checks strictly
+/// increasing creation indexes and matches every record's heap ID against this map.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] for an unsupported record encoding, inconsistent indexes
+/// or heap IDs, or omitted links. Returns errors from address resolution, metadata reads,
+/// or B-tree parsing.
 fn read_creation_index(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
+    source: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
     mut creation: BTreeMap<u64, Vec<u8>>,
 ) -> Result<(), Error> {
-    let framed = BaseOffsetSource {
-        inner: source,
-        base: addresses.effective_base(),
-    };
     let header = BTreeV2Header::parse_from_source_with_widths(
-        &SourceMetadata(&framed),
+        &StoredMetadata(source),
         address.get(),
         widths,
     )?;
@@ -255,7 +270,7 @@ fn read_creation_index(
     }
     let mut previous = None;
     let layout = BTreeV2Layout::new(&header, widths.offsets)?;
-    walk_index(source, addresses, &layout, |record| {
+    walk_index(source, &layout, |record| {
         let (index, id) = record
             .split_first_chunk::<LINK_CREATION_ORDER_LENGTH>()
             .ok_or(FormatError::InvalidBTreeV2Signature)?;
@@ -278,16 +293,21 @@ fn read_creation_index(
     Ok(())
 }
 
+/// Calls `read_record` with each index record, traversing children between records.
+///
+/// Reads nodes in stored coordinates through [`StoredRead::read_metadata`].
+///
+/// # Errors
+///
+/// Returns the errors of [`IndexReader::walk`].
 fn walk_index(
-    source: &(impl Source + ?Sized),
-    addresses: AddressContext,
+    source: &(impl StoredRead + ?Sized),
     layout: &BTreeV2Layout,
     mut read_record: impl FnMut(&[u8]) -> Result<(), Error>,
 ) -> Result<(), Error> {
     if let Some(root) = layout.root() {
         IndexReader {
             source,
-            addresses,
             visited: BTreeSet::new(),
         }
         .walk(root, &mut read_record)?;
@@ -295,32 +315,37 @@ fn walk_index(
     Ok(())
 }
 
-/// Reads one index while retaining the addresses of visited nodes.
-struct IndexReader<'a, S: Source + ?Sized> {
+/// Reads one index while retaining the stored addresses of visited nodes.
+///
+/// Reads metadata through [`StoredRead::read_metadata`]. Retains visited addresses across
+/// recursive calls.
+struct IndexReader<'a, S: StoredRead + ?Sized> {
     source: &'a S,
-    addresses: AddressContext,
     visited: BTreeSet<StoredAddress>,
 }
 
-impl<S: Source + ?Sized> IndexReader<'_, S> {
+impl<S: StoredRead + ?Sized> IndexReader<'_, S> {
+    /// Returns the subtree's record count after visiting its records.
+    ///
+    /// Checks physical endpoint arithmetic before reading at the node's stored address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] for a repeated node address, overflowing
+    /// record count, or inconsistent subtree total. Returns errors from address resolution,
+    /// metadata reads, node parsing, or `read_record`.
     fn walk(
         &mut self,
         node: BTreeV2Node<'_>,
         read_record: &mut impl FnMut(&[u8]) -> Result<(), Error>,
     ) -> Result<u64, Error> {
-        let Self {
-            source,
-            addresses,
-            visited,
-        } = self;
+        let Self { source, visited } = self;
         if !visited.insert(node.address()) {
             return Err(FormatError::InvalidBTreeV2Signature.into());
         }
-        let range = FileRange::new(
-            addresses.resolve(node.address())?,
-            node.encoded_len()?.to_u64(),
-        )?;
-        let bytes = source.read_range(range)?;
+        let length = node.encoded_len()?.to_u64();
+        FileRange::new(source.source_address(node.address())?, length)?;
+        let bytes = source.read_range(AddressRange::new(node.address(), length)?)?;
         let view = node.parse(&bytes)?;
         let mut count = 0u64;
         for record in 0..view.record_count() {

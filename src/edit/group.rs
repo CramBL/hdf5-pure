@@ -123,7 +123,7 @@ impl WriteEngine {
                 region.push(MessageType::ATTRIBUTE, &m.data);
             }
         }
-        let links = group_links::inspect(self.image(), base, self.context.widths(), &region)?;
+        let links = group_links::inspect(&self.opened_source(), self.context.widths(), &region)?;
         Ok(GroupInfo { region, links })
     }
     /// Reads a group's message region and compact or dense links.
@@ -145,12 +145,7 @@ impl WriteEngine {
             return self.reconstruct_v1_group(addr);
         }
         let mut region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses())?;
-        let links = group_links::inspect(
-            self.image(),
-            self.context.addresses(),
-            self.context.widths(),
-            &region,
-        )?;
+        let links = group_links::inspect(&self.opened_source(), self.context.widths(), &region)?;
         ensure_group_info(&mut region)?;
         Ok(GroupInfo { region, links })
     }
@@ -260,12 +255,7 @@ impl WriteEngine {
         region: &OhRegion,
         was_dense: bool,
     ) -> Result<bool, Error> {
-        let links = group_links::inspect(
-            self.image(),
-            self.context.addresses(),
-            self.context.widths(),
-            region,
-        )?;
+        let links = group_links::inspect(&self.opened_source(), self.context.widths(), region)?;
         let mut pos = 0;
         let mut thresholds = group_links::phase_change(&GROUP_INFO_BODY)?;
         while let Some((kind, body, end)) = region.next_message(pos)? {
@@ -304,12 +294,7 @@ impl WriteEngine {
         if !dense {
             return Ok(());
         }
-        let storage = group_links::inspect(
-            self.image(),
-            self.context.addresses(),
-            self.context.widths(),
-            region,
-        )?;
+        let storage = group_links::inspect(&self.opened_source(), self.context.widths(), region)?;
         let plan = dense_link_plan(storage, self.context.widths().lengths)?;
         let (_, info) =
             self.place_relocatable(plan.serialized_len(), AllocationClass::Metadata, |base| {
