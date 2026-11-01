@@ -80,6 +80,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
+use crate::object_path::ObjectTarget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
@@ -318,19 +319,30 @@ pub(crate) fn build_group_oh(
     link_info: Option<&LinkInfoMessage>,
     group_info: GroupInfo,
 ) -> Result<Vec<u8>, FormatError> {
+    group_header(
+        links.iter().map(|link| Ok(link.serialize(OFFSET_WIDTH))),
+        attrs,
+        attr_info,
+        link_info.unwrap_or(&COMPACT_LINK_INFO),
+        group_info,
+    )
+}
+
+fn group_header(
+    links: impl IntoIterator<Item = Result<Vec<u8>, FormatError>>,
+    attrs: &[AttributeMessage],
+    attr_info: Option<&[u8]>,
+    link_info: &LinkInfoMessage,
+    group_info: GroupInfo,
+) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
-    w.add_message(
-        MessageType::LINK_INFO,
-        link_info
-            .unwrap_or(&COMPACT_LINK_INFO)
-            .serialize(OFFSET_WIDTH),
-    );
+    w.add_message(MessageType::LINK_INFO, link_info.serialize(OFFSET_WIDTH));
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
     w.add_message(MessageType::GROUP_INFO, group_info.serialize());
-    if link_info.is_none() {
+    if link_info.fractal_heap_address.is_none() {
         for link in links {
-            w.add_message(MessageType::LINK, link.serialize(OFFSET_WIDTH));
+            w.add_message(MessageType::LINK, link?);
         }
     }
     add_attributes(&mut w, attrs, attr_info)?;
@@ -833,19 +845,19 @@ impl FileWriter {
     ///
     /// See [`Self::set_root_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::Verbatim`] for what this preserves that
     /// `set_root_attr` cannot, and for the datatypes it must not be used with.
     pub(crate) fn set_root_attr_verbatim(
         &mut self,
         message: crate::attribute::AttributeMessage,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) {
         self.root_attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
     }
@@ -855,8 +867,8 @@ impl FileWriter {
     ///
     /// See [`Self::set_root_attr`] for replacement and ordering.
     ///
-    /// Where `committed_datatype_path` is set, the written message refers to the committed
-    /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    /// When `committed_datatype_target` is set, the writer resolves the committed datatype target
+    /// to its destination address. See [`AttrSpec::VerbatimVarLen`].
     ///
     /// # Errors
     ///
@@ -866,7 +878,7 @@ impl FileWriter {
         &mut self,
         mut message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
-        committed_datatype_path: Option<ObjectPathBuf>,
+        committed_datatype_target: Option<ObjectTarget>,
     ) -> Result<(), FormatError> {
         message.raw_data = crate::type_builders::vl_string_reference_bytes(&strings)?;
         self.root_attrs.insert(
@@ -874,7 +886,7 @@ impl FileWriter {
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
-                committed_datatype_path,
+                committed_datatype_target,
             },
         );
         Ok(())
@@ -980,8 +992,8 @@ impl FileWriter {
             name: LinkNameBuf,
             link_phase_change: LinkPhaseChange,
             attrs: Vec<AttributeMessage>,
-            /// Attribute indices paired with committed datatype paths for address resolution.
-            attr_committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
+            /// Attribute indices paired with committed datatype targets for address resolution.
+            attr_committed_datatype_targets: Vec<(usize, ObjectTarget)>,
             ds_indices: Vec<usize>,
             sub_group_indices: Vec<usize>,
             committed_indices: Vec<usize>,
@@ -1068,7 +1080,7 @@ impl FileWriter {
             let name = name?;
             let PreparedAttributes {
                 messages: gattrs,
-                committed_datatype_paths: attr_committed_datatype_paths,
+                committed_datatype_targets: attr_committed_datatype_targets,
                 heaps: patches,
             } = PreparedAttributes::new(&attrs)?;
             let committed_idx = flatten_committed(group_committed, committed)?;
@@ -1085,7 +1097,7 @@ impl FileWriter {
                 name,
                 link_phase_change,
                 attrs: gattrs,
-                attr_committed_datatype_paths,
+                attr_committed_datatype_targets,
                 ds_indices: ds_idx,
                 sub_group_indices: sub_grp_idx,
                 committed_indices: committed_idx,
@@ -1144,7 +1156,7 @@ impl FileWriter {
 
         let PreparedAttributes {
             messages: mut root_attrs,
-            committed_datatype_paths: root_attr_committed_datatype_paths,
+            committed_datatype_targets: root_attr_committed_datatype_targets,
             heaps: vl_root,
         } = PreparedAttributes::new(&self.root_attrs)?;
 
@@ -1201,10 +1213,11 @@ impl FileWriter {
         fn register_committed_use(
             committed: &mut [CtFlat],
             by_path: &HashMap<ObjectPathBuf, usize>,
-            path: &ObjectPathBuf,
+            target: &ObjectTarget,
             dt: &Datatype,
             user: impl FnOnce() -> String,
         ) -> Result<(), FormatError> {
+            let path = target.path()?;
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
@@ -1220,40 +1233,40 @@ impl FileWriter {
             Ok(())
         }
 
-        for (index, path) in &root_attr_committed_datatype_paths {
+        for (index, target) in &root_attr_committed_datatype_targets {
             let attr = &root_attrs[*index];
             register_committed_use(
                 &mut committed,
                 &committed_by_path,
-                path,
+                target,
                 &attr.datatype,
                 || format!("root attribute {:?}", attr.name),
             )?;
         }
         for g in &groups {
-            for (index, path) in &g.attr_committed_datatype_paths {
+            for (index, target) in &g.attr_committed_datatype_targets {
                 let attr = &g.attrs[*index];
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
-                    path,
+                    target,
                     &attr.datatype,
                     || format!("attribute {:?} of group {:?}", attr.name, g.name.as_str()),
                 )?;
             }
         }
         for d in &all_ds {
-            if let Some(path) = &d.committed_datatype_path {
-                register_committed_use(&mut committed, &committed_by_path, path, &d.dt, || {
+            if let Some(target) = &d.committed_datatype_target {
+                register_committed_use(&mut committed, &committed_by_path, target, &d.dt, || {
                     format!("dataset {:?}", d.name.as_str())
                 })?;
             }
-            for (index, path) in &d.attr_committed_datatype_paths {
+            for (index, target) in &d.attr_committed_datatype_targets {
                 let attr = &d.attrs[*index];
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
-                    path,
+                    target,
                     &attr.datatype,
                     || format!("attribute {:?} of dataset {:?}", attr.name, d.name.as_str()),
                 )?;
@@ -1930,6 +1943,13 @@ impl FileWriter {
                             path_map.get(path).copied().unwrap_or(UNDEF_ADDRESS)
                         }
                         crate::type_builders::ObjectRefTarget::Raw(addr) => *addr,
+                        crate::type_builders::ObjectRefTarget::SourceIndex(_) => {
+                            return Err(FormatError::Internal(
+                                "a source object index reaches a whole-file reference writer"
+                                    .into(),
+                            )
+                            .into());
+                        }
                     };
                     type_builders::write_reference_address(
                         d.storage.raw_mut()?,
@@ -1955,28 +1975,32 @@ impl FileWriter {
         // below cover every dataset and every attribute in the file, which is
         // exactly the set `register_committed_use` walked to validate the paths.
         {
-            let committed_location = |path: &ObjectPathBuf| {
-                let ci = *committed_by_path.get(path).expect(
-                    "every committed-datatype path was resolved against this same map \
+            let committed_location =
+                |target: &ObjectTarget| -> Result<DatatypeLocation, FormatError> {
+                    let path = target.path()?;
+                    let ci = *committed_by_path.get(path).expect(
+                        "every committed-datatype path was resolved against this same map \
                      before any header was sized",
-                );
-                DatatypeLocation::Committed(committed_addrs[ci])
-            };
+                    );
+                    Ok(DatatypeLocation::Committed(committed_addrs[ci]))
+                };
             let resolve_attrs = |attrs: &mut [AttributeMessage],
-                                 paths: &[(usize, ObjectPathBuf)]| {
-                for (index, path) in paths {
-                    attrs[*index].datatype_location = committed_location(path);
+                                 targets: &[(usize, ObjectTarget)]|
+             -> Result<(), FormatError> {
+                for (index, target) in targets {
+                    attrs[*index].datatype_location = committed_location(target)?;
                 }
+                Ok(())
             };
-            resolve_attrs(&mut root_attrs, &root_attr_committed_datatype_paths);
+            resolve_attrs(&mut root_attrs, &root_attr_committed_datatype_targets)?;
             for g in &mut groups {
-                resolve_attrs(&mut g.attrs, &g.attr_committed_datatype_paths);
+                resolve_attrs(&mut g.attrs, &g.attr_committed_datatype_targets)?;
             }
             for d in &mut all_ds {
-                if let Some(path) = &d.committed_datatype_path {
-                    d.dt_location = committed_location(path);
+                if let Some(target) = &d.committed_datatype_target {
+                    d.dt_location = committed_location(target)?;
                 }
-                resolve_attrs(&mut d.attrs, &d.attr_committed_datatype_paths);
+                resolve_attrs(&mut d.attrs, &d.attr_committed_datatype_targets)?;
             }
         }
 

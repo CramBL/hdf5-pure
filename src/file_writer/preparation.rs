@@ -22,7 +22,8 @@ use crate::error::FormatError;
 use crate::file_emission::EmissionError;
 use crate::fill_value::FillPattern;
 use crate::libver::LibVer;
-use crate::object_path::{LinkNameBuf, ObjectPathBuf};
+use crate::object_path::LinkNameBuf;
+use crate::object_path::ObjectTarget;
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{AttributeSpecs, DatasetBuilder};
 
@@ -39,9 +40,9 @@ pub(super) struct PreparedDataset {
     /// Where `dt` is written: in this dataset's header, or in a committed
     /// datatype object it refers to.
     pub(super) dt_location: DatatypeLocation,
-    /// The path of the committed datatype `dt_location` refers to. `dt_location`
+    /// The committed datatype target for `dt_location`. `dt_location`
     /// holds the undefined address until the writer places that datatype.
-    pub(super) committed_datatype_path: Option<ObjectPathBuf>,
+    pub(super) committed_datatype_target: Option<ObjectTarget>,
     pub(super) ds: Dataspace,
     /// The storage source and deferred object and heap references.
     pub(super) storage: PreparedStorage,
@@ -49,8 +50,8 @@ pub(super) struct PreparedDataset {
     /// The reserved content hash, completed after resolving element addresses.
     #[cfg(feature = "provenance")]
     pub(super) pending_hash: Option<PendingHash>,
-    /// Indices in `attrs` paired with the paths of their committed datatypes.
-    pub(super) attr_committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
+    /// Indices in `attrs` paired with their committed datatype targets.
+    pub(super) attr_committed_datatype_targets: Vec<(usize, ObjectTarget)>,
     pub(super) chunk_options: ChunkOptions,
     pub(super) maxshape: Option<Vec<MaxExtent>>,
     /// A user-defined fill value, encoded in the dataset's datatype, or
@@ -69,7 +70,7 @@ impl PreparedDataset {
     ///
     /// Returns the dataset and the global-heap collections for its variable-length attributes.
     /// Provider payloads remain unread. Committed datatype addresses are undefined until the
-    /// writer resolves their paths.
+    /// writer resolves their targets.
     ///
     /// # Errors
     ///
@@ -89,7 +90,7 @@ impl PreparedDataset {
         let WholeFileDataset {
             metadata,
             storage,
-            committed_datatype_paths: attr_committed_datatype_paths,
+            committed_datatype_targets: attr_committed_datatype_targets,
         } = DatasetRequest::parse(db)?.into_whole_file()?;
         let DatasetMetadata {
             dt,
@@ -104,7 +105,7 @@ impl PreparedDataset {
             chunk_options,
             fill,
             fill_time,
-            committed_datatype_path,
+            committed_datatype_target,
             #[cfg(feature = "provenance")]
             provenance,
         } = metadata;
@@ -125,17 +126,17 @@ impl PreparedDataset {
             Self {
                 name,
                 dt,
-                dt_location: match committed_datatype_path {
+                dt_location: match committed_datatype_target {
                     Some(_) => DatatypeLocation::Committed(UNDEF_ADDRESS),
                     None => DatatypeLocation::Inline,
                 },
-                committed_datatype_path,
+                committed_datatype_target,
                 ds: dspace,
                 storage,
                 attrs,
                 #[cfg(feature = "provenance")]
                 pending_hash,
-                attr_committed_datatype_paths,
+                attr_committed_datatype_targets,
                 chunk_options,
                 maxshape,
                 fill,
@@ -596,20 +597,20 @@ pub(super) struct ChunkedBuilt<'a> {
     pub(super) data: DsData<'a>,
 }
 
-/// Attribute messages, indexed committed datatype paths, and variable-length heap collections.
+/// Attribute messages, indexed committed datatype targets, and variable-length heap collections.
 ///
-/// Messages have input specification order. Committed datatype paths and heap collections are
+/// Messages have input specification order. Committed datatype targets and heap collections are
 /// indexed by their attribute's position in `messages`.
 pub(super) struct PreparedAttributes {
     pub(super) messages: Vec<AttributeMessage>,
-    pub(super) committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
+    pub(super) committed_datatype_targets: Vec<(usize, ObjectTarget)>,
     pub(super) heaps: Vec<VlPatch>,
 }
 
 impl PreparedAttributes {
     /// Encodes attribute messages and constructs their global-heap collections.
     ///
-    /// The caller resolves committed datatype paths and patches heap addresses after allocation.
+    /// The caller resolves committed datatype targets and patches heap addresses after allocation.
     ///
     /// # Errors
     ///
@@ -623,7 +624,7 @@ impl PreparedAttributes {
         } = AttributeRequest::parse(specs)?;
         Ok(Self {
             messages,
-            committed_datatype_paths: specs.committed_datatype_paths(),
+            committed_datatype_targets: specs.committed_datatype_targets(),
             heaps: collections
                 .into_iter()
                 .map(|(attr_index, collections)| VlPatch {
@@ -745,7 +746,7 @@ mod tests {
         assert_eq!(dataset.attrs[2].raw_data, 11_i32.to_le_bytes());
         assert_eq!(
             dataset
-                .attr_committed_datatype_paths
+                .attr_committed_datatype_targets
                 .iter()
                 .map(|(index, path)| (*index, path.to_string()))
                 .collect::<Vec<_>>(),

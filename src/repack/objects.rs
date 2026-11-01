@@ -4,6 +4,7 @@
 //! paths name and then the objects the root group does not reach, and accepts the rest only as a
 //! tree, since a repack writes each object at one path.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -11,12 +12,17 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::GroupLinkStorage;
+use hdf5_pure_format::__private::LinkCreationPolicy;
+use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::OwnedLinkTarget;
 
 use super::headers::HeaderCache;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::file_writer::source::SourceLink;
 use crate::object_graph::Expansion;
 use crate::object_graph::GraphObject;
 use crate::object_graph::HardLink;
@@ -36,8 +42,8 @@ use crate::reader::ParsedHeader;
 /// The objects a repack keeps, as a tree under the root group, and the placement of every object
 /// the source reaches.
 ///
-/// Stores one record per object and one name per link. Paths are constructed from parent links
-/// when requested by a caller.
+/// Stores one record per object and retains each encoded link once. Paths are constructed from
+/// parent links when requested by a caller.
 pub(super) struct SourceObjects {
     /// The address context of the source, for resolving a stored address to an object.
     addresses: AddressContext,
@@ -46,7 +52,7 @@ pub(super) struct SourceObjects {
     /// The retained objects in post order, with the root last.
     objects: Vec<SourceObject>,
     /// The links of each object, grouped in the same order as `objects` and sorted by link name.
-    links: Vec<SourceLink>,
+    links: Vec<RetainedLink>,
     /// Object identities and their indices in `objects`, sorted by identity.
     kept: Vec<(ObjectId, usize)>,
     /// The objects the drop paths remove, each with the last step of its first path under a drop
@@ -62,7 +68,8 @@ impl SourceObjects {
     /// # Errors
     ///
     /// Returns [`Error::RepackUnsupported`] if `file` has staged edits, if a path of `drop` matches
-    /// no link, if a link that stays targets the root group or an object another link targets, or
+    /// no link, if no raw name matches and the display fallback is ambiguous, if a link that stays
+    /// targets the root group or an object another link targets, or
     /// if a link that stays has a name that is not a component of an object path. Returns
     /// [`Error::TraversalLimitExceeded`] if `file` reaches more objects or hard links than
     /// `budget` allows, or if the groups that stay nest more than [`MAX_DEPTH`] levels deep, and
@@ -104,23 +111,44 @@ impl SourceObjects {
             .collect();
         let mut objects: Vec<SourceObject> = Vec::with_capacity(descendants.len() + 1);
         let mut links = Vec::with_capacity(descendants.len());
-        for (index, mut object) in descendants.into_iter().chain([root]).enumerate() {
-            object.links.sort_by(|a, b| a.label.cmp(&b.label));
-            let start = links.len();
-            for link in object.links {
-                objects
-                    .get_mut(link.target.get())
-                    .ok_or_else(missing_path)?
-                    .parent = Some(links.len());
-                links.push(SourceLink {
-                    link_name: link.label,
-                    target: link.target.get(),
+        let mut errors = Vec::new();
+        for (index, object) in descendants.into_iter().chain([root]).enumerate() {
+            let DiscoveredObject {
+                id,
+                class,
+                creation_order,
+                symbolic,
+                error,
+            } = object.value;
+            let mut group_links = object
+                .links
+                .into_iter()
+                .map(|link| RetainedLink {
+                    record: link.label,
+                    target: Some(link.target.get()),
                     parent: index,
-                });
+                })
+                .chain(symbolic.into_iter().map(|link| RetainedLink {
+                    record: LinkLabel::Encoded(link),
+                    target: None,
+                    parent: index,
+                }))
+                .collect::<Vec<_>>();
+            group_links.sort_by(|a, b| a.record.bytes().cmp(b.record.bytes()));
+            let start = links.len();
+            for link in group_links {
+                if let Some(target) = link.target {
+                    objects.get_mut(target).ok_or_else(missing_path)?.parent = Some(links.len());
+                }
+                links.push(link);
+            }
+            if let Some(error) = error {
+                errors.push(error);
             }
             objects.push(SourceObject {
-                id: object.value.id,
-                class: object.value.class,
+                id,
+                class,
+                creation_order,
                 links: start..links.len(),
                 parent: None,
             });
@@ -146,10 +174,13 @@ impl SourceObjects {
                 .get(object.links.clone())
                 .ok_or_else(missing_path)?
             {
-                if LinkName::new(&link.link_name).is_none() {
-                    super::link_name_in(&objects.path(link.parent)?, &link.link_name)?;
+                if LinkName::new(&link.record.name()).is_none() {
+                    super::link_name_in(&objects.path(link.parent)?, &link.record.name())?;
                 }
             }
+        }
+        if let Some(error) = errors.into_iter().next() {
+            return Err(error);
         }
         Ok(objects)
     }
@@ -182,7 +213,9 @@ impl SourceObjects {
         self.objects.get(index).ok_or_else(missing_path)
     }
 
-    /// Returns borrowed link names and target indices for the object at `index`, in name order.
+    /// Returns borrowed link records and hard-target indices for the object at `index`.
+    ///
+    /// Orders links by their raw name bytes. Soft and external links retain their encoded targets.
     ///
     /// # Errors
     ///
@@ -191,24 +224,32 @@ impl SourceObjects {
     pub(super) fn links(
         &self,
         index: usize,
-    ) -> Result<impl ExactSizeIterator<Item = (&str, usize)>, Error> {
+    ) -> Result<impl ExactSizeIterator<Item = Result<SourceLink<'_>, Error>>, Error> {
         let object = self.object(index)?;
         Ok(self
             .links
             .get(object.links.clone())
             .ok_or_else(missing_path)?
             .iter()
-            .map(|link| (link.link_name.as_str(), link.target)))
+            .map(|link| match &link.record {
+                LinkLabel::Encoded(record) => Ok(SourceLink {
+                    link: Cow::Borrowed(record),
+                    target: link.target,
+                }),
+                LinkLabel::Rejected(_) => Err(missing_path()),
+            }))
     }
 
     /// Resolves an output path to the retained object's index.
     ///
-    /// Uses binary search within each group's sorted link names.
+    /// Searches each group by raw name bytes first, then by the lossy UTF-8 display spelling.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `path` is absent or an object
-    /// or link index is out of bounds.
+    /// Returns [`Error::RepackUnsupported`] if no raw name matches and the display fallback matches
+    /// multiple encoded names.
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `path` is absent, a target is
+    /// symbolic, or an object or link index is out of bounds.
     pub(super) fn index(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
         let mut index = self.objects.len().checked_sub(1).ok_or_else(missing_path)?;
         for component in path.components() {
@@ -217,12 +258,27 @@ impl SourceObjects {
                 .get(self.object(index)?.links.clone())
                 .ok_or_else(missing_path)?;
             let position =
-                links.partition_point(|link| link.link_name.as_str() < component.as_str());
-            let link = links
+                links.partition_point(|link| link.record.bytes() < component.as_str().as_bytes());
+            let link = match links
                 .get(position)
-                .filter(|link| link.link_name == component.as_str())
-                .ok_or_else(missing_path)?;
-            index = link.target;
+                .filter(|link| link.record.bytes() == component.as_str().as_bytes())
+            {
+                Some(link) => link,
+                None => {
+                    let mut matches = links
+                        .iter()
+                        .filter(|link| link.record.name() == component.as_str());
+                    let link = matches.next().ok_or_else(missing_path)?;
+                    if matches.next().is_some() {
+                        return Err(Error::RepackUnsupported(format!(
+                            "the output path {:?} matches multiple encoded link names",
+                            path.to_string()
+                        )));
+                    }
+                    link
+                }
+            };
+            index = link.target.ok_or_else(missing_path)?;
         }
         Ok(index)
     }
@@ -249,7 +305,7 @@ impl SourceObjects {
         self.objects.last().expect("a repack source holds its root")
     }
 
-    /// Returns the targets of `object`'s links, with their paths under `path`.
+    /// Returns hard-linked children of `object`, with their paths under `path`.
     ///
     /// # Errors
     ///
@@ -266,12 +322,13 @@ impl SourceObjects {
             .get(object.links.clone())
             .ok_or_else(missing_path)?
             .iter()
-            .map(|link| {
-                let object = self.objects.get(link.target).ok_or_else(missing_path)?;
+            .filter_map(|link| link.target.map(|target| (link, target)))
+            .map(|(link, target)| {
+                let object = self.objects.get(target).ok_or_else(missing_path)?;
                 Ok(Child {
-                    link_name: &link.link_name,
+                    link_name: link.record.name(),
                     object,
-                    path: path.join(&super::link_name_in(path, &link.link_name)?),
+                    path: path.join(&super::link_name_in(path, &link.record.name())?),
                 })
             })
             .collect()
@@ -283,13 +340,12 @@ impl SourceObjects {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if `header` and the base address of the source sum past
-    /// [`u64::MAX`]. Returns [`Error::Format`] with [`FormatError::Internal`] if a retained object
-    /// has an invalid parent link or index, or if a dropped object on the path to the object has
-    /// no last step.
+    /// [`u64::MAX`]. Returns [`Error::Format`] with [`FormatError::Internal`] if a dropped object
+    /// on the path to the object has no last step.
     pub(super) fn placement(&self, header: StoredAddress) -> Result<Option<Placement>, Error> {
         let id = ObjectId::resolve(self.addresses, header)?;
         if let Ok(position) = self.kept.binary_search_by_key(&id, |&(id, _)| id) {
-            return Ok(Some(Placement::Kept(self.path(self.kept[position].1)?)));
+            return Ok(Some(Placement::Kept(self.kept[position].1)));
         }
         let Some(last_step) = self.dropped.get(&id) else {
             return Ok(None);
@@ -312,10 +368,10 @@ impl SourceObjects {
         let mut names = Vec::new();
         while let Some(parent) = self.objects.get(index).ok_or_else(missing_path)?.parent {
             let link = self.links.get(parent).ok_or_else(missing_path)?;
-            names.push(LinkName::new(&link.link_name).ok_or_else(missing_path)?);
+            names.push(LinkNameBuf::new(&link.record.name()).ok_or_else(missing_path)?);
             index = link.parent;
         }
-        Ok(names.into_iter().rev().map(LinkNameBuf::from).collect())
+        Ok(names.into_iter().rev().collect())
     }
 
     /// Returns the path under a drop path that ends with `step`, from the last steps of the dropped
@@ -356,21 +412,22 @@ impl SourceObjects {
     }
 }
 
-/// A retained object's identity, class, and link indices.
+/// A retained object's identity, class, creation-order policy, and link indices.
 pub(super) struct SourceObject {
     pub(super) id: ObjectId,
     pub(super) class: ObjectClass,
+    pub(super) creation_order: LinkCreationPolicy,
     /// The range of this object's links in [`SourceObjects::links`].
     links: Range<usize>,
     /// The index of the incoming link in [`SourceObjects::links`], or `None` for the root.
     parent: Option<usize>,
 }
 
-/// A hard link between two retained objects.
-struct SourceLink {
-    link_name: String,
-    /// The target's index in [`SourceObjects::objects`].
-    target: usize,
+/// An encoded link retained in its containing group.
+struct RetainedLink {
+    record: LinkLabel,
+    /// The hard target's index in [`SourceObjects::objects`], or `None` for a symbolic target.
+    target: Option<usize>,
     /// The containing group's index in [`SourceObjects::objects`].
     parent: usize,
 }
@@ -378,23 +435,47 @@ struct SourceLink {
 /// A retained child object with its link name and output path.
 #[cfg(test)]
 pub(super) struct Child<'a> {
-    pub(super) link_name: &'a str,
+    pub(super) link_name: Cow<'a, str>,
     pub(super) object: &'a SourceObject,
     pub(super) path: ObjectPathBuf,
 }
 
-/// A reachable object's destination path or its removal by a drop path.
+/// A reachable object's destination index or its removal by a drop path.
 pub(super) enum Placement {
     /// A removed object's path, or `None` if every path under a drop path has an invalid name.
     Dropped(Option<ObjectPathBuf>),
-    /// The output path of a retained object.
-    Kept(ObjectPathBuf),
+    /// The index of a retained object in [`SourceObjects::objects`].
+    Kept(usize),
 }
 
 /// An object's identity and class during graph discovery.
 struct DiscoveredObject {
     id: ObjectId,
     class: ObjectClass,
+    creation_order: LinkCreationPolicy,
+    symbolic: Vec<OwnedLink>,
+    error: Option<Error>,
+}
+
+enum LinkLabel {
+    Encoded(OwnedLink),
+    Rejected(String),
+}
+
+impl LinkLabel {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Encoded(link) => link.name(),
+            Self::Rejected(name) => name.as_bytes(),
+        }
+    }
+
+    fn name(&self) -> Cow<'_, str> {
+        match self {
+            Self::Encoded(link) => String::from_utf8_lossy(link.name()),
+            Self::Rejected(name) => Cow::Borrowed(name),
+        }
+    }
 }
 
 /// The last step of the first path under a drop path to a dropped object.
@@ -420,23 +501,56 @@ fn discover_graph(
     file: &File,
     budget: TraversalBudget,
     headers: &mut HeaderCache,
-) -> Result<ObjectGraph<DiscoveredObject, String>, Error> {
+) -> Result<ObjectGraph<DiscoveredObject, LinkLabel>, Error> {
     let addresses = file.addresses();
     let root = ObjectId::new(PhysicalAddress::new(file.root().header_address()?));
     Ok(ObjectGraph::discover(budget, root, |id| {
-        let (class, entries, header) = file.hard_links_at(id.header_address())?;
+        let (class, storage, header, error, rejected) =
+            match file.repack_links_at(id.header_address()) {
+                Ok((class, storage, header)) => (class, storage, header, None, Vec::new()),
+                Err(error @ Error::RepackUnsupported(_)) => {
+                    let (class, entries, header) = match file.hard_links_at(id.header_address()) {
+                        Ok(discovery) => discovery,
+                        Err(_fallback_error) => return Err(error),
+                    };
+                    (class, None, header, Some(error), entries)
+                }
+                Err(error) => return Err(error),
+            };
         headers.insert(id, header);
-        let links = entries
-            .into_iter()
-            .map(|entry| {
-                Ok(HardLink {
-                    label: entry.name,
-                    target: ObjectId::resolve(addresses, entry.object_header_address)?,
-                })
-            })
-            .collect::<Result<_, FormatError>>()?;
+        let creation_order = storage.as_ref().map_or(
+            LinkCreationPolicy::Untracked,
+            GroupLinkStorage::creation_order,
+        );
+        let mut symbolic = Vec::new();
+        let mut links = Vec::new();
+        if let Some(storage) = storage {
+            for link in storage.into_links() {
+                match link.target() {
+                    OwnedLinkTarget::Hard {
+                        object_header_address,
+                    } => links.push(HardLink {
+                        target: ObjectId::resolve(addresses, *object_header_address)?,
+                        label: LinkLabel::Encoded(link),
+                    }),
+                    OwnedLinkTarget::Indirect(_) => symbolic.push(link),
+                }
+            }
+        }
+        for entry in rejected {
+            links.push(HardLink {
+                label: LinkLabel::Rejected(entry.name),
+                target: ObjectId::resolve(addresses, entry.object_header_address)?,
+            });
+        }
         Ok::<_, Error>(Expansion {
-            value: DiscoveredObject { id, class },
+            value: DiscoveredObject {
+                id,
+                class,
+                creation_order,
+                symbolic,
+                error,
+            },
             links,
         })
     })?)
@@ -446,21 +560,50 @@ fn discover_graph(
 ///
 /// # Errors
 ///
-/// Returns [`Error::RepackUnsupported`] if a path of `drop` matches no link.
+/// Returns [`Error::RepackUnsupported`] if a path of `drop` matches no hard link, or if no raw
+/// name matches and the display fallback matches multiple encoded names.
 fn find_drops<'a>(
-    graph: &ObjectGraph<DiscoveredObject, String>,
+    graph: &ObjectGraph<DiscoveredObject, LinkLabel>,
     drop: &'a BTreeSet<ObjectPathBuf>,
 ) -> Result<Vec<(LinkIndex, ObjectIndex, &'a ObjectPathBuf)>, Error> {
     drop.iter()
         .map(|path| {
-            graph
-                .find_link(path.components().iter().map(LinkNameBuf::as_str))
-                .map(|(link, target)| (link, target, path))
-                .ok_or_else(|| {
-                    Error::RepackUnsupported(format!(
+            let mut object = ObjectIndex::ROOT;
+            let mut found = None;
+            for component in path.components() {
+                let links = &graph.object(object).links;
+                let position = match links
+                    .iter()
+                    .position(|link| link.label.bytes() == component.as_str().as_bytes())
+                {
+                    Some(position) => Some(position),
+                    None => {
+                        let mut matches = links
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, link)| link.label.name() == component.as_str());
+                        let position = matches.next().map(|(position, _)| position);
+                        if matches.next().is_some() {
+                            return Err(Error::RepackUnsupported(format!(
+                                "drop path {:?} matches multiple encoded link names",
+                                path.to_string()
+                            )));
+                        }
+                        position
+                    }
+                };
+                let Some(position) = position else {
+                    return Err(Error::RepackUnsupported(format!(
                         "drop path does not exist in the source: {path}"
-                    ))
-                })
+                    )));
+                };
+                let link = &links[position];
+                found = Some((LinkIndex::new(object, position), link.target, path));
+                object = link.target;
+            }
+            found.ok_or_else(|| {
+                Error::RepackUnsupported(format!("drop path does not exist in the source: {path}"))
+            })
         })
         .collect()
 }
@@ -468,7 +611,7 @@ fn find_drops<'a>(
 /// Walks breadth-first from the targets of `drops` through the objects of `removed`, and returns
 /// the last step of the first path under a drop path it finds to each.
 fn dropped_last_steps(
-    removed: &BTreeMap<ObjectIndex, GraphObject<DiscoveredObject, String>>,
+    removed: &BTreeMap<ObjectIndex, GraphObject<DiscoveredObject, LinkLabel>>,
     drops: &[(LinkIndex, ObjectIndex, &ObjectPathBuf)],
 ) -> BTreeMap<ObjectId, LastStep> {
     // `removed` and the targets of `drops` hold the indices from before the removal, which the
@@ -486,7 +629,7 @@ fn dropped_last_steps(
             continue;
         }
         pending.extend(object.links.iter().filter_map(|link| {
-            LinkNameBuf::new(&link.label).map(|link_name| {
+            LinkNameBuf::new(&link.label.name()).map(|link_name| {
                 (
                     link.target,
                     LastStep::Link {
@@ -519,6 +662,9 @@ pub(super) const MAX_DEPTH: usize = 128;
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use test_util::group_info::HeaderVersion;
+    use test_util::group_info::LinkOrder;
+    use test_util::group_info::NameCollision;
     use test_util::image::Image;
     use test_util::link_message::HardLink;
     use test_util::object_header::v2::Header;
@@ -530,6 +676,79 @@ mod tests {
     use crate::FileBuilder;
     use crate::GroupBuilder;
     use crate::UserblockSize;
+
+    #[rstest]
+    #[case::raw_and_utf8(NameCollision::Utf8AndRaw, false)]
+    #[case::two_raw_names(NameCollision::RawAndRaw, true)]
+    fn colliding_encoded_names_keep_object_identity_and_drop_selection(
+        #[case] collision: NameCollision,
+        #[case] ambiguous: bool,
+    ) {
+        let source =
+            File::from_bytes(test_util::group_info::colliding_link_file(collision)).unwrap();
+        let objects =
+            SourceObjects::discover(&source, &BTreeSet::new(), TraversalBudget::new(3, 2)).unwrap();
+        assert_eq!(objects.path(0).unwrap(), objects.path(1).unwrap());
+        for index in 0..2 {
+            let address = source
+                .addresses()
+                .relative(objects.object(index).unwrap().id.header_address())
+                .unwrap();
+            let Some(Placement::Kept(actual)) = objects.placement(address).unwrap() else {
+                panic!("expected a retained object")
+            };
+            assert_eq!(actual, index);
+        }
+        let drop = BTreeSet::from([ObjectPathBuf::parse("x�")]);
+        let result = SourceObjects::discover(&source, &drop, TraversalBudget::new(3, 2));
+        if ambiguous {
+            let error = result.err().unwrap();
+            let Error::RepackUnsupported(reason) = error else {
+                panic!("expected RepackUnsupported, got {error:?}")
+            };
+            assert_eq!(
+                reason,
+                "drop path \"x�\" matches multiple encoded link names"
+            );
+        } else {
+            let pruned = result.unwrap();
+            assert_eq!(pruned.len(), 2);
+            let link = pruned.links(1).unwrap().next().unwrap().unwrap();
+            assert_eq!(link.link.name(), b"x\xff");
+        }
+    }
+
+    #[rstest]
+    #[case::untracked(LinkOrder::Untracked)]
+    #[case::tracked(LinkOrder::Tracked)]
+    #[case::indexed(LinkOrder::Indexed)]
+    fn encoded_names_map_to_objects_and_drop_paths(#[case] order: LinkOrder) {
+        let (image, _, _) = test_util::group_info::repack_link_file(order, HeaderVersion::V2);
+        let source = File::from_bytes(image).unwrap();
+        let objects =
+            SourceObjects::discover(&source, &BTreeSet::new(), TraversalBudget::new(2, 1)).unwrap();
+        let path = objects.path(0).unwrap();
+        assert_eq!(path.to_string(), "raw_�");
+        assert_eq!(objects.index(&path).unwrap(), 0);
+        assert_eq!(objects.links(1).unwrap().len(), 3);
+        let pruned =
+            SourceObjects::discover(&source, &BTreeSet::from([path]), TraversalBudget::new(2, 1))
+                .unwrap();
+        assert_eq!(pruned.len(), 1);
+        let links = pruned
+            .links(0)
+            .unwrap()
+            .map(|link| link.unwrap().link.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            links.iter().map(|link| link.name()).collect::<Vec<_>>(),
+            [b"external".as_slice(), b"soft".as_slice()]
+        );
+        assert_eq!(
+            pruned.object(0).unwrap().creation_order,
+            objects.object(1).unwrap().creation_order
+        );
+    }
 
     #[rstest]
     #[case::root("", false)]
@@ -576,7 +795,7 @@ mod tests {
         let Some(Placement::Kept(actual)) = objects.placement(stored).unwrap() else {
             panic!("expected a kept object at {path:?}");
         };
-        assert_eq!(actual, ObjectPathBuf::parse(path));
+        assert_eq!(objects.path(actual).unwrap(), ObjectPathBuf::parse(path));
     }
 
     #[test]
@@ -604,7 +823,7 @@ mod tests {
             objects
                 .links
                 .iter()
-                .map(|link| link.link_name.len())
+                .map(|link| link.record.bytes().len())
                 .sum::<usize>(),
             MAX_DEPTH + "values".len()
         );
@@ -624,9 +843,10 @@ mod tests {
         for (index, object) in objects.objects.iter().enumerate() {
             for link in &objects.links[object.links.clone()] {
                 assert_eq!(link.parent, index);
-                assert!(link.target < index);
-                let parent = objects.objects[link.target].parent.unwrap();
-                assert_eq!(objects.links[parent].target, link.target);
+                let target = link.target.unwrap();
+                assert!(target < index);
+                let parent = objects.objects[target].parent.unwrap();
+                assert_eq!(objects.links[parent].target, Some(target));
             }
         }
     }

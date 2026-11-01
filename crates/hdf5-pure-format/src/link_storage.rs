@@ -206,6 +206,11 @@ impl GroupLinkStorage {
         Ok(())
     }
 
+    /// Consumes the storage description and returns its owned link records.
+    pub fn into_links(self) -> Vec<OwnedLink> {
+        self.links
+    }
+
     /// Returns the file-address width used to check link targets and storage addresses.
     pub fn offset_width(&self) -> OffsetWidth {
         self.offset_width

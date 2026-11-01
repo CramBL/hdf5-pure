@@ -11,6 +11,7 @@ use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(test)]
 use core::borrow::Borrow;
 use core::fmt;
 
@@ -140,6 +141,7 @@ impl<T, L> ObjectGraph<T, L> {
     /// For each label, follows the first link with that label of the current object, so a path may
     /// go around a cycle. Returns `None` if `labels` is empty or a
     /// label matches no link of its object.
+    #[cfg(test)]
     pub(crate) fn find_link<'a, Q>(
         &self,
         labels: impl IntoIterator<Item = &'a Q>,

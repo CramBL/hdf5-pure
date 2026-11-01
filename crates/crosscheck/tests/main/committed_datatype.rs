@@ -599,6 +599,59 @@ fn repack_reproduces_a_committed_datatype_in_a_file_with_a_userblock() {
     );
 }
 
+#[test]
+#[cfg(target_endian = "little")]
+fn repack_keeps_committed_type_identity_when_names_decode_identically() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    write_committed_fixture(&source, EVERYTHING);
+    let native = hdf5::File::open_rw(&source).unwrap();
+    commit_type(&native, "x�", &hdf5::Datatype::from_type::<i32>().unwrap());
+    test_util_hdf5::dense_links::rename_link_bytes(&native, b"mytype", b"x\xff");
+    native.close().unwrap();
+    hdf5_pure::repack(&source, &destination, &RepackOptions::new()).unwrap();
+    let native = hdf5::File::open(&destination).unwrap();
+    let dataset = native.dataset("typed").unwrap();
+    let datatype = dataset.dtype().unwrap();
+    assert!(datatype.is_committed());
+    let identity = datatype.as_location().unwrap().loc_info().unwrap().token;
+    assert_ne!(identity, native.loc_info_by_name("x�").unwrap().token);
+    assert_eq!(
+        native
+            .attr("shared_attr")
+            .unwrap()
+            .dtype()
+            .unwrap()
+            .as_location()
+            .unwrap()
+            .loc_info()
+            .unwrap()
+            .token,
+        identity
+    );
+    assert_eq!(
+        native
+            .dataset("data")
+            .unwrap()
+            .attr("shared_attr")
+            .unwrap()
+            .dtype()
+            .unwrap()
+            .as_location()
+            .unwrap()
+            .loc_info()
+            .unwrap()
+            .token,
+        identity
+    );
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), DATASET_VALUES);
+    drop(datatype);
+    drop(dataset);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
+
 /// Two users of one committed type stay two users of *one* type across a repack.
 ///
 /// This is the assertion an inline copy passes right up until it is asked: with

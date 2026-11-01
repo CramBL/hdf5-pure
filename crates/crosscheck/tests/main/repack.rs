@@ -548,7 +548,7 @@ fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpa
     // libhdf5 writes two targets plus a dataset of object references to
     // them (one in the root, one in a subgroup).
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = file::libhdf5_create_v18(&src);
         file.new_dataset::<f64>()
             .shape((3,))
             .create("alpha")
@@ -562,18 +562,29 @@ fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpa
             .unwrap()
             .write(&[10i32, 20, 30, 40])
             .unwrap();
+        file.new_dataset_builder()
+            .with_data(&[31_i32])
+            .create("raw")
+            .unwrap();
+        file.new_dataset_builder()
+            .with_data(&[47_i32])
+            .create("x�")
+            .unwrap();
         let refs = vec![
             ObjectReference1::create(&file, "alpha").unwrap(),
             ObjectReference1::create(&file, "grp/beta").unwrap(),
-            // A reference to the root group exercises the empty-path resolution.
             ObjectReference1::create(&file, "/").unwrap(),
+            ObjectReference1::create(&file, "raw").unwrap(),
+            ObjectReference1::create(&file, "x�").unwrap(),
         ];
         file.new_dataset::<ObjectReference1>()
-            .shape((3,))
+            .shape((5,))
             .create("refs")
             .unwrap()
             .write(&refs)
             .unwrap();
+        test_util_hdf5::dense_links::rename_link_bytes(&file, b"raw", b"x\xff");
+        drop(grp);
         file.close().unwrap();
     }
 
@@ -602,7 +613,7 @@ fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpa
     let c = hdf5::File::open(&dst).unwrap();
     let cds = c.dataset("refs").unwrap();
     let cvals = cds.read_raw::<ObjectReference1>().unwrap();
-    assert_eq!(cvals.len(), 3);
+    assert_eq!(cvals.len(), 5);
     match cvals[0].dereference(&c).unwrap() {
         ReferencedObject::Dataset(d) => {
             assert_eq!(d.read_raw::<f64>().unwrap(), vec![1.0, 2.0, 3.0]);
@@ -619,6 +630,27 @@ fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpa
         ReferencedObject::Group(_) => {}
         other => panic!("ref 2 should resolve to the root group, got {other:?}"),
     }
+    let raw = match cvals[3].dereference(&c).unwrap() {
+        ReferencedObject::Dataset(dataset) => dataset,
+        other => panic!("expected a dataset, got {other:?}"),
+    };
+    let utf8 = match cvals[4].dereference(&c).unwrap() {
+        ReferencedObject::Dataset(dataset) => dataset,
+        other => panic!("expected a dataset, got {other:?}"),
+    };
+    assert_eq!(raw.read_raw::<i32>().unwrap(), [31]);
+    assert_eq!(utf8.read_raw::<i32>().unwrap(), [47]);
+    assert_ne!(
+        raw.loc_info().unwrap().token,
+        utf8.loc_info().unwrap().token
+    );
+    drop(raw);
+    drop(utf8);
+    drop(cvals);
+    drop(cds);
+    c.close().unwrap();
+    f.close().unwrap();
+    dir.close().unwrap();
 }
 
 #[test]

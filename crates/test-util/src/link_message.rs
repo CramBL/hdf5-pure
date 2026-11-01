@@ -7,7 +7,7 @@ use crate::widths::Widths;
 /// The body of a Link message pointing at the object at `address`.
 #[derive(Clone, Debug)]
 pub struct HardLink<'n> {
-    name: &'n str,
+    name: &'n [u8],
     address: u64,
     name_size_width: usize,
     creation_order: Option<u64>,
@@ -15,7 +15,13 @@ pub struct HardLink<'n> {
 }
 
 impl<'n> HardLink<'n> {
+    /// Starts a hard Link message with the name's UTF-8 bytes and a stored target address.
     pub fn new(name: &'n str, address: u64) -> Self {
+        Self::from_bytes(name.as_bytes(), address)
+    }
+
+    /// Starts a hard Link message with raw name bytes and a stored target address.
+    pub fn from_bytes(name: &'n [u8], address: u64) -> Self {
         Self {
             name,
             address,
@@ -70,7 +76,7 @@ impl<'n> HardLink<'n> {
             message.push(character_set.0);
         }
         bytes::push_uint(&mut message, self.name.len() as u64, self.name_size_width);
-        message.extend_from_slice(self.name.as_bytes());
+        message.extend_from_slice(self.name);
         bytes::push_uint(&mut message, self.address, widths.offset);
         message
     }
@@ -87,16 +93,28 @@ pub struct SymbolicLink<'n> {
 }
 
 impl<'n> SymbolicLink<'n> {
+    /// Starts a soft Link message with the target's UTF-8 bytes.
     pub fn soft(name: &'n str, target: &str) -> Self {
-        Self::new(name, SOFT_LINK, target.as_bytes().to_vec())
+        Self::soft_bytes(name, target.as_bytes())
     }
 
-    /// Writes a version 0 external link value without flags, followed by `filename` and
-    /// `object_path`, each null-terminated.
+    /// Starts a soft Link message with raw target bytes.
+    pub fn soft_bytes(name: &'n str, target: &[u8]) -> Self {
+        Self::new(name, SOFT_LINK, target.to_vec())
+    }
+
+    /// Starts an external Link message with null-terminated filename and object path fields.
     pub fn external(name: &'n str, filename: &str, object_path: &str) -> Self {
+        Self::external_bytes(name, filename.as_bytes(), object_path.as_bytes())
+    }
+
+    /// Starts a version 0 external link value with raw filename and object path bytes.
+    ///
+    /// Appends a null terminator to each field.
+    pub fn external_bytes(name: &'n str, filename: &[u8], object_path: &[u8]) -> Self {
         let mut value = vec![EXTERNAL_LINK_VERSION_AND_FLAGS];
         for path in [filename, object_path] {
-            value.extend_from_slice(path.as_bytes());
+            value.extend_from_slice(path);
             value.push(0);
         }
         Self::new(name, EXTERNAL_LINK, value)
