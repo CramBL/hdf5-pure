@@ -11,6 +11,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::MetadataSource;
 
 use crate::address::BaseAddressExt;
+#[cfg(any(test, doc))]
 use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::convert;
@@ -475,6 +476,7 @@ impl<S: Source> Source for ValidatedSource<S> {
 /// Read offsets are relative to `base` in the inner source. Metadata reads use its cache and
 /// retain its physical metadata ranges. Payload reads use [`Source::read_exact_at`] on the inner
 /// source after checking the base-relative extent.
+#[cfg(any(test, doc))]
 pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
     pub(crate) inner: &'a S,
     pub(crate) base: BaseAddress,
@@ -503,6 +505,7 @@ pub(crate) fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatErro
         })
 }
 
+#[cfg(any(test, doc))]
 impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
     fn len(&self) -> u64 {
         self.inner.len().saturating_sub(self.base.get())

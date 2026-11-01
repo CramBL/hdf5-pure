@@ -28,7 +28,7 @@ pub(crate) use view::PhysicalSource;
 pub(crate) use view::StoredSource;
 pub(crate) use view::{StoredBytes, StoredRead};
 
-#[cfg(any(feature = "std", test, doc))]
+#[cfg(any(test, doc))]
 pub(crate) use backend::BaseOffsetSource;
 #[cfg(any(feature = "std", test, doc))]
 pub(crate) use backend::BytesSource;

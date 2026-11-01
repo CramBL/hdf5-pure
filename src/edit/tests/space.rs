@@ -73,6 +73,7 @@ use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::source::BytesSource;
 use crate::source::MetadataCacheConfig;
+use crate::source::PhysicalSource;
 use crate::type_builders::AttrValue;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -640,11 +641,11 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     assert!(encoded_node.len() <= tree.node_size as usize);
     bytes[node_at..node_at + encoded_node.len()].copy_from_slice(&encoded_node);
     let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-        &crate::source::BaseOffsetSource {
-            inner: &BytesSource::new(&bytes),
-            base: BaseAddress::new(userblock),
-        },
-        AddressContext::from_effective_base(BaseAddress::new(userblock)),
+        &PhysicalSource::for_test(
+            &BytesSource::new(&bytes),
+            AddressContext::from_effective_base(BaseAddress::new(userblock)),
+        )
+        .stored(),
         StoredAddress::new(heap_address - userblock),
         widths,
     )
@@ -1961,8 +1962,7 @@ fn write_rejected_heap_owner(
         } = dense_attribute_owner(&session, object);
         let heap_address = attribute_heap_address(&session, addr);
         let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-            &session.image(),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &PhysicalSource::new(&session.opened_source()).stored(),
             StoredAddress::new(heap_address),
             crate::file_writer::WIDTHS,
         )
@@ -2014,8 +2014,11 @@ fn write_rejected_heap_owner(
         }
     };
     let err = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-        &BytesSource::new(bytes.as_slice()),
-        AddressContext::from_effective_base(BaseAddress::ZERO),
+        &PhysicalSource::for_test(
+            &BytesSource::new(bytes.as_slice()),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+        )
+        .stored(),
         StoredAddress::new(heap_address),
         crate::file_writer::WIDTHS,
     )
