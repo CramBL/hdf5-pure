@@ -81,6 +81,7 @@ mod layout_introspection;
 mod legacy;
 mod legacy_attributes;
 mod legacy_chunked;
+mod legacy_compound;
 mod libver_matrix;
 mod libver_output;
 mod link_storage;

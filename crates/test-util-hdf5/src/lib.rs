@@ -50,6 +50,7 @@ pub mod identity;
 pub mod legacy;
 pub mod legacy_attributes;
 pub mod legacy_chunked;
+pub mod legacy_compound;
 pub mod lock;
 pub mod lzf;
 pub mod mat_file;

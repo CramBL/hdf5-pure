@@ -242,7 +242,11 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
 @pytest.mark.parametrize(
     ("variant", "expected"),
     [
+        ("CompoundArraySizeOverflow", []),
         ("ConflictingDatasetStorage", []),
+        ("InvalidCompoundV1Extent", []),
+        ("InvalidCompoundV1Rank", []),
+        ("UnsupportedCompoundV1Permutation", []),
         ("InvalidAscii", []),
         ("MissingNumericDatatypeProperty", []),
         ("UnalignedGlobalHeapCollection", []),
