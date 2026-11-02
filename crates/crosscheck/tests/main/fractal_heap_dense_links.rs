@@ -13,6 +13,7 @@
 //! through both the buffered and the streaming reader.
 
 use std::collections::BTreeSet;
+use std::mem;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,13 +27,14 @@ use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, StoredAdd
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
-    BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, FractalHeapBlock,
-    FractalHeapBlockLayout, FractalHeapGeometry, FractalHeapHeader, FractalHeapHeaderLocator,
-    FractalHeapIdKind, FractalHeapIdLayout, FractalHeapLayout, LengthWidth, LinkMessage,
-    ManagedHeapPlan, OffsetWidth,
+    BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME, BTreeV2Header,
+    BTreeV2Layout, FractalHeapBlock, FractalHeapBlockLayout, FractalHeapGeometry,
+    FractalHeapHeader, FractalHeapHeaderLocator, FractalHeapIdKind, FractalHeapIdLayout,
+    FractalHeapLayout, LengthWidth, LinkMessage, ManagedHeapPlan, OffsetWidth,
 };
 use rstest::rstest;
 use test_util_hdf5::heap_interop;
+use test_util_hdf5::reader::ReadBackend;
 
 /// Write a group of `n` single-i32 datasets `g/d{i}` with the latest format, so
 /// the C library stores the links densely in a fractal heap.
@@ -376,39 +378,106 @@ fn indexed_matches_validate_only_the_selected_path(
 }
 
 #[rstest]
-#[case::wrong_type(
-    BTREE_HEADER_TYPE_OFFSET,
-    BTREE_V2_ATTRIBUTE_NAME,
+#[case::attribute_client(
+    NameIndexFault::Client(BTREE_V2_ATTRIBUTE_NAME),
     FormatError::InvalidBTreeNodeType(BTREE_V2_ATTRIBUTE_NAME)
 )]
-#[case::short_record(
-    BTREE_HEADER_RECORD_SIZE_OFFSET,
-    4,
+#[case::creation_client(
+    NameIndexFault::Client(BTREE_V2_LINK_CREATION_ORDER),
+    FormatError::InvalidBTreeNodeType(BTREE_V2_LINK_CREATION_ORDER)
+)]
+#[case::unknown_client(NameIndexFault::Client(0xFF), FormatError::InvalidBTreeNodeType(0xFF))]
+#[case::short_record(NameIndexFault::ShortRecord, FormatError::InvalidBTreeV2Signature)]
+#[case::zero_id(NameIndexFault::HeapIdLength(0), FormatError::InvalidBTreeV2Signature)]
+#[case::oversized_id(
+    NameIndexFault::HeapIdLength(u16::MAX),
     FormatError::InvalidBTreeV2Signature
 )]
-fn indexed_lookup_rejects_malformed_name_indexes(
-    #[case] offset: usize,
-    #[case] value: u8,
+fn dense_operations_reject_malformed_name_indexes(
+    #[case] fault: NameIndexFault,
     #[case] expected: FormatError,
-    #[values(false, true)] streaming: bool,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+    #[values(
+        DenseOperation::List,
+        DenseOperation::Lookup,
+        DenseOperation::LossyLookup
+    )]
+    operation: DenseOperation,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad-index.h5");
     write_dense_group(&path, 16);
+    {
+        let reference = hdf5::File::open(&path).unwrap();
+        assert_eq!(
+            reference
+                .dataset("g/d0")
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            [0]
+        );
+    }
     let mut bytes = std::fs::read(&path).unwrap();
-    let (at, _) = dense_index(&bytes);
-    bytes[at + offset] = value;
-    let header_len =
-        hdf5_pure_format::__private::btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight);
-    test_util::checksum::restamp(&mut bytes, at, header_len);
+    let (at, header) = dense_index(&bytes);
+    assert_eq!(header.depth, 0);
+    let start =
+        usize::try_from(header.root_node_address.get()).unwrap() + test_util::btree_v2::NODE_PREFIX;
+    let end = start + usize::from(header.num_records_in_root) * usize::from(header.record_size);
+    let records: Vec<_> = bytes[start..end]
+        .chunks_exact(usize::from(header.record_size))
+        .map(|record| {
+            record[..if matches!(fault, NameIndexFault::ShortRecord) {
+                LINK_NAME_HASH_LEN
+            } else {
+                record.len()
+            }]
+                .to_vec()
+        })
+        .collect();
+    test_util::btree_v2::replace_leaf_records(
+        &mut bytes,
+        at,
+        match fault {
+            NameIndexFault::Client(kind) => kind,
+            _ => BTREE_V2_LINK_NAME,
+        },
+        &records,
+    );
+    if let NameIndexFault::HeapIdLength(length) = fault {
+        let heap_at = test_util::fractal_heap::header_offsets(&bytes)[0];
+        test_util::bytes::set_u16_at(&mut bytes, heap_at + HEAP_ID_LENGTH_OFFSET, length);
+        test_util::checksum::restamp(
+            &mut bytes,
+            heap_at,
+            FractalHeapHeader::serialized_size(OffsetWidth::Eight, LengthWidth::Eight),
+        );
+    }
     std::fs::write(&path, bytes).unwrap();
-    let error = open_dense_reader(&path, streaming)
-        .dataset("g/d0")
-        .unwrap_err();
+    let reader = backend.open(&path).unwrap();
+    let error = match operation {
+        DenseOperation::List => reader.group("g").unwrap().datasets().unwrap_err(),
+        DenseOperation::Lookup => reader.dataset("g/d0").unwrap_err(),
+        DenseOperation::LossyLookup => reader.dataset("g/\u{fffd}0").unwrap_err(),
+    };
     let Error::Format(error) = error else {
         panic!("expected malformed index error");
     };
     assert_eq!(error, expected);
+}
+
+#[derive(Clone, Copy)]
+enum NameIndexFault {
+    Client(u8),
+    HeapIdLength(u16),
+    ShortRecord,
+}
+
+#[derive(Clone, Copy)]
+enum DenseOperation {
+    List,
+    Lookup,
+    LossyLookup,
 }
 
 #[rstest]
@@ -888,10 +957,13 @@ fn edits_reject_corrupt_checksummed_direct_blocks() {
 // direct-block checksum.
 const DIRECT_BLOCK_CHECKSUM_LEN: usize = 4;
 
-// "Version 2 B-trees" in the format specification, version 4.0, defines these header offsets,
-// the four-byte name hash of type 5 records, and the trailing checksum width.
-const BTREE_HEADER_TYPE_OFFSET: usize = 5;
-const BTREE_HEADER_RECORD_SIZE_OFFSET: usize = 10;
+// "Fractal Heap" of the format specification, version 4.0, places the ID length after the
+// signature and version.
+const HEAP_ID_LENGTH_OFFSET: usize =
+    test_util::fractal_heap::SIGNATURE.len() + mem::size_of::<u8>();
+
+// "Version 2 B-trees" in the format specification, version 4.0, defines the four-byte name hash
+// of type 5 records and the trailing checksum width.
 const LINK_NAME_HASH_LEN: usize = 4;
 const INDEX_CHECKSUM_LEN: usize = 4;
 

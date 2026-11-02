@@ -353,6 +353,8 @@ mod tests {
     use core::cell::Cell;
     use core::mem;
 
+    use alloc::rc::Rc;
+
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
@@ -389,6 +391,7 @@ mod tests {
         let source = CountingSource {
             bytes: &tree.file,
             reads: core::cell::Cell::new(0),
+            read_bytes: Cell::new(0),
         };
         let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
         assert_eq!(
@@ -424,6 +427,7 @@ mod tests {
         let source = CountingSource {
             bytes: &bytes,
             reads: core::cell::Cell::new(0),
+            read_bytes: Cell::new(0),
         };
         assert_eq!(
             search_btree_v2(
@@ -495,6 +499,116 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::links(
+        hdf5_pure_format::__private::BTREE_V2_LINK_NAME,
+        btree_v2::LINK_NAME_RECORD_SIZE
+    )]
+    #[case::attributes(
+        hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_NAME,
+        hdf5_pure_format::__private::AttributeRecord::name_record_size(8)
+    )]
+    #[case::chunks(hdf5_pure_format::__private::BTREE_V2_CHUNK, u16::try_from(WIDTHS.offset + 2 * mem::size_of::<u64>()).unwrap())]
+    fn full_collections_copy_each_encoded_record_once(
+        #[case] tree_type: u8,
+        #[case] record_size: u16,
+        #[values(1, 40_000)] count: usize,
+        #[values(0, 512)] base: usize,
+    ) {
+        let data = numbered_records(count, record_size);
+        let plan = BTreeV2Plan::new(
+            tree_type,
+            count,
+            record_size,
+            BTREE_V2_NODE_SIZE,
+            OFFSET_WIDTH,
+        )
+        .unwrap();
+        let image = plan
+            .serialize(
+                &data,
+                StoredAddress::new(HEADER_LENGTH.to_u64()),
+                OFFSET_WIDTH,
+                LengthWidth::Eight,
+            )
+            .unwrap();
+        let node_count = image.nodes.len() / usize::try_from(BTREE_V2_NODE_SIZE).unwrap();
+        assert_eq!(
+            image.nodes.len() % usize::try_from(BTREE_V2_NODE_SIZE).unwrap(),
+            0
+        );
+        let mut bytes = vec![0; base];
+        bytes.extend_from_slice(&image.header);
+        bytes.extend_from_slice(&image.nodes);
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base.to_u64()));
+        let source = CountingSource {
+            bytes: &bytes,
+            reads: Cell::new(0),
+            read_bytes: Cell::new(0),
+        };
+        let stored = PhysicalSource::for_test(&source, addresses).stored();
+        let resident = PhysicalBytes::for_test(&bytes, addresses).stored().unwrap();
+        let header = BTreeV2Header::parse(
+            resident.metadata_frame().bytes(),
+            0,
+            OFFSET_SIZE,
+            LENGTH_SIZE,
+        )
+        .unwrap();
+        assert_eq!(header.depth == 0, count == 1);
+        let expected: Vec<_> = data
+            .chunks_exact(usize::from(record_size))
+            .map(|data| BTreeV2Record {
+                data: data.to_vec(),
+            })
+            .collect();
+        assert_eq!(
+            collect_btree_v2_records(resident, &header, OFFSET_WIDTH).unwrap(),
+            expected
+        );
+        assert_eq!(
+            collect_btree_v2_records_from_source(
+                &BTreeV2Source::new(&stored),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(source.reads.replace(0), node_count);
+        assert_eq!(source.read_bytes.replace(0), image.nodes.len());
+        let layout = BTreeV2Layout::for_collection(&header, OFFSET_WIDTH).unwrap();
+        let copies = Rc::new(Cell::new(0));
+        let visits =
+            V2TreeVisitState::new(layout.root().unwrap(), OFFSET_WIDTH, V2WalkKind::Records)
+                .with_copy_counter(Rc::clone(&copies));
+        let records = visits
+            .walk(|node| stored.read_metadata(node.address(), node.encoded_len()?))
+            .unwrap();
+        assert_eq!(records, expected);
+        assert_eq!(source.reads.get(), node_count);
+        assert_eq!(copies.get(), data.len());
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.data.len())
+                .sum::<usize>(),
+            data.len()
+        );
+        assert!(copies.get() >= usize::from(record_size));
+        copies.set(0);
+        source.reads.set(0);
+        let visits =
+            V2TreeVisitState::new(layout.root().unwrap(), OFFSET_WIDTH, V2WalkKind::Storage)
+                .with_copy_counter(Rc::clone(&copies));
+        let records = visits
+            .walk(|node| stored.read_metadata(node.address(), node.encoded_len()?))
+            .unwrap();
+        assert_eq!(records, Vec::new());
+        assert_eq!(copies.get(), 0);
+        assert_eq!(source.reads.get(), node_count);
+    }
+
+    #[rstest::rstest]
     #[case::one_level(1)]
     #[case::sixty_four_levels(64)]
     #[case::maximum_declared_depth(u16::MAX)]
@@ -517,6 +631,7 @@ mod tests {
         let source = CountingSource {
             bytes: &tree.bytes,
             reads: Cell::new(0),
+            read_bytes: Cell::new(0),
         };
         let stored = crate::source::zero_base_source(&source);
         assert_eq!(
@@ -614,6 +729,7 @@ mod tests {
     struct CountingSource<'a> {
         bytes: &'a [u8],
         reads: core::cell::Cell<usize>,
+        read_bytes: Cell<usize>,
     }
 
     impl Source for CountingSource<'_> {
@@ -622,6 +738,8 @@ mod tests {
         }
         fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
             self.reads.set(self.reads.get() + 1);
+            self.read_bytes
+                .set(self.read_bytes.get().saturating_add(buffer.len()));
             BytesSource::new(self.bytes).read_at(offset, buffer)
         }
     }
@@ -1430,6 +1548,7 @@ mod tests {
         let source = CountingSource {
             bytes: &file,
             reads: Cell::new(0),
+            read_bytes: Cell::new(0),
         };
         let stored = crate::source::zero_base_source(&source);
         assert_eq!(
