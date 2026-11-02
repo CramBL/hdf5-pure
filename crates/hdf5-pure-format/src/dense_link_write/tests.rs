@@ -343,6 +343,57 @@ fn maximum_size_managed_hard_link_round_trips() {
     assert_eq!(links, vec![link]);
 }
 
+#[rstest]
+#[case::empty(0, 0)]
+#[case::direct(12, 0)]
+#[case::indirect(150, 0)]
+#[case::nested(3000, 1200)]
+fn independently_placed_dense_links_preserve_encoded_records(
+    #[case] count: usize,
+    #[case] name_len: usize,
+    #[values(0, 1, 2)] policy: u8,
+    #[values(512, 4096)] page: u64,
+) {
+    let storage = storage(count, policy, OffsetWidth::Eight, name_len);
+    let mut expected = storage.links().to_vec();
+    let plan = DenseLinkPlan::new(storage, LengthWidth::Eight).unwrap();
+    let base = StoredAddress::new(4096);
+    let lengths: Vec<_> = plan.block_lengths().collect();
+    assert_eq!(lengths.iter().sum::<u64>(), plan.serialized_len());
+    let mut addresses = vec![base; lengths.len()];
+    let mut cursor = base.get() + lengths[0];
+    for index in (1..lengths.len()).rev() {
+        let length = lengths[index];
+        if length >= page || cursor % page + length > page {
+            cursor = cursor.div_ceil(page) * page;
+        }
+        addresses[index] = StoredAddress::new(cursor);
+        cursor += length;
+    }
+    let placement = plan.place(&addresses).unwrap();
+    let mut bytes = vec![0; usize::try_from(cursor - base.get()).unwrap()];
+    let mut emitted = Vec::new();
+    for (block, encoded) in placement
+        .blocks()
+        .zip(placement.serialize_blocks().unwrap())
+    {
+        let (address, data) = encoded.unwrap();
+        assert_eq!(block, (address, data.len() as u64));
+        let at = usize::try_from(address.get() - base.get()).unwrap();
+        bytes[at..at + data.len()].copy_from_slice(&data);
+        emitted.push(address);
+    }
+    assert_eq!(emitted, addresses);
+    let image = DenseLinkImage {
+        bytes,
+        info: placement.link_info().clone(),
+    };
+    let (mut links, _, _) = parse(&image, base, 512, OffsetWidth::Eight, LengthWidth::Eight);
+    links.sort_by(|a, b| a.name().cmp(b.name()));
+    expected.sort_by(|a, b| a.name().cmp(b.name()));
+    assert_eq!(links, expected);
+}
+
 fn storage(count: usize, policy: u8, offsets: OffsetWidth, name_len: usize) -> GroupLinkStorage {
     let info = LinkInfoMessage {
         max_creation_order: (policy > 0).then_some(count as u64 * 3 + 10),

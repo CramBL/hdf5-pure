@@ -216,6 +216,20 @@ pub enum FormatError {
         /// The heap address space, in bytes.
         limit: u64,
     },
+    /// The number of supplied block addresses differs from the dense-link plan.
+    DenseLinkBlockCount {
+        /// The number of planned heap and index headers and blocks.
+        expected: usize,
+        /// The number of addresses supplied by the caller.
+        actual: usize,
+    },
+    /// Two complete dense-link metadata blocks overlap.
+    DenseLinkBlockOverlap {
+        /// The input index of the first overlapping block in address order.
+        first: usize,
+        /// The input index of the second overlapping block in address order.
+        second: usize,
+    },
     /// An encoded link exceeds the managed-object size limit for dense link storage.
     DenseLinkObjectTooLarge {
         /// The encoded link size in bytes.
@@ -2511,6 +2525,15 @@ impl fmt::Display for FormatError {
                     "these attributes need more than the {limit}-byte address space of a dense \
                      attribute heap"
                 )
+            }
+            Self::DenseLinkBlockCount { expected, actual } => {
+                write!(
+                    f,
+                    "dense link placement requires {expected} blocks, got {actual}"
+                )
+            }
+            Self::DenseLinkBlockOverlap { first, second } => {
+                write!(f, "dense link blocks {first} and {second} overlap")
             }
             Self::DenseLinkObjectTooLarge { size, limit } => {
                 write!(
