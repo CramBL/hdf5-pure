@@ -11,16 +11,21 @@ use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::free_space_manager::{EncodedManager, ManagerProjection};
 use crate::width::FormatWidths;
 
-/// Holds the encoded managers and the same final free-space state for adoption.
+/// A proposed PAGE tail with encoded managers and complete allocation coverage.
+///
+/// The extension and manager allocations completely cover the reservation. The proposed
+/// post-publication free-space state is disjoint from that reservation.
 pub(super) struct PagedPersistencePlan {
     /// The complete reservation, final EOA, and free-space state to adopt.
-    pub tail: PagedTail,
+    tail: PagedTail,
     /// The complete superblock-extension allocation, including surplus capacity.
-    pub extension: Extent,
+    extension: Extent,
     /// The manager addresses to record in File Space Info, undefined for inactive managers.
-    pub slots: [StoredAddress; NUM_FILE_FSM_MANAGERS],
+    slots: [StoredAddress; NUM_FILE_FSM_MANAGERS],
     /// The manager headers and section lists at their measured lengths.
-    pub blocks: Vec<EncodedManager>,
+    blocks: Vec<EncodedManager>,
+    /// Complete reservation coverage for writing and retirement accounting.
+    coverage: OccupiedReservation,
 }
 
 impl PagedPersistencePlan {
@@ -34,9 +39,10 @@ impl PagedPersistencePlan {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] or [`FormatError::ValueTooLargeForPlatform`] if
-    /// capacity or address calculations overflow, [`FormatError::Internal`] if the strategy is
-    /// not PAGE or the capacity does not contain the managers, or an encoding error if the
-    /// managers cannot be serialized at `widths`.
+    /// capacity or address calculations overflow. Returns [`FormatError::Internal`] if the
+    /// strategy is not PAGE, manager capacity is insufficient, allocations overlap or are outside
+    /// the reservation, or coverage is incomplete. Returns encoding errors if the managers cannot
+    /// be serialized at `widths`.
     pub fn new(
         space: &SessionSpace,
         eoa: StoredAddress,
@@ -53,6 +59,7 @@ impl PagedPersistencePlan {
             if tail.post.admitted_snapshot().sections().next().is_none() {
                 return Ok(Some(Self {
                     extension: tail.allocation,
+                    coverage: OccupiedReservation::whole(tail.allocation),
                     tail,
                     slots: [StoredAddress::undefined(widths.offsets); NUM_FILE_FSM_MANAGERS],
                     blocks: Vec::new(),
@@ -126,6 +133,11 @@ impl PagedPersistencePlan {
         let start = extension.end();
         let plan = managers.into_plan(start)?;
         let slots = plan.slots();
+        let coverage = ReservationPartition::new(
+            tail.allocation,
+            core::iter::once(extension).chain(plan.allocations()),
+        )?
+        .into_occupied()?;
         let blocks = plan
             .encode(tail.allocation.end())?
             .collect::<Result<Vec<_>, _>>()?;
@@ -134,7 +146,143 @@ impl PagedPersistencePlan {
             extension,
             slots,
             blocks,
+            coverage,
         }))
+    }
+
+    /// Returns the planned publication state and its complete reservation coverage.
+    ///
+    /// The tuple contains the proposed tail, extension allocation, File Space Info slots, encoded
+    /// managers, and checked reservation coverage, in that order.
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        PagedTail,
+        Extent,
+        [StoredAddress; NUM_FILE_FSM_MANAGERS],
+        Vec<EncodedManager>,
+        OccupiedReservation,
+    ) {
+        let Self {
+            tail,
+            extension,
+            slots,
+            blocks,
+            coverage,
+        } = self;
+        (tail, extension, slots, blocks, coverage)
+    }
+}
+
+/// Complete allocations and unoccupied ranges within a stored reservation.
+///
+/// Allocations and gaps are ordered and disjoint, and together cover the reservation exactly.
+/// Adjacent allocations retain their separate boundaries. Allocation ownership, admission, and
+/// PAGE placement remain the caller's responsibility.
+#[derive(Debug)]
+struct ReservationPartition {
+    reservation: Extent,
+    occupied: Vec<Extent>,
+    gaps: Vec<Extent>,
+}
+
+impl ReservationPartition {
+    /// Checks allocation containment and overlap, then records exact gaps in address order.
+    ///
+    /// With no allocations, the only gap is the complete reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if an allocation is outside `reservation` or allocations
+    /// overlap.
+    fn new(
+        reservation: Extent,
+        occupied: impl IntoIterator<Item = Extent>,
+    ) -> Result<Self, FormatError> {
+        let mut occupied = occupied.into_iter().collect::<Vec<_>>();
+        occupied.sort_unstable();
+        let mut gaps = Vec::new();
+        let mut cursor = reservation.start();
+        for &allocation in &occupied {
+            if !reservation.range().contains(allocation.range()) {
+                return Err(FormatError::Internal(
+                    "a PAGE block is outside its reservation".into(),
+                ));
+            }
+            if allocation.start() < cursor {
+                return Err(FormatError::Internal(
+                    "PAGE block allocations overlap".into(),
+                ));
+            }
+            if let Some(gap) = Extent::between(cursor, allocation.start()) {
+                gaps.push(gap);
+            }
+            cursor = allocation.end();
+        }
+        if let Some(gap) = Extent::between(cursor, reservation.end()) {
+            gaps.push(gap);
+        }
+        Ok(Self {
+            reservation,
+            occupied,
+            gaps,
+        })
+    }
+
+    /// Requires complete allocation coverage and returns the occupied reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if any unoccupied range remains.
+    fn into_occupied(self) -> Result<OccupiedReservation, FormatError> {
+        let Self {
+            reservation,
+            occupied,
+            gaps,
+        } = self;
+        if !gaps.is_empty() {
+            return Err(FormatError::Internal(
+                "a PAGE reservation has unoccupied bytes".into(),
+            ));
+        }
+        debug_assert_eq!(
+            occupied.first().map(|extent| extent.start()),
+            Some(reservation.start())
+        );
+        debug_assert_eq!(
+            occupied.last().map(|extent| extent.end()),
+            Some(reservation.end())
+        );
+        Ok(OccupiedReservation::whole(reservation))
+    }
+}
+
+/// A stored reservation completely covered by planned allocations.
+///
+/// The caller establishes allocation ownership and publication conditions before making the
+/// storage reusable.
+#[derive(Debug)]
+pub(super) struct OccupiedReservation {
+    reservation: Extent,
+}
+
+impl OccupiedReservation {
+    /// Records coverage by one allocation occupying the whole reservation.
+    fn whole(reservation: Extent) -> Self {
+        Self { reservation }
+    }
+
+    /// Returns the complete stored extent reserved for the planned allocations.
+    pub(super) fn reservation(&self) -> Extent {
+        self.reservation
+    }
+
+    /// Returns the complete allocation boundary for retirement accounting.
+    ///
+    /// The caller establishes that references have been replaced and published before freeing
+    /// this storage.
+    pub(super) fn into_retirement(self) -> Vec<Extent> {
+        vec![self.reservation]
     }
 }
 
