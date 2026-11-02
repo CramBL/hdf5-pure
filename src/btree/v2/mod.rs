@@ -31,7 +31,6 @@ use hdf5_pure_space::__private::Extent;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
@@ -41,6 +40,10 @@ use crate::source::StoredRead;
 #[cfg(test)]
 use crate::width::LengthWidth;
 use crate::width::{FormatWidths, OffsetWidth};
+
+use self::visit::{V2TreeVisitState, V2WalkKind};
+
+mod visit;
 
 /// A metadata source for version 2 B-trees with stored-coordinate offsets.
 ///
@@ -176,7 +179,9 @@ fn search_nodes<'layout, 'reader>(
 ///
 /// # Errors
 ///
-/// Returns errors from metadata reads, checked allocation bounds, and parsing the header or a node.
+/// Returns [`FormatError::InvalidBTreeV2Signature`] for repeated nodes or overlapping allocations,
+/// [`FormatError::ResourceLimit`] when the traversal work allowance is exceeded, and errors from
+/// metadata reads, checked allocation bounds, and parsing the header or a node.
 pub(crate) fn collect_btree_v2_storage_extents(
     source: &(impl StoredRead + ?Sized),
     header_address: StoredAddress,
@@ -204,15 +209,13 @@ pub(crate) fn collect_btree_v2_storage_extents(
 
     let layout = BTreeV2Layout::for_collection(&header, widths.offsets)?;
     let root = layout.root().ok_or(FormatError::InvalidBTreeV2Signature)?;
-    let mut visited = BTreeSet::new();
-    collect_storage_node(
-        source,
-        root,
-        header.node_size,
-        widths.offsets,
-        &mut visited,
-        &mut extents,
-    )?;
+    walk_nodes(root, widths.offsets, V2WalkKind::Storage, |node| {
+        let extent = extent_in_source(source, node.address(), u64::from(header.node_size))?;
+        let bytes =
+            source.read_metadata(node.address(), u64::from(header.node_size).to_usize()?)?;
+        extents.push(extent);
+        Ok(bytes)
+    })?;
 
     extents.sort_unstable();
     for pair in extents.windows(2) {
@@ -247,40 +250,6 @@ fn storage_header_has_root(
     Ok(!root_is_undefined)
 }
 
-/// Adds one complete node allocation and recursively follows the children its depth permits.
-///
-/// "Version 2 B-trees" gives an internal node with R records R + 1 child-pointer groups. Each
-/// group contains "Child Node Pointer" and "Number of Records in Child Node". A pointer whose child
-/// is also an internal node additionally contains "Total Number of Records in Child Node". "Depth"
-/// 0 is a leaf, so recursion stops there after validating the leaf layout.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-fn collect_storage_node(
-    source: &(impl StoredRead + ?Sized),
-    node: BTreeV2Node<'_>,
-    node_size: u32,
-    offset_width: OffsetWidth,
-    visited: &mut BTreeSet<StoredAddress>,
-    extents: &mut Vec<Extent>,
-) -> Result<(), FormatError> {
-    if !visited.insert(node.address()) {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
-    let extent = extent_in_source(source, node.address(), u64::from(node_size))?;
-    let bytes = source.read_metadata(node.address(), u64::from(node_size).to_usize()?)?;
-    let view = node.parse(&bytes)?;
-    extents.push(extent);
-    for index in 0..=view.record_count() {
-        if let Some(child) = view.child(index)? {
-            if child.address().is_undefined(offset_width) {
-                return Err(FormatError::InvalidBTreeV2Signature);
-            }
-            collect_storage_node(source, child, node_size, offset_width, visited, extents)?;
-        }
-    }
-    Ok(())
-}
-
 /// Returns a checked extent after proving its complete byte range lies within `source`.
 fn extent_in_source(
     source: &(impl StoredRead + ?Sized),
@@ -309,8 +278,9 @@ fn extent_in_source(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidBTreeV2Signature`] for contradictory root fields, and errors
-/// from address conversion or B-tree parsing.
+/// Returns [`FormatError::InvalidBTreeV2Signature`] for contradictory root fields or repeated node
+/// addresses, [`FormatError::ResourceLimit`] when the traversal work allowance is exceeded, and
+/// errors from address conversion or B-tree parsing.
 pub(crate) fn collect_btree_v2_records(
     source: StoredBytes<'_>,
     header: &BTreeV2Header,
@@ -321,35 +291,12 @@ pub(crate) fn collect_btree_v2_records(
         BTreeV2CollectionRoot::Empty | BTreeV2CollectionRoot::LegacyEmpty => return Ok(Vec::new()),
         BTreeV2CollectionRoot::NonEmpty(root) => root,
     };
-    let mut records = if header.depth == 0 {
-        Vec::with_capacity(usize::from(header.num_records_in_root))
-    } else {
-        Vec::new()
-    };
-    collect_node_records(source, root, &mut records)?;
-    Ok(records)
-}
-
-fn collect_node_records(
-    source: StoredBytes<'_>,
-    node: BTreeV2Node<'_>,
-    records: &mut Vec<BTreeV2Record>,
-) -> Result<(), FormatError> {
-    let file_data = source.metadata_frame().bytes();
-    let start = node.address().get().to_usize()?;
-    bytes::ensure_len(file_data, start, 0)?;
-    let view = node.parse(&file_data[start..])?;
-    for index in 0..=view.record_count() {
-        if let Some(child) = view.child(index)? {
-            collect_node_records(source, child, records)?;
-        }
-        if index < view.record_count() {
-            records.push(BTreeV2Record {
-                data: view.record(index)?.to_vec(),
-            });
-        }
-    }
-    Ok(())
+    walk_nodes(root, offset_width, V2WalkKind::Records, |node| {
+        let file_data = source.metadata_frame().bytes();
+        let start = node.address().get().to_usize()?;
+        crate::bytes::ensure_len(file_data, start, 0)?;
+        Ok(&file_data[start..])
+    })
 }
 
 /// Reads all records in tree order through a stored-coordinate view.
@@ -362,7 +309,8 @@ fn collect_node_records(
 /// # Errors
 ///
 /// Returns [`FormatError::InvalidBTreeV2Signature`] for contradictory root fields or a repeated
-/// node address, and errors from metadata reads or B-tree parsing.
+/// node address, [`FormatError::ResourceLimit`] when the traversal work allowance is exceeded,
+/// and errors from metadata reads or B-tree parsing.
 pub(crate) fn collect_btree_v2_records_from_source(
     source: &BTreeV2Source<'_, impl StoredRead + ?Sized>,
     header: &BTreeV2Header,
@@ -373,48 +321,37 @@ pub(crate) fn collect_btree_v2_records_from_source(
         BTreeV2CollectionRoot::Empty | BTreeV2CollectionRoot::LegacyEmpty => return Ok(Vec::new()),
         BTreeV2CollectionRoot::NonEmpty(root) => root,
     };
-    let mut visited = BTreeSet::new();
-    let mut records = Vec::new();
-    collect_node_from_source(source, root, header.node_size, &mut visited, &mut records)?;
-    Ok(records)
+    walk_nodes(root, offset_width, V2WalkKind::Records, |node| {
+        let address = node.address();
+        let node_len = u64::from(header.node_size)
+            .min(
+                StoredAddress::new(source.len())
+                    .checked_distance_from(address)
+                    .unwrap_or(0),
+            )
+            .to_usize()?;
+        source.read_metadata(address.get(), node_len)
+    })
 }
 
-fn collect_node_from_source(
-    source: &BTreeV2Source<'_, impl StoredRead + ?Sized>,
-    node: BTreeV2Node<'_>,
-    node_size: u32,
-    visited: &mut BTreeSet<StoredAddress>,
-    records: &mut Vec<BTreeV2Record>,
-) -> Result<(), FormatError> {
-    if !visited.insert(node.address()) {
-        return Err(FormatError::InvalidBTreeV2Signature);
-    }
-    let address = node.address();
-    let node_len = u64::from(node_size)
-        .min(
-            StoredAddress::new(source.len())
-                .checked_distance_from(address)
-                .unwrap_or(0),
-        )
-        .to_usize()?;
-    let bytes = source.read_metadata(address.get(), node_len)?;
-    let view = node.parse(&bytes)?;
-    for index in 0..=view.record_count() {
-        if let Some(child) = view.child(index)? {
-            collect_node_from_source(source, child, node_size, visited, records)?;
-        }
-        if index < view.record_count() {
-            records.push(BTreeV2Record {
-                data: view.record(index)?.to_vec(),
-            });
-        }
-    }
-    Ok(())
+/// Acquires each node once through `read_node` with a shared traversal work allowance.
+///
+/// # Errors
+///
+/// Returns errors from [`V2TreeVisitState::walk`], including `read_node` errors.
+fn walk_nodes<'layout, B: AsRef<[u8]>>(
+    root: BTreeV2Node<'layout>,
+    offset_width: OffsetWidth,
+    kind: V2WalkKind,
+    read_node: impl FnMut(BTreeV2Node<'layout>) -> Result<B, FormatError>,
+) -> Result<Vec<BTreeV2Record>, FormatError> {
+    V2TreeVisitState::new(root, offset_width, kind).walk(read_node)
 }
 
 #[cfg(test)]
 mod tests {
     use core::cell::Cell;
+    use core::mem;
 
     #[cfg(feature = "std")]
     use std::io::Cursor;
@@ -555,6 +492,123 @@ mod tests {
             (wanted.is_multiple_of(2) && wanted / 2 < count as u64).then_some(wanted / 2);
         assert_eq!(result, expected);
         assert!(comparisons <= 6 * (usize::from(header.depth) + 1));
+    }
+
+    #[rstest::rstest]
+    #[case::one_level(1)]
+    #[case::sixty_four_levels(64)]
+    #[case::maximum_declared_depth(u16::MAX)]
+    fn full_walks_traverse_deep_zero_record_branches(#[case] depth: u16) {
+        let tree = btree_v2::Chain::new(depth.try_into().unwrap());
+        let header = BTreeV2Header::parse(&tree.bytes, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        assert_eq!(header.depth, depth);
+        let expected = vec![BTreeV2Record {
+            data: vec![42; usize::from(btree_v2::LINK_NAME_RECORD_SIZE)],
+        }];
+        assert_eq!(
+            collect_btree_v2_records(
+                crate::source::zero_base_bytes(&tree.bytes),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap(),
+            expected
+        );
+        let source = CountingSource {
+            bytes: &tree.bytes,
+            reads: Cell::new(0),
+        };
+        let stored = crate::source::zero_base_source(&source);
+        assert_eq!(
+            collect_btree_v2_records_from_source(
+                &BTreeV2Source::new(&stored),
+                &header,
+                OFFSET_WIDTH
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(source.reads.replace(0), tree.nodes);
+        let extents =
+            collect_btree_v2_storage_extents(&stored, StoredAddress::ZERO, FORMAT_WIDTHS).unwrap();
+        assert_eq!(source.reads.get(), tree.nodes + 1);
+        let mut expected_extents =
+            vec![Extent::new(StoredAddress::ZERO, HEADER_LENGTH.to_u64()).unwrap()];
+        expected_extents.extend(
+            (1..=tree.nodes)
+                .map(|index| Extent::new(StoredAddress::new((index * 64).to_u64()), 64).unwrap()),
+        );
+        assert_eq!(extents, expected_extents);
+    }
+
+    #[rstest::rstest]
+    #[case::before_root(0, 0)]
+    #[case::before_first_edge(1, 1)]
+    #[case::before_second_edge(2, 1)]
+    #[case::before_first_child(3, 1)]
+    #[case::before_second_child(4, 2)]
+    #[case::complete_tree(5, 3)]
+    fn full_walks_charge_work_before_acquiring_nodes(
+        #[case] limit: u64,
+        #[case] expected_reads: usize,
+        #[values(V2WalkKind::Records, V2WalkKind::Storage)] kind: V2WalkKind,
+    ) {
+        let tree = btree_v2::Chain::new(1.try_into().unwrap());
+        let header = BTreeV2Header::parse(&tree.bytes, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::for_collection(&header, OFFSET_WIDTH).unwrap();
+        let root = layout.root().unwrap();
+        let reads = Cell::new(0);
+        let live = Cell::new(0);
+        let peak = Cell::new(0);
+        let result = V2TreeVisitState::with_limit(root, OFFSET_WIDTH, kind, limit).walk(|node| {
+            reads.set(reads.get() + 1);
+            live.set(live.get() + 1);
+            peak.set(peak.get().max(live.get()));
+            let start = node.address().get().to_usize().unwrap();
+            Ok(TrackedNode {
+                bytes: &tree.bytes[start..start + 64],
+                live: &live,
+            })
+        });
+        assert_eq!(reads.get(), expected_reads);
+        assert_eq!(live.get(), 0);
+        assert_eq!(peak.get(), usize::from(expected_reads > 0));
+        if limit < 5 {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::ResourceLimit {
+                    limit,
+                    required: limit + 1
+                }
+            );
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                match kind {
+                    V2WalkKind::Records => vec![BTreeV2Record {
+                        data: vec![42; usize::from(btree_v2::LINK_NAME_RECORD_SIZE)]
+                    }],
+                    V2WalkKind::Storage => Vec::new(),
+                }
+            );
+        }
+    }
+
+    struct TrackedNode<'a> {
+        bytes: &'a [u8],
+        live: &'a Cell<usize>,
+    }
+
+    impl AsRef<[u8]> for TrackedNode<'_> {
+        fn as_ref(&self) -> &[u8] {
+            self.bytes
+        }
+    }
+
+    impl Drop for TrackedNode<'_> {
+        fn drop(&mut self) {
+            self.live.set(self.live.get() - 1);
+        }
     }
 
     struct CountingSource<'a> {
@@ -1337,16 +1391,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn storage_walk_rejects_a_duplicate_child_pointer() {
+    #[rstest::rstest]
+    #[case::duplicate_leaf(MalformedChild::Repeated)]
+    #[case::ancestor_cycle(MalformedChild::Ancestor)]
+    #[case::undefined_address(MalformedChild::Undefined)]
+    fn full_walks_reject_repeated_or_undefined_nodes_before_loading(
+        #[case] child_kind: MalformedChild,
+    ) {
         let mut image = Image::new();
         image.place(0, &[0u8; 64]);
         let leaf = put_leaf(&mut image, 5, &[rec(0)]);
+        let root_at = leaf + u64::from(BTREE_V2_NODE_SIZE);
+        let (child, nodes_read) = match child_kind {
+            MalformedChild::Ancestor => (root_at, 1),
+            MalformedChild::Repeated => (leaf, 2),
+            MalformedChild::Undefined => (u64::MAX, 1),
+        };
         let root = put_internal(
             &mut image,
             5,
             &[rec(1)],
-            &[(leaf, 1, 1), (leaf, 1, 1)],
+            &[(child, 1, 1), (child, 1, 1)],
             1,
             None,
         );
@@ -1355,7 +1420,28 @@ mod tests {
             .total_records(3)
             .build(WIDTHS);
         image.place(0, &header);
-        let source = BytesSource::new(image.build());
+        let file = image.build();
+        let parsed = BTreeV2Header::parse(&file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        assert_eq!(
+            collect_btree_v2_records(crate::source::zero_base_bytes(&file), &parsed, OFFSET_WIDTH)
+                .unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
+        let source = CountingSource {
+            bytes: &file,
+            reads: Cell::new(0),
+        };
+        let stored = crate::source::zero_base_source(&source);
+        assert_eq!(
+            collect_btree_v2_records_from_source(
+                &BTreeV2Source::new(&stored),
+                &parsed,
+                OFFSET_WIDTH
+            )
+            .unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
+        assert_eq!(source.reads.replace(0), nodes_read);
 
         let err = collect_btree_v2_storage_extents(
             &crate::source::zero_base_source(&source),
@@ -1364,6 +1450,13 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, FormatError::InvalidBTreeV2Signature);
+        assert_eq!(source.reads.get(), nodes_read + 1);
+    }
+
+    enum MalformedChild {
+        Ancestor,
+        Repeated,
+        Undefined,
     }
 
     #[test]
@@ -1927,6 +2020,14 @@ mod tests {
         assert_eq!(depth, 2, "20 records per leaf, 314 per depth-1 subtree");
     }
 
+    // "Version 2 B-trees" of the format specification, version 4.0, defines the header fields.
+    const HEADER_LENGTH: usize = btree_v2::SIGNATURE.len()
+        + 4 * mem::size_of::<u8>()
+        + mem::size_of::<u32>()
+        + 3 * mem::size_of::<u16>()
+        + WIDTHS.offset
+        + WIDTHS.length
+        + test_util::checksum::CHECKSUM;
     const WIDTHS: Widths = Widths::EIGHT;
     const FORMAT_WIDTHS: FormatWidths = FormatWidths {
         offsets: OffsetWidth::Eight,
