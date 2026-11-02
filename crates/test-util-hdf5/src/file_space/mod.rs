@@ -32,6 +32,7 @@ use self::persisted::PersistedStrategy;
 
 #[cfg(feature = "__hdf5-1.10")]
 pub mod admission;
+pub mod chunk_holes;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod fragmentation;
 pub mod persisted;

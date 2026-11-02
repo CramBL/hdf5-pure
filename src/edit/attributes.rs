@@ -1,12 +1,13 @@
 //! Attribute edit preparation and compact and dense storage placement.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 use std::ops::Range;
 
 use hdf5_pure_format::__private::{
-    DenseAttrFixup, DenseAttrPlan, PreparedDenseAttrs, RecordSplice,
+    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedDenseAttrs, RecordSplice,
 };
-use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
 use crate::access_mode::AccessMode;
 use crate::attribute::{AttributeMessage, StoredAttribute};
@@ -28,8 +29,10 @@ use crate::source::SourceMetadata;
 use crate::type_builders::{self, AttrValue};
 
 use super::WriteEngine;
+use super::block::{BlockRequest, EncodingDependency};
 use super::object_header;
 use super::object_header::OhRegion;
+use super::reservation::ReservationFailure;
 use super::staging::StagedOp;
 
 impl WriteEngine {
@@ -152,18 +155,69 @@ impl WriteEngine {
 
     /// Writes dense attribute storage and returns its Attribute Info message.
     ///
+    /// In PAGE files, reserves and writes each heap and index block separately, using raw-data
+    /// space for huge-object payloads and metadata space for the remaining blocks. Complete
+    /// blocks smaller than a page stay within one page. Blocks at least one page long start at
+    /// a page boundary.
+    /// Reserves one contiguous allocation for other strategies.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if heap addresses or allocation geometry are invalid, or the
-    /// emitted length differs from its reservation. Returns [`Error::Io`] if writing the heap
-    /// or allocation padding fails.
+    /// emitted length differs from its reservation. Returns
+    /// [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
+    /// Propagates allocation and address-conversion
+    /// errors. Returns [`Error::Io`] if writing the heap, indexes, or allocation padding fails.
     pub(super) fn place_dense_attrs(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error> {
-        let (_addr, attr_info_message) =
-            self.place_relocatable(plan.blob_len(), AllocationClass::Metadata, |stored_base| {
-                let blob = plan.build(stored_base)?;
-                Ok((blob.blob, blob.attr_info_message))
-            })?;
-        Ok(attr_info_message)
+        if !self.space.is_paged() {
+            let (_, attr_info_message) = self.place_relocatable(
+                plan.blob_len(),
+                AllocationClass::Metadata,
+                |stored_base| {
+                    let blob = plan.build(stored_base)?;
+                    Ok((blob.blob, blob.attr_info_message))
+                },
+            )?;
+            return Ok(attr_info_message);
+        }
+        let requests = plan
+            .block_lengths()
+            .zip(plan.block_kinds())
+            .map(|(length, kind)| {
+                NonZeroU64::new(length)
+                    .map(|length| {
+                        BlockRequest::complete(
+                            ReservationRequest::new(
+                                length,
+                                match kind {
+                                    DenseAttrBlockKind::HugeObject => AllocationClass::Raw,
+                                    DenseAttrBlockKind::Metadata => AllocationClass::Metadata,
+                                },
+                            )
+                            .for_block(),
+                            EncodingDependency::Reservations,
+                        )
+                    })
+                    .ok_or_else(|| FormatError::Internal("a dense attribute block is empty".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let base = self.context.addresses();
+        let mut reservations = self
+            .plan_blocks(&requests)
+            .map_err(ReservationFailure::into_error)?;
+        let addresses = reservations
+            .reservations()
+            .iter()
+            .map(|reservation| base.relative(reservation.range().start()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let placement = plan.place(&addresses)?;
+        for block in placement.serialize_blocks()? {
+            reservations.write_next(&block?.bytes)?;
+        }
+        reservations.finish()?;
+        Ok(placement
+            .attribute_info()
+            .serialize(crate::file_writer::OFFSET_WIDTH))
     }
 
     /// Places prepared attribute storage and appends its header records.
