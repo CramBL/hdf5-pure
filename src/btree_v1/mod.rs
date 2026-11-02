@@ -98,7 +98,7 @@ fn collect_group_nodes(
         let node = GroupNode::parse(read(admitted.address())?, admitted)?;
         match node {
             GroupNode::Internal { level, children } => {
-                visits.push_children(level, children.into_iter().rev().map(Ok))?;
+                visits.push_children(level, children.into_iter().map(Ok))?;
             }
             GroupNode::Leaf(children) => result.extend(children),
         }

@@ -72,7 +72,7 @@ impl V1TreeVisitState {
 
     /// Queues children with their parent's checked child level.
     ///
-    /// The caller passes children in reverse traversal order for the stack.
+    /// The caller passes children in traversal order.
     ///
     /// # Errors
     ///
@@ -83,6 +83,7 @@ impl V1TreeVisitState {
         parent: V1InternalNode,
         children: impl Iterator<Item = Result<StoredAddress, FormatError>>,
     ) -> Result<(), FormatError> {
+        let start = self.pending.len();
         for address in children {
             self.charge()?;
             self.pending.push(PendingV1Node {
@@ -90,6 +91,7 @@ impl V1TreeVisitState {
                 expected_level: Some(parent.child_level),
             });
         }
+        self.pending[start..].reverse();
         Ok(())
     }
 
