@@ -9,7 +9,8 @@ use hdf5_pure::File;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::{
-    FormatWidths, MessageRecordLayout, ObjectHeaderAllocation, ObjectHeaderPrefix,
+    FormatWidths, MessageRecordLayout, ObjectHeaderAllocation, ObjectHeaderAllocationGeometry,
+    ObjectHeaderPrefix,
 };
 use rstest::rstest;
 use test_util::object_header::v2::{self as header, HeaderFlags};
@@ -103,8 +104,13 @@ const ROOT_ADDRESS: u64 = 128;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
 const GROUP_INFO_DEFAULT: [u8; 2] = [0, 0];
 
-#[test]
-fn a_native_header_preserves_its_records_in_a_bounded_allocation() {
+#[rstest]
+#[case::automatic(NativeChunkGeometry::Automatic)]
+#[case::page_chunks(NativeChunkGeometry::Pages)]
+#[case::short_gaps(NativeChunkGeometry::ShortGaps)]
+fn a_native_header_preserves_its_records_in_a_bounded_allocation(
+    #[case] chunks: NativeChunkGeometry,
+) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("native.h5");
     let output = directory.path().join("padded.h5");
@@ -131,17 +137,39 @@ fn a_native_header_preserves_its_records_in_a_bounded_allocation() {
     let parsed = ObjectHeaderPrefix::parse(&source_bytes[root..]).unwrap();
     let messages = &source_bytes
         [root + parsed.len..root + parsed.len + usize::try_from(parsed.chunk0_size).unwrap()];
-    let plan = ObjectHeaderAllocation::new(
-        parsed.prefix,
-        widths,
-        StoredAddress::new(ROOT_ADDRESS),
-        131_123,
-        messages,
-    )
+    let geometry = ObjectHeaderAllocationGeometry::new(parsed.prefix, widths, messages).unwrap();
+    let lengths = match chunks {
+        NativeChunkGeometry::Automatic => Vec::new(),
+        NativeChunkGeometry::Pages => vec![3_968, 4_096, 4_096, 128],
+        NativeChunkGeometry::ShortGaps => vec![
+            geometry.root_chunk_lengths(true).next().unwrap().start() + 1,
+            geometry.continuation_chunk_lengths(true).start() + 1,
+            *geometry.continuation_chunk_lengths(false).start(),
+        ],
+    };
+    let allocation = if lengths.is_empty() {
+        131_123
+    } else {
+        lengths.iter().sum()
+    };
+    let plan = if lengths.is_empty() {
+        geometry.into_allocation(StoredAddress::new(ROOT_ADDRESS), allocation)
+    } else {
+        geometry.into_chunked_allocation(StoredAddress::new(ROOT_ADDRESS), allocation, &lengths)
+    }
     .unwrap();
+    if matches!(chunks, NativeChunkGeometry::Pages) {
+        assert!(plan.chunks().all(|(address, len)| {
+            if len >= 4_096 {
+                address.get() % 4_096 == 0
+            } else {
+                address.get() / 4_096 == (address.get() + len - 1) / 4_096
+            }
+        }));
+    }
     let mut bytes = Superblock::new(Widths::EIGHT)
         .root_header_address(ROOT_ADDRESS)
-        .eof_address(ROOT_ADDRESS + 131_123)
+        .eof_address(ROOT_ADDRESS + allocation)
         .build();
     bytes.resize(usize::try_from(ROOT_ADDRESS).unwrap(), 0);
     bytes.extend(plan.encode());
@@ -261,4 +289,11 @@ fn empty_extension_chunks_survive_native_read_write_flush(
         Some(&AttrValue::U32(8))
     );
     pure.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum NativeChunkGeometry {
+    Automatic,
+    Pages,
+    ShortGaps,
 }

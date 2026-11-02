@@ -749,6 +749,13 @@ pub enum FormatError {
         /// The byte order supplied for this class.
         byte_order: DatatypeByteOrder,
     },
+    /// An object-header chunk cannot represent its records in the supplied length.
+    InvalidObjectHeaderChunkLength {
+        /// The zero-based chunk index, with chunk 0 first.
+        index: usize,
+        /// The complete chunk length in bytes, or zero for a missing chunk 0.
+        length: u64,
+    },
     /// A version 1 object-header message has a data size that is not a multiple of eight.
     ///
     /// Contains the declared message data size.
@@ -1014,6 +1021,13 @@ pub enum FormatError {
     NumericElementTooWide {
         /// Storage width of one element, in bytes.
         size: usize,
+    },
+    /// The sum of the object-header chunk lengths differs from the supplied allocation length.
+    ObjectHeaderAllocationLengthMismatch {
+        /// The supplied allocation length in bytes.
+        expected: u64,
+        /// The sum of the complete chunk lengths in bytes.
+        actual: u64,
     },
     /// An object-header message exceeds the version 2 object header's 2-byte
     /// message-size field. The whole-file writer reports the message type code
@@ -1468,6 +1482,18 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "length {length} does not fit a {length_size}-byte length field"
+                )
+            }
+            Self::InvalidObjectHeaderChunkLength { index, length } => {
+                write!(
+                    f,
+                    "object-header chunk {index} cannot represent its records in {length} bytes"
+                )
+            }
+            Self::ObjectHeaderAllocationLengthMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "object-header chunks cover {actual} bytes, expected {expected}"
                 )
             }
             Self::InvalidObjectHeaderSignature => {
