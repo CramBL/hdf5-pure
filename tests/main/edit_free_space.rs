@@ -27,10 +27,13 @@ use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 use test_util::file_space_info;
 use test_util::free_space;
+use test_util::range;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
+use test_util_hdf5::file_space::chunk_holes;
+use test_util_hdf5::file_space::persisted::PersistedStrategy;
 use test_util_hdf5::storage;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
@@ -3260,51 +3263,65 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
 
 #[test]
 fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
-    const CHUNK: usize = 64; // elements, so 256 bytes of i32 per chunk
-    const APPENDED: usize = 16;
+    const CHUNK: usize = chunk_holes::CHUNK_ELEMENTS; // elements, so 256 bytes of i32 per chunk
+    const APPENDED: usize = chunk_holes::APPENDED_CHUNKS;
+    const METADATA_BYTES: usize = chunk_holes::METADATA_BYTES;
     let payload = (APPENDED * CHUNK * 4) as u64;
 
     for (strategy, page, name) in [
         (
-            FileSpaceStrategy::FsmAggr,
+            PersistedStrategy::FsmAggr,
             0,
             "hdf5_pure_fs_append_holes_flat.h5",
         ),
         (
-            FileSpaceStrategy::Page,
+            PersistedStrategy::Page,
             4096,
             "hdf5_pure_fs_append_holes_paged.h5",
         ),
     ] {
         let path = temp::temp_path(name);
-        let mut b = FileBuilder::new();
-        let settings = FileSpaceSettings::new(strategy)
-            .with_persistence(true)
-            .with_threshold(0);
-        b.with_file_space_settings(if page > 0 {
-            settings.with_page_size(FileSpacePageSize::try_from(page).unwrap())
-        } else {
-            settings
-        });
-        Unlimited::new("d", &(0..CHUNK as i32).collect::<Vec<i32>>(), CHUNK as u64).add_to(&mut b);
-        b.write(&path).unwrap();
-
-        let f = open_rw_on_close(&path);
-        for i in 0..APPENDED {
-            for role in ["scratch", "spacer"] {
-                f.root()
-                    .create_dataset(&format!("{role}{i}"), |builder| {
-                        builder.with_i32_data(&(0..72).collect::<Vec<i32>>());
-                    })
-                    .unwrap();
-            }
-        }
-        f.commit().unwrap();
-        for i in 0..APPENDED {
-            f.root().delete(&format!("scratch{i}")).unwrap();
-        }
-        f.commit().unwrap();
+        let (f, original_holes) = chunk_holes::prepare(&path, strategy);
         let reusable = f.reusable_free_sections().unwrap();
+        let available = reusable
+            .sections()
+            .iter()
+            .map(|section| (section.address().get(), section.length().get()))
+            .collect::<Vec<_>>();
+        for hole in &original_holes {
+            assert_eq!(range::covered_len(&available, hole), hole.end - hole.start);
+        }
+        let raw_holes: Vec<_> = if page > 0 {
+            available
+                .iter()
+                .filter(|&&(start, length)| {
+                    original_holes
+                        .iter()
+                        .any(|hole| start < hole.end && hole.start < start + length)
+                })
+                .map(|&(start, length)| start..start + length)
+                .collect()
+        } else {
+            reusable
+                .sections()
+                .iter()
+                .map(|section| section.address().get()..section.end_address().get())
+                .collect()
+        };
+        assert!(
+            raw_holes
+                .iter()
+                .map(|range| range.end - range.start)
+                .sum::<u64>()
+                >= payload,
+            "{raw_holes:?}"
+        );
+        assert!(
+            raw_holes
+                .iter()
+                .all(|range| range.end - range.start < payload),
+            "{raw_holes:?}"
+        );
         let (size_before, free_before) = (
             f.file_size(),
             f.reusable_space_stats().unwrap().reusable_free_bytes(),
@@ -3324,6 +3341,11 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         let chunks = f.dataset("d").unwrap().chunks().unwrap();
         assert_eq!(chunks.len(), APPENDED + 1);
         for chunk in chunks.into_iter().filter(|chunk| chunk.offset != [0]) {
+            assert!(
+                raw_holes.iter().any(|range| range.start <= chunk.address
+                    && chunk.address + chunk.storage_size <= range.end),
+                "{chunk:?} lies outside {raw_holes:?}"
+            );
             assert!(
                 reusable.sections().iter().any(|section| {
                     section.address().get() <= chunk.address
@@ -3370,6 +3392,15 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
                     .read_i32()
                     .unwrap(),
                 (0..72).collect::<Vec<i32>>()
+            );
+        }
+        if page > 0 {
+            assert_eq!(f.root().groups().unwrap(), ["metadata_guard"]);
+            let attrs = f.group("metadata_guard").unwrap().attrs().unwrap();
+            assert_eq!(attrs.len(), 1);
+            assert_eq!(
+                attrs.get("padding"),
+                Some(&AttrValue::U8Array(vec![0; METADATA_BYTES]))
             );
         }
         drop(f);

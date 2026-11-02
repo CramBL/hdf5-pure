@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
@@ -11,7 +12,7 @@ use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::OwnedLink;
 
-use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
@@ -36,8 +37,10 @@ use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
 use super::WriteEngine;
+use super::block::{BlockRequest, EncodingDependency};
 use super::group_links;
 use super::object_header::{self, OhRegion};
+use super::reservation::ReservationFailure;
 
 mod hard_link;
 
@@ -299,6 +302,10 @@ impl WriteEngine {
     /// Preserves the region when `dense` is `false`. The caller passes the storage decision
     /// from [`Self::plan_group_links`] after resolving hard-link targets.
     ///
+    /// In PAGE files, reserves and writes each heap and index block separately. Complete blocks
+    /// smaller than a page stay within one page. Blocks at least one page long start at a page
+    /// boundary. Reserves one contiguous allocation for other strategies.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if link storage cannot be reproduced or Link Info is
@@ -313,11 +320,44 @@ impl WriteEngine {
         }
         let storage = group_links::inspect(&self.opened_source(), self.context.widths(), region)?;
         let plan = dense_link_plan(storage, self.context.widths().lengths)?;
-        let (_, info) =
+        let info = if self.space.is_paged() {
+            let requests = plan
+                .block_lengths()
+                .map(|length| {
+                    NonZeroU64::new(length)
+                        .map(|length| {
+                            BlockRequest::complete(
+                                ReservationRequest::new(length, AllocationClass::Metadata)
+                                    .for_block(),
+                                EncodingDependency::Reservations,
+                            )
+                        })
+                        .ok_or_else(|| FormatError::Internal("a dense link block is empty".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let base = self.context.addresses();
+            let mut reservations = self
+                .plan_blocks(&requests)
+                .map_err(ReservationFailure::into_error)?;
+            let addresses = reservations
+                .reservations()
+                .iter()
+                .map(|reservation| base.relative(reservation.range().start()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let placement = plan.place(&addresses)?;
+            for block in placement.serialize_blocks()? {
+                let (_, bytes) = block?;
+                reservations.write_next(&bytes)?;
+            }
+            reservations.finish()?;
+            placement.link_info().clone()
+        } else {
             self.place_relocatable(plan.serialized_len(), AllocationClass::Metadata, |base| {
                 let image = plan.serialize(base).map_err(dense_link_error)?;
                 Ok((image.bytes, image.info))
-            })?;
+            })?
+            .1
+        };
         let mut bytes = Vec::new();
         let mut pos = 0;
         while let Some((kind, _, end)) = region.next_message(pos)? {

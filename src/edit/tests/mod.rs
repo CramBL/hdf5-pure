@@ -6,6 +6,7 @@ mod group_links;
 mod object;
 mod opening_extension;
 mod ownership;
+mod page_dense;
 mod page_feasibility;
 mod page_header_reclamation;
 mod page_manager_tail;
