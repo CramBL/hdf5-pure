@@ -3,6 +3,8 @@
 //! A version 2 tree keeps its shape in a header of its own, and its nodes
 //! carry a checksum.
 
+use core::num::NonZeroU16;
+
 use crate::bytes;
 use crate::checksum;
 use crate::widths::Widths;
@@ -261,10 +263,106 @@ pub fn attribute_name_record(heap_id: &[u8], flags: u8, creation_order: u32, has
     record
 }
 
+/// A tree with one root record above two chains of zero-record nodes.
+pub struct Chain {
+    /// The header followed by complete 64-byte node allocations.
+    pub bytes: Vec<u8>,
+    /// The number of nodes, excluding the header.
+    pub nodes: usize,
+}
+
+impl Chain {
+    /// Builds a type-5 tree with `depth` internal levels and one record in its root.
+    ///
+    /// Uses eight-byte addresses and lengths. Every byte of the root record is 42.
+    pub fn new(depth: NonZeroU16) -> Self {
+        let depth = depth.get();
+        let node_size = 64;
+        let widths = Widths::EIGHT;
+        let mut image = vec![0; node_size];
+        let mut append = |node: Vec<u8>| {
+            let address = u64::try_from(image.len()).unwrap();
+            assert!(node.len() <= node_size);
+            image.extend_from_slice(&node);
+            image.resize(image.len() + node_size - node.len(), 0);
+            address
+        };
+        let mut child = append(leaf(LINK_NAME_TYPE, &[]));
+        let mut last = append(leaf(LINK_NAME_TYPE, &[]));
+        let record_size = usize::from(LINK_NAME_RECORD_SIZE);
+        let overhead = NODE_PREFIX + checksum::CHECKSUM;
+        let mut capacity = u64::try_from((node_size - overhead) / record_size).unwrap();
+        let direct_width =
+            usize::try_from((u64::BITS - capacity.leading_zeros()).div_ceil(u8::BITS)).unwrap();
+        let mut count_width = direct_width;
+        for level in 1..=depth {
+            let children = vec![
+                Child {
+                    address: child,
+                    records: 0,
+                    records_width: direct_width,
+                    subtree: (level > 1).then_some(Subtree {
+                        records: 0,
+                        width: count_width,
+                    }),
+                };
+                if level == depth { 2 } else { 1 }
+            ];
+            let mut children = children;
+            if level == depth {
+                children[1].address = last;
+            }
+            let records = if level == depth {
+                vec![vec![42; record_size]]
+            } else {
+                Vec::new()
+            };
+            if level < depth {
+                let mut right = children[0];
+                right.address = last;
+                last = append(internal(LINK_NAME_TYPE, &[], &[right], widths));
+            }
+            child = append(internal(LINK_NAME_TYPE, &records, &children, widths));
+            let pointer_width =
+                widths.offset + direct_width + if level == 1 { 0 } else { count_width };
+            let direct = u64::try_from(
+                (node_size - overhead - pointer_width) / (record_size + pointer_width),
+            )
+            .unwrap();
+            capacity = (direct + 1).saturating_mul(capacity).saturating_add(direct);
+            count_width =
+                usize::try_from((u64::BITS - capacity.leading_zeros()).div_ceil(u8::BITS)).unwrap();
+        }
+        let header = Header::new(LINK_NAME_TYPE, LINK_NAME_RECORD_SIZE, child, 1)
+            .node_size(u32::try_from(node_size).unwrap())
+            .depth(depth)
+            .total_records(1)
+            .build(widths);
+        image[..header.len()].copy_from_slice(&header);
+        Self {
+            bytes: image,
+            nodes: 2 * usize::from(depth) + 1,
+        }
+    }
+}
+
 // "Version 2 B-trees" of the format specification, version 4.0, defines type 8 and its
 // 17-byte record.
 const ATTRIBUTE_NAME_TYPE: u8 = 8;
 const ATTRIBUTE_NAME_RECORD_SIZE: u16 = 17;
+
+/// The client type for a dense group's link-name index.
+///
+/// Defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+pub const LINK_NAME_TYPE: u8 = 5;
+/// The size of a link-name record's four-byte hash and seven-byte heap ID.
+///
+/// Defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+pub const LINK_NAME_RECORD_SIZE: u16 = 11;
 
 pub const SIGNATURE: &[u8; 4] = b"BTHD";
 
