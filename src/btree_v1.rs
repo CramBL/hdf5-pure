@@ -83,9 +83,9 @@ fn collect_symbol_table_nodes_inner(
 
 /// Returns the stored symbol table node addresses in B-tree traversal order from `source`.
 ///
-/// Reads each node's eight-byte prefix, then its header, entries in use, and trailing key,
-/// through [`StoredRead::read_metadata`]. Uses the source's captured effective base and preserves its
-/// metadata ownership, physical ranges, and cache behavior.
+/// Reads each node's complete header before checking the signature, then its entries in use and
+/// trailing key, through [`StoredRead::read_metadata`]. Uses the source's captured effective base
+/// and preserves its metadata ownership, physical ranges, and cache behavior.
 ///
 /// # Errors
 ///
@@ -143,6 +143,7 @@ fn collect_symbol_table_nodes_from_source_inner(
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private as format;
     use rstest::rstest;
     use test_util::btree_v1;
     use test_util::widths::Widths;
@@ -196,14 +197,15 @@ mod tests {
             .unwrap(),
             expected,
         );
+        let header_size = format::btree_v1_node_header_size(os);
         assert_eq!(
             source.reads.into_inner(),
             vec![
-                (base + 512, 8),
+                (base + 512, header_size),
                 (base + 512, internal.len()),
-                (base, 8),
+                (base, header_size),
                 (base, leaf1.len()),
-                (base + 256, 8),
+                (base + 256, header_size),
                 (base + 256, leaf2.len())
             ],
         );
@@ -321,7 +323,7 @@ mod tests {
             collect_symbol_table_nodes_from_source(&stored, StoredAddress::ZERO, widths)
                 .unwrap_err(),
             FormatError::UnexpectedSourceEof {
-                expected: (base + if available < 8 { 8 } else { required }).to_u64(),
+                expected: (base + required).to_u64(),
                 available: image.len().to_u64(),
             },
         );
