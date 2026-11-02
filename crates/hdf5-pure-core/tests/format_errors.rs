@@ -41,6 +41,7 @@ fn huge_object_diagnostics_preserve_their_fields(
 )]
 #[case::duplicate_name(FormatError::DuplicateAttributeName("a\nb".into()), "duplicate attribute name \"a\\nb\"")]
 #[case::creation_counter(FormatError::InvalidAttributeCreationCounter { index: 7, next: 3 }, "attribute creation index 7 is not below the next index 3")]
+#[case::phase_change(FormatError::InvalidAttributePhaseChange { max_compact: 7, min_dense: 8 }, "attribute minimum dense count 8 exceeds maximum compact count 7")]
 fn attribute_creation_diagnostics_preserve_their_fields(
     #[case] error: FormatError,
     #[case] expected: &str,

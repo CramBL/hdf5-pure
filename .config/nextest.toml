@@ -133,6 +133,7 @@ filter = '''
 package(hdf5-pure-crosscheck) & (
     test(/^edit::/) |
     test(/^edit_append_inplace::/) |
+    test(/^edit_attribute_phase_change::/) |
     test(/^edit_creation_order::/) |
     test(/^edit_dense_attr::/) |
     test(/^edit_dense_attr_copy::/) |

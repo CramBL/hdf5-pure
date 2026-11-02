@@ -86,6 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` ignoring stored attribute thresholds when compact sets grow ([#1048](https://github.com/CramBL/hdf5-pure/pull/1048)).
 - Fixed invalid tag lengths and padded logical tags in `Datatype::Opaque` metadata. Reading rejects malformed tag properties, and writing rejects tags with NULs or more than 247 bytes ([#1045](https://github.com/CramBL/hdf5-pure/pull/1045)).
 - Fixed `File::commit` accepting oversized hard Link messages during staged edits ([#1047](https://github.com/CramBL/hdf5-pure/pull/1047)).
 - Fixed `File::commit` splitting contiguous PAGE free runs into page-sized records, preventing reuse for larger allocations and inflating manager storage ([#1040](https://github.com/CramBL/hdf5-pure/pull/1040)).

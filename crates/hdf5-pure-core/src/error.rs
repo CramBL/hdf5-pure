@@ -369,6 +369,13 @@ pub enum FormatError {
         /// The attribute name.
         name: String,
     },
+    /// An object's minimum dense attribute count exceeds its maximum compact count.
+    InvalidAttributePhaseChange {
+        /// The stored maximum compact attribute count.
+        max_compact: u16,
+        /// The stored minimum dense attribute count.
+        min_dense: u16,
+    },
     /// Invalid attribute message version.
     InvalidAttributeVersion(u8),
     /// Invalid B-tree node type.
@@ -2443,6 +2450,15 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "attribute creation index {index} is not below the next index {next}"
+                )
+            }
+            Self::InvalidAttributePhaseChange {
+                max_compact,
+                min_dense,
+            } => {
+                write!(
+                    f,
+                    "attribute minimum dense count {min_dense} exceeds maximum compact count {max_compact}"
                 )
             }
             Self::DuplicateLinkName(name) => write!(f, "duplicate link name {name:?}"),

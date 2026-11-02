@@ -4,6 +4,7 @@ use rstest::rstest;
 use super::*;
 use crate::File;
 use crate::access_mode::AccessMode;
+use crate::attribute_policy;
 use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
@@ -1670,18 +1671,13 @@ fn the_root_grows_into_an_indirect_block_rather_than_a_bigger_direct_one() {
     assert_eq!(&blob[address..address + 4], b"FHIB");
 }
 
-/// An attribute close to the managed-object limit needs the table's largest
-/// direct block, and those only recur inside *nested* indirect blocks once
-/// the root's own row of them is used up. Reading every attribute back proves
-/// the emitter and the reader agree about where the deeper blocks sit.
 #[test]
 fn attributes_survive_a_heap_with_nested_indirect_blocks() {
     let mut fw = FileWriter::new();
     let ds = fw.create_dataset("data");
     ds.with_f64_data(&[1.0]);
-    // Past DENSE_ATTR_THRESHOLD so the set goes to the heap at all, and each
-    // one big enough that only the table's largest direct block will take it.
-    let count = DENSE_ATTR_THRESHOLD + 2;
+    // The count requires dense storage, and each value requires the largest direct block.
+    let count = usize::from(attribute_policy::DEFAULT_MAX_COMPACT) + 2;
     let value = |i: usize| char::from(b'a' + i as u8).to_string().repeat(60_000);
     for i in 0..count {
         ds.set_attr(&format!("big{i}"), AttrValue::AsciiString(value(i)));
