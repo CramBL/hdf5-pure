@@ -200,7 +200,7 @@ impl<'a> ReservationPlan<'a> {
                 }
                 let length = extent.len().to_usize()?;
                 #[cfg(test)]
-                super::observations::record_zeros(length, length);
+                super::observations::record_zeros(length.to_u64(), length);
                 engine.append(&vec![0; length])?;
             }
             engine.space.record_transition(page_type, transition);

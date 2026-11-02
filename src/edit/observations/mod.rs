@@ -20,11 +20,11 @@ std::thread_local! {
 }
 
 /// Records one zero-generation request and its scratch buffer length.
-pub(super) fn record_zeros(bytes: usize, scratch: usize) {
+pub(super) fn record_zeros(bytes: u64, scratch: usize) {
     ZEROS.with(|observed| {
         let mut work = observed.get();
         work.calls = work.calls.saturating_add(1);
-        work.bytes = work.bytes.saturating_add(bytes as u64);
+        work.bytes = work.bytes.saturating_add(bytes);
         work.scratch_peak = work.scratch_peak.max(scratch as u64);
         observed.set(work);
     });

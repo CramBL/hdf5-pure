@@ -228,7 +228,7 @@ impl AggregateSpace {
         while image.len() < end {
             let length = (end - image.len()).min(padding.len() as u64).to_usize()?;
             #[cfg(test)]
-            super::observations::record_zeros(length, padding.len());
+            super::observations::record_zeros(length.to_u64(), padding.len());
             image.append(&padding[..length])?;
         }
         Ok(())
