@@ -24,6 +24,47 @@ use crate::superblock;
 use super::*;
 
 #[rstest]
+#[case::root(0)]
+#[case::continuation(1)]
+fn gathering_honors_checksum_verification_for_each_chunk(
+    #[case] damaged: usize,
+    #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER | HeaderFlags::INDEXES_CREATION_ORDER)]
+    flags: HeaderFlags,
+) {
+    let mut fixture = Predecessor::new(flags, true, true, 2);
+    let range = fixture.chunks[damaged].clone();
+    let checksum_at = range.end - checksum::CHECKSUM;
+    let computed = checksum::lookup3(&fixture.bytes[range.start..checksum_at]);
+    assert_eq!(
+        &fixture.bytes[checksum_at..range.end],
+        computed.to_le_bytes()
+    );
+    fixture.bytes[checksum_at] ^= 1;
+    let source = CountedSource::new(&fixture.bytes);
+    let result = WriteEngine::gather_oh_messages(&source, fixture.root, fixture.addresses);
+    if cfg!(feature = "checksum") {
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, Error::Format(FormatError::ChecksumMismatch {
+            expected, computed: actual,
+        }) if expected == computed ^ 1 && actual == computed),
+            "{error:?}"
+        );
+        assert_eq!(source.calls.get(), u64::try_from(damaged + 2).unwrap());
+        let expected_bytes = OBJECT_HEADER_PREFIX_MAX_LEN
+            + fixture.chunks[..=damaged]
+                .iter()
+                .map(core::ops::Range::len)
+                .sum::<usize>();
+        assert_eq!(source.bytes.get(), u64::try_from(expected_bytes).unwrap());
+    } else {
+        assert_eq!(&result.unwrap().without_nil().unwrap()[..], fixture.records);
+        assert_eq!(source.calls.get(), 3);
+        assert_eq!(source.bytes.get(), fixture.read_bytes);
+    }
+}
+
+#[rstest]
 #[case::plain(HeaderFlags::default())]
 #[case::tracked(HeaderFlags::TRACKS_CREATION_ORDER | HeaderFlags::INDEXES_CREATION_ORDER)]
 fn compact_reconstruction_preserves_records_and_optional_prefixes(
@@ -104,6 +145,8 @@ fn compact_reconstruction_checks_records_after_nil_and_file_space_info(#[case] f
     let record = v2::message_record(&Message::new(WireType::UNKNOWN, &[0xA5; 13]), flags);
     let start = fixture.bytes.len() - checksum::CHECKSUM - record.len();
     fixture.bytes[start + 1..start + 3].copy_from_slice(&14u16.to_le_bytes());
+    let chunk = fixture.chunks.last().unwrap();
+    checksum::restamp(&mut fixture.bytes, chunk.start, chunk.len());
     let source = BytesSource::new(&fixture.bytes);
     let err = ExtensionReconstruction::read(&source, fixture.root, fixture.addresses)
         .err()
@@ -482,6 +525,7 @@ struct Predecessor {
     records: Vec<u8>,
     props: ObjectHeaderPrefix,
     read_bytes: u64,
+    chunks: Vec<core::ops::Range<usize>>,
 }
 
 impl Predecessor {
@@ -546,13 +590,17 @@ impl Predecessor {
         let parsed = ObjectHeaderPrefix::parse(&header).unwrap();
         let props = parsed.prefix;
         let read_bytes = u64::try_from(
-            OBJECT_HEADER_PREFIX_MAX_LEN + header.len() - checksum::CHECKSUM
+            OBJECT_HEADER_PREFIX_MAX_LEN
+                + header.len()
                 + pieces.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
         )
         .unwrap();
         let mut bytes = vec![0; at.max(root + header.len())];
         bytes[root..root + header.len()].copy_from_slice(&header);
+        let mut chunk_ranges = Vec::with_capacity(chunks);
+        chunk_ranges.push(root..root + header.len());
         for (at, piece) in pieces {
+            chunk_ranges.push(at..at + piece.len());
             bytes[at..at + piece.len()].copy_from_slice(&piece);
         }
         Self {
@@ -564,6 +612,7 @@ impl Predecessor {
             records,
             props,
             read_bytes,
+            chunks: chunk_ranges,
         }
     }
     fn opening_context(&mut self) -> FileContext {

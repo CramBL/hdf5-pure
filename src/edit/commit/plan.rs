@@ -580,8 +580,7 @@ impl WriteEngine {
                     }
                 }
                 let region = Self::gather_oh_messages(&self.image(), addr, base)?;
-                let attributes =
-                    attributes::plan_attr_ops(&self.opened_source(), Some(addr), &region, &ops)?;
+                let attributes = attributes::plan_attr_ops(&self.opened_source(), &region, &ops)?;
 
                 edits.moving_writes.push(DatasetRelocation {
                     parent,
@@ -829,17 +828,10 @@ impl WriteEngine {
         }
 
         let attrs_by_group = group_by_parent(staged.group_attrs().iter().map(|(p, op)| (p, op)));
-        let existing_group_addrs: HashMap<ObjectPathBuf, u64> =
-            superseded_addrs.iter().cloned().collect();
         for (key, node) in nodes.iter_mut() {
             if let Some(ops) = attrs_by_group.get(key) {
                 let region = std::mem::take(&mut node.prepared.region);
-                let edits = attributes::plan_attr_ops(
-                    &self.opened_source(),
-                    existing_group_addrs.get(key).copied(),
-                    &region,
-                    ops,
-                )?;
+                let edits = attributes::plan_attr_ops(&self.opened_source(), &region, ops)?;
                 node.prepared.region = edits.region;
                 node.prepared.attrs = edits.attrs;
                 if edits.replaces_dense_storage

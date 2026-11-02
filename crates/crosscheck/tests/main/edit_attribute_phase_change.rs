@@ -5,7 +5,7 @@ use std::path::Path;
 
 use hdf5::plist::file_access::LibraryVersion;
 use hdf5::plist::group_create::{AttrCreationOrder, GroupCreateBuilder};
-use hdf5_pure::{AttrValue, File, MessageType};
+use hdf5_pure::{AttrValue, File, FileAccessProperties, MemoryStrategy, MessageType};
 use hdf5_pure_format::__private::{
     AccessMode, AttributeInfoMessage, ObjectHeader, ObjectHeaderPrefix,
 };
@@ -57,22 +57,7 @@ fn compact_attribute_edits_use_stored_policy(
     let count = initial + usize::from(!overwrite);
     {
         let file = File::open_rw(&path).unwrap();
-        match owner {
-            Owner::Root => file
-                .root()
-                .set_attr(&attr_name(changed), AttrValue::I64(71))
-                .unwrap(),
-            Owner::Group => file
-                .group("g")
-                .unwrap()
-                .set_attr(&attr_name(changed), AttrValue::I64(71))
-                .unwrap(),
-            Owner::Dataset => file
-                .dataset("d")
-                .unwrap()
-                .set_attr(&attr_name(changed), AttrValue::I64(71))
-                .unwrap(),
-        }
+        owner.set_attribute(&file, &attr_name(changed), AttrValue::I64(71));
         file.commit().unwrap();
     }
     assert_eq!(inspect_storage(&path, owner, dense, order, count), before);
@@ -154,22 +139,7 @@ fn oversized_attributes_override_compact_policy(
     let value: Vec<i64> = (0..10_000).collect();
     {
         let file = File::open_rw(&path).unwrap();
-        match owner {
-            Owner::Root => file
-                .root()
-                .set_attr("large", AttrValue::I64Array(value.clone()))
-                .unwrap(),
-            Owner::Group => file
-                .group("g")
-                .unwrap()
-                .set_attr("large", AttrValue::I64Array(value.clone()))
-                .unwrap(),
-            Owner::Dataset => file
-                .dataset("d")
-                .unwrap()
-                .set_attr("large", AttrValue::I64Array(value.clone()))
-                .unwrap(),
-        }
+        owner.set_attribute(&file, "large", AttrValue::I64Array(value.clone()));
         file.commit().unwrap();
     }
     assert_eq!(
@@ -197,6 +167,266 @@ fn oversized_attributes_override_compact_policy(
     file.close().unwrap();
 }
 
+#[rstest]
+#[case::custom_at_minimum(32, 24, 33, 24, true, false)]
+#[case::custom_below_minimum(32, 24, 33, 23, false, false)]
+#[case::default_at_minimum(8, 6, 9, 6, true, false)]
+#[case::default_below_minimum(8, 6, 9, 5, false, false)]
+#[case::one_way(12, 0, 13, 1, true, false)]
+#[case::always_dense(0, 0, 3, 1, true, false)]
+#[case::empty_default(8, 6, 9, 0, false, false)]
+#[case::empty_custom(32, 24, 33, 0, false, false)]
+#[case::reversion_with_new_vl_value(8, 6, 9, 5, false, true)]
+fn dense_attribute_deletions_use_stored_policy(
+    #[case] maximum: u16,
+    #[case] minimum: u16,
+    #[case] initial: usize,
+    #[case] remaining: usize,
+    #[case] dense: bool,
+    #[case] replace_vl: bool,
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+    #[values(
+        AttrCreationOrder::Untracked,
+        AttrCreationOrder::Tracked,
+        AttrCreationOrder::Indexed
+    )]
+    order: AttrCreationOrder,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reversion.h5");
+    create_fixture(&path, owner, order, maximum, minimum, initial);
+    let policy = inspect_storage(&path, owner, true, order, initial);
+    let initial_values: HashMap<_, _> = (0..initial)
+        .map(|index| {
+            (
+                attr_name(index),
+                AttrValue::I64(i64::try_from(index).unwrap()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        owner.attributes(&File::open(&path).unwrap()),
+        initial_values
+    );
+    let mut removed: Vec<_> = (0..initial)
+        .step_by(2)
+        .chain((1..initial).step_by(2))
+        .take(initial - remaining)
+        .collect();
+    removed.sort_unstable();
+    {
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_memory_strategy(memory),
+        )
+        .unwrap();
+        for &index in &removed {
+            owner.remove_attribute(&file, &attr_name(index));
+        }
+        if replace_vl {
+            owner.set_attribute(
+                &file,
+                &attr_name(initial - 1),
+                AttrValue::VarLenString("new variable-length value".into()),
+            );
+        }
+        file.commit().unwrap();
+    }
+    assert_eq!(
+        inspect_storage(
+            &path,
+            owner,
+            dense,
+            order,
+            if remaining == 0 { 0 } else { initial }
+        ),
+        policy
+    );
+    let surviving: Vec<_> = (0..initial)
+        .filter(|index| removed.binary_search(index).is_err())
+        .collect();
+    let mut expected_values: HashMap<_, _> = surviving
+        .iter()
+        .map(|&index| {
+            (
+                attr_name(index),
+                AttrValue::I64(i64::try_from(index).unwrap()),
+            )
+        })
+        .collect();
+    if replace_vl {
+        expected_values.insert(
+            attr_name(initial - 1),
+            AttrValue::VarLenString("new variable-length value".into()),
+        );
+    }
+    assert_eq!(
+        owner.attributes(&File::open(&path).unwrap()),
+        expected_values
+    );
+    let file = hdf5::File::open(&path).unwrap();
+    let location = owner.location(&file);
+    let names: Vec<_> = surviving.iter().copied().map(attr_name).collect();
+    assert_eq!(location.attr_names().unwrap(), names);
+    for (position, &index) in surviving.iter().enumerate() {
+        if replace_vl && index == initial - 1 {
+            assert_eq!(
+                location
+                    .attr(&attr_name(index))
+                    .unwrap()
+                    .read_scalar::<hdf5::types::VarLenUnicode>()
+                    .unwrap()
+                    .as_str(),
+                "new variable-length value"
+            );
+        } else {
+            assert_eq!(
+                location
+                    .attr(&attr_name(index))
+                    .unwrap()
+                    .read_scalar::<i64>()
+                    .unwrap(),
+                i64::try_from(index).unwrap()
+            );
+        }
+        if !matches!(order, AttrCreationOrder::Untracked) {
+            assert_eq!(
+                location
+                    .attr_info(&attr_name(index))
+                    .unwrap()
+                    .creation_order,
+                Some(u32::try_from(index).unwrap())
+            );
+            assert_eq!(
+                location
+                    .attr_by_index(
+                        hdf5::IndexType::CreationOrder,
+                        hdf5::IterationOrder::Increasing,
+                        u64::try_from(position).unwrap()
+                    )
+                    .unwrap()
+                    .name(),
+                attr_name(index)
+            );
+        }
+    }
+    let pair = match owner {
+        Owner::Root | Owner::Group => file
+            .group(owner.path())
+            .unwrap()
+            .gcpl()
+            .unwrap()
+            .get_attr_phase_change()
+            .unwrap(),
+        Owner::Dataset => file
+            .dataset(owner.path())
+            .unwrap()
+            .dcpl()
+            .unwrap()
+            .get_attr_phase_change()
+            .unwrap(),
+    };
+    assert_eq!(
+        (pair.max_compact, pair.min_dense),
+        (u32::from(maximum), u32::from(minimum))
+    );
+    if matches!(owner, Owner::Dataset) {
+        assert_eq!(file.dataset("d").unwrap().read_raw::<i32>().unwrap(), [19]);
+    }
+    drop(location);
+    file.close().unwrap();
+}
+
+#[rstest]
+fn oversized_survivor_keeps_dense_attribute_storage(
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+    #[values(
+        AttrCreationOrder::Untracked,
+        AttrCreationOrder::Tracked,
+        AttrCreationOrder::Indexed
+    )]
+    order: AttrCreationOrder,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oversized-survivor.h5");
+    create_fixture(&path, owner, order, 8, 6, 9);
+    let big: Vec<i64> = (0..10_000).collect();
+    let native = hdf5::File::open_rw(&path).unwrap();
+    let location = owner.location(&native);
+    location
+        .new_attr::<i64>()
+        .shape([big.len()])
+        .create("large")
+        .unwrap()
+        .write(&big)
+        .unwrap();
+    drop(location);
+    native.close().unwrap();
+    let policy = inspect_storage(&path, owner, true, order, 10);
+    let mut expected: HashMap<_, _> = (0..9)
+        .map(|index| {
+            (
+                attr_name(index),
+                AttrValue::I64(i64::try_from(index).unwrap()),
+            )
+        })
+        .collect();
+    expected.insert("large".into(), AttrValue::I64Array(big.clone()));
+    assert_eq!(owner.attributes(&File::open(&path).unwrap()), expected);
+    {
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_memory_strategy(memory),
+        )
+        .unwrap();
+        for index in 0..7 {
+            owner.remove_attribute(&file, &attr_name(index));
+            expected.remove(&attr_name(index));
+        }
+        file.commit().unwrap();
+    }
+    assert_eq!(inspect_storage(&path, owner, true, order, 10), policy);
+    assert_eq!(owner.attributes(&File::open(&path).unwrap()), expected);
+    let native = hdf5::File::open(&path).unwrap();
+    let location = owner.location(&native);
+    assert_eq!(location.attr_names().unwrap(), ["a007", "a008", "large"]);
+    assert_eq!(
+        location.attr("a007").unwrap().read_scalar::<i64>().unwrap(),
+        7
+    );
+    assert_eq!(
+        location.attr("a008").unwrap().read_scalar::<i64>().unwrap(),
+        8
+    );
+    assert_eq!(
+        location.attr("large").unwrap().read_raw::<i64>().unwrap(),
+        big
+    );
+    if !matches!(order, AttrCreationOrder::Untracked) {
+        for (position, name) in ["a007", "a008", "large"].into_iter().enumerate() {
+            assert_eq!(
+                location.attr_info(name).unwrap().creation_order,
+                Some(u32::try_from(position).unwrap() + 7)
+            );
+            assert_eq!(
+                location
+                    .attr_by_index(
+                        hdf5::IndexType::CreationOrder,
+                        hdf5::IterationOrder::Increasing,
+                        u64::try_from(position).unwrap()
+                    )
+                    .unwrap()
+                    .name(),
+                name
+            );
+        }
+    }
+    drop(location);
+    native.close().unwrap();
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Owner {
     Dataset,
@@ -205,6 +435,32 @@ enum Owner {
 }
 
 impl Owner {
+    fn set_attribute(self, file: &File, name: &str, value: AttrValue) {
+        match self {
+            Self::Dataset => file
+                .dataset(self.path())
+                .unwrap()
+                .set_attr(name, value)
+                .unwrap(),
+            Self::Group | Self::Root => file
+                .group(self.path())
+                .unwrap()
+                .set_attr(name, value)
+                .unwrap(),
+        }
+    }
+
+    fn remove_attribute(self, file: &File, name: &str) {
+        match self {
+            Self::Dataset => file
+                .dataset(self.path())
+                .unwrap()
+                .remove_attr(name)
+                .unwrap(),
+            Self::Group | Self::Root => file.group(self.path()).unwrap().remove_attr(name).unwrap(),
+        }
+    }
+
     fn attributes(self, file: &File) -> HashMap<String, AttrValue> {
         match self {
             Self::Dataset => file.dataset(self.path()).unwrap().attrs().unwrap(),
