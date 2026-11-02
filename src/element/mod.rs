@@ -235,6 +235,69 @@ impl_h5_element!(u32, make_u32_type, read_u32, with_u32_data, append_u32);
 impl_h5_element!(u64, make_u64_type, read_u64, with_u64_data, append_u64);
 
 impl DatasetBuilder {
+    /// Declares the element type and shape without allocating element storage.
+    ///
+    /// Uses [`H5Element::datatype`] with the shape and allocation behavior of
+    /// [`with_unallocated_storage`](Self::with_unallocated_storage). Separately configured
+    /// chunking, maximum shape, filters, fill settings, and attributes are retained.
+    ///
+    /// Type-construction errors are staged in the builder. File finalization and
+    /// [`Group::create_dataset`](crate::Group::create_dataset) return them through
+    /// [`Error::Format`]. Element data or a data provider conflicts with unallocated storage
+    /// and is rejected during preparation with [`FormatError::ConflictingDatasetStorage`].
+    ///
+    /// # Examples
+    ///
+    /// Declares a dataset in generic code:
+    ///
+    /// ```
+    /// use hdf5_pure::{DatasetBuilder, File, FileBuilder, H5Element, MaxExtent};
+    ///
+    /// fn declare<T: H5Element>(dataset: &mut DatasetBuilder) {
+    ///     dataset.with_unallocated_storage_for::<T>(&[0])
+    ///         .with_chunks(&[2])
+    ///         .with_maxshape(&[MaxExtent::Unlimited]);
+    /// }
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// declare::<[u8; 4]>(builder.create_dataset("bytes"));
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// let dataset = file.dataset("bytes")?;
+    /// assert_eq!(dataset.datatype()?, <[u8; 4]>::datatype()?);
+    /// assert_eq!(dataset.shape()?, [0]);
+    /// assert!(dataset.chunks()?.is_empty());
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    ///
+    /// Stages a declaration in a writable file:
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder};
+    ///
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("schema.h5");
+    /// FileBuilder::new().write(&path)?;
+    /// let file = File::open_rw(&path)?;
+    /// let dataset = file.root().create_dataset("values", |builder| {
+    ///     builder.with_unallocated_storage_for::<u32>(&[3])
+    ///         .with_fill_value(7_u32);
+    /// })?;
+    /// file.commit()?;
+    /// assert_eq!(dataset.read::<u32>()?, [7, 7, 7]);
+    /// drop(dataset);
+    /// file.close()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn with_unallocated_storage_for<T: H5Element>(&mut self, dims: &[u64]) -> &mut Self {
+        match T::datatype() {
+            Ok(datatype) => self.with_unallocated_storage(datatype, dims),
+            Err(error) => {
+                self.data = Some(Err(Box::new(error)));
+                self
+            }
+        }
+    }
+
     /// Sets the dataset's datatype from `T` and copies its elements in row-major order.
     ///
     /// If a shape has not been set, the writer infers `[data.len()]`. An existing shape is

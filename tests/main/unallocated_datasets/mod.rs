@@ -27,6 +27,8 @@ use test_util::extensible_array;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
 
+mod typed;
+
 #[rstest]
 #[case::immediate(AppendMethod::Immediate)]
 #[case::borrowed(AppendMethod::Borrowed)]
