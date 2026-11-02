@@ -62,6 +62,20 @@ pub enum FormatError {
         /// The attribute message's serialized size in bytes.
         size: usize,
     },
+    /// The number of supplied node addresses differs from the version 2 B-tree plan.
+    BTreeV2NodeCount {
+        /// The number of nodes in the plan.
+        expected: usize,
+        /// The number of supplied addresses.
+        actual: usize,
+    },
+    /// Two complete version 2 B-tree node ranges overlap.
+    BTreeV2NodeOverlap {
+        /// The index in the supplied address list of the first overlapping node in address order.
+        first: usize,
+        /// The index in the supplied address list of the other node.
+        second: usize,
+    },
     /// Jenkins lookup3 metadata checksum mismatch.
     ChecksumMismatch {
         /// The checksum stored in the file.
@@ -1974,6 +1988,15 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidFixedArrayVersion(v) => {
                 write!(f, "invalid fixed array version: {v}")
+            }
+            Self::BTreeV2NodeCount { expected, actual } => {
+                write!(
+                    f,
+                    "B-tree placement requires {expected} nodes, got {actual}"
+                )
+            }
+            Self::BTreeV2NodeOverlap { first, second } => {
+                write!(f, "B-tree nodes {first} and {second} overlap")
             }
             Self::FractalHeapBlockCount { expected, actual } => {
                 write!(

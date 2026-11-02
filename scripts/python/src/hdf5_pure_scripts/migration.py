@@ -276,6 +276,8 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidMantissaNormalization",
             "InvalidNumericByteOrder",
             "InvalidNumericBitRange",
+            "BTreeV2NodeCount",
+            "BTreeV2NodeOverlap",
             "FractalHeapBlockCount",
             "FractalHeapBlockOverlap",
             "InvalidFractalHeapBlockOffset",

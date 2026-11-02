@@ -44,6 +44,7 @@ pub use crate::btree_v2::SharedAttributeId;
 pub use crate::btree_v2::btree_v2_header_size;
 pub use crate::btree_v2_write::BTREE_V2_NODE_SIZE;
 pub use crate::btree_v2_write::BTreeV2Image;
+pub use crate::btree_v2_write::BTreeV2Placement;
 pub use crate::btree_v2_write::BTreeV2Plan;
 pub use crate::btree_v2_write::BTreeV2WriteDialect;
 pub use crate::bytes::ensure_len;
