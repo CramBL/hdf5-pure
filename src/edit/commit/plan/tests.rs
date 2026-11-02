@@ -30,6 +30,8 @@ use crate::object_path::ObjectPathBuf;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
 
+mod link_size;
+
 #[test]
 fn prepared_link_records_follow_destination_placement_order() {
     let directory = tempfile::tempdir().unwrap();
