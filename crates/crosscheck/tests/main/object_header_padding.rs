@@ -4,9 +4,11 @@
 
 use std::fs;
 
+use hdf5::plist::group_create::AttrCreationOrder;
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::{
     FormatWidths, MessageRecordLayout, ObjectHeaderAllocation, ObjectHeaderAllocationGeometry,
@@ -108,14 +110,24 @@ const GROUP_INFO_DEFAULT: [u8; 2] = [0, 0];
 #[case::automatic(NativeChunkGeometry::Automatic)]
 #[case::page_chunks(NativeChunkGeometry::Pages)]
 #[case::short_gaps(NativeChunkGeometry::ShortGaps)]
+#[case::separated(NativeChunkGeometry::Separated)]
+#[case::backward(NativeChunkGeometry::Backward)]
 fn a_native_header_preserves_its_records_in_a_bounded_allocation(
     #[case] chunks: NativeChunkGeometry,
+    #[values(false, true)] tracked: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("native.h5");
     let output = directory.path().join("padded.h5");
     let native = hdf5::File::with_options()
         .with_fapl(|properties| properties.libver_latest())
+        .with_fcpl(|properties| {
+            if tracked {
+                properties.attr_creation_order(AttrCreationOrder::Indexed)
+            } else {
+                properties
+            }
+        })
         .create(&source)
         .unwrap();
     native
@@ -135,13 +147,19 @@ fn a_native_header_preserves_its_records_in_a_bounded_allocation(
     pure.close().unwrap();
     let source_bytes = fs::read(&source).unwrap();
     let parsed = ObjectHeaderPrefix::parse(&source_bytes[root..]).unwrap();
+    assert_eq!(
+        parsed.prefix.layout.prefix_len(),
+        if tracked { 6 } else { 4 }
+    );
     let messages = &source_bytes
         [root + parsed.len..root + parsed.len + usize::try_from(parsed.chunk0_size).unwrap()];
     let geometry = ObjectHeaderAllocationGeometry::new(parsed.prefix, widths, messages).unwrap();
     let lengths = match chunks {
         NativeChunkGeometry::Automatic => Vec::new(),
         NativeChunkGeometry::Pages => vec![3_968, 4_096, 4_096, 128],
-        NativeChunkGeometry::ShortGaps => vec![
+        NativeChunkGeometry::ShortGaps
+        | NativeChunkGeometry::Separated
+        | NativeChunkGeometry::Backward => vec![
             geometry.root_chunk_lengths(true).next().unwrap().start() + 1,
             geometry.continuation_chunk_lengths(true).start() + 1,
             *geometry.continuation_chunk_lengths(false).start(),
@@ -152,7 +170,19 @@ fn a_native_header_preserves_its_records_in_a_bounded_allocation(
     } else {
         lengths.iter().sum()
     };
-    let plan = if lengths.is_empty() {
+    let addresses = match chunks {
+        NativeChunkGeometry::Separated => [ROOT_ADDRESS, 4_096, 8_192],
+        NativeChunkGeometry::Backward => [ROOT_ADDRESS, 8_192, 4_096],
+        _ => [0; 3],
+    };
+    let plan = if matches!(
+        chunks,
+        NativeChunkGeometry::Separated | NativeChunkGeometry::Backward
+    ) {
+        geometry.into_placed_allocation(addresses.into_iter().zip(lengths.iter().copied()).map(
+            |(address, length)| AddressRange::new(StoredAddress::new(address), length).unwrap(),
+        ))
+    } else if lengths.is_empty() {
         geometry.into_allocation(StoredAddress::new(ROOT_ADDRESS), allocation)
     } else {
         geometry.into_chunked_allocation(StoredAddress::new(ROOT_ADDRESS), allocation, &lengths)
@@ -167,12 +197,20 @@ fn a_native_header_preserves_its_records_in_a_bounded_allocation(
             }
         }));
     }
+    let end = plan
+        .chunks()
+        .map(|(address, len)| address.get() + len)
+        .max()
+        .unwrap();
     let mut bytes = Superblock::new(Widths::EIGHT)
         .root_header_address(ROOT_ADDRESS)
-        .eof_address(ROOT_ADDRESS + allocation)
+        .eof_address(end)
         .build();
-    bytes.resize(usize::try_from(ROOT_ADDRESS).unwrap(), 0);
-    bytes.extend(plan.encode());
+    bytes.resize(usize::try_from(end).unwrap(), 0);
+    for (address, chunk) in plan.encode_chunks() {
+        let start = usize::try_from(address.get()).unwrap();
+        bytes[start..start + chunk.len()].copy_from_slice(&chunk);
+    }
     fs::write(&output, bytes).unwrap();
     let native = hdf5::File::open_rw(&output).unwrap();
     assert_eq!(
@@ -294,6 +332,8 @@ fn empty_extension_chunks_survive_native_read_write_flush(
 #[derive(Clone, Copy)]
 enum NativeChunkGeometry {
     Automatic,
+    Backward,
     Pages,
+    Separated,
     ShortGaps,
 }

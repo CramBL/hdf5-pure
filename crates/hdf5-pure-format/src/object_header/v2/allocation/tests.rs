@@ -1,3 +1,4 @@
+use core::iter;
 use core::slice;
 
 use rstest::rstest;
@@ -19,6 +20,7 @@ use super::*;
 fn one_chunk_matches_independent_bytes(
     #[case] layout: MessageRecordLayout,
     #[case] flags: HeaderFlags,
+    #[values(false, true)] placed: bool,
     #[values(0, 1, 3, 4, 6, 17)] extra: usize,
 ) {
     let prefix = ObjectHeaderPrefix::with_layout(layout);
@@ -40,13 +42,16 @@ fn one_chunk_matches_independent_bytes(
         test_util::bytes::set_uint_at(&mut expected, 6, 1, size + extra.to_u64());
         test_util::checksum::append(&mut expected);
     }
-    let plan = ObjectHeaderAllocation::new(
-        prefix,
-        FormatWidths::from_sizes(8, 8).unwrap(),
-        StoredAddress::new(128),
-        (minimal.len() + extra).to_u64(),
-        &messages,
-    )
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let address = StoredAddress::new(128);
+    let len = (minimal.len() + extra).to_u64();
+    let plan = if placed {
+        ObjectHeaderAllocationGeometry::new(prefix, widths, &messages)
+            .unwrap()
+            .into_placed_allocation(iter::once(AddressRange::new(address, len).unwrap()))
+    } else {
+        ObjectHeaderAllocation::new(prefix, widths, address, len, &messages)
+    }
     .unwrap();
     assert_eq!(plan.encode(), expected);
     assert_eq!(
@@ -154,6 +159,7 @@ fn prefix_growth_uses_owned_capacity(
 #[rstest]
 fn padding_keeps_optional_fields_and_discards_old_nil_records(
     #[values(MessageRecordLayout::PLAIN, TRACKED)] layout: MessageRecordLayout,
+    #[values(false, true)] separated: bool,
     #[values(None, Some(ObjectTimes { access: 1, modification: 2, change: 3, birth: 4 }))]
     times: Option<ObjectTimes>,
     #[values(None, Some(AttributePhaseChange { max_compact: 8, min_dense: 6 }))] phase: Option<
@@ -183,11 +189,33 @@ fn padding_keeps_optional_fields_and_discards_old_nil_records(
         &records,
     )
     .unwrap();
+    let plan = if separated {
+        ObjectHeaderAllocationGeometry::new(
+            prefix,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+            &records,
+        )
+        .unwrap()
+        .into_placed_allocation(plan.chunks().enumerate().map(|(index, (_, len))| {
+            AddressRange::new(StoredAddress::new(128 + index.to_u64() * 262_144), len).unwrap()
+        }))
+        .unwrap()
+    } else {
+        plan
+    };
     let actual = plan.encode();
     let parsed = ObjectHeaderPrefix::parse(&actual).unwrap();
     assert_eq!(parsed.prefix, prefix);
-    let mut image = vec![0; 128];
-    image.extend(actual);
+    let end = plan
+        .chunks()
+        .map(|(address, len)| address.get() + len)
+        .max()
+        .unwrap();
+    let mut image = vec![0; end.to_usize().unwrap()];
+    for (address, bytes) in plan.encode_chunks() {
+        let start = address.get().to_usize().unwrap();
+        image[start..start + bytes.len()].copy_from_slice(&bytes);
+    }
     let parsed = ObjectHeader::parse(&image, AccessMode::ReadOnly, 128, 8, 8).unwrap();
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(parsed.messages[0].data, [5, 6]);
@@ -596,6 +624,8 @@ const TWO_BYTE_CHUNK_SIZE: HeaderFlags = HeaderFlags(0x01);
 fn chosen_chunks_match_independent_bytes(
     #[case] layout: MessageRecordLayout,
     #[case] flags: HeaderFlags,
+    #[values(false, true)] separated: bool,
+    #[values(2, 4, 8)] width: u8,
     #[values(0, 1, 2, 3, 4, 5, 6, 17)] padding: usize,
 ) {
     let prefix = ObjectHeaderPrefix::with_layout(layout);
@@ -605,7 +635,7 @@ fn chosen_chunks_match_independent_bytes(
     let mut source = independent::message_records(&[Message::nil(31), message.clone()], flags);
     source.extend([1, 2, 3]);
     let records_len = layout.prefix_len() + 2;
-    let continuation = layout.prefix_len() + 16;
+    let continuation = layout.prefix_len() + 2 * usize::from(width);
     let lengths = [
         (11 + records_len + continuation + padding).to_u64(),
         (8 + continuation + padding).to_u64(),
@@ -613,7 +643,7 @@ fn chosen_chunks_match_independent_bytes(
     ];
     let geometry = ObjectHeaderAllocationGeometry::new(
         prefix,
-        FormatWidths::from_sizes(8, 8).unwrap(),
+        FormatWidths::from_sizes(width, width).unwrap(),
         &source,
     )
     .unwrap();
@@ -632,19 +662,29 @@ fn chosen_chunks_match_independent_bytes(
             .continuation_chunk_lengths(false)
             .contains(&lengths[2])
     );
-    let plan = geometry
-        .into_chunked_allocation(StoredAddress::new(128), lengths.iter().sum(), &lengths)
-        .unwrap();
+    let addresses = if separated {
+        [128, 1_024, 512]
+    } else {
+        [128, 128 + lengths[0], 128 + lengths[0] + lengths[1]]
+    };
+    let plan = if separated {
+        geometry.into_placed_allocation(
+            addresses
+                .into_iter()
+                .zip(lengths)
+                .map(|(address, len)| AddressRange::new(StoredAddress::new(address), len).unwrap()),
+        )
+    } else {
+        geometry.into_chunked_allocation(StoredAddress::new(128), lengths.iter().sum(), &lengths)
+    }
+    .unwrap();
     assert_eq!(
         plan.chunks().collect::<Vec<_>>(),
-        [
-            (StoredAddress::new(128), lengths[0]),
-            (StoredAddress::new(128 + lengths[0]), lengths[1]),
-            (
-                StoredAddress::new(128 + lengths[0] + lengths[1]),
-                lengths[2]
-            ),
-        ]
+        addresses
+            .into_iter()
+            .zip(lengths)
+            .map(|(address, len)| (StoredAddress::new(address), len))
+            .collect::<Vec<_>>()
     );
     let chunks = plan.chunks().collect::<Vec<_>>();
     let mut expected = Vec::new();
@@ -663,7 +703,7 @@ fn chosen_chunks_match_independent_bytes(
             records.push(Message::continuation(
                 chunks[index + 1].0.get(),
                 chunks[index + 1].1,
-                Widths::EIGHT,
+                Widths::new(usize::from(width), usize::from(width)),
             ));
         }
         let mut chunk = if index == 0 {
@@ -686,9 +726,39 @@ fn chosen_chunks_match_independent_bytes(
         expected.extend(chunk);
     }
     assert_eq!(plan.encode(), expected);
-    let mut image = vec![0; 128];
-    image.extend(expected);
-    let header = ObjectHeader::parse(&image, AccessMode::ReadOnly, 128, 8, 8).unwrap();
+    let encoded = plan.encode_chunks().collect::<Vec<_>>();
+    assert_eq!(
+        encoded
+            .iter()
+            .flat_map(|(_, bytes)| bytes.iter())
+            .copied()
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let end = addresses
+        .into_iter()
+        .zip(lengths)
+        .map(|(address, len)| address + len)
+        .max()
+        .unwrap();
+    let mut image = vec![0xa5; end.to_usize().unwrap()];
+    for (address, bytes) in encoded {
+        let start = address.get().to_usize().unwrap();
+        image[start..start + bytes.len()].copy_from_slice(&bytes);
+    }
+    if separated {
+        assert!(
+            image[(128 + lengths[0]).to_usize().unwrap()..512]
+                .iter()
+                .all(|&byte| byte == 0xa5)
+        );
+        assert!(
+            image[(512 + lengths[2]).to_usize().unwrap()..1_024]
+                .iter()
+                .all(|&byte| byte == 0xa5)
+        );
+    }
+    let header = ObjectHeader::parse(&image, AccessMode::ReadOnly, 128, width, width).unwrap();
     assert_eq!(header.messages.len(), 1);
     assert_eq!(header.messages[0].data, [5, 6]);
     assert_eq!(header.messages[0].flags, MessageFlags::CONSTANT);
@@ -875,6 +945,189 @@ fn chosen_chunk_length_sum_overflow_is_rejected() {
         FormatError::OffsetOverflow {
             offset: u64::MAX,
             length: 1
+        }
+    );
+}
+
+#[rstest]
+#[case::root_child(&[(128, 64), (160, 12)], 0, 1)]
+#[case::child_root(&[(160, 64), (128, 40)], 1, 0)]
+#[case::duplicate(&[(128, 64), (128, 12)], 0, 1)]
+#[case::nonadjacent_chain(&[(128, 64), (1_024, 28), (1_030, 12)], 1, 2)]
+fn placed_chunks_reject_complete_allocation_overlap(
+    #[case] ranges: &[(u64, u64)],
+    #[case] first: usize,
+    #[case] second: usize,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let err =
+        geometry
+            .into_placed_allocation(ranges.iter().map(|&(address, len)| {
+                AddressRange::new(StoredAddress::new(address), len).unwrap()
+            }))
+            .unwrap_err();
+    assert_eq!(err, FormatError::ObjectHeaderChunkOverlap { first, second });
+}
+
+#[rstest]
+#[case::missing(&[], 0, 0)]
+#[case::empty_root(&[(128, 0)], 0, 0)]
+#[case::short_root(&[(128, 30), (512, 12)], 0, 30)]
+#[case::short_child(&[(128, 31), (512, 11)], 1, 11)]
+#[case::short_continued_child(&[(128, 31), (512, 27), (1_024, 12)], 1, 27)]
+#[case::too_long_child(&[(128, 31), (512, 65_548)], 1, 65_548)]
+fn placed_chunks_reject_unrepresentable_records(
+    #[case] ranges: &[(u64, u64)],
+    #[case] index: usize,
+    #[case] length: u64,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry
+            .into_placed_allocation(ranges.iter().map(|&(address, len)| {
+                AddressRange::new(StoredAddress::new(address), len).unwrap()
+            }))
+            .unwrap_err(),
+        FormatError::InvalidObjectHeaderChunkLength { index, length }
+    );
+}
+
+#[rstest]
+#[case::undefined_start(65_535, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+#[case::undefined_end(65_523, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+#[case::oversized_end(65_524, FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
+fn placed_chunks_check_each_output_address(#[case] address: u64, #[case] expected: FormatError) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(2, 2).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry
+            .into_placed_allocation(
+                [(128, 19), (address, 12)]
+                    .into_iter()
+                    .map(
+                        |(address, len)| AddressRange::new(StoredAddress::new(address), len)
+                            .unwrap()
+                    )
+            )
+            .unwrap_err(),
+        expected
+    );
+}
+
+#[rstest]
+#[case::last_supported(256)]
+#[case::over_limit(257)]
+fn placed_chunks_keep_the_chunk_count_limit(#[case] count: usize) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let result = geometry.into_placed_allocation((0..count).map(|index| {
+        AddressRange::new(
+            StoredAddress::new(128 + index.to_u64() * 64),
+            if index == 0 {
+                31
+            } else if index + 1 == count {
+                12
+            } else {
+                28
+            },
+        )
+        .unwrap()
+    }));
+    if count > 256 {
+        assert_eq!(result.unwrap_err(), FormatError::NestingDepthExceeded);
+    } else {
+        let plan = result.unwrap();
+        assert_eq!(plan.chunks().len(), count);
+        assert_eq!(
+            plan.encode_chunks()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>(),
+            31 + (count - 2) * 28 + 12
+        );
+    }
+}
+
+#[rstest]
+#[case::above_host_width(1 << 35)]
+#[case::last_defined_end(u64::MAX - 32)]
+fn placed_chunks_preserve_wide_stored_coordinates(#[case] root: u64) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let ranges = [(root, 31), (512, 12)];
+    let plan = geometry
+        .into_placed_allocation(
+            ranges
+                .into_iter()
+                .map(|(address, len)| AddressRange::new(StoredAddress::new(address), len).unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        plan.chunks().collect::<Vec<_>>(),
+        ranges.map(|(address, len)| (StoredAddress::new(address), len))
+    );
+    let chunks = plan.encode_chunks().collect::<Vec<_>>();
+    assert_eq!(
+        chunks[0],
+        (
+            StoredAddress::new(root),
+            independent::Header::new()
+                .message(Message::continuation(512, 12, Widths::EIGHT))
+                .build()
+        )
+    );
+    assert_eq!(
+        chunks[1],
+        (
+            StoredAddress::new(512),
+            independent::continuation_chunk(&[Message::nil(0)], HeaderFlags::default())
+        )
+    );
+}
+
+#[test]
+fn placed_chunks_keep_narrow_length_fields() {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 2).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry
+            .into_placed_allocation(
+                [(128, 25), (512, 65_536)]
+                    .into_iter()
+                    .map(
+                        |(address, len)| AddressRange::new(StoredAddress::new(address), len)
+                            .unwrap()
+                    )
+            )
+            .unwrap_err(),
+        FormatError::InvalidObjectHeaderChunkLength {
+            index: 1,
+            length: 65_536
         }
     );
 }

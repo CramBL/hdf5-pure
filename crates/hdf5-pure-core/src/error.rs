@@ -1085,6 +1085,15 @@ pub enum FormatError {
         /// The sum of the complete chunk lengths in bytes.
         actual: u64,
     },
+    /// Two complete version 2 object-header chunk allocations overlap.
+    ///
+    /// Chunk indexes count from zero in continuation order, beginning with chunk 0.
+    ObjectHeaderChunkOverlap {
+        /// The index of the first overlapping allocation in stored-address order.
+        first: usize,
+        /// The index of the overlapping allocation that follows it in stored-address order.
+        second: usize,
+    },
     /// An object-header message exceeds the version 2 object header's 2-byte
     /// message-size field. The whole-file writer reports the message type code
     /// and the serialized size. The in-place editor reports `Error::EditUnsupported`
@@ -1551,6 +1560,9 @@ impl fmt::Display for FormatError {
                     f,
                     "object-header chunks cover {actual} bytes, expected {expected}"
                 )
+            }
+            Self::ObjectHeaderChunkOverlap { first, second } => {
+                write!(f, "object-header chunks {first} and {second} overlap")
             }
             Self::InvalidObjectHeaderSignature => {
                 write!(f, "invalid object header signature")
