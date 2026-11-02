@@ -23,6 +23,9 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::BTreeV2Layout;
+use hdf5_pure_format::__private::BTreeV2Node;
+use hdf5_pure_format::__private::BTreeV2Plan;
+use hdf5_pure_format::__private::BTreeV2WriteDialect;
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::FractalHeapBlock;
 use hdf5_pure_format::__private::FractalHeapBlockLayout;
@@ -255,6 +258,147 @@ fn rebuilt_libhdf5_dense_links_preserve_metadata_and_creation_policy(
         image.info.btree_creation_order_address.is_some(),
         info.btree_creation_order_address.is_some()
     );
+}
+
+#[rstest]
+#[case::leaf(16, Sizeof::Bytes2, 0)]
+#[case::internal(200, Sizeof::Bytes4, 512)]
+#[case::depth_two(2000, Sizeof::Bytes8, 0)]
+fn libhdf5_reads_independently_placed_btree_nodes(
+    #[case] count: usize,
+    #[case] address_size: Sizeof,
+    #[case] userblock: u64,
+    #[values(LinkLookup::FirstLink, LinkLookup::LastLink, LinkLookup::Payload)] lookup: LinkLookup,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("placed_nodes.h5");
+    let reference = fixture(
+        &path,
+        LinkCreationOrder::Untracked,
+        address_size,
+        Sizeof::Bytes8,
+        userblock,
+    );
+    let dataset = reference
+        .new_dataset::<i32>()
+        .shape(3)
+        .create("payload")
+        .unwrap();
+    dataset.write(&[3, 5, 7]).unwrap();
+    drop(dataset);
+    let names: Vec<_> = (1..count).map(|index| format!("item_{index:05}")).collect();
+    for name in &names {
+        reference.link_soft("/payload", name).unwrap();
+    }
+    reference.close().unwrap();
+    let pure = File::open(&path).unwrap();
+    let mut superblock = pure.superblock().clone();
+    drop(pure);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let root = root_header(&bytes, &superblock);
+    let info = root
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::LINK_INFO)
+        .unwrap();
+    let info =
+        LinkInfoMessage::parse_with_offset_width(&info.data, superblock.offset_size).unwrap();
+    let at = usize::try_from(info.btree_name_index_address.unwrap().get() + userblock).unwrap();
+    let header = BTreeV2Header::parse(
+        &bytes,
+        at,
+        superblock.offset_size.get(),
+        superblock.length_size.get(),
+    )
+    .unwrap();
+    let layout = BTreeV2Layout::new(&header, superblock.offset_size).unwrap();
+    let records = ordered_btree_records(
+        &bytes[usize::try_from(userblock).unwrap()..],
+        layout.root().unwrap(),
+    );
+    let plan = BTreeV2Plan::new_with_undefined_empty_root(
+        BTreeV2WriteDialect::Libhdf5Global,
+        header.tree_type,
+        count,
+        header.record_size,
+        header.node_size,
+        superblock.offset_size,
+    )
+    .unwrap();
+    let base = bytes.len() as u64 - userblock;
+    let addresses: Vec<_> = (0..plan.block_lengths().len())
+        .rev()
+        .map(|index| StoredAddress::new(base + index as u64 * (u64::from(header.node_size) + 37)))
+        .collect();
+    let placement = plan.place(&addresses).unwrap();
+    let emitted_header = placement.serialize_header(superblock.length_size).unwrap();
+    let rebuilt = BTreeV2Header::parse(
+        &emitted_header,
+        0,
+        superblock.offset_size.get(),
+        superblock.length_size.get(),
+    )
+    .unwrap();
+    assert_eq!(
+        rebuilt.depth,
+        match count {
+            16 => 0,
+            200 => 1,
+            _ => 2,
+        }
+    );
+    assert_eq!(rebuilt.root_node_address, *addresses.last().unwrap());
+    for node in placement.serialize_nodes(&records).unwrap() {
+        let (address, data) = node.unwrap();
+        let start = usize::try_from(address.get() + userblock).unwrap();
+        bytes.resize(bytes.len().max(start + data.len()), 0);
+        bytes[start..start + data.len()].copy_from_slice(&data);
+    }
+    bytes[at..at + emitted_header.len()].copy_from_slice(&emitted_header);
+    superblock.eof_address = bytes.len() as u64;
+    let encoded = format::serialize_superblock(&superblock).unwrap();
+    let start = usize::try_from(userblock).unwrap();
+    bytes[start..start + encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(&path, bytes).unwrap();
+    let reference = hdf5::File::open(&path).unwrap();
+    let mut expected = names;
+    expected.push("payload".into());
+    expected.sort();
+    let mut actual = reference.member_names().unwrap();
+    actual.sort();
+    assert_eq!(actual, expected);
+    let link_name = match lookup {
+        LinkLookup::FirstLink => "item_00001".to_owned(),
+        LinkLookup::LastLink => format!("item_{:05}", count - 1),
+        LinkLookup::Payload => "payload".to_owned(),
+    };
+    let dataset = reference.dataset(&link_name).unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [3, 5, 7]);
+    drop(dataset);
+    reference.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum LinkLookup {
+    FirstLink,
+    LastLink,
+    Payload,
+}
+
+fn ordered_btree_records(bytes: &[u8], node: BTreeV2Node) -> Vec<u8> {
+    let view = node
+        .parse(&bytes[usize::try_from(node.address().get()).unwrap()..])
+        .unwrap();
+    let mut records = Vec::new();
+    for index in 0..=view.record_count() {
+        if let Some(child) = view.child(index).unwrap() {
+            records.extend(ordered_btree_records(bytes, child));
+        }
+        if index < view.record_count() {
+            records.extend_from_slice(view.record(index).unwrap());
+        }
+    }
+    records
 }
 
 fn fixture(
