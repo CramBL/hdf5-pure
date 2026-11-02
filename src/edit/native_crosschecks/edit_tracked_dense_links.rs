@@ -4,6 +4,7 @@ use std::path::Path;
 
 use hdf5_pure_format::__private::BTREE_V2_LINK_CREATION_ORDER;
 use hdf5_pure_format::__private::BTreeV2Header;
+use hdf5_pure_format::__private::GROUP_HEAP_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
@@ -78,6 +79,88 @@ fn tracked_storage_transitions_preserve_indexes_and_the_next_counter(
     );
     creation_order::assert_link_dataset_values(&path, group_path, removed, count);
     dir.close().unwrap();
+}
+
+#[rstest]
+#[case::object_header_limit(
+    65_532,
+    "a new hard link message exceeds the object-header message size limit"
+)]
+#[case::dense_limit(usize::try_from(GROUP_HEAP_MAX_MANAGED_OBJECT).unwrap(), "a group's resulting links cannot be encoded in dense storage")]
+fn staged_link_limits_preserve_native_tracking_and_allow_retry(
+    #[case] name_len: usize,
+    #[case] reason: &str,
+    #[values(4, 9)] count: usize,
+    #[values(Indexing::No, Indexing::Yes)] indexing: Indexing,
+    #[values("/", "/parent/g")] group_path: &str,
+    #[values(false, true)] source_only: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("link-limit.h5");
+    creation_order::write_link_fixture(&path, group_path, count, indexing, (4, 3));
+    let before = std::fs::read(&path).unwrap();
+    let original = group_inspection::inspect_group_links(&path, group_path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
+    let group = file.group(group_path).unwrap();
+    group
+        .create_group("retained")
+        .unwrap()
+        .create_dataset("payload", |dataset| {
+            dataset.with_i32_data(&[61]);
+        })
+        .unwrap();
+    let name = "x".repeat(name_len);
+    group
+        .create_group(&name)
+        .unwrap()
+        .create_dataset("child", |dataset| {
+            dataset.with_i32_data(&[67]);
+        })
+        .unwrap();
+    let error = file.commit().unwrap_err();
+    assert!(
+        matches!(error, Error::EditUnsupported(actual) if actual == reason),
+        "{error:?}"
+    );
+    assert_eq!(file.group_inspection_snapshot().unwrap(), before);
+    assert_eq!(file.page_publication_snapshot().unwrap(), before);
+    group.delete(&name).unwrap();
+    file.commit().unwrap();
+    drop(group);
+    drop(file);
+    let after = group_inspection::inspect_group_links(&path, group_path, source_only).unwrap();
+    assert_eq!(after.group_info, original.group_info);
+    let mut retained = after
+        .links
+        .links()
+        .iter()
+        .filter(|link| link.name() != b"retained")
+        .collect::<Vec<_>>();
+    let mut previous = original.links.links().iter().collect::<Vec<_>>();
+    retained.sort_by(|left, right| left.name().cmp(right.name()));
+    previous.sort_by(|left, right| left.name().cmp(right.name()));
+    assert_eq!(retained, previous);
+    let next = u64::try_from(count).unwrap();
+    let mut expected = indexes(&original.links);
+    expected.push(("retained".into(), next));
+    assert_group(
+        &path,
+        group_path,
+        &expected,
+        next + 1,
+        indexing,
+        true,
+        source_only,
+    );
+    creation_order::assert_link_dataset_values(&path, group_path, 0, count);
+    let native = file::libhdf5_open(&path);
+    let payload = format!("{}/retained/payload", group_path.trim_end_matches('/'));
+    assert_eq!(
+        native.dataset(&payload).unwrap().read_raw::<i32>().unwrap(),
+        [61]
+    );
+    native.close().unwrap();
+    directory.close().unwrap();
 }
 
 #[rstest]
