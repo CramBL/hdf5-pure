@@ -89,6 +89,31 @@ pub fn info(fractal_heap: Option<u64>, name_index: Option<u64>, widths: Widths) 
     message
 }
 
+/// Encodes compact Attribute Info with tracked creation order.
+///
+/// Writes `next` as the creation counter and undefined heap and index addresses. Includes
+/// the creation-order index address when `indexed` is true.
+/// Version 0 fields are defined in "The Attribute Info Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
+pub fn tracked_info(next: u16, indexed: bool, widths: Widths) -> Vec<u8> {
+    let flags = INFO_TRACKS_CREATION_ORDER
+        | if indexed {
+            INFO_INDEXES_CREATION_ORDER
+        } else {
+            0
+        };
+    let mut message = vec![INFO_VERSION, flags];
+    message.extend_from_slice(&next.to_le_bytes());
+    bytes::push_undefined_address(&mut message, widths.offset);
+    bytes::push_undefined_address(&mut message, widths.offset);
+    if indexed {
+        bytes::push_undefined_address(&mut message, widths.offset);
+    }
+    message
+}
+
 /// Which of an attribute's fields hold a reference to a shared message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Flags(pub u8);
@@ -111,3 +136,8 @@ impl core::ops::BitOr for Flags {
 const ALIGNMENT: usize = 8;
 
 const INFO_VERSION: u8 = 0;
+
+// "The Attribute Info Message" of the format specification, version 4.0, defines the tracking bit.
+const INFO_TRACKS_CREATION_ORDER: u8 = 0x01;
+// "The Attribute Info Message" of the format specification, version 4.0, defines the indexing bit.
+const INFO_INDEXES_CREATION_ORDER: u8 = 0x02;
