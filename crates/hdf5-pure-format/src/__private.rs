@@ -27,6 +27,8 @@ pub use crate::btree::v2::BTreeV2CollectionRoot;
 pub use crate::btree::v2::BTreeV2Header;
 pub use crate::btree::v2::BTreeV2Layout;
 pub use crate::btree::v2::BTreeV2LinkNameIndex;
+pub use crate::btree::v2::BTreeV2LinkRecord;
+pub use crate::btree::v2::BTreeV2LinkRecordContext;
 pub use crate::btree::v2::BTreeV2Node;
 pub use crate::btree::v2::BTreeV2NodeInfo;
 pub use crate::btree::v2::BTreeV2NodeView;

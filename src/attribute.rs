@@ -286,6 +286,7 @@ fn find_attribute_info(
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if `attr_info` contains no B-tree name index address,
+/// [`FormatError::InvalidBTreeNodeType`] if the name index's client type is not 8,
 /// [`FormatError::UnsupportedSohmReference`] if a shared record has no shared-message table,
 /// and [`FormatError::SohmIndexMissing`] if its Attribute index or heap is absent. Returns the
 /// parser error if a record, heap, or Attribute message is malformed.
@@ -311,6 +312,9 @@ fn extract_dense_attributes(
         btree_addr.get().to_usize()?,
         widths,
     )?;
+    if btree_hdr.tree_type != BTREE_V2_ATTRIBUTE_NAME {
+        return Err(FormatError::InvalidBTreeNodeType(btree_hdr.tree_type));
+    }
     let records = btree_v2::collect_btree_v2_records(source, &btree_hdr, widths.offsets)?;
 
     let resolver = StoredResolver::new(source, access_mode, widths, sohm);
@@ -400,7 +404,8 @@ fn extract_dense_attributes_from_source(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the name index is missing or a record is truncated.
+/// Returns [`FormatError::UnexpectedEof`] if the name index is missing or a record is truncated,
+/// and [`FormatError::InvalidBTreeNodeType`] if the name index's client type is not 8.
 /// Returns [`FormatError::UnsupportedSohmReference`] if a selected shared record has no
 /// shared-message table, and [`FormatError::SohmIndexMissing`] if its Attribute index or heap
 /// is absent. Returns the parser error if the index or heap cannot be read, or the error from
@@ -431,6 +436,9 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
         btree_addr.get(),
         widths,
     )?;
+    if btree_hdr.tree_type != BTREE_V2_ATTRIBUTE_NAME {
+        return Err(FormatError::InvalidBTreeNodeType(btree_hdr.tree_type));
+    }
     let records = btree_v2::collect_btree_v2_records_from_source(
         &BTreeV2Source::new(source),
         &btree_hdr,
@@ -529,6 +537,44 @@ mod tests {
             btree_creation_order_address: None,
         };
         (image, info, FormatWidths::from_sizes(8, 8).unwrap())
+    }
+
+    #[rstest]
+    #[case::creation_order(BTREE_V2_ATTRIBUTE_CREATION_ORDER)]
+    #[case::links(btree_v2::LINK_NAME_TYPE)]
+    fn dense_attribute_name_indexes_require_the_name_client(
+        #[case] tree_type: u8,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let (mut image, info, widths) = shared_dense_record_fixture();
+        let index = btree_v2::Header::new(tree_type, NAME_RECORD_SIZE, 0x300, 1).build(WIDTHS);
+        image[0x200..0x200 + index.len()].copy_from_slice(&index);
+        let source = BytesSource::new(&image);
+        let error = if streaming {
+            extract_dense_attributes_from_source(
+                &OpenedSource::for_test(
+                    &source,
+                    AddressContext::from_effective_base(BaseAddress::ZERO),
+                ),
+                AccessMode::ReadOnly,
+                &info,
+                StoredAddress::ZERO,
+                widths,
+                None,
+            )
+            .unwrap_err()
+        } else {
+            extract_dense_attributes(
+                source::zero_base_bytes(&image),
+                AccessMode::ReadOnly,
+                &info,
+                StoredAddress::ZERO,
+                widths,
+                None,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(error, FormatError::InvalidBTreeNodeType(tree_type));
     }
 
     #[rstest]

@@ -3,6 +3,7 @@
 //! A version 2 tree keeps its shape in a header of its own, and its nodes
 //! carry a checksum.
 
+use core::mem;
 use core::num::NonZeroU16;
 
 use crate::bytes;
@@ -72,6 +73,62 @@ impl Header {
         checksum::append(&mut header);
         header
     }
+}
+
+/// Rewrites a leaf root and its header with checksum-valid replacement records.
+///
+/// Uses eight-byte addresses and lengths, preserving the existing record count and node size.
+/// The header and leaf layouts are defined in "Version 2 B-trees" of the [format specification,
+/// version 4.0][spec].
+///
+/// # Panics
+///
+/// Panics if the image or root address is out of bounds, the root is not a leaf, the record count
+/// differs, or `records` is empty. Also panics if record widths differ or exceed [`u16::MAX`], or
+/// the encoded node exceeds its allocation.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+pub fn replace_leaf_records(
+    image: &mut [u8],
+    header_at: usize,
+    tree_type: u8,
+    records: &[Vec<u8>],
+) {
+    let widths = Widths::EIGHT;
+    let type_at = SIGNATURE.len() + mem::size_of::<u8>();
+    let record_size_at = type_at + mem::size_of::<u8>() + mem::size_of::<u32>();
+    let depth_at = record_size_at + mem::size_of::<u16>();
+    let root_at = depth_at + mem::size_of::<u16>() + 2 * mem::size_of::<u8>();
+    assert_eq!(bytes::u16_at(image, header_at + depth_at), 0);
+    let root = usize::try_from(bytes::u64_at(image, header_at + root_at)).unwrap();
+    assert_eq!(
+        usize::from(bytes::u16_at(image, header_at + root_at + widths.offset)),
+        records.len()
+    );
+    let record_size = u16::try_from(records.first().unwrap().len()).unwrap();
+    assert!(
+        records
+            .iter()
+            .all(|record| record.len() == usize::from(record_size))
+    );
+    bytes::set_u8_at(image, header_at + type_at, tree_type);
+    bytes::set_u16_at(image, header_at + record_size_at, record_size);
+    let header_len = SIGNATURE.len()
+        + 4 * mem::size_of::<u8>()
+        + mem::size_of::<u32>()
+        + 3 * mem::size_of::<u16>()
+        + widths.offset
+        + widths.length
+        + checksum::CHECKSUM;
+    checksum::restamp(image, header_at, header_len);
+    let node = leaf(tree_type, records);
+    let node_size = usize::try_from(bytes::u32_at(
+        image,
+        header_at + type_at + mem::size_of::<u8>(),
+    ))
+    .unwrap();
+    assert!(node.len() <= node_size);
+    bytes::set_slice_at(image, root, &node);
 }
 
 /// The bytes of a leaf node holding `records`, checksum included.

@@ -13,6 +13,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
 use core::num::{NonZeroU16, NonZeroU64};
+use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1103,19 +1104,20 @@ impl BTreeV2Record {
         })
     }
 
-    /// Returns the heap ID in the record of a link index of `tree_type`, or `None` if the record
-    /// ends before an ID of `heap_id_length` bytes.
+    /// Returns a borrowed heap ID after checking the link-index type and complete record prefix.
     ///
-    /// The heap ID follows the 4-byte name hash in a type 5 record of a name index, and the
-    /// 8-byte creation order in a type 6 record of a creation-order index. A record of any other
-    /// `tree_type` is read as type 6.
-    pub fn link_heap_id(&self, tree_type: u8, heap_id_length: u16) -> Option<&[u8]> {
-        let at = if tree_type == BTREE_V2_LINK_NAME {
-            usize::from(NAME_HASH_LEN)
-        } else {
-            LINK_CREATION_ORDER_LEN
-        };
-        self.data.get(at..at + usize::from(heap_id_length))
+    /// The heap ID follows the four-byte name hash in a type 5 record and the eight-byte creation
+    /// order in a type 6 record. Bytes after the heap ID are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeNodeType`] if `tree_type` is neither 5 nor 6, and
+    /// [`FormatError::InvalidBTreeV2Signature`] if the heap ID length is zero, the combined key and
+    /// ID length exceeds [`u16::MAX`], or the record ends before the complete heap ID.
+    pub fn link_heap_id(&self, tree_type: u8, heap_id_length: u16) -> Result<&[u8], FormatError> {
+        BTreeV2LinkRecordContext::new(tree_type, heap_id_length)?
+            .record(&self.data)
+            .map(|record| record.heap_id)
     }
 
     /// Returns the heap ID that opens a type 8 or type 9 record of an attribute index, or `None`
@@ -1132,6 +1134,132 @@ impl BTreeV2Record {
             .get(at..)
             .and_then(|rest| rest.first_chunk())
             .map(|&bytes| u32::from_le_bytes(bytes))
+    }
+}
+
+/// A checked heap-ID range for type 5 and type 6 link-index records.
+///
+/// A nonempty heap ID and its preceding key fit in a record of at most [`u16::MAX`] bytes. The
+/// caller supplies individual record bytes to [`record`](Self::record), then parses the ID for
+/// its fractal heap.
+///
+/// The record layouts are defined in "Version 2 B-trees" of the [format specification,
+/// version 4.0][spec].
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::__private::{BTREE_V2_LINK_NAME, BTreeV2LinkRecordContext};
+///
+/// let context = BTreeV2LinkRecordContext::new(BTREE_V2_LINK_NAME, 7)?;
+/// let bytes = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7];
+/// let record = context.record(&bytes)?;
+/// assert_eq!(record.heap_id(), &[1, 2, 3, 4, 5, 6, 7]);
+/// # Ok::<(), hdf5_pure_format::FormatError>(())
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Debug)]
+pub struct BTreeV2LinkRecordContext {
+    heap_id: Range<usize>,
+}
+
+impl BTreeV2LinkRecordContext {
+    /// Checks the key width and heap-ID length for a name or creation-order index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeNodeType`] if `tree_type` is neither 5 nor 6, and
+    /// [`FormatError::InvalidBTreeV2Signature`] if `heap_id_length` is zero or the key and ID
+    /// together exceed [`u16::MAX`] bytes.
+    pub fn new(tree_type: u8, heap_id_length: u16) -> Result<Self, FormatError> {
+        let kind = match tree_type {
+            BTREE_V2_LINK_NAME => LinkIndexKind::Name,
+            BTREE_V2_LINK_CREATION_ORDER => LinkIndexKind::CreationOrder,
+            other => return Err(FormatError::InvalidBTreeNodeType(other)),
+        };
+        if heap_id_length == 0 {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        let start = match kind {
+            LinkIndexKind::Name => usize::from(NAME_HASH_LEN),
+            LinkIndexKind::CreationOrder => LINK_CREATION_ORDER_LEN,
+        };
+        let end = start
+            .checked_add(usize::from(heap_id_length))
+            .filter(|&end| end <= usize::from(u16::MAX))
+            .ok_or(FormatError::InvalidBTreeV2Signature)?;
+        Ok(Self {
+            heap_id: start..end,
+        })
+    }
+
+    /// Checks a name-index header's client type and minimum record width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeNodeType`] if the header's type is not 5, and
+    /// [`FormatError::InvalidBTreeV2Signature`] if the heap ID length is zero or the declared
+    /// record size is too small for the name hash and heap ID.
+    pub fn for_name_index(
+        header: &BTreeV2Header,
+        heap_id_length: u16,
+    ) -> Result<Self, FormatError> {
+        if header.tree_type != BTREE_V2_LINK_NAME {
+            return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
+        }
+        let context = Self::new(header.tree_type, heap_id_length)?;
+        context.require_record_size(header.record_size)?;
+        Ok(context)
+    }
+
+    /// Checks that the declared record size includes the complete key and heap ID.
+    ///
+    /// Additional trailing fields are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] if `record_size` is too small.
+    pub fn require_record_size(&self, record_size: u16) -> Result<(), FormatError> {
+        if usize::from(record_size) < self.heap_id.end {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        Ok(())
+    }
+
+    /// Borrows the complete heap ID from `bytes` using the checked key width.
+    ///
+    /// Bytes after the heap ID are ignored. The caller parses the ID for its fractal heap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] if `bytes` ends before the heap ID.
+    pub fn record<'a>(&self, bytes: &'a [u8]) -> Result<BTreeV2LinkRecord<'a>, FormatError> {
+        let heap_id = bytes
+            .get(self.heap_id.clone())
+            .ok_or(FormatError::InvalidBTreeV2Signature)?;
+        Ok(BTreeV2LinkRecord { heap_id })
+    }
+}
+
+#[derive(Debug)]
+enum LinkIndexKind {
+    Name,
+    CreationOrder,
+}
+
+/// A borrowed view of a link-index record's complete heap ID.
+///
+/// Obtained from [`BTreeV2LinkRecordContext::record`]. The caller parses the ID for its fractal heap.
+#[derive(Clone, Copy, Debug)]
+pub struct BTreeV2LinkRecord<'a> {
+    heap_id: &'a [u8],
+}
+
+impl<'a> BTreeV2LinkRecord<'a> {
+    /// Returns the heap ID without copying its bytes.
+    pub fn heap_id(self) -> &'a [u8] {
+        self.heap_id
     }
 }
 
@@ -1732,7 +1860,7 @@ impl SharedAttributeId {
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub struct BTreeV2LinkNameIndex {
     nodes: BTreeV2Layout,
-    heap_id_end: usize,
+    records: BTreeV2LinkRecordContext,
 }
 
 impl BTreeV2LinkNameIndex {
@@ -1748,16 +1876,10 @@ impl BTreeV2LinkNameIndex {
         offset_width: OffsetWidth,
         heap_id_length: u16,
     ) -> Result<Self, FormatError> {
-        if header.tree_type != BTREE_V2_LINK_NAME {
-            return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
-        }
-        let heap_id_end = usize::from(NAME_HASH_LEN) + usize::from(heap_id_length);
-        if heap_id_length == 0 || usize::from(header.record_size) < heap_id_end {
-            return Err(FormatError::InvalidBTreeV2Signature);
-        }
+        let records = BTreeV2LinkRecordContext::for_name_index(header, heap_id_length)?;
         Ok(Self {
             nodes: BTreeV2Layout::new(header, offset_width)?,
-            heap_id_end,
+            records,
         })
     }
 
@@ -1780,9 +1902,7 @@ impl BTreeV2LinkNameIndex {
             .and_then(|bytes| bytes.try_into().ok())
             .map(u32::from_le_bytes)
             .ok_or(FormatError::InvalidBTreeV2Signature)?;
-        let heap_id = bytes
-            .get(usize::from(NAME_HASH_LEN)..self.heap_id_end)
-            .ok_or(FormatError::InvalidBTreeV2Signature)?;
+        let heap_id = self.records.record(bytes)?.heap_id();
         Ok((hash, heap_id))
     }
 }
@@ -3299,6 +3419,91 @@ mod tests {
     }
 
     #[rstest]
+    #[case::unknown_client(0xFF, 7, FormatError::InvalidBTreeNodeType(0xFF))]
+    #[case::attribute_client(
+        BTREE_V2_ATTRIBUTE_NAME,
+        7,
+        FormatError::InvalidBTreeNodeType(BTREE_V2_ATTRIBUTE_NAME)
+    )]
+    #[case::zero_heap_id(BTREE_V2_LINK_NAME, 0, FormatError::InvalidBTreeV2Signature)]
+    #[case::unrepresentable_name_record(
+        BTREE_V2_LINK_NAME,
+        u16::MAX,
+        FormatError::InvalidBTreeV2Signature
+    )]
+    #[case::unrepresentable_creation_record(
+        BTREE_V2_LINK_CREATION_ORDER,
+        u16::MAX,
+        FormatError::InvalidBTreeV2Signature
+    )]
+    fn link_record_contexts_reject_invalid_encodings(
+        #[case] tree_type: u8,
+        #[case] heap_id_length: u16,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(
+            BTreeV2LinkRecordContext::new(tree_type, heap_id_length).unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::short_hash(BTREE_V2_LINK_NAME, 3)]
+    #[case::short_name_id(BTREE_V2_LINK_NAME, 10)]
+    #[case::short_creation_order(BTREE_V2_LINK_CREATION_ORDER, 7)]
+    #[case::short_creation_id(BTREE_V2_LINK_CREATION_ORDER, 14)]
+    fn link_record_views_require_complete_keys_and_ids(
+        #[case] tree_type: u8,
+        #[case] length: usize,
+    ) {
+        let context = BTreeV2LinkRecordContext::new(tree_type, 7).unwrap();
+        assert_eq!(
+            context.record(&vec![0; length]).unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
+    }
+
+    #[rstest]
+    #[case::name(BTREE_V2_LINK_NAME, NAME_HASH_LEN)]
+    #[case::creation_order(BTREE_V2_LINK_CREATION_ORDER, u16::try_from(LINK_CREATION_ORDER_LEN).unwrap())]
+    fn link_record_contexts_accept_the_largest_representable_record(
+        #[case] tree_type: u8,
+        #[case] prefix: u16,
+    ) {
+        let length = u16::MAX - prefix;
+        let context = BTreeV2LinkRecordContext::new(tree_type, length).unwrap();
+        context.require_record_size(u16::MAX).unwrap();
+        let bytes = vec![0; usize::from(u16::MAX)];
+        let record = context.record(&bytes).unwrap();
+        assert_eq!(record.heap_id().len(), usize::from(length));
+        assert_eq!(
+            record.heap_id().as_ptr(),
+            bytes[usize::from(prefix)..].as_ptr()
+        );
+        assert_eq!(
+            BTreeV2LinkRecordContext::new(tree_type, length + 1).unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
+    }
+
+    #[rstest]
+    #[case::name(BTREE_V2_LINK_NAME, usize::from(NAME_HASH_LEN))]
+    #[case::creation_order(BTREE_V2_LINK_CREATION_ORDER, LINK_CREATION_ORDER_LEN)]
+    fn link_record_views_borrow_ids_and_allow_trailing_fields(
+        #[case] tree_type: u8,
+        #[case] prefix: usize,
+    ) {
+        let context = BTreeV2LinkRecordContext::new(tree_type, 7).unwrap();
+        let mut bytes = vec![0; prefix];
+        let id = [0, 1, 2, 3, 4, 5, 6];
+        bytes.extend_from_slice(&id);
+        bytes.push(99);
+        let record = context.record(&bytes).unwrap();
+        assert_eq!(record.heap_id(), id);
+        assert_eq!(record.heap_id().as_ptr(), bytes[prefix..].as_ptr());
+    }
+
+    #[rstest]
     #[case::a_name_index(BTREE_V2_LINK_NAME, &[0xA, 0xB, 0xC, 0xD, 1, 2, 3, 4, 5, 6, 7], Some(&[1, 2, 3, 4, 5, 6, 7][..]))]
     #[case::a_creation_order_index(6, &[0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7], Some(&[1, 2, 3, 4, 5, 6, 7][..]))]
     #[case::a_record_shorter_than_its_heap_id(BTREE_V2_LINK_NAME, &[0xA, 0xB, 0xC, 0xD, 1, 2], None)]
@@ -3310,7 +3515,13 @@ mod tests {
         let record = BTreeV2Record {
             data: data.to_vec(),
         };
-        assert_eq!(record.link_heap_id(tree_type, 7), heap_id);
+        match heap_id {
+            Some(expected) => assert_eq!(record.link_heap_id(tree_type, 7).unwrap(), expected),
+            None => assert_eq!(
+                record.link_heap_id(tree_type, 7).unwrap_err(),
+                FormatError::InvalidBTreeV2Signature
+            ),
+        }
     }
     /// The deflate filter identifier from "The Data Storage - Filter Pipeline Message" of the
     /// [format specification, version 4.0][spec].

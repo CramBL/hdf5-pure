@@ -12,6 +12,7 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::BTreeV2LinkNameIndex;
+use hdf5_pure_format::__private::BTreeV2LinkRecordContext;
 use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
 use hdf5_pure_space::__private::Extent;
@@ -567,8 +568,11 @@ fn scan_compact_links(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::PathNotFound`] if a dense group has no name index. Returns errors
-/// from address resolution, group metadata parsing, heap access, or link target parsing.
+/// Returns [`FormatError::PathNotFound`] if a dense group has no name index,
+/// [`FormatError::InvalidBTreeNodeType`] if the name index's client type is not 5, and
+/// [`FormatError::InvalidBTreeV2Signature`] if a record is too short for its hash and heap ID.
+/// Returns errors from address resolution, group metadata parsing, heap access, or link target
+/// parsing.
 fn find_noncompact_link(
     physical: PhysicalBytes<'_>,
     access_mode: AccessMode,
@@ -610,9 +614,7 @@ fn find_noncompact_link(
     let records = btree_v2::collect_btree_v2_records(stored, &btree, widths.offsets)?;
     let mut found = None;
     for record in &records {
-        let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
-            continue;
-        };
+        let (_, id) = index.record(&record.data)?;
         let data = heap.read(layout.parse(id)?)?;
         found = found.or(LinkMessage::target_if_named(
             &data,
@@ -685,9 +687,7 @@ fn find_noncompact_link_from_source(
     )?;
     let mut found = None;
     for record in &records {
-        let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
-            continue;
-        };
+        let (_, id) = index.record(&record.data)?;
         let data = heap.read(layout.parse(id)?)?;
         found = found.or(LinkMessage::target_if_named(
             &data,
@@ -744,8 +744,10 @@ fn find_indexed_dense_link(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::PathNotFound`] if the link info has no B-tree name index address, and
-/// the [`FormatError`] of the first dense-storage structure that does not parse.
+/// Returns [`FormatError::PathNotFound`] if the link info has no B-tree name index address,
+/// [`FormatError::InvalidBTreeNodeType`] if the name index's client type is not 5, and
+/// [`FormatError::InvalidBTreeV2Signature`] if a record is too short for its hash and heap ID.
+/// Returns the [`FormatError`] of the first dense-storage structure that does not parse.
 fn resolve_dense_entries(
     source: StoredBytes<'_>,
     access_mode: AccessMode,
@@ -762,15 +764,14 @@ fn resolve_dense_entries(
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree_hdr =
         BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
+    let context = BTreeV2LinkRecordContext::for_name_index(&btree_hdr, fh.heap_id_length)?;
     let records = btree_v2::collect_btree_v2_records(source, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(heap_source, &fh, fh_addr, access_mode, widths);
     let mut entries = Vec::new();
     for record in &records {
-        let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
-            continue;
-        };
+        let id_bytes = context.record(&record.data)?.heap_id();
 
         let link_data = heap.read(layout.parse(id_bytes)?)?;
 
@@ -1041,6 +1042,7 @@ pub(crate) fn resolve_dense_entries_from_source(
         btree_addr.get(),
         widths,
     )?;
+    let context = BTreeV2LinkRecordContext::for_name_index(&btree_hdr, fh.heap_id_length)?;
     let records = btree_v2::collect_btree_v2_records_from_source(
         &BTreeV2Source::new(source),
         &btree_hdr,
@@ -1051,9 +1053,7 @@ pub(crate) fn resolve_dense_entries_from_source(
     let mut heap = HeapObjectReader::new(heap_source, &fh, fh_addr, access_mode, widths);
     let mut entries = Vec::new();
     for record in &records {
-        let Some(id_bytes) = record.link_heap_id(btree_hdr.tree_type, fh.heap_id_length) else {
-            continue;
-        };
+        let id_bytes = context.record(&record.data)?.heap_id();
         let link_data = heap.read(layout.parse(id_bytes)?)?;
         let link = LinkMessage::parse_with_offset_width(&link_data, widths.offsets)?;
         if let LinkTarget::Hard {
