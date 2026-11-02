@@ -22,6 +22,7 @@ use hdf5_pure_core::__private::FileRange;
 #[cfg(test)]
 use hdf5_pure_core::__private::MetadataFrame;
 use hdf5_pure_core::AddressRange;
+use hdf5_pure_core::MetadataBytes;
 #[cfg(test)]
 use hdf5_pure_core::PhysicalAddress;
 #[cfg(test)]
@@ -40,6 +41,7 @@ use hdf5_pure_space::__private::Extent;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
+use crate::btree_v1::visit::{AdmittedV1Node, V1InternalNode, V1NodeLevel, V1TreeVisitState};
 use crate::btree_v2;
 use crate::btree_v2::BTreeV2Source;
 use crate::chunk_cache::{CachePass, ChunkCache};
@@ -233,13 +235,16 @@ pub(crate) struct ChunkInfo {
 }
 
 impl ChunkInfo {
-    /// Returns the chunks a leaf of a version 1 B-tree chunk index points to.
+    /// Appends the chunk records of a version 1 B-tree leaf.
     ///
     /// # Errors
     ///
-    /// Returns the error [`BTreeV1ChunkNode::entries`] yields for an entry of `node`.
-    fn leaf_chunks(node: BTreeV1ChunkNode<'_>) -> Result<Vec<Self>, FormatError> {
-        let mut chunks = Vec::with_capacity(usize::from(node.entries_used()));
+    /// Returns errors from [`BTreeV1ChunkNode::entries`].
+    fn append_leaf_chunks(
+        chunks: &mut Vec<Self>,
+        node: BTreeV1ChunkNode<'_>,
+    ) -> Result<(), FormatError> {
+        chunks.reserve(usize::from(node.entries_used()));
         for entry in node.entries() {
             let (key, address) = entry?;
             chunks.push(Self {
@@ -249,7 +254,7 @@ impl ChunkInfo {
                 address,
             });
         }
-        Ok(chunks)
+        Ok(())
     }
 
     /// Returns the chunk `record` describes at `slot` of `grid`, or `None` where the slot is
@@ -365,193 +370,199 @@ impl StoredChunkSize {
     }
 }
 
-/// Traverse B-tree v1 type 1 to collect all chunk locations.
+/// Returns chunk records in version 1 B-tree traversal order.
 ///
-/// `ndims` is the number of offset dimensions in each key, which equals
-/// `chunk_dimensions.len()` from the DataLayout::Chunked message (rank+1).
+/// Reads `file_data` in stored coordinates. `ndims` is the dataset rank plus one, including
+/// each key's trailing within-element offset.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeSignature`] for a repeated or undefined node address or
+/// an incorrect child level, [`FormatError::ResourceLimit`] if the traversal exceeds its work
+/// limit, and [`FormatError::AddressTooLarge`] if a node address exceeds the offset width.
+/// Returns errors from [`BTreeV1ChunkNode::parse_with_offset_width`] and entry decoding.
 pub fn collect_chunk_info(
     file_data: &[u8],
     btree_address: StoredAddress,
     ndims: usize,
     offset_width: OffsetWidth,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    collect_chunk_info_inner(file_data, btree_address, ndims, offset_width, 0)
-}
-
-/// Depth-tracking core of [`collect_chunk_info`]. The `depth` guard mirrors
-/// [`collect_chunk_btree_node_spans_inner`]: a cyclic or pathologically deep
-/// internal node in a foreign file errors out instead of recursing until the
-/// stack overflows (which would abort the process uncatchably).
-fn collect_chunk_info_inner(
-    file_data: &[u8],
-    btree_address: StoredAddress,
-    ndims: usize,
-    offset_width: OffsetWidth,
-    depth: u32,
-) -> Result<Vec<ChunkInfo>, FormatError> {
-    if depth > MAX_CHUNK_BTREE_DEPTH {
-        return Err(FormatError::ChunkedReadError(
-            "chunk B-tree nested too deeply".into(),
-        ));
-    }
-    let node = BTreeV1ChunkNode::parse_with_offset_width(
-        file_data,
-        btree_address.get().to_usize()?,
+    collect_chunk_records(
+        |address| {
+            BTreeV1ChunkNode::parse_with_offset_width(
+                file_data,
+                address.get().to_usize()?,
+                offset_width,
+                ndims,
+            )
+            .map(ChunkNodeBytes::Borrowed)
+        },
         offset_width,
-        ndims,
-    )?;
-    if node.node_level() == 0 {
-        return ChunkInfo::leaf_chunks(node);
-    }
-    let mut all_chunks = Vec::new();
-    for child_addr in node.children() {
-        all_chunks.extend(collect_chunk_info_inner(
-            file_data,
-            child_addr?,
-            ndims,
-            offset_width,
-            depth + 1,
-        )?);
-    }
-    Ok(all_chunks)
+        btree_address,
+    )
 }
 
-/// Recursion-depth cap for the chunk B-tree node-span walk, guarding against a
-/// stack overflow on a cyclic or pathological index in a foreign file. A real
-/// chunk B-tree is only a few levels deep, so this is far beyond any valid tree.
-const MAX_CHUNK_BTREE_DEPTH: u32 = 64;
-
-/// Returns the stored-coordinate ranges of every node in a version 1 B-tree of
-/// type 1 (the raw-data chunk index), so a deleted chunked dataset's index can
-/// be reclaimed. Returns one range per `TREE` node (internal and leaf).
-/// The chunk data blocks the leaves point at are enumerated separately by
-/// [`collect_chunk_info`].
+/// Returns candidate stored-coordinate ranges for every node in a version 1 chunk B-tree.
 ///
-/// Each node's length is sized from `entries_used` — the region the reader
-/// consumes (`header + entries_used * (key_size + offset_size) + key_size`).
-/// HDF5 allocates each node at its full `2K` capacity, so this is a lower bound:
-/// a partially-filled node's trailing slack is left unreclaimed rather than
-/// guessed at, honoring the editor's "under-reclaim, never over-reclaim" rule.
+/// Includes internal and leaf nodes. Chunk payloads are enumerated separately by
+/// [`collect_chunk_info`]. Each range covers the header, entries in use, and trailing key.
+/// Unused node capacity is excluded. The caller establishes exclusive ownership before
+/// reclaiming these ranges.
 ///
-/// `ndims` is the number of offset dimensions in each key (rank + 1), the same
-/// value [`collect_chunk_info`] takes.
+/// Returns ranges only after the complete traversal succeeds. `ndims` is the dataset rank
+/// plus one, including each key's trailing within-element offset.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ChunkedReadError`] if the traversal depth exceeds
-/// [`MAX_CHUNK_BTREE_DEPTH`], or [`FormatError::OffsetOverflow`] if a node's exclusive end exceeds
-/// [`u64::MAX`]. Propagates node-reading and parsing errors.
+/// Returns [`FormatError::OffsetOverflow`] if a node's exclusive end exceeds [`u64::MAX`].
+/// Returns admission, node-reading, and parsing errors as in [`collect_chunk_info_from_source`].
 pub(crate) fn collect_chunk_btree_node_spans<S: StoredRead + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
     offset_width: OffsetWidth,
 ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
-    let mut out = Vec::new();
-    collect_chunk_btree_node_spans_inner(source, btree_address, ndims, offset_width, 0, &mut out)?;
-    Ok(out)
-}
-
-fn collect_chunk_btree_node_spans_inner<S: StoredRead + ?Sized>(
-    source: &S,
-    btree_address: StoredAddress,
-    ndims: usize,
-    offset_width: OffsetWidth,
-    depth: u32,
-    out: &mut Vec<AddressRange<StoredAddress>>,
-) -> Result<(), FormatError> {
-    if depth > MAX_CHUNK_BTREE_DEPTH {
-        return Err(FormatError::ChunkedReadError(
-            "chunk B-tree nested too deeply".into(),
-        ));
-    }
-    // Reading the node is also the bounds check: a node claiming to run past
-    // end-of-file fails here rather than being recorded as reclaimable.
     let metadata = StoredMetadata(source);
-    let bytes = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
-        &metadata,
-        btree_address.get(),
-        offset_width,
-        ndims,
-    )?;
-    let node = bytes.node();
-    out.push(AddressRange::new(
-        btree_address,
-        node.stored_len().to_u64(),
-    )?);
-
-    // Internal nodes (level > 0) hold child node addresses, not chunk records;
-    // recurse so their nodes are reclaimed too.
-    if node.node_level() != 0 {
-        for child_addr in node.children() {
-            collect_chunk_btree_node_spans_inner(
-                source,
-                child_addr?,
-                ndims,
+    collect_chunk_tree(
+        |address| {
+            BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
+                &metadata,
+                address.get(),
                 offset_width,
-                depth + 1,
-                out,
-            )?;
-        }
-    }
-    Ok(())
+                ndims,
+            )
+            .map(ChunkNodeBytes::Source)
+        },
+        |address, node, spans| {
+            spans.push(AddressRange::new(
+                address,
+                node.node().stored_len().to_u64(),
+            )?);
+            Ok(())
+        },
+        offset_width,
+        btree_address,
+    )
 }
 
-/// Traverses a version 1 B-tree of node type 1 through stored-coordinate reads on demand.
+/// Returns chunk records through stored-coordinate metadata reads in traversal order.
 ///
-/// The streaming counterpart of [`collect_chunk_info`]. Reads each node's 8-byte prefix and
-/// remaining body through [`StoredRead::read_metadata`]. Node views borrow the returned bytes while
-/// the traversal descends into children.
+/// The source-backed counterpart of [`collect_chunk_info`]. Reads each node's eight-byte
+/// prefix and remaining body through [`StoredRead::read_metadata`], retaining its metadata
+/// owner while consuming the node and queuing its children.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ChunkedReadError`] if the traversal depth exceeds
-/// [`MAX_CHUNK_BTREE_DEPTH`], and errors from reading or parsing any node.
+/// Returns the admission errors of [`collect_chunk_info`], and errors from source reads,
+/// node parsing, or entry decoding.
 pub fn collect_chunk_info_from_source<S: StoredRead + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
     ndims: usize,
     offset_width: OffsetWidth,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    collect_chunk_info_from_source_inner(source, btree_address, ndims, offset_width, 0)
+    let metadata = StoredMetadata(source);
+    collect_chunk_records(
+        |address| {
+            BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
+                &metadata,
+                address.get(),
+                offset_width,
+                ndims,
+            )
+            .map(ChunkNodeBytes::Source)
+        },
+        offset_width,
+        btree_address,
+    )
 }
 
-/// Depth-tracking core of [`collect_chunk_info_from_source`]; see
-/// [`collect_chunk_info_inner`] for why the bound is required.
-fn collect_chunk_info_from_source_inner<S: StoredRead + ?Sized>(
-    source: &S,
-    btree_address: StoredAddress,
-    ndims: usize,
-    offset_width: OffsetWidth,
-    depth: u32,
+fn collect_chunk_records<'a>(
+    read: impl FnMut(StoredAddress) -> Result<ChunkNodeBytes<'a>, FormatError>,
+    width: OffsetWidth,
+    root: StoredAddress,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    if depth > MAX_CHUNK_BTREE_DEPTH {
-        return Err(FormatError::ChunkedReadError(
-            "chunk B-tree nested too deeply".into(),
-        ));
+    collect_chunk_tree(
+        read,
+        |_, node, chunks| {
+            if let CheckedChunkNode::Leaf(node) = node {
+                ChunkInfo::append_leaf_chunks(chunks, *node)?;
+            }
+            Ok(())
+        },
+        width,
+        root,
+    )
+}
+
+/// Collects results from one complete, admitted traversal.
+///
+/// Calls `consume` for every decoded node before queuing its children.
+///
+/// # Errors
+///
+/// Returns admission, node-reading, level-checking, or consumer errors.
+fn collect_chunk_tree<'a, T>(
+    mut read: impl FnMut(StoredAddress) -> Result<ChunkNodeBytes<'a>, FormatError>,
+    mut consume: impl FnMut(
+        StoredAddress,
+        &CheckedChunkNode<'_>,
+        &mut Vec<T>,
+    ) -> Result<(), FormatError>,
+    width: OffsetWidth,
+    root: StoredAddress,
+) -> Result<Vec<T>, FormatError> {
+    let mut visits = V1TreeVisitState::new(root, width);
+    let mut result = Vec::new();
+    while let Some(admitted) = visits.next()? {
+        let address = admitted.address();
+        let bytes = read(address)?;
+        let node = CheckedChunkNode::parse(bytes.node(), admitted)?;
+        consume(address, &node, &mut result)?;
+        if let CheckedChunkNode::Internal { level, node } = node {
+            visits.push_children(level, node.children())?;
+        }
     }
-    let metadata = StoredMetadata(source);
-    let bytes = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
-        &metadata,
-        btree_address.get(),
-        offset_width,
-        ndims,
-    )?;
-    let node = bytes.node();
-    if node.node_level() == 0 {
-        return ChunkInfo::leaf_chunks(node);
+    Ok(result)
+}
+
+/// A borrowed resident node or a source-backed metadata owner.
+enum ChunkNodeBytes<'a> {
+    Borrowed(BTreeV1ChunkNode<'a>),
+    Source(BTreeV1ChunkNodeBytes<MetadataBytes<'a>>),
+}
+
+impl ChunkNodeBytes<'_> {
+    fn node(&self) -> BTreeV1ChunkNode<'_> {
+        match self {
+            Self::Borrowed(node) => *node,
+            Self::Source(bytes) => bytes.node(),
+        }
     }
-    let mut all_chunks = Vec::new();
-    for child_addr in node.children() {
-        all_chunks.extend(collect_chunk_info_from_source_inner(
-            source,
-            child_addr?,
-            ndims,
-            offset_width,
-            depth + 1,
-        )?);
+}
+
+/// A chunk node with a checked level for this traversal.
+enum CheckedChunkNode<'a> {
+    Internal {
+        level: V1InternalNode,
+        node: BTreeV1ChunkNode<'a>,
+    },
+    Leaf(BTreeV1ChunkNode<'a>),
+}
+
+impl<'a> CheckedChunkNode<'a> {
+    fn parse(node: BTreeV1ChunkNode<'a>, admitted: AdmittedV1Node) -> Result<Self, FormatError> {
+        Ok(match admitted.parse_level(node.node_level())? {
+            V1NodeLevel::Internal(level) => Self::Internal { level, node },
+            V1NodeLevel::Leaf => Self::Leaf(node),
+        })
     }
-    Ok(all_chunks)
+
+    fn node(&self) -> BTreeV1ChunkNode<'_> {
+        match self {
+            Self::Internal { node, .. } | Self::Leaf(node) => *node,
+        }
+    }
 }
 
 /// Returns one [`ChunkInfo`] per chunk in the current extent of `grid`, under an Implicit index
@@ -2924,6 +2935,7 @@ mod tests {
     use crate::convert;
     use crate::dataspace::MaxExtent;
     use crate::filter_pipeline::FilterDescription;
+    use crate::placed_source::PlacedSource;
     use crate::source::PhysicalBytes;
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
@@ -4804,7 +4816,7 @@ mod tests {
 
     #[test]
     fn btree_node_spans_single_leaf() {
-        // A leaf's reclaim span is the whole node: its built byte length.
+        // The leaf's in-use span has its built byte length.
         let ndims = 2;
         let os: u8 = 8;
         let chunks = vec![
@@ -4837,7 +4849,7 @@ mod tests {
     }
 
     #[test]
-    fn btree_node_spans_two_level_recurses() {
+    fn btree_node_spans_include_internal_and_leaf_nodes() {
         // A 2-level tree yields one span per node: the internal root and both
         // leaves, each sized to its built byte length, pairwise disjoint.
         let ndims = 2;
@@ -4882,7 +4894,12 @@ mod tests {
     #[case::borrowed_userblock(512, false)]
     #[case::cached(0, true)]
     #[case::cached_userblock(512, true)]
-    fn btree_v1_traversals_preserve_multilevel_nodes(#[case] base: usize, #[case] cached: bool) {
+    fn btree_v1_traversals_preserve_multilevel_nodes(
+        #[case] base: usize,
+        #[case] cached: bool,
+        #[values(Widths::new(2, 8), Widths::new(4, 2), Widths::new(8, 4))] widths: Widths,
+    ) {
+        let offset_width = OffsetWidth::try_from(u8::try_from(widths.offset).unwrap()).unwrap();
         let chunks = vec![
             ChunkInfo {
                 chunk_size: StoredChunkSize::btree_v1(40),
@@ -4893,31 +4910,36 @@ mod tests {
             ChunkInfo {
                 chunk_size: StoredChunkSize::btree_v1(24),
                 filter_mask: 2,
-                offsets: vec![10, 0],
+                offsets: vec![1 << 40, 0],
                 address: StoredAddress::new(0x2000),
             },
         ];
         let nodes = [
             (
                 0x100,
-                build_chunk_btree_internal(2, &[0x200, 0x300], 2, WIDTHS),
+                build_chunk_btree_internal(2, &[0x200, 0x300], 2, widths),
             ),
-            (0x200, build_chunk_btree_internal(1, &[0x400], 2, WIDTHS)),
-            (0x400, build_chunk_btree_leaf(&chunks[..1], 2, WIDTHS)),
-            (0x300, build_chunk_btree_internal(1, &[0x500], 2, WIDTHS)),
-            (0x500, build_chunk_btree_leaf(&chunks[1..], 2, WIDTHS)),
+            (0x200, build_chunk_btree_internal(1, &[0x400], 2, widths)),
+            (0x400, build_chunk_btree_leaf(&chunks[..1], 2, widths)),
+            (0x300, build_chunk_btree_internal(1, &[0x500], 2, widths)),
+            (0x500, build_chunk_btree_leaf(&chunks[1..], 2, widths)),
         ];
         let mut image = test_util::image::Image::new();
         for (address, bytes) in &nodes {
             image.place(base + address, bytes);
         }
+        let file = image.build();
+        assert_eq!(
+            collect_chunk_info(&file[base..], StoredAddress::new(0x100), 2, offset_width).unwrap(),
+            chunks,
+        );
         let source: Box<dyn Source> = if cached {
             Box::new(MetadataCachingSource::new(
-                ReadSeekSource::new(Cursor::new(image.build())).unwrap(),
+                ReadSeekSource::new(Cursor::new(file)).unwrap(),
                 MetadataCacheConfig::new(4096),
             ))
         } else {
-            Box::new(BytesSource::new(image.build()))
+            Box::new(BytesSource::new(file))
         };
         let framed = source::PhysicalSource::for_test(
             source.as_ref(),
@@ -4925,41 +4947,32 @@ mod tests {
         )
         .stored();
         let metadata = StoredMetadata(&framed);
-        let parent = BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0x100, 8, 2).unwrap();
+        let parent = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
+            &metadata,
+            0x100,
+            offset_width,
+            2,
+        )
+        .unwrap();
         let node = parent.node();
         let mut children = node.children();
         assert_eq!(children.next().unwrap().unwrap(), StoredAddress::new(0x200));
         assert_eq!(
-            collect_chunk_info_from_source(
-                &framed,
-                StoredAddress::new(0x200),
-                2,
-                OffsetWidth::Eight
-            )
-            .unwrap(),
+            collect_chunk_info_from_source(&framed, StoredAddress::new(0x200), 2, offset_width)
+                .unwrap(),
             chunks[..1]
         );
         assert_eq!(children.next().unwrap().unwrap(), StoredAddress::new(0x300));
         assert!(children.next().is_none());
         assert_eq!(node.stored_len(), nodes[0].1.len());
         assert_eq!(
-            collect_chunk_info_from_source(
-                &framed,
-                StoredAddress::new(0x100),
-                2,
-                OffsetWidth::Eight
-            )
-            .unwrap(),
+            collect_chunk_info_from_source(&framed, StoredAddress::new(0x100), 2, offset_width)
+                .unwrap(),
             chunks
         );
         assert_eq!(
-            collect_chunk_btree_node_spans(
-                &framed,
-                StoredAddress::new(0x100),
-                2,
-                OffsetWidth::Eight
-            )
-            .unwrap(),
+            collect_chunk_btree_node_spans(&framed, StoredAddress::new(0x100), 2, offset_width)
+                .unwrap(),
             nodes
                 .iter()
                 .map(|(address, bytes)| AddressRange::new(
@@ -5034,11 +5047,135 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::repeated_siblings(ChunkTreeError::RepeatedSiblings, vec![0, 1])]
+    #[case::diamond(ChunkTreeError::Diamond, vec![0, 1, 3, 2])]
+    #[case::ancestor_cycle(ChunkTreeError::AncestorCycle, vec![0, 1])]
+    #[case::wrong_level(ChunkTreeError::WrongLevel, vec![0, 1])]
+    #[case::truncated_trailing_key(ChunkTreeError::TruncatedTrailingKey, vec![0, 1, 3])]
+    fn chunk_walks_reject_malformed_trees_without_partial_spans(
+        #[case] corruption: ChunkTreeError,
+        #[case] visited: Vec<usize>,
+        #[values(0, 512)] base: u64,
+        #[values(Widths::new(2, 8), Widths::new(4, 2), Widths::new(8, 4))] widths: Widths,
+    ) {
+        let offset_width = OffsetWidth::try_from(u8::try_from(widths.offset).unwrap()).unwrap();
+        let chunks = [ChunkInfo {
+            chunk_size: StoredChunkSize::btree_v1(40),
+            filter_mask: 0,
+            offsets: vec![1 << 40, 0],
+            address: StoredAddress::new(0x1000),
+        }];
+        let leaf = build_chunk_btree_leaf(&chunks, 2, widths);
+        let (root, left, right) = match corruption {
+            ChunkTreeError::AncestorCycle => (
+                build_chunk_btree_internal(2, &[0x200], 2, widths),
+                build_chunk_btree_internal(1, &[0x100], 2, widths),
+                leaf.clone(),
+            ),
+            ChunkTreeError::Diamond => (
+                build_chunk_btree_internal(2, &[0x200, 0x300], 2, widths),
+                build_chunk_btree_internal(1, &[0x400], 2, widths),
+                build_chunk_btree_internal(1, &[0x400], 2, widths),
+            ),
+            ChunkTreeError::RepeatedSiblings => (
+                build_chunk_btree_internal(1, &[0x200, 0x200], 2, widths),
+                leaf.clone(),
+                leaf.clone(),
+            ),
+            ChunkTreeError::TruncatedTrailingKey => (
+                build_chunk_btree_internal(1, &[0x200, 0x400], 2, widths),
+                leaf.clone(),
+                leaf.clone(),
+            ),
+            ChunkTreeError::WrongLevel => (
+                build_chunk_btree_internal(2, &[0x200], 2, widths),
+                leaf.clone(),
+                leaf.clone(),
+            ),
+        };
+        let nodes = [(0x100, root), (0x200, left), (0x300, right), (0x400, leaf)];
+        let mut image = test_util::image::Image::new();
+        for (address, bytes) in &nodes {
+            image.place(*address, bytes);
+        }
+        let mut image = image.build();
+        let truncated = matches!(corruption, ChunkTreeError::TruncatedTrailingKey);
+        let resident_error = if truncated {
+            let expected = image.len();
+            image.pop();
+            FormatError::UnexpectedEof {
+                expected,
+                available: image.len(),
+            }
+        } else {
+            FormatError::InvalidBTreeSignature
+        };
+        assert_eq!(
+            collect_chunk_info(&image, StoredAddress::new(0x100), 2, offset_width).unwrap_err(),
+            resident_error,
+        );
+        let source_error = if truncated {
+            FormatError::UnexpectedSourceEof {
+                expected: base + image.len().to_u64() + 1,
+                available: base + image.len().to_u64(),
+            }
+        } else {
+            FormatError::InvalidBTreeSignature
+        };
+        let mut expected_reads = Vec::new();
+        for index in visited {
+            let (address, node) = &nodes[index];
+            expected_reads.push((base + address.to_u64(), CHUNK_BTREE_PREFIX_LEN));
+            expected_reads.push((
+                base + address.to_u64() + CHUNK_BTREE_PREFIX_LEN.to_u64(),
+                node.len() - CHUNK_BTREE_PREFIX_LEN,
+            ));
+        }
+        let source = PlacedSource::new(base, image);
+        assert_eq!(
+            collect_chunk_info_from_source(
+                &source.framed(),
+                StoredAddress::new(0x100),
+                2,
+                offset_width
+            )
+            .unwrap_err(),
+            source_error,
+        );
+        assert_eq!(source.reads.take(), expected_reads);
+        assert_eq!(
+            collect_chunk_btree_node_spans(
+                &source.framed(),
+                StoredAddress::new(0x100),
+                2,
+                offset_width
+            )
+            .unwrap_err(),
+            source_error,
+        );
+        assert_eq!(source.reads.take(), expected_reads);
+    }
+
+    enum ChunkTreeError {
+        AncestorCycle,
+        Diamond,
+        RepeatedSiblings,
+        TruncatedTrailingKey,
+        WrongLevel,
+    }
+
+    /// The node prefix length, defined in "Version 1 B-trees" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
+    const CHUNK_BTREE_PREFIX_LEN: usize = 8;
+
     #[test]
-    fn btree_v1_source_traversals_reject_excessive_depth() {
+    fn btree_v1_source_traversals_reject_cyclic_nodes() {
         let bytes = build_chunk_btree_internal(1, &[0], 2, WIDTHS);
         let source = BytesSource::new(bytes);
-        let expected = FormatError::ChunkedReadError("chunk B-tree nested too deeply".into());
+        let expected = FormatError::InvalidBTreeSignature;
         assert_eq!(
             collect_chunk_info_from_source(
                 &source::zero_base_source(&source),
@@ -5223,9 +5360,6 @@ mod tests {
 
     #[test]
     fn collect_chunk_info_rejects_cyclic_btree() {
-        // An internal node whose only child points back at itself. Without a
-        // depth guard this recurses forever and overflows the stack (an
-        // uncatchable process abort); the guard must turn it into an error.
         let ndims = 2;
         let os: u8 = 8;
         let node = build_chunk_btree_internal(1, &[0u64], ndims, WIDTHS);
@@ -5239,10 +5373,7 @@ mod tests {
             OffsetWidth::try_from(os).unwrap(),
         )
         .unwrap_err();
-        assert_eq!(
-            err,
-            FormatError::ChunkedReadError("chunk B-tree nested too deeply".into())
-        );
+        assert_eq!(err, FormatError::InvalidBTreeSignature);
     }
 
     // --- Chunked read tests (synthetic) ---
