@@ -248,7 +248,7 @@ fn opening_extension_reuses_one_source_pass_and_retains_only_facts(#[case] chunk
     assert_eq!(source.calls.get() - calls, 2 * calls - 1);
     assert_eq!(
         source.bytes.get() - bytes,
-        2 * bytes - u64::try_from(v2::SIGNATURE.len() + checksum::CHECKSUM).unwrap()
+        2 * bytes - u64::try_from(v2::SIGNATURE.len()).unwrap()
     );
     assert!(previous.peak_bytes >= u64::try_from(chunks * 60_000).unwrap());
     assert!(
