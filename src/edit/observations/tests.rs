@@ -177,7 +177,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
     );
     let manager_start = addresses.relative(PhysicalAddress::new(end)).unwrap();
     let manager_plan = projection.into_plan(manager_start).unwrap();
-    let manager_end = manager_plan.end_of_managers;
+    let manager_end = manager_plan.end();
     let encoded = manager_plan
         .encode(manager_end)
         .unwrap()

@@ -125,7 +125,7 @@ impl PagedPersistencePlan {
             })?;
         let start = extension.end();
         let plan = managers.into_plan(start)?;
-        let slots = plan.slots;
+        let slots = plan.slots();
         let blocks = plan
             .encode(tail.allocation.end())?
             .collect::<Result<Vec<_>, _>>()?;
