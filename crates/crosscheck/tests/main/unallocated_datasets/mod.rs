@@ -121,8 +121,8 @@ fn schemas_match_reference_unallocated_storage(
     };
     creation.write(&pure_path, configure);
     if shape.contains(&0) {
-        assert_deferred_layout(&reference_path);
-        assert_deferred_layout(&pure_path);
+        assert_deferred_layout(&reference_path, "schema");
+        assert_deferred_layout(&pure_path, "schema");
     }
     let reference = hdf5::File::open(&reference_path)
         .unwrap()
@@ -206,9 +206,9 @@ fn schemas_match_reference_unallocated_storage(
     );
 }
 
-fn assert_deferred_layout(path: &Path) {
+pub(super) fn assert_deferred_layout(path: &Path, name: &str) {
     let native = hdf5::File::open(path).unwrap();
-    let address = usize::try_from(c_object::header_address(&native, "schema")).unwrap();
+    let address = usize::try_from(c_object::header_address(&native, name)).unwrap();
     native.close().unwrap();
     let bytes = std::fs::read(path).unwrap();
     let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, address, 8, 8).unwrap();

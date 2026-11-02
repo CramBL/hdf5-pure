@@ -121,9 +121,9 @@ fn typed_schemas_match_explicit_and_native_storage<T, N>(
         schema,
         Schema::EmptyUnlimited | Schema::FilteredEmptyUnlimited
     ) {
-        super::assert_deferred_layout(&typed_path);
-        super::assert_deferred_layout(&explicit_path);
-        super::assert_deferred_layout(&native_path);
+        super::assert_deferred_layout(&typed_path, "schema");
+        super::assert_deferred_layout(&explicit_path, "schema");
+        super::assert_deferred_layout(&native_path, "schema");
     }
 }
 
@@ -186,7 +186,7 @@ fn typed_fixed_elements_initialize_and_append_batches<T, N>(
         }
     }
     let original = std::fs::read(&path).unwrap();
-    super::assert_deferred_layout(&path);
+    super::assert_deferred_layout(&path, "schema");
     let access = || {
         FileAccessProperties::new()
             .with_memory_strategy(backing)
@@ -203,7 +203,7 @@ fn typed_fixed_elements_initialize_and_append_batches<T, N>(
     drop(dataset);
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
-    super::assert_deferred_layout(&path);
+    super::assert_deferred_layout(&path, "schema");
     let native = hdf5::File::open(&path).unwrap();
     let dataset = native.dataset("schema").unwrap();
     assert_eq!(
