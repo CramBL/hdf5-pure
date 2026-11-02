@@ -1,8 +1,6 @@
 //! Dataset requests, backend preparation, and deferred element references.
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
@@ -39,6 +37,8 @@ impl PreparedDataset {
     ///
     /// # Errors
     ///
+    /// Propagates an element-encoding error staged in the builder before parsing metadata.
+    ///
     /// Returns [`FormatError::DatasetMissingDatatype`] or [`FormatError::DatasetMissingShape`]
     /// if required metadata is absent, [`FormatError::DatasetRankUnsupported`] if the rank exceeds
     /// [`MAX_DATASET_RANK`], or [`FormatError::DatasetDimensionUnlimited`] if a current dimension
@@ -73,6 +73,7 @@ impl PreparedDataset {
             #[cfg(feature = "provenance")]
             provenance,
         } = builder;
+        let data = data.transpose().map_err(|error| *error)?;
         let dt = datatype.ok_or(FormatError::DatasetMissingDatatype)?;
         let shape = shape.ok_or(FormatError::DatasetMissingShape)?;
         let storage = PreparedStorage::parse(
@@ -411,9 +412,9 @@ impl PreparedStorage {
     /// Returns [`FormatError::ConflictingDatasetStorage`] if multiple sources are supplied,
     /// unallocated storage is paired with a source, or deferred references lack an element
     /// buffer. Returns [`FormatError::DatasetMissingData`] if a nonempty allocated dataset has
-    /// no source. Propagates an error staged in `data`.
+    /// no source.
     pub(crate) fn parse(
-        data: Option<Result<Vec<u8>, Box<FormatError>>>,
+        data: Option<Vec<u8>>,
         chunks: Option<RawChunkPayload>,
         produced: Option<ProducedPayload>,
         allocation: StorageAllocation,
@@ -421,7 +422,6 @@ impl PreparedStorage {
         reference_targets: Option<Vec<ObjectRefPatch>>,
         vl_string_staging: Option<VlStringStaging>,
     ) -> Result<Self, FormatError> {
-        let data = data.transpose().map_err(|error| *error)?;
         let deferred = reference_targets.is_some() || vl_string_staging.is_some();
         match (allocation, data, chunks, produced) {
             (StorageAllocation::Unallocated, None, None, None) if !deferred => {
@@ -685,7 +685,7 @@ mod tests {
     ) {
         let [bytes, chunks, produced] = sources;
         let result = PreparedStorage::parse(
-            bytes.then(|| Ok(Vec::new())),
+            bytes.then(Vec::new),
             chunks.then(raw_chunks),
             produced.then(produced_bytes),
             allocation,
@@ -704,7 +704,7 @@ mod tests {
     #[case::variable_length_references(false)]
     fn deferred_references_remain_with_their_element_bytes(#[case] object: bool) {
         let mut storage = PreparedStorage::parse(
-            Some(Ok(vec![0; 16])),
+            Some(vec![0; 16]),
             None,
             None,
             StorageAllocation::Allocated,
@@ -761,6 +761,32 @@ mod tests {
             reason,
             "write_dataset overwrites values only; it cannot change the fill time (set it when the dataset is created)"
         );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::chunks(true)]
+    #[case::producer(false)]
+    fn typed_unallocated_declarations_reject_providers(
+        #[case] chunks: bool,
+        #[values(false, true)] declaration_first: bool,
+    ) {
+        let mut builder = DatasetBuilder::new("schema");
+        if declaration_first {
+            builder.with_unallocated_storage_for::<u8>(&[0]);
+        }
+        if chunks {
+            builder.raw_chunks = Some(raw_chunks());
+        } else {
+            builder.produced = Some(produced_bytes());
+        }
+        if !declaration_first {
+            builder.with_unallocated_storage_for::<u8>(&[0]);
+        }
+        let Err(error) = PreparedDataset::parse(builder) else {
+            panic!("expected conflicting storage sources");
+        };
+        assert_eq!(error, FormatError::ConflictingDatasetStorage);
     }
 
     struct UnreadProvider;
