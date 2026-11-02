@@ -1,4 +1,5 @@
 mod btree_v2_placement;
+mod dense_link_placement;
 mod extensible_array_creation;
 mod fractal_heap_huge;
 mod fractal_heap_placement;

@@ -209,6 +209,8 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "DecodedSizeLimitExceeded",
             "DecodedSizeMismatch",
             "DefinedAddressIsUndefined",
+            "DenseLinkBlockCount",
+            "DenseLinkBlockOverlap",
             "DenseLinkObjectTooLarge",
             "DenseLinkStorageTooLarge",
             "DuplicateAttributeCreationIndex",

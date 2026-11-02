@@ -62,6 +62,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
     )]
     policy: LinkCreationOrder,
     #[values(0, 512)] userblock: u64,
+    #[values(false, true)] independently_placed: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("planned.h5");
@@ -109,13 +110,49 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
     let expected_counter = storage.info().max_creation_order;
     let plan = DenseLinkPlan::new(storage, superblock.length_size).unwrap();
     let stored = StoredAddress::new(bytes.len() as u64 - userblock);
-    let image = plan.serialize(stored).unwrap();
-    assert_eq!(image.bytes.len() as u64, plan.serialized_len());
-    bytes.extend_from_slice(&image.bytes);
+    let info = if independently_placed {
+        let mut cursor = bytes.len() as u64;
+        let mut addresses = vec![stored; plan.block_lengths().len()];
+        let lengths: Vec<_> = plan.block_lengths().collect();
+        for index in (0..lengths.len()).rev() {
+            let length = lengths[index];
+            if length >= 512 || cursor % 512 + length > 512 {
+                cursor = cursor.div_ceil(512) * 512;
+            }
+            addresses[index] = StoredAddress::new(cursor - userblock);
+            cursor += length;
+        }
+        let placement = plan.place(&addresses).unwrap();
+        assert_eq!(placement.blocks().count(), addresses.len());
+        let mut emitted = Vec::new();
+        for ((address, length), block) in placement
+            .blocks()
+            .zip(placement.serialize_blocks().unwrap())
+        {
+            let (stored, data) = block.unwrap();
+            assert_eq!((stored, data.len() as u64), (address, length));
+            let at = usize::try_from(address.get() + userblock).unwrap();
+            if length >= 512 {
+                assert_eq!(at % 512, 0);
+            } else {
+                assert!(at as u64 % 512 + length <= 512);
+            }
+            bytes.resize(bytes.len().max(at + data.len()), 0);
+            bytes[at..at + data.len()].copy_from_slice(&data);
+            emitted.push(stored);
+        }
+        assert_eq!(emitted, addresses);
+        placement.link_info().clone()
+    } else {
+        let image = plan.serialize(stored).unwrap();
+        assert_eq!(image.bytes.len() as u64, plan.serialized_len());
+        bytes.extend_from_slice(&image.bytes);
+        image.info
+    };
     let mut writer = ObjectHeaderWriter::new();
     writer.add_message(
         MessageType::LINK_INFO,
-        image.info.serialize(superblock.offset_size),
+        info.serialize(superblock.offset_size),
     );
     writer.add_message(MessageType::GROUP_INFO, GROUP_INFO.to_vec());
     let new_root = bytes.len() as u64 - userblock;
@@ -210,6 +247,7 @@ fn rebuilt_libhdf5_dense_links_preserve_metadata_and_creation_policy(
         LinkCreationOrder::Indexed
     )]
     policy: LinkCreationOrder,
+    #[values(false, true)] independently_placed: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("libhdf5.h5");
@@ -247,7 +285,30 @@ fn rebuilt_libhdf5_dense_links_preserve_metadata_and_creation_policy(
     let links = dense_links(&bytes, &info, offsets, lengths);
     let storage = GroupLinkStorage::new(&info, links.clone(), offsets).unwrap();
     let plan = DenseLinkPlan::new(storage, lengths).unwrap();
-    let image = plan.serialize(StoredAddress::new(0)).unwrap();
+    let image = if independently_placed {
+        let mut cursor = 0;
+        let addresses: Vec<_> = plan
+            .block_lengths()
+            .map(|length| {
+                let address = StoredAddress::new(cursor);
+                cursor += length + 37;
+                address
+            })
+            .collect();
+        let placement = plan.place(&addresses).unwrap();
+        let mut bytes = vec![0; usize::try_from(cursor).unwrap()];
+        for block in placement.serialize_blocks().unwrap() {
+            let (address, data) = block.unwrap();
+            let at = usize::try_from(address.get()).unwrap();
+            bytes[at..at + data.len()].copy_from_slice(&data);
+        }
+        format::DenseLinkImage {
+            bytes,
+            info: placement.link_info().clone(),
+        }
+    } else {
+        plan.serialize(StoredAddress::new(0)).unwrap()
+    };
     let mut rebuilt = dense_links(&image.bytes, &image.info, offsets, lengths);
     let mut original = links;
     rebuilt.sort_by(|a, b| a.name().cmp(b.name()));

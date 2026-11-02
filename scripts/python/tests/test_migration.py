@@ -271,6 +271,8 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "OpaqueTagTooLong", []),
         ("FormatError", "BTreeV2NodeCount", []),
         ("FormatError", "BTreeV2NodeOverlap", []),
+        ("FormatError", "DenseLinkBlockCount", []),
+        ("FormatError", "DenseLinkBlockOverlap", []),
         ("FormatError", "FractalHeapBlockCount", []),
         ("FormatError", "FractalHeapBlockOverlap", []),
         ("FormatError", "InvalidObjectHeaderChunkLength", []),
