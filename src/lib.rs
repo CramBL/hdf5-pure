@@ -439,6 +439,9 @@
 
 extern crate alloc;
 
+pub(crate) use crate::group::v1 as group_v1;
+pub(crate) use crate::group::v2 as group_v2;
+
 #[cfg(doc)]
 pub mod _guide;
 
@@ -486,8 +489,7 @@ pub(crate) mod fractal_heap_storage;
 pub(crate) mod free_sections;
 pub(crate) mod free_space_manager;
 pub(crate) mod global_heap;
-pub(crate) mod group_v1;
-pub(crate) mod group_v2;
+pub(crate) mod group;
 pub(crate) mod layout_info;
 pub(crate) mod libver;
 pub(crate) mod link_info;
