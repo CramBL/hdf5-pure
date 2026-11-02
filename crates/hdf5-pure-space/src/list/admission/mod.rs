@@ -87,7 +87,7 @@ impl FreeList {
 struct FlatAdmission {
     /// Completed admitted runs, sorted by address.
     admitted: Vec<Extent>,
-    /// Original returns from seedless completed runs and the current run.
+    /// Original returns from completed seedless runs and the current unseeded run.
     dropped: Vec<(Extent, ())>,
     /// The union of the current run's extents.
     run: Option<Extent>,
@@ -100,6 +100,9 @@ struct FlatAdmission {
 impl FlatAdmission {
     /// Extends the current run, completing it before a gap.
     ///
+    /// Buffers original returns until the first admission seed, then discards that run's
+    /// buffered originals. Retains the buffer's allocated capacity.
+    ///
     /// # Panics
     ///
     /// Panics if `extent` overlaps or precedes the current run.
@@ -107,7 +110,14 @@ impl FlatAdmission {
         if self.run.is_some_and(|run| run.end() < extent.start()) {
             self.finish_run();
         }
-        self.run = Some(match self.run {
+        let Self {
+            admitted: _,
+            dropped,
+            run,
+            seeded,
+            pending_start,
+        } = self;
+        *run = Some(match *run {
             Some(run) => {
                 assert_eq!(
                     run.end(),
@@ -119,9 +129,12 @@ impl FlatAdmission {
             }
             None => extent,
         });
-        self.seeded |= seed;
-        if returned {
-            self.dropped.push((extent, ()));
+        if seed && !*seeded {
+            dropped.truncate(*pending_start);
+            *seeded = true;
+        }
+        if returned && !*seeded {
+            dropped.push((extent, ()));
         }
     }
 

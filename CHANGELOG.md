@@ -68,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- `File::commit` reduces repeated pending-list scans and individual free-list insertions during threshold admission of returned allocations in flat and PAGE files. Flat admission stops buffering original returns once a run is eligible, retaining capacity allocated before eligibility ([#1051](https://github.com/CramBL/hdf5-pure/pull/1051)).
 - `File::open` and related constructors reduce temporary allocations and repeated reads of superblock extensions, reusing decoded metadata only while the opening source is unchanged ([#1046](https://github.com/CramBL/hdf5-pure/pull/1046)).
 
 - `File::commit` reduces temporary memory and source reads when reconstructing padded PAGE superblock extensions ([#1043](https://github.com/CramBL/hdf5-pure/pull/1043)).

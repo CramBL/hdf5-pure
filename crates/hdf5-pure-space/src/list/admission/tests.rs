@@ -8,6 +8,7 @@ use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use rstest::rstest;
 
+use super::FlatAdmission;
 use super::FreeList;
 use crate::admission::AdmissionWork;
 use crate::admission::Release;
@@ -132,6 +133,72 @@ fn high_end_seed_admission_bounds_ordering_and_complete_integration(
     if !reverse {
         assert_eq!(attempts, count * (count + 1) / 2);
         assert!(attempts > work.extent_visits * 8);
+    }
+}
+
+#[rstest]
+#[case::threshold_zero(0, Some(0), true, false)]
+#[case::threshold_one(1, Some(0), true, false)]
+#[case::eligible_low(16, Some(0), true, false)]
+#[case::tracked_low(16, Some(0), false, false)]
+#[case::eligible_middle(16, Some(2_048), true, true)]
+#[case::tracked_middle(16, Some(2_048), false, true)]
+#[case::eligible_high(16, Some(4_095), true, true)]
+#[case::tracked_high(16, Some(4_095), false, true)]
+#[case::seedless(16, None, true, true)]
+fn flat_runs_buffer_original_returns_only_until_seeded(
+    #[case] threshold: u64,
+    #[case] seed_index: Option<usize>,
+    #[case] seed_returned: bool,
+    #[case] preceding_dropped: bool,
+) {
+    let mut admission = FlatAdmission::default();
+    let prefix = if preceding_dropped {
+        admission.push(extent(0, 8), false, true);
+        admission.finish_run();
+        vec![(extent(0, 8), ())]
+    } else {
+        Vec::new()
+    };
+    let mut expected_dropped = prefix.clone();
+    let mut start = 32;
+    let mut seeded_capacity = None;
+    for index in 0..4_096 {
+        let seed = seed_index == Some(index);
+        let len = if seed && seed_returned {
+            threshold.max(8)
+        } else {
+            8
+        };
+        let returned = !seed || seed_returned;
+        let original = extent(start, len);
+        let previous_capacity = admission.dropped.capacity();
+        admission.push(original, seed, returned);
+        if seed {
+            assert_eq!(admission.dropped.capacity(), previous_capacity);
+        }
+        start += len;
+        if admission.seeded {
+            assert_eq!(admission.dropped, prefix);
+            let capacity = *seeded_capacity.get_or_insert(admission.dropped.capacity());
+            assert_eq!(admission.dropped.capacity(), capacity);
+            if seed_index == Some(0) {
+                assert_eq!(capacity, 0);
+            }
+        } else {
+            expected_dropped.push((original, ()));
+            assert_eq!(admission.dropped, expected_dropped);
+            assert!(admission.dropped.capacity() >= expected_dropped.len());
+        }
+    }
+    admission.finish_run();
+    if seed_index.is_some() {
+        assert_eq!(admission.admitted, [extent(32, start - 32)]);
+        assert_eq!(admission.dropped, prefix);
+    } else {
+        assert!(admission.admitted.is_empty());
+        assert_eq!(admission.dropped, expected_dropped);
+        assert!(admission.dropped.capacity() >= 4_097);
     }
 }
 
