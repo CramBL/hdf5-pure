@@ -439,6 +439,9 @@
 
 extern crate alloc;
 
+pub(crate) use crate::btree::v1 as btree_v1;
+pub(crate) use crate::btree::v2 as btree_v2;
+
 #[cfg(doc)]
 pub mod _guide;
 
@@ -450,8 +453,7 @@ pub(crate) mod attribute;
 pub(crate) mod attribute_info;
 mod attribute_policy;
 pub(crate) mod attribute_request;
-pub(crate) mod btree_v1;
-pub(crate) mod btree_v2;
+pub(crate) mod btree;
 pub(crate) mod bytes;
 pub(crate) mod checksum;
 pub(crate) mod chunk_cache;
