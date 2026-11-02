@@ -1,8 +1,10 @@
-//! Chunk planning within a supplied version 2 object-header allocation.
+//! Chunk planning and encoding for version 2 object-header allocations.
 
 use alloc::format;
 use alloc::vec::Vec;
 use core::ops::{Range, RangeInclusive};
+
+use hdf5_pure_core::AddressRange;
 
 use crate::address::StoredAddress;
 use crate::bytes;
@@ -16,11 +18,14 @@ use crate::width::{self, FormatWidths, UintWidth};
 use super::worklist;
 use super::{CHECKSUM_LEN, OCHK_SIGNATURE, ObjectHeaderPrefix};
 
-/// Holds checked chunk geometry for a version 2 header in one contiguous allocation.
+/// Holds checked chunk geometry and stored addresses for a version 2 object header.
 ///
-/// The plan borrows the source message records and retains their ranges and the output chunk
+/// The plan borrows the source message records and retains their ranges and the complete chunk
 /// geometry. Non-NIL records remain in chunk 0. Additional chunks contain padding, continuation
-/// records, or both. [`Self::encode`] materializes the complete allocation.
+/// records, or both. The chunks are disjoint and ordered by their continuation links.
+///
+/// [`Self::encode_chunks`] serializes one complete chunk per iteration. [`Self::encode`]
+/// concatenates those encodings in continuation order.
 ///
 /// # Examples
 ///
@@ -87,58 +92,17 @@ impl<'a> ObjectHeaderAllocation<'a> {
             .plan_allocation(address, allocation_len)
     }
 
-    /// Returns the complete allocation, with a checksum for every chunk.
+    /// Returns the complete chunk encodings concatenated in continuation order.
+    ///
+    /// The buffer length is the sum of the complete chunk lengths. Use [`Self::encode_chunks`]
+    /// to write chunks at their independently assigned addresses.
     ///
     /// Each chunk contains at most one NIL record. Nonempty padding shorter than a record prefix
     /// is a trailing gap. Checksums are emitted regardless of the reader's checksum feature.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.allocation_len);
         for (index, chunk) in self.chunks.iter().enumerate() {
-            let start = out.len();
-            if index == 0 {
-                let fixed = super::OHDR_SIGNATURE.len()
-                    + 2
-                    + self.geometry.prefix.optional_len()
-                    + usize::from(self.root_width.get())
-                    + CHECKSUM_LEN;
-                self.geometry
-                    .prefix
-                    .write_prefix(&mut out, self.root_width, chunk.len - fixed);
-                for record in &self.geometry.records {
-                    out.extend_from_slice(&self.geometry.messages[record.clone()]);
-                }
-            } else {
-                out.extend_from_slice(&OCHK_SIGNATURE);
-            }
-            let trailing_gap =
-                chunk.next.is_some() && chunk.padding < self.geometry.prefix.layout.prefix_len();
-            if !trailing_gap {
-                self.write_padding(&mut out, chunk.padding);
-            }
-            if let Some((address, len)) = chunk.next {
-                self.geometry.prefix.layout.write_record_prefix(
-                    &mut out,
-                    MessageType::OBJECT_HEADER_CONTINUATION
-                        .to_u16()
-                        .to_le_bytes()[0],
-                    MessageFlags::NONE,
-                    0,
-                    u16::from(self.geometry.widths.offsets.get())
-                        + u16::from(self.geometry.widths.lengths.get()),
-                );
-                bytes::write_offset(&mut out, address.get(), self.geometry.widths.offsets);
-                bytes::write_length(&mut out, len.to_u64(), self.geometry.widths.lengths);
-            }
-            if trailing_gap {
-                self.write_padding(&mut out, chunk.padding);
-            }
-            let checksum = checksum::jenkins_lookup3(&out[start..]);
-            out.extend_from_slice(&checksum.to_le_bytes());
-            assert_eq!(
-                out.len() - start,
-                chunk.len,
-                "a planned header chunk has its exact owned length"
-            );
+            self.encode_chunk(index, chunk, &mut out);
         }
         assert_eq!(
             out.len(),
@@ -148,14 +112,76 @@ impl<'a> ObjectHeaderAllocation<'a> {
         out
     }
 
-    /// Returns chunk addresses and complete lengths in ascending address order.
+    /// Returns each stored chunk address with its complete encoding.
     ///
-    /// Addresses are stored, base-relative addresses. The chunks are contiguous and cover the
-    /// supplied allocation, including signatures, record prefixes, and checksums.
+    /// Serializes chunks in continuation order, beginning with chunk 0. Each iteration
+    /// materializes one complete chunk, including padding and a checksum. The caller writes each
+    /// buffer at its returned stored address.
+    pub fn encode_chunks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, Vec<u8>)> + '_ {
+        self.chunks.iter().enumerate().map(|(index, chunk)| {
+            let mut out = Vec::with_capacity(chunk.len);
+            self.encode_chunk(index, chunk, &mut out);
+            (chunk.address, out)
+        })
+    }
+
+    /// Returns chunk addresses and complete lengths in continuation order, beginning with chunk 0.
+    ///
+    /// Addresses are stored and base-relative. Lengths include signatures, record prefixes, and
+    /// checksums.
     pub fn chunks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> + '_ {
         self.chunks
             .iter()
             .map(|chunk| (chunk.address, chunk.len.to_u64()))
+    }
+
+    /// Appends one complete chunk encoding and its checksum to `out`.
+    fn encode_chunk(&self, index: usize, chunk: &Chunk, out: &mut Vec<u8>) {
+        let start = out.len();
+        if index == 0 {
+            let fixed = super::OHDR_SIGNATURE.len()
+                + 2
+                + self.geometry.prefix.optional_len()
+                + usize::from(self.root_width.get())
+                + CHECKSUM_LEN;
+            self.geometry
+                .prefix
+                .write_prefix(out, self.root_width, chunk.len - fixed);
+            for record in &self.geometry.records {
+                out.extend_from_slice(&self.geometry.messages[record.clone()]);
+            }
+        } else {
+            out.extend_from_slice(&OCHK_SIGNATURE);
+        }
+        let trailing_gap =
+            chunk.next.is_some() && chunk.padding < self.geometry.prefix.layout.prefix_len();
+        if !trailing_gap {
+            self.write_padding(out, chunk.padding);
+        }
+        if let Some((address, len)) = chunk.next {
+            self.geometry.prefix.layout.write_record_prefix(
+                out,
+                MessageType::OBJECT_HEADER_CONTINUATION
+                    .to_u16()
+                    .to_le_bytes()[0],
+                MessageFlags::NONE,
+                0,
+                u16::from(self.geometry.widths.offsets.get())
+                    + u16::from(self.geometry.widths.lengths.get()),
+            );
+            bytes::write_offset(out, address.get(), self.geometry.widths.offsets);
+            bytes::write_length(out, len.to_u64(), self.geometry.widths.lengths);
+        }
+        if trailing_gap {
+            self.write_padding(out, chunk.padding);
+        }
+        let checksum = checksum::jenkins_lookup3(&out[start..]);
+        out.extend_from_slice(&checksum.to_le_bytes());
+        assert_eq!(
+            out.len() - start,
+            chunk.len,
+            "a planned header chunk has its exact owned length"
+        );
     }
 
     // H5O__chunk_deserialize in H5Ocache.c, HDF5 2.2.0, rejects gaps after NIL
@@ -164,7 +190,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
         let prefix = self.geometry.prefix.layout.prefix_len();
         if len >= prefix {
             let body = len - prefix;
-            // Both allocation constructors bound every NIL body to its two-byte field.
+            // Allocation constructors bound every NIL body to its two-byte field.
             let body = u16::try_from(body).expect("a planned NIL body fits its size field");
             self.geometry.prefix.layout.write_record_prefix(
                 out,
@@ -180,7 +206,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
     }
 }
 
-/// Holds checked message records for planning a version 2 object-header allocation.
+/// Holds checked message records for planning version 2 object-header chunks.
 ///
 /// Borrows the source records and retains the ranges of the non-NIL records. Planning keeps
 /// those records in chunk 0, in source order, with their flags and creation indices.
@@ -335,47 +361,119 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
                 length: 0,
             });
         };
-        let continued = !children.is_empty();
-        let root_width = self
-            .root_geometries(continued)
-            .find_map(|(width, range)| range.contains(&root_len).then_some(width))
-            .ok_or(FormatError::InvalidObjectHeaderChunkLength {
-                index: 0,
-                length: root_len,
-            })?;
+        let root_width = self.root_width(root_len, !children.is_empty())?;
         let mut chunks = Vec::with_capacity(lengths.len());
         for (index, &length) in lengths.iter().enumerate() {
             let next_len = lengths.get(index + 1).copied();
-            let continued = next_len.is_some();
-            let root = index == 0;
-            if !root && !self.continuation_chunk_lengths(continued).contains(&length) {
-                return Err(FormatError::InvalidObjectHeaderChunkLength { index, length });
-            }
-            let fixed = if root {
-                self.root_fixed(root_width) + self.records_len
-            } else {
-                OCHK_SIGNATURE.len() + CHECKSUM_LEN
-            };
             let next_address = address.checked_add(length)?;
-            let len = length.to_usize()?;
-            let next = match next_len {
-                Some(length) => Some((next_address, length.to_usize()?)),
-                None => None,
-            };
-            chunks.push(Chunk {
-                address,
-                len,
-                padding: len
-                    - fixed
-                    - if continued {
-                        self.continuation_len()
-                    } else {
-                        0
-                    },
-                remaining: None,
-                next,
-            });
+            let next = next_len
+                .map(|length| length.to_usize().map(|len| (next_address, len)))
+                .transpose()?;
+            chunks.push(self.chunk(index, root_width, address, length, next)?);
             address = next_address;
+        }
+        Ok(ObjectHeaderAllocation {
+            geometry: self,
+            root_width,
+            chunks,
+            allocation_len,
+        })
+    }
+
+    /// Plans complete chunks at the caller's stored allocation ranges.
+    ///
+    /// `allocations` begins with chunk 0, followed by continuation chunks in link order. The
+    /// ranges may be physically separated or in decreasing address order. Each range includes
+    /// all signatures, prefixes, records, padding, and checksums for its chunk. Retained records
+    /// remain in chunk 0, in source order, with their flags and creation indices.
+    ///
+    /// Choose lengths from [`Self::root_chunk_lengths`] and [`Self::continuation_chunk_lengths`].
+    /// The caller establishes allocation ownership, availability, and any PAGE placement policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::NestingDepthExceeded`] if more than 256 chunks are supplied, and
+    /// [`FormatError::InvalidObjectHeaderChunkLength`] if `allocations` is empty or a chunk
+    /// cannot represent its records in the supplied length.
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the combined encoding length cannot
+    /// be materialized on this host, [`FormatError::AddressTooLarge`] or
+    /// [`FormatError::DefinedAddressIsUndefined`] if an endpoint is not a defined address at the
+    /// output width, and [`FormatError::ObjectHeaderChunkOverlap`] if complete chunk ranges
+    /// overlap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::AddressRange;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::FormatWidths;
+    /// use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
+    /// use hdf5_pure_format::__private::ObjectHeaderPrefix;
+    ///
+    /// let geometry = ObjectHeaderAllocationGeometry::new(
+    ///     ObjectHeaderPrefix::PLAIN,
+    ///     FormatWidths::from_sizes(8, 8)?,
+    ///     &[],
+    /// )?;
+    /// let allocations = [
+    ///     AddressRange::new(StoredAddress::new(128), 64)?,
+    ///     AddressRange::new(StoredAddress::new(4_096), 32)?,
+    ///     AddressRange::new(StoredAddress::new(2_048), 16)?,
+    /// ];
+    /// let plan = geometry.into_placed_allocation(allocations.iter().copied())?;
+    /// for (allocation, (address, bytes)) in allocations.into_iter().zip(plan.encode_chunks()) {
+    ///     assert_eq!(address, allocation.start());
+    ///     assert_eq!(bytes.len() as u64, allocation.length());
+    /// }
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub fn into_placed_allocation(
+        self,
+        allocations: impl ExactSizeIterator<Item = AddressRange<StoredAddress>>,
+    ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
+        if allocations.len() > worklist::MAX_CONTINUATIONS {
+            return Err(FormatError::NestingDepthExceeded);
+        }
+        let mut allocations = allocations.peekable();
+        let root_len = allocations.peek().map_or(0, |range| range.length());
+        let root_width = self.root_width(root_len, allocations.len() > 1)?;
+        let mut chunks = Vec::with_capacity(allocations.len());
+        let mut allocation_len = 0_usize;
+        while let Some(range) = allocations.next() {
+            let len = Self::allocation_len(self.widths, range.start(), range.length())?;
+            allocation_len = allocation_len
+                .checked_add(len)
+                .filter(|&len| len <= isize::MAX as usize)
+                .ok_or(FormatError::ValueTooLargeForPlatform {
+                    value: allocation_len.to_u64().saturating_add(range.length()),
+                    target: "object header allocation",
+                })?;
+            let next = allocations
+                .peek()
+                .map(|range| range.length().to_usize().map(|len| (range.start(), len)))
+                .transpose()?;
+            chunks.push(self.chunk(
+                chunks.len(),
+                root_width,
+                range.start(),
+                range.length(),
+                next,
+            )?);
+        }
+        let mut order = (0..chunks.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&index| (chunks[index].address, index));
+        for pair in order.windows(2) {
+            let first = pair[0];
+            let second = pair[1];
+            if chunks[first]
+                .address
+                .checked_add(chunks[first].len.to_u64())?
+                > chunks[second].address
+            {
+                return Err(FormatError::ObjectHeaderChunkOverlap { first, second });
+            }
         }
         Ok(ObjectHeaderAllocation {
             geometry: self,
@@ -478,6 +576,48 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         )))
     }
 
+    fn root_width(&self, length: u64, continued: bool) -> Result<UintWidth, FormatError> {
+        self.root_geometries(continued)
+            .find_map(|(width, range)| range.contains(&length).then_some(width))
+            .ok_or(FormatError::InvalidObjectHeaderChunkLength { index: 0, length })
+    }
+
+    fn chunk(
+        &self,
+        index: usize,
+        root_width: UintWidth,
+        address: StoredAddress,
+        length: u64,
+        next: Option<(StoredAddress, usize)>,
+    ) -> Result<Chunk, FormatError> {
+        if index != 0
+            && !self
+                .continuation_chunk_lengths(next.is_some())
+                .contains(&length)
+        {
+            return Err(FormatError::InvalidObjectHeaderChunkLength { index, length });
+        }
+        let fixed = if index == 0 {
+            self.root_fixed(root_width) + self.records_len
+        } else {
+            OCHK_SIGNATURE.len() + CHECKSUM_LEN
+        };
+        let len = length.to_usize()?;
+        Ok(Chunk {
+            address,
+            len,
+            padding: len
+                - fixed
+                - if next.is_some() {
+                    self.continuation_len()
+                } else {
+                    0
+                },
+            remaining: None,
+            next,
+        })
+    }
+
     fn root_geometries(
         &self,
         continued: bool,
@@ -559,13 +699,13 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
     }
 }
 
-/// Holds one chunk's geometry while dividing the allocation.
+/// Complete chunk geometry and its planned continuation target.
 #[derive(Debug)]
 struct Chunk {
     address: StoredAddress,
     len: usize,
     padding: usize,
-    /// The complete bytes reserved for subsequent chunks.
+    /// The complete length reserved for subsequent chunks, in bytes.
     remaining: Option<usize>,
     /// The address and complete length of the next chunk, once planned.
     next: Option<(StoredAddress, usize)>,

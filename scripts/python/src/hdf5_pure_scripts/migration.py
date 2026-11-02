@@ -303,6 +303,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidOpaqueTagLength",
             "InvalidOpaqueTagPadding",
             "ObjectHeaderAllocationLengthMismatch",
+            "ObjectHeaderChunkOverlap",
             "OpaqueTagTooLong",
             "InvalidSoftLinkEncoding",
             "InvalidSoftLinkTarget",
