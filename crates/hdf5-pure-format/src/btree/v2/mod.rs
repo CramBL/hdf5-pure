@@ -36,6 +36,8 @@ use crate::metadata_source::MetadataSource;
 use crate::shared_message::FHEAP_ID_LEN;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
+pub(crate) mod write;
+
 /// A version 2 B-tree header, signature `BTHD`: the geometry every node of the tree shares, and
 /// the address of the root node.
 ///
