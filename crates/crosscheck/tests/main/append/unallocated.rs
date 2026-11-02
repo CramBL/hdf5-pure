@@ -332,7 +332,7 @@ impl Creation {
     fn write(self, path: &Path, filtered: bool, paged: bool, count: usize, unallocated: bool) {
         let configure = |dataset: &mut DatasetBuilder| {
             if unallocated {
-                dataset.with_unallocated_storage(hdf5_pure::make_i32_type(), &[0]);
+                dataset.with_unallocated_storage_for::<i32>(&[0]);
             } else {
                 dataset.with_i32_data(&[]).with_shape(&[0]);
             }
