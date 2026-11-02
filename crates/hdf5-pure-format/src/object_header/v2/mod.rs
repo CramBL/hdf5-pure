@@ -35,6 +35,7 @@ mod splice;
 mod worklist;
 
 pub use allocation::ObjectHeaderAllocation;
+pub use allocation::ObjectHeaderAllocationGeometry;
 pub use splice::RecordSplice;
 
 impl ObjectHeader {

@@ -45,10 +45,7 @@ use super::{CHECKSUM_LEN, OCHK_SIGNATURE, ObjectHeaderPrefix};
 /// ```
 #[derive(Debug)]
 pub struct ObjectHeaderAllocation<'a> {
-    prefix: ObjectHeaderPrefix,
-    widths: FormatWidths,
-    messages: &'a [u8],
-    records: Vec<Range<usize>>,
+    geometry: ObjectHeaderAllocationGeometry<'a>,
     root_width: UintWidth,
     chunks: Vec<Chunk>,
     allocation_len: usize,
@@ -84,15 +81,126 @@ impl<'a> ObjectHeaderAllocation<'a> {
         allocation_len: u64,
         messages: &'a [u8],
     ) -> Result<Self, FormatError> {
-        if allocation_len > isize::MAX as u64 {
-            return Err(FormatError::ValueTooLargeForPlatform {
-                value: allocation_len,
-                target: "object header allocation",
-            });
+        let allocation_len =
+            ObjectHeaderAllocationGeometry::allocation_len(widths, address, allocation_len)?;
+        ObjectHeaderAllocationGeometry::new(prefix, widths, messages)?
+            .plan_allocation(address, allocation_len)
+    }
+
+    /// Returns the complete allocation, with a checksum for every chunk.
+    ///
+    /// Each chunk contains at most one NIL record. Nonempty padding shorter than a record prefix
+    /// is a trailing gap. Checksums are emitted regardless of the reader's checksum feature.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.allocation_len);
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            let start = out.len();
+            if index == 0 {
+                let fixed = super::OHDR_SIGNATURE.len()
+                    + 2
+                    + self.geometry.prefix.optional_len()
+                    + usize::from(self.root_width.get())
+                    + CHECKSUM_LEN;
+                self.geometry
+                    .prefix
+                    .write_prefix(&mut out, self.root_width, chunk.len - fixed);
+                for record in &self.geometry.records {
+                    out.extend_from_slice(&self.geometry.messages[record.clone()]);
+                }
+            } else {
+                out.extend_from_slice(&OCHK_SIGNATURE);
+            }
+            self.write_padding(&mut out, chunk.padding);
+            if let Some((address, len)) = chunk.next {
+                self.geometry.prefix.layout.write_record_prefix(
+                    &mut out,
+                    MessageType::OBJECT_HEADER_CONTINUATION
+                        .to_u16()
+                        .to_le_bytes()[0],
+                    MessageFlags::NONE,
+                    0,
+                    u16::from(self.geometry.widths.offsets.get())
+                        + u16::from(self.geometry.widths.lengths.get()),
+                );
+                bytes::write_offset(&mut out, address.get(), self.geometry.widths.offsets);
+                bytes::write_length(&mut out, len.to_u64(), self.geometry.widths.lengths);
+            }
+            let checksum = checksum::jenkins_lookup3(&out[start..]);
+            out.extend_from_slice(&checksum.to_le_bytes());
+            assert_eq!(
+                out.len() - start,
+                chunk.len,
+                "a planned header chunk has its exact owned length"
+            );
         }
-        let end = address.checked_add(allocation_len)?;
-        Self::require_address(widths, address)?;
-        Self::require_address(widths, end)?;
+        assert_eq!(
+            out.len(),
+            self.allocation_len,
+            "header chunks cover the complete allocation"
+        );
+        out
+    }
+
+    /// Returns chunk addresses and complete lengths in ascending address order.
+    ///
+    /// Addresses are stored, base-relative addresses. The chunks are contiguous and cover the
+    /// supplied allocation, including signatures, record prefixes, and checksums.
+    pub fn chunks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> + '_ {
+        self.chunks
+            .iter()
+            .map(|chunk| (chunk.address, chunk.len.to_u64()))
+    }
+
+    // H5O__chunk_deserialize in H5Ocache.c, HDF5 2.2.0, rejects gaps after NIL
+    // records and coalesces adjacent NIL records on read-write opening within each chunk.
+    fn write_padding(&self, out: &mut Vec<u8>, len: usize) {
+        let prefix = self.geometry.prefix.layout.prefix_len();
+        if len >= prefix {
+            let body = len - prefix;
+            // Chunk::new bounds every NIL body to its two-byte field.
+            let body = u16::try_from(body).expect("a planned NIL body fits its size field");
+            self.geometry.prefix.layout.write_record_prefix(
+                out,
+                MessageType::NIL.to_u16().to_le_bytes()[0],
+                MessageFlags::NONE,
+                0,
+                body,
+            );
+            out.resize(out.len() + usize::from(body), 0);
+        } else {
+            out.resize(out.len() + len, 0);
+        }
+    }
+}
+
+/// Holds checked message records for planning a version 2 object-header allocation.
+///
+/// Borrows the source records and retains the ranges of the non-NIL records. Planning keeps
+/// those records in chunk 0, in source order, with their flags and creation indices.
+#[derive(Debug)]
+pub struct ObjectHeaderAllocationGeometry<'a> {
+    prefix: ObjectHeaderPrefix,
+    widths: FormatWidths,
+    messages: &'a [u8],
+    records: Vec<Range<usize>>,
+    records_len: usize,
+}
+
+impl<'a> ObjectHeaderAllocationGeometry<'a> {
+    /// Parses the records once for subsequent allocation planning.
+    ///
+    /// The caller passes records in `prefix.layout`, with source continuations already flattened.
+    /// Discards NIL records and trailing bytes shorter than a record prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a message body extends beyond `messages`, and
+    /// [`FormatError::Internal`] if `messages` contains a continuation record.
+    pub fn new(
+        prefix: ObjectHeaderPrefix,
+        widths: FormatWidths,
+        messages: &'a [u8],
+    ) -> Result<Self, FormatError> {
         let mut records = Vec::new();
         let mut records_len = 0;
         let mut start = 0;
@@ -109,7 +217,47 @@ impl<'a> ObjectHeaderAllocation<'a> {
             }
             start = end;
         }
-        let allocation_len = allocation_len.to_usize()?;
+        Ok(Self {
+            prefix,
+            widths,
+            messages,
+            records,
+            records_len,
+        })
+    }
+
+    /// Plans contiguous chunks that cover the complete supplied allocation.
+    ///
+    /// The caller establishes ownership and availability of the allocation and passes a stored,
+    /// base-relative `address`. Equivalent to [`ObjectHeaderAllocation::new`] with the records
+    /// parsed by [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the allocation cannot be materialized
+    /// on this host, [`FormatError::OffsetOverflow`] if its exclusive end exceeds [`u64::MAX`],
+    /// and [`FormatError::AddressTooLarge`] or [`FormatError::DefinedAddressIsUndefined`] if either
+    /// endpoint is not a defined address at the output width.
+    ///
+    /// Returns [`FormatError::Internal`] if the allocation cannot represent the header, and
+    /// [`FormatError::NestingDepthExceeded`] if more than 256 chunks, including chunk 0, are required.
+    pub fn into_allocation(
+        self,
+        address: StoredAddress,
+        allocation_len: u64,
+    ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
+        let allocation_len = Self::allocation_len(self.widths, address, allocation_len)?;
+        self.plan_allocation(address, allocation_len)
+    }
+
+    fn plan_allocation(
+        self,
+        address: StoredAddress,
+        allocation_len: usize,
+    ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
+        let prefix = self.prefix;
+        let widths = self.widths;
+        let records_len = self.records_len;
         for root_width in [
             UintWidth::One,
             UintWidth::Two,
@@ -151,11 +299,8 @@ impl<'a> ObjectHeaderAllocation<'a> {
                 chunk = next;
             }
             chunks.push(chunk);
-            return Ok(Self {
-                prefix,
-                widths,
-                messages,
-                records,
+            return Ok(ObjectHeaderAllocation {
+                geometry: self,
                 root_width,
                 chunks,
                 allocation_len,
@@ -166,66 +311,21 @@ impl<'a> ObjectHeaderAllocation<'a> {
         )))
     }
 
-    /// Returns the complete allocation, with a checksum for every chunk.
-    ///
-    /// Each chunk contains at most one NIL record. Nonempty padding shorter than a record prefix
-    /// is a trailing gap. Checksums are emitted regardless of the reader's checksum feature.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.allocation_len);
-        for (index, chunk) in self.chunks.iter().enumerate() {
-            let start = out.len();
-            if index == 0 {
-                let fixed = super::OHDR_SIGNATURE.len()
-                    + 2
-                    + self.prefix.optional_len()
-                    + usize::from(self.root_width.get())
-                    + CHECKSUM_LEN;
-                self.prefix
-                    .write_prefix(&mut out, self.root_width, chunk.len - fixed);
-                for record in &self.records {
-                    out.extend_from_slice(&self.messages[record.clone()]);
-                }
-            } else {
-                out.extend_from_slice(&OCHK_SIGNATURE);
-            }
-            self.write_padding(&mut out, chunk.padding);
-            if let Some((address, len)) = chunk.next {
-                self.prefix.layout.write_record_prefix(
-                    &mut out,
-                    MessageType::OBJECT_HEADER_CONTINUATION
-                        .to_u16()
-                        .to_le_bytes()[0],
-                    MessageFlags::NONE,
-                    0,
-                    u16::from(self.widths.offsets.get()) + u16::from(self.widths.lengths.get()),
-                );
-                bytes::write_offset(&mut out, address.get(), self.widths.offsets);
-                bytes::write_length(&mut out, len.to_u64(), self.widths.lengths);
-            }
-            let checksum = checksum::jenkins_lookup3(&out[start..]);
-            out.extend_from_slice(&checksum.to_le_bytes());
-            assert_eq!(
-                out.len() - start,
-                chunk.len,
-                "a planned header chunk has its exact owned length"
-            );
+    fn allocation_len(
+        widths: FormatWidths,
+        address: StoredAddress,
+        allocation_len: u64,
+    ) -> Result<usize, FormatError> {
+        if allocation_len > isize::MAX as u64 {
+            return Err(FormatError::ValueTooLargeForPlatform {
+                value: allocation_len,
+                target: "object header allocation",
+            });
         }
-        assert_eq!(
-            out.len(),
-            self.allocation_len,
-            "header chunks cover the complete allocation"
-        );
-        out
-    }
-
-    /// Returns chunk addresses and complete lengths in ascending address order.
-    ///
-    /// Addresses are stored, base-relative addresses. The chunks are contiguous and cover the
-    /// supplied allocation, including signatures, record prefixes, and checksums.
-    pub fn chunks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> + '_ {
-        self.chunks
-            .iter()
-            .map(|chunk| (chunk.address, chunk.len.to_u64()))
+        let end = address.checked_add(allocation_len)?;
+        Self::require_address(widths, address)?;
+        Self::require_address(widths, end)?;
+        allocation_len.to_usize()
     }
 
     fn require_address(widths: FormatWidths, address: StoredAddress) -> Result<(), FormatError> {
@@ -242,27 +342,6 @@ impl<'a> ObjectHeaderAllocation<'a> {
             });
         }
         Ok(())
-    }
-
-    // H5O__chunk_deserialize in H5Ocache.c, HDF5 2.2.0, rejects gaps after NIL
-    // records and coalesces adjacent NIL records on read-write opening within each chunk.
-    fn write_padding(&self, out: &mut Vec<u8>, len: usize) {
-        let prefix = self.prefix.layout.prefix_len();
-        if len >= prefix {
-            let body = len - prefix;
-            // Chunk::new bounds every NIL body to its two-byte field.
-            let body = u16::try_from(body).expect("a planned NIL body fits its size field");
-            self.prefix.layout.write_record_prefix(
-                out,
-                MessageType::NIL.to_u16().to_le_bytes()[0],
-                MessageFlags::NONE,
-                0,
-                body,
-            );
-            out.resize(out.len() + usize::from(body), 0);
-        } else {
-            out.resize(out.len() + len, 0);
-        }
     }
 }
 
