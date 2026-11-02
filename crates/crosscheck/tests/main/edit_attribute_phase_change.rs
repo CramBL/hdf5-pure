@@ -23,6 +23,7 @@ use hdf5_pure_format::__private::{
 use rstest::rstest;
 
 use test_util_hdf5::heap_allocations;
+use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::space_ownership::{self, SharedStorage};
 use test_util_hdf5::storage;
 
@@ -433,6 +434,155 @@ fn oversized_survivor_keeps_dense_attribute_storage(
                     .unwrap()
                     .name(),
                 name
+            );
+        }
+    }
+    drop(location);
+    native.close().unwrap();
+}
+
+#[rstest]
+#[case::compact(32, 1, false)]
+#[case::dense(33, 9, true)]
+fn repack_preserves_attribute_policy_form_and_creation_metadata(
+    #[case] initial: usize,
+    #[case] removed: usize,
+    #[case] dense: bool,
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+    #[values(
+        AttrCreationOrder::Untracked,
+        AttrCreationOrder::Tracked,
+        AttrCreationOrder::Indexed
+    )]
+    order: AttrCreationOrder,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("repacked.h5");
+    create_fixture(&source, owner, order, 32, 24, initial);
+    let times = {
+        let native = hdf5::File::open_rw(&source).unwrap();
+        let location = owner.location(&native);
+        for index in 0..removed {
+            location.delete_attr(&attr_name(index)).unwrap();
+        }
+        let info = location.loc_info().unwrap();
+        let times = (info.atime, info.mtime, info.ctime, info.btime);
+        drop(location);
+        native.close().unwrap();
+        times
+    };
+    let prefix = read_header(&source, owner).0;
+    assert!(prefix.times.is_some());
+    let mut values: BTreeMap<_, _> = (removed..initial)
+        .map(|index| {
+            (
+                attr_name(index),
+                (i64::try_from(index).unwrap(), u32::try_from(index).unwrap()),
+            )
+        })
+        .collect();
+    assert_reconstruction(&source, owner, order, dense, initial, &values);
+    let file = backend.open(&source).unwrap();
+    hdf5_pure::repack_to_path(&file, &destination, &hdf5_pure::RepackOptions::new()).unwrap();
+    file.close().unwrap();
+    assert_eq!(read_header(&destination, owner).0, prefix);
+    assert_reconstruction(&destination, owner, order, dense, initial, &values);
+    {
+        let native = hdf5::File::open(&destination).unwrap();
+        let info = owner.location(&native).loc_info().unwrap();
+        assert_eq!((info.atime, info.mtime, info.ctime, info.btime), times);
+        native.close().unwrap();
+    }
+    let mut next = initial;
+    {
+        let file = File::open_rw(&destination).unwrap();
+        if dense {
+            owner.remove_attribute(&file, &attr_name(removed));
+            values.remove(&attr_name(removed)).unwrap();
+        } else {
+            owner.set_attribute(&file, "new000", AttrValue::I64(71));
+            values.insert("new000".into(), (71, u32::try_from(next).unwrap()));
+            next += 1;
+        }
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    assert_reconstruction(&destination, owner, order, false, next, &values);
+    {
+        let file = File::open_rw(&destination).unwrap();
+        for index in 0..(33 - values.len()) {
+            let name = format!("added{index:03}");
+            let value = i64::try_from(index).unwrap() + 100;
+            owner.set_attribute(&file, &name, AttrValue::I64(value));
+            values.insert(name, (value, u32::try_from(next).unwrap()));
+            next += 1;
+        }
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    assert_reconstruction(&destination, owner, order, true, next, &values);
+}
+
+fn assert_reconstruction(
+    path: &Path,
+    owner: Owner,
+    order: AttrCreationOrder,
+    dense: bool,
+    next: usize,
+    values: &BTreeMap<String, (i64, u32)>,
+) {
+    assert_eq!(
+        inspect_storage(path, owner, dense, order, next),
+        Some((32, 24))
+    );
+    {
+        let file = File::open(path).unwrap();
+        assert_eq!(
+            owner.attributes(&file),
+            values
+                .iter()
+                .map(|(name, (value, _))| (name.clone(), AttrValue::I64(*value)))
+                .collect()
+        );
+        if matches!(owner, Owner::Dataset) {
+            assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [19]);
+        }
+    }
+    let native = hdf5::File::open(path).unwrap();
+    let location = owner.location(&native);
+    assert_eq!(owner.native_policy(&native), (32, 24));
+    assert_eq!(
+        location.attr_names().unwrap(),
+        values.keys().cloned().collect::<Vec<_>>()
+    );
+    for (name, (value, index)) in values {
+        assert_eq!(
+            location.attr(name).unwrap().read_scalar::<i64>().unwrap(),
+            *value
+        );
+        if !matches!(order, AttrCreationOrder::Untracked) {
+            assert_eq!(
+                location.attr_info(name).unwrap().creation_order,
+                Some(*index)
+            );
+        }
+    }
+    if !matches!(order, AttrCreationOrder::Untracked) {
+        let mut ordered: Vec<_> = values.iter().collect();
+        ordered.sort_unstable_by_key(|(_, (_, index))| *index);
+        for (position, (name, _)) in ordered.into_iter().enumerate() {
+            assert_eq!(
+                location
+                    .attr_by_index(
+                        hdf5::IndexType::CreationOrder,
+                        hdf5::IterationOrder::Increasing,
+                        u64::try_from(position).unwrap()
+                    )
+                    .unwrap()
+                    .name(),
+                *name
             );
         }
     }
@@ -1085,6 +1235,7 @@ fn create_fixture(
         }
         Owner::Dataset => {
             file.new_dataset::<i32>()
+                .obj_track_times(true)
                 .with_dcpl(|p| {
                     p.attr_phase_change(u32::from(maximum), u32::from(minimum))
                         .attr_creation_order(order)

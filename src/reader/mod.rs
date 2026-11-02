@@ -56,7 +56,6 @@ use crate::LinkPhaseChange;
 use crate::SuperblockVersion;
 use crate::appender::{BufferedAppender, OwnedBufferedAppender};
 use crate::attribute;
-use crate::attribute::AttributeMessage;
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
@@ -70,6 +69,7 @@ use crate::extension::OpeningMetadata;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolicy};
 use crate::file_space_info::FileSpaceInfo;
+use crate::file_writer::source::AttributeReconstruction;
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_sections::FreeSections;
@@ -2447,6 +2447,27 @@ impl FileInner {
         .map_err(Error::Format)
     }
 
+    /// Reads attributes in name order with checked reconstruction metadata.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source-read, attribute-decoding, and [`AttributeReconstruction::new`] errors.
+    fn reconstruction_attributes_of(
+        &self,
+        header: &ObjectHeader,
+    ) -> Result<AttributeReconstruction, Error> {
+        let stored = self.with_opened_source(|source| {
+            attribute::extract_stored_attributes_from_source(
+                source,
+                self.access_mode(),
+                header,
+                self.widths,
+                self.sohm_table.as_deref(),
+            )
+        })?;
+        AttributeReconstruction::new(header, stored, self.widths.offsets)
+    }
+
     /// Read a dataset's raw bytes for the given layout, dispatching on the backend.
     fn read_dataset_raw(
         &self,
@@ -4170,7 +4191,7 @@ impl File {
         ))
     }
 
-    /// Reads attributes and effective Group Info from the object header at `header`.
+    /// Reads attributes, reconstruction metadata, and effective Group Info at `header`.
     ///
     /// Consumes `parsed` under the source, address, and revision checks of [`ParsedHeader`].
     /// For streaming sources, the reader retains Attribute, Attribute Info, and Group Info
@@ -4184,7 +4205,7 @@ impl File {
         &self,
         header: PhysicalAddress,
         parsed: Option<ParsedHeader>,
-    ) -> Result<(Vec<AttributeMessage>, GroupInfo), Error> {
+    ) -> Result<(AttributeReconstruction, GroupInfo), Error> {
         let parsed = parsed
             .map(|parsed| parsed.reuse(self, header))
             .transpose()?
@@ -4211,7 +4232,7 @@ impl File {
             (None, _) => self.inner.parse_header(header.get())?,
         };
         Ok((
-            self.inner.attr_messages_of(&header)?,
+            self.inner.reconstruction_attributes_of(&header)?,
             self.inner.group_info_of(&header)?,
         ))
     }
@@ -7554,6 +7575,16 @@ the same commit to replace it",
     /// decoded map.
     pub(crate) fn attr_messages(&self) -> Result<Vec<crate::attribute::AttributeMessage>, Error> {
         self.file.attr_messages_of(&self.resolved()?.header)
+    }
+
+    /// Reads this dataset's attributes with checked storage and creation metadata.
+    ///
+    /// # Errors
+    ///
+    /// Propagates object resolution, attribute-reading, and reconstruction-metadata errors.
+    pub(crate) fn reconstruction_attributes(&self) -> Result<AttributeReconstruction, Error> {
+        self.file
+            .reconstruction_attributes_of(&self.resolved()?.header)
     }
 
     /// Returns the exact HDF5 datatype, including compound field offsets and

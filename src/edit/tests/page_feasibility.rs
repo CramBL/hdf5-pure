@@ -213,6 +213,7 @@ impl WriteEngine {
             dataset.fill_time,
             dataset.fill.as_deref(),
             self.libver(),
+            file_writer::HeaderOptions::PLAIN,
         )
         .unwrap();
         let header = self

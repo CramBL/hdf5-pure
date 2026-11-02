@@ -215,7 +215,8 @@ mod tests {
             let attributes = file
                 .attr_messages_and_group_info_at(address, header)
                 .unwrap()
-                .0;
+                .0
+                .messages;
             assert_eq!(attributes.len(), 1);
             assert_eq!(attributes[0].name, "index");
             assert_eq!(

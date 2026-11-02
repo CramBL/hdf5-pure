@@ -199,8 +199,7 @@ pub struct StoredAttribute {
     pub message: AttributeMessage,
     /// Its creation index: the object-header message record's field for a
     /// compact attribute, the name index record's for a dense one. `None`
-    /// where the object does not track attribute creation order — which is
-    /// every object this crate's own whole-file writer produces.
+    /// where the object does not track attribute creation order.
     pub creation_index: Option<u16>,
 }
 

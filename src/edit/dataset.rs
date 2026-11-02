@@ -211,6 +211,7 @@ impl WriteEngine {
                 fd.fill_time,
                 fd.fill.as_deref(),
                 self.libver(),
+                file_writer::HeaderOptions::PLAIN,
             )?
         };
         self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
@@ -1059,6 +1060,7 @@ impl WriteEngine {
             attr_info.as_deref(),
             fill_time,
             fd.fill.as_deref(),
+            file_writer::HeaderOptions::PLAIN,
         )?)
     }
 
