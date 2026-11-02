@@ -9,6 +9,7 @@ mod ownership;
 mod page_feasibility;
 mod page_header_reclamation;
 mod page_manager_tail;
+mod page_padding;
 mod persisted;
 mod publication;
 mod space;

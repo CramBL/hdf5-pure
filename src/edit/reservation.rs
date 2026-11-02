@@ -8,7 +8,6 @@ use hdf5_pure_space::__private::{
 };
 
 use crate::address::{AddressContext, StoredAddress};
-use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
 
 use super::aggregation::AggregateSpace;
@@ -191,17 +190,7 @@ impl<'a> ReservationPlan<'a> {
     ) -> Result<(), Error> {
         if let Some(transition) = transition {
             if let PageTransition::Pad { extent, .. } = transition {
-                let start = engine.context.addresses().resolve(extent.start())?.get();
-                if engine.image.len() != start {
-                    return Err(FormatError::Internal(
-                        "planned PAGE padding does not begin at the image end".into(),
-                    )
-                    .into());
-                }
-                let length = extent.len().to_usize()?;
-                #[cfg(test)]
-                super::observations::record_zeros(length.to_u64(), length);
-                engine.append(&vec![0; length])?;
+                engine.pad_page_extent(extent)?;
             }
             engine.space.record_transition(page_type, transition);
         }
