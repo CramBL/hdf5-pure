@@ -31,9 +31,9 @@
 use crate::data_read::{NumericDecoder, NumericReadTarget};
 use crate::datatype::Datatype;
 use crate::edit::AppendBuilder;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::reader::Dataset;
-use crate::type_builders::DatasetBuilder;
+use crate::type_builders::{self, DatasetBuilder};
 
 mod fixed_ascii;
 mod fixed_bytes;
@@ -98,6 +98,39 @@ mod sealed {
 /// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 pub trait H5Element: sealed::Sealed + Copy {
+    /// Returns the datatype used to write an element of this type.
+    ///
+    /// The writer uses little-endian storage for numeric types. It stores a byte array as a
+    /// one-dimensional HDF5 array of unsigned bytes, and [`FixedAscii`] as a fixed-width,
+    /// null-padded ASCII string. The array dimension and string width are part of one
+    /// element's datatype, independently of the dataset's shape.
+    ///
+    /// Constructs datatype metadata without constructing or encoding an element. Numeric
+    /// reads also support the conversions described by [`Dataset::read`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ZeroSizedDatatype`] for a zero-width byte array, or
+    /// [`FormatError::ZeroFixedStringWidth`] for a zero-width [`FixedAscii`]. Returns
+    /// [`FormatError::ValueTooLargeForRepresentation`] if either width exceeds [`u32::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, H5Element};
+    ///
+    /// let datatype = <[u8; 4]>::datatype()?;
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("bytes")
+    ///     .with_unallocated_storage(datatype.clone(), &[0]);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// let dataset = file.dataset("bytes")?;
+    /// assert_eq!(dataset.datatype()?, datatype);
+    /// assert_eq!(dataset.shape()?, [0]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    fn datatype() -> Result<Datatype, FormatError>;
+
     /// Reads every element of `ds` as `Self`, in row-major order.
     ///
     /// # Errors
@@ -160,13 +193,17 @@ pub trait H5Element: sealed::Sealed + Copy {
 }
 
 macro_rules! impl_h5_element {
-    ($ty:ty, $read:ident, $write:ident, $append:ident) => {
+    ($ty:ty, $datatype:ident, $read:ident, $write:ident, $append:ident) => {
         impl sealed::Sealed for $ty {
             fn convert_scalar(raw: &[u8], datatype: &Datatype) -> Result<Self, Error> {
                 Ok(NumericDecoder::parse(datatype)?.scalar(raw)?.decode()?)
             }
         }
         impl H5Element for $ty {
+            fn datatype() -> Result<Datatype, FormatError> {
+                Ok(type_builders::$datatype())
+            }
+
             fn read_from(ds: &Dataset) -> Result<Vec<Self>, Error> {
                 ds.$read()
             }
@@ -186,16 +223,16 @@ macro_rules! impl_h5_element {
     };
 }
 
-impl_h5_element!(f32, read_f32, with_f32_data, append_f32);
-impl_h5_element!(f64, read_f64, with_f64_data, append_f64);
-impl_h5_element!(i8, read_i8, with_i8_data, append_i8);
-impl_h5_element!(i16, read_i16, with_i16_data, append_i16);
-impl_h5_element!(i32, read_i32, with_i32_data, append_i32);
-impl_h5_element!(i64, read_i64, with_i64_data, append_i64);
-impl_h5_element!(u8, read_u8, with_u8_data, append_u8);
-impl_h5_element!(u16, read_u16, with_u16_data, append_u16);
-impl_h5_element!(u32, read_u32, with_u32_data, append_u32);
-impl_h5_element!(u64, read_u64, with_u64_data, append_u64);
+impl_h5_element!(f32, make_f32_type, read_f32, with_f32_data, append_f32);
+impl_h5_element!(f64, make_f64_type, read_f64, with_f64_data, append_f64);
+impl_h5_element!(i8, make_i8_type, read_i8, with_i8_data, append_i8);
+impl_h5_element!(i16, make_i16_type, read_i16, with_i16_data, append_i16);
+impl_h5_element!(i32, make_i32_type, read_i32, with_i32_data, append_i32);
+impl_h5_element!(i64, make_i64_type, read_i64, with_i64_data, append_i64);
+impl_h5_element!(u8, make_u8_type, read_u8, with_u8_data, append_u8);
+impl_h5_element!(u16, make_u16_type, read_u16, with_u16_data, append_u16);
+impl_h5_element!(u32, make_u32_type, read_u32, with_u32_data, append_u32);
+impl_h5_element!(u64, make_u64_type, read_u64, with_u64_data, append_u64);
 
 impl DatasetBuilder {
     /// Sets the dataset's datatype from `T` and copies its elements in row-major order.
@@ -233,7 +270,7 @@ impl DatasetBuilder {
     ///
     /// The writer stores the value in the dataset's datatype and checks its byte width when
     /// preparing the dataset. A width mismatch is reported as
-    /// [`FormatError::FillValueSizeMismatch`](crate::FormatError::FillValueSizeMismatch).
+    /// [`FormatError::FillValueSizeMismatch`].
     /// Use the dataset's element type to encode the fill value. The default is zero.
     ///
     /// # Examples
@@ -267,7 +304,7 @@ impl Dataset {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the stored datatype is unsupported for `T` or the element
-    /// width is invalid. Returns [`FormatError::InvalidAscii`](crate::FormatError::InvalidAscii)
+    /// width is invalid. Returns [`FormatError::InvalidAscii`]
     /// through [`Error::Format`] if a byte read into [`FixedAscii`] is outside ASCII. The byte
     /// offset is relative to the current decoding window. Propagates errors from reading the
     /// dataset's metadata and bytes.
@@ -303,7 +340,7 @@ impl Dataset {
     /// Returns [`Error::Format`] if the Fill Value message is malformed. Returns
     /// [`Error::Format`] if a user-defined fill value is stored and its datatype is unsupported
     /// for `T`, or if a byte read into [`FixedAscii`] is outside ASCII. Returns
-    /// [`FormatError::DataSizeMismatch`](crate::FormatError::DataSizeMismatch) through
+    /// [`FormatError::DataSizeMismatch`] through
     /// [`Error::Format`] if the payload length differs from the stored element width.
     ///
     /// # Examples

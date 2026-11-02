@@ -122,6 +122,10 @@ impl<const N: usize> sealed::Sealed for FixedAscii<N> {
 }
 
 impl<const N: usize> H5Element for FixedAscii<N> {
+    fn datatype() -> Result<Datatype, FormatError> {
+        datatype::<N>()
+    }
+
     fn read_from(dataset: &Dataset) -> Result<Vec<Self>, Error> {
         dataset.read_whole_decoded::<Self, AsciiDecoder<N>>()
     }
