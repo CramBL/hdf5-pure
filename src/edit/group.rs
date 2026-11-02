@@ -1,13 +1,13 @@
 //! Group-link inspection, storage selection, and placement for staged edits.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
-use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::OwnedLink;
 
@@ -18,7 +18,7 @@ use crate::address::StoredAddress;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
-use crate::file_writer::{self, OFFSET_WIDTH};
+use crate::file_writer::OFFSET_WIDTH;
 use crate::filter_pipeline;
 use crate::group_v1;
 use crate::group_v2;
@@ -28,6 +28,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
+use crate::object_path::LinkNameBuf;
 use crate::source::PhysicalSource;
 use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
@@ -37,6 +38,10 @@ use crate::width::OffsetWidth;
 use super::WriteEngine;
 use super::group_links;
 use super::object_header::{self, OhRegion};
+
+mod hard_link;
+
+pub(super) use hard_link::PreparedHardLinkRecord;
 
 impl WriteEngine {
     /// Converts the group whose version 1 object header is at `addr` to a version 2 message
@@ -473,26 +478,6 @@ pub(super) fn ensure_group_info(region: &mut OhRegion) -> Result<(), Error> {
     Ok(())
 }
 
-/// Serializes a hard link using the caller's message-record layout.
-///
-/// `creation_order` is the link's creation index, separate from the header record's attribute
-/// creation index.
-///
-/// # Panics
-///
-/// Panics if the serialized Link body is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
-pub(super) fn encode_link_message(
-    layout: MessageRecordLayout,
-    name: &str,
-    addr: StoredAddress,
-    creation_order: Option<u64>,
-) -> Vec<u8> {
-    let mut link = file_writer::make_link(name, addr);
-    link.creation_order = creation_order;
-    let body = link.serialize(crate::file_writer::OFFSET_WIDTH);
-    layout.record(MessageType::LINK, &body)
-}
-
 /// Replaces the address of the hard link named `name`, preserving its other fields.
 ///
 /// # Errors
@@ -646,37 +631,32 @@ pub(super) fn find_link_info(
     Ok(None)
 }
 
-/// Copies the region without Link messages named `name`, preserving every other byte.
+/// Copies the region without the named Link records, preserving every surviving byte.
+///
+/// Compares encoded name bytes and removes each distinct name once in a single region walk.
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] if a message body extends past the region or the named
-/// link is absent.
-pub(super) fn remove_link_from_region(region: &OhRegion, name: &str) -> Result<OhRegion, Error> {
+/// Returns [`Error::EditUnsupported`] if a message body extends past the region or a named link is
+/// absent. Propagates errors from reading encoded Link names.
+pub(super) fn remove_links_from_region(
+    region: &OhRegion,
+    names: &[LinkNameBuf],
+) -> Result<OhRegion, Error> {
+    let mut remaining: BTreeSet<&[u8]> =
+        names.iter().map(|name| name.as_str().as_bytes()).collect();
     let mut out = Vec::with_capacity(region.len());
     let mut p = 0;
-    let mut removed = false;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        let mut skip = false;
-        if msg_type == MessageType::LINK {
-            if let Ok(link) =
-                LinkMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
-            {
-                if link.name == name {
-                    skip = true;
-                    removed = true;
-                }
-            }
-        }
+        let skip = msg_type == MessageType::LINK
+            && remaining.remove(LinkMessage::name_bytes(&region[body..body_end])?);
         if !skip {
             out.extend_from_slice(&region[p..body_end]);
         }
         p = body_end;
     }
-    if p < region.len() {
-        out.extend_from_slice(&region[p..]);
-    }
-    if !removed {
+    out.extend_from_slice(&region[p..]);
+    if !remaining.is_empty() {
         return Err(Error::EditUnsupported(
             "link to delete not found in its parent group",
         ));
@@ -689,17 +669,24 @@ impl OhRegion {
     ///
     /// The caller obtains `creation_order` from [`LinkCreationOrder`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the serialized Link body is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
+    /// Returns [`FormatError::InvalidLinkName`] if `name` is not a valid path component.
+    /// Returns [`Error::EditUnsupported`] if the encoded Link body exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`]. Propagates address-encoding errors.
+    #[cfg(test)]
     pub(super) fn push_link(
         &mut self,
         name: &str,
         addr: StoredAddress,
         creation_order: Option<u64>,
-    ) {
-        let record = encode_link_message(self.layout(), name, addr, creation_order);
-        self.push_bytes(&record);
+    ) -> Result<(), Error> {
+        let name =
+            LinkNameBuf::new(name).ok_or_else(|| FormatError::InvalidLinkName(name.to_string()))?;
+        let mut record = PreparedHardLinkRecord::new(self.layout(), name, creation_order)?;
+        record.patch_target(addr)?;
+        self.push_bytes(record.as_bytes());
+        Ok(())
     }
 
     fn replace_link_info(&mut self, info: &LinkInfoMessage) -> Result<(), Error> {
@@ -715,9 +702,11 @@ impl OhRegion {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::MessageRecordLayout;
     use hdf5_pure_format::__private::ObjectHeaderPrefix;
     use rstest::rstest;
     use test_util::filter_pipeline;
+    use test_util::object_header::v2::HeaderFlags;
 
     use super::OhRegion;
     use crate::Error;
@@ -729,6 +718,58 @@ mod tests {
     use crate::file_writer;
     use crate::message_flags::MessageFlags;
     use crate::message_type::MessageType;
+    use crate::object_path::LinkNameBuf;
+
+    #[rstest]
+    #[case::ends(&["a", "c"], &["b"])]
+    #[case::middle(&["b"], &["a", "c"])]
+    #[case::all(&["a", "b", "c"], &[])]
+    #[case::none(&[], &["a", "b", "c"])]
+    fn bulk_link_deletion_preserves_every_surviving_record(
+        #[case] deleted: &[&str],
+        #[case] surviving: &[&str],
+        #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER)] flags: HeaderFlags,
+    ) {
+        let mut before = OhRegion::empty(ObjectHeaderPrefix::with_layout(
+            MessageRecordLayout::from_header_flags(flags.0),
+        ));
+        before.push(MessageType::ATTRIBUTE, b"retained\0");
+        let mut expected = before.clone();
+        for name in ["a", "b", "c"] {
+            before
+                .push_link(name, StoredAddress::new(100), None)
+                .unwrap();
+        }
+        for name in surviving {
+            expected
+                .push_link(name, StoredAddress::new(100), None)
+                .unwrap();
+        }
+        before.push_bytes(&[0, 0, 0]);
+        expected.push_bytes(&[0, 0, 0]);
+        let deleted = deleted
+            .iter()
+            .map(|name| LinkNameBuf::new(name).unwrap())
+            .collect::<Vec<_>>();
+        let after = super::remove_links_from_region(&before, &deleted).unwrap();
+        assert_eq!(*after, *expected);
+        assert_eq!(after.layout(), expected.layout());
+    }
+
+    #[test]
+    fn bulk_link_deletion_rejects_an_absent_name() {
+        let region = super::fresh_group_region();
+        let error =
+            super::remove_links_from_region(&region, &[LinkNameBuf::new("absent").unwrap()])
+                .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::EditUnsupported("link to delete not found in its parent group")
+            ),
+            "{error:?}"
+        );
+    }
 
     #[rstest]
     #[case::empty(filter_pipeline::empty(), MessageFlags::CONSTANT, false)]
@@ -756,7 +797,9 @@ mod tests {
                 .unwrap()
                 .serialize(),
         );
-        region.push_link("child", StoredAddress::new(100), None);
+        region
+            .push_link("child", StoredAddress::new(100), None)
+            .unwrap();
         let record = region.layout().record_with_creation_index(
             MessageType::FILTER_PIPELINE,
             flags,

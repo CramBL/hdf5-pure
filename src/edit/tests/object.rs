@@ -74,6 +74,7 @@ use crate::object_graph::TraversalBudget;
 use crate::object_graph::TraversalLimit;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
+use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
@@ -822,8 +823,12 @@ fn ensure_group_info_appends_when_missing() {
 fn links_added_to_a_tracked_group_take_consecutive_creation_indexes() {
     let mut region = link_tracked_region(3, false, &["a", "b", "c"]);
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
-    region.push_link("d", StoredAddress::new(0x200), order.take().unwrap());
-    region.push_link("e", StoredAddress::new(0x300), order.take().unwrap());
+    region
+        .push_link("d", StoredAddress::new(0x200), order.take().unwrap())
+        .unwrap();
+    region
+        .push_link("e", StoredAddress::new(0x300), order.take().unwrap())
+        .unwrap();
     order.record(&mut region).unwrap();
 
     assert_eq!(
@@ -842,10 +847,14 @@ fn links_added_to_a_tracked_group_take_consecutive_creation_indexes() {
 #[test]
 fn a_tracked_group_resumes_past_a_gap_a_deletion_left() {
     let region = link_tracked_region(3, false, &["a", "b", "c"]);
-    let mut region = edit::group::remove_link_from_region(&region, "a").unwrap();
-    region = edit::group::remove_link_from_region(&region, "c").unwrap();
+    let mut region =
+        edit::group::remove_links_from_region(&region, &[LinkNameBuf::new("a").unwrap()]).unwrap();
+    region =
+        edit::group::remove_links_from_region(&region, &[LinkNameBuf::new("c").unwrap()]).unwrap();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
-    region.push_link("d", StoredAddress::new(0x200), order.take().unwrap());
+    region
+        .push_link("d", StoredAddress::new(0x200), order.take().unwrap())
+        .unwrap();
     order.record(&mut region).unwrap();
 
     assert_eq!(
@@ -859,7 +868,9 @@ fn a_tracked_group_resumes_past_a_gap_a_deletion_left() {
 fn link_creation_indexing_preserves_index_addresses_while_updating_the_counter() {
     let mut region = link_tracked_region(1, true, &["a"]);
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
-    region.push_link("b", StoredAddress::new(0x200), order.take().unwrap());
+    region
+        .push_link("b", StoredAddress::new(0x200), order.take().unwrap())
+        .unwrap();
     order.record(&mut region).unwrap();
 
     let (_, _, info) = edit::group::find_link_info(&region).unwrap().unwrap();
@@ -876,7 +887,9 @@ fn an_untracked_group_numbers_none_of_its_links() {
     let before = region.clone();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
     assert_eq!(order.take().unwrap(), None);
-    region.push_link("d", StoredAddress::new(0x200), None);
+    region
+        .push_link("d", StoredAddress::new(0x200), None)
+        .unwrap();
     order.record(&mut region).unwrap();
 
     assert_eq!(region_links(&region), vec![("d".to_string(), None)]);
@@ -887,7 +900,8 @@ fn an_untracked_group_numbers_none_of_its_links() {
 #[test]
 fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
     let region = link_tracked_region(3, false, &["a", "b", "c"]);
-    let mut after = edit::group::remove_link_from_region(&region, "b").unwrap();
+    let mut after =
+        edit::group::remove_links_from_region(&region, &[LinkNameBuf::new("b").unwrap()]).unwrap();
     let order = LinkCreationOrder::for_region(&after).unwrap();
     let before = after.clone();
     order.record(&mut after).unwrap();
@@ -1866,7 +1880,9 @@ fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     };
     let root = (0..depth).fold(leaf, |child, _| {
         let mut region = edit::group::fresh_group_region();
-        region.push_link("g", StoredAddress::new(UNDEF), None);
+        region
+            .push_link("g", StoredAddress::new(UNDEF), None)
+            .unwrap();
         CopyNode::Group {
             links: vec![CopyLink {
                 addr_off: region.len() - usize::from(OFFSET_WIDTH.get()),
@@ -1971,7 +1987,9 @@ fn link_tracked_region(max: u64, indexed: bool, links: &[&str]) -> OhRegion {
     region.push(MessageType::LINK_INFO, &li);
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     for (i, name) in links.iter().enumerate() {
-        region.push_link(name, StoredAddress::new(0x100 + i as u64), Some(i as u64));
+        region
+            .push_link(name, StoredAddress::new(0x100 + i as u64), Some(i as u64))
+            .unwrap();
     }
     region
 }

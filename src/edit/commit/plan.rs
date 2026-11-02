@@ -3,7 +3,9 @@
 //! Planning reads the current file and borrows the staged inputs. The prepared operations
 //! contain the structural decisions needed during placement, where allocation and I/O can fail.
 
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
+use std::vec;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
@@ -20,6 +22,8 @@ use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
 use crate::edit::dataset::{ChunkPayload, FlatDataset, MovingWrite, OverwriteBytes, WritePlan};
 use crate::edit::group;
+use crate::edit::group::LinkCreationOrder;
+use crate::edit::group::PreparedHardLinkRecord;
 use crate::edit::staging::{StagedApply, StagedEdits, StagedScope};
 use crate::edit::{self, OhRegion};
 use crate::edit::{MAX_LINK_GRAPH_NODES, UNDEF, WriteEngine};
@@ -203,6 +207,79 @@ pub(super) struct PreparedGroup {
     pub(super) copies: Vec<(LinkNameBuf, CopyTree)>,
     pub(super) writes: Vec<RelocatedDataset>,
     pub(super) attrs: EditedAttrs,
+    /// Checked destination records consumed in object-placement order.
+    pub(super) additions: GroupAdditions,
+}
+
+/// Checked destination records and the group's final link creation counter.
+///
+/// Records are ordered by same-file copies, cross-file copies, datasets, and new child groups.
+/// Datasets with staged reference targets follow the other datasets. Application patches each
+/// record's stored target address before appending it to the group.
+#[derive(Default)]
+pub(super) enum GroupAdditions {
+    /// A group with no new destination links.
+    #[default]
+    Empty,
+    /// Remaining records and the counter after assigning all their creation indexes.
+    Records {
+        records: vec::IntoIter<PreparedHardLinkRecord>,
+        order: LinkCreationOrder,
+    },
+}
+
+impl GroupAdditions {
+    fn new(records: Vec<PreparedHardLinkRecord>, order: LinkCreationOrder) -> Self {
+        if records.is_empty() {
+            Self::Empty
+        } else {
+            Self::Records {
+                records: records.into_iter(),
+                order,
+            }
+        }
+    }
+
+    /// Removes the next record and checks its destination name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the sequence is empty or its next destination differs
+    /// from `name`. Propagates errors from reading the encoded name.
+    pub(super) fn take(&mut self, name: &LinkNameBuf) -> Result<PreparedHardLinkRecord, Error> {
+        let Self::Records { records, .. } = self else {
+            return Err(FormatError::Internal("a new link has no prepared record".into()).into());
+        };
+        let record = records.next().ok_or_else(|| {
+            FormatError::Internal("a new link has no remaining prepared record".into())
+        })?;
+        if record.name_bytes()? != name.as_str().as_bytes() {
+            return Err(FormatError::Internal(
+                "a prepared link has a different destination".into(),
+            )
+            .into());
+        }
+        Ok(record)
+    }
+
+    /// Writes the final creation counter after every prepared record has been consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a prepared record remains. Propagates errors from
+    /// [`LinkCreationOrder::record`].
+    pub(super) fn finish(self, region: &mut OhRegion) -> Result<(), Error> {
+        if let Self::Records { mut records, order } = self {
+            if records.next().is_some() {
+                return Err(FormatError::Internal(
+                    "prepared links remain after group placement".into(),
+                )
+                .into());
+            }
+            order.record(region)?;
+        }
+        Ok(())
+    }
 }
 
 /// Identifies a superseded group header and any dense attribute storage to reclaim.
@@ -902,17 +979,18 @@ impl WriteEngine {
             invalidates_reference_proof,
         })
     }
-    /// Checks link additions and selects storage for each final link set.
+    /// Prepares destination records and selects storage for each final link set.
     ///
     /// Every affected group's policy is checked before object placement, including attribute-only
-    /// edits. Additions are counted together to check the full counter increment, and storage
-    /// selection includes every staged addition and deletion.
+    /// edits. Assigns creation indexes in placement order and retains the encoded records in
+    /// [`GroupAdditions`]. Storage selection uses one temporary region per group with link edits,
+    /// including every staged addition and deletion.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] for duplicate link names, unsupported creation-order
-    /// policies, counter exhaustion, or a final link set that cannot be encoded. Returns parsing
-    /// and source-read errors from group inspection.
+    /// Returns [`Error::EditUnsupported`] for duplicate link names, oversized Link bodies,
+    /// unsupported creation-order policies, counter exhaustion, or a final link set that cannot
+    /// be encoded. Propagates parsing and source-read errors from group inspection.
     fn check_group_additions(
         &self,
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
@@ -921,62 +999,73 @@ impl WriteEngine {
         datasets_by_group: &BTreeMap<&ObjectPathBuf, Vec<&FlatDataset>>,
     ) -> Result<(), Error> {
         for key in keys {
-            let node = &nodes[key];
-            let added = node.prepared.copies.len()
-                + node.cross_copies.len()
-                + datasets_by_group.get(key).map_or(0, Vec::len)
-                + children.get(key).map_or(0, |kids| {
-                    kids.iter()
-                        .filter(|child| matches!(child, ChildLink::Insert { .. }))
-                        .count()
-                });
-            let mut order = group::LinkCreationOrder::for_region(&node.prepared.region)?;
-            if added > 0 {
-                for _ in 0..added {
-                    order.take()?;
-                }
-            }
-        }
-
-        for key in keys {
             let node = nodes
                 .get_mut(key)
                 .ok_or_else(|| FormatError::Internal("a prepared group is absent".into()))?;
-            let mut adding: Vec<&str> = Vec::new();
-            for fd in datasets_by_group.get(key).into_iter().flatten() {
-                adding.push(fd.name.as_str());
-            }
-            for child in children.get(key).into_iter().flatten() {
-                if let ChildLink::Insert { leaf, .. } = child {
-                    adding.push(leaf.as_str());
+            let mut adding: Vec<&LinkNameBuf> =
+                node.prepared.copies.iter().map(|(leaf, _)| leaf).collect();
+            adding.extend(&node.cross_copies);
+            let datasets = datasets_by_group.get(key).map_or(&[][..], Vec::as_slice);
+            adding.extend(
+                datasets
+                    .iter()
+                    .filter(|dataset| dataset.storage.reference_targets().is_none())
+                    .chain(
+                        datasets
+                            .iter()
+                            .filter(|dataset| dataset.storage.reference_targets().is_some()),
+                    )
+                    .map(|dataset| &dataset.name),
+            );
+            adding.extend(children.get(key).into_iter().flatten().filter_map(
+                |child| match child {
+                    ChildLink::Insert { leaf, .. } => Some(leaf),
+                    ChildLink::Replace { .. } => None,
+                },
+            ));
+            if !adding.is_empty() {
+                let deleted: BTreeSet<&str> = node
+                    .prepared
+                    .deletes
+                    .iter()
+                    .map(LinkNameBuf::as_str)
+                    .collect();
+                let mut names: BTreeSet<&str> = node
+                    .existing_links
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|name| !deleted.contains(name))
+                    .collect();
+                for name in &adding {
+                    if !names.insert(name.as_str()) {
+                        return Err(Error::EditUnsupported(
+                            "a link with this name already exists in the target group",
+                        ));
+                    }
                 }
             }
-            for (leaf, _) in &node.prepared.copies {
-                adding.push(leaf.as_str());
+            let mut order = LinkCreationOrder::for_region(&node.prepared.region)?;
+            if adding.is_empty() && node.prepared.deletes.is_empty() {
+                node.prepared.dense_links =
+                    self.plan_group_links(&node.prepared.region, node.prepared.dense_links)?;
+                continue;
             }
-            for leaf in &node.cross_copies {
-                adding.push(leaf.as_str());
-            }
-            for (i, name) in adding.iter().enumerate() {
-                let survives = node.existing_links.iter().any(|n| n == name)
-                    && !node.prepared.deletes.iter().any(|n| n.as_str() == *name);
-                if survives || adding[..i].contains(name) {
-                    return Err(Error::EditUnsupported(
-                        "a link with this name already exists in the target group",
-                    ));
-                }
-            }
-            let mut result = node.prepared.region.clone();
-            for name in &node.prepared.deletes {
-                result = group::remove_link_from_region(&result, name.as_str())?;
-            }
-            let mut order = group::LinkCreationOrder::for_region(&result)?;
+            let mut result = if node.prepared.deletes.is_empty() {
+                node.prepared.region.clone()
+            } else {
+                group::remove_links_from_region(&node.prepared.region, &node.prepared.deletes)?
+            };
+            let mut records = Vec::with_capacity(adding.len());
             for name in adding {
-                result.push_link(name, StoredAddress::new(0), order.take()?);
+                let record =
+                    PreparedHardLinkRecord::new(result.layout(), name.clone(), order.take()?)?;
+                result.push_bytes(record.as_bytes());
+                records.push(record);
             }
             order.record(&mut result)?;
             node.prepared.dense_links =
                 self.plan_group_links(&result, node.prepared.dense_links)?;
+            node.prepared.additions = GroupAdditions::new(records, order);
         }
 
         Ok(())

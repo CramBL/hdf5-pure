@@ -18,7 +18,7 @@ use super::plan::{
 use super::publish::AppliedTree;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
-use crate::edit::group::{self, LinkCreationOrder};
+use crate::edit::group;
 use crate::edit::object_header;
 use crate::edit::retirement::RootRetirement;
 use crate::edit::staging::StagedApply;
@@ -138,31 +138,29 @@ impl WriteEngine {
                 copies,
                 writes,
                 attrs,
+                mut additions,
             } = groups
                 .remove(key)
                 .ok_or_else(|| {
                     FormatError::Internal("a prepared group has already been placed".into())
                 })?
                 .into_prepared();
-            for name in &deletes {
-                region = group::remove_link_from_region(&region, name.as_str())?;
+            if !deletes.is_empty() {
+                region = group::remove_links_from_region(&region, &deletes)?;
             }
 
-            let mut link_order = LinkCreationOrder::for_region(&region)?;
-
             for (leaf, tree) in copies {
+                let mut record = additions.take(&leaf)?;
                 let root = self.write_copy_subtree(&tree)?;
-                region.push_link(
-                    leaf.as_str(),
-                    base.relative(PhysicalAddress::new(root))?,
-                    link_order.take()?,
-                );
+                record.patch_target(base.relative(PhysicalAddress::new(root))?)?;
+                region.push_bytes(record.as_bytes());
             }
 
             let mut group_datasets: Vec<FlatDataset> =
                 flat.remove(key).into_iter().flatten().collect();
             group_datasets.sort_by_key(|fd| fd.storage.reference_targets().is_some());
             for mut fd in group_datasets {
+                let mut record = additions.take(&fd.name)?;
                 let dataset_path = key.join(&fd.name);
                 self.resolve_dataset_attributes(&mut fd)?;
                 if fd.storage.take_reference_targets().is_some()
@@ -191,11 +189,8 @@ impl WriteEngine {
                     }
                 }
                 let oh_addr = self.write_dataset(&mut fd)?;
-                region.push_link(
-                    fd.name.as_str(),
-                    base.relative(PhysicalAddress::new(oh_addr))?,
-                    link_order.take()?,
-                );
+                record.patch_target(base.relative(PhysicalAddress::new(oh_addr))?)?;
+                region.push_bytes(record.as_bytes());
                 path_addr.insert(dataset_path, oh_addr);
             }
 
@@ -227,11 +222,10 @@ impl WriteEngine {
             for child in children.remove(key).into_iter().flatten() {
                 match child {
                     ChildLink::Insert { path, leaf } => {
-                        region.push_link(
-                            leaf.as_str(),
-                            base.relative(PhysicalAddress::new(path_addr[&path]))?,
-                            link_order.take()?,
-                        );
+                        let mut record = additions.take(&leaf)?;
+                        record
+                            .patch_target(base.relative(PhysicalAddress::new(path_addr[&path]))?)?;
+                        region.push_bytes(record.as_bytes());
                     }
                     ChildLink::Replace { path, leaf } => {
                         group::patch_link_target(
@@ -242,7 +236,7 @@ impl WriteEngine {
                     }
                 }
             }
-            link_order.record(&mut region)?;
+            additions.finish(&mut region)?;
 
             self.place_edited_attrs(&mut region, attrs)?;
             self.place_group_links(&mut region, dense_links)?;
