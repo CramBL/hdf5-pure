@@ -845,7 +845,7 @@ impl EditStore<'_> {
             if let PageTransition::Pad { extent, .. } = transition {
                 let length = extent.len().to_usize()?;
                 #[cfg(test)]
-                super::observations::record_zeros(length, length);
+                super::observations::record_zeros(length.to_u64(), length);
                 self.engine.image.append(&vec![0u8; length])?;
             }
             self.engine

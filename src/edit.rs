@@ -2918,7 +2918,7 @@ impl WriteEngine {
         {
             let length = extent.len().to_usize()?;
             #[cfg(test)]
-            observations::record_zeros(length, length);
+            observations::record_zeros(length.to_u64(), length);
             self.append(&vec![0u8; length])?;
             self.space.record_page_padding(transition);
         }
@@ -2972,15 +2972,21 @@ impl WriteEngine {
         self.write_at(at.get(), region.bytes())
     }
 
-    /// Extend the file with zeros up to `target` (>= the current length), used by
-    /// the paged tail to pad the final metadata page to its boundary.
+    /// Extends the image to `target` using bounded zero scratch.
+    ///
+    /// The caller passes a target at or beyond the current image length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if writing fails, or [`Error::Format`] if the image cannot
+    /// represent `target` or reading or representing a clean gap fails.
     fn pad_zeros_to(&mut self, target: u64) -> Result<(), Error> {
         let len = self.image.len();
         if target > len {
-            let pad = (target - len).to_usize()?;
+            let range = FileRange::new(PhysicalAddress::new(len), target - len)?;
             #[cfg(test)]
-            observations::record_zeros(pad, pad);
-            self.append(&vec![0u8; pad])?;
+            observations::record_zeros(range.length(), crate::image::zeros::scratch_length(range));
+            self.image.fill_zeros(range)?;
         }
         debug_assert_eq!(self.image.len(), target);
         Ok(())
@@ -3021,7 +3027,7 @@ impl WriteEngine {
         if let PageTransition::Pad { extent, .. } = transition {
             let length = extent.len().to_usize()?;
             #[cfg(test)]
-            observations::record_zeros(length, length);
+            observations::record_zeros(length.to_u64(), length);
             image.append(&vec![0u8; length])?;
         }
         space.record_transition(ty, transition);

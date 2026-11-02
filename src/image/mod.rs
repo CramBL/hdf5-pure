@@ -77,6 +77,8 @@ use crate::source::{
     BytesSource, MetadataCacheConfig, MetadataCacheStats, MetadataReadCache, Source,
 };
 
+pub(crate) mod zeros;
+
 #[cfg(test)]
 mod observations;
 #[cfg(test)]
@@ -207,6 +209,40 @@ pub(crate) trait FileImage: Source + Send + Sync {
     /// range past end-of-file is a bug rather than a bad file, and
     /// implementations may assert it.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error>;
+
+    /// Appends or overwrites zeros using a bounded scratch buffer.
+    ///
+    /// A nonempty range must start at the current [`Source::len`] or lie wholly within the
+    /// image. An empty range is a no-op at any address. Implementations invalidate cached
+    /// reads before changing their bytes and extend the logical image after each accepted
+    /// append batch. On error, completed batches remain part of the image, and the failing
+    /// write may have changed a prefix on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedSourceEof`] if a nonempty range exceeds the current
+    /// length without starting there. Returns [`Error::Io`] if writing fails, or
+    /// [`Error::Format`] if a mirror cannot represent the range or reading or representing
+    /// a clean gap between pending writes fails.
+    ///
+    /// # Performance
+    ///
+    /// Zero scratch is at most 64 KiB. Pending writes, flush buffers, clean-gap reads, and
+    /// mirror storage require separate memory. Native images drain pending writes once before
+    /// issuing a request at least as large as the byte budget directly. Unbuffered and bypassed
+    /// fills may issue one physical write per batch. Smaller buffered requests use the ordinary
+    /// adjacent-write coalescing policy.
+    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
+        let append = zeros::appends(range, self.len())?;
+        zeros::emit(range, |offset, bytes| {
+            if append {
+                self.append(bytes)?;
+                Ok(())
+            } else {
+                self.write_at(offset, bytes)
+            }
+        })
+    }
 
     /// Shrink the image to `len` bytes, physically shortening the file. `len`
     /// must not exceed the current [`Source::len`]: this cannot grow an image,
@@ -461,6 +497,41 @@ impl BufferedWrites {
             self.flush()?;
         }
         Ok(())
+    }
+
+    /// Selects direct emission for a nonempty request at least as large as the byte budget.
+    ///
+    /// Drains pending writes once before returning `true`. Returns `false` for unbuffered
+    /// requests, which the writer issues through [`write_at`](Self::write_at).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if issuing pending writes fails, or [`Error::Format`] if reading
+    /// or representing a clean gap between pending writes fails.
+    fn begin_zero_range(&mut self, length: u64) -> Result<bool, Error> {
+        let bypass = length != 0
+            && self
+                .mode
+                .budget()
+                .is_some_and(|(_, budget)| length >= budget as u64);
+        if bypass {
+            self.flush()?;
+        }
+        Ok(bypass)
+    }
+
+    /// Issues a batch directly when `bypass` is true, otherwise applies the write-buffer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if writing fails, or [`Error::Format`] if reading or representing
+    /// a clean gap between pending writes fails.
+    fn write_zero_chunk(&mut self, offset: u64, bytes: &[u8], bypass: bool) -> Result<(), Error> {
+        if bypass {
+            self.issue(offset, bytes)
+        } else {
+            self.write_at(offset, bytes)
+        }
     }
 
     /// Every run is non-empty, the runs are disjoint *and* non-touching in
@@ -984,6 +1055,24 @@ impl FileImage for MirrorImage {
         Ok(())
     }
 
+    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
+        let append = zeros::appends(range, self.len())?;
+        if range.length() != 0 {
+            range.end().get().to_usize()?;
+        }
+        let bypass = self.writes.begin_zero_range(range.length())?;
+        zeros::emit(range, |offset, bytes| {
+            self.writes.write_zero_chunk(offset, bytes, bypass)?;
+            if append {
+                self.data.extend_from_slice(bytes);
+            } else {
+                let start = offset.to_usize()?;
+                self.data[start..start + bytes.len()].copy_from_slice(bytes);
+            }
+            Ok(())
+        })
+    }
+
     fn truncate(&mut self, len: u64) -> Result<(), Error> {
         debug_assert!(
             len <= self.len(),
@@ -1215,9 +1304,9 @@ impl free_sections::PersistedManagerSource for PersistedHandle<'_> {
 /// plus whatever the caller is parsing, independent of the file's size.
 ///
 /// The end-of-file cursor is explicit ([`len`](Source::len)), seeded from the
-/// file's real length at open and advanced by [`append`](FileImage::append). It
-/// is not re-read from the filesystem, so it stays the authority even if the
-/// handle's own cursor moves.
+/// file's real length at open and advanced by [`append`](FileImage::append) and appending
+/// [`fill_zeros`](FileImage::fill_zeros). It is not re-read from the filesystem, so it stays the
+/// authority even if the handle's own cursor moves.
 ///
 /// Every mutation invalidates the cache entries it overlaps *before* the write
 /// reaches the disk, so a concurrent-looking read can miss a fresh byte but
@@ -1229,8 +1318,9 @@ impl free_sections::PersistedManagerSource for PersistedHandle<'_> {
 /// it lands.
 pub(crate) struct HandleImage {
     writes: BufferedWrites,
-    /// Logical end-of-file: the real file length at open, moved by `append` and
-    /// `truncate` and by nothing else.
+    /// Logical end-of-file, initialized from the file length at open.
+    ///
+    /// Updated after accepted appends, including zero batches, and successful truncation.
     len: u64,
     /// Bounded read cache for metadata-sized reads; `None` when disabled.
     metadata_cache: Option<(MetadataCacheConfig, std::sync::Mutex<MetadataReadCache>)>,
@@ -1391,6 +1481,19 @@ impl FileImage for HandleImage {
         self.writes.write_at(offset, bytes)
     }
 
+    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
+        let append = zeros::appends(range, self.len())?;
+        let bypass = self.writes.begin_zero_range(range.length())?;
+        zeros::emit(range, |offset, bytes| {
+            self.invalidate(offset, bytes.len() as u64);
+            self.writes.write_zero_chunk(offset, bytes, bypass)?;
+            if append {
+                self.len += bytes.len() as u64;
+            }
+            Ok(())
+        })
+    }
+
     fn truncate(&mut self, len: u64) -> Result<(), Error> {
         debug_assert!(
             len <= self.len,
@@ -1519,6 +1622,10 @@ impl FileImage for CountingImage {
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
         self.inner.write_at(offset, bytes)
+    }
+
+    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
+        self.inner.fill_zeros(range)
     }
 
     fn truncate(&mut self, len: u64) -> Result<(), Error> {
@@ -1724,6 +1831,10 @@ impl FileImage for SourceOnlyImage {
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
         self.0.write_at(offset, bytes)
+    }
+
+    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
+        self.0.fill_zeros(range)
     }
 
     fn truncate(&mut self, len: u64) -> Result<(), Error> {
