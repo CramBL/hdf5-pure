@@ -215,6 +215,7 @@ pub use crate::fractal_heap_write::GROUP_HEAP_MAX_MANAGED_OBJECT;
 pub use crate::fractal_heap_write::GROUP_HEAP_START_ROOT_ROWS;
 pub use crate::fractal_heap_write::GROUP_HEAP_STARTING_BLOCK_SIZE;
 pub use crate::fractal_heap_write::GROUP_HEAP_TABLE_WIDTH;
+pub use crate::fractal_heap_write::ManagedHeapPlacement;
 pub use crate::fractal_heap_write::ManagedHeapPlan;
 pub use crate::fractal_heap_write::ManagedHeapPlanError;
 pub use crate::fractal_heap_write::attribute_heap_max_managed_object;

@@ -129,6 +129,7 @@ struct PlannedDirect {
 struct PlannedIndirect {
     heap_offset: u64,
     nrows: u16,
+    size: u64,
     region_offset: u64,
     entries: Vec<Option<Child>>,
 }
@@ -281,6 +282,86 @@ impl ManagedHeapPlan {
         Self::new(sizes, offset_width, geometry)
     }
 
+    /// Returns each complete block's serialized length in placement order.
+    ///
+    /// Indirect blocks precede direct blocks. Pass addresses in this order to [`Self::place`].
+    /// Each length includes the metadata prefix, checksum, and any unused direct-block data.
+    pub fn block_lengths(&self) -> impl ExactSizeIterator<Item = u64> + DoubleEndedIterator + '_ {
+        (0..self.indirects.len() + self.directs.len()).map(|index| self.block_length(index))
+    }
+
+    /// Assigns independently selected stored addresses to the planned blocks.
+    ///
+    /// Pass one address per length returned by [`Self::block_lengths`], in the same order.
+    /// Complete blocks must fit the encoded address width and occupy disjoint ranges. A block's
+    /// exclusive end may equal the undefined address value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::FractalHeapBlockCount`] if the address count differs from the block
+    /// count, and [`FormatError::FractalHeapBlockOverlap`] if complete block ranges overlap.
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a block's exclusive end exceeds `u64`,
+    /// [`FormatError::AddressTooLarge`] if an address or exclusive end exceeds the encoded width,
+    /// and [`FormatError::DefinedAddressIsUndefined`] if a block starts at the undefined address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::{ManagedHeapPlan, OffsetWidth};
+    ///
+    /// let plan = ManagedHeapPlan::group_links(&[491, 1], OffsetWidth::Eight).unwrap();
+    /// let addresses = [128, 1024, 2048].map(StoredAddress::new);
+    /// let placement = plan.place(&addresses).unwrap();
+    /// assert_eq!(placement.root_address(), addresses[0]);
+    /// assert_eq!(placement.blocks().map(|block| block.0).collect::<Vec<_>>(), addresses);
+    /// ```
+    pub fn place(
+        &self,
+        addresses: &[StoredAddress],
+    ) -> Result<ManagedHeapPlacement<'_>, FormatError> {
+        let expected = self.indirects.len() + self.directs.len();
+        if addresses.len() != expected {
+            return Err(FormatError::FractalHeapBlockCount {
+                expected,
+                actual: addresses.len(),
+            });
+        }
+        let mut ranges = Vec::with_capacity(expected);
+        for (index, (&address, length)) in addresses.iter().zip(self.block_lengths()).enumerate() {
+            self.address_at(address, 0)?;
+            let end = address
+                .get()
+                .checked_add(length)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: address.get(),
+                    length,
+                })?;
+            if end > StoredAddress::undefined(self.offset_width).get() {
+                return Err(FormatError::AddressTooLarge {
+                    address: end,
+                    offset_size: self.offset_width.get(),
+                });
+            }
+            ranges.push((address.get(), end, index));
+        }
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            if pair[0].1 > pair[1].0 {
+                return Err(FormatError::FractalHeapBlockOverlap {
+                    first: pair[0].2,
+                    second: pair[1].2,
+                });
+            }
+        }
+        Ok(ManagedHeapPlacement {
+            plan: self,
+            addresses: addresses.to_vec(),
+        })
+    }
+
     /// Returns the serialized length of all blocks, excluding the heap header.
     pub fn region_size(&self) -> u64 {
         self.region_size
@@ -359,19 +440,7 @@ impl ManagedHeapPlan {
         region_address: StoredAddress,
         heap_header_address: StoredAddress,
     ) -> Result<Vec<u8>, FormatError> {
-        if objects.len() != self.sizes.len() {
-            return Err(FormatError::Internal(
-                "managed heap emission received another object count".into(),
-            ));
-        }
-        for (object, &size) in objects.iter().zip(&self.sizes) {
-            if object.len() as u64 != size {
-                return Err(FormatError::DataSizeMismatch {
-                    expected: size.to_usize()?,
-                    actual: object.len(),
-                });
-            }
-        }
+        self.check_objects(objects)?;
         self.address_at(region_address, 0)?;
         self.address_at(heap_header_address, 0)?;
         let end = region_address.get().checked_add(self.region_size).ok_or(
@@ -387,25 +456,70 @@ impl ManagedHeapPlan {
             });
         }
         let mut region = vec![0; self.region_size.to_usize()?];
-        for block in &self.indirects {
-            let mut data = Vec::new();
+        for index in 0..self.indirects.len() + self.directs.len() {
+            let data = self.encode_block(index, objects, heap_header_address, |child| {
+                self.address_at(region_address, self.block_offset(child))
+            })?;
+            place(&mut region, self.block_offset(index), &data)?;
+        }
+        Ok(region)
+    }
+
+    fn check_objects(&self, objects: &[&[u8]]) -> Result<(), FormatError> {
+        if objects.len() != self.sizes.len() {
+            return Err(FormatError::Internal(
+                "managed heap emission received another object count".into(),
+            ));
+        }
+        for (object, &size) in objects.iter().zip(&self.sizes) {
+            if object.len() as u64 != size {
+                return Err(FormatError::DataSizeMismatch {
+                    expected: size.to_usize()?,
+                    actual: object.len(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn block_length(&self, index: usize) -> u64 {
+        if let Some(block) = self.indirects.get(index) {
+            block.size
+        } else {
+            self.directs[index - self.indirects.len()].size
+        }
+    }
+
+    fn block_offset(&self, index: usize) -> u64 {
+        if let Some(block) = self.indirects.get(index) {
+            block.region_offset
+        } else {
+            self.directs[index - self.indirects.len()].region_offset
+        }
+    }
+
+    fn encode_block(
+        &self,
+        index: usize,
+        objects: &[&[u8]],
+        owner: StoredAddress,
+        address: impl Fn(usize) -> Result<StoredAddress, FormatError>,
+    ) -> Result<Vec<u8>, FormatError> {
+        let mut data = Vec::with_capacity(self.block_length(index).to_usize()?);
+        if let Some(block) = self.indirects.get(index) {
             data.extend_from_slice(&INDIRECT_SIGNATURE);
             data.push(VERSION);
-            self.write_address(&mut data, heap_header_address)?;
+            self.write_address(&mut data, owner)?;
             self.write_heap_offset(&mut data, block.heap_offset)?;
             for entry in &block.entries {
-                let address = match entry {
-                    Some(Child::Direct(index)) => {
-                        Some(self.address_at(region_address, self.directs[*index].region_offset)?)
-                    }
-                    Some(Child::Indirect(index)) => {
-                        Some(self.address_at(region_address, self.indirects[*index].region_offset)?)
-                    }
+                let child = match entry {
+                    Some(Child::Direct(index)) => Some(address(self.indirects.len() + index)?),
+                    Some(Child::Indirect(index)) => Some(address(*index)?),
                     None => None,
                 };
                 bytes::try_write_decoded_address(
                     &mut data,
-                    address.map_or(
+                    child.map_or(
                         DecodedStoredAddress::Undefined,
                         DecodedStoredAddress::Defined,
                     ),
@@ -414,15 +528,12 @@ impl ManagedHeapPlan {
             }
             let checksum = crate::checksum::jenkins_lookup3(&data);
             data.extend_from_slice(&checksum.to_le_bytes());
-            debug_assert_eq!(Ok(data.len() as u64), self.indirect_block_size(block.nrows));
-            place(&mut region, block.region_offset, &data)?;
-        }
-        for block in &self.directs {
-            let size = block.size.to_usize()?;
-            let mut data = Vec::with_capacity(size);
+            debug_assert_eq!(data.len() as u64, block.size);
+        } else {
+            let block = &self.directs[index - self.indirects.len()];
             data.extend_from_slice(&DIRECT_SIGNATURE);
             data.push(VERSION);
-            self.write_address(&mut data, heap_header_address)?;
+            self.write_address(&mut data, owner)?;
             self.write_heap_offset(&mut data, block.heap_offset)?;
             let checksum_at = data.len();
             data.extend_from_slice(&[0; CHECKSUM_LEN]);
@@ -434,12 +545,11 @@ impl ManagedHeapPlan {
                 );
                 data.extend_from_slice(objects[index]);
             }
-            data.resize(size, 0);
+            data.resize(block.size.to_usize()?, 0);
             let checksum = crate::checksum::jenkins_lookup3(&data);
             data[checksum_at..checksum_at + CHECKSUM_LEN].copy_from_slice(&checksum.to_le_bytes());
-            place(&mut region, block.region_offset, &data)?;
         }
-        Ok(region)
+        Ok(data)
     }
 
     /// Places objects in managed heap order and computes the heap statistics.
@@ -552,7 +662,7 @@ impl ManagedHeapPlan {
     /// [`ManagedHeapPlanError::Host`] if the complete region length exceeds [`usize::MAX`].
     fn place_blocks(&mut self) -> Result<(), ManagedHeapPlanError> {
         for index in 0..self.indirects.len() {
-            let size = self.indirect_block_size(self.indirects[index].nrows)?;
+            let size = self.indirects[index].size;
             let block = &mut self.indirects[index];
             block.region_offset = self.region_size;
             self.region_size = self
@@ -639,6 +749,7 @@ impl ManagedHeapPlan {
         self.indirects.push(PlannedIndirect {
             heap_offset: base,
             nrows,
+            size: self.indirect_block_size(nrows)?,
             region_offset: 0,
             entries,
         });
@@ -803,6 +914,94 @@ impl ManagedHeapPlan {
                 .ok_or(FormatError::InvalidFractalHeapGeometry)?,
         );
         Ok(())
+    }
+}
+
+/// A managed fractal-heap plan with checked, disjoint stored block ranges.
+///
+/// Created by [`ManagedHeapPlan::place`]. Object heap offsets and heap statistics are those of
+/// the borrowed plan. The caller allocates storage for each complete block and writes the heap
+/// header separately.
+pub struct ManagedHeapPlacement<'a> {
+    plan: &'a ManagedHeapPlan,
+    addresses: Vec<StoredAddress>,
+}
+
+impl ManagedHeapPlacement<'_> {
+    /// Returns the root block's stored address for the heap header.
+    pub fn root_address(&self) -> StoredAddress {
+        self.addresses[self.plan.indirects.len().saturating_sub(1)]
+    }
+
+    /// Returns each block's stored address and complete serialized length in placement order.
+    ///
+    /// The order is the same as [`ManagedHeapPlan::block_lengths`].
+    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> + '_ {
+        self.addresses
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, address)| (address, self.plan.block_length(index)))
+    }
+
+    /// Serializes each block separately with its owner set to `heap_header_address`.
+    ///
+    /// Encodes one block per iterator step, in the order returned by [`Self::blocks`]. Each item
+    /// contains the block's stored address and encoded bytes. Unused direct-block data bytes are
+    /// zeroed, and each block includes its checksum. The caller sets the heap header's
+    /// direct-block checksum flag.
+    ///
+    /// Pass objects in the plan's input order, with their planned lengths. Object lengths and
+    /// the heap header address are checked before the iterator is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the object count differs from the plan and
+    /// [`FormatError::DataSizeMismatch`] if an object's length differs from its planned size.
+    /// Returns [`FormatError::AddressTooLarge`] if `heap_header_address` exceeds the encoded
+    /// file-address width, and [`FormatError::DefinedAddressIsUndefined`] if it equals that
+    /// width's undefined value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::{ManagedHeapPlan, OffsetWidth};
+    ///
+    /// let plan = ManagedHeapPlan::group_links(&[491, 1], OffsetWidth::Eight).unwrap();
+    /// let addresses = [128, 1024, 2048].map(StoredAddress::new);
+    /// let placement = plan.place(&addresses).unwrap();
+    /// let objects: &[&[u8]] = &[&[7; 491], &[9]];
+    /// let blocks = placement.serialize_blocks(objects, StoredAddress::new(64)).unwrap();
+    /// for ((address, length), encoded) in placement.blocks().zip(blocks) {
+    ///     let (stored_address, bytes) = encoded.unwrap();
+    ///     assert_eq!(stored_address, address);
+    ///     assert_eq!(bytes.len() as u64, length);
+    /// }
+    /// ```
+    pub fn serialize_blocks<'b>(
+        &'b self,
+        objects: &'b [&'b [u8]],
+        heap_header_address: StoredAddress,
+    ) -> Result<
+        impl ExactSizeIterator<Item = Result<(StoredAddress, Vec<u8>), FormatError>> + 'b,
+        FormatError,
+    > {
+        self.plan.check_objects(objects)?;
+        self.plan.address_at(heap_header_address, 0)?;
+        Ok(self
+            .addresses
+            .iter()
+            .copied()
+            .enumerate()
+            .map(move |(index, address)| {
+                self.plan
+                    .encode_block(index, objects, heap_header_address, |child| {
+                        Ok(self.addresses[child])
+                    })
+                    .map(|data| (address, data))
+            }))
     }
 }
 

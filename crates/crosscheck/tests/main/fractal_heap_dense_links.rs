@@ -1024,6 +1024,114 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
             *id
         );
     }
+    let owner = StoredAddress::new(heap_at as u64);
+    let block_layout =
+        FractalHeapBlockLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight, owner)
+            .unwrap();
+    let image = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
+        &bytes,
+    )
+    .unwrap();
+    let root = block_layout.root().unwrap().unwrap();
+    let (mut addresses, directs) = match root {
+        FractalHeapBlock::Direct(block) => (Vec::new(), vec![block]),
+        FractalHeapBlock::Indirect(block) => {
+            let view = block
+                .at(PhysicalAddress::new(block.address().get()))
+                .unwrap()
+                .parse(image)
+                .unwrap();
+            let directs = view
+                .children()
+                .map(|child| {
+                    let FractalHeapBlock::Direct(block) = child.unwrap() else {
+                        panic!("expected direct children")
+                    };
+                    block
+                })
+                .collect::<Vec<_>>();
+            (vec![block.address()], directs)
+        }
+    };
+    addresses.extend(directs.iter().map(|block| block.address()));
+    let placement = plan.place(&addresses).unwrap();
+    let expected_lengths: Vec<_> = match root {
+        FractalHeapBlock::Direct(_) => Vec::new(),
+        FractalHeapBlock::Indirect(block) => vec![
+            block
+                .at(PhysicalAddress::new(block.address().get()))
+                .unwrap()
+                .range()
+                .length(),
+        ],
+    }
+    .into_iter()
+    .chain(directs.iter().map(|block| block.decoded_size()))
+    .collect();
+    assert_eq!(plan.block_lengths().collect::<Vec<_>>(), expected_lengths);
+    let allocations: Vec<_> = placement.blocks().collect();
+    if allocations.len() > 1 {
+        assert!(
+            allocations
+                .windows(2)
+                .any(|pair| pair[0].0.get() + pair[0].1 != pair[1].0.get())
+        );
+    }
+    assert_eq!(placement.root_address(), header.root_block_address);
+    let objects: Vec<_> = placements
+        .iter()
+        .map(|&(offset, length, _)| {
+            let block = directs
+                .iter()
+                .find(|block| {
+                    offset >= block.heap_offset()
+                        && offset < block.heap_offset() + block.decoded_size()
+                })
+                .unwrap();
+            let reference = block
+                .at(PhysicalAddress::new(block.address().get()))
+                .unwrap();
+            reference
+                .parse_object(image, offset, length)
+                .unwrap()
+                .parse(image)
+                .unwrap()
+        })
+        .collect();
+    let mut rewritten = bytes.clone();
+    for block in placement.serialize_blocks(&objects, owner).unwrap() {
+        let (address, data) = block.unwrap();
+        let start = usize::try_from(address.get()).unwrap();
+        rewritten[start..start + data.len()].copy_from_slice(&data);
+    }
+    std::fs::write(&path, rewritten).unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    let group = file.group("g").unwrap();
+    let expected: Vec<_> = (0..16)
+        .map(|index| format!("entry_{index}{}", "x".repeat(name_padding)))
+        .collect();
+    if attributes {
+        let mut names = group.attr_names().unwrap();
+        names.sort();
+        let mut sorted = expected.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        for (index, name) in expected.iter().enumerate() {
+            assert_eq!(
+                group.attr(name).unwrap().read_scalar::<i32>().unwrap(),
+                i32::try_from(index).unwrap()
+            );
+        }
+    } else {
+        let mut names = group.member_names().unwrap();
+        names.sort();
+        let mut sorted = expected;
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+    drop(group);
+    file.close().unwrap();
 }
 
 #[rstest]
