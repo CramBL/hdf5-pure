@@ -223,6 +223,8 @@ fn select_shared_message(
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::ObjectHeaderPrefix;
+
     #[cfg(feature = "std")]
     use rstest::rstest;
     #[cfg(feature = "std")]
@@ -369,6 +371,7 @@ mod tests {
     fn header_with(messages: Vec<HeaderMessage>) -> ObjectHeader {
         ObjectHeader {
             version: 2,
+            prefix: Some(ObjectHeaderPrefix::PLAIN),
             messages,
             reference_count: None,
             flags: 0,

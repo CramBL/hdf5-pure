@@ -1,3 +1,5 @@
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
+
 use ::test_util;
 use test_util::btree_v2;
 use test_util::widths::Widths;
@@ -377,6 +379,7 @@ fn compact_storage_link_messages() {
 
     let oh = ObjectHeader {
         version: 2,
+        prefix: Some(ObjectHeaderPrefix::PLAIN),
         messages: vec![
             crate::object_header::HeaderMessage {
                 msg_type: MessageType::LINK_INFO,
@@ -427,6 +430,7 @@ fn compact_storage_link_messages() {
 fn header_of(messages: Vec<(MessageType, Vec<u8>)>) -> ObjectHeader {
     ObjectHeader {
         version: 2,
+        prefix: Some(ObjectHeaderPrefix::PLAIN),
         messages: messages
             .into_iter()
             .map(|(msg_type, data)| crate::object_header::HeaderMessage {

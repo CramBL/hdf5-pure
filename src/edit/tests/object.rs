@@ -762,6 +762,7 @@ fn converting_version_1_link_messages_rejects_a_truncated_body(
 fn version_1_header(messages: Vec<(MessageType, MessageFlags, Vec<u8>)>) -> ObjectHeader {
     ObjectHeader {
         version: 1,
+        prefix: None,
         messages: messages
             .into_iter()
             .map(|(msg_type, flags, data)| HeaderMessage {

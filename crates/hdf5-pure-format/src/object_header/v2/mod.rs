@@ -149,6 +149,7 @@ impl ParsedObjectHeaderPrefix {
         let times = self.prefix.times;
         ObjectHeader {
             version: OBJECT_HEADER_VERSION,
+            prefix: Some(self.prefix),
             messages,
             reference_count: None,
             flags: self.flags,
@@ -795,6 +796,8 @@ mod tests {
     use test_util::object_header::v2 as v2_bytes;
 
     use super::*;
+    use crate::address::BaseAddress;
+    use crate::address::BaseAddressExt;
 
     #[test]
     fn a_prefix_parses_to_the_fields_its_flags_select() {
@@ -854,8 +857,21 @@ mod tests {
         let parsed_header =
             ObjectHeader::parse(&header, crate::access_mode::AccessMode::ReadOnly, 0, 8, 8)
                 .unwrap();
+        assert_eq!(parsed_header.prefix, Some(prefix));
         assert_eq!(parsed_header.messages.len(), 1);
         assert_eq!(parsed_header.messages[0].data, vec![1, 2, 3]);
+        let filtered = ObjectHeader::parse_from_source_filtered(
+            header.as_slice(),
+            crate::access_mode::AccessMode::ReadOnly,
+            0,
+            8,
+            8,
+            BaseAddress::ZERO,
+            MessageFilter::Only(&mut |_, _| false),
+        )
+        .unwrap();
+        assert_eq!(filtered.prefix, Some(prefix));
+        assert!(filtered.messages.is_empty());
     }
 
     #[test]

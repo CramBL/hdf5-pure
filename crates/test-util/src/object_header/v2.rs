@@ -13,6 +13,7 @@ use crate::widths::Widths;
 pub struct Header {
     flags: HeaderFlags,
     timestamps: Timestamps,
+    phase_change: Option<(u16, u16)>,
     messages: Vec<Message>,
 }
 
@@ -34,6 +35,15 @@ impl Header {
     pub fn timestamps(mut self, timestamps: Timestamps) -> Self {
         self.flags = self.flags | HeaderFlags::STORES_TIMES;
         self.timestamps = timestamps;
+        self
+    }
+
+    /// Sets the attribute thresholds and enables their prefix fields.
+    ///
+    /// Stores the pair verbatim, including invalid thresholds for malformed fixtures.
+    pub fn phase_change(mut self, max_compact: u16, min_dense: u16) -> Self {
+        self.flags = self.flags | HeaderFlags::STORES_ATTRIBUTE_PHASE_CHANGE;
+        self.phase_change = Some((max_compact, min_dense));
         self
     }
 
@@ -71,8 +81,11 @@ impl Header {
             }
         }
         if self.flags.stores_attribute_phase_change() {
-            header.extend_from_slice(&DEFAULT_MAX_COMPACT.to_le_bytes());
-            header.extend_from_slice(&DEFAULT_MIN_DENSE.to_le_bytes());
+            let (max_compact, min_dense) = self
+                .phase_change
+                .unwrap_or((DEFAULT_MAX_COMPACT, DEFAULT_MIN_DENSE));
+            header.extend_from_slice(&max_compact.to_le_bytes());
+            header.extend_from_slice(&min_dense.to_le_bytes());
         }
         bytes::push_uint(
             &mut header,
