@@ -1303,17 +1303,48 @@ impl HugeObjectRecord {
         offset_width.get() as u16 + 2 * length_width.get() as u16
     }
 
-    /// Appends the record to `buf`, with the address in `offset_width` bytes and the length and
-    /// the key in `length_width` bytes each.
-    pub fn encode(&self, buf: &mut Vec<u8>, offset_width: OffsetWidth, length_width: LengthWidth) {
-        let Self {
-            address,
-            length,
-            id,
-        } = *self;
-        bytes::write_offset(buf, address.get(), offset_width);
-        bytes::write_length(buf, length, length_width);
-        bytes::write_length(buf, id, length_width);
+    /// Appends one complete record after checking the address, length, and key.
+    ///
+    /// Uses `offset_width` bytes for the address and `length_width` bytes each for the length and
+    /// key. Leaves `buf` unchanged if a field cannot be represented.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if the address does not fit `offset_width`,
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined address,
+    /// and [`FormatError::LengthTooLarge`] if the length or key does not fit `length_width`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FormatError, LengthWidth, OffsetWidth, StoredAddress};
+    /// use hdf5_pure_format::__private::HugeObjectRecord;
+    ///
+    /// let record = HugeObjectRecord {
+    ///     address: StoredAddress::new(1024),
+    ///     length: 17,
+    ///     id: 65_536,
+    /// };
+    /// let mut bytes = vec![0xAB, 0xCD];
+    /// let error = record.encode(&mut bytes, OffsetWidth::Two, LengthWidth::Two).unwrap_err();
+    /// assert_eq!(error, FormatError::LengthTooLarge { length: 65_536, length_size: 2 });
+    /// assert_eq!(bytes, [0xAB, 0xCD]);
+    /// ```
+    pub fn encode(
+        &self,
+        buf: &mut Vec<u8>,
+        offset_width: OffsetWidth,
+        length_width: LengthWidth,
+    ) -> Result<(), FormatError> {
+        write::HugeObjectRecordEncoding::new(
+            *self,
+            FormatWidths {
+                offsets: offset_width,
+                lengths: length_width,
+            },
+        )?
+        .append(buf)
     }
 }
 
@@ -3309,7 +3340,9 @@ mod tests {
             id: 3,
         };
         let mut data = Vec::new();
-        record.encode(&mut data, offset_width, length_width);
+        record
+            .encode(&mut data, offset_width, length_width)
+            .unwrap();
 
         assert_eq!(
             data.len(),

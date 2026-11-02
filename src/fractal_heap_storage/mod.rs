@@ -2848,7 +2848,8 @@ mod tests {
             length,
             id,
         }
-        .encode(&mut bytes, OffsetWidth::Eight, LengthWidth::Eight);
+        .encode(&mut bytes, OffsetWidth::Eight, LengthWidth::Eight)
+        .unwrap();
         bytes
     }
 

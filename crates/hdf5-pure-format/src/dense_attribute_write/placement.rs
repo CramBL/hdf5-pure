@@ -4,9 +4,11 @@ use alloc::vec::Vec;
 use crate::address::StoredAddress;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::btree::v2::write::BTreeV2Placement;
+use crate::btree::v2::write::PreparedHeapId;
 use crate::btree::v2::{AttributeRecord, HugeObjectRecord};
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap_write::ManagedHeapPlacement;
 use crate::message_flags::MessageFlags;
 
@@ -66,6 +68,8 @@ impl<'a> DenseAttrPlacement<'a> {
                 DENSE_ATTR_UNDEFINED
             },
         );
+        let ids =
+            FractalHeapIdLayout::new(&header, DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
         let mut managed = Vec::with_capacity(attributes.len() - geometry.huge_count);
         let mut huge = Vec::with_capacity(geometry.huge_count);
         let mut heap_ids = Vec::with_capacity(attributes.len());
@@ -81,7 +85,7 @@ impl<'a> DenseAttrPlacement<'a> {
                     &mut huge_records,
                     DENSE_ATTR_OFFSET_WIDTH,
                     DENSE_ATTR_LENGTH_WIDTH,
-                );
+                )?;
                 huge.push(attribute.bytes.as_slice());
                 header.encode_huge_id(*id, DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)?
             } else {
@@ -97,7 +101,7 @@ impl<'a> DenseAttrPlacement<'a> {
         for &(hash, position) in &geometry.order {
             let position = position.to_usize()?;
             AttributeRecord {
-                heap_id: &heap_ids[position],
+                heap_id: PreparedHeapId::new(&ids, &heap_ids[position])?.bytes(),
                 flags: MessageFlags::NONE,
                 creation_order: attributes[position].creation_index,
             }
@@ -107,7 +111,7 @@ impl<'a> DenseAttrPlacement<'a> {
             for &position in &geometry.corder_order {
                 let position = position.to_usize()?;
                 AttributeRecord {
-                    heap_id: &heap_ids[position],
+                    heap_id: PreparedHeapId::new(&ids, &heap_ids[position])?.bytes(),
                     flags: MessageFlags::NONE,
                     creation_order: attributes[position].creation_index,
                 }

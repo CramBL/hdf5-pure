@@ -14,12 +14,14 @@ use crate::btree::v2::BTREE_V2_LINK_NAME;
 use crate::btree::v2::write::BTreeV2Placement;
 use crate::btree::v2::write::BTreeV2Plan;
 use crate::btree::v2::write::BTreeV2WriteDialect;
+use crate::btree::v2::write::PreparedHeapId;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
 use crate::fractal_heap::FractalHeapFiltering;
 use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap_write::GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE;
 use crate::fractal_heap_write::GROUP_HEAP_MAX_HEAP_SIZE_BITS;
 use crate::fractal_heap_write::GROUP_HEAP_MAX_MANAGED_OBJECT;
@@ -122,7 +124,8 @@ impl DenseLinkPlan {
     /// # Errors
     ///
     /// Returns [`DenseLinkPlanError::Heap`] if the managed-heap limits are exceeded,
-    /// [`DenseLinkPlanError::Format`] if a field exceeds its encoding or platform width, and
+    /// [`DenseLinkPlanError::Format`] if a field exceeds its encoding or platform width or an
+    /// encoded heap ID is invalid, and
     /// [`DenseLinkPlanError::LengthOverflow`] if layout arithmetic overflows. Returns
     /// [`DenseLinkPlanError::Link`] if link encoding fails, or
     /// [`DenseLinkPlanError::IndexGeometry`] if the index geometry cannot represent the links.
@@ -143,6 +146,7 @@ impl DenseLinkPlan {
             .collect::<Vec<_>>();
         let heap = ManagedHeapPlan::group_links(&sizes, offset_width)?;
         let header = Self::heap_header(offset_width, length_width, &heap, serialized.len())?;
+        let id_layout = FractalHeapIdLayout::new(&header, offset_width, length_width);
         let ids = sizes
             .iter()
             .enumerate()
@@ -163,8 +167,9 @@ impl DenseLinkPlan {
         });
         let mut name_records = Vec::new();
         for (hash, index) in order {
+            let id = PreparedHeapId::new(&id_layout, &ids[index])?;
             name_records.extend_from_slice(&hash.to_le_bytes());
-            name_records.extend_from_slice(&ids[index]);
+            name_records.extend_from_slice(id.bytes());
         }
         let heap_offset = FractalHeapHeader::serialized_size(offset_width, length_width).to_u64();
         let mut cursor = heap_offset
@@ -196,8 +201,9 @@ impl DenseLinkPlan {
             order.sort_unstable_by_key(|&(creation, _)| creation);
             let mut records = Vec::new();
             for (creation, index) in order {
+                let id = PreparedHeapId::new(&id_layout, &ids[index])?;
                 records.extend_from_slice(&creation.to_le_bytes());
-                records.extend_from_slice(&ids[index]);
+                records.extend_from_slice(id.bytes());
             }
             Some(PlannedIndex::new(
                 widths,
