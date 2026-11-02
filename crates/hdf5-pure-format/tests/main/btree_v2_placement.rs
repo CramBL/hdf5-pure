@@ -7,6 +7,7 @@ use hdf5_pure_format::__private::BTREE_V2_LINK_NAME;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::BTreeV2Layout;
+use hdf5_pure_format::__private::BTreeV2Node;
 use hdf5_pure_format::__private::BTreeV2Plan;
 use hdf5_pure_format::__private::BTreeV2WriteDialect;
 use rstest::rstest;
@@ -241,4 +242,181 @@ fn contiguous_serialization_rejects_another_address_width(#[case] width: OffsetW
         error,
         FormatError::Internal("B-tree serialization address width differs from the plan".into())
     );
+}
+
+#[rstest]
+#[case::zero_record_width(0, 512)]
+#[case::zero_node_width(11, 0)]
+#[case::truncated_prefix(11, 5)]
+#[case::truncated_checksum(11, 9)]
+#[case::no_record_space(11, 10)]
+#[case::record_does_not_fit(11, 20)]
+fn planning_rejects_invalid_geometry(
+    #[case] record_size: u16,
+    #[case] node_size: u32,
+    #[values(0, 1)] count: usize,
+    #[values(false, true)] undefined_empty_root: bool,
+) {
+    let plan = if undefined_empty_root {
+        BTreeV2Plan::new_with_undefined_empty_root(
+            BTreeV2WriteDialect::Libhdf5Global,
+            BTREE_V2_LINK_NAME,
+            count,
+            record_size,
+            node_size,
+            OffsetWidth::Eight,
+        )
+    } else {
+        BTreeV2Plan::new(
+            BTREE_V2_LINK_NAME,
+            count,
+            record_size,
+            node_size,
+            OffsetWidth::Eight,
+        )
+    };
+    assert!(plan.is_none());
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two)]
+#[case::four(OffsetWidth::Four)]
+#[case::eight(OffsetWidth::Eight)]
+fn minimum_node_geometry_preserves_a_complete_record(#[case] offsets: OffsetWidth) {
+    let plan = BTreeV2Plan::new(BTREE_V2_LINK_NAME, 1, 11, 21, offsets).unwrap();
+    let records = [37; 11];
+    let image = plan
+        .serialize(
+            &records,
+            StoredAddress::new(1024),
+            offsets,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+    assert_eq!(image.nodes.len(), 21);
+    let header = BTreeV2Header::parse(&image.header, 0, offsets.get(), 8).unwrap();
+    assert_eq!(header.total_records, 1);
+    let layout = BTreeV2Layout::new(&header, offsets).unwrap();
+    let node = layout.root().unwrap().parse(&image.nodes).unwrap();
+    assert_eq!(node.record_count(), 1);
+    assert_eq!(node.record(0).unwrap(), &records);
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two)]
+#[case::four(OffsetWidth::Four)]
+#[case::eight(OffsetWidth::Eight)]
+fn contiguous_nodes_at_the_address_limit_preserve_order_and_checksums(
+    #[case] offsets: OffsetWidth,
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+) {
+    let plan = BTreeV2Plan::new(BTREE_V2_LINK_NAME, 50, 11, 512, offsets).unwrap();
+    assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [512; 3]);
+    let base = StoredAddress::undefined(offsets).get() - plan.nodes_size();
+    let records: Vec<u8> = (0u8..50).flat_map(|index| [index; 11]).collect();
+    let image = plan
+        .serialize(&records, StoredAddress::new(base), offsets, lengths)
+        .unwrap();
+    let header = BTreeV2Header::parse(&image.header, 0, offsets.get(), lengths.get()).unwrap();
+    assert_eq!(
+        header.root_node_address.get(),
+        StoredAddress::undefined(offsets).get() - 512
+    );
+    assert_eq!(header.depth, 1);
+    assert_eq!(header.total_records, 50);
+    assert_eq!(image.nodes.len(), 3 * 512);
+    let layout = BTreeV2Layout::new(&header, offsets).unwrap();
+    assert_eq!(
+        ordered_records(layout.root().unwrap(), base, &image.nodes),
+        records
+    );
+}
+
+#[rstest]
+#[case::maximum_two_byte_count(65_535)]
+#[case::above_two_byte_count(65_536)]
+fn contiguous_serialization_checks_the_total_before_encoding(
+    #[case] count: usize,
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+) {
+    let plan = BTreeV2Plan::new(BTREE_V2_LINK_NAME, count, 11, 512, OffsetWidth::Eight).unwrap();
+    let records = vec![53; count * 11];
+    let result = plan.serialize(&records, StoredAddress::new(0), OffsetWidth::Eight, lengths);
+    if lengths == LengthWidth::Two && count == 65_536 {
+        assert_eq!(
+            result.err().unwrap(),
+            FormatError::LengthTooLarge {
+                length: 65_536,
+                length_size: 2
+            }
+        );
+    } else {
+        let image = result.unwrap();
+        let header = BTreeV2Header::parse(&image.header, 0, 8, lengths.get()).unwrap();
+        assert_eq!(header.total_records, count as u64);
+        assert_eq!(image.nodes.len() as u64, plan.nodes_size());
+    }
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two)]
+#[case::four(OffsetWidth::Four)]
+#[case::eight(OffsetWidth::Eight)]
+fn placement_rejects_each_undefined_node_address(#[case] offsets: OffsetWidth) {
+    let plan = BTreeV2Plan::new(BTREE_V2_LINK_NAME, 1, 11, 512, offsets).unwrap();
+    let undefined = StoredAddress::undefined(offsets);
+    assert_eq!(
+        plan.place(&[undefined]).err().unwrap(),
+        FormatError::DefinedAddressIsUndefined {
+            address: undefined.get(),
+            offset_size: offsets.get(),
+        }
+    );
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two)]
+#[case::four(OffsetWidth::Four)]
+fn contiguous_serialization_rejects_unrepresentable_node_addresses(
+    #[case] offsets: OffsetWidth,
+    #[values(false, true)] undefined: bool,
+) {
+    let plan = BTreeV2Plan::new(BTREE_V2_LINK_NAME, 1, 11, 512, offsets).unwrap();
+    let address = StoredAddress::undefined(offsets).get() + u64::from(!undefined);
+    let error = plan
+        .serialize(
+            &[0; 11],
+            StoredAddress::new(address),
+            offsets,
+            LengthWidth::Eight,
+        )
+        .err()
+        .unwrap();
+    let expected = if undefined {
+        FormatError::DefinedAddressIsUndefined {
+            address,
+            offset_size: offsets.get(),
+        }
+    } else {
+        FormatError::AddressTooLarge {
+            address,
+            offset_size: offsets.get(),
+        }
+    };
+    assert_eq!(error, expected);
+}
+
+fn ordered_records(node: BTreeV2Node<'_>, base: u64, bytes: &[u8]) -> Vec<u8> {
+    let offset = usize::try_from(node.address().get() - base).unwrap();
+    let view = node.parse(&bytes[offset..]).unwrap();
+    let mut records = Vec::new();
+    for index in 0..=view.record_count() {
+        if let Some(child) = view.child(index).unwrap() {
+            records.extend(ordered_records(child, base, bytes));
+        }
+        if index < view.record_count() {
+            records.extend_from_slice(view.record(index).unwrap());
+        }
+    }
+    records
 }

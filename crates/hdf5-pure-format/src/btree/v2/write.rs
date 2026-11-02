@@ -5,13 +5,17 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroU16;
 
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::btree::v2::BTreeV2NodeInfo;
+use crate::btree::v2::NODE_CHECKSUM_LEN;
+use crate::btree::v2::NODE_PREFIX_LEN;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::width;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -51,6 +55,17 @@ struct PlannedNode {
     children: Vec<usize>,
 }
 
+impl PlannedNode {
+    fn encoded_size(&self, record_size: NonZeroU16, pointer_width: usize) -> Option<usize> {
+        self.records
+            .len()
+            .checked_mul(usize::from(record_size.get()))?
+            .checked_add(self.children.len().checked_mul(pointer_width)?)?
+            .checked_add(NODE_PREFIX_LEN)?
+            .checked_add(NODE_CHECKSUM_LEN)
+    }
+}
+
 /// The layout of a version 2 B-tree: its nodes and the records each holds, before the tree has an
 /// address.
 ///
@@ -63,7 +78,7 @@ struct PlannedNode {
 pub struct BTreeV2Plan {
     tree_type: u8,
     node_size: u32,
-    record_size: u16,
+    record_size: NonZeroU16,
     depth: u16,
     total_records: u64,
     offset_width: OffsetWidth,
@@ -104,12 +119,14 @@ fn capacity_as_usize(capacity: u64) -> usize {
 }
 
 impl BTreeV2Plan {
-    /// Lays out a tree of type `tree_type` with `record_count` records of `record_size` bytes in
-    /// nodes of `node_size` bytes.
+    /// Lays out a tree with nonzero record width and checked node capacity.
     ///
-    /// Returns `None` if every tree of these sizes over `record_count` records has an empty node,
-    /// or if a leaf of `node_size` bytes fits more than `u16::MAX` records, the largest count the
-    /// 2-byte "Number of Records in Root Node" field of the header stores.
+    /// For zero records, plans one empty leaf with a defined address.
+    /// [`Self::new_with_undefined_empty_root`] plans no nodes for an empty tree.
+    ///
+    /// Returns `None` if `record_size` is zero, a leaf cannot fit its prefix, checksum, and one
+    /// complete record, or a leaf fits more than [`u16::MAX`] records. For nonzero `record_count`,
+    /// also returns `None` if the tree cannot be laid out without an empty node.
     pub fn new(
         tree_type: u8,
         record_count: usize,
@@ -117,12 +134,16 @@ impl BTreeV2Plan {
         node_size: u32,
         offset_width: OffsetWidth,
     ) -> Option<BTreeV2Plan> {
+        let record_size = NonZeroU16::new(record_size)?;
         let (info, depth) = BTreeV2NodeInfo::for_record_count(
             node_size,
-            record_size,
+            record_size.get(),
             offset_width,
             record_count as u64,
         )?;
+        if info.max_nrec(0) == 0 {
+            return None;
+        }
         u16::try_from(info.max_nrec(0)).ok()?;
 
         let mut nodes = Vec::new();
@@ -202,10 +223,13 @@ impl BTreeV2Plan {
     /// tree planned with [`Self::new_with_undefined_empty_root`], the root address is undefined and
     /// `nodes_address` is unused.
     ///
+    /// Checks the record buffer, node geometry, counts, and address ranges before encoding the
+    /// header or nodes.
+    ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if `offset_width` differs from the plan's address width
-    /// or the record buffer length differs from the planned length.
+    /// Returns [`FormatError::Internal`] if `offset_width` differs from the plan's address width,
+    /// the record buffer length is incorrect, or the plan's geometry or counts are inconsistent.
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the total node size or exclusive end exceeds
     /// [`u64::MAX`], [`FormatError::AddressTooLarge`] if the starting address or exclusive end
@@ -263,18 +287,27 @@ impl BTreeV2Plan {
             nodes_address.checked_add(length)?;
             self.block_end(nodes_address, length)?;
         }
-        self.check_records(records)?;
-        let subtree_total = self.subtree_totals();
-        let address_of = |index: usize| {
-            StoredAddress::new(nodes_address.get() + index as u64 * u64::from(self.node_size))
+        let records = self.prepare_records(records)?;
+        let encoding = CheckedNodeEncoding::new(self)?;
+        let emission = CheckedNodeEmission {
+            encoding: &encoding,
+            records,
+            addresses: CheckedNodeAddresses::Contiguous {
+                start: nodes_address,
+                node_size: self.node_size,
+            },
         };
-        let header = self.encode_header(
-            self.nodes.len().checked_sub(1).map(address_of),
-            length_width,
-        )?;
+        let root_address = self
+            .nodes
+            .len()
+            .checked_sub(1)
+            .map(|index| emission.addresses.address(index))
+            .transpose()?;
+        let header = CheckedHeaderEncoding::new(&encoding, root_address, length_width)?;
         let mut nodes = Vec::with_capacity(length.to_usize()?);
+        let header = header.encode()?;
         for index in 0..self.nodes.len() {
-            self.encode_node(&mut nodes, index, records, &subtree_total, address_of)?;
+            emission.encode_node(&mut nodes, index)?;
         }
         Ok(BTreeV2Image { header, nodes })
     }
@@ -302,7 +335,8 @@ impl BTreeV2Plan {
     /// Returns [`FormatError::OffsetOverflow`] if a node's exclusive end exceeds [`u64::MAX`],
     /// [`FormatError::AddressTooLarge`] if an address or exclusive end exceeds the plan's address
     /// width, and [`FormatError::DefinedAddressIsUndefined`] if a node starts at the undefined
-    /// address.
+    /// address. Returns [`FormatError::ValueTooLargeForPlatform`] if the node size exceeds
+    /// [`usize::MAX`], and [`FormatError::Internal`] if the node geometry or counts are inconsistent.
     ///
     /// # Examples
     ///
@@ -351,9 +385,8 @@ impl BTreeV2Plan {
             }
         }
         Ok(BTreeV2Placement {
-            plan: self,
             addresses: addresses.to_vec(),
-            subtree_total: self.subtree_totals(),
+            encoding: CheckedNodeEncoding::new(self)?,
         })
     }
 
@@ -381,110 +414,30 @@ impl BTreeV2Plan {
         Ok(end)
     }
 
-    fn check_records(&self, records: &[u8]) -> Result<(), FormatError> {
-        if records.len() as u64 != self.total_records * u64::from(self.record_size) {
+    fn prepare_records<'a>(&self, records: &'a [u8]) -> Result<CheckedRecords<'a>, FormatError> {
+        let expected = self
+            .total_records
+            .checked_mul(u64::from(self.record_size.get()))
+            .ok_or_else(|| {
+                FormatError::Internal("planned record buffer length exceeds u64::MAX".into())
+            })?;
+        if records.len().to_u64() != expected {
             return Err(FormatError::Internal(
                 "record buffer length differs from the planned records".into(),
             ));
         }
-        Ok(())
-    }
-
-    fn subtree_totals(&self) -> Vec<u64> {
-        let mut totals = vec![0; self.nodes.len()];
-        for (index, node) in self.nodes.iter().enumerate() {
-            totals[index] = node.records.len() as u64
-                + node
-                    .children
-                    .iter()
-                    .map(|&child| totals[child])
-                    .sum::<u64>();
-        }
-        totals
-    }
-
-    fn encode_node(
-        &self,
-        data: &mut Vec<u8>,
-        index: usize,
-        records: &[u8],
-        subtree_total: &[u64],
-        address_of: impl Fn(usize) -> StoredAddress,
-    ) -> Result<(), FormatError> {
-        let node = &self.nodes[index];
-        let start = data.len();
-        let node_size = self.node_size.to_usize()?;
-        let record_size = usize::from(self.record_size);
-        data.extend_from_slice(if node.depth == 0 { b"BTLF" } else { b"BTIN" });
-        data.push(0);
-        data.push(self.tree_type);
-        for &record in &node.records {
-            data.extend_from_slice(&records[record * record_size..(record + 1) * record_size]);
-        }
-        for &child in &node.children {
-            bytes::try_write_offset(data, address_of(child).get(), self.offset_width)?;
-            write_uint(
-                data,
-                self.nodes[child].records.len() as u64,
-                self.info.max_nrec_size(),
-            );
-            write_uint(
-                data,
-                subtree_total[child],
-                self.info.total_nrec_size(node.depth),
-            );
-        }
-        let checksum = crate::checksum::jenkins_lookup3(&data[start..]);
-        data.extend_from_slice(&checksum.to_le_bytes());
-        debug_assert!(data.len() - start <= node_size);
-        data.resize(start + node_size, 0);
-        Ok(())
-    }
-
-    fn encode_header(
-        &self,
-        root_address: Option<StoredAddress>,
-        length_width: LengthWidth,
-    ) -> Result<Vec<u8>, FormatError> {
-        let mut header = Vec::with_capacity(crate::btree::v2::btree_v2_header_size(
-            self.offset_width,
-            length_width,
-        ));
-        header.extend_from_slice(b"BTHD");
-        header.push(0);
-        header.push(self.tree_type);
-        header.extend_from_slice(&self.node_size.to_le_bytes());
-        header.extend_from_slice(&self.record_size.to_le_bytes());
-        header.extend_from_slice(&self.depth.to_le_bytes());
-        header.push(SPLIT_PERCENT);
-        header.push(MERGE_PERCENT);
-        bytes::try_write_offset(
-            &mut header,
-            root_address
-                .unwrap_or_else(|| StoredAddress::undefined(self.offset_width))
-                .get(),
-            self.offset_width,
-        )?;
-        // `new` rejects a geometry whose leaf capacity exceeds `u16::MAX`, and no node holds more
-        // records than a leaf.
-        let root_nrec = u16::try_from(self.nodes.last().map_or(0, |root| root.records.len()))
-            .expect("`BTreeV2Plan::new` bounds every node's record count by `u16::MAX`");
-        header.extend_from_slice(&root_nrec.to_le_bytes());
-        bytes::try_write_length(&mut header, self.total_records, length_width)?;
-        let checksum = crate::checksum::jenkins_lookup3(&header);
-        header.extend_from_slice(&checksum.to_le_bytes());
-        Ok(header)
+        Ok(CheckedRecords { bytes: records })
     }
 }
 
 /// A version 2 B-tree plan with checked, disjoint stored node ranges.
 ///
 /// Created by [`BTreeV2Plan::place`]. The caller allocates storage for each complete node and
-/// writes the header separately. Node placement excludes the header's allocation.
+/// writes the header separately. Node placement excludes the header's allocation. Node geometry
+/// and count-field widths are checked before placement is returned.
 pub struct BTreeV2Placement<'a> {
-    plan: &'a BTreeV2Plan,
     addresses: Vec<StoredAddress>,
-    subtree_total: Vec<u64>,
+    encoding: CheckedNodeEncoding<'a>,
 }
 
 impl BTreeV2Placement<'_> {
@@ -495,7 +448,7 @@ impl BTreeV2Placement<'_> {
         self.addresses
             .iter()
             .copied()
-            .zip(self.plan.block_lengths())
+            .zip(self.encoding.plan.block_lengths())
     }
 
     /// Serializes the header with the placed root address.
@@ -507,8 +460,8 @@ impl BTreeV2Placement<'_> {
     ///
     /// Returns [`FormatError::LengthTooLarge`] if the planned record count exceeds `length_width`.
     pub fn serialize_header(&self, length_width: LengthWidth) -> Result<Vec<u8>, FormatError> {
-        self.plan
-            .encode_header(self.addresses.last().copied(), length_width)
+        CheckedHeaderEncoding::new(&self.encoding, self.addresses.last().copied(), length_width)?
+            .encode()
     }
 
     /// Serializes one complete node per iterator step, in placement order.
@@ -522,9 +475,8 @@ impl BTreeV2Placement<'_> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if the record buffer length differs from the planned
-    /// length. Iterator items report [`FormatError::ValueTooLargeForPlatform`] if the node size
-    /// exceeds [`usize::MAX`].
+    /// Returns [`FormatError::Internal`] if the supplied byte length differs from the planned
+    /// length, or the planned byte length exceeds [`u64::MAX`].
     pub fn serialize_nodes<'a>(
         &'a self,
         records: &'a [u8],
@@ -532,20 +484,237 @@ impl BTreeV2Placement<'_> {
         impl ExactSizeIterator<Item = Result<(StoredAddress, Vec<u8>), FormatError>> + 'a,
         FormatError,
     > {
-        self.plan.check_records(records)?;
+        let records = self.encoding.plan.prepare_records(records)?;
+        let emission = CheckedNodeEmission {
+            encoding: &self.encoding,
+            records,
+            addresses: CheckedNodeAddresses::Placed(&self.addresses),
+        };
         Ok(self
             .addresses
             .iter()
             .copied()
             .enumerate()
             .map(move |(index, address)| {
-                let mut data = Vec::with_capacity(self.plan.node_size.to_usize()?);
-                self.plan
-                    .encode_node(&mut data, index, records, &self.subtree_total, |child| {
-                        self.addresses[child]
-                    })?;
+                let mut data = Vec::with_capacity(self.encoding.plan.node_size.to_usize()?);
+                emission.encode_node(&mut data, index)?;
                 Ok((address, data))
             }))
+    }
+}
+
+/// Record bytes whose length matches the plan's checked count and nonzero record width.
+struct CheckedRecords<'a> {
+    bytes: &'a [u8],
+}
+
+/// Node allocation sizes and count-field widths checked against an immutable plan.
+///
+/// The writer computes subtree totals with checked arithmetic in child-before-parent order.
+/// The root's total equals the plan's record count.
+struct CheckedNodeEncoding<'a> {
+    plan: &'a BTreeV2Plan,
+    subtree_total: Vec<u64>,
+}
+
+impl<'a> CheckedNodeEncoding<'a> {
+    fn new(plan: &'a BTreeV2Plan) -> Result<Self, FormatError> {
+        let node_size = plan.node_size.to_usize()?;
+        let mut subtree_total = vec![0u64; plan.nodes.len()];
+        for (index, node) in plan.nodes.iter().enumerate() {
+            let record_count = node.records.len().to_u64();
+            let pointer_width = usize::from(plan.offset_width.get())
+                + plan.info.max_nrec_size()
+                + plan.info.total_nrec_size(node.depth);
+            if node
+                .encoded_size(plan.record_size, pointer_width)
+                .is_none_or(|length| length > node_size)
+            {
+                return Err(FormatError::Internal(
+                    "planned B-tree node exceeds its allocation".into(),
+                ));
+            }
+            let mut total = record_count;
+            for &child in &node.children {
+                let child_total = *subtree_total
+                    .get(..index)
+                    .and_then(|totals| totals.get(child))
+                    .ok_or_else(|| {
+                        FormatError::Internal("B-tree child does not precede its parent".into())
+                    })?;
+                let child_count = plan.nodes[child].records.len().to_u64();
+                let total_width = plan.info.total_nrec_size(node.depth);
+                if !count_fits(child_count, plan.info.max_nrec_size())
+                    || (total_width != 0 && !count_fits(child_total, total_width))
+                {
+                    return Err(FormatError::Internal(
+                        "planned B-tree count exceeds its field width".into(),
+                    ));
+                }
+                total = total.checked_add(child_total).ok_or_else(|| {
+                    FormatError::Internal("planned B-tree subtree count exceeds u64::MAX".into())
+                })?;
+            }
+            subtree_total[index] = total;
+        }
+        if subtree_total.last().copied().unwrap_or(0) != plan.total_records {
+            return Err(FormatError::Internal(
+                "planned B-tree subtree count differs from the declared total".into(),
+            ));
+        }
+        u16::try_from(plan.nodes.last().map_or(0, |root| root.records.len()))
+            .map_err(|_error| FormatError::Internal("B-tree root count exceeds u16::MAX".into()))?;
+        Ok(Self {
+            plan,
+            subtree_total,
+        })
+    }
+}
+
+/// Node-address lookup for contiguous or independently placed allocations.
+enum CheckedNodeAddresses<'a> {
+    Contiguous {
+        start: StoredAddress,
+        node_size: u32,
+    },
+    Placed(&'a [StoredAddress]),
+}
+
+impl CheckedNodeAddresses<'_> {
+    fn address(&self, index: usize) -> Result<StoredAddress, FormatError> {
+        match self {
+            Self::Contiguous { start, node_size } => {
+                let offset = index.to_u64().checked_mul(u64::from(*node_size)).ok_or(
+                    FormatError::OffsetOverflow {
+                        offset: start.get(),
+                        length: u64::MAX,
+                    },
+                )?;
+                start.checked_add(offset)
+            }
+            Self::Placed(addresses) => Ok(addresses[index]),
+        }
+    }
+}
+
+/// Checked node geometry and record bytes paired with the selected address layout.
+///
+/// The internal and leaf node layouts are defined in "Version 2 B-trees" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+struct CheckedNodeEmission<'a, 'b> {
+    encoding: &'a CheckedNodeEncoding<'a>,
+    records: CheckedRecords<'b>,
+    addresses: CheckedNodeAddresses<'a>,
+}
+
+impl CheckedNodeEmission<'_, '_> {
+    fn encode_node(&self, data: &mut Vec<u8>, index: usize) -> Result<(), FormatError> {
+        let plan = self.encoding.plan;
+        let node = &plan.nodes[index];
+        let start = data.len();
+        let record_size = usize::from(plan.record_size.get());
+        let node_size = plan.node_size.to_usize()?;
+        data.extend_from_slice(if node.depth == 0 { b"BTLF" } else { b"BTIN" });
+        data.push(0);
+        data.push(plan.tree_type);
+        for &record in &node.records {
+            data.extend_from_slice(
+                &self.records.bytes[record * record_size..(record + 1) * record_size],
+            );
+        }
+        for &child in &node.children {
+            bytes::try_write_decoded_address(
+                data,
+                DecodedStoredAddress::Defined(self.addresses.address(child)?),
+                plan.offset_width,
+            )?;
+            write_uint(
+                data,
+                plan.nodes[child].records.len() as u64,
+                plan.info.max_nrec_size(),
+            );
+            write_uint(
+                data,
+                self.encoding.subtree_total[child],
+                plan.info.total_nrec_size(node.depth),
+            );
+        }
+        let checksum = crate::checksum::jenkins_lookup3(&data[start..]);
+        data.extend_from_slice(&checksum.to_le_bytes());
+        debug_assert!(data.len() - start <= node_size);
+        data.resize(start + node_size, 0);
+        Ok(())
+    }
+}
+
+/// Header fields checked for their selected offset and length widths.
+///
+/// A defined root address fits the offset width and differs from its undefined-address value.
+/// The root record count and total record count fit their header fields.
+///
+/// The header layout is defined in "Version 2 B-trees" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+struct CheckedHeaderEncoding<'a> {
+    plan: &'a BTreeV2Plan,
+    root_address: DecodedStoredAddress,
+    root_records: u16,
+    length_width: LengthWidth,
+}
+
+impl<'a> CheckedHeaderEncoding<'a> {
+    fn new(
+        nodes: &CheckedNodeEncoding<'a>,
+        root_address: Option<StoredAddress>,
+        length_width: LengthWidth,
+    ) -> Result<Self, FormatError> {
+        let plan = nodes.plan;
+        if !width::length_width_holds(length_width, plan.total_records) {
+            return Err(FormatError::LengthTooLarge {
+                length: plan.total_records,
+                length_size: length_width.get(),
+            });
+        }
+        let root_address = if let Some(address) = root_address {
+            plan.block_end(address, 0)?;
+            DecodedStoredAddress::Defined(address)
+        } else {
+            DecodedStoredAddress::Undefined
+        };
+        Ok(Self {
+            plan,
+            root_address,
+            root_records: u16::try_from(plan.nodes.last().map_or(0, |root| root.records.len()))
+                .map_err(|_error| {
+                    FormatError::Internal("B-tree root count exceeds u16::MAX".into())
+                })?,
+            length_width,
+        })
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, FormatError> {
+        let plan = self.plan;
+        let mut header = Vec::with_capacity(crate::btree::v2::btree_v2_header_size(
+            plan.offset_width,
+            self.length_width,
+        ));
+        header.extend_from_slice(b"BTHD");
+        header.push(0);
+        header.push(plan.tree_type);
+        header.extend_from_slice(&plan.node_size.to_le_bytes());
+        header.extend_from_slice(&plan.record_size.get().to_le_bytes());
+        header.extend_from_slice(&plan.depth.to_le_bytes());
+        header.push(SPLIT_PERCENT);
+        header.push(MERGE_PERCENT);
+        bytes::try_write_decoded_address(&mut header, self.root_address, plan.offset_width)?;
+        header.extend_from_slice(&self.root_records.to_le_bytes());
+        bytes::try_write_length(&mut header, plan.total_records, self.length_width)?;
+        let checksum = crate::checksum::jenkins_lookup3(&header);
+        header.extend_from_slice(&checksum.to_le_bytes());
+        Ok(header)
     }
 }
 
@@ -629,6 +798,7 @@ fn plan_subtree(
 ///
 /// A width of 0 appends no bytes, for a field the child pointers of a node do not have.
 fn write_uint(buf: &mut Vec<u8>, value: u64, width: usize) {
+    debug_assert!(width == 0 || count_fits(value, width));
     for i in 0..width {
         #[expect(
             clippy::cast_possible_truncation,
@@ -638,11 +808,17 @@ fn write_uint(buf: &mut Vec<u8>, value: u64, width: usize) {
     }
 }
 
+fn count_fits(value: u64, width: usize) -> bool {
+    width <= core::mem::size_of::<u64>()
+        && (width == core::mem::size_of::<u64>() || value >> (width * 8) == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddressExt;
     use crate::btree::v2 as btree_v2;
     use crate::btree::v2::BTreeV2Header;
     use crate::dense_link_write::NAME_RECORD_LEN;
@@ -801,6 +977,24 @@ mod tests {
                 .map(|_| ())
                 .unwrap_err(),
             FormatError::Internal("record buffer length differs from the planned records".into())
+        );
+    }
+
+    #[test]
+    fn record_preparation_rejects_an_overflowing_byte_length() {
+        let mut plan = BTreeV2Plan::new(
+            btree_v2::BTREE_V2_ATTRIBUTE_NAME,
+            1,
+            17,
+            BTREE_V2_NODE_SIZE,
+            OFFSET_WIDTH,
+        )
+        .unwrap();
+        plan.total_records = u64::MAX / 17 + 1;
+        let error = plan.prepare_records(&[]).err().unwrap();
+        assert_eq!(
+            error,
+            FormatError::Internal("planned record buffer length exceeds u64::MAX".into())
         );
     }
 
