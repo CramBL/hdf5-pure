@@ -283,6 +283,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidGroupInfoFlags",
             "InvalidGroupInfoLength",
             "InvalidGroupInfoThresholds",
+            "InvalidAttributePhaseChange",
             "InvalidGroupInfoVersion",
             "InvalidGroupLeafNodeK",
             "InvalidLocalHeapNameOffset",
