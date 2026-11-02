@@ -3,6 +3,9 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
+
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
@@ -18,6 +21,7 @@ use crate::object_header::HeaderMessage;
 use crate::object_header::MessageFilter;
 use crate::object_header::OHDR_SIGNATURE;
 use crate::object_header::ObjectHeader;
+use crate::object_header::ObjectHeaderChunk;
 use crate::object_header::ParseContext;
 use crate::object_header::v2::chunk::RootChunk;
 use crate::object_header::v2::collector::HeaderCollector;
@@ -52,11 +56,20 @@ impl ObjectHeader {
         Ok(collector.finish())
     }
 
+    /// Parses a version 2 header and observes each chunk after checking its framing.
+    ///
+    /// Checksum verification follows the `checksum` feature. Calls the observer before checking
+    /// message compatibility and filtering records. Continuations are visited breadth-first.
+    ///
+    /// # Errors
+    ///
+    /// Returns framing, message-compatibility, address-conversion, and source-read errors.
     pub(super) fn parse_v2_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
         address: u64,
         filter: MessageFilter<'_>,
+        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
     ) -> Result<ObjectHeader, FormatError> {
         let head_len = OBJECT_HEADER_PREFIX_MAX_LEN
             .to_u64()
@@ -64,11 +77,24 @@ impl ObjectHeader {
             .to_usize()?;
         let prefix = ObjectHeaderPrefix::parse(&source.read_metadata(address, head_len)?)?;
         let image = source.read_metadata(address, prefix.chunk0_len()?)?;
-        let mut collector =
-            HeaderCollector::new(context, filter, RootChunk::parse(prefix, &image)?)?;
+        let root = RootChunk::parse(prefix, &image)?;
+        if let Some(observer) = observer.as_deref_mut() {
+            observer(root.chunk.observation(FileRange::new(
+                PhysicalAddress::new(address),
+                image.len().to_u64(),
+            )?)?);
+        }
+        let mut collector = HeaderCollector::new(context, filter, root)?;
         while let Some(block) = collector.next_continuation()? {
             let bytes = source.read_metadata(block.address, block.length.to_usize()?)?;
-            collector.ingest(block.parse(&bytes)?)?;
+            let chunk = block.parse(&bytes)?;
+            if let Some(observer) = observer.as_deref_mut() {
+                observer(chunk.observation(FileRange::new(
+                    PhysicalAddress::new(block.address),
+                    block.length,
+                )?)?);
+            }
+            collector.ingest(chunk)?;
         }
         Ok(collector.finish())
     }

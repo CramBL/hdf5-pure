@@ -282,6 +282,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
 #[cfg(doc)]
@@ -303,6 +304,10 @@ use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError};
+use crate::extension::ExtensionMessages;
+use crate::extension::ExtensionSummary;
+use crate::extension::OpeningMetadata;
+use crate::extension::SharedTableSummary;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking};
 use crate::file_space_info::DEFAULT_THRESHOLD;
@@ -318,16 +323,14 @@ use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
-use crate::message_type::MessageType;
-use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::{FileAccessProperties, OpenedSource, PersistedFreeSpacePolicy};
+use crate::sohm::SharedMessageTableMessage;
 use crate::source::MetadataCacheConfig;
 use crate::source::PhysicalSource;
 use crate::source::Source;
-use crate::source::SourceMetadata;
 use crate::superblock;
 use crate::superblock::Superblock;
 #[cfg(doc)]
@@ -1076,6 +1079,123 @@ struct PersistState {
     old_blocks: Vec<FreeExtent>,
 }
 
+/// Decoded opening messages and a separate extension-allocation result.
+///
+/// Allocation errors are deferred until strict manager recovery has completed. The caller uses
+/// these results within the same unchanged source phase.
+struct OpeningExtension {
+    /// The physical extension address and first File Space Info message, if present.
+    info: Option<(u64, FileSpaceInfo)>,
+    /// Complete physical chunk ranges, or a deferred editor geometry error.
+    ///
+    /// Empty when persistence is absent or disabled.
+    allocations: Result<Vec<FileRange>, Error>,
+    /// The first Shared Message Table message, or its independent decoding error.
+    shared_table: Result<Option<SharedMessageTableMessage>, FormatError>,
+}
+
+impl OpeningExtension {
+    /// Prepares settings and allocation geometry during one extension traversal.
+    ///
+    /// Materializes allocation ranges only when the decoded settings enable persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`WriteEngine::extension_summary`] and the first File Space Info
+    /// decoding outcome. Allocation and Shared Message Table errors remain in the result.
+    fn read(source: &(impl Source + ?Sized), context: &FileContext) -> Result<Self, FormatError> {
+        let mut allocations = self::object_header::ExtensionAllocations::new();
+        let summary = WriteEngine::extension_summary(
+            source,
+            context,
+            Some(&mut |chunk| {
+                allocations.observe(chunk, context.addresses(), source.len());
+            }),
+        )?;
+        let ExtensionMessages {
+            file_space: info,
+            shared_table,
+        } = match summary {
+            Some(summary) => summary.into_parts(),
+            None => ExtensionMessages {
+                file_space: Ok(None),
+                shared_table: Ok(None),
+            },
+        };
+        let info = info?.map(|(address, info)| (address.get(), info));
+        let allocations = if info.as_ref().is_some_and(|(_, info)| info.persist) {
+            allocations.finish()
+        } else {
+            Ok(Vec::new())
+        };
+        Ok(Self {
+            info,
+            allocations,
+            shared_table,
+        })
+    }
+}
+
+/// A writable session with pending metadata from its opening source phase.
+///
+/// The engine remains private while the pending outcome is retained.
+/// Opening writes invalidate successful, absent, and failed outcomes before changing the source.
+pub(crate) struct OpeningSession {
+    session: WriteEngine,
+    /// `None` when reader construction requires a fresh extension read.
+    shared_table: Option<Result<Option<SharedMessageTableMessage>, FormatError>>,
+}
+
+impl OpeningSession {
+    /// Returns the engine and discards the pending opening outcome.
+    #[cfg(any(test, doc))]
+    pub(crate) fn into_engine(self) -> WriteEngine {
+        self.session
+    }
+
+    /// Wraps an existing engine for a fresh metadata read during reader construction.
+    #[cfg(any(test, doc))]
+    pub(crate) fn from_engine(session: WriteEngine) -> Self {
+        Self {
+            session,
+            shared_table: None,
+        }
+    }
+
+    /// Configures the session and reads the table from any current pending message outcome.
+    ///
+    /// Invalidates the outcome before configuring a nonzero page buffer, which can write to
+    /// the source. The reader reads the extension from the configured session when the metadata
+    /// result is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`WriteEngine::set_libver_bounds`] or
+    /// [`WriteEngine::set_page_buffer_size`].
+    pub(crate) fn into_reader_parts(
+        mut self,
+        bounds: Option<(LibVer, LibVer)>,
+        sync: SyncPolicy,
+        page_buffer: usize,
+    ) -> Result<(WriteEngine, Option<OpeningMetadata>), Error> {
+        self.session.set_libver_bounds(bounds)?;
+        self.session.set_sync_policy(sync);
+        if page_buffer != 0 {
+            // Discard the handoff before a source write, including references overlapping its bytes.
+            self.shared_table = None;
+        }
+        self.session.set_page_buffer_size(page_buffer)?;
+        let metadata = self.shared_table.map(|message| {
+            OpeningMetadata::from_message(
+                &self.session.opened_source(),
+                message,
+                self.session.widths(),
+            )
+        });
+        Ok((self.session, metadata))
+    }
+}
+
 /// Parsed persistent managers and extension allocation ranges for allocator installation.
 struct PersistedRecovery {
     managers: PersistedManagerSet,
@@ -1083,18 +1203,22 @@ struct PersistedRecovery {
 }
 
 impl PersistedRecovery {
-    /// Reads the complete manager set and its physical extension allocation ranges.
+    /// Reads the complete manager set and adopts prepared physical extension ranges.
+    ///
+    /// Reports manager failures before the deferred extension-allocation result. Uses
+    /// [`BorrowedHandle::finish`](crate::image::BorrowedHandle::finish) to preserve captured I/O
+    /// errors when discharging that result.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::PersistedFreeSpace`] for a manager read or parse failure,
-    /// [`Error::Io`] for an extension read failure, or [`Error::Format`] for invalid extension
-    /// metadata, address arithmetic, or a source shorter than the logical end of file.
+    /// Returns [`Error::PersistedFreeSpace`] for a manager read or parse failure. Propagates
+    /// the extension error through the source adapter. Returns [`Error::Format`] for invalid
+    /// address arithmetic or a source shorter than the logical end of file.
     fn read(
         source: &crate::image::BorrowedHandle<'_>,
         context: &FileContext,
-        extension: u64,
         info: &FileSpaceInfo,
+        extension: Result<Vec<FileRange>, Error>,
     ) -> Result<Self, Error> {
         let addresses = context.addresses();
         let stored_eof =
@@ -1106,13 +1230,7 @@ impl PersistedRecovery {
             stored_eof.get(),
             info,
         )?;
-        let extension = source
-            .finish(self::object_header::read_oh_chunks(
-                source, extension, addresses,
-            ))?
-            .into_iter()
-            .map(|chunk| chunk.span)
-            .collect();
+        let extension = source.finish(extension)?;
         if context.superblock().eof_address > source.len() {
             return Err(FormatError::TruncatedFile {
                 expected_eof: context.superblock().eof_address,
@@ -1175,8 +1293,42 @@ impl WriteEngine {
     /// supported target; its documentation enumerates the exact requirements.
     /// `HDF5_USE_FILE_LOCKING` overrides the requested policy, as in the C
     /// library.
+    #[cfg(any(test, doc))]
     pub fn open_with_locking<P: AsRef<Path>>(path: P, locking: FileLocking) -> Result<Self, Error> {
         Self::open_inner(path.as_ref(), Some(locking))
+    }
+
+    /// Opens a strict bounded session with shared image-read counters.
+    ///
+    /// # Errors
+    ///
+    /// Returns the acquisition, metadata, and backing errors of
+    /// [`open_prepared`](Self::open_prepared).
+    #[cfg(test)]
+    pub(crate) fn open_prepared_counting(
+        path: &Path,
+        bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<OpeningSession, Error> {
+        Self::open_prepared(
+            path,
+            Some(FileLocking::Enabled),
+            PersistedFreeSpacePolicy::Strict,
+            |handle, len| {
+                Ok(Box::new(
+                    crate::image::CountingImage::new(
+                        Box::new(HandleImage::new(
+                            handle,
+                            len,
+                            MetadataCacheConfig::disabled(),
+                        )),
+                        bytes,
+                        std::sync::Arc::default(),
+                    )
+                    .with_read_calls(calls),
+                ))
+            },
+        )
     }
 
     /// Opens a PAGE mirror configured to inject one publication error.
@@ -1306,13 +1458,15 @@ impl WriteEngine {
     ///
     /// Falls back to a mirror only for [`bounded_only_limitation`]. Metadata and acquisition
     /// errors are returned directly. Preserves the persisted-manager policy when reopening
-    /// the file through a mirror under [`MemoryStrategy::Auto`].
+    /// the file through a mirror under [`MemoryStrategy::Auto`]. Discards pending reader metadata
+    /// and returns the mutable engine.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] for unsupported address widths or layouts, including
     /// a backing that cannot satisfy [`MemoryStrategy::Bounded`]. Other failures are the errors
     /// of [`open_imaged_with_policy`](Self::open_imaged_with_policy).
+    #[cfg(any(test, doc))]
     pub(crate) fn open_rw_with_strategy(
         path: &Path,
         cache: MetadataCacheConfig,
@@ -1320,16 +1474,37 @@ impl WriteEngine {
         strategy: MemoryStrategy,
         policy: PersistedFreeSpacePolicy,
     ) -> Result<Self, Error> {
+        Self::open_rw_prepared(path, cache, locking, strategy, policy)
+            .map(OpeningSession::into_engine)
+    }
+
+    /// Opens a writable session with pending extension facts under the selected backing policy.
+    ///
+    /// Under [`MemoryStrategy::Auto`], falls back only for [`bounded_only_limitation`]. The
+    /// mirrored attempt reacquires the handle and reads its own opening metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the file is unsupported under
+    /// [`MemoryStrategy::Bounded`].
+    /// Returns acquisition, metadata, and backing errors from
+    /// [`open_prepared`](Self::open_prepared).
+    pub(crate) fn open_rw_prepared(
+        path: &Path,
+        cache: MetadataCacheConfig,
+        locking: FileLocking,
+        strategy: MemoryStrategy,
+        policy: PersistedFreeSpacePolicy,
+    ) -> Result<OpeningSession, Error> {
         if strategy == MemoryStrategy::Mirrored {
             return Self::open_inner_with_policy(path, Some(locking), policy);
         }
-        let mut session =
-            Self::open_imaged_with_policy(path, Some(locking), policy, |handle, len| {
-                Ok(Box::new(HandleImage::new(handle, len, cache)))
-            })?;
-        session.batched_appends = true;
-        session.bounded = true;
-        if let Some(reason) = bounded_only_limitation(&session) {
+        let mut opened = Self::open_prepared(path, Some(locking), policy, |handle, len| {
+            Ok(Box::new(HandleImage::new(handle, len, cache)))
+        })?;
+        opened.session.batched_appends = true;
+        opened.session.bounded = true;
+        if let Some(reason) = bounded_only_limitation(&opened.session) {
             if strategy == MemoryStrategy::Bounded {
                 return Err(Error::EditUnsupported(reason));
             }
@@ -1340,10 +1515,10 @@ impl WriteEngine {
             // dropped writer owes lives on `FileInner`, which this is not yet.
             // Another writer can take the lock in that window; the reopen then
             // reports `Error::FileLocked`, which is the truthful answer.
-            drop(session);
+            drop(opened);
             return Self::open_inner_with_policy(path, Some(locking), policy);
         }
-        Ok(session)
+        Ok(opened)
     }
 
     /// Open an existing file for SWMR (single-writer/multiple-reader) writing:
@@ -1362,11 +1537,38 @@ impl WriteEngine {
     /// meaningful: neither library reads the status-flags byte back on an older
     /// superblock, so a flag raised there would announce a live writer to nobody.
     /// This crate's writer emits version 3, so no file it produces is affected.
+    ///
+    /// Discards pending reader metadata and returns the mutable engine.
+    #[cfg(any(test, doc))]
     pub(crate) fn open_swmr_writer<P: AsRef<Path>>(
         path: P,
         sync_policy: SyncPolicy,
     ) -> Result<Self, Error> {
-        let mut session = Self::open_inner(path.as_ref(), None)?;
+        Self::open_swmr_prepared(path, sync_policy).map(OpeningSession::into_engine)
+    }
+
+    /// Opens a mirrored SWMR writer and invalidates opening facts before writing status flags.
+    ///
+    /// OS locking is disabled. Reader construction reads shared-message metadata after the
+    /// flag write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SwmrAppendUnsupported`] unless the file has a version 3 superblock,
+    /// no userblock, no persisted free space, and no nonpersistent PAGE allocation. Returns
+    /// opening errors from [`open_prepared`](Self::open_prepared) and publication errors from
+    /// [`set_consistency_flags`](Self::set_consistency_flags).
+    pub(crate) fn open_swmr_prepared<P: AsRef<Path>>(
+        path: P,
+        sync_policy: SyncPolicy,
+    ) -> Result<OpeningSession, Error> {
+        let mut opened = Self::open_prepared(
+            path.as_ref(),
+            None,
+            PersistedFreeSpacePolicy::Tolerant,
+            |handle, _| Ok(Box::new(Self::read_mirror(handle)?)),
+        )?;
+        let session = &mut opened.session;
         // Before the flag write below, which is a durability point like any
         // other: a caller who asked for no `fsync` gets none, and the flag still
         // reaches every other process, which reads it from the operating system.
@@ -1390,8 +1592,10 @@ impl WriteEngine {
         if session.space.is_enabled() {
             session.aggregation = None;
         }
+        // The flag write invalidates facts even when accepted references overlap the superblock.
+        opened.shared_table = None;
         session.set_consistency_flags(SWMR_WRITE_FLAGS)?;
-        Ok(session)
+        Ok(opened)
     }
 
     /// Writes the consistency flags in the session's superblock and physical image.
@@ -1480,6 +1684,7 @@ impl WriteEngine {
     /// Shared open path. `lock = Some(policy)` acquires an exclusive OS lock under
     /// that policy (the ordinary read-write session); `lock = None` takes no lock
     /// at all (the SWMR writer — see [`open_swmr_writer`](Self::open_swmr_writer)).
+    #[cfg(any(test, doc))]
     fn open_inner(path: &Path, lock: Option<FileLocking>) -> Result<Self, Error> {
         Self::open_imaged(path, lock, |handle, _len| {
             Ok(Box::new(Self::read_mirror(handle)?))
@@ -1496,14 +1701,8 @@ impl WriteEngine {
         path: &Path,
         lock: Option<FileLocking>,
         policy: PersistedFreeSpacePolicy,
-    ) -> Result<Self, Error> {
-        if policy == PersistedFreeSpacePolicy::Tolerant {
-            return match lock {
-                Some(locking) => Self::open_with_locking(path, locking),
-                None => Self::open_inner(path, None),
-            };
-        }
-        Self::open_imaged_with_policy(path, lock, policy, |handle, _len| {
+    ) -> Result<OpeningSession, Error> {
+        Self::open_prepared(path, lock, policy, |handle, _len| {
             Ok(Box::new(Self::read_mirror(handle)?))
         })
     }
@@ -1532,6 +1731,7 @@ impl WriteEngine {
     ///
     /// Returns the acquisition and parsing errors of
     /// [`open_imaged_with_policy`](Self::open_imaged_with_policy).
+    #[cfg(any(test, doc))]
     fn open_imaged(
         path: &Path,
         lock: Option<FileLocking>,
@@ -1545,7 +1745,7 @@ impl WriteEngine {
     /// Under [`PersistedFreeSpacePolicy::Strict`], reads the complete persisted manager set and
     /// extension allocation ranges before calling `build`. Strict metadata parsing failures occur
     /// before allocator installation or page buffering. Calls `build` with the handle and
-    /// physical file length.
+    /// physical file length. Discards pending reader metadata and returns the mutable engine.
     ///
     /// # Errors
     ///
@@ -1555,12 +1755,37 @@ impl WriteEngine {
     /// flags, or [`Error::PersistedFreeSpace`] for a strict manager read or parse failure.
     /// Returns [`Error::Format`] for invalid opening metadata or address arithmetic.
     /// Other failures are the errors of `build` and backing configuration.
+    #[cfg(any(test, doc))]
     fn open_imaged_with_policy(
         path: &Path,
         lock: Option<FileLocking>,
         policy: PersistedFreeSpacePolicy,
         build: impl FnOnce(fs::File, u64) -> Result<Box<dyn FileImage>, Error>,
     ) -> Result<Self, Error> {
+        Self::open_prepared(path, lock, policy, build).map(OpeningSession::into_engine)
+    }
+
+    /// Parses opening metadata before constructing the editing image and pending handoff.
+    ///
+    /// Under [`PersistedFreeSpacePolicy::Strict`], reads the complete persisted manager set and
+    /// extension allocation ranges before calling `build`. Calls `build` with the handle and
+    /// physical file length. The image constructor and buffering setup preserve source content
+    /// while the pending message outcome is retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] for opening failures, and for superblock or extension read failures
+    /// under the strict policy. Returns [`Error::FileLocked`] for a lock conflict,
+    /// [`Error::FileMarkedInUse`] for writer status flags, or [`Error::PersistedFreeSpace`] for
+    /// a strict manager read or parse failure. Returns [`Error::Format`] for invalid opening
+    /// metadata or address arithmetic. Other failures are the errors of `build` and backing
+    /// configuration.
+    fn open_prepared(
+        path: &Path,
+        lock: Option<FileLocking>,
+        policy: PersistedFreeSpacePolicy,
+        build: impl FnOnce(fs::File, u64) -> Result<Box<dyn FileImage>, Error>,
+    ) -> Result<OpeningSession, Error> {
         let handle = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1594,24 +1819,32 @@ impl WriteEngine {
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = match policy {
+        let OpeningExtension {
+            info: file_space_info,
+            allocations,
+            shared_table,
+        } = match policy {
             PersistedFreeSpacePolicy::Strict => {
-                probe.finish(Self::extension_fsinfo(&probe, &context))
+                probe.finish(OpeningExtension::read(&probe, &context))
             }
             PersistedFreeSpacePolicy::Tolerant => {
-                Self::extension_fsinfo(&probe, &context).map_err(Error::from)
+                OpeningExtension::read(&probe, &context).map_err(Error::from)
             }
         }?;
-        let recovered = if policy == PersistedFreeSpacePolicy::Strict {
-            file_space_info
-                .as_ref()
-                .filter(|(_, info)| info.persist)
-                .map(|(extension, info)| {
-                    PersistedRecovery::read(&probe, &context, *extension, info)
-                })
-                .transpose()?
+        let (recovered, extension_allocations) = if policy == PersistedFreeSpacePolicy::Strict
+            && let Some((_, info)) = file_space_info.as_ref().filter(|(_, info)| info.persist)
+        {
+            (
+                Some(PersistedRecovery::read(
+                    &probe,
+                    &context,
+                    info,
+                    allocations,
+                )?),
+                None,
+            )
         } else {
-            None
+            (None, allocations.ok())
         };
         let fresh_page_boundary = if let Some((_, info)) = &file_space_info
             && info.strategy == FileSpaceStrategy::Page
@@ -1691,7 +1924,7 @@ impl WriteEngine {
         };
         // If the file persists its free space, seed the free list from the
         // on-disk managers and arm persistence for future commits.
-        session.load_persisted_free_space(file_space_info, recovered)?;
+        session.load_persisted_free_space(file_space_info, recovered, extension_allocations)?;
         if session.fresh_page_boundary.is_some() {
             session.space_ownership()?;
         }
@@ -1717,7 +1950,10 @@ impl WriteEngine {
                     max_bytes: WRITE_GATHER_BYTES,
                 })?;
         }
-        Ok(session)
+        Ok(OpeningSession {
+            session,
+            shared_table: Some(shared_table),
+        })
     }
 
     /// The page this session's writes are merged within: the file's own
@@ -1838,9 +2074,10 @@ impl WriteEngine {
     ///
     /// Installs checked recovery when supplied. Otherwise, reads every defined manager tolerantly.
     /// Excludes the entire manager set from reusable space if any manager read fails. After
-    /// successful reads, omits invalid, overlapping, or out-of-bounds extents. A nonpersistent PAGE
-    /// session starts with empty free lists. Files without File Space Info use the default
-    /// `FSM_AGGR` strategy with separate metadata and raw aggregates.
+    /// successful reads, omits invalid, overlapping, or out-of-bounds extents. Uses prepared
+    /// extension ranges when available and omits unsupported extension allocations.
+    /// A nonpersistent PAGE session starts with empty free lists. Files without File Space Info
+    /// use the default `FSM_AGGR` strategy with separate metadata and raw aggregates.
     ///
     /// # Errors
     ///
@@ -1850,8 +2087,9 @@ impl WriteEngine {
         &mut self,
         file_space_info: Option<(u64, FileSpaceInfo)>,
         recovered: Option<PersistedRecovery>,
+        extension_allocations: Option<Vec<FileRange>>,
     ) -> Result<(), Error> {
-        let Some((ext_addr, info)) = file_space_info else {
+        let Some((_, info)) = file_space_info else {
             if let Ok(eoa) = self.end_of_allocation() {
                 self.aggregation = Some(AggregateSpace::new(eoa));
             }
@@ -1954,7 +2192,7 @@ impl WriteEngine {
         }
 
         let mut old_blocks = Vec::new();
-        if let Ok(spans) = self.oh_chunk_spans(ext_addr) {
+        if let Some(spans) = extension_allocations {
             old_blocks.extend(
                 spans
                     .into_iter()
@@ -2147,6 +2385,26 @@ impl WriteEngine {
         source: &(impl Source + ?Sized),
         context: &FileContext,
     ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
+        Ok(Self::extension_summary(source, context, None)?
+            .map(ExtensionSummary::into_file_space_info)
+            .transpose()?
+            .flatten()
+            .map(|(address, info)| (address.get(), info)))
+    }
+
+    /// Resolves the extension address and reads its selected facts under a source borrow.
+    ///
+    /// Returns `None` when the superblock has no defined extension address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if address resolution overflows, and header or
+    /// source-read errors from [`ExtensionSummary::read`].
+    fn extension_summary<'a, S: Source + ?Sized>(
+        source: &'a S,
+        context: &FileContext,
+        observer: Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+    ) -> Result<Option<ExtensionSummary<'a, S>>, FormatError> {
         let superblock = context.superblock();
         let widths = context.widths();
         let base = context.addresses();
@@ -2166,22 +2424,15 @@ impl WriteEngine {
         // address on a file without a userblock. The caller reads the strategy of a file with a
         // userblock as well, so the address is resolved here for both.
         let ext_addr = base.resolve(ext_rel)?.get();
-        let oh = ObjectHeader::parse_from_source_with_widths(
-            &SourceMetadata(source),
+        ExtensionSummary::read(
+            source,
             AccessMode::ReadWrite,
-            ext_addr,
+            PhysicalAddress::new(ext_addr),
             widths,
-            base.effective_base(),
-        )?;
-        let Some(msg) = oh
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::FILE_SPACE_INFO)
-        else {
-            return Ok(None);
-        };
-        let info = hdf5_pure_format::__private::parse_file_space_info(widths, &msg.data)?;
-        Ok(Some((ext_addr, info)))
+            base,
+            observer,
+        )
+        .map(Some)
     }
 
     /// Reserves exclusive appender access and returns its release token.
@@ -2357,26 +2608,18 @@ impl WriteEngine {
         let Ok(abs) = base.resolve(rel).map(PhysicalAddress::get) else {
             return Ok(None);
         };
-        let Ok(header) = ObjectHeader::parse_from_source_with_widths(
-            &SourceMetadata(&self.image()),
+        let Ok(summary) = SharedTableSummary::read(
+            self.image(),
             AccessMode::ReadWrite,
-            abs,
+            PhysicalAddress::new(abs),
             widths,
-            base.effective_base(),
+            base,
         ) else {
             return Ok(None);
         };
-        let Some(msg) = header
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)
-        else {
+        let Some(message) = summary.into_message()? else {
             return Ok(None);
         };
-        let message = crate::sohm::SharedMessageTableMessage::parse_with_offset_width(
-            &msg.data,
-            widths.offsets,
-        )?;
         let opened = self.opened_source();
         Ok(Some(crate::sohm::read_table_from_source(
             &PhysicalSource::new(&opened).stored(),

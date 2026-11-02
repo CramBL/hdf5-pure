@@ -5,9 +5,17 @@
 
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::PhysicalAddress;
+
 use byteorder::{ByteOrder, LittleEndian};
 
-use super::{HeaderMessage, MessageFilter, ObjectHeader, ParseContext};
+use super::HeaderMessage;
+use super::MessageFilter;
+use super::ObjectHeader;
+use super::ObjectHeaderChunk;
+use super::ParseContext;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
@@ -197,11 +205,19 @@ impl ObjectHeader {
         Ok(messages)
     }
 
+    /// Parses a version 1 header and observes each chunk before decoding its records.
+    ///
+    /// Continuations are visited depth-first. The observer borrows the current record buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns parsing, address-conversion, and source-read errors.
     pub(super) fn parse_v1_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
         address: u64,
         filter: &mut MessageFilter<'_>,
+        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
     ) -> Result<ObjectHeader, FormatError> {
         // version(1) + reserved(1) + num_messages(2) + ref_count(4) +
         // header_size(4) = 12, padded to 16 before the first message.
@@ -238,6 +254,7 @@ impl ObjectHeader {
             MAX_V1_CONTINUATION_DEPTH,
             &mut messages,
             filter,
+            observer,
         )?;
 
         Ok(ObjectHeader {
@@ -252,9 +269,15 @@ impl ObjectHeader {
         })
     }
 
-    /// Parse the messages of one v1 header chunk read from the source, following
-    /// each continuation depth-first (as the buffered v1 parser does) so the
-    /// resulting message order is identical.
+    /// Parses one version 1 chunk and follows each continuation depth-first.
+    ///
+    /// Calls the observer before decoding records. Ancestor buffers remain borrowed while
+    /// parsing nested continuations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::NestingDepthExceeded`] when the depth budget is exhausted.
+    /// Propagates record, address-conversion, and source-read errors.
     fn parse_v1_chunk_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
@@ -265,11 +288,38 @@ impl ObjectHeader {
         depth_remaining: u16,
         messages: &mut Vec<HeaderMessage>,
         filter: &mut MessageFilter<'_>,
+        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
     ) -> Result<(), FormatError> {
         if depth_remaining == 0 {
             return Err(FormatError::NestingDepthExceeded);
         }
         let region = source.read_metadata(region_addr, region_len.to_usize()?)?;
+        if let Some(observer) = observer.as_deref_mut() {
+            let prefix_len = if reject_partial_prefix {
+                0
+            } else {
+                ALIGNED_HEADER_PREFIX_LEN
+            };
+            let allocation_start = region_addr.checked_sub(prefix_len).ok_or_else(|| {
+                FormatError::Internal("an object header region precedes its prefix".into())
+            })?;
+            let allocation_len =
+                prefix_len
+                    .checked_add(region_len)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: allocation_start,
+                        length: region_len,
+                    })?;
+            observer(ObjectHeaderChunk::new(
+                FileRange::new(PhysicalAddress::new(allocation_start), allocation_len)?,
+                FileRegion::new(
+                    FileRange::new(PhysicalAddress::new(region_addr), region_len)?,
+                    &region,
+                )?,
+                None,
+            ));
+        }
+
         let end = region.len();
         let mut pos = 0usize;
         let mut count = 0u16;
@@ -318,6 +368,7 @@ impl ObjectHeader {
                     depth_remaining - 1,
                     messages,
                     filter,
+                    observer,
                 )?;
             }
         }

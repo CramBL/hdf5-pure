@@ -35,6 +35,7 @@ use crate::edit::AppendOptions;
 use crate::edit::AppendTarget;
 use crate::edit::EditBacking;
 use crate::edit::MemoryStrategy;
+use crate::edit::OpeningSession;
 use crate::edit::StagedChild;
 use crate::edit::StagedKind;
 use crate::edit::StagedMeta;
@@ -61,6 +62,7 @@ use crate::data_read::{NumericDecoder, NumericReadTarget};
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::{Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
+use crate::extension::OpeningMetadata;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolicy};
 use crate::file_space_info::FileSpaceInfo;
@@ -863,6 +865,24 @@ pub fn is_hdf5_bytes(data: &[u8]) -> bool {
     matches!(superblock::find_signature(data), Ok(Some(_)))
 }
 
+/// Opening resources and shared-message metadata for reader construction.
+struct ReaderOpening {
+    /// The retained handle for a SWMR reader's refreshes.
+    handle: Option<std::fs::File>,
+    /// `None` when reader construction requires a fresh read from the installed backend.
+    extension: Option<OpeningMetadata>,
+}
+
+impl ReaderOpening {
+    /// Requests fresh extension metadata with an optional retained SWMR handle.
+    fn read(handle: Option<std::fs::File>) -> Self {
+        Self {
+            handle,
+            extension: None,
+        }
+    }
+}
+
 /// An open HDF5 file for reading.
 struct FileInner {
     backend: Backend,
@@ -880,20 +900,12 @@ struct FileInner {
     /// Live file handle, retained only when the file was opened with
     /// [`File::open_swmr`] so [`File::refresh`] can re-read appended data.
     handle: Option<std::fs::File>,
-    /// File Space Info parsed from the superblock extension, if the file records
-    /// one. Best-effort: a malformed or unreadable extension leaves this `None`
-    /// rather than failing the open.
-    file_space_info: Option<FileSpaceInfo>,
-    /// The shared object header message (SOHM) table, if the superblock
-    /// extension records one. `None` for almost every file: no common producer
-    /// enables shared-message indexes. Best-effort like `file_space_info`, so a
-    /// file whose table cannot be read still opens and still reads every object
-    /// that shares nothing; what fails is following a reference into the heap,
-    /// with [`FormatError::UnsupportedSohmReference`].
+    /// The shared object header message (SOHM) table, if readable.
     ///
-    /// Boxed because it is absent on essentially every file, and this struct is
-    /// allocated once per open: one pointer costs less here than the table
-    /// inline, and the absent case allocates nothing at all.
+    /// When the table is unreadable, the reader can open the file and read objects with inline
+    /// metadata. Resolving a heap reference without the table returns
+    /// [`FormatError::UnsupportedSohmReference`].
+    /// Boxing limits the absent case to one pointer without an allocation.
     sohm_table: Option<Box<crate::sohm::SohmTable>>,
     access_properties: FileAccessProperties,
     /// Set by [`File::close`] to seal a read-write file: after it, a write
@@ -1106,7 +1118,7 @@ impl FileInner {
             superblock,
             widths,
             opened,
-            None,
+            ReaderOpening::read(None),
             properties,
         ))
     }
@@ -1151,7 +1163,7 @@ impl FileInner {
             superblock,
             widths,
             opened,
-            Some(handle),
+            ReaderOpening::read(Some(handle)),
             properties,
         ))
     }
@@ -1174,7 +1186,7 @@ impl FileInner {
             superblock,
             widths,
             opened,
-            None,
+            ReaderOpening::read(None),
             properties,
         ))
     }
@@ -1199,31 +1211,45 @@ impl FileInner {
         properties: FileAccessProperties,
         default: MemoryStrategy,
     ) -> Result<Self, Error> {
-        let session = WriteEngine::open_rw_with_strategy(
+        let session = WriteEngine::open_rw_prepared(
             path.as_ref(),
             properties.metadata_cache,
             properties.locking,
             properties.memory_strategy.unwrap_or(default),
             properties.persisted_free_space_policy,
         )?;
-        Self::from_rw_session(session, properties)
+        Self::from_opening_session(session, properties)
     }
 
-    /// Wrap an opened [`WriteEngine`] as a read-write [`Backend::Edit`] file.
+    /// Wraps an existing [`WriteEngine`] with a fresh extension-metadata read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration and address errors of
+    /// [`from_opening_session`](Self::from_opening_session).
+    #[cfg(any(test, doc))]
     fn from_rw_session(
-        mut session: WriteEngine,
+        session: WriteEngine,
         properties: FileAccessProperties,
     ) -> Result<Self, Error> {
-        // The one funnel every read-write session passes through, so the fapl's
-        // format bound and `fsync` cadence reach the engine no matter which entry
-        // point opened it — the SWMR writer included, which
-        // `WriteEngine::open_swmr_writer` says why.
-        session.set_libver_bounds(properties.libver_bounds)?;
-        session.set_sync_policy(properties.sync_policy);
-        // Every page-buffer refusal lives in `set_page_buffer_size`, including the
-        // `SyncPolicy::Always` one — which is why `set_sync_policy` must precede
-        // this call rather than merely happening to.
-        session.set_page_buffer_size(properties.page_buffer_size)?;
+        Self::from_opening_session(OpeningSession::from_engine(session), properties)
+    }
+
+    /// Constructs a reader after configuring the opening session and consuming current metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration errors from [`OpeningSession::into_reader_parts`] or address
+    /// errors from [`OpenedImageContext::reconcile`].
+    fn from_opening_session(
+        opening: OpeningSession,
+        properties: FileAccessProperties,
+    ) -> Result<Self, Error> {
+        let (session, extension) = opening.into_reader_parts(
+            properties.libver_bounds,
+            properties.sync_policy,
+            properties.page_buffer_size,
+        )?;
         // Reuse the parsed superblock so the image need not provide a whole-file slice.
         let superblock = session.superblock().clone();
         let widths = session.widths();
@@ -1238,7 +1264,10 @@ impl FileInner {
             superblock,
             widths,
             opened,
-            None,
+            ReaderOpening {
+                handle: None,
+                extension,
+            },
             properties,
         ))
     }
@@ -1285,8 +1314,8 @@ impl FileInner {
                  open it",
             ));
         }
-        let session = WriteEngine::open_swmr_writer(path, properties.sync_policy)?;
-        let mut inner = Self::from_rw_session(session, properties)?;
+        let session = WriteEngine::open_swmr_prepared(path, properties.sync_policy)?;
+        let mut inner = Self::from_opening_session(session, properties)?;
         inner.swmr_write = true;
         Ok(inner)
     }
@@ -1661,18 +1690,19 @@ impl FileInner {
         Ok((superblock, widths, opened))
     }
 
-    /// Assemble a [`File`] from parsed parts, then load the File Space Info from
-    /// the superblock extension (best-effort, so a bad extension never fails the
-    /// open).
+    /// Constructs shared file state with a prepared table or a fresh best-effort table read.
+    ///
+    /// An unreadable extension, message, or shared-message table is represented by an absent table.
     fn from_parts(
         backend: Backend,
         access_mode: AccessMode,
         superblock: Superblock,
         widths: FormatWidths,
         opened: OpenedImageContext,
-        handle: Option<std::fs::File>,
+        opening: ReaderOpening,
         access_properties: FileAccessProperties,
     ) -> Self {
+        let ReaderOpening { handle, extension } = opening;
         let mut file = FileInner {
             backend,
             access_mode,
@@ -1680,7 +1710,6 @@ impl FileInner {
             widths,
             opened,
             handle,
-            file_space_info: None,
             sohm_table: None,
             access_properties,
             closed: AtomicBool::new(false),
@@ -1688,16 +1717,11 @@ impl FileInner {
             address_revision: AtomicU64::new(0),
             swmr_write: false,
         };
-        file.file_space_info = file.read_file_space_info();
-        file.sohm_table = file.read_sohm_table();
+        file.sohm_table = match extension {
+            Some(extension) => extension.into_table(),
+            None => file.read_sohm_table(),
+        };
         file
-    }
-
-    /// Parse the File Space Info message from the superblock extension, if the
-    /// file records one and it can be read. Best-effort: any failure (no
-    /// extension, unreadable object header, malformed message) yields `None`.
-    fn read_file_space_info(&self) -> Option<FileSpaceInfo> {
-        self.parse_file_space_info().ok().flatten()
     }
 
     /// Parses the File Space Info message from the superblock extension, or returns `None` if the
@@ -1736,36 +1760,10 @@ impl FileInner {
     /// Returns `None` if the extension, message, or table cannot be read. The caller can read
     /// objects with inline metadata when the shared-message table is unavailable.
     fn read_sohm_table(&self) -> Option<Box<crate::sohm::SohmTable>> {
-        let rel = self.superblock.superblock_extension_address?;
-        if rel.is_undefined(self.widths.offsets) {
-            return None;
-        }
-        let abs = self.addresses().resolve(rel).ok()?.get();
-        let header = self.parse_header(abs).ok()?;
-        let msg = header
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::SHARED_MESSAGE_TABLE)?;
-        let message = crate::sohm::SharedMessageTableMessage::parse_with_offset_width(
-            &msg.data,
-            self.widths.offsets,
-        )
-        .ok()?;
         self.with_opened_source(|source| {
-            let physical = PhysicalSource::new(source);
-            match physical.resident() {
-                Some(bytes) => {
-                    crate::sohm::read_table(bytes.stored()?, &message, self.widths.offsets)
-                }
-                None => crate::sohm::read_table_from_source(
-                    &physical.stored(),
-                    &message,
-                    self.widths.offsets,
-                ),
-            }
+            OpeningMetadata::read(source, self.access_mode, &self.superblock, self.widths)
+                .into_table()
         })
-        .ok()
-        .map(Box::new)
     }
 
     /// Re-read the file from disk to pick up data appended by a concurrent
@@ -1808,7 +1806,6 @@ impl FileInner {
                     self.superblock = superblock;
                     self.widths = widths;
                     self.opened = opened;
-                    self.file_space_info = self.read_file_space_info();
                     self.sohm_table = self.read_sohm_table();
                     // Every byte just moved. `File::refresh` takes `&mut self`
                     // through `Arc::get_mut`, so no handle can be alive to see

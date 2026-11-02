@@ -8,9 +8,14 @@
 //! [prefix]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
 //! [continuation]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_continuation
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+
 use crate::checksum;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
+use crate::object_header::ObjectHeaderChunk;
 use crate::object_header::ParseContext;
 use crate::object_header::v2;
 use crate::object_header::v2::CHECKSUM_LEN;
@@ -79,6 +84,35 @@ impl<'a> HeaderChunk<'a> {
             records_start,
             layout,
         })
+    }
+
+    /// Associates the message bytes with the complete physical chunk `allocation`.
+    ///
+    /// `allocation` includes the prefix or signature and the trailing checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the message start is outside the chunk.
+    /// Returns range errors from [`FileRange::new`] and [`FileRegion::new`].
+    pub(super) fn observation(
+        self,
+        allocation: FileRange,
+    ) -> Result<ObjectHeaderChunk<'a>, FormatError> {
+        let records = self
+            .region
+            .get(self.records_start..)
+            .ok_or(FormatError::UnexpectedEof {
+                expected: self.records_start,
+                available: self.region.len(),
+            })?;
+        let start = allocation
+            .start()
+            .checked_add(self.records_start.to_u64())?;
+        Ok(ObjectHeaderChunk::new(
+            allocation,
+            FileRegion::new(FileRange::new(start, records.len().to_u64())?, records)?,
+            Some(self.layout),
+        ))
     }
 
     /// Returns the message records of the chunk in the order the chunk stores them, each as
