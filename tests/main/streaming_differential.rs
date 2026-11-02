@@ -10,6 +10,7 @@ use test_util::object_header::{Message, MessageType, v2};
 use test_util::superblock;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
+use test_util_hdf5::reader::ReadBackend;
 
 use self::oracle::{Comparison, Operation};
 
@@ -292,6 +293,52 @@ fn invalid_object_header_version_precedes_missing_alignment_padding() {
             datasets: 0
         }
     );
+}
+
+#[rstest]
+#[case::valid(false)]
+#[case::shared_leaf(true)]
+fn group_listings_reject_repeated_btree_metadata_nodes(
+    #[case] repeated: bool,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let image = if repeated {
+        test_util::fuzz::repeated_group_btree_leaf()
+    } else {
+        test_util::legacy::simple_dataset()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("group-tree.h5");
+    std::fs::write(&path, image).unwrap();
+    let file = backend.open(&path).unwrap();
+    let root = file.root();
+    if repeated {
+        let error = root.groups().unwrap_err();
+        let Error::Format(groups) = error else {
+            panic!("expected a group tree format error, got {error:?}");
+        };
+        let error = root.datasets().unwrap_err();
+        let Error::Format(datasets) = error else {
+            panic!("expected a dataset tree format error, got {error:?}");
+        };
+        assert_eq!(groups, FormatError::InvalidBTreeSignature);
+        assert_eq!(datasets, FormatError::InvalidBTreeSignature);
+    } else {
+        assert_eq!(root.groups().unwrap(), Vec::<String>::new());
+        assert_eq!(root.datasets().unwrap(), ["data"]);
+        assert_eq!(
+            file.dataset("data").unwrap().read_f64().unwrap(),
+            [1.0, 2.0, 3.0]
+        );
+    }
+    drop(root);
+    file.close().unwrap();
 }
 
 #[test]

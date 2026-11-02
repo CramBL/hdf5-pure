@@ -146,6 +146,7 @@ mod tests {
     use hdf5_pure_format::__private as format;
     use rstest::rstest;
     use test_util::btree_v1;
+    use test_util::btree_v1::{TraversalShape, TraversalTree};
     use test_util::widths::Widths;
 
     use super::*;
@@ -374,6 +375,62 @@ mod tests {
         Diamond,
         RepeatedSiblings,
         WrongLevel,
+    }
+
+    #[rstest]
+    #[case::single_leaf(TraversalShape::Binary(0))]
+    #[case::sixteen_leaves(TraversalShape::Binary(4))]
+    #[case::two_hundred_fifty_six_leaves(TraversalShape::Binary(8))]
+    #[case::deep_unique_chain(TraversalShape::Chain(u8::MAX))]
+    #[case::shared_chain(TraversalShape::SharedChain(12))]
+    fn group_walk_work_matches_distinct_node_count(#[case] shape: TraversalShape) {
+        let TraversalTree {
+            bytes,
+            nodes,
+            payloads,
+        } = TraversalTree::group(shape);
+        let base = 512;
+        let source = PlacedSource::new(base, bytes.clone());
+        let actual = collect_symbol_table_nodes_from_source(
+            &source.framed(),
+            StoredAddress::ZERO,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+        );
+        let expected = match shape {
+            TraversalShape::Binary(_) | TraversalShape::Chain(_) => Ok(payloads
+                .iter()
+                .copied()
+                .map(StoredAddress::new)
+                .collect::<Vec<_>>()),
+            TraversalShape::SharedChain(_) => Err(FormatError::InvalidBTreeSignature),
+        };
+        assert_eq!(actual, expected);
+        let reads = source.reads.take();
+        assert_eq!(reads.len(), 2 * nodes.len());
+        let mut observed = reads
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                assert_eq!(pair[0], (pair[1].0, format::btree_v1_node_header_size(8)));
+                (pair[1].0 - base, pair[1].1)
+            })
+            .collect::<Vec<_>>();
+        observed.sort_unstable();
+        assert_eq!(observed, nodes);
+        let mut resident = vec![0; base.to_usize().unwrap()];
+        resident.extend_from_slice(&bytes);
+        assert_eq!(
+            collect_symbol_table_nodes(
+                PhysicalBytes::for_test(
+                    &resident,
+                    AddressContext::from_effective_base(BaseAddress::new(base))
+                ),
+                StoredAddress::ZERO,
+                FormatWidths::from_sizes(8, 8).unwrap(),
+            ),
+            expected,
+        );
     }
 
     #[rstest]
