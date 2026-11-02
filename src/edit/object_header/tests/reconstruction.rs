@@ -177,6 +177,7 @@ fn opening_extension_reuses_one_source_pass_and_retains_only_facts(#[case] chunk
         calls: Cell::new(0),
         bytes: Cell::new(0),
     };
+    source.inner.read_at(0, &mut []).unwrap();
     let (facts, measured) = allocation::measure(&format!("opening_extension_{chunks}"), || {
         OpeningExtension::read(&source, &context).unwrap()
     });
