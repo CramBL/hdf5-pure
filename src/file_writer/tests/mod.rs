@@ -5,7 +5,7 @@ use super::*;
 use crate::File;
 use crate::access_mode::AccessMode;
 use crate::attribute_policy;
-use crate::group_v2;
+use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;

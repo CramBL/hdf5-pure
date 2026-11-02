@@ -168,7 +168,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     let object = ObjectPathBuf::parse("/g");
     let mut session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     let resolve = |object_path: &ObjectPathBuf| {
-        crate::group_v2::resolve_path_any_from_source(
+        crate::group::v2::resolve_path_any_from_source(
             &session.opened_source(),
             AccessMode::ReadWrite,
             session.superblock(),
@@ -486,7 +486,7 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByte
     let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     let page_size = s.space.page_size().expect("a paged file has a page size");
     assert_eq!(page_size.get(), PAGE);
-    let victim_addr = crate::group_v2::resolve_path_any(
+    let victim_addr = crate::group::v2::resolve_path_any(
         PhysicalBytes::for_test(
             s.image.as_slice().unwrap(),
             AddressContext::from_effective_base(s.context.superblock().base_address),

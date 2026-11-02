@@ -8,7 +8,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::fractal_heap;
-use crate::group_v2;
+use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;

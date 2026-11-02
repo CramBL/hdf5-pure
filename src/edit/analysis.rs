@@ -11,8 +11,8 @@ use hdf5_pure_space::__private::FreeClass;
 
 use crate::access_mode::AccessMode;
 use crate::error::{Error, FormatError};
-use crate::group_v1;
-use crate::group_v2;
+use crate::group::v1 as group_v1;
+use crate::group::v2 as group_v2;
 use crate::object_graph::{
     Expansion, HardLink, LinkIndex, ObjectGraph, ObjectId, ObjectIndex, ObjectTraversal,
     TraversalBudget, TraversalLimit,

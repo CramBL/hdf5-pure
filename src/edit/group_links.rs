@@ -6,8 +6,8 @@ use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::OwnedLink;
 
 use crate::error::Error;
-use crate::group_v2::storage;
-pub(super) use crate::group_v2::storage::storage_error;
+use crate::group::v2::storage;
+pub(super) use crate::group::v2::storage::storage_error;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::OriginalSource;

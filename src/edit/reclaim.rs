@@ -27,7 +27,7 @@ use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::global_heap;
 #[cfg(doc)]
-use crate::group_v2;
+use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
 use crate::link_message::LinkTarget;
@@ -313,7 +313,7 @@ impl WriteEngine {
         let Some(heap_address) = link_info.fractal_heap_address else {
             return Some(Vec::new());
         };
-        let index = crate::group_v2::collect_dense_group_index_storage_extents(
+        let index = crate::group::v2::collect_dense_group_index_storage_extents(
             &PhysicalSource::new(&self.opened_source()).stored(),
             link_info,
             self.widths(),
@@ -1119,7 +1119,7 @@ impl WriteEngine {
         if let Some(heap) = info.fractal_heap_address {
             let opened = self.opened_source();
             let source = PhysicalSource::new(&opened).stored();
-            let index = crate::group_v2::collect_dense_group_index_storage_extents(
+            let index = crate::group::v2::collect_dense_group_index_storage_extents(
                 &source,
                 &info,
                 self.widths(),
@@ -1132,7 +1132,7 @@ impl WriteEngine {
             if !self.collect_owned_heap(heap, metadata)? {
                 return Ok(false);
             }
-            let entries = crate::group_v2::resolve_dense_entries_from_source(
+            let entries = crate::group::v2::resolve_dense_entries_from_source(
                 &source,
                 AccessMode::ReadWrite,
                 &info,

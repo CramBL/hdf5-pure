@@ -386,7 +386,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
             (at - userblock) / page_size..=(at + len - 1 - userblock) / page_size
         })
         .collect::<BTreeSet<_>>();
-    let chunks_addr = crate::group_v2::resolve_path_any_from_source(
+    let chunks_addr = crate::group::v2::resolve_path_any_from_source(
         &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.context.superblock(),

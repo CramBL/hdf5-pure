@@ -2634,7 +2634,7 @@ mod tests {
     use crate::edit::LocatedState;
     use crate::edit::allocation::PublicationAction;
     use crate::filters;
-    use crate::group_v2;
+    use crate::group::v2 as group_v2;
     use crate::object_path::ObjectPath;
     use crate::source::BytesSource;
     use crate::superblock::LocatedSuperblock;
