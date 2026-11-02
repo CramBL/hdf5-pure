@@ -16,6 +16,8 @@ use crate::image::WriteBuffering;
 use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
+mod large_page;
+
 #[derive(Clone, Copy)]
 enum Layout {
     Appended,
