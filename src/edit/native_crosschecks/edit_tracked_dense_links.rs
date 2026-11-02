@@ -13,11 +13,15 @@ use rstest::rstest;
 use test_util_hdf5::creation_order;
 use test_util_hdf5::creation_order::Indexing;
 use test_util_hdf5::dense_links::GroupOrder;
+use test_util_hdf5::file;
 
 use crate::AttrValue;
 use crate::CharacterSet;
 use crate::Error;
+use crate::File;
+use crate::FileBuilder;
 use crate::MessageType;
+use crate::Object;
 use crate::edit::group_inspection;
 
 #[rstest]
@@ -121,18 +125,30 @@ fn tracked_creation_indexes_keep_deletion_gaps_across_repeated_transitions(
 }
 
 #[rstest]
-fn tracked_dense_additions_and_replacements_assign_monotonic_indexes(
+fn tracked_group_additions_and_replacements_assign_monotonic_indexes(
+    #[values(4, 9)] count: usize,
     #[values(Indexing::No, Indexing::Yes)] indexing: Indexing,
     #[values(false, true)] source_only: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("additions.h5");
-    creation_order::write_link_fixture(&path, "/", 9, indexing, (8, 6));
+    creation_order::write_link_fixture(&path, "/", count, indexing, (8, 6));
+    let source_path = dir.path().join("source.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("source").with_i32_data(&[17, 23]);
+    builder.write(&source_path).unwrap();
+    let source = File::open(&source_path).unwrap();
     let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().delete("link_0000").unwrap();
     file.root()
         .create_dataset("link_0000", |dataset| {
             dataset.with_i32_data(&[99]);
+        })
+        .unwrap();
+    file.copy_from(&source, "source", "imported").unwrap();
+    file.root()
+        .create_dataset("refs", |dataset| {
+            dataset.with_path_references(&["dataset"]);
         })
         .unwrap();
     file.copy("link_0001", "copy").unwrap();
@@ -144,16 +160,46 @@ fn tracked_dense_additions_and_replacements_assign_monotonic_indexes(
         .unwrap();
     file.commit().unwrap();
     drop(file);
-    let mut expected = (1..9)
+    drop(source);
+    let next = u64::try_from(count).unwrap();
+    let mut expected = (1..next)
         .map(|index| (format!("link_{index:04}"), index))
         .collect::<Vec<_>>();
     expected.extend([
-        ("copy".into(), 9),
-        ("link_0000".into(), 10),
-        ("dataset".into(), 11),
-        ("added".into(), 12),
+        ("copy".into(), next),
+        ("imported".into(), next + 1),
+        ("link_0000".into(), next + 2),
+        ("dataset".into(), next + 3),
+        ("refs".into(), next + 4),
+        ("added".into(), next + 5),
     ]);
-    assert_group(&path, "/", &expected, 13, indexing, true, source_only);
+    assert_group(&path, "/", &expected, next + 6, indexing, true, source_only);
+    let reference = file::libhdf5_open(&path);
+    assert_eq!(
+        reference
+            .dataset("imported")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [17, 23]
+    );
+    assert_eq!(
+        reference
+            .dataset("dataset")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [11]
+    );
+    reference.close().unwrap();
+    let file = File::open(&path).unwrap();
+    let targets = file.dataset("refs").unwrap().dereference().unwrap();
+    let [Object::Dataset(target)] = targets.as_slice() else {
+        panic!("expected a dataset reference");
+    };
+    assert_eq!(target.read_i32().unwrap(), [11]);
+    drop(targets);
+    drop(file);
     creation_order::assert_link_replacements(&path);
     dir.close().unwrap();
 }

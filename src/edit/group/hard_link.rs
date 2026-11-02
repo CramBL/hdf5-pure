@@ -22,6 +22,7 @@ use crate::object_path::LinkNameBuf;
 pub(in crate::edit) struct PreparedHardLinkRecord {
     record: Vec<u8>,
     target: Range<usize>,
+    layout: MessageRecordLayout,
 }
 
 impl PreparedHardLinkRecord {
@@ -56,6 +57,7 @@ impl PreparedHardLinkRecord {
         Ok(Self {
             record: layout.record(MessageType::LINK, &body),
             target,
+            layout,
         })
     }
 
@@ -76,6 +78,19 @@ impl PreparedHardLinkRecord {
             file_writer::OFFSET_WIDTH,
         )?;
         Ok(())
+    }
+
+    /// Borrows the encoded name from the prepared record's message body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the record is shorter than its prefix. Propagates
+    /// errors from reading the encoded Link name.
+    pub(in crate::edit) fn name_bytes(&self) -> Result<&[u8], Error> {
+        let body = self.record.get(self.layout.prefix_len()..).ok_or_else(|| {
+            FormatError::Internal("a prepared hard link has no message body".into())
+        })?;
+        Ok(LinkMessage::name_bytes(body)?)
     }
 
     /// Returns the encoded record, including its object-header message prefix.

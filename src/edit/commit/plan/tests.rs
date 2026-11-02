@@ -2,24 +2,178 @@
 //!
 //! Allocation measurements cover [`PreparedCommit::prepare`] after staging and before application.
 
+use std::collections::BTreeMap;
+
 use rstest::rstest;
 
 use super::CommitPlan;
 use super::CommitPreparation;
+use super::GroupAdditions;
 use super::InPlaceWrite;
+use super::Node;
 use super::PreparedCommit;
 #[cfg(feature = "deflate")]
 use crate::DeflateLevel;
 use crate::File;
+use crate::Object;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::chunked_write::StorageAllocation;
 use crate::edit::WriteEngine;
 use crate::edit::dataset::MovingWrite;
+use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
+use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
+
+#[test]
+fn prepared_link_records_follow_destination_placement_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("destination.h5");
+    let source = directory.path().join("source.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("original").with_i32_data(&[7, 11]);
+    builder.write(&destination).unwrap();
+    std::fs::copy(&destination, &source).unwrap();
+    let source = File::open(&source).unwrap();
+    let mut engine = edit_test_util::open_engine(&destination);
+    engine.create_group(&ObjectPathBuf::parse("child")).unwrap();
+    let mut references = DatasetBuilder::new("");
+    references.with_path_references(&["plain"]);
+    engine
+        .stage_created_dataset(&ObjectPathBuf::parse("refs"), references)
+        .unwrap();
+    engine
+        .stage_created_dataset(&ObjectPathBuf::parse("plain"), i32_dataset(&[19]))
+        .unwrap();
+    engine
+        .copy_from(
+            &source,
+            &ObjectPathBuf::parse("original"),
+            &ObjectPathBuf::parse("cross"),
+        )
+        .unwrap();
+    engine
+        .copy(
+            &ObjectPathBuf::parse("original"),
+            &ObjectPathBuf::parse("same"),
+        )
+        .unwrap();
+    let staged = std::mem::take(&mut engine.staged);
+    engine.begin_commit(&staged);
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(&mut engine, staged) else {
+        panic!("expected the mixed additions to prepare");
+    };
+    let CommitPlan::Tree(tree) = &prepared.plan else {
+        panic!("expected a prepared tree");
+    };
+    let GroupAdditions::Records { records, .. } =
+        &tree.groups[&ObjectPathBuf::root()].prepared.additions
+    else {
+        panic!("expected prepared root links");
+    };
+    assert_eq!(
+        records
+            .as_slice()
+            .iter()
+            .map(|record| record.name_bytes().unwrap())
+            .collect::<Vec<_>>(),
+        [b"same".as_slice(), b"cross", b"plain", b"refs", b"child"]
+    );
+    engine.apply_commit(prepared).unwrap();
+    drop(engine);
+    drop(source);
+    let file = File::open(&destination).unwrap();
+    assert_eq!(
+        file.root().datasets().unwrap(),
+        ["original", "same", "cross", "plain", "refs"]
+    );
+    assert_eq!(file.root().groups().unwrap(), ["child"]);
+    assert_eq!(file.dataset("same").unwrap().read_i32().unwrap(), [7, 11]);
+    assert_eq!(file.dataset("cross").unwrap().read_i32().unwrap(), [7, 11]);
+    assert_eq!(file.dataset("plain").unwrap().read_i32().unwrap(), [19]);
+    let objects = file.dataset("refs").unwrap().dereference().unwrap();
+    let [Object::Dataset(target)] = objects.as_slice() else {
+        panic!("expected a dataset reference");
+    };
+    assert_eq!(target.read_i32().unwrap(), [19]);
+    drop(objects);
+    drop(file);
+    directory.close().unwrap();
+}
+
+#[rstest]
+#[case::surviving(&["existing"], false, true)]
+#[case::repeated(&["new", "new"], false, true)]
+#[case::deleted_replaced(&["existing"], true, false)]
+#[case::distinct(&["new", "other"], false, false)]
+fn prepared_link_names_distinguish_survivors_and_deleted_destinations(
+    #[case] adding: &[&str],
+    #[case] delete_existing: bool,
+    #[case] duplicate: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("names.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let engine = edit_test_util::open_engine(&path);
+    let mut node = Node::default();
+    node.prepared.region = group::fresh_group_region();
+    node.prepared
+        .region
+        .push_link("existing", StoredAddress::new(100), None)
+        .unwrap();
+    node.existing_links.push("existing".into());
+    node.cross_copies = adding
+        .iter()
+        .map(|name| LinkNameBuf::new(name).unwrap())
+        .collect();
+    if delete_existing {
+        node.prepared
+            .deletes
+            .push(LinkNameBuf::new("existing").unwrap());
+    }
+    let key = ObjectPathBuf::root();
+    let mut nodes = BTreeMap::from([(key.clone(), node)]);
+    let result = engine.check_group_additions(
+        &mut nodes,
+        std::slice::from_ref(&key),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    if duplicate {
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::EditUnsupported("a link with this name already exists in the target group")
+            ),
+            "{error:?}"
+        );
+    } else {
+        result.unwrap();
+        let GroupAdditions::Records { records, .. } = &nodes[&key].prepared.additions else {
+            panic!("expected the destination records to be retained");
+        };
+        assert_eq!(
+            records
+                .as_slice()
+                .iter()
+                .map(|record| record.name_bytes().unwrap())
+                .collect::<Vec<_>>(),
+            adding
+                .iter()
+                .map(|name| name.as_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+    drop(nodes);
+    drop(engine);
+    directory.close().unwrap();
+}
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[rstest]

@@ -74,6 +74,7 @@ use crate::object_graph::TraversalBudget;
 use crate::object_graph::TraversalLimit;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
+use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
@@ -846,8 +847,10 @@ fn links_added_to_a_tracked_group_take_consecutive_creation_indexes() {
 #[test]
 fn a_tracked_group_resumes_past_a_gap_a_deletion_left() {
     let region = link_tracked_region(3, false, &["a", "b", "c"]);
-    let mut region = edit::group::remove_link_from_region(&region, "a").unwrap();
-    region = edit::group::remove_link_from_region(&region, "c").unwrap();
+    let mut region =
+        edit::group::remove_links_from_region(&region, &[LinkNameBuf::new("a").unwrap()]).unwrap();
+    region =
+        edit::group::remove_links_from_region(&region, &[LinkNameBuf::new("c").unwrap()]).unwrap();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
     region
         .push_link("d", StoredAddress::new(0x200), order.take().unwrap())
@@ -897,7 +900,8 @@ fn an_untracked_group_numbers_none_of_its_links() {
 #[test]
 fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
     let region = link_tracked_region(3, false, &["a", "b", "c"]);
-    let mut after = edit::group::remove_link_from_region(&region, "b").unwrap();
+    let mut after =
+        edit::group::remove_links_from_region(&region, &[LinkNameBuf::new("b").unwrap()]).unwrap();
     let order = LinkCreationOrder::for_region(&after).unwrap();
     let before = after.clone();
     order.record(&mut after).unwrap();
