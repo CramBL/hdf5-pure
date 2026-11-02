@@ -304,6 +304,20 @@ pub enum FormatError {
         /// Computed checksum.
         computed: u32,
     },
+    /// The number of supplied block addresses differs from the managed fractal-heap plan.
+    FractalHeapBlockCount {
+        /// The number of planned direct and indirect blocks.
+        expected: usize,
+        /// The number of addresses supplied by the caller.
+        actual: usize,
+    },
+    /// Two complete managed fractal-heap blocks overlap.
+    FractalHeapBlockOverlap {
+        /// The input index of the first overlapping block in address order.
+        first: usize,
+        /// The input index of the second overlapping block in address order.
+        second: usize,
+    },
     /// A global heap collection is smaller than 4096 bytes, the minimum collection size.
     GlobalHeapCollectionTooSmall {
         /// The physical address of the collection.
@@ -1960,6 +1974,15 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidFixedArrayVersion(v) => {
                 write!(f, "invalid fixed array version: {v}")
+            }
+            Self::FractalHeapBlockCount { expected, actual } => {
+                write!(
+                    f,
+                    "fractal heap placement requires {expected} blocks, got {actual}"
+                )
+            }
+            Self::FractalHeapBlockOverlap { first, second } => {
+                write!(f, "fractal heap blocks {first} and {second} overlap")
             }
             Self::InvalidFractalHeapBlockOffset { expected, actual } => {
                 write!(

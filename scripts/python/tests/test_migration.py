@@ -269,6 +269,8 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "InvalidOpaqueTagLength", []),
         ("FormatError", "InvalidOpaqueTagPadding", []),
         ("FormatError", "OpaqueTagTooLong", []),
+        ("FormatError", "FractalHeapBlockCount", []),
+        ("FormatError", "FractalHeapBlockOverlap", []),
         ("FormatError", "InvalidObjectHeaderChunkLength", []),
         ("FormatError", "ObjectHeaderAllocationLengthMismatch", []),
         ("FormatError", "UnalignedGlobalHeapCollection", []),
