@@ -22,6 +22,8 @@ use test_util_hdf5::__private::c_object;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
+mod typed;
+
 #[derive(Clone, Copy, Debug)]
 enum Creation {
     Buffered,

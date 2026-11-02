@@ -12,6 +12,7 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FillTime;
 use hdf5_pure::FormatError;
+use hdf5_pure::H5Element;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
@@ -26,15 +27,17 @@ use rstest::rstest;
 use test_util::extensible_array;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
+use test_util_hdf5::dataset::AppendMode;
 
 mod typed;
 
 #[rstest]
-#[case::immediate(AppendMethod::Immediate)]
-#[case::borrowed(AppendMethod::Borrowed)]
-#[case::owned(AppendMethod::Owned)]
+#[case::immediate(AppendMode::Immediate)]
+#[case::borrowed(AppendMode::Buffered)]
+#[case::owned(AppendMode::OwnedBuffered)]
+#[case::staged(AppendMode::Staged)]
 fn first_and_subsequent_appends_materialize_deferred_indexes(
-    #[case] operation: AppendMethod,
+    #[case] operation: AppendMode,
     #[values(false, true)] filtered: bool,
     #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
@@ -53,7 +56,7 @@ fn first_and_subsequent_appends_materialize_deferred_indexes(
         FileSpaceSettings::new(strategy).with_persistence(true),
         |target| {
             target
-                .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0])
+                .with_unallocated_storage_for::<i32>(&[0])
                 .with_chunks(&[4])
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .with_fill_value(-7_i32);
@@ -70,15 +73,25 @@ fn first_and_subsequent_appends_materialize_deferred_indexes(
             .with_sync_policy(sync),
     )
     .unwrap();
-    operation.run(file.dataset("schema").unwrap(), &(0..7).collect::<Vec<_>>());
+    operation
+        .append(
+            &file,
+            &mut file.dataset("schema").unwrap(),
+            &(0..7).collect::<Vec<i32>>(),
+        )
+        .unwrap();
     let target = file.dataset("schema").unwrap();
     assert_eq!(target.read_i32().unwrap(), (0..7).collect::<Vec<_>>());
-    operation.run(
-        file.dataset("schema").unwrap(),
-        &(7..11).collect::<Vec<_>>(),
-    );
+    operation
+        .append(
+            &file,
+            &mut file.dataset("schema").unwrap(),
+            &(7..11).collect::<Vec<i32>>(),
+        )
+        .unwrap();
     assert_eq!(target.read_i32().unwrap(), (0..11).collect::<Vec<_>>());
     assert_eq!(target.shape().unwrap(), [11]);
+    assert_eq!(target.datatype().unwrap(), i32::datatype().unwrap());
     assert_eq!(target.chunks().unwrap().len(), 3);
     drop(target);
     file.close().unwrap();
@@ -116,31 +129,6 @@ fn first_append_uses_the_layouts_encoded_dimension_width(#[case] chunk_elements:
     assert_eq!(target.chunk_shape().unwrap().unwrap(), [chunk_elements]);
     drop(target);
     file.close().unwrap();
-}
-
-#[derive(Clone, Copy)]
-enum AppendMethod {
-    Borrowed,
-    Immediate,
-    Owned,
-}
-
-impl AppendMethod {
-    fn run(self, mut target: Dataset, values: &[i32]) {
-        match self {
-            Self::Immediate => target.append(values).unwrap(),
-            Self::Borrowed => {
-                let mut appender = target.buffered_appender().unwrap();
-                appender.append(values).unwrap();
-                appender.finish().unwrap();
-            }
-            Self::Owned => {
-                let mut appender = target.into_buffered_appender().unwrap();
-                appender.append(values).unwrap();
-                appender.finish().unwrap();
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -281,7 +269,7 @@ fn empty_append_operations_preserve_index_storage(
         FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
         |dataset| {
             if unallocated {
-                dataset.with_unallocated_storage(hdf5_pure::make_i32_type(), &[0]);
+                dataset.with_unallocated_storage_for::<i32>(&[0]);
             } else {
                 dataset.with_i32_data(&[]).with_shape(&[0]);
             }

@@ -4,9 +4,11 @@
 //! These exercise the generic path on default features (no `ndarray`), so they
 //! also prove the trait is available independently of that feature.
 
+use std::fmt::Debug;
+
 use hdf5_pure::{
     CharacterSet, Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FixedAscii,
-    FixedPointType, FloatingPointType, FormatError, H5Element, StringPadding,
+    FixedPointType, FloatingPointType, FormatError, H5Element, MaxExtent, StringPadding,
 };
 use rstest::rstest;
 
@@ -195,7 +197,7 @@ fn converts_eight_bit_targets_like_numeric_reads(
 #[case::ascii(vec![FixedAscii::<4>::new("abc").unwrap(), FixedAscii::new("defg").unwrap()],
     Datatype::String {size: 4, padding: StringPadding::NullPad, charset: CharacterSet::Ascii}
 )]
-fn element_datatype_matches_complete_write_type<T: H5Element>(
+fn element_datatype_matches_complete_write_type<T: H5Element + PartialEq + Debug>(
     #[case] values: Vec<T>,
     #[case] expected: Datatype,
     #[values(false, true)] empty: bool,
@@ -210,6 +212,7 @@ fn element_datatype_matches_complete_write_type<T: H5Element>(
         file.dataset("values").unwrap().datatype().unwrap(),
         expected
     );
+    assert_typed_append_datatype(if empty { &[] } else { &values }, &expected);
 }
 
 #[rstest]
@@ -270,6 +273,42 @@ fn big_endian_numeric_reads_preserve_canonical_write_datatype() {
             DatatypeByteOrder::LittleEndian,
         ))
     );
+}
+
+fn assert_typed_append_datatype<T: H5Element + PartialEq + Debug>(
+    values: &[T],
+    expected: &Datatype,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("types.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("values")
+        .with_unallocated_storage_for::<T>(&[0])
+        .with_chunks(&[3])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("values").unwrap();
+    dataset
+        .append_staged(|append| {
+            append.append(values);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert_eq!(&dataset.datatype().unwrap(), expected);
+    assert_eq!(dataset.read::<T>().unwrap(), values);
+    dataset.append(values).unwrap();
+    assert_eq!(&dataset.datatype().unwrap(), expected);
+    assert_eq!(dataset.read::<T>().unwrap(), values.repeat(2));
+    drop(dataset);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(&dataset.datatype().unwrap(), expected);
+    assert_eq!(dataset.read::<T>().unwrap(), values.repeat(2));
+    drop(dataset);
+    file.close().unwrap();
 }
 
 fn integer_type(size: u32, signed: bool) -> Datatype {

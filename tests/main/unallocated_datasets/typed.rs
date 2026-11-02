@@ -12,6 +12,8 @@ use hdf5_pure::FilterId;
 use hdf5_pure::FixedAscii;
 use hdf5_pure::FormatError;
 use hdf5_pure::H5Element;
+use hdf5_pure::Layout;
+use hdf5_pure::LibVer;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use rstest::rstest;
@@ -256,6 +258,45 @@ fn replacing_element_data_clears_a_staged_type_error() {
     let values = file.dataset("values").unwrap();
     assert_eq!(values.datatype().unwrap(), u32::datatype().unwrap());
     assert_eq!(values.read::<u32>().unwrap(), [1, 2, 3]);
+}
+
+#[rstest]
+#[case::numeric(-7_i32)]
+#[case::byte_array([0_u8, 128, 255])]
+#[case::ascii(FixedAscii::<4>::new("abc").unwrap())]
+fn typed_unallocated_storage_preserves_supported_file_versions<T>(
+    #[case] fill: T,
+    #[values(LibVer::V18, LibVer::V110)] version: LibVer,
+    #[values(false, true)] streaming: bool,
+) where
+    T: H5Element + PartialEq + Debug,
+{
+    let mut builder = FileBuilder::new();
+    builder.with_libver_bounds(LibVer::Earliest, version);
+    builder
+        .create_dataset("schema")
+        .with_unallocated_storage_for::<T>(&[3])
+        .with_fill_value(fill);
+    let bytes = if streaming {
+        let mut bytes = Vec::new();
+        builder.finish_to(&mut bytes).unwrap();
+        bytes
+    } else {
+        builder.finish().unwrap()
+    };
+    let file = File::from_bytes(bytes).unwrap();
+    let schema = file.dataset("schema").unwrap();
+    assert_eq!(file.libver_bound(), version);
+    assert_eq!(schema.datatype().unwrap(), T::datatype().unwrap());
+    assert_eq!(schema.shape().unwrap(), [3]);
+    assert_eq!(schema.read::<T>().unwrap(), [fill; 3]);
+    assert_eq!(
+        schema.layout().unwrap(),
+        Layout::Contiguous {
+            address: None,
+            size: 3 * u64::from(T::datatype().unwrap().type_size()),
+        }
+    );
 }
 
 fn declare<T: H5Element>(schema: &mut DatasetBuilder) -> &mut DatasetBuilder {
