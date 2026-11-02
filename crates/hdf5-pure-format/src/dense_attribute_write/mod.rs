@@ -41,6 +41,10 @@ use crate::message_flags::MessageFlags;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+mod placement;
+
+pub use placement::{DenseAttrBlock, DenseAttrPlacement};
+
 // ---- Dense attribute blob ----
 
 /// Serialized dense attribute storage and its object-header message.
@@ -324,6 +328,38 @@ impl PreparedDenseAttrs {
         Ok(plan)
     }
 
+    /// Returns the allocation kind of each block in placement order.
+    ///
+    /// The order matches [`Self::block_lengths`] and is preserved by [`Self::finalize`].
+    pub fn block_kinds(&self) -> impl ExactSizeIterator<Item = DenseAttrBlockKind> + '_ {
+        self.plan.block_kinds()
+    }
+
+    /// Returns the complete block lengths before resolving deferred updates.
+    ///
+    /// The lengths and their order match [`DenseAttrPlan::block_lengths`] after
+    /// [`Self::finalize`].
+    pub fn block_lengths(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+        self.plan.block_lengths()
+    }
+
+    /// Returns the object-header metadata for independently placed blocks.
+    ///
+    /// Pass one address per entry of [`Self::block_lengths`], in the same order. The returned
+    /// message contains the placement addresses and creation metadata, independently of the
+    /// deferred payload updates. Resolve those updates with [`Self::finalize`] before
+    /// serializing the blocks through [`DenseAttrPlacement::serialize_blocks`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the placement errors documented by [`DenseAttrPlan::place`].
+    pub fn attribute_info(
+        &self,
+        addresses: &[StoredAddress],
+    ) -> Result<AttributeInfoMessage, FormatError> {
+        self.plan.placement_info(addresses)
+    }
+
     /// Returns the reserved length, including heap blocks, indexes, and huge objects.
     pub fn blob_len(&self) -> u64 {
         self.plan.blob_len()
@@ -532,9 +568,27 @@ pub fn dense_attrs_plan(
 
     total_len.to_usize()?;
 
+    let block_lengths = core::iter::once(managed_off)
+        .chain(managed_plan.block_lengths())
+        .chain(
+            core::iter::once(&name_plan)
+                .chain(corder_plan.iter())
+                .chain(huge_plan.iter())
+                .flat_map(|tree| core::iter::once(bthd_size.to_u64()).chain(tree.block_lengths())),
+        )
+        .chain(
+            attributes
+                .iter()
+                .zip(&huge_id_of)
+                .filter(|(_, id)| id.is_some())
+                .map(|(attribute, _)| attribute.bytes.len().to_u64()),
+        )
+        .collect();
+
     Ok(DenseAttrPlan {
         attributes,
         geometry: Arc::new(DenseAttrGeometry {
+            block_lengths,
             huge_id_of,
             huge_count,
             huge_total,
@@ -560,6 +614,76 @@ pub fn dense_attrs_plan(
 }
 
 impl DenseAttrPlan {
+    /// Returns the allocation kind of each block in placement order.
+    ///
+    /// The order matches [`Self::block_lengths`]. Huge-object payloads follow the metadata.
+    pub fn block_kinds(&self) -> impl ExactSizeIterator<Item = DenseAttrBlockKind> + '_ {
+        let metadata = self.geometry.block_lengths.len() - self.geometry.huge_count;
+        (0..self.geometry.block_lengths.len()).map(move |index| {
+            if index < metadata {
+                DenseAttrBlockKind::Metadata
+            } else {
+                DenseAttrBlockKind::HugeObject
+            }
+        })
+    }
+
+    /// Returns the complete lengths of independently placed blocks.
+    ///
+    /// The order is the heap header, managed heap blocks, name index, optional creation-order
+    /// index, optional huge-object index, and huge-object payloads. Each index includes its
+    /// header followed by its nodes. Huge objects retain the input attribute order.
+    /// [`Self::place`] takes addresses in this order.
+    pub fn block_lengths(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+        self.geometry.block_lengths.iter().copied()
+    }
+
+    /// Places each heap block, index block, and huge object at its supplied address.
+    ///
+    /// Pass one address per entry of [`Self::block_lengths`], in the same order. Blocks may be
+    /// separated by gaps or placed in a different address order. Every complete block must
+    /// have a defined start address, a representable exclusive end, and no overlap with
+    /// another block. The caller chooses alignment and page boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DenseAttributeBlockCount`] if the number of addresses differs
+    /// from the planned count, or [`FormatError::DenseAttributeBlockOverlap`] if blocks
+    /// overlap. Returns [`FormatError::DefinedAddressIsUndefined`] if a start address is
+    /// undefined, or [`FormatError::OffsetOverflow`] if a block's exclusive end exceeds
+    /// [`u64::MAX`]. Propagates heap ID encoding and index position conversion errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::FormatError;
+    /// use hdf5_pure_format::__private::{dense_attrs_plan, DenseAttrCreationOrder};
+    ///
+    /// let plan = dense_attrs_plan(&[], DenseAttrCreationOrder::Untracked)?;
+    /// let mut next = 0x8000;
+    /// let addresses: Vec<_> = plan.block_lengths().map(|length| {
+    ///     let address = StoredAddress::new(next);
+    ///     next += length + 256;
+    ///     address
+    /// }).collect();
+    /// let placement = plan.place(&addresses)?;
+    /// assert_eq!(placement.attribute_info().fractal_heap_address, Some(addresses[0]));
+    /// for ((address, length), block) in placement.blocks().zip(placement.serialize_blocks()?) {
+    ///     let block = block?;
+    ///     assert_eq!(block.address, address);
+    ///     assert_eq!(block.bytes.len() as u64, length);
+    /// }
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn place(
+        &self,
+        addresses: &[StoredAddress],
+    ) -> Result<DenseAttrPlacement<'_>, FormatError> {
+        DenseAttrPlacement::new(self, addresses)
+    }
+
     /// Returns the reserved length, including heap blocks, indexes, and huge objects.
     pub fn blob_len(&self) -> u64 {
         self.geometry.total_len
@@ -614,7 +738,6 @@ impl DenseAttrPlan {
     /// if the serialized length differs from the reservation.
     pub fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
         self.extent(heap_address)?;
-        let max_heap_size: u16 = DENSE_ATTR_MAX_HEAP_SIZE_BITS;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
         let heap_id_length = DENSE_ATTR_HEAP_ID_LENGTH;
 
@@ -625,7 +748,7 @@ impl DenseAttrPlan {
         let DenseAttrGeometry {
             huge_id_of,
             huge_count,
-            huge_total,
+            huge_total: _,
             managed_plan,
             name_plan,
             corder_plan,
@@ -668,48 +791,7 @@ impl DenseAttrPlan {
             "managed heap ID width must match what the declared maximum managed object size implies"
         );
 
-        // A constant independent of `max_direct_block_size`:
-        // this is the per-object cap the 2-byte length field of an 8-byte managed
-        // heap ID can encode. Larger messages use huge-object storage.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "DENSE_ATTR_MAX_MANAGED_OBJECT is 65,514, well inside the 4-byte \
-                      max-managed-object-size field"
-        )]
-        let max_managed = DENSE_ATTR_MAX_MANAGED_OBJECT as u32;
-        let header = FractalHeapHeader {
-            heap_id_length,
-            filtering: FractalHeapFiltering::Unfiltered,
-            flags: FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
-            max_managed_object_size: max_managed,
-            next_huge_object_id: huge_count as u64,
-            btree_huge_objects_address: if huge_count == 0 {
-                DENSE_ATTR_UNDEFINED
-            } else {
-                huge_bthd_addr
-            },
-            free_space_in_managed_blocks: managed_plan.free_space(),
-            managed_block_free_space_manager_address: DENSE_ATTR_UNDEFINED,
-            managed_space: managed_plan.managed_space(),
-            allocated_managed_space: managed_plan.allocated_space(),
-            direct_block_allocation_iterator_offset: managed_plan.allocation_iterator(),
-            // Managed and huge objects are counted separately, and an attribute is
-            // in exactly one of the two.
-            managed_objects_count: (attributes.len() - huge_count) as u64,
-            huge_objects_size: *huge_total,
-            huge_objects_count: huge_count as u64,
-            tiny_objects_size: 0,
-            tiny_objects_count: 0,
-            table_width: ATTRIBUTE_HEAP_TABLE_WIDTH,
-            starting_block_size: ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
-            max_direct_block_size: ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
-            max_heap_size,
-            start_root_rows: ATTRIBUTE_HEAP_START_ROOT_ROWS,
-            root_block_address: managed_plan.root_address(managed_addr)?,
-            // Zero when the root is a direct block, which is how a reader decides
-            // which of the two the address above points at.
-            current_rows_in_root_indirect_block: managed_plan.root_rows(),
-        };
+        let header = self.heap_header(managed_plan.root_address(managed_addr)?, huge_bthd_addr);
         let frhp = header.serialize(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)?;
 
         // Encode a managed ID with its heap offset, or a huge ID with its B-tree key.
@@ -839,6 +921,48 @@ impl DenseAttrPlan {
             blob,
         })
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "DENSE_ATTR_MAX_MANAGED_OBJECT is 65,514, well inside the 4-byte \
+                      max-managed-object-size field"
+    )]
+    fn heap_header(&self, root: StoredAddress, huge_index: StoredAddress) -> FractalHeapHeader {
+        let geometry = &self.geometry;
+        FractalHeapHeader {
+            heap_id_length: DENSE_ATTR_HEAP_ID_LENGTH,
+            filtering: FractalHeapFiltering::Unfiltered,
+            flags: FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
+            max_managed_object_size: DENSE_ATTR_MAX_MANAGED_OBJECT as u32,
+            next_huge_object_id: geometry.huge_count as u64,
+            btree_huge_objects_address: if geometry.huge_count == 0 {
+                DENSE_ATTR_UNDEFINED
+            } else {
+                huge_index
+            },
+            free_space_in_managed_blocks: geometry.managed_plan.free_space(),
+            managed_block_free_space_manager_address: DENSE_ATTR_UNDEFINED,
+            managed_space: geometry.managed_plan.managed_space(),
+            allocated_managed_space: geometry.managed_plan.allocated_space(),
+            direct_block_allocation_iterator_offset: geometry.managed_plan.allocation_iterator(),
+            // Managed and huge objects are counted separately, and an attribute is
+            // in exactly one of the two.
+            managed_objects_count: (self.attributes.len() - geometry.huge_count) as u64,
+            huge_objects_size: geometry.huge_total,
+            huge_objects_count: geometry.huge_count as u64,
+            tiny_objects_size: 0,
+            tiny_objects_count: 0,
+            table_width: ATTRIBUTE_HEAP_TABLE_WIDTH,
+            starting_block_size: ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
+            max_direct_block_size: ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
+            max_heap_size: DENSE_ATTR_MAX_HEAP_SIZE_BITS,
+            start_root_rows: ATTRIBUTE_HEAP_START_ROOT_ROWS,
+            root_block_address: root,
+            // Zero when the root is a direct block, which is how a reader decides
+            // which of the two the address above points at.
+            current_rows_in_root_indirect_block: geometry.managed_plan.root_rows(),
+        }
+    }
+
     /// Checks the heap's base address and reserved end.
     ///
     /// # Errors
@@ -881,8 +1005,18 @@ pub fn build_dense_attrs(
     dense_attrs_plan(attrs, creation)?.build(heap_address)
 }
 
+/// The allocation kind of an independently placed dense-attribute block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DenseAttrBlockKind {
+    /// An encoded attribute stored outside the managed heap blocks.
+    HugeObject,
+    /// A heap header, managed heap block, B-tree header, or B-tree node.
+    Metadata,
+}
+
 /// Heap classification, index ordering, and relative offsets retained during finalization.
 struct DenseAttrGeometry {
+    block_lengths: Vec<u64>,
     /// Huge-object ID for each attribute whose bytes go outside the managed
     /// blocks. `None` for a managed one.
     huge_id_of: Vec<Option<u64>>,

@@ -32,6 +32,7 @@ mod conversions;
 mod decoded_chunk_size;
 mod deflate_level;
 mod dense_attr_limits;
+mod dense_attribute_placement;
 mod dense_attributes;
 mod dense_huge_objects;
 mod dense_link_write;
