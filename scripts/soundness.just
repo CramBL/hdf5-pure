@@ -86,3 +86,7 @@ filtered-pipeline-profile CASE="shuffle_deflate" DIRECTION="decode" PATTERN="cyc
 # Measure bounded writable opening of native fragmented PAGE files.
 fragmented-recovery:
     cargo bench --locked -p {{ CROSSCHECK }} --features __hdf5-bundled --bench fragmented_recovery
+
+# Measure complete commit time for native and pure threshold-admission chains.
+threshold-admission:
+    cargo bench --locked -p {{ CROSSCHECK }} --features __hdf5-bundled --bench threshold_admission
