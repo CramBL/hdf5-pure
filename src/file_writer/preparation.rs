@@ -27,6 +27,7 @@ use crate::object_path::ObjectTarget;
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{AttributeSpecs, DatasetBuilder};
 
+use super::HeaderOptions;
 use super::UNDEF_ADDRESS;
 
 /// A dataset's metadata and storage source before assigning file addresses.
@@ -173,6 +174,7 @@ impl PreparedDataset {
     ///
     /// Provider payloads remain unread. For chunked object-reference data, the data length is
     /// zero until the writer resolves references and encodes the chunks.
+    /// Uses `header` for the prefix properties and attribute creation metadata.
     ///
     /// # Errors
     ///
@@ -184,6 +186,7 @@ impl PreparedDataset {
         chunk_set: Option<&CompressedChunkSet>,
         dense_attr_info: Option<&[u8]>,
         libver: LibVer,
+        header: HeaderOptions<'_>,
     ) -> Result<DatasetMeasure, FormatError> {
         let (data_len, messages) = if self.is_chunked() {
             if self.storage.reference_targets().is_some() {
@@ -209,7 +212,13 @@ impl PreparedDataset {
             (self.contiguous_len(), None)
         };
         let header_len = self
-            .build_header(data_address, messages.as_ref(), dense_attr_info, libver)?
+            .build_header(
+                data_address,
+                messages.as_ref(),
+                dense_attr_info,
+                libver,
+                header,
+            )?
             .len();
         Ok(DatasetMeasure {
             header_len,
@@ -221,6 +230,7 @@ impl PreparedDataset {
     ///
     /// Uses `chunked_messages` when supplied, or writes a contiguous layout at `data_address`.
     /// With `dense_attr_info`, writes the Attribute Info message in place of inline attributes.
+    /// Uses `header` for the prefix properties and attribute creation metadata.
     ///
     /// # Errors
     ///
@@ -233,6 +243,7 @@ impl PreparedDataset {
         chunked_messages: Option<&(Vec<u8>, Option<Vec<u8>>)>,
         dense_attr_info: Option<&[u8]>,
         libver: LibVer,
+        header: HeaderOptions<'_>,
     ) -> Result<Vec<u8>, FormatError> {
         match chunked_messages {
             Some((layout, pipeline)) => super::build_chunked_dataset_oh(
@@ -245,6 +256,7 @@ impl PreparedDataset {
                 dense_attr_info,
                 self.fill_time,
                 self.fill.as_deref(),
+                header,
             ),
             None => super::build_dataset_oh(
                 &self.dt,
@@ -257,6 +269,7 @@ impl PreparedDataset {
                 self.fill_time,
                 self.fill.as_deref(),
                 libver,
+                header,
             ),
         }
     }
@@ -702,7 +715,13 @@ mod tests {
         assert_eq!(dataset.ds.dimensions, [4]);
         assert_eq!(dataset.is_chunked(), chunked);
         let measured = dataset
-            .measure(StoredAddress::new(0), None, None, LibVer::V110)
+            .measure(
+                StoredAddress::new(0),
+                None,
+                None,
+                LibVer::V110,
+                super::super::HeaderOptions::PLAIN,
+            )
             .unwrap();
         assert!(measured.header_len > 0);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -770,7 +789,13 @@ mod tests {
                 .map(|_| ())
         } else {
             dataset
-                .measure(StoredAddress::new(0), None, None, LibVer::V110)
+                .measure(
+                    StoredAddress::new(0),
+                    None,
+                    None,
+                    LibVer::V110,
+                    super::super::HeaderOptions::PLAIN,
+                )
                 .map(|_| ())
         };
         let error = result.unwrap_err();

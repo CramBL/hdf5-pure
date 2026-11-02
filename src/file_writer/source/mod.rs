@@ -63,6 +63,11 @@ use crate::type_builders::ObjectRefTarget;
 use crate::writer::LazyFile;
 use crate::writer::WriteSink;
 
+mod inherited;
+
+pub(crate) use inherited::AttributeReconstruction;
+pub(crate) use inherited::InheritedHeader;
+
 /// An indexed source of reproducible object metadata and encoded links.
 ///
 /// The final index identifies the root group. Indices, links, and object contents must remain
@@ -132,6 +137,8 @@ pub(crate) struct SourceLink<'a> {
 ///
 /// Dataset element heap collections are held in prepared storage.
 pub(crate) struct Object {
+    /// Source metadata, absent for an object prepared with fresh defaults.
+    inherited: Option<InheritedHeader>,
     kind: Kind,
     heaps: Vec<VlPatch>,
     /// Exclusive collection end indices for the attribute heap patches in `heaps`.
@@ -204,10 +211,38 @@ impl Object {
             })
             .collect::<Result<_, FormatError>>()?;
         Ok(Self {
+            inherited: None,
             kind,
             heaps,
             heap_ends,
         })
+    }
+
+    /// Attaches source metadata for attributes in their prepared name order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the source and prepared attribute counts differ.
+    pub(crate) fn with_inherited(
+        mut self,
+        inherited: InheritedHeader,
+    ) -> Result<Self, FormatError> {
+        if inherited.count != self.attributes().len() {
+            return Err(inconsistent());
+        }
+        self.inherited = Some(inherited);
+        Ok(self)
+    }
+
+    /// Returns inherited prefix and creation metadata, or fresh header defaults.
+    fn header_options(&self) -> super::HeaderOptions<'_> {
+        match &self.inherited {
+            Some(inherited) => super::HeaderOptions {
+                prefix: inherited.prefix,
+                creation: &inherited.creation,
+            },
+            None => super::HeaderOptions::PLAIN,
+        }
     }
 
     /// Adds dataset and attribute uses of committed datatypes to `references`.
@@ -281,6 +316,7 @@ impl Object {
                     chunks.as_ref(),
                     info.as_deref(),
                     libver,
+                    self.header_options(),
                 )?;
                 (
                     measured.header_len as u64,
@@ -327,6 +363,7 @@ impl Object {
                         .as_ref()
                         .unwrap_or(&compact_link_info(*creation_order)),
                     *group_info,
+                    self.header_options(),
                 )?;
                 (
                     header.len() as u64,
@@ -399,6 +436,7 @@ impl Object {
     /// Returns attribute heap collections followed by dataset element heap collections.
     fn collections(&self) -> impl Iterator<Item = &Vec<u8>> {
         let Self {
+            inherited: _,
             kind,
             heaps,
             heap_ends: _,
@@ -421,6 +459,7 @@ impl Object {
     /// Returns [`None`] if `index` is outside that sequence.
     fn collection(&self, index: usize) -> Option<&Vec<u8>> {
         let Self {
+            inherited: _,
             kind,
             heaps,
             heap_ends,
@@ -454,6 +493,7 @@ impl Object {
     /// from the prepared metadata. Propagates errors accessing dataset element bytes.
     fn patch_heaps(&mut self, spans: &[Allocation]) -> Result<(), FormatError> {
         let Self {
+            inherited: _,
             kind,
             heaps,
             heap_ends: _,
@@ -508,12 +548,26 @@ impl Object {
 
     /// Prepares dense attribute storage when the attributes require it.
     ///
+    /// Uses inherited policy, current storage form, and creation metadata for reconstructed
+    /// objects. Uses the default policy for fresh objects.
+    ///
     /// # Errors
     ///
     /// Propagates attribute sizing and dense storage preparation errors.
     fn dense(&self) -> Result<Option<PreparedDenseAttrs>, FormatError> {
         let attributes = self.attributes();
-        if !super::needs_dense_attrs(attributes)? {
+        let dense = match &self.inherited {
+            Some(inherited) => {
+                super::select_attribute_storage(
+                    attributes,
+                    inherited.policy,
+                    inherited.current,
+                    inherited.count,
+                )? == crate::attribute_policy::AttributeStorage::Dense
+            }
+            None => super::needs_dense_attrs(attributes)?,
+        };
+        if !dense {
             return Ok(None);
         }
         let fixups = self
@@ -532,7 +586,16 @@ impl Object {
                             .then_some(DenseAttrFixup::CommittedDatatype { attribute })
                     }),
             );
-        PreparedDenseAttrs::new(attributes, DenseAttrCreationOrder::Untracked, fixups).map(Some)
+        PreparedDenseAttrs::new(
+            attributes,
+            self.inherited
+                .as_ref()
+                .map_or(DenseAttrCreationOrder::Untracked, |inherited| {
+                    inherited.creation.clone()
+                }),
+            fixups,
+        )
+        .map(Some)
     }
 
     /// Encodes chunks for a chunked dataset whose storage is not verbatim.
@@ -1012,7 +1075,13 @@ impl<S: ObjectSource> Plan<S> {
                     .transpose()?;
                 let messages =
                     measured.map(|measured| (measured.layout_message, measured.pipeline_message));
-                dataset.build_header(address, messages.as_ref(), info.as_deref(), self.libver)?
+                dataset.build_header(
+                    address,
+                    messages.as_ref(),
+                    info.as_deref(),
+                    self.libver,
+                    object.header_options(),
+                )?
             }
             Kind::Group {
                 attributes,
@@ -1028,7 +1097,14 @@ impl<S: ObjectSource> Plan<S> {
                 } else {
                     links_at(&self.source, index, Some(&self.records))?
                 };
-                group_header(&links, attributes, info.as_deref(), &link_info, *group_info)?
+                group_header(
+                    &links,
+                    attributes,
+                    info.as_deref(),
+                    &link_info,
+                    *group_info,
+                    object.header_options(),
+                )?
             }
             Kind::Committed(datatype) => {
                 super::build_committed_datatype_oh(datatype, record.references)?
@@ -1482,6 +1558,7 @@ fn group_header(
     attribute_info: Option<&[u8]>,
     link_info: &LinkInfoMessage,
     group_info: GroupInfo,
+    header: super::HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
     super::group_header(
         links.iter().map(|link| {
@@ -1492,6 +1569,7 @@ fn group_header(
         attribute_info,
         link_info,
         group_info,
+        header,
     )
 }
 

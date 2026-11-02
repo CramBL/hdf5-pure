@@ -61,6 +61,9 @@
 //!   encoding the source gave them rather than rebuilt from an [`AttrValue`],
 //!   which is a decoded view and cannot express a byte order, a sub-width
 //!   precision, a variable-length string, or a rank above one.
+//! - Version 2 prefix timestamps and attribute thresholds on groups and datasets, including
+//!   the root group. Reconstruction uses each attribute set's stored policy, current storage
+//!   form, and creation-order metadata.
 //! - The source file's effective file-space settings, including persistence, unless
 //!   [`RepackOptions::with_file_space_settings`] selects an output policy. The writer
 //!   rebuilds persistent free-space metadata for the destination layout.
@@ -137,6 +140,7 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::MaxExtent;
 use crate::datatype::{self, Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
+use crate::file_writer::source::InheritedHeader;
 use crate::file_writer::source::Object;
 use crate::file_writer::source::ObjectSource;
 use crate::file_writer::source::Plan;
@@ -562,7 +566,8 @@ impl ObjectSource for RepackSource {
                         .as_str(),
                 );
                 emit_dataset(&mut builder, &dataset, &path, file, objects)?;
-                Ok(Object::dataset(builder)?)
+                let inherited = copy_dataset_attrs(&mut builder, &dataset, &path, objects)?;
+                Ok(Object::dataset(builder)?.with_inherited(inherited)?)
             }
             ObjectClass::Group => {
                 let mut builder = GroupBuilder::new("repack");
@@ -572,7 +577,7 @@ impl ObjectSource for RepackSource {
                 )?;
                 copy_attrs(
                     &mut builder,
-                    attributes,
+                    attributes.messages,
                     || {
                         file.group_at(object.id.header_address(), path.clone())
                             .attrs()
@@ -580,11 +585,10 @@ impl ObjectSource for RepackSource {
                     &group_owner(&path),
                     objects,
                 )?;
-                Ok(Object::group(
-                    &builder.finish().attrs,
-                    group_info,
-                    object.creation_order,
-                )?)
+                Ok(
+                    Object::group(&builder.finish().attrs, group_info, object.creation_order)?
+                        .with_inherited(attributes.header)?,
+                )
             }
             ObjectClass::NamedDatatype => {
                 let datatype = file
@@ -717,8 +721,14 @@ fn group_owner(path: &ObjectPathBuf) -> String {
     }
 }
 
-/// Capture one dataset's full description and stage it on `db`, or fail with a
-/// named [`Error::RepackUnsupported`] if any part cannot be reproduced.
+/// Stages a dataset's element storage and creation properties on `db`.
+///
+/// The caller copies attributes through [`copy_dataset_attrs`].
+///
+/// # Errors
+///
+/// Returns [`Error::RepackUnsupported`] if element storage cannot be reproduced. Propagates
+/// metadata-reading, element-reading, and storage-preparation errors.
 fn emit_dataset(
     db: &mut DatasetBuilder,
     ds: &Dataset,
@@ -821,7 +831,6 @@ fn emit_dataset(
             &layout,
             &[],
         );
-        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -831,8 +840,6 @@ fn emit_dataset(
     // element bytes (whose stored heap addresses would go stale on rewrite).
     if vl_data::is_vlen_string_datatype(&datatype) {
         emit_vlen_string_dataset(db, ds, path, &datatype, &dims, &layout, &pipeline)?;
-        // VL-string datasets carry attributes the same way as any other.
-        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -843,7 +850,6 @@ fn emit_dataset(
     // path so a chunked one is refused (not copied with stale references).
     if is_nonstring_vlen(&datatype) {
         emit_vlen_sequence_dataset(db, ds, path, &datatype, &dims, &layout, &pipeline)?;
-        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -854,7 +860,6 @@ fn emit_dataset(
     // chunked one is refused (not copied with stale addresses).
     if is_object_reference(&datatype) {
         emit_object_reference_dataset(db, ds, path, &dims, &layout, file, objects)?;
-        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -883,7 +888,6 @@ fn emit_dataset(
             file,
             objects,
         )?;
-        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -934,9 +938,6 @@ fn emit_dataset(
                 Box::new(provider),
             );
 
-            // Carry the dataset's attributes, refusing any that cannot be
-            // represented.
-            copy_dataset_attrs(db, ds, path, objects)?;
             return Ok(());
         }
 
@@ -969,30 +970,29 @@ fn emit_dataset(
         &filters,
     );
 
-    // Carry the dataset's attributes, refusing if any cannot be represented.
-    copy_dataset_attrs(db, ds, path, objects)?;
-
     Ok(())
 }
 
-/// Carry `ds`'s attributes onto `db`, refusing any that cannot be represented.
+/// Copies `ds`'s attributes onto `db` and returns their inherited header metadata.
 ///
-/// Every exit from [`emit_dataset`] ends here with the same arguments, and each
-/// one has to: a dataset that reaches the output without its attributes is a
-/// silent loss, not a refusal.
+/// # Errors
+///
+/// Propagates attribute-reading, reconstruction-metadata, and [`copy_attrs`] errors.
 fn copy_dataset_attrs(
     db: &mut DatasetBuilder,
     ds: &Dataset,
     path: &ObjectPathBuf,
     objects: &SourceObjects,
-) -> Result<(), Error> {
+) -> Result<InheritedHeader, Error> {
+    let attributes = ds.reconstruction_attributes()?;
     copy_attrs(
         db,
-        ds.attr_messages()?,
+        attributes.messages,
         || ds.attrs(),
         &format!("dataset {path}"),
         objects,
-    )
+    )?;
+    Ok(attributes.header)
 }
 
 /// Sets the maximum dimensions, the chunk dimensions, the [`PartialEdgeFiltering`] policy, and
@@ -1406,8 +1406,9 @@ fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
     }
 }
 
-/// Copy every attribute of `owner` onto `sink`, in name order for a
-/// deterministic output.
+/// Copies each supplied attribute onto `sink`, retaining message order.
+///
+/// The caller supplies `messages` in name order.
 ///
 /// An attribute whose bytes are position-independent is copied *verbatim*: the
 /// source's own datatype, dataspace and element bytes go straight into the
@@ -1436,7 +1437,7 @@ fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
 /// attribute actually needs it, which for most objects is never.
 fn copy_attrs<S, F>(
     sink: &mut S,
-    mut messages: Vec<AttributeMessage>,
+    messages: Vec<AttributeMessage>,
     decode: F,
     owner: &str,
     objects: &SourceObjects,
@@ -1445,10 +1446,6 @@ where
     S: AttrSink + ?Sized,
     F: FnOnce() -> Result<std::collections::HashMap<String, AttrValue>, Error>,
 {
-    // Stable, because equal keys here are not interchangeable: a malformed source
-    // header carrying one name twice carries two different payloads under it, and
-    // an unstable sort would pick between them arbitrarily. Header order decides.
-    messages.sort_by(|a, b| a.name.cmp(&b.name));
     // An attribute naming a committed (`H5Tcommit`) datatype is re-pointed at the
     // same type in the output, exactly as a dataset's committed element type is.
     // The source address is what says *which* committed object, so two attributes

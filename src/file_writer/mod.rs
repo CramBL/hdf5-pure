@@ -33,6 +33,7 @@ use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_space::__private::AllocationClass;
@@ -147,8 +148,9 @@ pub(crate) fn build_chunked_dataset_oh(
     attr_info: Option<&[u8]>,
     fill_time: FillTime,
     fill: Option<&[u8]>,
+    header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut w = ObjectHeaderWriter::new();
+    let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     add_datatype(&mut w, dt, dt_location)?;
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
@@ -160,7 +162,7 @@ pub(crate) fn build_chunked_dataset_oh(
     if let Some(pm) = pipeline_message {
         w.add_message(MessageType::FILTER_PIPELINE, pm.to_vec());
     }
-    add_attributes(&mut w, attrs, attr_info)?;
+    add_attributes(&mut w, attrs, attr_info, header)?;
     w.serialize()
 }
 
@@ -212,8 +214,9 @@ pub(crate) fn build_dataset_oh(
     fill_time: FillTime,
     fill: Option<&[u8]>,
     libver: LibVer,
+    header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut w = ObjectHeaderWriter::new();
+    let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     add_datatype(&mut w, dt, dt_location)?;
     w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
     w.add_message_with_flags(
@@ -231,7 +234,7 @@ pub(crate) fn build_dataset_oh(
             LENGTH_WIDTH,
         ),
     );
-    add_attributes(&mut w, attrs, attr_info)?;
+    add_attributes(&mut w, attrs, attr_info, header)?;
     w.serialize()
 }
 
@@ -324,6 +327,7 @@ pub(crate) fn build_group_oh(
         attr_info,
         link_info.unwrap_or(&COMPACT_LINK_INFO),
         group_info,
+        HeaderOptions::PLAIN,
     )
 }
 
@@ -333,8 +337,9 @@ fn group_header(
     attr_info: Option<&[u8]>,
     link_info: &LinkInfoMessage,
     group_info: GroupInfo,
+    header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut w = ObjectHeaderWriter::new();
+    let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     w.add_message(MessageType::LINK_INFO, link_info.serialize(OFFSET_WIDTH));
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
@@ -344,7 +349,7 @@ fn group_header(
             w.add_message(MessageType::LINK, link?);
         }
     }
-    add_attributes(&mut w, attrs, attr_info)?;
+    add_attributes(&mut w, attrs, attr_info, header)?;
     w.serialize()
 }
 
@@ -445,7 +450,7 @@ fn link_storage_error(error: LinkStorageError) -> FormatError {
 #[cfg(test)]
 const MAX_COMPACT_LINKS: usize = 8;
 
-/// Add an object's attribute storage to its header: either the Attribute Info
+/// Adds an object's attribute storage to its header: either the Attribute Info
 /// message naming a dense (fractal-heap) attribute store, or the inline
 /// Attribute messages preceded by the compact-storage Attribute Info message
 /// that lets the reference library count them (see
@@ -454,6 +459,8 @@ const MAX_COMPACT_LINKS: usize = 8;
 /// The dense case takes the Attribute Info message rather than the heap itself
 /// because that message is all a header needs. A sizing pass can therefore get
 /// its header size from a [`DenseAttrPlan`] without the heap's bytes existing.
+/// Compact records use the creation indexes from `header`. Tracked empty sets retain their
+/// Attribute Info metadata.
 ///
 /// # Errors
 ///
@@ -463,24 +470,43 @@ fn add_attributes(
     w: &mut ObjectHeaderWriter,
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
+    header: HeaderOptions<'_>,
 ) -> Result<(), FormatError> {
     if let Some(message) = attr_info {
         w.add_message(MessageType::ATTRIBUTE_INFO, message.to_vec());
-    } else {
-        if !attrs.is_empty() {
-            w.add_message(
-                MessageType::ATTRIBUTE_INFO,
-                compact_attribute_info_message(),
-            );
-        }
-        for attr in attrs {
-            w.add_message(
-                MessageType::ATTRIBUTE,
-                attr.serialize(OFFSET_WIDTH, LENGTH_SIZE)?,
-            );
-        }
+        return Ok(());
+    }
+    if !attrs.is_empty() || matches!(header.creation, DenseAttrCreationOrder::Tracked { .. }) {
+        w.add_message(
+            MessageType::ATTRIBUTE_INFO,
+            compact_attribute_info_message(header.creation),
+        );
+    }
+    for (index, attr) in attrs.iter().enumerate() {
+        w.add_message_record(
+            MessageType::ATTRIBUTE,
+            attr.serialize(OFFSET_WIDTH, LENGTH_SIZE)?,
+            MessageFlags::NONE,
+            header.creation.index_at(index).unwrap_or_default(),
+        );
     }
     Ok(())
+}
+
+/// Prefix properties and attribute creation metadata for header measurement and emission.
+#[derive(Clone, Copy)]
+pub(crate) struct HeaderOptions<'a> {
+    prefix: ObjectHeaderPrefix,
+    /// Creation indexes in the serialized attribute order, with their counter and indexing policy.
+    creation: &'a DenseAttrCreationOrder,
+}
+
+impl HeaderOptions<'_> {
+    /// An untracked header with no optional prefix fields.
+    pub(crate) const PLAIN: Self = Self {
+        prefix: ObjectHeaderPrefix::PLAIN,
+        creation: &DenseAttrCreationOrder::Untracked,
+    };
 }
 
 /// Returns the link name `name` spells.
@@ -583,17 +609,38 @@ pub(crate) fn finalize_dense_attrs(
 /// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
 /// is longer than its 2-byte size field can hold.
 pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, FormatError> {
-    let policy = AttributePolicy::DEFAULT;
-    let current = AttributeStorage::Compact;
-    if policy.select(current, 0, attrs.len(), true) == AttributeStorage::Dense {
-        return Ok(true);
+    select_attribute_storage(
+        attrs,
+        AttributePolicy::DEFAULT,
+        AttributeStorage::Compact,
+        0,
+    )
+    .map(|storage| storage == AttributeStorage::Dense)
+}
+
+/// Selects storage from count history and compact message sizes.
+///
+/// Measures individual bodies when the policy permits compact storage. Any body larger than
+/// [`OBJECT_HEADER_MESSAGE_MAX`] requires dense storage.
+///
+/// # Errors
+///
+/// Propagates attribute encoding errors when measuring a compact candidate.
+fn select_attribute_storage(
+    attrs: &[AttributeMessage],
+    policy: AttributePolicy,
+    current: AttributeStorage,
+    previous_count: usize,
+) -> Result<AttributeStorage, FormatError> {
+    if policy.select(current, previous_count, attrs.len(), true) == AttributeStorage::Dense {
+        return Ok(AttributeStorage::Dense);
     }
-    for a in attrs {
-        if a.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len() > OBJECT_HEADER_MESSAGE_MAX {
-            return Ok(true);
+    for attr in attrs {
+        if attr.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len() > OBJECT_HEADER_MESSAGE_MAX {
+            return Ok(AttributeStorage::Dense);
         }
     }
-    Ok(false)
+    Ok(AttributeStorage::Compact)
 }
 
 /// The provisional heap address used to size object headers.
@@ -602,25 +649,21 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// their space. The message length is independent of the chosen heap address.
 const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 
-/// The Attribute Info (0x0015) message a version 2 object header needs when its
-/// attributes are stored *compactly*, as inline Attribute messages.
+/// Serializes compact Attribute Info with the supplied creation-order metadata.
 ///
-/// On a version 2 header libhdf5 does not count attribute
-/// messages to answer `H5Oget_info().num_attrs`; it reads the Attribute Info
-/// message and, finding an undefined fractal-heap address there, falls back to
-/// the header's own attribute-message tally (`H5A__get_ainfo`, `H5Aint.c`). With
-/// no Attribute Info message at all, `H5O__attr_count_real` reports zero — while
-/// `H5Aiterate` and `H5Aopen_by_name` still find every attribute. Tools that size
-/// their work by the count then skip the attributes silently: `h5repack` copies
-/// such an object with none of them.
+/// Uses undefined heap and index addresses. Retains the creation counter and indexing policy
+/// for tracked attributes. Version 0 fields are defined in "The Attribute Info Message" of the
+/// [format specification, version 4.0][spec].
 ///
-/// So the message is emitted for a compactly-stored attribute set too, with both
-/// addresses undefined, which is what the C library and h5py write in the same
-/// position. An object with no attributes gets no message, again matching them.
-pub(crate) fn compact_attribute_info_message() -> Vec<u8> {
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
+pub(crate) fn compact_attribute_info_message(creation: &DenseAttrCreationOrder) -> Vec<u8> {
+    let (max_creation_index, indexes_creation_order) = match creation {
+        DenseAttrCreationOrder::Tracked { max, indexed, .. } => (Some(*max), *indexed),
+        DenseAttrCreationOrder::Untracked => (None, false),
+    };
     AttributeInfoMessage {
-        max_creation_index: None,
-        indexes_creation_order: false,
+        max_creation_index,
+        indexes_creation_order,
         fractal_heap_address: None,
         btree_name_index_address: None,
         btree_creation_order_address: None,
@@ -1762,6 +1805,7 @@ impl FileWriter {
                 chunk_sets[i].as_ref(),
                 dense_attr_info.as_deref(),
                 libver,
+                HeaderOptions::PLAIN,
             )?;
             if is_chunked[i] {
                 dummy_cursor = dummy_cursor.checked_add(measured.data_len)?;
@@ -2035,6 +2079,7 @@ impl FileWriter {
                         .as_ref()
                         .map(|blob| blob.attr_info_message.as_slice()),
                     libver,
+                    HeaderOptions::PLAIN,
                 )?;
                 oh_bytes.push(oh);
             }
