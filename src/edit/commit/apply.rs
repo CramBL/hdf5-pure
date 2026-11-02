@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::{AllocationClass, FreeClass, PageType};
+use hdf5_pure_space::__private::{FreeClass, PageType};
 
 use super::plan::{
     self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, InPlaceWrite, Node,
@@ -242,7 +242,7 @@ impl WriteEngine {
             self.place_group_links(&mut region, dense_links)?;
 
             let oh = object_header::build_v2_object_header(&region)?;
-            let addr = self.alloc_or_append_typed(&oh, AllocationClass::Metadata)?;
+            let addr = self.place_object_header(&oh)?;
             path_addr.insert(key.clone(), addr);
         }
 

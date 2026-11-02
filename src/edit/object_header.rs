@@ -1,6 +1,7 @@
 //! Object-header traversal and reconstruction for staged edits.
 
 use std::collections::VecDeque;
+use std::num::NonZeroU64;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
@@ -12,7 +13,7 @@ use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::RecordSplice;
-use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest};
 
 use crate::address::AddressContext;
 use crate::convert::Narrow;
@@ -28,6 +29,25 @@ use crate::width::FormatWidths;
 use super::WriteEngine;
 
 impl WriteEngine {
+    /// Writes an encoded object header as one metadata block.
+    ///
+    /// Returns its physical address. In PAGE files, a header smaller than a page stays within
+    /// one page, and a header at least one page long starts on a page boundary. Page boundaries
+    /// are relative to the file's base address. The caller supplies one complete header,
+    /// including its prefix and checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `bytes` is empty. Propagates reservation and write
+    /// errors from [`reserve_request`](Self::reserve_request) and [`place`](Self::place).
+    pub(super) fn place_object_header(&mut self, bytes: &[u8]) -> Result<u64, Error> {
+        let size = NonZeroU64::new(bytes.len() as u64)
+            .ok_or_else(|| FormatError::Internal("an object header is empty".into()))?;
+        let request = ReservationRequest::new(size, AllocationClass::Metadata).for_block();
+        let placement = self.reserve_request(request)?;
+        self.place(placement, bytes)
+    }
+
     /// Reads the extension header and replaces its File Space Info message bodies.
     ///
     /// `ext_addr` is an absolute file offset. The replacement is a persistent version 1 message

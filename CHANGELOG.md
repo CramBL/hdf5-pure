@@ -90,6 +90,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` writing small group and dataset object headers across PAGE boundaries or placing large headers at unaligned addresses ([#1056](https://github.com/CramBL/hdf5-pure/pull/1056)).
 - Fixed `Group::datasets` and chunk enumeration returning duplicate entries through repeated version 1 B-tree nodes. Metadata walks reject repeated nodes and inconsistent child levels, with a bounded work allowance ([#1054](https://github.com/CramBL/hdf5-pure/pull/1054)).
 - Fixed `Group::datasets` and related streaming reads reporting an invalid signature before truncation for an incomplete version 1 group B-tree header. Buffered and streaming reads check the complete header first ([#1052](https://github.com/CramBL/hdf5-pure/pull/1052)).
 - Fixed `DatasetBuilder::with_fill_value` accepting equal-width fill values with incompatible storage datatypes, including through creation properties. Dataset preparation rejects mismatched encodings before writing storage ([#1052](https://github.com/CramBL/hdf5-pure/pull/1052)).

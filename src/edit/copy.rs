@@ -368,7 +368,7 @@ impl WriteEngine {
                 let mut region = region.clone();
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+                self.place_object_header(&oh)
             }
             CopyNode::DatasetContiguous {
                 region,
@@ -389,7 +389,7 @@ impl WriteEngine {
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+                self.place_object_header(&oh)
             }
             CopyNode::DatasetChunked {
                 region,
@@ -431,7 +431,7 @@ impl WriteEngine {
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+                self.place_object_header(&oh)
             }
         }
     }

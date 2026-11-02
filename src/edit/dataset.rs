@@ -214,7 +214,7 @@ impl WriteEngine {
                 file_writer::HeaderOptions::PLAIN,
             )?
         };
-        self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+        self.place_object_header(&oh)
     }
 
     /// Plans replacement values against the committed dataset's storage.
@@ -747,13 +747,13 @@ impl WriteEngine {
                 let raw_len = raw.len() as u64;
                 region.bytes_mut()[size_off..size_off + 8].copy_from_slice(&raw_len.to_le_bytes());
                 let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+                self.place_object_header(&oh)
             }
             MovingWrite::Compact { region, bytes } => {
                 let raw = self.resolve_overwrite_bytes(overwrites.take(bytes))?;
                 let region = super::object_header::rebuild_compact_layout_region(&region, &raw)?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+                self.place_object_header(&oh)
             }
             MovingWrite::Chunked {
                 region,
@@ -812,7 +812,7 @@ impl WriteEngine {
                 let mut region = region;
                 self.place_edited_attrs(&mut region, attrs)?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+                self.place_object_header(&oh)
             }
         }
     }
@@ -1009,7 +1009,7 @@ impl WriteEngine {
         let region = replace_dataspace_message(region, new_dataspace_body)?;
         let region = replace_layout_message(&region, &layout_body)?;
         let oh = super::object_header::build_v2_object_header(&region)?;
-        self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+        self.place_object_header(&oh)
     }
 
     /// Writes a prepared dataset's chunk storage and returns its object-header bytes.
@@ -1150,7 +1150,7 @@ impl WriteEngine {
         let mut new_region = replace_layout_message(region, &layout_message)?;
         self.append_dense_attrs(&mut new_region, dense_attrs)?;
         let oh = super::object_header::build_v2_object_header(&new_region)?;
-        self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
+        self.place_object_header(&oh)
     }
 
     /// Adds elements to the prepared bytes and leading dimension of a staged creation.

@@ -64,6 +64,8 @@ pub mod native_fixtures;
 pub mod numeric;
 pub mod object_copy;
 #[cfg(feature = "__hdf5-1.10")]
+pub mod page_object_headers;
+#[cfg(feature = "__hdf5-1.10")]
 pub mod page_publication;
 pub mod paged;
 pub mod paged_index;
