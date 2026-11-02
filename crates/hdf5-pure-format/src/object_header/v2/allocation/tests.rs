@@ -589,3 +589,292 @@ const TRACKED: MessageRecordLayout = MessageRecordLayout::from_header_flags(TRAC
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
 const TWO_BYTE_CHUNK_SIZE: HeaderFlags = HeaderFlags(0x01);
+
+#[rstest]
+#[case::plain(MessageRecordLayout::PLAIN, HeaderFlags::default())]
+#[case::tracked(TRACKED, TRACKED_FLAGS)]
+fn chosen_chunks_match_independent_bytes(
+    #[case] layout: MessageRecordLayout,
+    #[case] flags: HeaderFlags,
+    #[values(0, 1, 2, 3, 4, 5, 6, 17)] padding: usize,
+) {
+    let prefix = ObjectHeaderPrefix::with_layout(layout);
+    let message = Message::new(RecordType::DATATYPE, &[5, 6])
+        .with_flags(test_util::object_header::MessageFlags::CONSTANT)
+        .with_creation_order(17);
+    let mut source = independent::message_records(&[Message::nil(31), message.clone()], flags);
+    source.extend([1, 2, 3]);
+    let records_len = layout.prefix_len() + 2;
+    let continuation = layout.prefix_len() + 16;
+    let lengths = [
+        (11 + records_len + continuation + padding).to_u64(),
+        (8 + continuation + padding).to_u64(),
+        (8 + layout.prefix_len()).to_u64(),
+    ];
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        prefix,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &source,
+    )
+    .unwrap();
+    assert!(
+        geometry
+            .root_chunk_lengths(true)
+            .any(|range| range.contains(&lengths[0]))
+    );
+    assert!(
+        geometry
+            .continuation_chunk_lengths(true)
+            .contains(&lengths[1])
+    );
+    assert!(
+        geometry
+            .continuation_chunk_lengths(false)
+            .contains(&lengths[2])
+    );
+    let plan = geometry
+        .into_chunked_allocation(StoredAddress::new(128), lengths.iter().sum(), &lengths)
+        .unwrap();
+    assert_eq!(
+        plan.chunks().collect::<Vec<_>>(),
+        [
+            (StoredAddress::new(128), lengths[0]),
+            (StoredAddress::new(128 + lengths[0]), lengths[1]),
+            (
+                StoredAddress::new(128 + lengths[0] + lengths[1]),
+                lengths[2]
+            ),
+        ]
+    );
+    let chunks = plan.chunks().collect::<Vec<_>>();
+    let mut expected = Vec::new();
+    for (index, &(_, length)) in chunks.iter().enumerate() {
+        let mut records = if index == 0 {
+            vec![message.clone()]
+        } else {
+            Vec::new()
+        };
+        if index + 1 == chunks.len() {
+            records.push(Message::nil(0));
+        } else {
+            if padding >= layout.prefix_len() {
+                records.push(Message::nil(padding - layout.prefix_len()));
+            }
+            records.push(Message::continuation(
+                chunks[index + 1].0.get(),
+                chunks[index + 1].1,
+                Widths::EIGHT,
+            ));
+        }
+        let mut chunk = if index == 0 {
+            independent::Header::new()
+                .flags(flags)
+                .messages(records)
+                .build()
+        } else {
+            independent::continuation_chunk(&records, flags)
+        };
+        if padding < layout.prefix_len() && index + 1 < chunks.len() {
+            chunk.truncate(chunk.len() - CHECKSUM_LEN);
+            chunk.resize(chunk.len() + padding, 0);
+            if index == 0 {
+                test_util::bytes::set_uint_at(&mut chunk, 6, 1, length - 11);
+            }
+            test_util::checksum::append(&mut chunk);
+        }
+        assert_eq!(chunk.len().to_u64(), length);
+        expected.extend(chunk);
+    }
+    assert_eq!(plan.encode(), expected);
+    let mut image = vec![0; 128];
+    image.extend(expected);
+    let header = ObjectHeader::parse(&image, AccessMode::ReadOnly, 128, 8, 8).unwrap();
+    assert_eq!(header.messages.len(), 1);
+    assert_eq!(header.messages[0].data, [5, 6]);
+    assert_eq!(header.messages[0].flags, MessageFlags::CONSTANT);
+}
+
+#[rstest]
+#[case::plain(HeaderFlags::default(), &[11..=11, 15..=266, 12..=12, 16..=65_547, 14..=14, 18..=65_553, 18..=18, 22..=65_557], 12..=65_547, 28..=65_567)]
+#[case::tracked(TRACKED_FLAGS, &[11..=11, 17..=266, 12..=12, 18..=65_547, 14..=14, 20..=65_555, 18..=18, 24..=65_559], 14..=65_549, 30..=65_571)]
+fn empty_geometry_exposes_exact_framing_ranges(
+    #[case] flags: HeaderFlags,
+    #[case] roots: &[RangeInclusive<u64>],
+    #[case] terminal: RangeInclusive<u64>,
+    #[case] continued: RangeInclusive<u64>,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry.root_chunk_lengths(false).collect::<Vec<_>>(),
+        roots
+    );
+    assert_eq!(geometry.continuation_chunk_lengths(false), terminal);
+    assert_eq!(geometry.continuation_chunk_lengths(true), continued);
+}
+
+#[rstest]
+#[case::too_short_root(&[30, 12], 0, 30)]
+#[case::too_short_child(&[37, 11], 1, 11)]
+#[case::too_short_continued_child(&[37, 27, 12], 1, 27)]
+#[case::oversized_padding(&[37, 65_548], 1, 65_548)]
+#[case::unrepresentable_empty_root(&[13], 0, 13)]
+#[case::missing_root(&[], 0, 0)]
+fn chosen_chunk_lengths_reject_unrepresentable_records(
+    #[case] lengths: &[u64],
+    #[case] index: usize,
+    #[case] length: u64,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let err = geometry
+        .into_chunked_allocation(StoredAddress::new(128), lengths.iter().sum(), lengths)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        FormatError::InvalidObjectHeaderChunkLength { index, length }
+    );
+}
+
+#[rstest]
+#[case::one_byte(266, UintWidth::One)]
+#[case::two_bytes(267, UintWidth::Two)]
+#[case::last_two_bytes(65_547, UintWidth::Two)]
+#[case::four_bytes(65_548, UintWidth::Four)]
+fn chosen_root_lengths_select_a_representable_size_field(
+    #[case] root_len: u64,
+    #[case] width: UintWidth,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let plan = geometry
+        .into_chunked_allocation(StoredAddress::new(128), root_len + 12, &[root_len, 12])
+        .unwrap();
+    assert_eq!(
+        UintWidth::from_flags(ObjectHeaderPrefix::parse(&plan.encode()).unwrap().flags),
+        width
+    );
+}
+
+#[rstest]
+#[case::short(&[32], 33, 32)]
+#[case::long(&[32], 31, 32)]
+#[case::empty(&[], 31, 0)]
+fn chosen_chunks_cover_the_complete_supplied_allocation(
+    #[case] lengths: &[u64],
+    #[case] expected: u64,
+    #[case] actual: u64,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry
+            .into_chunked_allocation(StoredAddress::new(128), expected, lengths)
+            .unwrap_err(),
+        FormatError::ObjectHeaderAllocationLengthMismatch { expected, actual }
+    );
+}
+
+#[rstest]
+#[case::last_supported(256)]
+#[case::over_limit(257)]
+fn chosen_chunks_keep_the_chunk_count_limit(#[case] count: usize) {
+    let mut lengths = vec![28; count];
+    lengths[0] = 31;
+    lengths[count - 1] = 12;
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let result =
+        geometry.into_chunked_allocation(StoredAddress::new(128), lengths.iter().sum(), &lengths);
+    if count > 256 {
+        assert_eq!(result.unwrap_err(), FormatError::NestingDepthExceeded);
+    } else {
+        let plan = result.unwrap();
+        assert_eq!(plan.chunks().len(), count);
+        assert_eq!(plan.encode().len().to_u64(), lengths.iter().sum());
+    }
+}
+
+#[test]
+fn narrow_length_fields_bound_exposed_and_chosen_chunks() {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 2).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(geometry.continuation_chunk_lengths(false), 12..=65_535);
+    assert_eq!(geometry.continuation_chunk_lengths(true), 22..=65_535);
+    let err = geometry
+        .into_chunked_allocation(StoredAddress::new(128), 65_567, &[31, 65_536])
+        .unwrap_err();
+    assert_eq!(
+        err,
+        FormatError::InvalidObjectHeaderChunkLength {
+            index: 1,
+            length: 65_536
+        }
+    );
+}
+
+#[rstest]
+#[case::undefined_start(65_535, 0, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+#[case::undefined_end(65_500, 35, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+#[case::oversized_end(65_500, 36, FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
+fn chosen_chunks_keep_output_address_width_checks(
+    #[case] address: u64,
+    #[case] len: u64,
+    #[case] expected: FormatError,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(2, 2).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry
+            .into_chunked_allocation(StoredAddress::new(address), len, &[len])
+            .unwrap_err(),
+        expected
+    );
+}
+
+#[test]
+fn chosen_chunk_length_sum_overflow_is_rejected() {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        geometry
+            .into_chunked_allocation(StoredAddress::new(128), 64, &[u64::MAX, 1])
+            .unwrap_err(),
+        FormatError::OffsetOverflow {
+            offset: u64::MAX,
+            length: 1
+        }
+    );
+}

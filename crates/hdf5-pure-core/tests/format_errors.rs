@@ -67,3 +67,19 @@ fn group_info_diagnostics_preserve_their_fields(
 ) {
     assert_eq!(error.to_string(), expected);
 }
+
+#[rstest::rstest]
+#[case::chunk_length(
+    FormatError::InvalidObjectHeaderChunkLength { index: 17, length: 4_294_967_600 },
+    "object-header chunk 17 cannot represent its records in 4294967600 bytes"
+)]
+#[case::allocation_length(
+    FormatError::ObjectHeaderAllocationLengthMismatch { expected: 4_294_967_600, actual: 4_294_967_616 },
+    "object-header chunks cover 4294967616 bytes, expected 4294967600"
+)]
+fn object_header_allocation_diagnostics_preserve_their_fields(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}
