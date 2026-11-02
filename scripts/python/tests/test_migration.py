@@ -259,6 +259,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "InvalidGroupInfoFlags", []),
         ("FormatError", "InvalidGroupInfoLength", []),
         ("FormatError", "InvalidGroupInfoThresholds", []),
+        ("FormatError", "InvalidAttributePhaseChange", []),
         ("FormatError", "InvalidGroupInfoVersion", []),
         ("FormatError", "InvalidAscii", []),
         ("FormatError", "MissingNumericDatatypeProperty", []),

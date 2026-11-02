@@ -130,12 +130,12 @@
 //!   whole-file writer. Every
 //!   added dataset must have a fixed-size datatype. Group, root, and **dataset**
 //!   attribute edits (`set_group_attr` / `set_dataset_attr`) may be fixed-size or
-//!   variable-length. An attribute set larger than an object header holds
-//!   compactly, either more than [`attributes::MAX_COMPACT_ATTRS`] of them or one whose
-//!   message overflows the header's 2-byte size field, is stored in a fractal heap, on
-//!   an object this engine adds and on one whose edit takes it past the
-//!   threshold alike, and an object already storing its attributes densely is
-//!   rebuilt the same way ([`attributes::plan_attr_ops`], issue #102). A dataset attribute
+//!   variable-length. The editor stores compact attributes in a fractal heap when an edit
+//!   increases their count above the object's stored maximum, when that maximum is zero, or
+//!   when a staged message overflows the header's 2-byte size field. An omitted maximum defaults
+//!   to eight.
+//!   Dense attributes are rebuilt in a heap unless the edit removes all attributes
+//!   ([`attributes::plan_attr_ops`]). A dataset attribute
 //!   edit relocates the dataset header and so requires a single hard link.
 //! - A new group's parent must already exist or be created in the same session
 //!   (each level created explicitly); intermediate groups are not auto-created.
