@@ -5,7 +5,8 @@
 //! also prove the trait is available independently of that feature.
 
 use hdf5_pure::{
-    Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FixedPointType, H5Element,
+    CharacterSet, Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FixedAscii,
+    FixedPointType, FloatingPointType, FormatError, H5Element, StringPadding,
 };
 use rstest::rstest;
 
@@ -173,3 +174,122 @@ fn converts_eight_bit_targets_like_numeric_reads(
     assert_eq!(dataset.read_u8().unwrap(), unsigned);
     assert_eq!(dataset.read_i8().unwrap(), signed_values);
 }
+
+#[rstest]
+#[case::i8(vec![-1i8, 42], integer_type(1, true))]
+#[case::i16(vec![-1i16, 42], integer_type(2, true))]
+#[case::i32(vec![-1i32, 42], integer_type(4, true))]
+#[case::i64(vec![-1i64, 42], integer_type(8, true))]
+#[case::u8(vec![0u8, 42], integer_type(1, false))]
+#[case::u16(vec![0u16, 42], integer_type(2, false))]
+#[case::u32(vec![0u32, 42], integer_type(4, false))]
+#[case::u64(vec![0u64, 42], integer_type(8, false))]
+#[case::f32(vec![-1.5f32, 42.25], Datatype::FloatingPoint(
+    FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian)
+))]
+#[case::f64(vec![-1.5f64, 42.25], Datatype::FloatingPoint(
+    FloatingPointType::ieee754_binary64(DatatypeByteOrder::LittleEndian)
+))]
+#[case::byte_array_one(vec![[0u8], [255]], byte_array_type(1))]
+#[case::byte_array_three(vec![[0u8, 128, 255], [1, 2, 3]], byte_array_type(3))]
+#[case::ascii(vec![FixedAscii::<4>::new("abc").unwrap(), FixedAscii::new("defg").unwrap()],
+    Datatype::String {size: 4, padding: StringPadding::NullPad, charset: CharacterSet::Ascii}
+)]
+fn element_datatype_matches_complete_write_type<T: H5Element>(
+    #[case] values: Vec<T>,
+    #[case] expected: Datatype,
+    #[values(false, true)] empty: bool,
+) {
+    assert_eq!(T::datatype().unwrap(), expected);
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("values")
+        .with_data(if empty { &[] } else { &values });
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    assert_eq!(
+        file.dataset("values").unwrap().datatype().unwrap(),
+        expected
+    );
+}
+
+#[rstest]
+#[case::byte_array(<[u8; 0]>::datatype(), FormatError::ZeroSizedDatatype { class: ARRAY_CLASS })]
+#[case::ascii(FixedAscii::<0>::datatype(), FormatError::ZeroFixedStringWidth)]
+fn element_datatype_rejects_zero_width(
+    #[case] result: Result<Datatype, FormatError>,
+    #[case] expected: FormatError,
+) {
+    assert_eq!(result.unwrap_err(), expected);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[rstest]
+#[case::byte_array(<[u8; u32::MAX as usize + 1]>::datatype())]
+#[case::ascii(FixedAscii::<{ u32::MAX as usize + 1 }>::datatype())]
+fn element_datatype_rejects_unrepresentable_width(#[case] result: Result<Datatype, FormatError>) {
+    assert_eq!(
+        result.unwrap_err(),
+        FormatError::ValueTooLargeForRepresentation {
+            value: u64::from(u32::MAX) + 1,
+            target: "u32",
+        }
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[rstest]
+#[case::byte_array(<[u8; u32::MAX as usize]>::datatype(), byte_array_type(u32::MAX))]
+#[case::ascii(FixedAscii::<{ u32::MAX as usize }>::datatype(), Datatype::String {
+    size: u32::MAX, padding: StringPadding::NullPad, charset: CharacterSet::Ascii,
+})]
+fn element_datatype_accepts_maximum_width_without_elements(
+    #[case] result: Result<Datatype, FormatError>,
+    #[case] expected: Datatype,
+) {
+    assert_eq!(result.unwrap(), expected);
+}
+
+#[test]
+fn big_endian_numeric_reads_preserve_canonical_write_datatype() {
+    let stored = Datatype::FixedPoint(
+        FixedPointType::new(2, DatatypeByteOrder::BigEndian, true, 0, 16).unwrap(),
+    );
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("values")
+        .with_raw_data(stored.clone(), vec![255, 214, 0, 42], 2);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), stored);
+    assert_eq!(dataset.read::<i16>().unwrap(), [-42, 42]);
+    assert_eq!(dataset.read::<f64>().unwrap(), [-42.0, 42.0]);
+    assert_eq!(i16::datatype().unwrap(), integer_type(2, true));
+    assert_eq!(
+        f64::datatype().unwrap(),
+        Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
+            DatatypeByteOrder::LittleEndian,
+        ))
+    );
+}
+
+fn integer_type(size: u32, signed: bool) -> Datatype {
+    Datatype::FixedPoint(
+        FixedPointType::new(
+            size,
+            DatatypeByteOrder::LittleEndian,
+            signed,
+            0,
+            (size * 8).try_into().unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+fn byte_array_type(width: u32) -> Datatype {
+    Datatype::Array {
+        base_type: Box::new(integer_type(1, false)),
+        dimensions: vec![width],
+    }
+}
+
+const ARRAY_CLASS: u8 = 10;

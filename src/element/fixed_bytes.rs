@@ -27,6 +27,10 @@ impl<const N: usize> sealed::Sealed for [u8; N] {
 }
 
 impl<const N: usize> H5Element for [u8; N] {
+    fn datatype() -> Result<Datatype, FormatError> {
+        datatype::<N>()
+    }
+
     fn read_from(dataset: &Dataset) -> Result<Vec<Self>, Error> {
         dataset.read_whole_decoded::<Self, ByteArrayDecoder<N>>()
     }
