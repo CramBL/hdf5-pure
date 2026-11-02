@@ -814,7 +814,6 @@ fn a_link_target_that_overflows_the_base_address_is_refused() {
     }
 
     // Repair the checksum so parsing reaches the overflowing link target.
-    bytes[target..target + 8].copy_from_slice(&u64::MAX.to_le_bytes());
     let chunk = crate::edit::object_header::read_oh_chunks(
         &crate::source::BytesSource::new(&bytes[..]),
         root_oh as u64,
@@ -824,6 +823,7 @@ fn a_link_target_that_overflows_the_base_address_is_refused() {
         .span;
     let chunk_at = chunk.start().get();
     let end = chunk.end().get().to_usize().unwrap() - 4;
+    bytes[target..target + 8].copy_from_slice(&u64::MAX.to_le_bytes());
     let repaired = crate::checksum::jenkins_lookup3(&bytes[chunk_at.to_usize().unwrap()..end]);
     bytes[end..end + 4].copy_from_slice(&repaired.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
