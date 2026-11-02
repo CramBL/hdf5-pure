@@ -497,13 +497,13 @@ impl WriteEngine {
             .map(|state| state.reconcile(final_eoa))
             .transpose()?;
 
-        let flat_block = match plan.blocks.as_slice() {
+        let flat_block = match plan.blocks() {
             [] => None,
-            [block] if block.kind == ManagerKind::Flat => Some(block),
+            [block] if block.kind() == ManagerKind::Flat => Some(block),
             [block] => {
                 return Err(Error::Format(FormatError::Internal(format!(
                     "flat free-space plan produced a {:?} manager",
-                    block.kind
+                    block.kind()
                 ))));
             }
             _ => {
@@ -524,7 +524,7 @@ impl WriteEngine {
                 strategy,
                 threshold,
                 page_size,
-                block.fshd_addr,
+                block.header().start(),
                 eoa_pre_fsm,
             );
             object_header::build_v2_object_header(
