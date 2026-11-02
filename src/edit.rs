@@ -132,11 +132,13 @@
 //!   attribute edits (`set_group_attr` / `set_dataset_attr`) may be fixed-size or
 //!   variable-length. The editor stores compact attributes in a fractal heap when an edit
 //!   increases their count above the object's stored maximum, when that maximum is zero, or
-//!   when a staged message overflows the header's 2-byte size field. An omitted maximum defaults
-//!   to eight.
-//!   Dense attributes are rebuilt in a heap unless the edit removes all attributes
-//!   ([`attributes::plan_attr_ops`]). A dataset attribute
-//!   edit relocates the dataset header and so requires a single hard link.
+//!   when a surviving message overflows the header's 2-byte size field. An omitted maximum
+//!   defaults to eight.
+//!   After a count decrease below the stored minimum, the editor returns dense attributes to
+//!   compact storage if every remaining message fits. An omitted minimum defaults to six.
+//!   The editor retains dense storage by count when the minimum is zero
+//!   ([`attributes::plan_attr_ops`]). A dataset attribute edit relocates the dataset header and
+//!   so requires a single hard link.
 //! - A new group's parent must already exist or be created in the same session
 //!   (each level created explicitly); intermediate groups are not auto-created.
 //! - Rows can be appended to an existing chunked, unlimited, Extensible-Array

@@ -55,7 +55,7 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
-    /// parsing and source-read errors from [`visit_oh_chunks`].
+    /// parsing, checksum, and source-read errors from [`visit_oh_chunks`].
     pub(super) fn gather_oh_messages<S: Source + ?Sized>(
         src: &S,
         addr: u64,
@@ -425,7 +425,10 @@ pub(super) fn oh_region_at(
     // The region is followed by a 4-byte checksum, which must also be present.
     let region_end = region_start
         .checked_add(parsed.chunk0_size)
-        .filter(|e| e.checked_add(4).is_some_and(|end| end <= file_len))
+        .filter(|e| {
+            e.checked_add(OBJECT_HEADER_CHECKSUM_SIZE.to_u64())
+                .is_some_and(|end| end <= file_len)
+        })
         .ok_or(Error::EditUnsupported("truncated object header"))?;
     Ok((region_start, region_end, parsed.prefix))
 }
@@ -465,10 +468,13 @@ impl OhChunk {
 
 /// Reads chunk 0 with its checksum excluded from the message buffer.
 ///
+/// Verifies the checksum when the `checksum` feature is enabled.
+///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] for an unsupported or truncated header. Propagates
-/// parsing and source-read errors.
+/// Returns [`Error::EditUnsupported`] for an unsupported or truncated header. Returns
+/// [`FormatError::ChecksumMismatch`] if checksum verification is enabled and the checksum is
+/// invalid. Propagates parsing and source-read errors.
 fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Error> {
     let file_len = src.len();
     let window = file_len
@@ -480,9 +486,16 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
     // `re >= rs > addr`, so both differences are non-negative, and `oh_region_at`
     // has checked that the 4-byte checksum past `re` is present.
     let len = (re - addr).to_usize()?;
+    let span = FileRange::new(
+        PhysicalAddress::new(addr),
+        re - addr + OBJECT_HEADER_CHECKSUM_SIZE.to_u64(),
+    )?;
+    let mut buf = src.read_metadata_at(addr, span.length().to_usize()?)?;
+    hdf5_pure_format::__private::verify_trailing(&buf)?;
+    buf.truncate(len);
     Ok(OhChunk {
-        span: FileRange::new(PhysicalAddress::new(addr), len as u64 + 4)?,
-        buf: src.read_metadata_at(addr, len)?,
+        span,
+        buf,
         messages_start: (rs - addr).to_usize()?,
         props,
     })
@@ -520,7 +533,7 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
 ///
 /// Returns [`Error::EditUnsupported`] if a chunk or record is unsupported or truncated, or if
 /// the traversal exceeds [`MAX_OH_CHUNKS`]. Propagates source-read, address-conversion, parsing,
-/// and visitor errors.
+/// checksum, and visitor errors.
 fn visit_oh_chunks<S: Source + ?Sized>(
     src: &S,
     addr: u64,
@@ -615,10 +628,13 @@ impl ContinuationChunk {
 
     /// Reads the complete block and excludes its checksum from the message buffer.
     ///
+    /// Verifies the checksum when the `checksum` feature is enabled.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the block signature is invalid. Propagates
-    /// source-read, size-conversion, and parsing errors.
+    /// Returns [`Error::EditUnsupported`] if the block signature is invalid. Returns
+    /// [`FormatError::ChecksumMismatch`] if checksum verification is enabled and the checksum
+    /// is invalid. Propagates source-read, size-conversion, and parsing errors.
     fn read<S: Source + ?Sized>(self, src: &S) -> Result<OhChunk, Error> {
         let mut buf =
             src.read_metadata_at(self.span.start().get(), self.span.length().to_usize()?)?;
@@ -631,6 +647,7 @@ impl ContinuationChunk {
             }
             Err(err) => return Err(Error::Format(err)),
         };
+        hdf5_pure_format::__private::verify_trailing(&buf)?;
         buf.truncate(messages.end);
         Ok(OhChunk {
             span: self.span,
@@ -666,7 +683,7 @@ pub(crate) fn next_record(
 }
 
 /// Maps a truncated record to [`Error::EditUnsupported`] and other failures to [`Error::Format`].
-fn record_error(err: FormatError) -> Error {
+pub(super) fn record_error(err: FormatError) -> Error {
     match err {
         FormatError::UnexpectedEof { .. } => {
             Error::EditUnsupported("malformed object header message")
@@ -923,6 +940,10 @@ pub(super) fn unix_time_now() -> Option<u32> {
 pub(super) fn unix_time_now() -> Option<u32> {
     None
 }
+
+// "Version 2 Data Object Header Prefix" of the format specification, version 4.0, defines a
+// four-byte checksum.
+const OBJECT_HEADER_CHECKSUM_SIZE: usize = 4;
 
 /// The traversal limit for header chunks, including cyclic continuation chains.
 const MAX_OH_CHUNKS: usize = 256;

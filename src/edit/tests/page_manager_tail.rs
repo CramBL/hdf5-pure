@@ -9,7 +9,6 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::{Extent, ManagerKind, ManagerSections};
 use rstest::rstest;
-use test_util::checksum;
 use test_util::disk_log::{self, DiskOp};
 use test_util::free_space;
 use test_util::object_header::v2 as object_header;
@@ -652,7 +651,6 @@ fn a_page_publication_reads_each_protected_extension_chunk_once(#[case] memory: 
             .unwrap();
     assert!(chunks.len() > 1);
     let source_bytes = chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>()
-        - u64::try_from(checksum::CHECKSUM).unwrap()
         + u64::try_from(hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN).unwrap();
     reads.store(0, Ordering::Relaxed);
     calls.store(0, Ordering::Relaxed);
