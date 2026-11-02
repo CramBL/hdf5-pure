@@ -79,8 +79,7 @@ impl MessageFilter<'_> {
 
 /// A single parsed header message.
 ///
-/// `size` and `creation_order` are decoded from the on-disk message prefix for
-/// completeness but are not consulted by the current reader.
+/// Retains the message body, record flags, and optional creation index.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct HeaderMessage {
@@ -97,28 +96,31 @@ pub struct HeaderMessage {
     pub data: Vec<u8>,
 }
 
-/// Parsed HDF5 object header.
+/// A parsed HDF5 object header.
 ///
-/// The version, reference count, flags, and v2 timestamps are decoded for
-/// on-disk format completeness. The current reader does not consult them.
+/// Retains non-NIL messages from every header chunk. For version 2, [`prefix`](Self::prefix)
+/// holds the record layout and optional timestamps and attribute thresholds, including when
+/// message filtering removes every record.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ObjectHeader {
     /// Header version (1 or 2).
     pub version: u8,
+    /// The version 2 record layout and optional prefix fields, or `None` for version 1.
+    pub prefix: Option<ObjectHeaderPrefix>,
     /// All non-NIL messages collected from all chunks.
     pub messages: Vec<HeaderMessage>,
     /// Object reference count (v1 only).
     pub reference_count: Option<u32>,
     /// Contains the v2 object header flags. Version 1 uses zero.
     pub flags: u8,
-    /// Access time (v2, when flags bit 2 set).
+    /// Access time, when present in a version 2 prefix.
     pub access_time: Option<u32>,
-    /// Modification time (v2, when flags bit 2 set).
+    /// Modification time, when present in a version 2 prefix.
     pub modification_time: Option<u32>,
-    /// Change time (v2, when flags bit 2 set).
+    /// Change time, when present in a version 2 prefix.
     pub change_time: Option<u32>,
-    /// Birth time (v2, when flags bit 2 set).
+    /// Birth time, when present in a version 2 prefix.
     pub birth_time: Option<u32>,
 }
 

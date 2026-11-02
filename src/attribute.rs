@@ -470,6 +470,7 @@ mod tests {
     use core::cell::RefCell;
 
     use hdf5_pure_format::__private::AttributeRecord;
+    use hdf5_pure_format::__private::ObjectHeaderPrefix;
     use rstest::rstest;
     use test_util::btree_v2;
     use test_util::bytes as test_bytes;
@@ -1066,6 +1067,7 @@ mod tests {
 
         let header = ObjectHeader {
             version: 2,
+            prefix: Some(ObjectHeaderPrefix::PLAIN),
             messages: msgs,
             reference_count: None,
             flags: 0,

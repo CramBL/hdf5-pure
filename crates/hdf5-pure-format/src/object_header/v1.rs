@@ -130,6 +130,7 @@ impl ObjectHeader {
 
         Ok(ObjectHeader {
             version: 1,
+            prefix: None,
             messages,
             reference_count: Some(reference_count),
             flags: 0,
@@ -259,6 +260,7 @@ impl ObjectHeader {
 
         Ok(ObjectHeader {
             version: 1,
+            prefix: None,
             messages,
             reference_count: Some(reference_count),
             flags: 0,

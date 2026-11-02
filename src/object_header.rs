@@ -5,6 +5,7 @@ pub use hdf5_pure_format::__private::ObjectHeader;
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    use hdf5_pure_format::__private::ObjectHeaderPrefix;
     use rstest::rstest;
     use test_util::image::Image;
     use test_util::object_header::Message;
@@ -40,11 +41,16 @@ mod tests {
         let seek = parse_through(&ReadSeekSource::new(std::io::Cursor::new(data.clone())).unwrap())
             .unwrap();
 
+        let expected_prefix = match version {
+            Version::One => None,
+            Version::Two => Some(ObjectHeaderPrefix::PLAIN),
+        };
         let expected = vec![
             (MessageType::DATASPACE, DATASPACE_BODY.to_vec()),
             (MessageType::DATATYPE, DATATYPE_BODY.to_vec()),
         ];
         for (path, header) in [("buffered", buffered), ("memory", memory), ("seek", seek)] {
+            assert_eq!(header.prefix, expected_prefix, "{version:?} {path}");
             let messages = header
                 .messages
                 .into_iter()

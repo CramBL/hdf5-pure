@@ -1,6 +1,8 @@
 use std::io::Cursor;
 use std::sync::atomic::AtomicUsize;
 
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
+
 use ::test_util;
 use rstest::rstest;
 use test_util::disk_log::{self, DiskOp};
@@ -1383,6 +1385,7 @@ fn opening_a_named_datatype_as_a_group_is_refused() {
 fn header_of(types: &[MessageType]) -> ObjectHeader {
     ObjectHeader {
         version: 2,
+        prefix: Some(ObjectHeaderPrefix::PLAIN),
         messages: types
             .iter()
             .map(|&msg_type| crate::object_header::HeaderMessage {
