@@ -4,10 +4,12 @@ use core::fmt;
 
 use hdf5_pure_core::StoredAddress;
 
+use super::admission::AdmissionWork;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::persistence::TRAILING_RESERVE_TAILS;
 
+mod admission;
 pub(crate) mod indexed;
 
 /// A sorted, coalesced set of free regions in stored-address coordinates.
@@ -664,6 +666,14 @@ impl TrackedSpace for FreeList {
 
     fn track(&mut self, extent: Extent, (): ()) {
         self.free(extent);
+    }
+
+    fn release_each(
+        &mut self,
+        threshold: u64,
+        extents: impl IntoIterator<Item = (Extent, ())>,
+    ) -> Vec<(Extent, ())> {
+        self.release_batch(threshold, extents, &mut AdmissionWork::default())
     }
 }
 

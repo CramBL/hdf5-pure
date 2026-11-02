@@ -7,6 +7,11 @@ use super::extent::Extent;
 use super::list::FreeListError;
 use super::paged::FreeClass;
 
+mod batch;
+
+pub(crate) use batch::AdmissionWork;
+pub(crate) use batch::OrderedReturns;
+
 /// Nonempty, disjoint allocations in stored-address order, with their free-space classes.
 ///
 /// Adjacent allocations remain separate so threshold admission uses each original length.
