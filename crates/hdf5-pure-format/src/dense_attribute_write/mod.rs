@@ -22,12 +22,14 @@ use crate::btree::v2::BTREE_V2_HUGE_OBJECT;
 use crate::btree::v2::HugeObjectRecord;
 use crate::btree::v2::write::BTREE_V2_NODE_SIZE;
 use crate::btree::v2::write::BTreeV2Plan;
+use crate::btree::v2::write::PreparedHeapId;
 use crate::convert::Narrow;
 use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::fractal_heap::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
 use crate::fractal_heap::FractalHeapFiltering;
 use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
 use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
@@ -651,7 +653,8 @@ impl DenseAttrPlan {
     /// from the planned count, or [`FormatError::DenseAttributeBlockOverlap`] if blocks
     /// overlap. Returns [`FormatError::DefinedAddressIsUndefined`] if a start address is
     /// undefined, or [`FormatError::OffsetOverflow`] if a block's exclusive end exceeds
-    /// [`u64::MAX`]. Propagates heap ID encoding and index position conversion errors.
+    /// [`u64::MAX`]. Propagates heap-ID encoding, heap-ID parsing, and index position conversion
+    /// errors.
     ///
     /// # Examples
     ///
@@ -730,12 +733,12 @@ impl DenseAttrPlan {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if the heap ID of an attribute does not
-    /// fit the 8-byte heap IDs of the heap. Returns [`FormatError::OffsetOverflow`] if a managed
-    /// block's address or region end overflows `u64`, [`FormatError::AddressTooLarge`] if it
-    /// exceeds the encoded address width, and [`FormatError::DefinedAddressIsUndefined`] if a
-    /// required address equals the width's undefined value. Returns [`FormatError::Internal`]
-    /// if the serialized length differs from the reservation.
+    /// Returns [`FormatError::OffsetOverflow`] if a managed block's address or region end
+    /// overflows `u64`, [`FormatError::AddressTooLarge`] if it exceeds the encoded address width,
+    /// and [`FormatError::DefinedAddressIsUndefined`] if a required address equals the width's
+    /// undefined value. Returns [`FormatError::Internal`] if the serialized length differs from
+    /// the reservation. Propagates heap-ID encoding and parsing errors, and errors from
+    /// [`HugeObjectRecord::encode`].
     pub fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
         self.extent(heap_address)?;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
@@ -792,6 +795,8 @@ impl DenseAttrPlan {
         );
 
         let header = self.heap_header(managed_plan.root_address(managed_addr)?, huge_bthd_addr);
+        let ids =
+            FractalHeapIdLayout::new(&header, DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
         let frhp = header.serialize(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)?;
 
         // Encode a managed ID with its heap offset, or a huge ID with its B-tree key.
@@ -830,7 +835,7 @@ impl DenseAttrPlan {
             Vec::with_capacity(attributes.len() * usize::from(DENSE_ATTR_BTREE_RECORD));
         for &(hash, i) in order {
             AttributeRecord {
-                heap_id: &heap_ids[i as usize],
+                heap_id: PreparedHeapId::new(&ids, &heap_ids[i as usize])?.bytes(),
                 flags: MessageFlags::NONE,
                 creation_order: attributes[i as usize].creation_index,
             }
@@ -857,7 +862,7 @@ impl DenseAttrPlan {
                 Vec::with_capacity(corder_order.len() * DENSE_ATTR_CORDER_BTREE_RECORD as usize);
             for &i in corder_order {
                 AttributeRecord {
-                    heap_id: &heap_ids[i as usize],
+                    heap_id: PreparedHeapId::new(&ids, &heap_ids[i as usize])?.bytes(),
                     flags: MessageFlags::NONE,
                     creation_order: attributes[i as usize].creation_index,
                 }
@@ -889,7 +894,7 @@ impl DenseAttrPlan {
                     &mut huge_bytes,
                     DENSE_ATTR_OFFSET_WIDTH,
                     DENSE_ATTR_LENGTH_WIDTH,
-                );
+                )?;
             }
             let huge_tree = huge_plan.serialize(
                 &huge_bytes,
