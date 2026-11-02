@@ -1,8 +1,5 @@
 //! Dataset creation properties, the analogue of an HDF5 dataset creation property list.
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use hdf5_pure_core::FillTime;
 
 use crate::DeflateLevel;
@@ -12,6 +9,7 @@ use crate::ScaleOffset;
 use crate::ZfpRate;
 use crate::chunked_write::ChunkOptions;
 use crate::chunked_write::FilterKind;
+use crate::dataset_request::StagedFill;
 #[cfg(feature = "std")]
 use crate::element::H5Element;
 use crate::type_builders::DatasetBuilder;
@@ -84,7 +82,7 @@ use crate::type_builders::DatasetBuilder;
 #[derive(Clone, Debug, Default)]
 pub struct DatasetCreateProperties {
     chunk_options: ChunkOptions,
-    fill: Option<Vec<u8>>,
+    fill: Option<StagedFill>,
     fill_time: Option<FillTime>,
 }
 
@@ -208,14 +206,29 @@ impl DatasetCreateProperties {
     /// Sets the fill value, which a reader returns for an element that has never been written
     /// unless the fill time is [`FillTime::Never`].
     ///
-    /// `T` has to have the width of the dataset's element type. The writer rejects a dataset
-    /// where the widths differ with [`FormatError::FillValueSizeMismatch`].
+    /// Retains the value's storage encoding until dataset preparation. The parser checks it
+    /// against the final dataset datatype using the rules of [`DatasetBuilder::with_fill_value`].
+    /// Applying these properties replaces an earlier fill setting. A later direct setter
+    /// replaces this fill value.
     ///
-    /// [`FormatError::FillValueSizeMismatch`]: crate::FormatError::FillValueSizeMismatch
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{DatasetCreateProperties, File, FileBuilder};
+    ///
+    /// let properties = DatasetCreateProperties::new().with_fill_value([255u8, 0]);
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("bytes")
+    ///     .with_unallocated_storage_for::<[u8; 2]>(&[2])
+    ///     .with_create_properties(properties);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.dataset("bytes")?.read::<[u8; 2]>()?, [[255, 0]; 2]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
     #[cfg(feature = "std")]
     #[doc(alias = "H5Pset_fill_value")]
     pub fn with_fill_value<T: H5Element>(mut self, value: T) -> Self {
-        self.fill = Some(T::fill_bytes(value));
+        self.fill = Some(StagedFill::typed(value));
         self
     }
 

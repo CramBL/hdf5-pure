@@ -14,7 +14,8 @@ use crate::chunked_write::{
 };
 use crate::convert::Narrow;
 use crate::dataset_request::{
-    DatasetMetadata, PreparedDataset as DatasetRequest, PreparedStorage, WholeFileDataset,
+    DatasetMetadata, PreparedDataset as DatasetRequest, PreparedFill, PreparedStorage,
+    WholeFileDataset,
 };
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
@@ -55,10 +56,8 @@ pub(super) struct PreparedDataset {
     pub(super) attr_committed_datatype_targets: Vec<(usize, ObjectTarget)>,
     pub(super) chunk_options: ChunkOptions,
     pub(super) maxshape: Option<Vec<MaxExtent>>,
-    /// A user-defined fill value, encoded in the dataset's datatype, or
-    /// `None` for the library default. The writer checks its length against the datatype's
-    /// element size in [`PreparedDataset::prepare`].
-    pub(super) fill: Option<Vec<u8>>,
+    /// One fill element checked against the dataset datatype, or `None` for the library default.
+    pub(super) fill: Option<PreparedFill>,
     /// The fill time policy for the dataset.
     pub(super) fill_time: FillTime,
     /// The length stored in the contiguous layout message, including the logical byte extent
@@ -82,10 +81,12 @@ impl PreparedDataset {
     ///
     /// Returns [`FormatError::LogicalShapeDataMismatch`] if supplied or produced contiguous
     /// bytes differ in length from the shape's byte extent, or [`FormatError::FillValueSizeMismatch`]
-    /// if a fill value differs in length from one element. With the `provenance` feature, returns
+    /// if a fill value differs in length from one element. Returns
+    /// [`FormatError::FillValueDatatypeMismatch`] if the fill's storage encoding is incompatible
+    /// with the dataset datatype. With the `provenance` feature, returns
     /// [`FormatError::DatasetProvenanceRequiresData`] for a content hash on a nonempty unallocated
-    /// dataset. Propagates name, datatype, storage source, chunk geometry, filter option, and
-    /// attribute preparation errors.
+    /// dataset. Propagates name, datatype, fill encoding, storage source, chunk geometry, filter
+    /// option, and attribute preparation errors.
     pub(super) fn prepare(mut db: DatasetBuilder) -> Result<(Self, Vec<VlPatch>), FormatError> {
         let name = super::link_name(core::mem::take(&mut db.name))?;
         let WholeFileDataset {
@@ -197,7 +198,7 @@ impl PreparedDataset {
                     &self.ds.dimensions,
                     ctx,
                     self.maxshape.as_deref(),
-                    FillPattern::from_value(self.fill.as_deref(), elem),
+                    FillPattern::from_value(self.fill.as_ref().map(PreparedFill::as_bytes), elem),
                     self.storage.allocation(),
                 )?;
                 (0, Some((header.layout_message, header.pipeline_message)))
@@ -255,7 +256,7 @@ impl PreparedDataset {
                 &self.attrs,
                 dense_attr_info,
                 self.fill_time,
-                self.fill.as_deref(),
+                self.fill.as_ref().map(PreparedFill::as_bytes),
                 header,
             ),
             None => super::build_dataset_oh(
@@ -267,7 +268,7 @@ impl PreparedDataset {
                 &self.attrs,
                 dense_attr_info,
                 self.fill_time,
-                self.fill.as_deref(),
+                self.fill.as_ref().map(PreparedFill::as_bytes),
                 libver,
                 header,
             ),
@@ -308,7 +309,7 @@ impl PreparedDataset {
             ctx,
             &self.chunk_options,
             self.maxshape.as_deref(),
-            FillPattern::from_value(self.fill.as_deref(), elem),
+            FillPattern::from_value(self.fill.as_ref().map(PreparedFill::as_bytes), elem),
             self.fill_time,
             self.storage.allocation(),
         )

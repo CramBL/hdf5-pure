@@ -220,6 +220,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "EnumBaseSizeMismatch",
             "ExternalLinkUnsupported",
             "FileRegionLengthMismatch",
+            "FillValueDatatypeMismatch",
             "GlobalHeapCollectionTooSmall",
             "GlobalHeapObjectOutsideCollection",
             "InsufficientRegion",

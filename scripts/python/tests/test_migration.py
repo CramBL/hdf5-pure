@@ -252,6 +252,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "UnsupportedComplexForm", []),
         ("FormatError", "CompoundArraySizeOverflow", []),
         ("FormatError", "ConflictingDatasetStorage", []),
+        ("FormatError", "FillValueDatatypeMismatch", []),
         ("FormatError", "InvalidCompoundV1Extent", []),
         ("FormatError", "InvalidCompoundV1Rank", []),
         ("FormatError", "UnsupportedCompoundV1Permutation", []),

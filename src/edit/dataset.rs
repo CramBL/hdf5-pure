@@ -33,7 +33,7 @@ use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataset_request::{
     DatasetMetadata, InPlaceDataset, PreparedBytes, PreparedDataset, PreparedElements,
-    ValueOverwrite,
+    PreparedFill, ValueOverwrite,
 };
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::Datatype;
@@ -209,7 +209,7 @@ impl WriteEngine {
                 &fd.attrs,
                 attr_info.as_deref(),
                 fd.fill_time,
-                fd.fill.as_deref(),
+                fd.fill.as_ref().map(PreparedFill::as_bytes),
                 self.libver(),
                 file_writer::HeaderOptions::PLAIN,
             )?
@@ -1027,7 +1027,7 @@ impl WriteEngine {
         let ctx = ChunkContext::from_datatype(&chunk_dims, &fd.dt)?;
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         let fill_time = fd.fill_time;
-        let fill = FillPattern::from_value(fd.fill.as_deref(), elem);
+        let fill = FillPattern::from_value(fd.fill.as_ref().map(PreparedFill::as_bytes), elem);
         let set = chunked_write::compress_chunks(
             fd.storage.raw(),
             &fd.ds.dimensions,
@@ -1059,7 +1059,7 @@ impl WriteEngine {
             &fd.attrs,
             attr_info.as_deref(),
             fill_time,
-            fd.fill.as_deref(),
+            fd.fill.as_ref().map(PreparedFill::as_bytes),
             file_writer::HeaderOptions::PLAIN,
         )?)
     }
@@ -1244,8 +1244,12 @@ impl WriteEngine {
         if fd.storage.allocation() == StorageAllocation::Unallocated && !bytes.is_empty() {
             let elem_size = crate::datatype::element_size_usize(&fd.dt)?;
             fd.storage = PreparedElements::Bytes(PreparedBytes::new(
-                FillPattern::new(fd.fill_time, fd.fill.as_deref(), elem_size)
-                    .buffer(fd.extent.to_usize()?)?,
+                FillPattern::new(
+                    fd.fill_time,
+                    fd.fill.as_ref().map(PreparedFill::as_bytes),
+                    elem_size,
+                )
+                .buffer(fd.extent.to_usize()?)?,
             ));
         }
         if !bytes.is_empty() {
@@ -1453,8 +1457,8 @@ pub(super) struct FlatDataset {
     ///
     /// Reference patching and digest updates preserve serialized lengths.
     pub(super) dense_attrs: Option<PreparedDenseAttrs>,
-    /// One encoded fill element, or `None` for the default.
-    pub(super) fill: Option<Vec<u8>>,
+    /// One fill element checked against the dataset datatype, or `None` for the default.
+    pub(super) fill: Option<PreparedFill>,
     /// The fill policy after default normalization.
     pub(super) fill_time: FillTime,
     /// Inputs used to rebuild generated attributes after the prepared bytes change.
@@ -1530,7 +1534,10 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         let chunk_dims = chunk_options.resolve_chunk_dims(&ds.dimensions);
         let ctx = ChunkContext::from_datatype(&chunk_dims, &dt)?;
         chunked_read::bounded_chunk_len(&chunk_dims, elem_size)?;
-        chunk_options.build_pipeline(&ctx, FillPattern::from_value(fill.as_deref(), elem_size))?;
+        chunk_options.build_pipeline(
+            &ctx,
+            FillPattern::from_value(fill.as_ref().map(PreparedFill::as_bytes), elem_size),
+        )?;
     }
 
     let mut sized = file_writer::make_link(name.as_str(), StoredAddress::new(0));

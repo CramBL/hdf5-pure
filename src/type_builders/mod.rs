@@ -23,6 +23,7 @@ use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, S
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
+use crate::dataset_request::StagedFill;
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::CharacterSet;
 use crate::datatype::CompoundMember;
@@ -2361,11 +2362,10 @@ pub struct DatasetBuilder {
     /// carries the global heap collection plus the mask of references to patch
     /// once the post-data cursor is known.
     pub(crate) vl_string_staging: Option<VlStringStaging>,
-    /// A user-defined fill value, encoded in the dataset's datatype (little-
-    /// endian, one element wide). `None` leaves the crate's library-default fill
-    /// value message untouched. Its byte width is checked against the datatype's
-    /// element size when the dataset is serialized.
-    pub(crate) fill: Option<Vec<u8>>,
+    /// A fill element with its typed or source-derived storage encoding, pending preparation.
+    /// The parser checks its encoding and byte width against the final dataset datatype.
+    /// `None` selects the library-default fill value.
+    pub(crate) fill: Option<StagedFill>,
     /// The fill time policy for the dataset. `None` defaults to [`FillTime::IfSet`].
     pub(crate) fill_time: Option<FillTime>,
     /// Whether this dataset allocates storage at all. `Unallocated` declares the

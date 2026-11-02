@@ -29,6 +29,7 @@
 )]
 
 use crate::data_read::{NumericDecoder, NumericReadTarget};
+use crate::dataset_request::StagedFill;
 use crate::datatype::Datatype;
 use crate::edit::AppendBuilder;
 use crate::error::{Error, FormatError};
@@ -331,10 +332,19 @@ impl DatasetBuilder {
 
     /// Sets the value used for unwritten elements of the dataset.
     ///
-    /// The writer stores the value in the dataset's datatype and checks its byte width when
-    /// preparing the dataset. A width mismatch is reported as
-    /// [`FormatError::FillValueSizeMismatch`].
-    /// Use the dataset's element type to encode the fill value. The default is zero.
+    /// Encodes one element and retains its storage datatype from [`H5Element::datatype`] until
+    /// dataset preparation. The parser checks compatibility with the final datatype, including
+    /// for empty and unallocated datasets. Numeric layouts and byte order must match. Byte
+    /// arrays require matching dimensions and a full-width unsigned-byte base, whose byte order
+    /// is immaterial. For [`FixedAscii`], the parser requires matching width, ASCII, and null
+    /// padding.
+    ///
+    /// File finalization and [`Group::create_dataset`](crate::Group::create_dataset) return
+    /// [`FormatError::FillValueSizeMismatch`] through [`Error::Format`] if the widths differ, or
+    /// [`FormatError::FillValueDatatypeMismatch`] if equal-width encodings are incompatible.
+    /// Type-construction errors from [`H5Element::datatype`] are reported during preparation.
+    /// The default fill is zero. [`FillTime::Never`](crate::FillTime::Never) suppresses automatic
+    /// filling while retaining the configured value in metadata.
     ///
     /// # Examples
     ///
@@ -349,8 +359,24 @@ impl DatasetBuilder {
     /// assert_eq!(file.dataset("bytes")?.fill_value::<[u8; 2]>()?, Some([255, 0]));
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
+    ///
+    /// Dataset preparation rejects incompatible encodings even for an empty dataset:
+    ///
+    /// ```
+    /// use hdf5_pure::{Error, FileBuilder, FormatError};
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("values")
+    ///     .with_unallocated_storage_for::<f32>(&[0])
+    ///     .with_fill_value([255u8, 0, 1, 2]);
+    /// let error = builder.finish().unwrap_err();
+    /// assert!(
+    ///     matches!(error, Error::Format(FormatError::FillValueDatatypeMismatch)),
+    ///     "{error:?}",
+    /// );
+    /// ```
     pub fn with_fill_value<T: H5Element>(&mut self, value: T) -> &mut Self {
-        self.fill = Some(T::fill_bytes(value));
+        self.fill = Some(StagedFill::typed(value));
         self
     }
 }

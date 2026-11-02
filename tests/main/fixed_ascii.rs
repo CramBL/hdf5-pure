@@ -1,8 +1,17 @@
 use hdf5_pure::{
-    CharacterSet, Datatype, Error, File, FileBuilder, FixedAscii, FormatError, H5Element,
+    CharacterSet, Datatype, Error, File, FileBuilder, FillTime, FixedAscii, FormatError, H5Element,
     StringPadding,
 };
 use rstest::rstest;
+
+use hdf5_pure_format::__private as format;
+use test_util::data_layout;
+use test_util::dataspace;
+use test_util::datatype;
+use test_util::image::Image;
+use test_util::object_header::{Message, MessageType};
+use test_util::superblock::v2::Superblock;
+use test_util::widths::Widths;
 
 #[rstest]
 #[case::empty(b"", [0, 0, 0], "")]
@@ -99,12 +108,30 @@ fn typed_ascii_rejects_incompatible_datatypes(
 
 #[test]
 fn typed_ascii_rejects_non_ascii_stored_bytes_and_fill() {
-    let mut builder = FileBuilder::new();
-    builder
-        .create_dataset("values")
-        .with_raw_data(ascii_type(2), vec![b'a', 0, b'b', 255], 2)
-        .with_fill_value([0u8, 128]);
-    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let image = Image::starting_with(&vec![0; Superblock::new(Widths::EIGHT).build().len()]);
+    let fill = format::serialize_fill_value_message_v3(FillTime::IfSet, Some(&[0, 128])).unwrap();
+    let bytes = image.build_with_dataset(
+        "values",
+        [
+            Message::new(
+                MessageType::DATASPACE,
+                &dataspace::v2(
+                    1,
+                    dataspace::Flags::NONE,
+                    dataspace::Kind::SIMPLE,
+                    &[2],
+                    None,
+                ),
+            ),
+            Message::new(MessageType::DATATYPE, &datatype::fixed_string(2)),
+            Message::new(MessageType::FILL_VALUE, &fill),
+            Message::new(
+                MessageType::DATA_LAYOUT,
+                &data_layout::compact(&[b'a', 0, b'b', 255]),
+            ),
+        ],
+    );
+    let file = File::from_bytes(bytes).unwrap();
     let dataset = file.dataset("values").unwrap();
     assert_format_error(
         dataset.read::<FixedAscii<2>>().unwrap_err(),
