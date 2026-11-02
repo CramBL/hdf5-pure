@@ -1,28 +1,31 @@
 //! Address and size indexes borrowed from a canonical free list.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::mem;
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::StoredAddressExt;
-use hdf5_pure_core::StoredAddress;
+use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
 
 use super::FreeList;
 use crate::admission::TrackedSpace;
 use crate::extent::Extent;
-use crate::reservation::ReservationWork;
+use crate::reservation::{ReservationRequest, ReservationWork};
 
-/// A borrowed free list indexed by address, length, and optional aligned-interior length.
+/// A borrowed free list with address, size, and PAGE placement indexes.
 ///
 /// Lookup ties use the containing extent's stored start address. The caller restores unused extents
 /// before releasing the borrow. Successful allocations remain excluded from the owning list.
+/// The PAGE block indexes are built on the first block request.
 pub(crate) struct IndexedFreeList<'a> {
     owner: &'a mut FreeList,
     regions: BTreeMap<StoredAddress, Extent>,
     sizes: BTreeSet<(u64, StoredAddress)>,
     interiors: BTreeSet<(u64, StoredAddress)>,
     alignment: Option<NonZeroU64>,
+    blocks: Option<Box<BlockIndex>>,
     buffer: Vec<Extent>,
     total_bytes: u64,
     work: ReservationWork,
@@ -40,6 +43,7 @@ impl<'a> IndexedFreeList<'a> {
             sizes: BTreeSet::new(),
             interiors: BTreeSet::new(),
             alignment,
+            blocks: None,
             buffer: Vec::new(),
             total_bytes,
             work: ReservationWork::default(),
@@ -66,6 +70,39 @@ impl<'a> IndexedFreeList<'a> {
             .expect("the allocation fits inside the indexed extent");
         if let Some(remainder) = Extent::between(allocation.end(), region.end()) {
             self.insert(remainder);
+        }
+        self.total_bytes -= allocation.len();
+        Some(allocation)
+    }
+
+    /// Reserves a PAGE block from the smallest sufficient legal capacity, retaining both edges.
+    ///
+    /// The caller passes a block request and the same page size for every call on this index.
+    pub(crate) fn allocate_block(
+        &mut self,
+        request: ReservationRequest,
+        page_size: FileSpacePageSize,
+    ) -> Option<Extent> {
+        self.work.lookups = self.work.lookups.saturating_add(1);
+        let blocks = self.blocks.get_or_insert_with(|| {
+            let mut blocks = BlockIndex::new(page_size);
+            for &extent in self.regions.values() {
+                blocks.insert(extent);
+            }
+            Box::new(blocks)
+        });
+        let start = blocks.find(request.size())?;
+        let region = self.regions.get(&start).copied()?;
+        let allocation = request
+            .place_after(region.start(), Some(page_size))
+            .ok()?
+            .extent();
+        self.remove(start);
+        if let Some(head) = Extent::between(region.start(), allocation.start()) {
+            self.insert(head);
+        }
+        if let Some(tail) = Extent::between(allocation.end(), region.end()) {
+            self.insert(tail);
         }
         self.total_bytes -= allocation.len();
         Some(allocation)
@@ -148,6 +185,7 @@ impl<'a> IndexedFreeList<'a> {
             sizes,
             interiors,
             alignment: _,
+            blocks,
             buffer,
             total_bytes,
             work,
@@ -162,6 +200,7 @@ impl<'a> IndexedFreeList<'a> {
         owner.total_bytes = mem::replace(total_bytes, 0);
         sizes.clear();
         interiors.clear();
+        *blocks = None;
     }
 
     /// Returns operation counts accumulated by this index.
@@ -176,11 +215,15 @@ impl<'a> IndexedFreeList<'a> {
             sizes,
             interiors,
             alignment,
+            blocks,
             buffer: _,
             total_bytes: _,
             work,
             restored: _,
         } = self;
+        if let Some(blocks) = blocks {
+            blocks.insert(extent);
+        }
         regions.insert(extent.start(), extent);
         sizes.insert((extent.len(), extent.start()));
         if let Some(interior) =
@@ -198,6 +241,7 @@ impl<'a> IndexedFreeList<'a> {
             sizes,
             interiors,
             alignment,
+            blocks,
             buffer: _,
             total_bytes: _,
             work,
@@ -205,6 +249,9 @@ impl<'a> IndexedFreeList<'a> {
         } = self;
         // Every start in either lookup index has an entry in the address map.
         let extent = regions.remove(&start).expect("the indexed extent exists");
+        if let Some(blocks) = blocks {
+            blocks.remove(extent);
+        }
         sizes.remove(&(extent.len(), start));
         if let Some(interior) =
             alignment.and_then(|alignment| extent.aligned_interior(alignment.get()))
@@ -229,5 +276,52 @@ impl TrackedSpace for IndexedFreeList<'_> {
 
     fn track(&mut self, extent: Extent, (): ()) {
         self.free(extent);
+    }
+}
+
+/// Indexes single-page capacities and page-aligned suffix lengths by containing extent start.
+struct BlockIndex {
+    page_size: FileSpacePageSize,
+    small: BTreeSet<(u64, StoredAddress)>,
+    large: BTreeSet<(u64, StoredAddress)>,
+}
+
+impl BlockIndex {
+    fn new(page_size: FileSpacePageSize) -> Self {
+        Self {
+            page_size,
+            small: BTreeSet::new(),
+            large: BTreeSet::new(),
+        }
+    }
+
+    fn find(&self, size: NonZeroU64) -> Option<StoredAddress> {
+        let index = if size.get() < self.page_size.get() {
+            &self.small
+        } else {
+            &self.large
+        };
+        index
+            .range((size.get(), StoredAddress::new(0))..)
+            .next()
+            .map(|&(_, start)| start)
+    }
+
+    fn insert(&mut self, extent: Extent) {
+        self.small
+            .insert((extent.block_capacity(self.page_size, 1), extent.start()));
+        self.large.insert((
+            extent.block_capacity(self.page_size, self.page_size.get()),
+            extent.start(),
+        ));
+    }
+
+    fn remove(&mut self, extent: Extent) {
+        self.small
+            .remove(&(extent.block_capacity(self.page_size, 1), extent.start()));
+        self.large.remove(&(
+            extent.block_capacity(self.page_size, self.page_size.get()),
+            extent.start(),
+        ));
     }
 }

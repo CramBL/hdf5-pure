@@ -3,8 +3,8 @@
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{FileSpacePageSize, PhysicalAddress};
 use hdf5_pure_space::__private::{
-    Extent, PageTransition, PageType, ReservationBatch, ReservationRequest, ReservationWork,
-    ReusableReservation,
+    Extent, PageTransition, PageType, ReservationBatch, ReservationPlacement, ReservationRequest,
+    ReservationWork, ReusableReservation,
 };
 
 use crate::address::{AddressContext, StoredAddress};
@@ -288,7 +288,11 @@ impl<'a> ReservationPlan<'a> {
                     addr: range.start().get(),
                     len: range.length(),
                 },
-                block: PlannedBlock::new(range, block_request)?,
+                block: PlannedBlock::placed(
+                    page.addresses,
+                    reservation.placement(),
+                    block_request,
+                )?,
                 transition: None,
             });
         }
@@ -303,17 +307,21 @@ impl<'a> ReservationPlan<'a> {
             page.cursor = aggregation.eoa();
             return Ok(PlannedReservation {
                 placement,
-                block: PlannedBlock::new(range, block_request)?,
+                block: PlannedBlock::placed(
+                    page.addresses,
+                    request.place_after(page.addresses.relative(range.start())?, None)?,
+                    block_request,
+                )?,
                 transition: None,
             });
         }
-        let (range, transition) = page.reserve(request)?;
+        let (range, placement, transition) = page.reserve(request)?;
         Ok(PlannedReservation {
             placement: Placement::Appended {
                 addr: range.start().get(),
                 len: range.length(),
             },
-            block: PlannedBlock::new(range, block_request)?,
+            block: PlannedBlock::placed(page.addresses, placement, block_request)?,
             transition,
         })
     }
@@ -393,6 +401,9 @@ struct AppendCursor {
 impl AppendCursor {
     /// Advances EOA past a complete allocation and any PAGE alignment gap.
     ///
+    /// Applies [`ReservationRequest::for_block`] geometry to block requests before resolving the
+    /// physical range. Preserves the cursor and tail page type on error.
+    ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if stored or physical range arithmetic overflows, or
@@ -400,7 +411,7 @@ impl AppendCursor {
     fn reserve(
         &mut self,
         request: ReservationRequest,
-    ) -> Result<(FileRange, Option<PageTransition>), FormatError> {
+    ) -> Result<(FileRange, ReservationPlacement, Option<PageTransition>), FormatError> {
         let Self {
             addresses,
             cursor,
@@ -408,42 +419,36 @@ impl AppendCursor {
             tail_type,
             fresh_boundary,
         } = self;
-        let mut start = *cursor;
-        let transition = if let Some(page_size) = *page_size {
-            let page_size = page_size.get();
-            let transition =
-                if start.get() % page_size == 0 || *tail_type == Some(request.page_type()) {
-                    PageTransition::Unchanged
-                } else {
-                    let length = page_size - start.get() % page_size;
-                    let extent = Extent::new(start, length).ok_or(FormatError::OffsetOverflow {
-                        offset: start.get(),
-                        length,
-                    })?;
-                    start = extent.end();
-                    addresses.resolve(start)?;
-                    PageTransition::Pad {
-                        extent,
-                        track_as: *tail_type,
-                    }
-                };
-            Some(transition)
+        let start = if let Some(page_size) = *page_size
+            && cursor.get() % page_size.get() != 0
+            && *tail_type != Some(request.page_type())
+        {
+            cursor.checked_add(page_size.get() - cursor.get() % page_size.get())?
         } else {
-            None
+            *cursor
         };
+        let placement = request.place_after(start, *page_size)?;
+        let start = placement.extent().start();
+        let transition = page_size.map(|_| match Extent::between(*cursor, start) {
+            Some(extent) => PageTransition::Pad {
+                extent,
+                track_as: *tail_type,
+            },
+            None => PageTransition::Unchanged,
+        });
         if fresh_boundary.is_some_and(|boundary| start < boundary) {
             return Err(FormatError::Internal(
                 "PAGE allocation precedes its fresh-page boundary".into(),
             ));
         }
-        let end = start.checked_add(request.size().get())?;
+        let end = placement.extent().end();
         let range = FileRange::new(addresses.resolve(start)?, request.size().get())?;
         addresses.resolve(end)?;
         *cursor = end;
         if page_size.is_some() {
             *tail_type = Some(request.page_type());
         }
-        Ok((range, transition))
+        Ok((range, placement, transition))
     }
 
     fn physical_range(

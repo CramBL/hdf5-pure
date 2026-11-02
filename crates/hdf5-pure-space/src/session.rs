@@ -14,7 +14,7 @@ use super::paged::{
     PagedPostFree, PagedSections, PagedTail,
 };
 use super::persistence::ManagerKind;
-use super::reservation::ReservationBatch;
+use super::reservation::{ReservationBatch, ReservationRequest};
 use super::snapshot::AdmittedFreeSnapshot;
 
 /// The reusable-space strategy active for one editing session.
@@ -439,6 +439,18 @@ impl SessionSpace {
             Self::Disabled => None,
             Self::Flat(space) => space.free.alloc(len),
             Self::Paged(space) => space.paged.allocate(len, page_type),
+        }
+    }
+
+    /// Reserves reusable space with complete-block geometry when requested under PAGE.
+    pub(crate) fn allocate_request(&mut self, request: ReservationRequest) -> Option<Extent> {
+        match self {
+            Self::Paged(space) if request.is_block() => space.paged.allocate_block(request),
+            _ => self.allocate_with_page_type(
+                request.size().get(),
+                request.class(),
+                request.page_type(),
+            ),
         }
     }
 

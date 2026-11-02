@@ -1,7 +1,7 @@
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::StoredAddressExt;
-use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, FormatError, StoredAddress};
 use hdf5_pure_space::__private::{
     AllocationClass, Extent, FreeClass, ManagerKind, PageType, ReservationRequest, ReservationWork,
     SessionSpace,
@@ -447,6 +447,196 @@ fn returning_batches_keep_one_index_as_free_space_grows(#[case] initial: &[(u64,
     );
 }
 
+#[rstest]
+#[case::aligned_small(0, 4095, 0)]
+#[case::ending_at_boundary(4000, 96, 4000)]
+#[case::crossing_boundary(4000, 97, 4096)]
+#[case::exact_page(4000, 4096, 4096)]
+#[case::aligned_page(4096, 4096, 4096)]
+#[case::large(3, 8193, 4096)]
+#[case::last_page(u64::MAX - 100, 50, u64::MAX - 100)]
+fn block_placement_uses_complete_page_geometry(
+    #[case] start: u64,
+    #[case] size: u64,
+    #[case] expected: u64,
+) {
+    let block = request(size, PageType::Meta).for_block();
+    let placement = block
+        .place_after(StoredAddress::new(start), Some(FileSpacePageSize::DEFAULT))
+        .unwrap();
+    assert_eq!(placement.extent(), extent(expected, size));
+    assert_eq!(placement.request(), block);
+    assert!(placement.request().is_block());
+    assert_eq!(
+        block
+            .place_after(StoredAddress::new(start), None)
+            .unwrap()
+            .extent(),
+        extent(start, size)
+    );
+    assert_eq!(
+        request(size, PageType::Meta)
+            .place_after(StoredAddress::new(start), Some(FileSpacePageSize::DEFAULT))
+            .unwrap()
+            .extent(),
+        extent(start, size)
+    );
+}
+
+#[rstest]
+#[case::minimum(FileSpacePageSize::MIN)]
+#[case::odd(FileSpacePageSize::try_from(513).unwrap())]
+#[case::default(FileSpacePageSize::DEFAULT)]
+#[case::maximum(FileSpacePageSize::MAX)]
+fn block_geometry_uses_the_configured_page_size(#[case] page_size: FileSpacePageSize) {
+    let page = page_size.get();
+    let small = request(100, PageType::Meta).for_block();
+    assert_eq!(
+        small
+            .place_after(StoredAddress::new(page - 99), Some(page_size))
+            .unwrap()
+            .extent(),
+        extent(page, 100)
+    );
+    let large = request(page + 1, PageType::Meta).for_block();
+    assert_eq!(
+        large
+            .place_after(StoredAddress::new(page + 1), Some(page_size))
+            .unwrap()
+            .extent(),
+        extent(2 * page, page + 1)
+    );
+}
+
+#[rstest]
+#[case::alignment(u64::MAX - 100, 102, u64::MAX - 100, 101)]
+#[case::allocation(u64::MAX - 4095, 4096, u64::MAX - 4095, 4096)]
+fn block_placement_rejects_unrepresentable_geometry(
+    #[case] start: u64,
+    #[case] size: u64,
+    #[case] offset: u64,
+    #[case] length: u64,
+) {
+    assert_eq!(
+        request(size, PageType::Meta)
+            .for_block()
+            .place_after(StoredAddress::new(start), Some(FileSpacePageSize::DEFAULT))
+            .unwrap_err(),
+        FormatError::OffsetOverflow { offset, length }
+    );
+}
+
+#[rstest]
+#[case::small(4000, 200, 100, Some(4096), &[(4000, 96), (4196, 4)])]
+#[case::page(4000, 5000, 4096, Some(4096), &[(4000, 96), (8192, 808)])]
+#[case::large(4000, 5000, 4097, Some(4096), &[(4000, 96), (8193, 807)])]
+#[case::crossing_only(4000, 100, 100, None, &[(4000, 100)])]
+#[case::compact_run(4096, 40_960_000, 4097, Some(4096), &[(8193, 40_955_903)])]
+#[case::last_page(u64::MAX - 100, 100, 100, Some(u64::MAX - 100), &[])]
+fn block_reservations_keep_alignment_remainders_and_compact_runs(
+    #[case] start: u64,
+    #[case] available: u64,
+    #[case] size: u64,
+    #[case] expected: Option<u64>,
+    #[case] remaining: &[(u64, u64)],
+    #[values(1, 2)] count: usize,
+    #[values(PageType::Meta, PageType::Raw)] page_type: PageType,
+) {
+    let mut space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    space.return_allocation_with_page_type(
+        extent(start, available),
+        AllocationClass::Metadata,
+        page_type,
+    );
+    let request = ReservationRequest::with_page_type(
+        NonZeroU64::new(size).unwrap(),
+        AllocationClass::Metadata,
+        page_type,
+    )
+    .for_block();
+    let mut batch = space.reservation_batch(count);
+    let reservation = batch.reserve(request);
+    assert_eq!(
+        reservation.as_ref().map(|reservation| reservation.extent()),
+        expected.map(|start| extent(start, size))
+    );
+    if let Some(reservation) = reservation {
+        assert_eq!(reservation.placement().request(), request);
+        assert_eq!(reservation.class(), AllocationClass::Metadata);
+        assert_eq!(reservation.page_type(), page_type);
+    }
+    let work = batch.finish();
+    assert_eq!(
+        space.reusable_sections().collect::<Vec<_>>(),
+        remaining
+            .iter()
+            .map(|&(start, length)| extent(start, length))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        space.reusable_bytes().unwrap(),
+        available - expected.map_or(0, |_| size)
+    );
+    assert_eq!(work.indexed_extents, u64::from(count > 1));
+    assert!(work.inserted_extents <= 3, "{work:?}");
+    assert!(work.lookups <= 2, "{work:?}");
+}
+
+#[rstest]
+fn block_reservations_claim_only_complete_pages_from_the_other_type(#[values(1, 2)] count: usize) {
+    let mut space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    space.return_allocation(extent(4000, 8292), AllocationClass::Raw);
+    let mut batch = space.reservation_batch(count);
+    let allocation = batch
+        .reserve(request(4097, PageType::Meta).for_block())
+        .unwrap();
+    assert_eq!(allocation.extent(), extent(4096, 4097));
+    batch.finish();
+    assert_eq!(
+        space.admitted_snapshot().sections().collect::<Vec<_>>(),
+        [
+            (extent(4000, 96), FreeClass::Page(PageType::Raw)),
+            (extent(8193, 4095), FreeClass::Page(PageType::Meta)),
+            (extent(12288, 4), FreeClass::Page(PageType::Raw)),
+        ]
+    );
+}
+
+#[rstest]
+fn mixed_reservations_update_block_indexes_after_each_split(#[values(1, 3)] count: usize) {
+    let mut space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    space.return_allocation(extent(4000, 200), AllocationClass::Metadata);
+    let mut batch = space.reservation_batch(count);
+    assert_eq!(
+        batch.reserve(request(16, PageType::Meta)).unwrap().extent(),
+        extent(4000, 16)
+    );
+    assert_eq!(
+        batch
+            .reserve(request(100, PageType::Meta).for_block())
+            .unwrap()
+            .extent(),
+        extent(4096, 100)
+    );
+    assert_eq!(
+        batch.reserve(request(4, PageType::Meta)).unwrap().extent(),
+        extent(4196, 4)
+    );
+    assert_eq!(
+        batch
+            .reserve(request(80, PageType::Meta).for_block())
+            .unwrap()
+            .extent(),
+        extent(4016, 80)
+    );
+    assert_eq!(batch.reserve(request(1, PageType::Meta).for_block()), None);
+    batch.finish();
+    assert_eq!(space.reusable_sections().collect::<Vec<_>>(), []);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
@@ -459,7 +649,7 @@ proptest! {
     #[test]
     fn mixed_batch_reservations_match_scalar_policy(
         initial in prop::collection::vec((0u64..4096, 1u64..8192, any::<bool>()), 0..24),
-        requests in prop::collection::vec((1u64..16384, any::<bool>()), 0..64),
+        requests in prop::collection::vec((1u64..16384, any::<bool>(), any::<bool>()), 0..64),
         paged in any::<bool>(),
     ) {
         let strategy = if paged { FileSpaceStrategy::Page } else { FileSpaceStrategy::FsmAggr };
@@ -470,10 +660,20 @@ proptest! {
         let mut scalar = SessionSpace::from_persisted(Some(strategy), 1, FileSpacePageSize::DEFAULT, entries.iter().copied()).unwrap();
         let mut indexed = SessionSpace::from_persisted(Some(strategy), 1, FileSpacePageSize::DEFAULT, entries).unwrap();
         let mut batch = indexed.reservation_batch(requests.len().max(2));
-        for (size, metadata) in requests {
+        for (size, metadata, block) in requests {
             let request = request(size, if metadata { PageType::Meta } else { PageType::Raw });
-            let expected = scalar.allocate_with_page_type(size, request.class(), request.page_type());
-            prop_assert_eq!(batch.reserve(request).map(|allocation| allocation.extent()), expected);
+            let request = if block { request.for_block() } else { request };
+            let expected = scalar.reservation_batch(1).reserve(request).map(|allocation| allocation.extent());
+            let allocation = batch.reserve(request).map(|allocation| allocation.extent());
+            prop_assert_eq!(allocation, expected);
+            if paged && block && let Some(allocation) = allocation {
+                let offset = allocation.start().get() % FileSpacePageSize::DEFAULT.get();
+                if size < FileSpacePageSize::DEFAULT.get() {
+                    prop_assert!(offset + size <= FileSpacePageSize::DEFAULT.get());
+                } else {
+                    prop_assert_eq!(offset, 0);
+                }
+            }
         }
         batch.finish();
         prop_assert_eq!(indexed.admitted_snapshot().sections().collect::<Vec<_>>(), scalar.admitted_snapshot().sections().collect::<Vec<_>>());

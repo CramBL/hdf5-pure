@@ -13,7 +13,7 @@ use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, PageParts, TRAILING_RESERVE_TAILS};
-use super::reservation::ReservationBatch;
+use super::reservation::{ReservationBatch, ReservationRequest};
 use super::snapshot::AdmittedFreeSnapshot;
 
 mod admission;
@@ -45,7 +45,7 @@ impl From<PageType> for FreeClass {
     }
 }
 
-/// Describes the padding required before an append changes the tail page type.
+/// Describes the padding required before a PAGE append.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageTransition {
     /// Padding is required before the append.
@@ -351,6 +351,34 @@ impl PagedEdit {
         let remainder = Extent::new(allocation.end(), span - len)
             .expect("the remainder is a non-empty suffix of the claimed extent");
         own.free(remainder);
+        Some(allocation)
+    }
+
+    /// Reserves one complete block under the request's PAGE geometry and effective page type.
+    ///
+    /// The caller passes a block request. Tries the matching page type before claiming whole
+    /// pages from the other type, retaining unused bytes under their resulting page type.
+    pub(crate) fn allocate_block(&mut self, request: ReservationRequest) -> Option<Extent> {
+        let (own, other) = match request.page_type() {
+            PageType::Meta => (&mut self.meta, &mut self.raw),
+            PageType::Raw => (&mut self.raw, &mut self.meta),
+        };
+        if let Some(extent) = own.alloc_block(request, self.page_size) {
+            return Some(extent);
+        }
+        let span = request
+            .size()
+            .get()
+            .checked_next_multiple_of(self.page_size.get())?;
+        let claimed = other.alloc_whole_units(span, self.page_size.get())?;
+        // Whole-page claims start at a page boundary and contain the complete request.
+        let allocation = request
+            .place_after(claimed.start(), Some(self.page_size))
+            .expect("the block fits in the claimed pages")
+            .extent();
+        if let Some(remainder) = Extent::between(allocation.end(), claimed.end()) {
+            own.free(remainder);
+        }
         Some(allocation)
     }
 

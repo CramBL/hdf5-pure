@@ -336,13 +336,13 @@ fn provisional_geometry_above_32bit_addresses_uses_only_local_lengths(#[values(0
         tail_type: Some(PageType::Raw),
         fresh_boundary: None,
     };
-    let (raw, transition) = cursor.reserve(request(32, PageType::Raw)).unwrap();
+    let (raw, _, transition) = cursor.reserve(request(32, PageType::Raw)).unwrap();
     assert_eq!(
         raw,
         FileRange::new(PhysicalAddress::new(base + start), 32).unwrap()
     );
     assert_eq!(transition, Some(PageTransition::Unchanged));
-    let (metadata, transition) = cursor.reserve(request(64, PageType::Meta)).unwrap();
+    let (metadata, _, transition) = cursor.reserve(request(64, PageType::Meta)).unwrap();
     assert_eq!(
         metadata,
         FileRange::new(PhysicalAddress::new(base + (1u64 << 40) + 4096), 64).unwrap()
@@ -646,6 +646,135 @@ fn partial_zero_emission_blocks_later_reservations_and_retains_owned_capacity(
     drop(plan);
     assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
     assert_eq!(engine.image().read_exact_at(start, 16).unwrap(), [17; 16]);
+}
+
+#[rstest]
+#[case::small(100)]
+#[case::large(4100)]
+fn single_block_plans_preserve_complete_geometry_and_ordered_gaps(
+    #[case] capacity: u64,
+    #[values(false, true)] reused: bool,
+    #[values(0, 4096)] userblock: u64,
+) {
+    let (_directory, mut engine) = engine(FileSpaceStrategy::Page, userblock);
+    let physical = engine.image.len();
+    let addresses = engine.context.addresses();
+    let stored = addresses
+        .relative(PhysicalAddress::new(physical))
+        .unwrap()
+        .get();
+    assert_eq!(stored % 4096, 0);
+    if reused {
+        engine.append(&vec![13; 12_288]).unwrap();
+        engine
+            .space
+            .return_allocation(extent(stored + 4000, 8192), AllocationClass::Metadata);
+    } else {
+        engine.append(&[13; 4000]).unwrap();
+    }
+    engine
+        .space
+        .record_transition(PageType::Meta, PageTransition::Unchanged);
+    let requests = [
+        BlockRequest::new(
+            request(capacity, PageType::Meta).for_block(),
+            16,
+            EncodingDependency::Allocation,
+        )
+        .unwrap(),
+        BlockRequest::complete(
+            request(32, PageType::Meta).for_block(),
+            EncodingDependency::Independent,
+        ),
+    ];
+    let second = physical + if reused { 4000 } else { 4096 + capacity };
+    let mut plan = engine
+        .plan_blocks(&requests)
+        .unwrap_or_else(|failure| panic!("block reservation failed: {:?}", failure.error));
+    assert_eq!(
+        plan.reservations()[0].range(),
+        FileRange::new(PhysicalAddress::new(physical + 4096), capacity).unwrap()
+    );
+    assert_eq!(
+        plan.reservations()[1].range(),
+        FileRange::new(PhysicalAddress::new(second), 32).unwrap()
+    );
+    assert_eq!(
+        plan.engine.space.pending_padding(PageType::Meta).unwrap(),
+        []
+    );
+    assert_eq!(
+        plan.write_next(&[17; 16]).unwrap(),
+        PhysicalAddress::new(physical + 4096)
+    );
+    assert_eq!(
+        plan.engine.space.pending_padding(PageType::Meta).unwrap(),
+        if reused {
+            Vec::new()
+        } else {
+            vec![extent(stored + 4000, 96)]
+        }
+    );
+    assert_eq!(
+        plan.write_next(&[23; 32]).unwrap(),
+        PhysicalAddress::new(second)
+    );
+    plan.finish().unwrap();
+    assert_eq!(
+        engine.image().read_exact_at(physical + 4096, 16).unwrap(),
+        [17; 16]
+    );
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(physical + 4112, usize::try_from(capacity - 16).unwrap())
+            .unwrap(),
+        vec![if reused { 13 } else { 0 }; usize::try_from(capacity - 16).unwrap()]
+    );
+    assert_eq!(engine.image().read_exact_at(second, 32).unwrap(), [23; 32]);
+    if reused {
+        assert_eq!(
+            engine.space.reusable_sections().collect::<Vec<_>>(),
+            [
+                extent(stored + 4032, 64),
+                extent(stored + 4096 + capacity, 8096 - capacity)
+            ]
+        );
+    } else {
+        assert_eq!(
+            engine.image().read_exact_at(physical + 4000, 96).unwrap(),
+            [0; 96]
+        );
+        assert_eq!(engine.image.len(), physical + 4128 + capacity);
+    }
+}
+
+#[rstest]
+#[case::stored_alignment(0, u64::MAX - 100, 102, u64::MAX - 100, 101)]
+#[case::physical_start(512, u64::MAX - 100, 50, u64::MAX - 100, 512)]
+#[case::physical_end(512, u64::MAX - 4095, 4000, u64::MAX - 3583, 4000)]
+fn failed_block_geometry_preserves_the_append_cursor(
+    #[case] base: u64,
+    #[case] start: u64,
+    #[case] capacity: u64,
+    #[case] offset: u64,
+    #[case] length: u64,
+) {
+    let mut cursor = AppendCursor {
+        addresses: AddressContext::from_effective_base(BaseAddress::new(base)),
+        cursor: StoredAddress::new(start),
+        page_size: Some(FileSpacePageSize::DEFAULT),
+        tail_type: Some(PageType::Meta),
+        fresh_boundary: None,
+    };
+    assert_eq!(
+        cursor
+            .reserve(request(capacity, PageType::Meta).for_block())
+            .unwrap_err(),
+        FormatError::OffsetOverflow { offset, length }
+    );
+    assert_eq!(cursor.cursor, StoredAddress::new(start));
+    assert_eq!(cursor.tail_type, Some(PageType::Meta));
 }
 
 fn planned<'a>(
