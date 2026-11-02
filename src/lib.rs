@@ -439,9 +439,6 @@
 
 extern crate alloc;
 
-pub(crate) use crate::btree::v1 as btree_v1;
-pub(crate) use crate::btree::v2 as btree_v2;
-
 #[cfg(doc)]
 pub mod _guide;
 

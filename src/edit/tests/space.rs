@@ -597,7 +597,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     let tree_at = (header.btree_huge_objects_address.get() + userblock)
         .to_usize()
         .unwrap();
-    let tree = crate::btree_v2::BTreeV2Header::parse_with_widths(&bytes, tree_at, widths).unwrap();
+    let tree = crate::btree::v2::BTreeV2Header::parse_with_widths(&bytes, tree_at, widths).unwrap();
     assert_eq!(tree.depth, 0);
     let layout = BTreeV2Layout::new(&tree, widths.offsets).unwrap();
     let root = layout.root().unwrap();
@@ -605,7 +605,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     let node = root.parse(&bytes[node_at..]).unwrap();
     let records: Vec<_> = (0..node.record_count())
         .map(|index| {
-            let record = crate::btree_v2::BTreeV2Record {
+            let record = crate::btree::v2::BTreeV2Record {
                 data: node.record(index).unwrap().to_vec(),
             };
             record.huge_object(widths.offsets, widths.lengths).unwrap()

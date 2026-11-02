@@ -41,9 +41,9 @@ use hdf5_pure_space::__private::Extent;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::btree_v1::visit::{AdmittedV1Node, V1InternalNode, V1NodeLevel, V1TreeVisitState};
-use crate::btree_v2;
-use crate::btree_v2::BTreeV2Source;
+use crate::btree::v1::visit::{AdmittedV1Node, V1InternalNode, V1NodeLevel, V1TreeVisitState};
+use crate::btree::v2 as btree_v2;
+use crate::btree::v2::BTreeV2Source;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid;
 use crate::chunk_grid::ChunkGrid;
@@ -2102,7 +2102,7 @@ fn collect_chunk_index_spans(
             extensible_array::index_spans(source, widths, index_addr)
         }
         ChunkIndexLayout::BTreeV2 { .. } => {
-            crate::btree_v2::collect_btree_v2_storage_extents(source, index_addr, widths)
+            crate::btree::v2::collect_btree_v2_storage_extents(source, index_addr, widths)
                 .map(|extents| extents.into_iter().map(Extent::range).collect())
         }
     }

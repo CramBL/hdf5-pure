@@ -43,7 +43,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::btree_v2::BTreeV2Header;
+use crate::btree::v2::BTreeV2Header;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap;

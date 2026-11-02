@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::btree_v2::{AttributeRecord, HugeObjectRecord};
-use crate::btree_v2_write::BTreeV2Placement;
+use crate::btree::v2::write::BTreeV2Placement;
+use crate::btree::v2::{AttributeRecord, HugeObjectRecord};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap_write::ManagedHeapPlacement;

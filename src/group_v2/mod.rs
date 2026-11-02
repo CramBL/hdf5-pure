@@ -26,8 +26,8 @@ use crate::address::BaseAddressExt;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
-use crate::btree_v2::BTreeV2Source;
-use crate::btree_v2::{self, BTreeV2Header};
+use crate::btree::v2::BTreeV2Source;
+use crate::btree::v2::{self as btree_v2, BTreeV2Header};
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};

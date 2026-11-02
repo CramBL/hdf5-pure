@@ -18,9 +18,9 @@ use crate::address::AddressContext;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::btree_v2;
-use crate::btree_v2::BTreeV2Header;
-use crate::btree_v2::BTreeV2Source;
+use crate::btree::v2 as btree_v2;
+use crate::btree::v2::BTreeV2Header;
+use crate::btree::v2::BTreeV2Source;
 use crate::error::FormatError;
 #[cfg(test)]
 use crate::fractal_heap::FractalHeapHeader;

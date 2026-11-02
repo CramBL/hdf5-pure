@@ -10,8 +10,9 @@ use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
 use hdf5_pure_core::BaseAddress;
 
 use crate::address::StoredAddress;
-use crate::btree_v2::{
-    self, BTreeV2Header, HugeObjectRecordContext, HugeObjectRecordDecoder, HugeObjectTrackerRecord,
+use crate::btree::v2::{
+    self as btree_v2, BTreeV2Header, HugeObjectRecordContext, HugeObjectRecordDecoder,
+    HugeObjectTrackerRecord,
 };
 use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
@@ -179,16 +180,16 @@ impl FractalHeapHugeObjectLayout {
         let matches = matches!(
             (tree_type, kind),
             (
-                crate::btree_v2::BTREE_V2_HUGE_OBJECT,
+                crate::btree::v2::BTREE_V2_HUGE_OBJECT,
                 FractalHeapIdKind::Huge(HugeObjectReference::Indexed(_))
             ) | (
-                crate::btree_v2::BTREE_V2_FILTERED_HUGE_OBJECT,
+                crate::btree::v2::BTREE_V2_FILTERED_HUGE_OBJECT,
                 FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(_))
             ) | (
-                crate::btree_v2::BTREE_V2_HUGE_OBJECT_DIRECT,
+                crate::btree::v2::BTREE_V2_HUGE_OBJECT_DIRECT,
                 FractalHeapIdKind::Huge(HugeObjectReference::Inline { .. })
             ) | (
-                crate::btree_v2::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+                crate::btree::v2::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
                 FractalHeapIdKind::Huge(HugeObjectReference::FilteredInline(_))
             )
         );

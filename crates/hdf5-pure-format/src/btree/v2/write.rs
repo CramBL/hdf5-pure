@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::btree_v2::BTreeV2NodeInfo;
+use crate::btree::v2::BTreeV2NodeInfo;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -446,7 +446,7 @@ impl BTreeV2Plan {
         root_address: Option<StoredAddress>,
         length_width: LengthWidth,
     ) -> Result<Vec<u8>, FormatError> {
-        let mut header = Vec::with_capacity(crate::btree_v2::btree_v2_header_size(
+        let mut header = Vec::with_capacity(crate::btree::v2::btree_v2_header_size(
             self.offset_width,
             length_width,
         ));
@@ -643,8 +643,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::btree_v2;
-    use crate::btree_v2::BTreeV2Header;
+    use crate::btree::v2 as btree_v2;
+    use crate::btree::v2::BTreeV2Header;
     use crate::dense_link_write::NAME_RECORD_LEN;
 
     const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
@@ -807,7 +807,7 @@ mod tests {
     #[test]
     fn a_planned_tree_parses_back_to_its_header_and_records() {
         let records: Vec<u8> = (0..34).collect();
-        let nodes_address = StoredAddress::new(crate::btree_v2::btree_v2_header_size(
+        let nodes_address = StoredAddress::new(crate::btree::v2::btree_v2_header_size(
             OFFSET_WIDTH,
             LENGTH_WIDTH,
         ) as u64);

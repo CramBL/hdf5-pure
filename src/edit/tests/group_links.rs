@@ -21,7 +21,7 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::btree_v2::BTreeV2Header;
+use crate::btree::v2::BTreeV2Header;
 use crate::datatype::CharacterSet;
 use crate::edit::WriteEngine;
 use crate::edit::group;

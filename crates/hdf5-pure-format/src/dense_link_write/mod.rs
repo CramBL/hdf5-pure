@@ -8,12 +8,12 @@ use alloc::vec::Vec;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::btree_v2;
-use crate::btree_v2::BTREE_V2_LINK_CREATION_ORDER;
-use crate::btree_v2::BTREE_V2_LINK_NAME;
-use crate::btree_v2_write::BTreeV2Placement;
-use crate::btree_v2_write::BTreeV2Plan;
-use crate::btree_v2_write::BTreeV2WriteDialect;
+use crate::btree::v2 as btree_v2;
+use crate::btree::v2::BTREE_V2_LINK_CREATION_ORDER;
+use crate::btree::v2::BTREE_V2_LINK_NAME;
+use crate::btree::v2::write::BTreeV2Placement;
+use crate::btree::v2::write::BTreeV2Plan;
+use crate::btree::v2::write::BTreeV2WriteDialect;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;

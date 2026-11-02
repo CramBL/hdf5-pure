@@ -22,7 +22,7 @@ use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
-use crate::btree_v1;
+use crate::btree::v1 as btree_v1;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 use crate::link_message::LinkTarget;
