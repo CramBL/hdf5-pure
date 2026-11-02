@@ -2,7 +2,7 @@
 
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::AddressRange;
-use hdf5_pure_space::__private::{Extent, ReservationRequest};
+use hdf5_pure_space::__private::{Extent, ReservationPlacement, ReservationRequest};
 
 use crate::address::{AddressContext, StoredAddress};
 use crate::error::FormatError;
@@ -22,7 +22,7 @@ impl PlannedBlock {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if the allocation length differs from the request.
-    pub(super) fn new(allocation: FileRange, request: BlockRequest) -> Result<Self, FormatError> {
+    fn new(allocation: FileRange, request: BlockRequest) -> Result<Self, FormatError> {
         if allocation.length() != request.reservation().size().get() {
             return Err(FormatError::Internal(
                 "planned block allocation length differs from its request".into(),
@@ -34,6 +34,30 @@ impl PlannedBlock {
             encoding,
             request,
         })
+    }
+
+    /// Resolves checked stored placement and places the encoding at the allocation's start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the placement's request differs from the block's
+    /// reservation request, or [`FormatError::OffsetOverflow`] if physical range arithmetic
+    /// overflows.
+    pub(super) fn placed(
+        addresses: AddressContext,
+        placement: ReservationPlacement,
+        request: BlockRequest,
+    ) -> Result<Self, FormatError> {
+        if placement.request() != request.reservation() {
+            return Err(FormatError::Internal(
+                "planned block placement differs from its request".into(),
+            ));
+        }
+        let allocation = placement.extent();
+        Self::new(
+            FileRange::new(addresses.resolve(allocation.start())?, allocation.len())?,
+            request,
+        )
     }
 
     /// Places an encoding inside a complete stored-address allocation.

@@ -93,3 +93,28 @@ fn block_request_rejects_encoding_larger_than_allocation() {
         FormatError::SerializationError("a block reserves 16 bytes but encodes 17".into()),
     );
 }
+
+#[test]
+fn planned_block_rejects_a_different_placement_request() {
+    let reservation =
+        ReservationRequest::new(NonZeroU64::new(64).unwrap(), AllocationClass::Metadata);
+    let placement = reservation
+        .for_block()
+        .place_after(
+            StoredAddress::new(4000),
+            Some(crate::FileSpacePageSize::DEFAULT),
+        )
+        .unwrap();
+    let request = BlockRequest::complete(reservation, EncodingDependency::Allocation);
+    let Err(error) = PlannedBlock::placed(
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+        placement,
+        request,
+    ) else {
+        panic!("expected a different placement request");
+    };
+    assert_eq!(
+        error,
+        FormatError::Internal("planned block placement differs from its request".into())
+    );
+}

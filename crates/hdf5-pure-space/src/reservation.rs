@@ -2,8 +2,7 @@
 
 use core::num::NonZeroU64;
 
-use hdf5_pure_core::FileSpacePageSize;
-use hdf5_pure_core::StoredAddress;
+use hdf5_pure_core::{FileSpacePageSize, FormatError, StoredAddress};
 
 use crate::admission::TrackedSpace;
 use crate::allocation::AllocationClass;
@@ -16,12 +15,14 @@ use crate::session::SessionSpace;
 /// A nonempty allocation request with its purpose and effective PAGE type.
 ///
 /// The caller selects PAGE placement independently of the allocation class. Reservation addresses use
-/// stored coordinates.
+/// stored coordinates. Constructors create compound requests. Use [`Self::for_block`] for one
+/// independently read block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReservationRequest {
     size: NonZeroU64,
     class: AllocationClass,
     page_type: PageType,
+    kind: ReservationKind,
 }
 
 impl ReservationRequest {
@@ -36,7 +37,85 @@ impl ReservationRequest {
             size,
             class,
             page_type,
+            kind: ReservationKind::Compound,
         }
+    }
+
+    /// Returns a request for one independently read block.
+    ///
+    /// With PAGE allocation, a block smaller than a page fits within one page. A block of at least
+    /// one page starts on a page boundary. These rules apply to the complete reserved length,
+    /// including capacity beyond the encoded bytes.
+    pub fn for_block(self) -> Self {
+        Self {
+            kind: ReservationKind::Block,
+            ..self
+        }
+    }
+
+    /// Places the complete allocation at the earliest permitted address at or after `start`.
+    ///
+    /// Applies the rules of [`Self::for_block`] when this is a block request and `page_size` is
+    /// [`Some`]. Otherwise, the allocation starts at `start`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if alignment or the exclusive end exceeds
+    /// [`u64::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroU64;
+    ///
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
+    /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest};
+    ///
+    /// let request = ReservationRequest::new(
+    ///     NonZeroU64::new(100).unwrap(), AllocationClass::Metadata,
+    /// );
+    /// let start = StoredAddress::new(4_000);
+    /// let page_size = Some(FileSpacePageSize::DEFAULT);
+    /// let compound = request.place_after(start, page_size)?;
+    /// assert_eq!(compound.extent(), Extent::new(start, 100).unwrap());
+    ///
+    /// let block = request.for_block().place_after(start, page_size)?;
+    /// assert_eq!(block.request(), request.for_block());
+    /// assert_eq!(block.extent(), Extent::new(StoredAddress::new(4_096), 100).unwrap());
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub fn place_after(
+        self,
+        start: StoredAddress,
+        page_size: Option<FileSpacePageSize>,
+    ) -> Result<ReservationPlacement, FormatError> {
+        let start = if let Some(page_size) = page_size.filter(|_| self.is_block()) {
+            let page_size = page_size.get();
+            let remaining = page_size - start.get() % page_size;
+            if start.get() % page_size != 0
+                && (self.size.get() >= page_size || self.size.get() > remaining)
+            {
+                start.checked_add(remaining)?
+            } else {
+                start
+            }
+        } else {
+            start
+        };
+        let extent = Extent::new(start, self.size.get()).ok_or(FormatError::OffsetOverflow {
+            offset: start.get(),
+            length: self.size.get(),
+        })?;
+        Ok(ReservationPlacement {
+            request: self,
+            extent,
+        })
+    }
+
+    /// Returns whether this request requires placement as one complete block.
+    pub fn is_block(self) -> bool {
+        self.kind == ReservationKind::Block
     }
 
     /// Returns the allocation length in bytes.
@@ -55,41 +134,69 @@ impl ReservationRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReservationKind {
+    Block,
+    Compound,
+}
+
+/// A checked stored-address range for an allocation request.
+///
+/// The range has the request's complete length. A block placed with a page size satisfies the
+/// geometry of [`ReservationRequest::for_block`]. The caller establishes ownership and resolves
+/// physical addresses separately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReservationPlacement {
+    request: ReservationRequest,
+    extent: Extent,
+}
+
+impl ReservationPlacement {
+    /// Returns the request used to establish this placement.
+    pub fn request(self) -> ReservationRequest {
+        self.request
+    }
+
+    /// Returns the complete allocation in stored coordinates.
+    pub fn extent(self) -> Extent {
+        self.extent
+    }
+}
+
 /// A complete stored-address allocation removed from reusable space.
 ///
 /// Dropping this value leaves its bytes unavailable. The caller establishes whether the allocation
 /// can be returned through [`SessionSpace::return_allocation_with_page_type`].
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReusableReservation {
-    extent: Extent,
-    class: AllocationClass,
-    page_type: PageType,
+    placement: ReservationPlacement,
 }
 
 impl ReusableReservation {
     /// Returns the complete reserved range in stored coordinates.
     pub fn extent(&self) -> Extent {
-        self.extent
+        self.placement.extent()
+    }
+
+    /// Returns the checked geometry and request for this reusable allocation.
+    pub fn placement(&self) -> ReservationPlacement {
+        self.placement
     }
 
     /// Returns the allocation's purpose.
     pub fn class(&self) -> AllocationClass {
-        self.class
+        self.placement.request().class()
     }
 
     /// Returns the page type used for PAGE placement and return.
     pub fn page_type(&self) -> PageType {
-        self.page_type
+        self.placement.request().page_type()
     }
 
     /// Consumes the reservation into the arguments for an explicit return to reusable space.
     pub fn into_parts(self) -> (Extent, AllocationClass, PageType) {
-        let Self {
-            extent,
-            class,
-            page_type,
-        } = self;
-        (extent, class, page_type)
+        let request = self.placement.request();
+        (self.extent(), request.class(), request.page_type())
     }
 }
 
@@ -142,20 +249,29 @@ impl<'a> ReservationBatch<'a> {
 
     /// Reserves bytes under the allocator's best-fit and PAGE policies.
     ///
-    /// Equal-sized eligible regions are selected by lowest stored address. Returns [`None`] if no
-    /// eligible region fits, including when the required PAGE rounding exceeds [`u64::MAX`]. Prior
-    /// successful reservations remain unavailable after a failed request.
+    /// Within the request's PAGE type, the allocator compares the largest single-page capacity
+    /// for blocks smaller than a page and the page-aligned suffix length for blocks of at least
+    /// one page. For compound requests, it compares region lengths. For whole-page claims from
+    /// the other type, it compares aligned interiors. Ties use the containing region's lowest
+    /// stored address.
+    ///
+    /// Returns [`None`] if no eligible region fits, including when the required PAGE rounding
+    /// exceeds [`u64::MAX`]. Prior successful reservations remain unavailable after a failed request.
     pub fn reserve(&mut self, request: ReservationRequest) -> Option<ReusableReservation> {
         let ReservationRequest {
             size,
-            class,
+            class: _,
             page_type,
+            kind,
         } = request;
+        let page_size = match &self.state {
+            ReservationState::Scalar(space) => space.page_size(),
+            ReservationState::Paged { page_size, .. } => Some(*page_size),
+            ReservationState::Disabled | ReservationState::Flat { .. } => None,
+        };
         let extent = match &mut self.state {
             ReservationState::Disabled => None,
-            ReservationState::Scalar(space) => {
-                space.allocate_with_page_type(size.get(), class, page_type)
-            }
+            ReservationState::Scalar(space) => space.allocate_request(request),
             ReservationState::Flat { free, threshold: _ } => free.allocate(size),
             ReservationState::Paged {
                 meta,
@@ -166,7 +282,11 @@ impl<'a> ReservationBatch<'a> {
                     PageType::Meta => (meta, raw),
                     PageType::Raw => (raw, meta),
                 };
-                own.allocate(size).or_else(|| {
+                let extent = match kind {
+                    ReservationKind::Block => own.allocate_block(request, *page_size),
+                    ReservationKind::Compound => own.allocate(size),
+                };
+                extent.or_else(|| {
                     let span =
                         NonZeroU64::new(size.get().checked_next_multiple_of(page_size.get())?)?;
                     let claimed = other.allocate_whole_units(span)?;
@@ -180,11 +300,12 @@ impl<'a> ReservationBatch<'a> {
                 })
             }
         }?;
-        Some(ReusableReservation {
-            extent,
-            class,
-            page_type,
-        })
+        // Each allocation path selects a range that contains the request at its legal start.
+        let placement = request
+            .place_after(extent.start(), page_size)
+            .expect("the selected allocation has representable block geometry");
+        debug_assert_eq!(placement.extent(), extent);
+        Some(ReusableReservation { placement })
     }
 
     /// Returns abandoned aggregate spare through ordinary threshold admission.
@@ -272,7 +393,8 @@ enum ReservationState<'a> {
 
 /// Saturating operation counts for the indexed paths of a reservation batch.
 ///
-/// Counts describe extent operations, excluding ordered-map comparisons and scalar-path work.
+/// Counts describe address-map operations and best-fit queries, excluding lookup-index
+/// maintenance, ordered-map comparisons, and scalar-path work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReservationWork {
     /// Original extents inserted during index construction.

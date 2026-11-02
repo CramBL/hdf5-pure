@@ -2,7 +2,7 @@ use core::mem;
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::{NonEmptyRange, StoredAddressExt};
-use hdf5_pure_core::{AddressRange, StoredAddress};
+use hdf5_pure_core::{AddressRange, FileSpacePageSize, StoredAddress};
 
 /// A nonempty interval of stored HDF5 addresses.
 ///
@@ -103,6 +103,22 @@ impl Extent {
     /// Returns the checked interval with the same stored endpoints and positive length.
     pub fn range(self) -> AddressRange<StoredAddress> {
         self.range.range()
+    }
+
+    /// Returns the largest PAGE block capacity for lengths below or at least one page.
+    ///
+    /// For `size` smaller than a page, returns the largest part contained in one page. For `size`
+    /// of at least one page, returns the suffix starting on a page boundary, or zero if it is empty.
+    pub(crate) fn block_capacity(self, page_size: FileSpacePageSize, size: u64) -> u64 {
+        let page_size = page_size.get();
+        let head = self.len().min(page_size - self.start().get() % page_size);
+        if size < page_size {
+            head.max((self.len() - head).min(page_size))
+        } else if self.start().get() % page_size == 0 {
+            self.len()
+        } else {
+            self.len() - head
+        }
     }
 
     /// Returns the whole `align`-sized units inside this extent, or `None` when it contains none.

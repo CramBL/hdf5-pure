@@ -2,12 +2,13 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::fmt;
 
-use hdf5_pure_core::StoredAddress;
+use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
 
 use super::admission::AdmissionWork;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::persistence::TRAILING_RESERVE_TAILS;
+use super::reservation::ReservationRequest;
 
 mod admission;
 pub(crate) mod indexed;
@@ -250,6 +251,34 @@ impl FreeList {
                 .expect("the remainder is a non-empty suffix of the selected extent");
         }
         self.subtract_bytes(len);
+        Some(allocation)
+    }
+
+    /// Reserves a PAGE block from the smallest sufficient legal capacity, retaining both edges.
+    ///
+    /// The caller passes a block request. Ties use the lowest allocation start address.
+    pub(crate) fn alloc_block(
+        &mut self,
+        request: ReservationRequest,
+        page_size: FileSpacePageSize,
+    ) -> Option<Extent> {
+        let allocation = self
+            .regions
+            .iter()
+            .filter_map(|&region| {
+                let capacity = region.block_capacity(page_size, request.size().get());
+                if capacity < request.size().get() {
+                    return None;
+                }
+                let allocation = request
+                    .place_after(region.start(), Some(page_size))
+                    .ok()?
+                    .extent();
+                Some((capacity, allocation))
+            })
+            .min_by_key(|&(capacity, allocation)| (capacity, allocation.start()))?
+            .1;
+        self.take_range(allocation);
         Some(allocation)
     }
 
