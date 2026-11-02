@@ -8,6 +8,8 @@ use hdf5_pure_space::__private::AllocationClass;
 use crate::access_mode::AccessMode;
 use crate::attribute::{AttributeMessage, StoredAttribute};
 use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_policy::AttributePolicy;
+use crate::attribute_policy::AttributeStorage;
 use crate::attribute_request::AttributeName;
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
@@ -390,25 +392,33 @@ pub(super) struct DenseAttrEdit {
 /// edits preserve records of attributes whose names are absent from `ops`. New variable-length
 /// values are placed during commit application.
 ///
-/// Selects dense storage if the object is already dense, a staged value exceeds the record
-/// size limit, or a compact result with a staged addition or replacement exceeds
-/// [`MAX_COMPACT_ATTRS`]. A dense rebuild preserves attribute values and creation indexes,
-/// serializing the messages in
-/// version 3 format. An empty dense result requires no replacement heap.
+/// Selects dense storage for a nonempty result if the object is already dense, a staged value
+/// exceeds the record size limit, the stored maximum is zero, or the attribute count increases
+/// above that maximum. Uses a maximum of eight when the prefix omits the thresholds.
+/// A dense rebuild preserves attribute values and creation indexes, serializing the messages
+/// in version 3 format. An empty dense result requires no replacement heap.
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if an edit cannot be reproduced, a required attribute is
 /// absent, creation indexes are exhausted, or conversion to dense storage would prevent
-/// reference patching. Propagates source-read, parsing, and storage-planning errors.
+/// reference patching. Returns [`FormatError::InvalidAttributePhaseChange`] if the stored
+/// minimum dense count exceeds the maximum compact count. Propagates source-read, parsing,
+/// and storage-planning errors.
 pub(super) fn plan_attr_ops(
     src: &(impl OriginalSource + ?Sized),
     addr: Option<u64>,
     region: &OhRegion,
     ops: &[&AttrOp],
 ) -> Result<AttrEdits, Error> {
+    let policy = AttributePolicy::from_prefix(region.props().attribute_phase_change)?;
     let dense_now = region_uses_dense_attrs(region)?;
-    if !dense_now {
+    let current = if dense_now {
+        AttributeStorage::Dense
+    } else {
+        AttributeStorage::Compact
+    };
+    if current == AttributeStorage::Compact {
         // Detect oversized values before attempting compact editing.
         let mut oversized = false;
         for op in ops {
@@ -421,10 +431,15 @@ pub(super) fn plan_attr_ops(
             }
         }
         if !oversized {
+            let previous_count = compact_attr_count(region)?;
             let (out, pending_vl) = apply_compact_attr_ops(region, ops)?;
-            // Removals preserve compact storage even above this writer's count threshold.
-            let only_removes = !ops.iter().any(|op| matches!(op, AttrOp::Set { .. }));
-            if only_removes || compact_attr_count(&out)? + pending_vl.len() <= MAX_COMPACT_ATTRS {
+            if policy.select(
+                current,
+                previous_count,
+                compact_attr_count(&out)? + pending_vl.len(),
+                true,
+            ) == AttributeStorage::Compact
+            {
                 return Ok(AttrEdits {
                     region: out,
                     attrs: EditedAttrs::Compact(pending_vl),
@@ -1105,5 +1120,5 @@ const REFERENCE_ATTRIBUTE_WOULD_LEAVE_THE_HEADER: &str = "an attribute holding a
      (fractal-heap) storage, where a later commit could no longer repoint it when \
      its target moves; keep this object within compact attribute storage";
 
-/// The compact attribute-count limit shared with the whole-file writer.
-pub(super) const MAX_COMPACT_ATTRS: usize = crate::file_writer::DENSE_ATTR_THRESHOLD;
+#[cfg(test)]
+mod tests;

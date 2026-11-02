@@ -55,6 +55,8 @@ use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_policy::AttributePolicy;
+use crate::attribute_policy::AttributeStorage;
 use crate::bytes;
 use crate::chunked_write::{self, ByteSink, CompressedChunkSet};
 use crate::convert::Narrow;
@@ -116,9 +118,6 @@ pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
 pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
 const SUPERBLOCK_SIZE: usize = 48;
-
-/// Threshold for switching from compact (inline) to dense attribute storage.
-pub(crate) const DENSE_ATTR_THRESHOLD: usize = 8;
 
 /// The Link Info message of a group that keeps its links in its object header and
 /// does not track their creation order.
@@ -574,8 +573,9 @@ pub(crate) fn finalize_dense_attrs(
 
 /// Returns `true` if `attrs` require dense storage.
 ///
-/// Selects dense storage when the attribute count exceeds [`DENSE_ATTR_THRESHOLD`] or a compact
-/// message exceeds [`OBJECT_HEADER_MESSAGE_MAX`] bytes. Measures compact messages through
+/// Selects dense storage when the attribute count exceeds
+/// [`DEFAULT_MAX_COMPACT`](crate::attribute_policy::DEFAULT_MAX_COMPACT) or a compact message
+/// exceeds [`OBJECT_HEADER_MESSAGE_MAX`] bytes. Measures compact messages through
 /// [`AttributeMessage::serialize`], including the character-set byte for non-ASCII names.
 ///
 /// # Errors
@@ -583,7 +583,9 @@ pub(crate) fn finalize_dense_attrs(
 /// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
 /// is longer than its 2-byte size field can hold.
 pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, FormatError> {
-    if attrs.len() > DENSE_ATTR_THRESHOLD {
+    let policy = AttributePolicy::DEFAULT;
+    let current = AttributeStorage::Compact;
+    if policy.select(current, 0, attrs.len(), true) == AttributeStorage::Dense {
         return Ok(true);
     }
     for a in attrs {
