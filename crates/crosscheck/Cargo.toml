@@ -40,6 +40,12 @@ name = "fragmented_recovery"
 harness = false
 required-features = ["__hdf5-1.10"]
 
+# Measures commit time for seeded chunk retirement through threshold admission.
+[[bench]]
+name = "threshold_admission"
+harness = false
+required-features = ["__hdf5-1.10"]
+
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]
