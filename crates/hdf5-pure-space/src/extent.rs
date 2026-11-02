@@ -79,6 +79,21 @@ impl Extent {
         self.range().adjoins(other.range())
     }
 
+    /// Returns `true` if this extent touches `other` at an address that is not a multiple of
+    /// `unit`.
+    pub(super) fn adjoins_within(self, other: Self, unit: u64) -> bool {
+        (self.end() == other.start() && !other.start().get().is_multiple_of(unit))
+            || (self.start() == other.end() && !other.end().get().is_multiple_of(unit))
+    }
+
+    /// Returns `true` if this extent is at least `unit` bytes long and touches `other` at a
+    /// multiple of `unit`.
+    pub(super) fn adjoins_whole_unit(self, other: Self, unit: u64) -> bool {
+        self.len() >= unit
+            && ((self.end() == other.start() && other.start().get().is_multiple_of(unit))
+                || (self.start() == other.end() && other.end().get().is_multiple_of(unit)))
+    }
+
     /// Returns the overlap of this extent and `other`, or `None` when they are disjoint.
     pub(super) fn intersection(self, other: Self) -> Option<Self> {
         let common = self.range().intersection(other.range())?;

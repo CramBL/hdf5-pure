@@ -106,6 +106,18 @@ impl FreeList {
     ///
     /// Returns [`FreeListError::Overlap`] if extents from different lists overlap.
     pub(crate) fn from_lists<const N: usize>(lists: [&Self; N]) -> Result<Self, FreeListError> {
+        Self::from_lists_observed(lists, || {})
+    }
+
+    /// Merges canonical lists, calling `visit` for each consumed input extent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FreeListError::Overlap`] if extents from different lists overlap.
+    pub(crate) fn from_lists_observed<const N: usize>(
+        lists: [&Self; N],
+        mut visit: impl FnMut(),
+    ) -> Result<Self, FreeListError> {
         let mut regions = lists.map(|list| list.regions.iter());
         Self::from_sorted(core::iter::from_fn(|| {
             let (index, _) = regions
@@ -118,7 +130,11 @@ impl FreeList {
                         .map(|extent| (index, extent.start()))
                 })
                 .min_by_key(|&(_, start)| start)?;
-            regions[index].next().copied()
+            let next = regions[index].next().copied();
+            if next.is_some() {
+                visit();
+            }
+            next
         }))
     }
 
@@ -575,16 +591,32 @@ impl FreeList {
 
     /// Returns `true` if a region adjoins `extent`.
     pub fn adjoins(&self, extent: Extent) -> bool {
-        self.regions.iter().any(|region| region.adjoins(extent))
+        self.adjoins_observed(extent, || {})
+    }
+
+    /// Tests endpoint adjacency, calling `lookup` before each binary search.
+    ///
+    /// Performs one or two searches, stopping after a matching end address. The query may
+    /// overlap other regions.
+    pub(crate) fn adjoins_observed(&self, extent: Extent, mut lookup: impl FnMut()) -> bool {
+        lookup();
+        self.regions
+            .binary_search_by_key(&extent.start(), |region| region.end())
+            .is_ok()
+            || {
+                lookup();
+                self.regions
+                    .binary_search_by_key(&extent.end(), |region| region.start())
+                    .is_ok()
+            }
     }
 
     /// Returns `true` if a region adjoins `extent` inside one `unit`, at an address that is not a
     /// multiple of `unit`.
     pub fn adjoins_within(&self, extent: Extent, unit: u64) -> bool {
-        self.regions.iter().any(|region| {
-            (region.end() == extent.start() && !extent.start().get().is_multiple_of(unit))
-                || (region.start() == extent.end() && !extent.end().get().is_multiple_of(unit))
-        })
+        self.regions
+            .iter()
+            .any(|region| region.adjoins_within(extent, unit))
     }
 
     /// Returns how many bytes of `extent` the regions cover.
@@ -599,14 +631,9 @@ impl FreeList {
     /// Returns `true` if a region of at least `unit` bytes adjoins `extent` at a multiple of
     /// `unit`.
     pub fn adjoins_whole_unit(&self, extent: Extent, unit: u64) -> bool {
-        self.regions.iter().any(|region| {
-            (region.end() == extent.start()
-                && extent.start().get().is_multiple_of(unit)
-                && region.len() >= unit)
-                || (region.start() == extent.end()
-                    && extent.end().get().is_multiple_of(unit)
-                    && region.len() >= unit)
-        })
+        self.regions
+            .iter()
+            .any(|region| region.adjoins_whole_unit(extent, unit))
     }
     fn subtract_bytes(&mut self, length: u64) {
         // Each caller removes an allocation or trailing extent included in the cached total.
@@ -1239,6 +1266,31 @@ mod tests {
                 .sum::<u128>()
         );
         fl.sections()
+    }
+
+    #[rstest]
+    #[case::before(50, 50, true)]
+    #[case::after(120, 30, true)]
+    #[case::between(120, 80, true)]
+    #[case::overlapping_with_adjoining_end(110, 90, true)]
+    #[case::overlapping_with_adjoining_start(120, 90, true)]
+    #[case::inside(105, 10, false)]
+    #[case::overlapping_both_regions_with_distinct_endpoints(110, 100, false)]
+    #[case::live_gap(130, 50, false)]
+    fn ordered_adjacency_retains_exact_endpoint_geometry(
+        #[case] start: u64,
+        #[case] len: u64,
+        #[case] expected: bool,
+    ) {
+        let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
+        let free = FreeList::from_sorted([extent(100, 20), extent(200, 20)]).unwrap();
+        let mut lookups = 0;
+        assert_eq!(
+            free.adjoins_observed(extent(start, len), || lookups += 1),
+            expected
+        );
+        assert_eq!(free.adjoins(extent(start, len)), expected);
+        assert_eq!(lookups, if start == 120 { 1 } else { 2 });
     }
 
     const THRESHOLD: u64 = 64;
