@@ -2725,3 +2725,53 @@ fn pad_page_extension(path: &Path, chunks: usize) -> u64 {
     std::fs::write(path, bytes).unwrap();
     u64::try_from(capacity).unwrap()
 }
+
+#[rstest]
+#[case::four_megabytes(4_194_304)]
+#[case::eight_megabytes(8_388_608)]
+fn large_page_small_creation_bounds_padding_allocation(#[case] page: u64) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("large-page-padding.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
+    );
+    builder.write(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(MemoryStrategy::Bounded)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("values", |builder| {
+            builder.with_i32_data(&[3, 5, 7, 11]);
+        })
+        .unwrap();
+    let name = format!("large_page_padding_commit_{page}");
+    let ((), measured) = allocation::measure(&name, || file.commit().unwrap());
+    assert!(measured.blocks > 0, "{measured}");
+    assert!(measured.bytes >= 65_536, "{measured}");
+    assert!(measured.peak_bytes < 524_288, "{measured}");
+    assert!(measured.bytes < 1_048_576, "{measured}");
+    assert!(measured.live_bytes < 131_072, "{measured}");
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("values").unwrap().read_i32().unwrap(),
+        [3, 5, 7, 11]
+    );
+    assert!(file.superblock().eof_address >= 2 * page);
+    assert!(
+        file.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections()
+            .free_bytes()
+            > page
+    );
+    file.close().unwrap();
+}

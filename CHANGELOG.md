@@ -68,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- In-place editing through `File::commit` and immediate appends reduces temporary memory for PAGE padding with bounded zero batches. Buffering, encoded metadata, and mirror allocations remain separate, and large padding writes can require more physical I/O calls ([#1053](https://github.com/CramBL/hdf5-pure/pull/1053)).
 - `File::commit` reduces repeated pending-list scans and individual free-list insertions during threshold admission of returned allocations in flat and PAGE files. Flat admission stops buffering original returns once a run is eligible, retaining capacity allocated before eligibility ([#1051](https://github.com/CramBL/hdf5-pure/pull/1051)).
 - `File::open` and related constructors reduce temporary allocations and repeated reads of superblock extensions, reusing decoded metadata only while the opening source is unchanged ([#1046](https://github.com/CramBL/hdf5-pure/pull/1046)).
 
