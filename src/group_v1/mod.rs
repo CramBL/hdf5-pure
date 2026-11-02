@@ -504,6 +504,7 @@ pub(crate) const SYMBOLIC_LINK: u32 = 2;
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private as format;
     use rstest::rstest;
     use test_util::btree_v1;
     use test_util::image::Image;
@@ -630,7 +631,7 @@ mod tests {
             test_util::bytes::set_uint_at(&mut self.bytes, at, 4, value.into());
         }
 
-        fn reads(&self, base: u64) -> Vec<(u64, usize)> {
+        fn reads(&self, base: u64, widths: Widths) -> Vec<(u64, usize)> {
             let Self {
                 bytes: _,
                 message: _,
@@ -642,7 +643,10 @@ mod tests {
             [
                 (0, *heap_header_len),
                 *data_segment,
-                (*btree_at, 8),
+                (
+                    *btree_at,
+                    format::btree_v1_node_header_size(widths.offset.try_into().unwrap()),
+                ),
                 (*btree_at, *btree_len),
             ]
             .into_iter()
@@ -1213,7 +1217,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed(entries), hard_children(THREE_NODES));
-        assert_eq!(source.reads.into_inner(), group.reads(base));
+        assert_eq!(source.reads.into_inner(), group.reads(base, Widths::EIGHT));
     }
 
     #[rstest]
@@ -1322,7 +1326,7 @@ mod tests {
         let group = group(&[CHILDREN], Widths::EIGHT, DataSegment::AtTheEnd);
         let source = FailingSource {
             inner: PlacedSource::new(512, group.bytes.clone()),
-            failing_read: group.reads(512)[failing_read],
+            failing_read: group.reads(512, Widths::EIGHT)[failing_read],
         };
         assert_eq!(
             resolve_v1_group_entries_from_source(

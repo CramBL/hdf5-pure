@@ -294,6 +294,59 @@ fn invalid_object_header_version_precedes_missing_alignment_padding() {
     );
 }
 
+#[test]
+fn legacy_group_btree_header_truncation_precedes_an_invalid_signature() {
+    let image = test_util::fuzz::truncated_group_btree_header();
+    assert_eq!(image.len(), 2202);
+    assert_eq!(
+        u64::from_le_bytes(image[0x78..0x80].try_into().unwrap()),
+        0x888
+    );
+    assert_eq!(&image[0x88..0x8c], test_util::btree_v1::SIGNATURE);
+    assert_eq!(&image[0x888..0x88c], &[0xf0, 0x3f, 0, 0]);
+    assert_eq!(image.len() - 0x888, 18);
+    let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    std::fs::write(&path, &image).unwrap();
+    let buffered = File::open(&path).unwrap();
+    let streaming = File::open_streaming(&path).unwrap();
+    assert_eq!(buffered.superblock().offset_size.get(), 8);
+    let left = buffered.root().datasets().unwrap_err();
+    let right = streaming.root().datasets().unwrap_err();
+    let Error::Format(left_error) = &left else {
+        panic!("expected a format error, got {left:?}");
+    };
+    let Error::Format(right_error) = &right else {
+        panic!("expected a format error, got {right:?}");
+    };
+    assert_eq!(
+        left_error,
+        &FormatError::UnexpectedEof {
+            expected: 2208,
+            available: 2202
+        }
+    );
+    assert_eq!(
+        right_error,
+        &FormatError::UnexpectedSourceEof {
+            expected: 2208,
+            available: 2202
+        }
+    );
+    assert_eq!(
+        oracle::matched::<Vec<String>>(Operation::DatasetNames, Err(left), Err(right)),
+        None
+    );
+    drop(streaming);
+    drop(buffered);
+    assert_eq!(
+        oracle::compare(&image),
+        Comparison::Opened {
+            groups: 1,
+            datasets: 0
+        }
+    );
+}
+
 #[rstest]
 #[case::owner_type_with_restamped_checksum(NodeCorruption::ClientType(ChecksumUpdate::Recompute))]
 #[case::owner_type_with_original_checksum(NodeCorruption::ClientType(ChecksumUpdate::Keep))]

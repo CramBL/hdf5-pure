@@ -170,8 +170,8 @@ impl BTreeV1Node {
 
     /// Parses the version 1 B-tree node at `address` in `source`.
     ///
-    /// Reads the 8-byte prefix for the number of entries in use, then the node up to its last key
-    /// in use, and parses it as [`parse`](Self::parse) does.
+    /// Reads the complete header, including both sibling addresses, before checking the signature.
+    /// Then reads the node through its last key in use and parses it as [`parse`](Self::parse) does.
     ///
     /// # Errors
     ///
@@ -192,6 +192,9 @@ impl BTreeV1Node {
 
     /// Parses the version 1 B-tree node at `address` with validated file widths.
     ///
+    /// Reads the complete header before checking the signature, then the node through its last
+    /// key in use.
+    ///
     /// # Errors
     ///
     /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
@@ -201,17 +204,18 @@ impl BTreeV1Node {
         address: u64,
         widths: FormatWidths,
     ) -> Result<BTreeV1Node, FormatError> {
-        let prefix = source.read_metadata(address, BTREE_V1_NODE_PREFIX_LEN)?;
-        if &prefix[0..4] != BTREE_V1_SIGNATURE {
+        let header_size = btree_v1_node_header_size(widths.offsets.get());
+        let header = source.read_metadata(address, header_size)?;
+        if &header[0..4] != BTREE_V1_SIGNATURE {
             return Err(FormatError::InvalidBTreeSignature);
         }
-        let entries_used = u16::from_le_bytes([prefix[6], prefix[7]]) as usize;
+        let entries_used = u16::from_le_bytes([header[6], header[7]]) as usize;
 
         // For type 0: header + entries_used*(key + child) + a trailing key,
         // with child `offset_size` bytes wide and key `length_size` bytes wide.
         let os = usize::from(widths.offsets.get());
         let ls = usize::from(widths.lengths.get());
-        let total = btree_v1_node_header_size(widths.offsets.get()) + entries_used * (ls + os) + ls;
+        let total = header_size + entries_used * (ls + os) + ls;
         let buf = source.read_metadata(address, total)?;
         Self::parse_with_widths(&buf, 0, widths)
     }
@@ -695,6 +699,109 @@ mod tests {
             BTreeV1Node::parse_from_source(node.as_slice(), 0, 4, 8),
             Ok(expected)
         );
+    }
+
+    #[rstest]
+    #[case::truncated_invalid_signature(
+        false,
+        GroupNodeExtent::ShortHeader,
+        GroupNodeOutcome::TruncatedHeader
+    )]
+    #[case::contained_invalid_signature(
+        false,
+        GroupNodeExtent::Header,
+        GroupNodeOutcome::InvalidSignature
+    )]
+    #[case::complete_node(true, GroupNodeExtent::Complete, GroupNodeOutcome::Parsed)]
+    #[case::truncated_valid_header(
+        true,
+        GroupNodeExtent::ShortHeader,
+        GroupNodeOutcome::TruncatedHeader
+    )]
+    #[case::truncated_valid_body(true, GroupNodeExtent::ShortBody, GroupNodeOutcome::TruncatedBody)]
+    fn group_nodes_preserve_header_and_signature_error_precedence(
+        #[case] signature: bool,
+        #[case] extent: GroupNodeExtent,
+        #[case] outcome: GroupNodeOutcome,
+        #[values(Widths::new(2, 2), Widths::new(4, 8), Widths::EIGHT)] widths: Widths,
+        #[values(0, 7)] offset: usize,
+    ) {
+        let mut node =
+            btree_v1::node_with_group_keys(btree_v1::NodeType::GROUP, 0, &[0, 6], &[0x300], widths);
+        if !signature {
+            node[..4].copy_from_slice(&[0xf0, 0x3f, 0, 0]);
+        }
+        let header_size = btree_v1_node_header_size(widths.offset.try_into().unwrap());
+        let available = match extent {
+            GroupNodeExtent::Complete => node.len(),
+            GroupNodeExtent::Header => header_size,
+            GroupNodeExtent::ShortBody => node.len() - 1,
+            GroupNodeExtent::ShortHeader => header_size - widths.offset.min(6),
+        };
+        let mut bytes = vec![0; offset];
+        bytes.extend_from_slice(&node[..available]);
+        let formats = FormatWidths::from_sizes(
+            widths.offset.try_into().unwrap(),
+            widths.length.try_into().unwrap(),
+        )
+        .unwrap();
+        let buffered = BTreeV1Node::parse_with_widths(&bytes, offset, formats);
+        let streamed =
+            BTreeV1Node::parse_from_source_with_widths(bytes.as_slice(), offset as u64, formats);
+        match outcome {
+            GroupNodeOutcome::InvalidSignature => {
+                assert_eq!(buffered, Err(FormatError::InvalidBTreeSignature));
+                assert_eq!(streamed, Err(FormatError::InvalidBTreeSignature));
+            }
+            GroupNodeOutcome::Parsed => {
+                let expected = BTreeV1Node {
+                    node_type: btree_v1::NodeType::GROUP.0,
+                    node_level: 0,
+                    entries_used: 1,
+                    left_sibling: None,
+                    right_sibling: None,
+                    keys: vec![0, 6],
+                    children: vec![StoredAddress::new(0x300)],
+                };
+                assert_eq!(buffered.unwrap(), expected);
+                assert_eq!(streamed.unwrap(), expected);
+            }
+            GroupNodeOutcome::TruncatedBody | GroupNodeOutcome::TruncatedHeader => {
+                let required = offset
+                    + if matches!(outcome, GroupNodeOutcome::TruncatedHeader) {
+                        header_size
+                    } else {
+                        node.len()
+                    };
+                assert_eq!(
+                    buffered,
+                    Err(FormatError::UnexpectedEof {
+                        expected: required,
+                        available: bytes.len()
+                    })
+                );
+                assert_eq!(
+                    streamed,
+                    Err(FormatError::UnexpectedSourceEof {
+                        expected: required as u64,
+                        available: bytes.len() as u64
+                    })
+                );
+            }
+        }
+    }
+
+    enum GroupNodeExtent {
+        Complete,
+        Header,
+        ShortBody,
+        ShortHeader,
+    }
+    enum GroupNodeOutcome {
+        InvalidSignature,
+        Parsed,
+        TruncatedBody,
+        TruncatedHeader,
     }
 
     /// Returns the size, the filter mask, and the offsets of each key of `node`, with the child
