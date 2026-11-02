@@ -25,6 +25,8 @@ use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
 use test_util_hdf5::reader::ReadBackend;
 
+mod typed;
+
 #[rstest]
 #[case::default_policy(FillTime::IfSet, ReferenceFillTime::IfSet)]
 #[case::allocate(FillTime::Alloc, ReferenceFillTime::Alloc)]
