@@ -817,14 +817,10 @@ impl WriteEngine {
         else {
             return Ok(());
         };
-        let paged_persistence::PagedPersistencePlan {
-            tail,
-            extension,
-            slots,
-            blocks,
-        } = plan;
-        let ext_addr = tail.allocation.start();
-        let blocks_len = tail.allocation.len();
+        let (tail, extension, slots, blocks, coverage) = plan.into_parts();
+        let region = coverage.reservation();
+        let ext_addr = region.start();
+        let blocks_len = region.len();
         let final_eoa = tail.final_eoa;
         let reused = !tail.appended;
         let info = if blocks.is_empty() {
@@ -875,13 +871,7 @@ impl WriteEngine {
         let final_eof = self.context.addresses().resolve(final_eoa)?;
 
         // Include extension padding in the allocation recorded for future reclamation.
-        let region = FreeExtent::new(ext_addr, blocks_len).ok_or(Error::Format(
-            FormatError::OffsetOverflow {
-                offset: ext_addr.get(),
-                length: blocks_len,
-            },
-        ))?;
-        let new_old_blocks = vec![region];
+        let new_old_blocks = coverage.into_retirement();
 
         // The extension and manager blocks remain unreferenced until superblock publication.
         self.write_tail_block(region, ext_addr, &ext_oh)?;

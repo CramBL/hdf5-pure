@@ -355,6 +355,16 @@ impl ManagerPlan {
         &self.blocks
     }
 
+    /// Returns complete stored allocations in File Space Info slot order.
+    ///
+    /// For each manager, yields the header allocation and then the section-list allocation,
+    /// including any surplus capacity.
+    pub(crate) fn allocations(&self) -> impl Iterator<Item = Extent> + '_ {
+        self.blocks
+            .iter()
+            .flat_map(|block| [block.header, block.section_list])
+    }
+
     /// Returns the largest exclusive allocation end.
     ///
     /// For an empty contiguous plan, returns the start passed to [`ManagerProjection::into_plan`].

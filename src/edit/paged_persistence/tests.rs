@@ -1,5 +1,8 @@
+use hdf5_pure_space::__private::AdmittedFreeSnapshot;
+use hdf5_pure_space::__private::FreeList;
 use hdf5_pure_space::__private::{ManagerKind, ManagerSections, PageType};
 use rstest::rstest;
+use test_util::range;
 use test_util::snapshot::text::{Report, Value};
 
 use crate::AddressRange;
@@ -8,6 +11,181 @@ use crate::file_space_info::{FileSpacePageSize, FileSpaceStrategy};
 use crate::free_space_manager;
 
 use super::*;
+
+#[rstest]
+#[case::empty(&[], &[], &[(100, 100)])]
+#[case::whole(&[(100, 100)], &[(100, 100)], &[])]
+#[case::middle(&[(120, 40)], &[(120, 40)], &[(100, 20), (160, 40)])]
+#[case::adjacent(&[(100, 20), (120, 80)], &[(100, 20), (120, 80)], &[])]
+#[case::unordered(&[(170, 30), (100, 20), (120, 30)], &[(100, 20), (120, 30), (170, 30)], &[(150, 20)])]
+#[case::several_gaps(&[(170, 20), (120, 30)], &[(120, 30), (170, 20)], &[(100, 20), (150, 20), (190, 10)])]
+fn partitions_preserve_complete_allocations_and_exact_gaps(
+    #[case] allocations: &[(u64, u64)],
+    #[case] expected_occupied: &[(u64, u64)],
+    #[case] expected_gaps: &[(u64, u64)],
+) {
+    let reservation = extent(100, 100);
+    let partition = ReservationPartition::new(
+        reservation,
+        allocations
+            .iter()
+            .map(|&(start, length)| extent(start, length)),
+    )
+    .unwrap();
+    assert_eq!(partition.reservation, reservation);
+    assert_eq!(
+        partition.occupied,
+        expected_occupied
+            .iter()
+            .map(|&(start, length)| extent(start, length))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        partition.gaps,
+        expected_gaps
+            .iter()
+            .map(|&(start, length)| extent(start, length))
+            .collect::<Vec<_>>()
+    );
+    let pieces = partition
+        .occupied
+        .iter()
+        .chain(&partition.gaps)
+        .map(|allocation| (allocation.start().get(), allocation.len()))
+        .collect::<Vec<_>>();
+    assert_eq!(range::covered_len(&pieces, &(100..200)), 100);
+    assert_eq!(pieces.iter().map(|&(_, length)| length).sum::<u64>(), 100);
+    if expected_gaps.is_empty() {
+        let covered = partition.into_occupied().unwrap();
+        assert_eq!(covered.reservation(), reservation);
+        assert_eq!(covered.into_retirement(), [reservation]);
+    } else {
+        assert_eq!(
+            partition.into_occupied().unwrap_err(),
+            FormatError::Internal("a PAGE reservation has unoccupied bytes".into())
+        );
+    }
+}
+
+#[rstest]
+#[case::before(&[(99, 10)], "a PAGE block is outside its reservation")]
+#[case::after(&[(195, 6)], "a PAGE block is outside its reservation")]
+#[case::enclosing(&[(99, 102)], "a PAGE block is outside its reservation")]
+#[case::duplicate(&[(100, 20), (100, 20)], "PAGE block allocations overlap")]
+#[case::overlap(&[(100, 51), (150, 50)], "PAGE block allocations overlap")]
+#[case::nested(&[(100, 100), (120, 20)], "PAGE block allocations overlap")]
+fn partition_construction_rejects_invalid_occupied_ranges(
+    #[case] allocations: &[(u64, u64)],
+    #[case] reason: &str,
+) {
+    let error = ReservationPartition::new(
+        extent(100, 100),
+        allocations
+            .iter()
+            .map(|&(start, length)| extent(start, length)),
+    )
+    .unwrap_err();
+    assert_eq!(error, FormatError::Internal(reason.into()));
+}
+
+#[rstest]
+#[case::wide(1 << 35, 1 << 33)]
+#[case::maximum_end(u64::MAX - 100, 100)]
+fn reservation_partitions_preserve_u64_geometry(#[case] start: u64, #[case] length: u64) {
+    let reservation = extent(start, length);
+    let partition = ReservationPartition::new(
+        reservation,
+        [extent(start, 20), extent(start + 40, length - 40)],
+    )
+    .unwrap();
+    assert_eq!(partition.reservation, reservation);
+    assert_eq!(
+        partition.occupied,
+        [extent(start, 20), extent(start + 40, length - 40)]
+    );
+    assert_eq!(partition.gaps, [extent(start + 20, 20)]);
+}
+
+#[test]
+fn partitions_include_complete_manager_capacity() {
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let free = FreeList::from_sorted([extent(4096, 4096)]).unwrap();
+    let projection = ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths).unwrap();
+    assert_eq!(projection.block_lengths().collect::<Vec<_>>(), [[82, 35]]);
+    let managers = projection
+        .place(|[header, list]| Ok([extent(1100, header), extent(1182, list + 32)]))
+        .unwrap();
+    assert_eq!(
+        managers.allocations().collect::<Vec<_>>(),
+        [extent(1100, 82), extent(1182, 67)]
+    );
+    let partition = ReservationPartition::new(
+        extent(1000, 249),
+        core::iter::once(extent(1000, 100)).chain(managers.allocations()),
+    )
+    .unwrap();
+    assert_eq!(
+        partition.occupied,
+        [extent(1000, 100), extent(1100, 82), extent(1182, 67)]
+    );
+    assert!(partition.gaps.is_empty());
+    assert_eq!(
+        partition.into_occupied().unwrap().into_retirement(),
+        [extent(1000, 249)]
+    );
+}
+
+#[rstest]
+#[case::extension_only(160, 0)]
+#[case::with_manager(4096, 1)]
+fn paged_plans_retain_one_fully_occupied_reservation(#[case] hole: u64, #[case] managers: usize) {
+    let mut space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, FileSpacePageSize::DEFAULT);
+    space.seed_persisted(Some(ManagerKind::PagedSmallMetadata), extent(4096, hole));
+    let plan = PagedPersistencePlan::new(
+        &space,
+        StoredAddress::new(12288),
+        &[],
+        &[],
+        160,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    let reservation = plan.tail.allocation;
+    assert!(!plan.tail.appended);
+    assert_eq!(plan.coverage.reservation(), reservation);
+    assert_eq!(plan.blocks.len(), managers);
+    assert_eq!(plan.extension.start(), reservation.start());
+    let expected_free = plan.tail.post.admitted_snapshot().reusable_bytes().unwrap();
+    assert_eq!(expected_free + reservation.len(), hole);
+    let (tail, extension, slots, blocks, coverage) = plan.into_parts();
+    assert_eq!(tail.allocation, reservation);
+    assert_eq!(extension.start(), reservation.start());
+    assert_eq!(blocks.len(), managers);
+    if managers == 0 {
+        assert_eq!(extension, reservation);
+        assert!(
+            slots.iter().all(
+                |address| address.is_undefined(FormatWidths::from_sizes(8, 8).unwrap().offsets)
+            )
+        );
+    } else {
+        assert_eq!(slots[0], blocks[0].header_address);
+        assert!(
+            slots[1..].iter().all(
+                |address| address.is_undefined(FormatWidths::from_sizes(8, 8).unwrap().offsets)
+            )
+        );
+    }
+    assert_eq!(coverage.into_retirement(), [reservation]);
+    space.adopt_paged_post_free(tail.post, false, None);
+    assert_eq!(
+        space.admitted_snapshot().reusable_bytes().unwrap(),
+        expected_free
+    );
+}
 
 #[test]
 fn exact_manager_sizes_can_oscillate_while_owned_capacity_terminates() {
