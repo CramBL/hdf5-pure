@@ -7,12 +7,16 @@ use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::StoredAddress;
 
+use super::admission::AdmissionWork;
+use super::admission::OrderedReturns;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, PageParts, TRAILING_RESERVE_TAILS};
 use super::reservation::ReservationBatch;
 use super::snapshot::AdmittedFreeSnapshot;
+
+mod admission;
 
 /// Identifies whether an allocation belongs to metadata or raw-data pages.
 ///
@@ -520,23 +524,50 @@ impl PagedEdit {
         freed: impl IntoIterator<Item = (Extent, FreeClass)>,
         old_blocks: impl IntoIterator<Item = Extent>,
     ) -> (PagedPostFree, StoredAddress) {
+        self.post_free_with_work(
+            threshold,
+            eoa,
+            freed,
+            old_blocks,
+            &mut AdmissionWork::default(),
+        )
+    }
+
+    /// Builds a post-free candidate with observations of admission and padding integration.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid caller geometry as described by [`Self::with_padding`] and
+    /// [`PagedPostFree::release_batch`].
+    fn post_free_with_work(
+        &self,
+        threshold: u64,
+        eoa: StoredAddress,
+        freed: impl IntoIterator<Item = (Extent, FreeClass)>,
+        old_blocks: impl IntoIterator<Item = Extent>,
+        work: &mut AdmissionWork,
+    ) -> (PagedPostFree, StoredAddress) {
+        let Self {
+            page_size,
+            meta,
+            raw,
+            unclassified,
+            dead,
+            last: _,
+            meta_pad,
+            raw_pad,
+        } = self;
         let mut post = PagedPostFree {
-            page_size: self.page_size,
-            meta: self.meta.clone(),
-            raw: self.raw.clone(),
-            dead: self.dead.clone(),
-            unclassified: self.unclassified.clone(),
+            page_size: *page_size,
+            meta: Self::with_padding(meta, meta_pad, work),
+            raw: Self::with_padding(raw, raw_pad, work),
+            dead: dead.clone(),
+            unclassified: unclassified.clone(),
         };
-        for &extent in &self.meta_pad {
-            post.track(extent, PageType::Meta.into());
-        }
-        for &extent in &self.raw_pad {
-            post.track(extent, PageType::Raw.into());
-        }
         let old_blocks = old_blocks
             .into_iter()
             .map(|extent| (extent, FreeClass::Page(PageType::Meta)));
-        let eoa = post.release_all(threshold, eoa, freed.into_iter().chain(old_blocks));
+        let eoa = post.release_all(threshold, eoa, freed.into_iter().chain(old_blocks), work);
         Self::promote_whole_free_pages(
             &mut post.meta,
             &mut post.raw,
@@ -565,6 +596,37 @@ impl PagedEdit {
         if let Some(tail) = appended_tail {
             self.meta.free(tail);
         }
+    }
+
+    /// Combines already admitted allocation tails with a canonical list in a private copy.
+    ///
+    /// Orders multiple padding extents once and merges them in bulk. Empty or scalar padding
+    /// uses the direct cloning and insertion paths. Ordinary return thresholds do not apply.
+    ///
+    /// # Panics
+    ///
+    /// Panics if multiple padding extents overlap each other or `list`. A scalar tail overlapping
+    /// `list` can panic in debug builds.
+    fn with_padding(list: &FreeList, padding: &[Extent], work: &mut AdmissionWork) -> FreeList {
+        if padding.len() <= 1 {
+            let mut list = list.clone();
+            if let Some(&extent) = padding.first() {
+                list.free(extent);
+            }
+            return list;
+        }
+        // Padding consists of distinct allocation-created remainders, already admitted as tails.
+        let padding =
+            OrderedReturns::new(padding.iter().map(|&extent| (extent, ())).collect(), work)
+                .expect("allocation padding is disjoint");
+        let padding = FreeList::from_sorted(padding.into_iter().map(|(extent, ())| {
+            work.visit_extent();
+            extent
+        }))
+        .expect("ordered padding is sorted and disjoint");
+        // Allocation padding excludes all previously tracked free space.
+        FreeList::from_lists_observed([list, &padding], || work.visit_extent())
+            .expect("allocation padding is disjoint from tracked free space")
     }
 
     fn track(&mut self, extent: Extent, class: FreeClass) {
@@ -695,17 +757,26 @@ impl PagedPostFree {
         published_eoa
     }
 
+    /// Admits original returns, reconsiders completed pages, and releases dropped EOF tails.
+    ///
+    /// Reconsiders completed pages individually when the threshold exceeds the page size.
+    /// Retains original dropped boundaries and classes for tail release.
+    ///
+    /// # Panics
+    ///
+    /// Panics on overlapping returns as described by [`Self::release_batch`].
     fn release_all(
         &mut self,
         threshold: u64,
         eoa: StoredAddress,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
+        work: &mut AdmissionWork,
     ) -> StoredAddress {
         let extents: Vec<_> = extents.into_iter().collect();
-        let mut dropped = self.release_each(threshold, extents.iter().copied());
+        let mut dropped = self.release_batch(threshold, extents.iter().copied(), work);
         if threshold > self.page_size.get() {
             let completed = self.pages_completed_by_merges(&extents, &dropped);
-            dropped.extend(self.release_pages(threshold, completed));
+            dropped.extend(self.release_pages(threshold, completed, work));
         }
         self.give_back(eoa, dropped)
     }
@@ -749,6 +820,7 @@ impl PagedPostFree {
         &mut self,
         threshold: u64,
         pages: BTreeSet<Extent>,
+        work: &mut AdmissionWork,
     ) -> Vec<(Extent, FreeClass)> {
         let pages: Vec<_> = pages.into_iter().collect();
         // The set contains distinct whole pages in ascending address order.
@@ -757,11 +829,12 @@ impl PagedPostFree {
         for list in [&mut self.meta, &mut self.raw, &mut self.dead] {
             list.take_ranges(&removed);
         }
-        self.release_each(
+        self.release_batch(
             threshold,
             pages
                 .into_iter()
                 .map(|page| (page, FreeClass::Page(PageType::Raw))),
+            work,
         )
     }
 
@@ -818,6 +891,34 @@ impl TrackedSpace for PagedPostFree {
     fn track(&mut self, extent: Extent, class: FreeClass) {
         PagedEdit::route_free(&mut self.meta, &mut self.raw, &mut self.dead, extent, class);
     }
+
+    fn release_each(
+        &mut self,
+        threshold: u64,
+        extents: impl IntoIterator<Item = (Extent, FreeClass)>,
+    ) -> Vec<(Extent, FreeClass)> {
+        self.release_batch(threshold, extents, &mut AdmissionWork::default())
+    }
+}
+
+#[cfg(test)]
+impl Clone for PagedPostFree {
+    fn clone(&self) -> Self {
+        let Self {
+            page_size,
+            meta,
+            raw,
+            dead,
+            unclassified,
+        } = self;
+        Self {
+            page_size: *page_size,
+            meta: meta.clone(),
+            raw: raw.clone(),
+            dead: dead.clone(),
+            unclassified: unclassified.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +933,7 @@ mod tests {
     use crate::admission::Release;
     use crate::persistence::ManagerSections;
 
+    mod admission;
     mod normalization;
 
     const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
@@ -1591,7 +1693,8 @@ mod tests {
                 StoredAddress::new(10 * PAGE),
                 extents
                     .iter()
-                    .map(|&(addr, len)| (Extent::new(StoredAddress::new(addr), len).unwrap(), RAW))
+                    .map(|&(addr, len)| (Extent::new(StoredAddress::new(addr), len).unwrap(), RAW)),
+                &mut AdmissionWork::default(),
             ),
             StoredAddress::new(expected)
         );
@@ -1639,6 +1742,7 @@ mod tests {
                         Extent::new(StoredAddress::new(2 * PAGE - 100), 100).unwrap(),
                         RAW
                     )],
+                    &mut AdmissionWork::default(),
                 ),
                 paged_sections(&post)
             ),

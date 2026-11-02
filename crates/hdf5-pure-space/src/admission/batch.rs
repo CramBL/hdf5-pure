@@ -67,15 +67,65 @@ pub(crate) struct AdmissionWork {
     /// Address comparisons performed by sorting unordered input.
     #[cfg(test)]
     pub(crate) sort_comparisons: usize,
-    /// Existing extents and original returns consumed by the admission sweep.
+    /// Input extents visited during admission, padding normalization, and observed list merges.
     #[cfg(test)]
     pub(crate) extent_visits: usize,
     /// Admitted runs passed to canonical free-list construction.
     #[cfg(test)]
     pub(crate) integrated_extents: usize,
+    /// Existing tracked extents copied into PAGE class indexes.
+    #[cfg(test)]
+    pub(crate) indexed_extents: usize,
+    /// Entries removed from the PAGE admission queue, including repeated visits.
+    #[cfg(test)]
+    pub(crate) queue_visits: usize,
+    /// Explicit neighbor and endpoint searches, excluding their internal comparisons.
+    #[cfg(test)]
+    pub(crate) lookups: usize,
+    /// Class-index insertions, including the initial tracked extents.
+    #[cfg(test)]
+    pub(crate) inserted_extents: usize,
+    /// Class-index removals while coalescing neighboring extents.
+    #[cfg(test)]
+    pub(crate) removed_extents: usize,
 }
 
 impl AdmissionWork {
+    pub(crate) fn index_extent(&mut self) {
+        #[cfg(test)]
+        {
+            self.indexed_extents += 1;
+        }
+    }
+
+    pub(crate) fn visit_queue(&mut self) {
+        #[cfg(test)]
+        {
+            self.queue_visits += 1;
+        }
+    }
+
+    pub(crate) fn lookup(&mut self) {
+        #[cfg(test)]
+        {
+            self.lookups += 1;
+        }
+    }
+
+    pub(crate) fn insert_extent(&mut self) {
+        #[cfg(test)]
+        {
+            self.inserted_extents += 1;
+        }
+    }
+
+    pub(crate) fn remove_extent(&mut self) {
+        #[cfg(test)]
+        {
+            self.removed_extents += 1;
+        }
+    }
+
     fn visit_order(&mut self) {
         #[cfg(test)]
         {

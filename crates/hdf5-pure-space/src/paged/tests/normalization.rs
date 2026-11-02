@@ -77,7 +77,7 @@ proptest! {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/proptest-regressions/paged_normalization.txt"
         )))),
-        ..ProptestConfig::with_cases(64)
+        ..ProptestConfig::with_cases(256)
     })]
 
     #[test]
@@ -309,7 +309,12 @@ fn compare_allocations(mut actual: PagedEdit, mut expected: PagedEdit) {
     }
 }
 
-fn normalize_reference(meta: &mut FreeList, raw: &mut FreeList, dead: &mut FreeList, page: u64) {
+pub(super) fn normalize_reference(
+    meta: &mut FreeList,
+    raw: &mut FreeList,
+    dead: &mut FreeList,
+    page: u64,
+) {
     let mut all = meta.extents().to_vec();
     all.extend_from_slice(raw.extents());
     all.extend_from_slice(dead.extents());
@@ -333,13 +338,13 @@ fn normalize_reference(meta: &mut FreeList, raw: &mut FreeList, dead: &mut FreeL
     }
 }
 
-fn release_reference(
+pub(super) fn release_reference(
     post: &mut PagedPostFree,
     threshold: u64,
     eoa: StoredAddress,
     extents: Vec<(Extent, FreeClass)>,
 ) -> StoredAddress {
-    let mut dropped = post.release_each(threshold, extents.iter().copied());
+    let mut dropped = release_each_reference(post, threshold, extents.iter().copied(), &mut 0);
     let page_size = post.page_size.get();
     if threshold > page_size {
         let dropped_extents: BTreeSet<_> = dropped.iter().map(|&(extent, _)| extent).collect();
@@ -365,7 +370,38 @@ fn release_reference(
                 list.take_range(page);
             }
         }
-        dropped.extend(post.release_each(threshold, pages.into_iter().map(|page| (page, RAW))));
+        dropped.extend(release_each_reference(
+            post,
+            threshold,
+            pages.into_iter().map(|page| (page, RAW)),
+            &mut 0,
+        ));
     }
     post.give_back(eoa, dropped)
+}
+
+/// Counts scalar admission attempts in the repeated-pass reference model.
+pub(super) fn release_each_reference(
+    post: &mut PagedPostFree,
+    threshold: u64,
+    extents: impl IntoIterator<Item = (Extent, FreeClass)>,
+    attempts: &mut usize,
+) -> Vec<(Extent, FreeClass)> {
+    let (mut pending, eligible): (Vec<_>, Vec<_>) = extents
+        .into_iter()
+        .partition(|&(extent, _)| extent.len() < threshold);
+    for (extent, class) in eligible {
+        post.track(extent, class);
+    }
+    loop {
+        let offered = pending.len();
+        pending.retain(|&(extent, class)| {
+            *attempts += 1;
+            post.release(threshold, extent, class) == Release::Drop
+        });
+        if pending.len() == offered {
+            break;
+        }
+    }
+    pending
 }
