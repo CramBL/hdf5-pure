@@ -1809,7 +1809,7 @@ fn max_records_leaf(node_size: u32, record_size: u16) -> u64 {
 /// `cum_max_nrec[u] = (max_nrec[u] + 1) * cum_max_nrec[u - 1] + max_nrec[u]`, and the table follows
 /// the C library.
 ///
-/// [`BTreeV2Plan`](crate::btree_v2_write::BTreeV2Plan) lays out a tree from the same table, so a
+/// [`BTreeV2Plan`](crate::btree::v2::write::BTreeV2Plan) lays out a tree from the same table, so a
 /// written tree has the widths a reader computes for it.
 ///
 /// The child pointers are defined in "Version 2 B-trees" of the [format specification, version

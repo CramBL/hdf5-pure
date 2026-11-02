@@ -16,10 +16,6 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-use crate::btree::v1 as btree_v1;
-use crate::btree::v2 as btree_v2;
-use crate::btree::v2::write as btree_v2_write;
-
 #[doc(hidden)]
 pub mod __private;
 

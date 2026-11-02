@@ -23,9 +23,9 @@ use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::btree_v2;
-use crate::btree_v2::BTreeV2Header;
-use crate::btree_v2::BTreeV2Source;
+use crate::btree::v2 as btree_v2;
+use crate::btree::v2::BTreeV2Header;
+use crate::btree::v2::BTreeV2Source;
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;

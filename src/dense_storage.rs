@@ -8,7 +8,7 @@ use hdf5_pure_space::__private::Extent;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::btree_v2::{self, BTreeV2Header};
+use crate::btree::v2::{self as btree_v2, BTreeV2Header};
 use crate::error::FormatError;
 use crate::source::StoredMetadata;
 use crate::source::StoredRead;

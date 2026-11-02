@@ -200,7 +200,7 @@ pub enum HugeObjectReference {
 /// If every filter is skipped, the encoded and decoded sizes are equal.
 ///
 /// Obtained from [`FractalHeapIdLayout::parse`] or
-/// [`HugeObjectRecordDecoder::parse`](crate::btree_v2::HugeObjectRecordDecoder::parse).
+/// [`HugeObjectRecordDecoder::parse`](crate::btree::v2::HugeObjectRecordDecoder::parse).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilteredHugeObjectLocation {
     address: StoredAddress,

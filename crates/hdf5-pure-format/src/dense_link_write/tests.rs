@@ -5,9 +5,9 @@ use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
 
-use crate::btree_v2::BTreeV2Header;
-use crate::btree_v2::BTreeV2Layout;
-use crate::btree_v2::BTreeV2Node;
+use crate::btree::v2::BTreeV2Header;
+use crate::btree::v2::BTreeV2Layout;
+use crate::btree::v2::BTreeV2Node;
 use crate::datatype::CharacterSet;
 use crate::fractal_heap::FractalHeapIdKind;
 use crate::fractal_heap::FractalHeapIdLayout;
