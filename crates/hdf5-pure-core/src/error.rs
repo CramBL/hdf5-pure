@@ -205,6 +205,20 @@ pub enum FormatError {
         /// The address field's width in bytes.
         offset_size: u8,
     },
+    /// The number of supplied block addresses differs from the dense-attribute plan.
+    DenseAttributeBlockCount {
+        /// The number of planned heap blocks, index blocks, and huge objects.
+        expected: usize,
+        /// The number of addresses supplied by the caller.
+        actual: usize,
+    },
+    /// Two complete dense-attribute blocks overlap.
+    DenseAttributeBlockOverlap {
+        /// The input index of the first overlapping block in address order.
+        first: usize,
+        /// The input index of the second overlapping block in address order.
+        second: usize,
+    },
     /// An object's attributes need more space than a dense attribute heap can
     /// address: its offsets are 40 bits wide, so the blocks holding the
     /// attributes cannot span more than `limit` bytes between them. Reaching this
@@ -2518,6 +2532,15 @@ impl fmt::Display for FormatError {
                     "attribute {name:?} has a {size}-byte {field}, past the {limit}-byte limit of \
                      the attribute message's {field} size field"
                 )
+            }
+            Self::DenseAttributeBlockCount { expected, actual } => {
+                write!(
+                    f,
+                    "dense attribute placement requires {expected} blocks, got {actual}"
+                )
+            }
+            Self::DenseAttributeBlockOverlap { first, second } => {
+                write!(f, "dense attribute blocks {first} and {second} overlap")
             }
             Self::DenseAttributeHeapTooLarge { limit } => {
                 write!(
