@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::MetadataFrame;
 use hdf5_pure_core::MetadataBytes;
+use hdf5_pure_format::__private::BTreeV2CollectionRoot;
 pub use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::BTreeV2Layout;
 use hdf5_pure_format::__private::BTreeV2Node;
@@ -302,23 +303,24 @@ fn extent_in_source(
 
 /// Reads all records in tree order from the resident image at stored addresses.
 ///
-/// Returns an empty vector when either record count in `header` is zero. Parses each visited
-/// node with the header's type and geometry before reading its records and children.
+/// Checks the root fields with [`BTreeV2Layout::for_collection`] before reading nodes. Returns
+/// an empty vector for an undefined empty root or a defined zero-record root accepted for
+/// compatibility. Parses each visited node with the header's type and geometry.
 ///
 /// # Errors
 ///
-/// Returns errors from address conversion or B-tree parsing.
+/// Returns [`FormatError::InvalidBTreeV2Signature`] for contradictory root fields, and errors
+/// from address conversion or B-tree parsing.
 pub(crate) fn collect_btree_v2_records(
     source: StoredBytes<'_>,
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
 ) -> Result<Vec<BTreeV2Record>, FormatError> {
-    if header.total_records == 0 || header.num_records_in_root == 0 {
-        return Ok(Vec::new());
-    }
-
     let layout = BTreeV2Layout::for_collection(header, offset_width)?;
-    let root = layout.root().ok_or(FormatError::InvalidBTreeV2Signature)?;
+    let root = match layout.collection_root() {
+        BTreeV2CollectionRoot::Empty | BTreeV2CollectionRoot::LegacyEmpty => return Ok(Vec::new()),
+        BTreeV2CollectionRoot::NonEmpty(root) => root,
+    };
     let mut records = if header.depth == 0 {
         Vec::with_capacity(usize::from(header.num_records_in_root))
     } else {
@@ -352,24 +354,25 @@ fn collect_node_records(
 
 /// Reads all records in tree order through a stored-coordinate view.
 ///
-/// Returns an empty vector when either record count in `header` is zero. Each node is parsed with
-/// the header's type and geometry. The reader preserves the source's metadata ownership and
-/// physical ranges.
+/// Checks the root fields with [`BTreeV2Layout::for_collection`] before reading nodes. Returns
+/// an empty vector for an undefined empty root or a defined zero-record root accepted for
+/// compatibility. Parses each node with the header's type and geometry, preserving the source's
+/// metadata ownership and physical ranges.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidBTreeV2Signature`] for a repeated node address, and errors from
-/// metadata reads or B-tree parsing.
+/// Returns [`FormatError::InvalidBTreeV2Signature`] for contradictory root fields or a repeated
+/// node address, and errors from metadata reads or B-tree parsing.
 pub(crate) fn collect_btree_v2_records_from_source(
     source: &BTreeV2Source<'_, impl StoredRead + ?Sized>,
     header: &BTreeV2Header,
     offset_width: OffsetWidth,
 ) -> Result<Vec<BTreeV2Record>, FormatError> {
-    if header.total_records == 0 || header.num_records_in_root == 0 {
-        return Ok(Vec::new());
-    }
     let layout = BTreeV2Layout::for_collection(header, offset_width)?;
-    let root = layout.root().ok_or(FormatError::InvalidBTreeV2Signature)?;
+    let root = match layout.collection_root() {
+        BTreeV2CollectionRoot::Empty | BTreeV2CollectionRoot::LegacyEmpty => return Ok(Vec::new()),
+        BTreeV2CollectionRoot::NonEmpty(root) => root,
+    };
     let mut visited = BTreeSet::new();
     let mut records = Vec::new();
     collect_node_from_source(source, root, header.node_size, &mut visited, &mut records)?;
@@ -1529,10 +1532,20 @@ mod tests {
     fn tree_with_one_invalid_child(child_address: u64) -> (Vec<u8>, u64) {
         let mut image = Image::new();
         image.place(0, &[0u8; 64]);
-        let root = put_internal(&mut image, 5, &[], &[(child_address, 0, 0)], 1, None);
-        let header = btree_v2::Header::new(5, 11, root, 0)
+        let leaf = image
+            .append(&node_allocation(btree_v2::leaf(5, &[rec(0)])))
+            .to_u64();
+        let root = put_internal(
+            &mut image,
+            5,
+            &[rec(1)],
+            &[(child_address, 1, 1), (leaf, 1, 1)],
+            1,
+            None,
+        );
+        let header = btree_v2::Header::new(5, 11, root, 1)
             .depth(1)
-            .total_records(1)
+            .total_records(3)
             .build(WIDTHS);
         image.place(0, &header);
         (image.build(), child_address)
@@ -1561,6 +1574,56 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].data, rec1.to_vec());
         assert_eq!(records[1].data, rec2.to_vec());
+    }
+
+    #[rstest::rstest]
+    #[case::standard_empty(false, 0, 0, 0, true)]
+    #[case::legacy_empty(true, 0, 0, 0, true)]
+    #[case::missing_root_records(true, 0, 1, 0, false)]
+    #[case::missing_total_records(true, 1, 0, 0, false)]
+    #[case::undefined_nonempty(false, 1, 1, 0, false)]
+    #[case::undefined_internal_empty(false, 0, 0, 1, false)]
+    #[case::defined_internal_empty(true, 0, 0, 1, false)]
+    fn collection_root_fields_are_checked_before_node_reads(
+        #[case] defined: bool,
+        #[case] records: u16,
+        #[case] total: u64,
+        #[case] depth: u16,
+        #[case] accepted: bool,
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+    ) {
+        let header = BTreeV2Header {
+            tree_type: BTREE_V2_LINK_NAME,
+            node_size: BTREE_V2_NODE_SIZE,
+            record_size: 11,
+            depth,
+            root_node_address: if defined {
+                StoredAddress::new(512)
+            } else {
+                StoredAddress::undefined(width)
+            },
+            num_records_in_root: records,
+            total_records: total,
+        };
+        let expected = if accepted {
+            Ok(Vec::new())
+        } else {
+            Err(FormatError::InvalidBTreeV2Signature)
+        };
+        assert_eq!(
+            collect_btree_v2_records(crate::source::zero_base_bytes(&[]), &header, width),
+            expected
+        );
+        let source = crate::placed_source::PlacedSource::new(512, Vec::new());
+        assert_eq!(
+            collect_btree_v2_records_from_source(
+                &BTreeV2Source::new(&source.framed()),
+                &header,
+                width
+            ),
+            expected
+        );
+        assert_eq!(source.reads.take(), []);
     }
 
     #[test]
