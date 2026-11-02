@@ -83,7 +83,7 @@ fn allocations(
     initial_eof: u64,
 ) -> Vec<Extent> {
     let engine = test_util::open_engine(path);
-    let address = crate::group_v2::resolve_path_any_from_source(
+    let address = crate::group::v2::resolve_path_any_from_source(
         &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.superblock(),
@@ -157,7 +157,7 @@ fn allocations(
     );
     if let Some(heap) = links.info().fractal_heap_address {
         allocations.extend(
-            crate::group_v2::collect_dense_group_index_storage_extents(
+            crate::group::v2::collect_dense_group_index_storage_extents(
                 &source,
                 &links.info(),
                 engine.widths(),
