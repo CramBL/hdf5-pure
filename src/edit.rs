@@ -2916,10 +2916,7 @@ impl WriteEngine {
         if let Some(transition @ PageTransition::Pad { extent, .. }) =
             self.space.page_padding(eoa)?
         {
-            let length = extent.len().to_usize()?;
-            #[cfg(test)]
-            observations::record_zeros(length.to_u64(), length);
-            self.append(&vec![0u8; length])?;
+            self.pad_page_extent(extent)?;
             self.space.record_page_padding(transition);
         }
         Ok(())
@@ -2972,6 +2969,28 @@ impl WriteEngine {
         self.write_at(at.get(), region.bytes())
     }
 
+    /// Writes a planned PAGE gap at the image end using bounded zero scratch.
+    ///
+    /// Resolves the stored extent against the effective base. The caller records the PAGE
+    /// transition after this write succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the gap does not start at the image end, or
+    /// [`FormatError::OffsetOverflow`] if its physical range exceeds [`u64::MAX`].
+    /// Returns padding errors from [`Self::pad_zeros_to`].
+    fn pad_page_extent(&mut self, extent: FreeExtent) -> Result<(), Error> {
+        let start = self.context.addresses().resolve(extent.start())?;
+        if self.image.len() != start.get() {
+            return Err(FormatError::Internal(
+                "planned PAGE padding does not begin at the image end".into(),
+            )
+            .into());
+        }
+        let range = FileRange::new(start, extent.len())?;
+        self.pad_zeros_to(range.end().get())
+    }
+
     /// Extends the image to `target` using bounded zero scratch.
     ///
     /// The caller passes a target at or beyond the current image length.
@@ -3020,17 +3039,13 @@ impl WriteEngine {
     /// address out from under them.
     fn begin_page(&mut self, ty: PageType) -> Result<(), Error> {
         let eoa = self.end_of_allocation()?;
-        let Self { image, space, .. } = self;
-        let Some(transition) = space.plan_transition(eoa, ty)? else {
+        let Some(transition) = self.space.plan_transition(eoa, ty)? else {
             return Ok(());
         };
         if let PageTransition::Pad { extent, .. } = transition {
-            let length = extent.len().to_usize()?;
-            #[cfg(test)]
-            observations::record_zeros(length.to_u64(), length);
-            image.append(&vec![0u8; length])?;
+            self.pad_page_extent(extent)?;
         }
-        space.record_transition(ty, transition);
+        self.space.record_transition(ty, transition);
         Ok(())
     }
 

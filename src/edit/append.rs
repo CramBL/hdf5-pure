@@ -843,10 +843,7 @@ impl EditStore<'_> {
         let bytes = Self::prepare_allocation_bytes(length, address, prepare)?;
         if let Some(transition) = transition {
             if let PageTransition::Pad { extent, .. } = transition {
-                let length = extent.len().to_usize()?;
-                #[cfg(test)]
-                super::observations::record_zeros(length.to_u64(), length);
-                self.engine.image.append(&vec![0u8; length])?;
+                self.engine.pad_page_extent(extent)?;
             }
             self.engine
                 .space
@@ -1192,3 +1189,6 @@ pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
 ///
 /// The first batch may also include the elements needed to fill an existing partial chunk.
 pub(super) const APPEND_BATCH_BYTES: u64 = 1 << 20;
+
+#[cfg(test)]
+mod tests;

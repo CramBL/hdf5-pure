@@ -13,6 +13,7 @@ use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
 };
 use crate::edit::WriteEngine;
+use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
@@ -376,17 +377,27 @@ fn emission_length_mismatch_preserves_the_pending_reservation() {
 }
 
 fn engine(strategy: FileSpaceStrategy, userblock: u64) -> (tempfile::TempDir, WriteEngine) {
+    engine_with_page(strategy, userblock, FileSpacePageSize::DEFAULT)
+}
+
+fn engine_with_page(
+    strategy: FileSpaceStrategy,
+    userblock: u64,
+    page_size: FileSpacePageSize,
+) -> (tempfile::TempDir, WriteEngine) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reservations.h5");
     let mut builder = FileBuilder::new();
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.with_file_space_settings(
-        FileSpaceSettings::new(strategy).with_persistence(strategy == FileSpaceStrategy::Page),
+        FileSpaceSettings::new(strategy)
+            .with_persistence(strategy == FileSpaceStrategy::Page)
+            .with_page_size(page_size),
     );
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
     if strategy == FileSpaceStrategy::Page {
-        engine.space = SessionSpace::from_strategy(Some(strategy), 1, FileSpacePageSize::DEFAULT);
+        engine.space = SessionSpace::from_strategy(Some(strategy), 1, page_size);
     }
     (directory, engine)
 }
@@ -444,6 +455,197 @@ fn block_reservations_keep_capacity_separate_from_encoding(#[case] reused: bool)
         engine.space.reusable_bytes().unwrap(),
         if reused { 32 } else { 0 }
     );
+}
+
+#[rstest]
+#[case::scalar(true)]
+#[case::batch(false)]
+fn large_page_reservations_emit_bounded_transition_padding(
+    #[case] scalar: bool,
+    #[values(0, 262_144)] base: u64,
+) {
+    let page = 262_144;
+    let (_directory, mut engine) = engine_with_page(
+        FileSpaceStrategy::Page,
+        base,
+        FileSpacePageSize::try_from(page).unwrap(),
+    );
+    engine.begin_page(PageType::Meta).unwrap();
+    engine.append(&[17; 19]).unwrap();
+    let start = engine.image.len();
+    observations::reset_zeros();
+    let address = if scalar {
+        let placement = engine.reserve(16, AllocationClass::Raw).unwrap();
+        engine.place(placement, &[23; 16]).unwrap()
+    } else {
+        let requests = [request(16, PageType::Raw), request(32, PageType::Meta)];
+        let mut plan = planned(&mut engine, &requests);
+        let address = plan.write_next(&[23; 16]).unwrap().get();
+        assert_eq!(
+            plan.write_next(&[29; 32]).unwrap().get(),
+            start + 2 * page - 19
+        );
+        plan.finish().unwrap();
+        address
+    };
+    assert_eq!(address, start + page - 19);
+    assert_eq!(engine.image().read_exact_at(address, 16).unwrap(), [23; 16]);
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(start, (page - 19) as usize)
+            .unwrap(),
+        vec![0; (page - 19) as usize]
+    );
+    assert_eq!(
+        engine.space.pending_padding(PageType::Meta).unwrap(),
+        [extent(start - base, page - 19)]
+    );
+    assert_eq!(
+        engine.image.len(),
+        if scalar {
+            address + 16
+        } else {
+            address + page + 32
+        }
+    );
+    assert_eq!(
+        observations::zero_work(),
+        ZeroWork {
+            calls: if scalar { 1 } else { 2 },
+            bytes: page - 19 + if scalar { 0 } else { page - 16 },
+            scratch_peak: 65_536
+        }
+    );
+}
+
+#[test]
+fn large_appended_capacity_remains_owned_after_bounded_zero_emission() {
+    let (_directory, mut engine) = engine(FileSpaceStrategy::None, 4096);
+    let start = engine.image.len();
+    let capacity = 196_624;
+    let requests = [BlockRequest::new(
+        request(capacity, PageType::Raw),
+        16,
+        EncodingDependency::Independent,
+    )
+    .unwrap()];
+    observations::reset_zeros();
+    let mut plan = engine
+        .plan_blocks(&requests)
+        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+    assert_eq!(
+        plan.reservations()[0].range(),
+        FileRange::new(PhysicalAddress::new(start), capacity).unwrap()
+    );
+    assert_eq!(plan.write_next(&[31; 16]).unwrap().get(), start);
+    plan.finish().unwrap();
+    assert_eq!(engine.image.len(), start + capacity);
+    assert_eq!(engine.image().read_exact_at(start, 16).unwrap(), [31; 16]);
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(start + 16, (capacity - 16) as usize)
+            .unwrap(),
+        vec![0; (capacity - 16) as usize]
+    );
+    assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
+    assert_eq!(
+        observations::zero_work(),
+        ZeroWork {
+            calls: 1,
+            bytes: capacity - 16,
+            scratch_peak: 65_536
+        }
+    );
+}
+
+#[rstest]
+#[case::transition(false)]
+#[case::capacity(true)]
+fn partial_zero_emission_blocks_later_reservations_and_retains_owned_capacity(
+    #[case] capacity: bool,
+) {
+    let page = 262_144;
+    let (_directory, mut engine) = engine_with_page(
+        FileSpaceStrategy::Page,
+        page,
+        FileSpacePageSize::try_from(page).unwrap(),
+    );
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    engine.begin_page(PageType::Raw).unwrap();
+    let start = engine.image.len();
+    let requests = [
+        BlockRequest::complete(request(16, PageType::Raw), EncodingDependency::Independent),
+        BlockRequest::new(
+            request(
+                if capacity { page } else { 32 },
+                if capacity {
+                    PageType::Raw
+                } else {
+                    PageType::Meta
+                },
+            ),
+            32,
+            EncodingDependency::Independent,
+        )
+        .unwrap(),
+        BlockRequest::complete(request(16, PageType::Raw), EncodingDependency::Independent),
+    ];
+    let mut plan = engine
+        .plan_blocks(&requests)
+        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+    plan.write_next(&[17; 16]).unwrap();
+    disk_log::fail_write_after(if capacity { 2 } else { 1 }, 7);
+    let error = plan.write_next(&[23; 32]).unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected I/O error, got {error:?}")
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert_eq!(plan.next, 1);
+    assert!(plan.failed);
+    assert_eq!(
+        plan.engine.image.len(),
+        start + if capacity { 48 } else { 16 } + 65_536
+    );
+    assert_eq!(
+        plan.engine.space.paged_tail_type(),
+        Some(Some(PageType::Raw))
+    );
+    assert_eq!(
+        plan.engine.space.pending_padding(PageType::Raw).unwrap(),
+        []
+    );
+    assert_eq!(
+        plan.engine.space.pending_padding(PageType::Meta).unwrap(),
+        []
+    );
+    assert_eq!(
+        plan.engine
+            .image()
+            .read_exact_at(start + if capacity { 48 } else { 16 }, 65_536)
+            .unwrap(),
+        vec![0; 65_536]
+    );
+    if capacity {
+        assert_eq!(
+            plan.engine.image().read_exact_at(start + 16, 32).unwrap(),
+            [23; 32]
+        );
+    }
+    assert!(plan.end().get() > plan.engine.image.len());
+    assert_eq!(plan.reservations().len(), 3);
+    let error = plan.write_next(&[31; 16]).unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == "reservation plan has an earlier failed write"),
+        "{error:?}"
+    );
+    drop(plan);
+    assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
+    assert_eq!(engine.image().read_exact_at(start, 16).unwrap(), [17; 16]);
 }
 
 fn planned<'a>(
