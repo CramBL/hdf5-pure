@@ -137,6 +137,7 @@ use crate::chunked_write::PartialEdgeFiltering;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
+use crate::dataset_request::StagedFill;
 use crate::dataspace::MaxExtent;
 use crate::datatype::{self, Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
@@ -821,7 +822,7 @@ fn emit_dataset(
                 "dataset {path}: filter pipeline requires chunked storage"
             )));
         }
-        db.fill = fill;
+        db.fill = fill.map(|bytes| StagedFill::source(datatype.clone(), bytes));
         db.with_unallocated_storage(datatype, &dims);
         db.chunk_options.unallocated_pipeline = ds.filter_pipeline_message_bytes()?;
         carry_shape_and_pipeline(
@@ -893,7 +894,7 @@ fn emit_dataset(
 
     // Past the reference-bearing paths: carry the fill value through the
     // fixed-size storage paths below, both of which reproduce it exactly.
-    db.fill = fill;
+    db.fill = fill.map(|bytes| StagedFill::source(datatype.clone(), bytes));
 
     // A chunked dataset with allocated chunks is copied chunk-by-chunk, verbatim:
     // each compressed chunk is laid into the output without decoding, so any

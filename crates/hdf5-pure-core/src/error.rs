@@ -269,6 +269,10 @@ pub enum FormatError {
         /// The supplied buffer length in bytes.
         bytes_length: u64,
     },
+    /// A fill value's storage encoding is incompatible with the dataset datatype.
+    ///
+    /// The fill value has the correct byte width for one element.
+    FillValueDatatypeMismatch,
     /// A user-supplied fill value's byte width does not match the dataset's
     /// datatype element size (for example a `u8` fill value on an `i32`
     /// dataset).
@@ -2387,6 +2391,12 @@ impl fmt::Display for FormatError {
             }
             Self::UnsupportedFillValueVersion(v) => {
                 write!(f, "unsupported fill value message version: {v}")
+            }
+            Self::FillValueDatatypeMismatch => {
+                write!(
+                    f,
+                    "fill value storage datatype does not match the dataset datatype"
+                )
             }
             Self::FillValueSizeMismatch { expected, actual } => {
                 write!(

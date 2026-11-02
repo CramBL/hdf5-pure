@@ -22,6 +22,10 @@ use crate::type_builders::{
     VlStringStaging,
 };
 
+mod fill;
+
+pub(crate) use fill::{PreparedFill, StagedFill};
+
 /// A dataset request with a nonzero element width and checked shape, payload, fill, and attributes.
 ///
 /// Explicit creation options are preserved until conversion to a backend operation. Deferred
@@ -48,7 +52,9 @@ impl PreparedDataset {
     /// [`FormatError::LogicalShapeDataMismatch`] if an allocated element buffer's length or a
     /// producer's declared byte length disagrees with that extent,
     /// [`FormatError::InvalidChunkGeometry`] if chunk dimensions or maxima are incompatible, or
-    /// [`FormatError::FillValueSizeMismatch`] if a fill value is not one element wide.
+    /// [`FormatError::FillValueSizeMismatch`] if a fill value is not one element wide. Returns
+    /// [`FormatError::FillValueDatatypeMismatch`] if the fill's storage encoding is incompatible
+    /// with the dataset datatype. Propagates a staged fill type-construction error.
     ///
     /// With the `provenance` feature, returns [`FormatError::DatasetProvenanceRequiresData`] for a
     /// nonempty unallocated declaration with requested checksums. Propagates datatype, storage,
@@ -125,14 +131,9 @@ impl PreparedDataset {
                 .and_then(|geometry| chunk_options.validate_geometry(geometry))
                 .map_err(FormatError::InvalidChunkGeometry)?;
         }
-        if let Some(fill) = &fill {
-            if fill.len() != element_size.get() {
-                return Err(FormatError::FillValueSizeMismatch {
-                    expected: element_size.get(),
-                    actual: fill.len(),
-                });
-            }
-        }
+        let fill = fill
+            .map(|fill| PreparedFill::parse(fill, &dt, element_size))
+            .transpose()?;
         #[cfg(feature = "provenance")]
         if unallocated && extent != 0 && provenance.is_some() {
             return Err(FormatError::DatasetProvenanceRequiresData);
@@ -337,7 +338,8 @@ pub(crate) struct DatasetMetadata {
     pub(crate) extent: u64,
     pub(crate) attrs: PreparedAttributes,
     pub(crate) chunk_options: ChunkOptions,
-    pub(crate) fill: Option<Vec<u8>>,
+    /// One checked fill element, or `None` for the library default.
+    pub(crate) fill: Option<PreparedFill>,
     /// The explicitly supplied fill policy, before default normalization.
     pub(crate) fill_time: Option<FillTime>,
     /// The committed datatype target awaiting address resolution, if supplied.
@@ -787,6 +789,27 @@ mod tests {
             panic!("expected conflicting storage sources");
         };
         assert_eq!(error, FormatError::ConflictingDatasetStorage);
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::chunks(true)]
+    #[case::producer(false)]
+    fn incompatible_fills_are_rejected_without_reading_providers(#[case] chunks: bool) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_f32_data(&[1.0]).with_fill_value([1_u8; 4]);
+        builder.data = None;
+        if chunks {
+            builder.raw_chunks = Some(raw_chunks());
+        } else {
+            let mut produced = produced_bytes();
+            produced.total_bytes = 4;
+            builder.produced = Some(produced);
+        }
+        let Err(error) = PreparedDataset::parse(builder) else {
+            panic!("expected an incompatible fill");
+        };
+        assert_eq!(error, FormatError::FillValueDatatypeMismatch);
     }
 
     struct UnreadProvider;

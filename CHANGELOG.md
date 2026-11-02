@@ -89,6 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `DatasetBuilder::with_fill_value` accepting equal-width fill values with incompatible storage datatypes, including through creation properties. Dataset preparation rejects mismatched encodings before writing storage.
 - Fixed `File::commit` ignoring stored attribute thresholds when compact sets grow or dense sets shrink. Repacking preserves stored thresholds and attribute creation metadata ([#1048](https://github.com/CramBL/hdf5-pure/pull/1048), [#1049](https://github.com/CramBL/hdf5-pure/pull/1049)).
 - Fixed invalid tag lengths and padded logical tags in `Datatype::Opaque` metadata. Reading rejects malformed tag properties, and writing rejects tags with NULs or more than 247 bytes ([#1045](https://github.com/CramBL/hdf5-pure/pull/1045)).
 - Fixed `File::commit` accepting oversized hard Link messages during staged edits ([#1047](https://github.com/CramBL/hdf5-pure/pull/1047)).

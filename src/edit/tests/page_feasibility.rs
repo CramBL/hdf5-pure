@@ -26,6 +26,7 @@ use crate::access_mode::AccessMode;
 use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
 };
+use crate::dataset_request::PreparedFill;
 use crate::edit;
 use crate::edit::WriteEngine;
 use crate::edit::retirement::RootRetirement;
@@ -211,7 +212,7 @@ impl WriteEngine {
             &dataset.attrs,
             None,
             dataset.fill_time,
-            dataset.fill.as_deref(),
+            dataset.fill.as_ref().map(PreparedFill::as_bytes),
             self.libver(),
             file_writer::HeaderOptions::PLAIN,
         )
