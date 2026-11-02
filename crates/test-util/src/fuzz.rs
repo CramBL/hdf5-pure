@@ -3,6 +3,7 @@
 use crate::btree_v1;
 use crate::bytes;
 use crate::image::Image;
+use crate::legacy;
 use crate::local_heap::Segment;
 use crate::object_header::{Message, MessageType, v1};
 use crate::superblock::v0::Fields;
@@ -61,4 +62,99 @@ pub fn truncated_group_btree_header() -> Vec<u8> {
     tail[..4].copy_from_slice(&[0xf0, 0x3f, 0, 0]);
     image.place(0x888, &tail);
     image.build()
+}
+
+/// Constructs a dataset file whose group B-tree root points twice to one leaf.
+///
+/// Uses the dataset from [`legacy::simple_dataset`] and duplicates its B-tree leaf reference.
+pub fn repeated_group_btree_leaf() -> Vec<u8> {
+    let mut image = legacy::simple_dataset();
+    let Fields {
+        widths,
+        base_address: _,
+        eof_address_at,
+        root_header_address,
+    } = Fields::read(&image, 0);
+    let table = v1::root_group_chunks(&image)
+        .into_iter()
+        .flat_map(|chunk| chunk.records)
+        .find(|record| record.msg_type == MessageType::SYMBOL_TABLE)
+        .unwrap();
+    let leaf = bytes::uint_at(&image, table.body.start, widths.offset);
+    let root = image.len().next_multiple_of(8);
+    let mut node = btree_v1::node_with_group_keys(
+        btree_v1::NodeType::GROUP,
+        1,
+        &[0, 1, 1],
+        &[leaf, leaf],
+        widths,
+    );
+    let capacity = usize::try_from(root_header_address - leaf).unwrap();
+    assert!(node.len() <= capacity);
+    node.resize(capacity, 0);
+    image.resize(root, 0);
+    image.extend_from_slice(&node);
+    bytes::set_uint_at(
+        &mut image,
+        table.body.start,
+        widths.offset,
+        u64::try_from(root).unwrap(),
+    );
+    let eof = u64::try_from(image.len()).unwrap();
+    bytes::set_uint_at(&mut image, eof_address_at, widths.offset, eof);
+    image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_group_fixture_has_two_references_to_one_leaf() {
+        let image = repeated_group_btree_leaf();
+        let fields = Fields::read(&image, 0);
+        let table = v1::root_group_chunks(&image)
+            .into_iter()
+            .flat_map(|chunk| chunk.records)
+            .find(|record| record.msg_type == MessageType::SYMBOL_TABLE)
+            .unwrap();
+        let root = usize::try_from(bytes::uint_at(
+            &image,
+            table.body.start,
+            fields.widths.offset,
+        ))
+        .unwrap();
+        assert_eq!(
+            &image[root..root + btree_v1::SIGNATURE.len()],
+            btree_v1::SIGNATURE
+        );
+        assert_eq!(
+            &image[root + btree_v1::SIGNATURE.len()..root + btree_v1::SIGNATURE.len() + 4],
+            &[btree_v1::NodeType::GROUP.0, 1, 2, 0]
+        );
+        let first_child =
+            root + btree_v1::SIGNATURE.len() + 4 + 2 * fields.widths.offset + fields.widths.length;
+        let leaf = bytes::uint_at(&image, first_child, fields.widths.offset);
+        assert_eq!(
+            bytes::uint_at(
+                &image,
+                first_child + fields.widths.offset + fields.widths.length,
+                fields.widths.offset
+            ),
+            leaf
+        );
+        let leaf = usize::try_from(leaf).unwrap();
+        assert_eq!(
+            &image[leaf..leaf + btree_v1::SIGNATURE.len()],
+            btree_v1::SIGNATURE
+        );
+        assert_eq!(
+            &image[leaf + btree_v1::SIGNATURE.len()..leaf + btree_v1::SIGNATURE.len() + 4],
+            &[btree_v1::NodeType::GROUP.0, 0, 1, 0]
+        );
+        assert_eq!(
+            bytes::uint_at(&image, fields.eof_address_at, fields.widths.offset),
+            u64::try_from(image.len()).unwrap()
+        );
+    }
 }

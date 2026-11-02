@@ -2920,6 +2920,7 @@ mod tests {
     use hdf5_pure_format::__private::FilteredSingleChunk;
     use rstest::rstest;
     use test_util::btree_v1;
+    use test_util::btree_v1::{TraversalShape, TraversalTree};
     use test_util::btree_v2;
     use test_util::bytes as test_bytes;
     use test_util::widths::Widths;
@@ -5170,6 +5171,75 @@ mod tests {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
     const CHUNK_BTREE_PREFIX_LEN: usize = 8;
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::single_leaf(TraversalShape::Binary(0))]
+    #[case::sixteen_leaves(TraversalShape::Binary(4))]
+    #[case::two_hundred_fifty_six_leaves(TraversalShape::Binary(8))]
+    #[case::deep_unique_chain(TraversalShape::Chain(u8::MAX))]
+    #[case::shared_chain(TraversalShape::SharedChain(12))]
+    fn chunk_storage_work_matches_distinct_node_count(#[case] shape: TraversalShape) {
+        let TraversalTree {
+            bytes,
+            nodes,
+            payloads,
+        } = TraversalTree::chunk(shape);
+        let source = PlacedSource::new(512, bytes);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![1, 4],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::ZERO),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![payloads.len().to_u64()],
+            max_dimensions: None,
+        };
+        let actual =
+            collect_chunked_storage_spans(&source.framed(), &layout, &dataspace, FORMAT_WIDTHS);
+        let walks = match shape {
+            TraversalShape::Binary(_) | TraversalShape::Chain(_) => {
+                let mut spans = actual.unwrap();
+                spans.index.sort_unstable();
+                assert_eq!(
+                    spans.index,
+                    stored_ranges(nodes.iter().map(|&(address, len)| (address, len.to_u64())))
+                );
+                assert_eq!(
+                    spans.data,
+                    stored_ranges(payloads.iter().map(|&address| (address, 4)))
+                );
+                2
+            }
+            TraversalShape::SharedChain(_) => {
+                let Err(error) = actual else {
+                    panic!("expected invalid chunk tree");
+                };
+                assert_eq!(error, FormatError::InvalidBTreeSignature);
+                1
+            }
+        };
+        let reads = source.reads.take();
+        assert_eq!(reads.len(), 2 * walks * nodes.len());
+        for pass in reads.chunks_exact(2 * nodes.len()) {
+            let mut observed = pass
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| {
+                    assert_eq!(pair[0].1, CHUNK_BTREE_PREFIX_LEN);
+                    assert_eq!(pair[1].0, pair[0].0 + CHUNK_BTREE_PREFIX_LEN.to_u64());
+                    (pair[0].0 - 512, pair[1].1 + CHUNK_BTREE_PREFIX_LEN)
+                })
+                .collect::<Vec<_>>();
+            observed.sort_unstable();
+            assert_eq!(observed, nodes);
+        }
+    }
 
     #[test]
     fn btree_v1_source_traversals_reject_cyclic_nodes() {

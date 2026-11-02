@@ -5,7 +5,124 @@
 //! offset, and a type 1 node indexes a dataset's chunks by their coordinates.
 
 use crate::bytes;
+use crate::image::Image;
 use crate::widths::Widths;
+
+/// An in-memory traversal fixture with expected node and payload addresses.
+pub struct TraversalTree {
+    /// The node image, including chunk payload bytes for a chunk fixture.
+    pub bytes: Vec<u8>,
+    /// Each node's stored address and in-use byte length, in address order.
+    pub nodes: Vec<(u64, usize)>,
+    /// One stored payload address per leaf, in leaf order.
+    pub payloads: Vec<u64>,
+}
+
+impl TraversalTree {
+    /// Builds group nodes whose leaf pointers name synthetic symbol table addresses.
+    ///
+    /// The image contains node bytes only.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a binary tree's root level exceeds eight.
+    pub fn group(shape: TraversalShape) -> Self {
+        Self::build(shape, TreeKind::Group)
+    }
+
+    /// Builds chunk nodes with one four-byte payload per leaf.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a binary tree's root level exceeds eight.
+    pub fn chunk(shape: TraversalShape) -> Self {
+        Self::build(shape, TreeKind::Chunk)
+    }
+
+    fn build(shape: TraversalShape, kind: TreeKind) -> Self {
+        let (depth, count) = match shape {
+            TraversalShape::Binary(depth) => {
+                assert!(depth <= 8);
+                (depth, (1usize << (depth + 1)) - 1)
+            }
+            TraversalShape::Chain(depth) | TraversalShape::SharedChain(depth) => {
+                (depth, usize::from(depth) + 1)
+            }
+        };
+        let mut image = Image::new();
+        let mut nodes = Vec::new();
+        let mut payloads = Vec::new();
+        for index in 0..count {
+            let level = match shape {
+                TraversalShape::Binary(_) => depth - u8::try_from((index + 1).ilog2()).unwrap(),
+                TraversalShape::Chain(_) | TraversalShape::SharedChain(_) => {
+                    depth - u8::try_from(index).unwrap()
+                }
+            };
+            let children = if level == 0 {
+                let address = PAYLOAD_BASE + u64::try_from(payloads.len()).unwrap() * 4;
+                payloads.push(address);
+                vec![address]
+            } else {
+                match shape {
+                    TraversalShape::Binary(_) => vec![
+                        u64::try_from(2 * index + 1).unwrap() * NODE_STRIDE,
+                        u64::try_from(2 * index + 2).unwrap() * NODE_STRIDE,
+                    ],
+                    TraversalShape::Chain(_) => {
+                        vec![u64::try_from(index + 1).unwrap() * NODE_STRIDE]
+                    }
+                    TraversalShape::SharedChain(_) => {
+                        vec![u64::try_from(index + 1).unwrap() * NODE_STRIDE; 2]
+                    }
+                }
+            };
+            let keys = match kind {
+                TreeKind::Group => (0..=children.len())
+                    .map(|key| group_key(u64::try_from(key).unwrap(), Widths::EIGHT))
+                    .collect::<Vec<_>>(),
+                TreeKind::Chunk => (0..=children.len())
+                    .map(|key| {
+                        let offset = if level == 0 {
+                            u64::try_from(payloads.len() - 1 + key).unwrap()
+                        } else {
+                            u64::try_from(key).unwrap()
+                        };
+                        chunk_key(4, 0, &[offset, 0])
+                    })
+                    .collect(),
+            };
+            let node_type = match kind {
+                TreeKind::Group => NodeType::GROUP,
+                TreeKind::Chunk => NodeType::CHUNK,
+            };
+            let bytes = node(node_type, level, &keys, &children, Widths::EIGHT);
+            assert!(bytes.len() <= usize::try_from(NODE_STRIDE).unwrap());
+            let address = u64::try_from(index).unwrap() * NODE_STRIDE;
+            image.place(usize::try_from(address).unwrap(), &bytes);
+            if level == 0 && matches!(kind, TreeKind::Chunk) {
+                image.place(usize::try_from(children[0]).unwrap(), &[1, 0, 0, 0]);
+            }
+            nodes.push((address, bytes.len()));
+        }
+        Self {
+            bytes: image.build(),
+            nodes,
+            payloads,
+        }
+    }
+}
+
+/// The child-pointer arrangement and root level of a traversal fixture.
+#[derive(Clone, Copy, Debug)]
+pub enum TraversalShape {
+    /// A complete binary tree with the supplied root level.
+    Binary(u8),
+    /// A chain with one node per level.
+    Chain(u8),
+    /// A chain with two pointers to the same child at each internal node.
+    SharedChain(u8),
+}
 
 /// The bytes of one node, whose `keys` are the raw key bytes of each entry and
 /// which holds one more key than it has children.
@@ -123,3 +240,12 @@ impl NodeType {
 }
 
 pub const SIGNATURE: &[u8; 4] = b"TREE";
+
+#[derive(Clone, Copy)]
+enum TreeKind {
+    Group,
+    Chunk,
+}
+
+const NODE_STRIDE: u64 = 128;
+const PAYLOAD_BASE: u64 = 0x10_0000;
