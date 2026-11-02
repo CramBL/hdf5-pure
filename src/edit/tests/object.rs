@@ -1588,7 +1588,7 @@ fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
         session.context.superblock().root_group_address,
         StoredAddress::undefined(OffsetWidth::Eight)
     );
-    let err = crate::group_v2::resolve_path_any_from_source(
+    let err = crate::group::v2::resolve_path_any_from_source(
         &session.opened_source(),
         AccessMode::ReadWrite,
         session.context.superblock(),

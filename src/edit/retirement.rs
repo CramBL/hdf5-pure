@@ -161,7 +161,7 @@ mod tests {
     use crate::edit::test_util as edit_test_util;
     use crate::edit::{AppendTarget, WriteEngine};
     use crate::error::{Error, FormatError};
-    use crate::group_v2;
+    use crate::group::v2 as group_v2;
     use crate::image::WriteBuffering;
     use crate::object_path::{ObjectPath, ObjectPathBuf};
     use crate::superblock;

@@ -12,7 +12,7 @@ use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_lock::FileLocking;
-use crate::group_v2;
+use crate::group::v2 as group_v2;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPath;
 

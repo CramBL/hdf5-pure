@@ -47,7 +47,7 @@ fn dense_reversion_preserves_encoded_records_and_prefix() {
     drop(group);
     file.close().unwrap();
     let mut engine = test_util::open_engine(&path);
-    let address = crate::group_v2::resolve_path_any_from_source(
+    let address = crate::group::v2::resolve_path_any_from_source(
         &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.superblock(),

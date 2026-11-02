@@ -103,7 +103,7 @@ impl WriteEngine {
             let bytes = physical.resident().ok_or(Error::EditUnsupported(
                 "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
             ))?;
-            let src_addr = crate::group_v2::resolve_path_any(
+            let src_addr = crate::group::v2::resolve_path_any(
                 bytes,
                 source.access_mode(),
                 src_sb,

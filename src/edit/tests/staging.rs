@@ -449,7 +449,7 @@ fn an_append_onto_a_staged_dataset_grows_the_pending_creation() {
     assert!(e.staged.appends().is_empty());
 
     e.commit().unwrap();
-    let addr = crate::group_v2::resolve_path_any_from_source(
+    let addr = crate::group::v2::resolve_path_any_from_source(
         &e.opened_source(),
         AccessMode::ReadWrite,
         e.superblock(),
@@ -613,7 +613,7 @@ fn deleting_a_staged_replacement_leaves_the_plain_deletion() {
     assert_eq!(kind(&e, "existing"), None);
     assert_eq!(e.staged.deletes().len(), 1);
     e.commit().unwrap();
-    let error = crate::group_v2::resolve_path_any_from_source(
+    let error = crate::group::v2::resolve_path_any_from_source(
         &e.opened_source(),
         AccessMode::ReadWrite,
         e.superblock(),

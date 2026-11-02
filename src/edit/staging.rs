@@ -277,7 +277,7 @@ impl WriteEngine {
         let source = self.opened_source();
         let physical = PhysicalSource::new(&source);
         match physical.resident() {
-            Some(bytes) => crate::group_v2::resolve_path_any(
+            Some(bytes) => crate::group::v2::resolve_path_any(
                 bytes,
                 AccessMode::ReadWrite,
                 self.context.superblock(),
@@ -285,7 +285,7 @@ impl WriteEngine {
                 &path.as_path(),
             )
             .is_ok(),
-            None => crate::group_v2::resolve_path_any_from_source(
+            None => crate::group::v2::resolve_path_any_from_source(
                 &source,
                 AccessMode::ReadWrite,
                 self.context.superblock(),

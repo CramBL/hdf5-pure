@@ -428,7 +428,7 @@ impl WriteEngine {
                     "the same dataset is overwritten twice in one commit; use separate commits",
                 ));
             }
-            let addr = crate::group_v2::resolve_path_any_from_source(
+            let addr = crate::group::v2::resolve_path_any_from_source(
                 &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
@@ -497,7 +497,7 @@ impl WriteEngine {
                     "the same dataset is edited more than once in one commit; use separate commits",
                 ));
             }
-            let addr = crate::group_v2::resolve_path_any_from_source(
+            let addr = crate::group::v2::resolve_path_any_from_source(
                 &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
@@ -560,7 +560,7 @@ impl WriteEngine {
                          edit plus another edit); use separate commits",
                     ));
                 }
-                let addr = crate::group_v2::resolve_path_any_from_source(
+                let addr = crate::group::v2::resolve_path_any_from_source(
                     &self.opened_source(),
                     AccessMode::ReadWrite,
                     self.context.superblock(),
@@ -649,7 +649,7 @@ impl WriteEngine {
                     "cannot copy an object into itself or its own subtree",
                 ));
             }
-            let src_addr = crate::group_v2::resolve_path_any_from_source(
+            let src_addr = crate::group::v2::resolve_path_any_from_source(
                 &self.opened_source(),
                 AccessMode::ReadWrite,
                 self.context.superblock(),
@@ -699,7 +699,7 @@ impl WriteEngine {
                 .and_then(|topology| topology.find_link(d))
             {
                 Some((_, id)) => id.header_address().get(),
-                None => crate::group_v2::resolve_path_any_from_source(
+                None => crate::group::v2::resolve_path_any_from_source(
                     &self.opened_source(),
                     AccessMode::ReadWrite,
                     self.context.superblock(),
@@ -789,7 +789,7 @@ impl WriteEngine {
             if node.is_new {
                 node.prepared.region = group::fresh_group_region();
             } else {
-                let addr = crate::group_v2::resolve_path_any_from_source(
+                let addr = crate::group::v2::resolve_path_any_from_source(
                     &self.opened_source(),
                     AccessMode::ReadWrite,
                     self.context.superblock(),
@@ -1187,7 +1187,7 @@ impl WriteEngine {
             ));
         }
         Ok(
-            match crate::group_v2::resolve_path_any_from_source(
+            match crate::group::v2::resolve_path_any_from_source(
                 src,
                 AccessMode::ReadWrite,
                 context.superblock(),

@@ -40,7 +40,7 @@ pub(super) fn open_bounded_session(path: &Path) -> WriteEngine {
 
 /// Resolves dataset `d` to its absolute position in the session image.
 pub(super) fn dataset_addr(engine: &WriteEngine) -> u64 {
-    crate::group_v2::resolve_path_any_from_source(
+    crate::group::v2::resolve_path_any_from_source(
         &engine.opened_source(),
         AccessMode::ReadWrite,
         engine.superblock(),

@@ -8,7 +8,7 @@ use test_util_hdf5::global_heap_fixture::{self, Fixture};
 use super::{AnalysisPhase, DISCOVERY_WORK};
 use crate::access_mode::AccessMode;
 use crate::edit::test_util as edit_test_util;
-use crate::group_v2;
+use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
 use crate::object_graph::TraversalBudget;

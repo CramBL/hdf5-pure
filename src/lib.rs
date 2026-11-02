@@ -439,9 +439,6 @@
 
 extern crate alloc;
 
-pub(crate) use crate::group::v1 as group_v1;
-pub(crate) use crate::group::v2 as group_v2;
-
 #[cfg(doc)]
 pub mod _guide;
 
