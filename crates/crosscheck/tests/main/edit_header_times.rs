@@ -1,21 +1,9 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! The optional prefix blocks of a version 2 object header survive an in-place
-//! edit (PR #422).
+//! Native checks of version 2 timestamps and attribute thresholds across edits and repacking.
 //!
-//! A version 2 object header may carry two blocks between its flags byte and its
-//! chunk-0 size field: four timestamps (access, modification, change, birth) and
-//! the attribute phase-change thresholds. libhdf5 stores the
-//! timestamps on **every** v2 header it writes — `H5O_CRT_OHDR_FLAGS_DEF` is
-//! `H5O_HDR_STORE_TIMES` — so this reaches every file libhdf5, h5py or netCDF-4
-//! produces in the latest format, and `EditSession` used to drop both blocks on
-//! any rewrite, leaving `H5Oget_info` reporting four zeroed times.
-//!
-//! The fixture has to come from the C library: nothing in this crate's whole-file
-//! writer emits either block, so a fixture written here would only test the
-//! editor against itself. And the assertion has to come from the C library too —
-//! this crate exposes no timestamp reader at all, so the C library's object info
-//! is the only thing that can say the file still means what it meant.
+//! Fixtures are created and inspected through libhdf5.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,9 +12,7 @@ use hdf5_pure::{AttrValue, File};
 
 use test_util_hdf5::file;
 
-/// A phase-change pair the C library would never write by default (its defaults
-/// are 8 and 6), and one it therefore stores in the header prefix rather than
-/// leaving implied.
+/// The custom attribute thresholds stored on the fixture objects.
 const PHASE_CHANGE: AttrPhaseChange = AttrPhaseChange {
     max_compact: 32,
     min_dense: 24,
@@ -42,11 +28,7 @@ fn gcpl_with_phase_change() -> GroupCreate {
         .expect("a group creation property list")
 }
 
-/// A file with a group `/g` and a dataset `/d`, each carrying one integer
-/// attribute and a non-default attribute phase-change pair.
-///
-/// Nothing here asks for timestamps: the C library stores them on every version 2
-/// header it writes, which is the whole point.
+/// Creates a group and dataset with timestamps, one integer attribute, and custom thresholds.
 fn write_fixture(path: &Path) {
     let file = file::libhdf5_create_v18(path);
     let group = file
@@ -73,6 +55,8 @@ fn write_fixture(path: &Path) {
             .write_scalar(&1i32)
             .expect("write attribute");
     }
+    drop(dataset);
+    drop(group);
     file.close().unwrap();
 }
 
@@ -194,5 +178,102 @@ fn an_in_place_edit_keeps_a_headers_times_and_phase_change_thresholds() {
     ] {
         assert_eq!(attrs.get("added"), Some(&AttrValue::I64(7)));
         assert_eq!(attrs.get("kept"), Some(&AttrValue::I32(1)));
+    }
+}
+
+#[test]
+fn attribute_lifecycles_preserve_timestamps_through_repack() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut source = directory.path().join("source.h5");
+    write_fixture(&source);
+    let births: Vec<_> = OBJECTS
+        .iter()
+        .map(|object| object_info(&source, object).btime)
+        .collect();
+    assert!(births.iter().all(|time| *time > 0));
+    let mut previous = 1;
+    for (stage, count) in [9, 32, 33, 24, 23, 33].into_iter().enumerate() {
+        {
+            let file = File::open_rw(&source).unwrap();
+            for index in previous.min(count)..previous.max(count) {
+                let name = format!("value{index:03}");
+                if count > previous {
+                    let value = AttrValue::I64(i64::try_from(index).unwrap());
+                    file.group("g")
+                        .unwrap()
+                        .set_attr(&name, value.clone())
+                        .unwrap();
+                    file.dataset("d").unwrap().set_attr(&name, value).unwrap();
+                } else {
+                    file.group("g").unwrap().remove_attr(&name).unwrap();
+                    file.dataset("d").unwrap().remove_attr(&name).unwrap();
+                }
+            }
+            file.commit().unwrap();
+            file.close().unwrap();
+        }
+        let before: Vec<_> = OBJECTS
+            .iter()
+            .map(|object| object_info(&source, object))
+            .collect();
+        let destination = directory.path().join(format!("stage{stage}.h5"));
+        hdf5_pure::repack(&source, &destination, &hdf5_pure::RepackOptions::new()).unwrap();
+        for ((object, was), birth) in OBJECTS.iter().zip(before).zip(&births) {
+            let now = object_info(&destination, object);
+            assert_eq!(now.num_attrs, count);
+            assert_eq!(
+                (now.atime, now.mtime, now.ctime, now.btime),
+                (was.atime, was.mtime, was.ctime, *birth)
+            );
+            assert_eq!(phase_change(&destination, object), PHASE_CHANGE);
+        }
+        {
+            let pure = File::open(&destination).unwrap();
+            let native = hdf5::File::open(&destination).unwrap();
+            for object in OBJECTS {
+                let attributes = if object == "/g" {
+                    pure.group(object).unwrap().attrs().unwrap()
+                } else {
+                    pure.dataset(object).unwrap().attrs().unwrap()
+                };
+                let expected: HashMap<_, _> = std::iter::once(("kept".into(), AttrValue::I32(1)))
+                    .chain((1..count).map(|index| {
+                        (
+                            format!("value{index:03}"),
+                            AttrValue::I64(i64::try_from(index).unwrap()),
+                        )
+                    }))
+                    .collect();
+                assert_eq!(attributes, expected);
+                let location: hdf5::Location = if object == "/g" {
+                    native.group(object).unwrap().as_location().unwrap()
+                } else {
+                    native.dataset(object).unwrap().as_location().unwrap()
+                };
+                assert_eq!(
+                    location.attr("kept").unwrap().read_scalar::<i32>().unwrap(),
+                    1
+                );
+                for index in 1..count {
+                    assert_eq!(
+                        location
+                            .attr(&format!("value{index:03}"))
+                            .unwrap()
+                            .read_scalar::<i64>()
+                            .unwrap(),
+                        i64::try_from(index).unwrap()
+                    );
+                }
+            }
+            assert_eq!(pure.dataset("d").unwrap().read_i32().unwrap(), [0; 4]);
+            assert_eq!(
+                native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+                [0; 4]
+            );
+            native.close().unwrap();
+            pure.close().unwrap();
+        }
+        source = destination;
+        previous = count;
     }
 }

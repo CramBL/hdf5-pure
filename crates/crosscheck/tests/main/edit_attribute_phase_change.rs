@@ -533,9 +533,24 @@ fn assert_reconstruction(
     next: usize,
     values: &BTreeMap<String, (i64, u32)>,
 ) {
+    assert_reconstruction_policy(path, owner, order, dense, next, values, (32, 24));
+}
+
+/// Checks policy, storage, creation metadata, and values through both readers.
+///
+/// `policy` is the maximum compact count paired with the minimum dense count.
+fn assert_reconstruction_policy(
+    path: &Path,
+    owner: Owner,
+    order: AttrCreationOrder,
+    dense: bool,
+    next: usize,
+    values: &BTreeMap<String, (i64, u32)>,
+    policy: (u16, u16),
+) {
     assert_eq!(
         inspect_storage(path, owner, dense, order, next),
-        Some((32, 24))
+        (policy != (8, 6)).then_some(policy)
     );
     {
         let file = File::open(path).unwrap();
@@ -552,7 +567,10 @@ fn assert_reconstruction(
     }
     let native = hdf5::File::open(path).unwrap();
     let location = owner.location(&native);
-    assert_eq!(owner.native_policy(&native), (32, 24));
+    assert_eq!(
+        owner.native_policy(&native),
+        (u32::from(policy.0), u32::from(policy.1))
+    );
     assert_eq!(
         location.attr_names().unwrap(),
         values.keys().cloned().collect::<Vec<_>>()
@@ -588,6 +606,319 @@ fn assert_reconstruction(
     }
     drop(location);
     native.close().unwrap();
+}
+
+#[rstest]
+#[case::default_at_max(8, 6, 8, 0, false, false, true)]
+#[case::default_at_min(8, 6, 9, 3, true, true, false)]
+#[case::default_empty(8, 6, 9, 9, false, false, false)]
+#[case::always_dense(0, 0, 3, 2, true, false, true)]
+#[case::always_dense_empty(0, 0, 3, 3, false, false, true)]
+#[case::one_way(12, 0, 13, 12, true, false, true)]
+#[case::one_way_empty(12, 0, 13, 13, false, false, false)]
+fn repack_preserves_other_attribute_policies_and_empty_sets(
+    #[case] maximum: u16,
+    #[case] minimum: u16,
+    #[case] initial: usize,
+    #[case] removed: usize,
+    #[case] dense: bool,
+    #[case] remove: bool,
+    #[case] after_dense: bool,
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+    #[values(AttrCreationOrder::Tracked, AttrCreationOrder::Indexed)] order: AttrCreationOrder,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("output.h5");
+    create_fixture(&source, owner, order, maximum, minimum, initial);
+    {
+        let native = hdf5::File::open_rw(&source).unwrap();
+        let location = owner.location(&native);
+        for index in 0..removed {
+            location.delete_attr(&attr_name(index)).unwrap();
+        }
+        drop(location);
+        native.close().unwrap();
+    }
+    let before = std::fs::read(&source).unwrap();
+    let (prefix, header, width) = read_header(&source, owner);
+    let mut next = header
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::ATTRIBUTE_INFO)
+        .and_then(|message| {
+            AttributeInfoMessage::parse_with_offset_width(&message.data, width)
+                .unwrap()
+                .max_creation_index
+        })
+        .map_or(0, usize::from);
+    let mut values: BTreeMap<_, _> = (removed..initial)
+        .map(|index| {
+            (
+                attr_name(index),
+                (i64::try_from(index).unwrap(), u32::try_from(index).unwrap()),
+            )
+        })
+        .collect();
+    assert_reconstruction_policy(
+        &source,
+        owner,
+        order,
+        dense,
+        next,
+        &values,
+        (maximum, minimum),
+    );
+    let file = ReadBackend::Source.open(&source).unwrap();
+    let mut output = Vec::new();
+    hdf5_pure::repack_into(&file, &mut output, &hdf5_pure::RepackOptions::new()).unwrap();
+    file.close().unwrap();
+    std::fs::write(&destination, output).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(read_header(&destination, owner).0, prefix);
+    assert_reconstruction_policy(
+        &destination,
+        owner,
+        order,
+        dense,
+        next,
+        &values,
+        (maximum, minimum),
+    );
+    {
+        let file = File::open_rw(&destination).unwrap();
+        if remove {
+            let name = values.keys().next().unwrap().clone();
+            owner.remove_attribute(&file, &name);
+            values.remove(&name).unwrap();
+        } else {
+            owner.set_attribute(&file, "next", AttrValue::I64(71));
+            values.insert("next".into(), (71, u32::try_from(next).unwrap()));
+            next += 1;
+        }
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    assert_reconstruction_policy(
+        &destination,
+        owner,
+        order,
+        after_dense,
+        next,
+        &values,
+        (maximum, minimum),
+    );
+}
+
+#[rstest]
+#[case::dense(0)]
+#[case::compact(11)]
+fn repack_preserves_vlen_committed_types_and_nonlexical_creation_order(
+    #[case] removed: usize,
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+    #[values(
+        Session::BoundedFsm,
+        Session::BoundedPage,
+        Session::MirroredFsm,
+        Session::MirroredPage,
+        Session::UserblockFsm,
+        Session::UserblockPage
+    )]
+    session: Session,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("output.h5");
+    let mut values = lifecycle_fixture(&source, owner, session);
+    let mut indices: BTreeMap<_, _> = (0..33)
+        .map(|index| (attr_name(index), u32::try_from(index).unwrap()))
+        .collect();
+    {
+        let native = hdf5::File::open_rw(&source).unwrap();
+        let location = owner.location(&native);
+        location
+            .new_attr::<i64>()
+            .shape(())
+            .create("000first")
+            .unwrap()
+            .write_scalar(&73)
+            .unwrap();
+        values.insert("000first".into(), Value::Integer(73));
+        indices.insert("000first".into(), 33);
+        for index in 0..removed {
+            location.delete_attr(&attr_name(index)).unwrap();
+            values.remove(&attr_name(index)).unwrap();
+            indices.remove(&attr_name(index)).unwrap();
+        }
+        drop(location);
+        native.close().unwrap();
+    }
+    let settings;
+    {
+        let file = File::open_rw_with_options(&source, session.access()).unwrap();
+        let value = Value::Ascii("prepared payload".into());
+        owner.set_attribute(&file, "a032", value.pure());
+        values.insert("a032".into(), value);
+        file.commit().unwrap();
+        settings = file.file_space_settings().unwrap();
+        if session.userblock() {
+            assert_eq!(
+                file.resolve_address(hdf5_pure::StoredAddress::ZERO)
+                    .unwrap()
+                    .get(),
+                USERBLOCK_BYTES
+            );
+        }
+        file.close().unwrap();
+    }
+    assert_lifecycle_with_indices(&source, owner, &values, 34, removed == 0, |name| {
+        indices[name]
+    });
+    let before = std::fs::read(&source).unwrap();
+    let backend = if session.paged() {
+        ReadBackend::Bytes
+    } else {
+        ReadBackend::Source
+    };
+    let file = backend.open(&source).unwrap();
+    hdf5_pure::repack_to_path(&file, &destination, &hdf5_pure::RepackOptions::new()).unwrap();
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(
+        File::open(&destination)
+            .unwrap()
+            .file_space_settings()
+            .unwrap(),
+        settings
+    );
+    let identity =
+        assert_lifecycle_with_indices(&destination, owner, &values, 34, removed == 0, |name| {
+            indices[name]
+        });
+    let mut removals: Vec<_> = (removed..11).map(attr_name).collect();
+    let mut next = 34;
+    let mut live = Vec::new();
+    for round in 0..4 {
+        {
+            let file = File::open_rw_with_options(&destination, session.access()).unwrap();
+            for name in &removals {
+                owner.remove_attribute(&file, name);
+                values.remove(name).unwrap();
+                indices.remove(name).unwrap();
+            }
+            file.commit().unwrap();
+            file.close().unwrap();
+        }
+        assert_eq!(
+            assert_lifecycle_with_indices(&destination, owner, &values, next, false, |name| {
+                indices[name]
+            }),
+            identity
+        );
+        removals = (0..10)
+            .map(|index| format!("repacked{round}_{index}"))
+            .collect();
+        {
+            let file = File::open_rw_with_options(&destination, session.access()).unwrap();
+            for name in &removals {
+                let value = Value::Integer(i64::try_from(next).unwrap());
+                owner.set_attribute(&file, name, value.pure());
+                values.insert(name.clone(), value);
+                indices.insert(name.clone(), u32::try_from(next).unwrap());
+                next += 1;
+            }
+            file.commit().unwrap();
+            let stats = file.reusable_space_stats().unwrap();
+            live.push(stats.logical_size() - stats.reusable_free_bytes());
+            file.close().unwrap();
+        }
+        assert_eq!(
+            assert_lifecycle_with_indices(&destination, owner, &values, next, true, |name| indices
+                [name]),
+            identity
+        );
+    }
+    assert!(
+        live[1..].iter().max().unwrap() - live[1..].iter().min().unwrap() <= PAGE_BYTES,
+        "{session:?}: {live:?}"
+    );
+}
+
+#[rstest]
+fn repack_keeps_an_oversized_survivor_dense_until_it_is_removed(
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+    #[values(AttrCreationOrder::Tracked, AttrCreationOrder::Indexed)] order: AttrCreationOrder,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("output.h5");
+    create_fixture(&source, owner, order, 32, 24, 33);
+    let data: Vec<i64> = (0..10_000).collect();
+    assert!(data.len() * std::mem::size_of::<i64>() > hdf5_pure::OBJECT_HEADER_MESSAGE_MAX);
+    {
+        let native = hdf5::File::open_rw(&source).unwrap();
+        let location = owner.location(&native);
+        location
+            .new_attr::<i64>()
+            .shape([data.len()])
+            .create("huge")
+            .unwrap()
+            .write(&data)
+            .unwrap();
+        for index in 0..31 {
+            location.delete_attr(&attr_name(index)).unwrap();
+        }
+        drop(location);
+        native.close().unwrap();
+    }
+    hdf5_pure::repack(&source, &destination, &hdf5_pure::RepackOptions::new()).unwrap();
+    assert_eq!(
+        inspect_storage(&destination, owner, true, order, 34),
+        Some((32, 24))
+    );
+    {
+        let file = File::open_rw(&destination).unwrap();
+        owner.remove_attribute(&file, "a031");
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    assert_eq!(
+        inspect_storage(&destination, owner, true, order, 34),
+        Some((32, 24))
+    );
+    assert_eq!(
+        owner.attributes(&File::open(&destination).unwrap()),
+        HashMap::from([
+            ("a032".into(), AttrValue::I64(32)),
+            ("huge".into(), AttrValue::I64Array(data.clone()))
+        ])
+    );
+    {
+        let native = hdf5::File::open(&destination).unwrap();
+        let location = owner.location(&native);
+        assert_eq!(location.attr_names().unwrap(), ["a032", "huge"]);
+        assert_eq!(
+            location.attr("huge").unwrap().read_raw::<i64>().unwrap(),
+            data
+        );
+        assert_eq!(location.attr_info("huge").unwrap().creation_order, Some(33));
+        drop(location);
+        native.close().unwrap();
+    }
+    {
+        let file = File::open_rw(&destination).unwrap();
+        owner.remove_attribute(&file, "huge");
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    assert_reconstruction(
+        &destination,
+        owner,
+        order,
+        false,
+        34,
+        &BTreeMap::from([("a032".into(), (32, 32))]),
+    );
 }
 
 #[rstest]
@@ -1038,6 +1369,20 @@ fn assert_lifecycle(
     next: usize,
     dense: bool,
 ) -> PhysicalAddress {
+    assert_lifecycle_with_indices(path, owner, values, next, dense, fixture_creation_index)
+}
+
+/// Checks attribute state and live storage and returns the committed datatype's address.
+///
+/// Uses `creation_index` to check each attribute's stored index and iteration order.
+fn assert_lifecycle_with_indices(
+    path: &Path,
+    owner: Owner,
+    values: &BTreeMap<String, Value>,
+    next: usize,
+    dense: bool,
+    creation_index: impl Fn(&str) -> u32,
+) -> PhysicalAddress {
     assert_eq!(
         inspect_storage(path, owner, dense, AttrCreationOrder::Indexed, next),
         Some((32, 24))
@@ -1101,7 +1446,7 @@ fn assert_lifecycle(
         values.keys().cloned().collect::<Vec<_>>()
     );
     assert_eq!(owner.native_policy(&native), (32, 24));
-    assert_native_values(&native, &location, values);
+    assert_native_values_with_indices(&native, &location, values, creation_index);
     drop(location);
     native.close().unwrap();
     identity
@@ -1350,11 +1695,21 @@ fn assert_native_values(
     location: &hdf5::Location,
     values: &BTreeMap<String, Value>,
 ) {
+    assert_native_values_with_indices(native, location, values, fixture_creation_index);
+}
+
+/// Checks native values and creation order against `creation_index`.
+fn assert_native_values_with_indices(
+    native: &hdf5::File,
+    location: &hdf5::Location,
+    values: &BTreeMap<String, Value>,
+    creation_index: impl Fn(&str) -> u32,
+) {
     for (name, value) in values {
         let attr = location.attr(name).unwrap();
         assert_eq!(
             location.attr_info(name).unwrap().creation_order,
-            Some(fixture_creation_index(name))
+            Some(creation_index(name))
         );
         match value {
             Value::Integer(value) => {
@@ -1390,7 +1745,7 @@ fn assert_native_values(
         }
     }
     let mut ordered: Vec<_> = values.keys().collect();
-    ordered.sort_unstable_by_key(|name| fixture_creation_index(name));
+    ordered.sort_unstable_by_key(|name| creation_index(name));
     for (position, name) in ordered.into_iter().enumerate() {
         assert_eq!(
             location
