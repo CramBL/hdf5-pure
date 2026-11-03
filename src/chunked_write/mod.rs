@@ -5,6 +5,8 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 /// The HDF5 "undefined address" sentinel (`HADDR_UNDEF`): all bits set, in
 /// whatever width the field is. A chunked layout message carrying it declares
@@ -937,6 +939,66 @@ pub(crate) struct CompressedChunkSet {
 }
 
 impl CompressedChunkSet {
+    /// Returns borrowed encoded chunks in their retained order.
+    #[cfg(feature = "std")]
+    pub(crate) fn chunks(&self) -> &[PreparedChunk] {
+        &self.chunks
+    }
+
+    /// Returns array geometry with ascending occupied-slot assignments.
+    ///
+    /// Returns [`None`] for unallocated and single-chunk layouts. Ordered assignments are borrowed.
+    /// Otherwise, the writer copies and sorts the assignments.
+    #[cfg(feature = "std")]
+    pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
+        let Self {
+            chunks: _,
+            chunk_dims_u32: _,
+            element_size: _,
+            flags: _,
+            has_filters,
+            kind,
+            slot_of_chunk,
+            index_slots,
+            pipeline_message: _,
+        } = self;
+        let kind = kind.array_kind()?;
+        let occupied = if slot_of_chunk.windows(2).all(|pair| pair[0] <= pair[1]) {
+            Cow::Borrowed(slot_of_chunk.as_slice())
+        } else {
+            let mut slots = slot_of_chunk.clone();
+            slots.sort_unstable();
+            Cow::Owned(slots)
+        };
+        Some(ChunkArrayGeometry {
+            kind,
+            occupied,
+            slots: *index_slots,
+            chunk_bytes: self.full_chunk_bytes(),
+            filtered: *has_filters,
+        })
+    }
+
+    /// Returns object-header messages for the assigned stored addresses.
+    ///
+    /// The writer uses `index` for allocated array layouts and the first of `records` for a
+    /// single-chunk layout. The filter-pipeline message is cloned from the prepared set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ChunkIndexKind::layout_message`].
+    #[cfg(feature = "std")]
+    pub(crate) fn header(
+        &self,
+        records: &[ChunkRecord],
+        index: StoredAddress,
+    ) -> Result<ChunkedHeader, FormatError> {
+        Ok(ChunkedHeader {
+            layout_message: chunk_index_layout(self, records, index)?,
+            pipeline_message: self.pipeline_message.clone(),
+        })
+    }
+
     /// Returns scalar index geometry for an array containing no stored chunks.
     ///
     /// Returns [`None`] for unallocated and single-chunk layouts, or if the set holds chunks
@@ -967,13 +1029,15 @@ impl CompressedChunkSet {
         })
     }
 
-    /// Where this set's chunks sit in its chunk index, given the addresses a
-    /// layout pass assigned them.
+    /// Returns the logical slot view for chunk records at their assigned stored addresses.
     ///
-    /// Built at each use rather than stored, because the view borrows the
-    /// addresses and those change from pass to pass; it costs no allocation for
-    /// a set whose chunks fill their slots in order.
-    fn index_slots<'a>(
+    /// The view borrows `written_chunks`. A scattered-slot lookup table is allocated only when
+    /// the records do not fill the logical span in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`IndexSlots::new`].
+    pub(crate) fn index_slots<'a>(
         &self,
         written_chunks: &'a [ChunkRecord],
     ) -> Result<IndexSlots<'a>, FormatError> {
@@ -987,6 +1051,24 @@ impl CompressedChunkSet {
             self.element_size,
         )
     }
+}
+
+/// Address-independent array geometry and ordered occupied-slot assignments.
+///
+/// The writer obtains this geometry from [`CompressedChunkSet::array_geometry`] and assigns
+/// chunk addresses separately.
+#[cfg(feature = "std")]
+pub(crate) struct ChunkArrayGeometry<'a> {
+    /// The array representation selected from the maximum chunk grid.
+    pub(crate) kind: ChunkArrayKind,
+    /// Occupied logical slots in ascending order.
+    pub(crate) occupied: Cow<'a, [u64]>,
+    /// The logical slot span, including unallocated slots.
+    pub(crate) slots: u64,
+    /// The unfiltered byte length of a full chunk.
+    pub(crate) chunk_bytes: u64,
+    /// Whether records include stored sizes and filter masks.
+    pub(crate) filtered: bool,
 }
 
 /// The scalar geometry of a chunk array containing no stored chunks.
@@ -1512,18 +1594,17 @@ pub(crate) struct ChunkedMeasure {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
-/// The messages needed to size a chunked dataset's object header before encoding its elements.
+/// Encoded layout and filter-pipeline messages for a chunked dataset's object header.
 pub(crate) struct ChunkedHeader {
-    /// The layout message used for its encoded length during object-header sizing.
+    /// The encoded Data Layout message.
     pub layout_message: Vec<u8>,
-    /// The final filter-pipeline message, if the dataset has one.
+    /// The encoded Filter Pipeline message, if configured.
     pub pipeline_message: Option<Vec<u8>>,
 }
 
 /// Materializes encoded chunks and their index in a contiguous data-region buffer.
 ///
-/// Uses [`plan_chunked_at`] and [`emit_chunked_data`] at `data_address`. The in-place editor
-/// requires an owned buffer for relocation.
+/// Uses [`plan_chunked_at`] and [`emit_chunked_data`] at `data_address`.
 ///
 /// # Errors
 ///

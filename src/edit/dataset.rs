@@ -26,7 +26,10 @@ use crate::address::StoredAddressExt;
 use crate::attribute_request::PreparedAttributes;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
+use crate::chunked_write::ChunkArrayGeometry;
 use crate::chunked_write::ChunkArrayKind;
+use crate::chunked_write::ChunkedHeader;
+use crate::chunked_write::CompressedChunkSet;
 #[cfg(doc)]
 use crate::chunked_write::PartialEdgeFiltering;
 use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
@@ -1069,8 +1072,9 @@ impl WriteEngine {
 
     /// Writes a prepared dataset's chunk storage and returns its object-header bytes.
     ///
-    /// Chunks are encoded once before their storage is sized and allocated. The shared chunk writer
-    /// assembles the storage for the allocated address.
+    /// Chunks are encoded once before their storage is sized and allocated. For PAGE array layouts,
+    /// the writer calls [`Self::write_paged_chunk_set`]. For other layouts and non-PAGE files, the
+    /// writer selects the contiguous chunk serializer.
     ///
     /// # Errors
     ///
@@ -1093,17 +1097,29 @@ impl WriteEngine {
             fill_time,
             fd.storage.allocation(),
         )?;
-        let (_addr, (layout_message, pipeline_message)) = self.place_relocatable(
-            chunked_write::chunked_data_len(&set)?,
-            AllocationClass::Raw,
-            |stored_base| {
-                let result = chunked_write::assemble_chunked_at(&set, stored_base)?;
-                Ok((
-                    result.data_bytes,
-                    (result.layout_message, result.pipeline_message),
-                ))
-            },
-        )?;
+        let geometry = self.space.page_size().and_then(|_| set.array_geometry());
+        let ChunkedHeader {
+            layout_message,
+            pipeline_message,
+        } = if let Some(geometry) = geometry {
+            self.write_paged_chunk_set(&set, geometry)?
+        } else {
+            let (_, header) = self.place_relocatable(
+                chunked_write::chunked_data_len(&set)?,
+                AllocationClass::Raw,
+                |stored_base| {
+                    let result = chunked_write::assemble_chunked_at(&set, stored_base)?;
+                    Ok((
+                        result.data_bytes,
+                        ChunkedHeader {
+                            layout_message: result.layout_message,
+                            pipeline_message: result.pipeline_message,
+                        },
+                    ))
+                },
+            )?;
+            header
+        };
         let attr_info = self.place_dense_attrs_if_needed(fd)?;
         Ok(file_writer::build_chunked_dataset_oh(
             &fd.dt,
@@ -1117,6 +1133,90 @@ impl WriteEngine {
             fd.fill.as_ref().map(PreparedFill::as_bytes),
             file_writer::HeaderOptions::PLAIN,
         )?)
+    }
+
+    /// Writes a prepared PAGE chunk set with independent metadata array blocks.
+    ///
+    /// The caller obtains `geometry` from `set`. For a nonempty payload, the writer reserves one
+    /// raw allocation and writes the retained encoded chunk slices into it. The writer reserves each
+    /// complete index block through [`ArrayIndexPlan`]'s metadata requests. The returned messages
+    /// refer to the chosen stored addresses.
+    ///
+    /// The caller is responsible for allocation rollback and publication within the enclosing
+    /// commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] for invalid geometry, addresses, slot records, or header encoding.
+    /// Returns [`Error::Io`] if writing payload, metadata, or padding fails, or
+    /// [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
+    fn write_paged_chunk_set(
+        &mut self,
+        set: &CompressedChunkSet,
+        geometry: ChunkArrayGeometry<'_>,
+    ) -> Result<ChunkedHeader, Error> {
+        let ChunkArrayGeometry {
+            kind,
+            occupied,
+            slots,
+            chunk_bytes,
+            filtered,
+        } = geometry;
+        let index = ArrayIndexPlan::new(
+            kind,
+            SlotOccupancy::Slots(&occupied),
+            slots,
+            chunk_bytes,
+            FormatWidths {
+                offsets: OFFSET_WIDTH,
+                lengths: LENGTH_WIDTH,
+            },
+            filtered,
+        )?;
+        drop(occupied);
+        let length = set.chunks().iter().try_fold(0_u64, |offset, chunk| {
+            offset
+                .checked_add(chunk.stored_size())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset,
+                    length: chunk.stored_size(),
+                })
+        })?;
+        let mut requests = Vec::new();
+        if let Some(size) = NonZeroU64::new(length) {
+            requests.push(BlockRequest::complete(
+                ReservationRequest::new(size, AllocationClass::Raw),
+                EncodingDependency::Independent,
+            ));
+        }
+        requests.extend(index.requests()?);
+        let mut reservations = self
+            .plan_blocks(&requests)
+            .map_err(ReservationFailure::into_error)?;
+        let mut records = Vec::with_capacity(set.chunks().len());
+        if length > 0 {
+            let mut cursor = reservations
+                .addresses()
+                .relative(reservations.reservations()[0].range().start())?;
+            for chunk in set.chunks() {
+                records.push(ChunkRecord {
+                    address: cursor,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
+                });
+                cursor = cursor.checked_add(chunk.stored_size())?;
+            }
+            reservations.write_next_with(|writer| {
+                for chunk in set.chunks() {
+                    writer.write(chunk.bytes())?;
+                }
+                Ok(())
+            })?;
+        }
+        let slots = set.index_slots(&records)?;
+        let address = index.write(&slots, &mut reservations)?;
+        reservations.finish()?;
+        Ok(set.header(&records, address)?)
     }
 
     /// Places attributes selected for dense storage during dataset preparation.
@@ -2032,3 +2132,6 @@ impl ChunkProvider for PreparedChunkProvider<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+pub(in crate::edit) mod tests;

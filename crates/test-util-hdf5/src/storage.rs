@@ -12,17 +12,24 @@ use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure::PhysicalAddress;
 use hdf5_pure::StoredAddress;
+use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
 use hdf5_pure_core::BaseAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
+use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
+use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
 use hdf5_pure_format::__private::LinkMessage;
 use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use test_util::bytes;
 use test_util::checksum;
+use test_util::object_header;
 
 /// Returns allocations for the superblock, root and extension headers, and free-space managers.
 ///
@@ -221,6 +228,82 @@ pub fn root_object_address(file: &File, bytes: &[u8], link_name: &str) -> Physic
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing compact root hard link {link_name:?}"))
+}
+
+/// Returns the complete header and index-block ranges of one empty Extensible Array.
+///
+/// Scans version 2 object-header signatures in `bytes`, which must contain the controlled image
+/// opened as `file` and exactly one defined Extensible Array layout. Its index block must be
+/// defined, with no occupied slots or referenced data or secondary blocks. The returned ranges
+/// use physical coordinates, with the header first.
+///
+/// # Panics
+///
+/// Panics if the fixture premise fails, metadata cannot be parsed, or a range cannot index `bytes`.
+pub fn empty_extensible_array_extents(
+    file: &File,
+    bytes: &[u8],
+) -> Vec<AddressRange<PhysicalAddress>> {
+    let sb = file.superblock();
+    let widths = FormatWidths {
+        offsets: sb.offset_size,
+        lengths: sb.length_size,
+    };
+    let base = BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get());
+    let addresses: Vec<_> = bytes::signature_offsets(bytes, object_header::v2::SIGNATURE)
+        .into_iter()
+        .flat_map(|at| {
+            ObjectHeader::parse_with_base_and_widths(bytes, AccessMode::ReadOnly, at, widths, base)
+                .unwrap()
+                .messages
+        })
+        .filter(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .filter_map(
+            |message| match DataLayout::parse_with_widths(&message.data, widths).unwrap() {
+                DataLayout::Chunked {
+                    index:
+                        ChunkIndexLayout::ExtensibleArray {
+                            address: Some(address),
+                            ..
+                        },
+                    ..
+                } => Some(address),
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(addresses.len(), 1);
+    let locator = ExtensibleArrayHeaderLocator::new(widths, base, addresses[0]);
+    let range = locator.parse_range().unwrap();
+    let header = locator
+        .parse(
+            FileRegion::new(
+                range,
+                &bytes[usize::try_from(range.start().get()).unwrap()
+                    ..usize::try_from(range.end().get()).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(header.header().max_idx_set, 0);
+    let index = header.index_block().unwrap();
+    let range = index.range();
+    let parsed = index
+        .parse(
+            FileRegion::new(
+                range,
+                &bytes[usize::try_from(range.start().get()).unwrap()
+                    ..usize::try_from(range.end().get()).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(parsed.data_blocks().count(), 0);
+    assert_eq!(parsed.super_blocks().count(), 0);
+    [header.range(), range]
+        .into_iter()
+        .map(|range| AddressRange::new(range.start(), range.length()).unwrap())
+        .collect()
 }
 
 /// Asserts that allocated extents are disjoint and outside the userblock and reusable free space.
