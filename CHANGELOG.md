@@ -91,6 +91,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed unbounded version 1 object-header continuation traversal in `File::from_bytes` and related metadata reads. Each header is limited to 256 continuation visits ([#1069](https://github.com/CramBL/hdf5-pure/pull/1069)).
 - Fixed `File::commit` dropping dense attributes when converting a version 1 group header containing Attribute Info. Such conversions return `Error::EditUnsupported` before writing changes ([#1068](https://github.com/CramBL/hdf5-pure/pull/1068)).
 - Fixed `File::commit` leaving unreferenced global-heap collections allocated after variable-length attributes are replaced or removed. Reclamation requires proved collection ownership and complete analysis of surviving references ([#1063](https://github.com/CramBL/hdf5-pure/pull/1063)).
 - Fixed `File::commit` writing small object-header chunks, dense attribute metadata blocks, or persisted free-space manager blocks across PAGE boundaries, or placing large blocks at unaligned addresses ([#1056](https://github.com/CramBL/hdf5-pure/pull/1056), [#1057](https://github.com/CramBL/hdf5-pure/pull/1057), [#1065](https://github.com/CramBL/hdf5-pure/pull/1065)).

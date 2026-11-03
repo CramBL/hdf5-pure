@@ -1,8 +1,3 @@
-#![allow(
-    clippy::unreachable,
-    reason = "TODO: make unreachable in the type system"
-)]
-
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileRange;
@@ -18,14 +13,14 @@ use super::ObjectHeaderChunk;
 use super::ParseContext;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
-use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
+use crate::address::DecodedStoredAddress;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source::MetadataSource;
+use crate::width;
 
 /// Defines the fixed prefix width of a version 1 object header message.
 ///
@@ -36,9 +31,19 @@ use crate::metadata_source::MetadataSource;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 const MESSAGE_PREFIX_LEN: usize = 8;
 
+/// The parser resource limit on continuation hops after the root chunk.
 const MAX_V1_CONTINUATION_DEPTH: u16 = 32;
 
 impl ObjectHeader {
+    /// Parses the root and its continuations into one depth-first message sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::NestingDepthExceeded`] if traversal exceeds 256 continuation
+    /// visits or 32 continuation hops after the root. Returns
+    /// [`FormatError::UndefinedContinuationAddress`] if a continuation body contains complete
+    /// address and length fields and stores the undefined address.
+    /// Propagates record, address-conversion, and buffer-bound errors.
     pub(super) fn parse_v1(
         data: &[u8],
         context: ParseContext,
@@ -69,64 +74,25 @@ impl ObjectHeader {
 
         bytes::ensure_len(data, msg_start, header_data_size)?;
 
-        // The v1 header states its own message count, so the vector is sized
-        // once. The count is capped by what the chunk can physically hold.
-        // Each message requires an eight-byte header at minimum, so a larger
-        // count cannot describe records contained by the chunk.
+        // Reserve for root records only, bounded by the number of minimum-size records
+        // in the chunk. Continuation records are appended to the same vector.
         let mut messages = Vec::with_capacity(if filter.keeps_all() {
             (num_messages as usize).min(header_data_size / 8)
         } else {
             0
         });
-        let mut pos = msg_start;
-        let msg_end =
-            msg_start
-                .checked_add(header_data_size)
-                .ok_or(FormatError::UnexpectedEof {
-                    expected: usize::MAX,
-                    available: data.len(),
-                })?;
-
-        for _ in 0..num_messages {
-            let Some((record, record_len)) =
-                parse_message_record(&data[pos..msg_end], context.access_mode)?
-            else {
-                break;
-            };
-
-            if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
-                messages.push(HeaderMessage {
-                    msg_type: record.msg_type,
-                    size: record.body.len(),
-                    flags: record.flags,
-                    creation_order: None,
-                    data: record.body.to_vec(),
-                });
-            }
-
-            pos += record_len;
-
-            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && let Some(continuation) = parse_continuation(record.body, context)?
-            {
-                let offset = context
-                    .base_address
-                    .resolve(continuation.address)?
-                    .get()
-                    .to_usize()?;
-
-                let cont_msgs = Self::parse_v1_continuation(
-                    data,
-                    context,
-                    offset,
-                    continuation.length.to_usize()?,
-                    MAX_V1_CONTINUATION_DEPTH,
-                    filter,
-                )?;
-
-                messages.extend(cont_msgs);
-            }
-        }
+        let mut collector = HeaderCollector {
+            context,
+            traversal: Traversal::new(),
+            messages: &mut messages,
+            filter,
+        };
+        collector.collect_buffered(
+            data,
+            &data[msg_start..msg_start + header_data_size],
+            Some(num_messages),
+            0,
+        )?;
 
         Ok(ObjectHeader {
             version: 1,
@@ -141,78 +107,14 @@ impl ObjectHeader {
         })
     }
 
-    fn parse_v1_continuation(
-        data: &[u8],
-        context: ParseContext,
-        offset: usize,
-        length: usize,
-        depth_remaining: u16,
-        filter: &mut MessageFilter<'_>,
-    ) -> Result<Vec<HeaderMessage>, FormatError> {
-        if depth_remaining == 0 {
-            return Err(FormatError::NestingDepthExceeded);
-        }
-        bytes::ensure_len(data, offset, length)?;
-        let mut messages = Vec::new();
-        let mut pos = offset;
-        let end = offset.saturating_add(length);
-
-        while pos < end {
-            let remaining = &data[pos..end];
-            let Some((record, record_len)) = parse_message_record(remaining, context.access_mode)?
-            else {
-                // A version 1 continuation is traversed to its declared boundary.
-                // Any non-empty remainder must therefore contain another complete
-                // message prefix.
-                bytes::ensure_len(remaining, 0, MESSAGE_PREFIX_LEN)?;
-
-                unreachable!("a complete message prefix must produce a record");
-            };
-
-            if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
-                messages.push(HeaderMessage {
-                    msg_type: record.msg_type,
-                    size: record.body.len(),
-                    flags: record.flags,
-                    creation_order: None,
-                    data: record.body.to_vec(),
-                });
-            }
-
-            pos += record_len;
-
-            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && let Some(continuation) = parse_continuation(record.body, context)?
-            {
-                let offset = context
-                    .base_address
-                    .resolve(continuation.address)?
-                    .get()
-                    .to_usize()?;
-
-                let cont_msgs = Self::parse_v1_continuation(
-                    data,
-                    context,
-                    offset,
-                    continuation.length.to_usize()?,
-                    depth_remaining - 1,
-                    filter,
-                )?;
-
-                messages.extend(cont_msgs);
-            }
-        }
-
-        Ok(messages)
-    }
-
     /// Parses a version 1 header and observes each chunk before decoding its records.
     ///
     /// Continuations are visited depth-first. The observer borrows the current record buffer.
     ///
     /// # Errors
     ///
-    /// Returns parsing, address-conversion, and source-read errors.
+    /// Returns the errors from [`Self::parse_v1`] and source-read errors. The parser rejects
+    /// an over-budget continuation before reading or observing its target.
     pub(super) fn parse_v1_from_source<S: MetadataSource + ?Sized>(
         source: &S,
         context: ParseContext,
@@ -245,18 +147,25 @@ impl ObjectHeader {
         } else {
             0
         });
-        Self::parse_v1_chunk_from_source(
-            source,
-            context,
-            region_addr,
-            header_data_size,
-            num_messages,
-            false,
-            MAX_V1_CONTINUATION_DEPTH,
-            &mut messages,
-            filter,
-            observer,
+        let records = FileRange::new(PhysicalAddress::new(region_addr), header_data_size)?;
+        let allocation = FileRange::new(
+            PhysicalAddress::new(address),
+            ALIGNED_HEADER_PREFIX_LEN
+                .checked_add(header_data_size)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: address,
+                    length: header_data_size,
+                })?,
         )?;
+        let region = source.read_metadata(region_addr, header_data_size.to_usize()?)?;
+        observe_chunk(&region, records, allocation, observer)?;
+        let mut collector = HeaderCollector {
+            context,
+            traversal: Traversal::new(),
+            messages: &mut messages,
+            filter,
+        };
+        collector.collect_from_source(source, &region, Some(num_messages), 0, observer)?;
 
         Ok(ObjectHeader {
             version: 1,
@@ -270,114 +179,217 @@ impl ObjectHeader {
             birth_time: None,
         })
     }
+}
 
-    /// Parses one version 1 chunk and follows each continuation depth-first.
+/// Collects retained messages depth-first with one traversal allowance per header.
+///
+/// The parse context and filter apply to every chunk. Filtering affects retention only.
+struct HeaderCollector<'a, 'f> {
+    context: ParseContext,
+    traversal: Traversal,
+    messages: &'a mut Vec<HeaderMessage>,
+    filter: &'a mut MessageFilter<'f>,
+}
+
+impl HeaderCollector<'_, '_> {
+    /// Parses root records up to `max_messages`, or a continuation's complete record area.
     ///
-    /// Calls the observer before decoding records. Ancestor buffers remain borrowed while
-    /// parsing nested continuations.
+    /// `depth` counts continuation hops after the root. Each continuation is admitted before
+    /// accessing its target bytes.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::NestingDepthExceeded`] when the depth budget is exhausted.
-    /// Propagates record, address-conversion, and source-read errors.
-    fn parse_v1_chunk_from_source<S: MetadataSource + ?Sized>(
-        source: &S,
-        context: ParseContext,
-        region_addr: u64,
-        region_len: u64,
-        max_messages: u16,
-        reject_partial_prefix: bool,
-        depth_remaining: u16,
-        messages: &mut Vec<HeaderMessage>,
-        filter: &mut MessageFilter<'_>,
-        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation ends inside a message prefix.
+    /// Propagates record, admission, and target-access errors.
+    fn collect_buffered(
+        &mut self,
+        data: &[u8],
+        mut records: &[u8],
+        max_messages: Option<u16>,
+        depth: u16,
     ) -> Result<(), FormatError> {
-        if depth_remaining == 0 {
-            return Err(FormatError::NestingDepthExceeded);
-        }
-        let region = source.read_metadata(region_addr, region_len.to_usize()?)?;
-        if let Some(observer) = observer.as_deref_mut() {
-            let prefix_len = if reject_partial_prefix {
-                0
-            } else {
-                ALIGNED_HEADER_PREFIX_LEN
-            };
-            let allocation_start = region_addr.checked_sub(prefix_len).ok_or_else(|| {
-                FormatError::Internal("an object header region precedes its prefix".into())
-            })?;
-            let allocation_len =
-                prefix_len
-                    .checked_add(region_len)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: allocation_start,
-                        length: region_len,
-                    })?;
-            observer(ObjectHeaderChunk::new(
-                FileRange::new(PhysicalAddress::new(allocation_start), allocation_len)?,
-                FileRegion::new(
-                    FileRange::new(PhysicalAddress::new(region_addr), region_len)?,
-                    &region,
-                )?,
-                None,
-            ));
-        }
-
-        let end = region.len();
-        let mut pos = 0usize;
-        let mut count = 0u16;
-
-        while count < max_messages && pos < end {
-            let remaining = &region[pos..end];
-            let Some((record, record_len)) = parse_message_record(remaining, context.access_mode)?
+        let mut count = 0usize;
+        while !records.is_empty() && max_messages.is_none_or(|max| count < usize::from(max)) {
+            let Some((record, record_len)) =
+                parse_message_record(records, self.context.access_mode)?
             else {
-                if reject_partial_prefix {
-                    bytes::ensure_len(remaining, 0, MESSAGE_PREFIX_LEN)?;
-                    unreachable!("a complete message prefix must produce a record");
+                if max_messages.is_none() {
+                    return Err(FormatError::UnexpectedEof {
+                        expected: MESSAGE_PREFIX_LEN,
+                        available: records.len(),
+                    });
                 }
-
                 break;
             };
-
+            self.keep(record);
+            records = &records[record_len..];
             count += 1;
-            pos += record_len;
-
-            let continuation = if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
-                parse_continuation(record.body, context)?
-            } else {
-                None
-            };
-
-            if record.msg_type != MessageType::NIL && filter.keeps(record.msg_type, record.body) {
-                messages.push(HeaderMessage {
-                    msg_type: record.msg_type,
-                    size: record.body.len(),
-                    flags: record.flags,
-                    creation_order: None,
-                    data: record.body.to_vec(),
-                });
-            }
-
-            if let Some(continuation) = continuation {
-                let address = context.base_address.resolve(continuation.address)?.get();
-
-                Self::parse_v1_chunk_from_source(
-                    source,
-                    context,
-                    address,
-                    continuation.length,
-                    u16::MAX,
-                    true,
-                    depth_remaining - 1,
-                    messages,
-                    filter,
-                    observer,
-                )?;
+            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
+                && let Some(permit) = self.traversal.admit(self.context, record.body, depth)?
+            {
+                self.follow_buffered(data, permit)?;
             }
         }
-
         Ok(())
     }
+
+    fn follow_buffered(
+        &mut self,
+        data: &[u8],
+        permit: ContinuationVisit,
+    ) -> Result<(), FormatError> {
+        let ContinuationVisit { range, depth } = permit;
+        let offset = range.start().get().to_usize()?;
+        let length = range.length().to_usize()?;
+        bytes::ensure_len(data, offset, length)?;
+        self.collect_buffered(data, &data[offset..offset + length], None, depth)
+    }
+
+    /// Parses root records up to `max_messages`, or a continuation's complete record area.
+    ///
+    /// Active ancestor buffers remain borrowed during recursive continuation reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation ends inside a message prefix.
+    /// Propagates record, admission, address-conversion, and source-read errors.
+    fn collect_from_source<S: MetadataSource + ?Sized>(
+        &mut self,
+        source: &S,
+        mut records: &[u8],
+        max_messages: Option<u16>,
+        depth: u16,
+        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+    ) -> Result<(), FormatError> {
+        let mut count = 0usize;
+        while !records.is_empty() && max_messages.is_none_or(|max| count < usize::from(max)) {
+            let Some((record, record_len)) =
+                parse_message_record(records, self.context.access_mode)?
+            else {
+                if max_messages.is_none() {
+                    return Err(FormatError::UnexpectedEof {
+                        expected: MESSAGE_PREFIX_LEN,
+                        available: records.len(),
+                    });
+                }
+                break;
+            };
+            self.keep(record);
+            records = &records[record_len..];
+            count += 1;
+            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
+                && let Some(permit) = self.traversal.admit(self.context, record.body, depth)?
+            {
+                self.follow_from_source(source, permit, observer)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn follow_from_source<S: MetadataSource + ?Sized>(
+        &mut self,
+        source: &S,
+        permit: ContinuationVisit,
+        observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+    ) -> Result<(), FormatError> {
+        let ContinuationVisit { range, depth } = permit;
+        let region = source.read_metadata(range.start().get(), range.length().to_usize()?)?;
+        observe_chunk(&region, range, range, observer)?;
+        self.collect_from_source(source, &region, None, depth, observer)
+    }
+
+    fn keep(&mut self, record: MessageRecord<'_>) {
+        if record.msg_type != MessageType::NIL && self.filter.keeps(record.msg_type, record.body) {
+            self.messages.push(HeaderMessage {
+                msg_type: record.msg_type,
+                size: record.body.len(),
+                flags: record.flags,
+                creation_order: None,
+                data: record.body.to_vec(),
+            });
+        }
+    }
 }
+
+fn observe_chunk(
+    bytes: &[u8],
+    records: FileRange,
+    allocation: FileRange,
+    observer: &mut Option<&mut dyn FnMut(ObjectHeaderChunk<'_>)>,
+) -> Result<(), FormatError> {
+    if let Some(observer) = observer.as_deref_mut() {
+        observer(ObjectHeaderChunk::new(
+            allocation,
+            FileRegion::new(records, bytes)?,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Counts followed continuation references across all branches of one header.
+///
+/// Repeated targets and zero-length targets each cost one visit. The root chunk is excluded.
+struct Traversal {
+    visits: u16,
+}
+
+impl Traversal {
+    fn new() -> Self {
+        Self { visits: 0 }
+    }
+
+    /// Charges one visit and checks depth and target geometry before issuing a permit.
+    ///
+    /// Returns `Ok(None)` if the body is too short to decode both fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UndefinedContinuationAddress`] for an undefined target and
+    /// [`FormatError::NestingDepthExceeded`] if the visit or depth allowance is exhausted.
+    /// Propagates address-resolution and range-overflow errors.
+    fn admit(
+        &mut self,
+        context: ParseContext,
+        data: &[u8],
+        parent_depth: u16,
+    ) -> Result<Option<ContinuationVisit>, FormatError> {
+        let required_len =
+            usize::from(context.widths.offsets.get()) + usize::from(context.widths.lengths.get());
+        if data.len() < required_len {
+            return Ok(None);
+        }
+        let address = width::decode_stored_address(context.widths.offsets, data, 0)?;
+        let length = bytes::read_length_width(
+            data,
+            usize::from(context.widths.offsets.get()),
+            context.widths.lengths,
+        )?;
+        let DecodedStoredAddress::Defined(address) = address else {
+            return Err(FormatError::UndefinedContinuationAddress);
+        };
+        if parent_depth >= MAX_V1_CONTINUATION_DEPTH || self.visits >= MAX_V1_CONTINUATION_VISITS {
+            return Err(FormatError::NestingDepthExceeded);
+        }
+        self.visits += 1;
+        Ok(Some(ContinuationVisit {
+            range: FileRange::new(context.base_address.resolve(address)?, length)?,
+            depth: parent_depth + 1,
+        }))
+    }
+}
+
+/// A charged continuation visit with a checked physical range and depth.
+///
+/// Constructed by [`Traversal::admit`] and consumed when following the target. The parser
+/// checks that target bytes are present before decoding records.
+struct ContinuationVisit {
+    range: FileRange,
+    depth: u16,
+}
+
+/// The parser resource limit on followed continuation references per header.
+const MAX_V1_CONTINUATION_VISITS: u16 = 256;
 
 /// Represents one decoded message record from a version 1 object header.
 ///
@@ -447,33 +459,6 @@ fn parse_message_record(
         },
         record_len,
     )))
-}
-
-fn parse_continuation(
-    data: &[u8],
-    context: ParseContext,
-) -> Result<Option<Continuation>, FormatError> {
-    let required_len =
-        usize::from(context.widths.offsets.get()) + usize::from(context.widths.lengths.get());
-
-    if data.len() < required_len {
-        return Ok(None);
-    }
-
-    let address = StoredAddress::new(bytes::read_offset_width(data, 0, context.widths.offsets)?);
-    let length = bytes::read_length_width(
-        data,
-        usize::from(context.widths.offsets.get()),
-        context.widths.lengths,
-    )?;
-
-    Ok(Some(Continuation { address, length }))
-}
-
-#[derive(Clone, Copy)]
-struct Continuation {
-    address: StoredAddress,
-    length: u64,
 }
 
 /// The number of bytes before the alignment padding of a version 1 object header.
