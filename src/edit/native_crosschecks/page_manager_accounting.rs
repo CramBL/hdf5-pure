@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use hdf5_pure_space::__private::FreeClass;
+use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
 use test_util_hdf5::file_space_oracle;
 use test_util_hdf5::free_space_churn;
@@ -76,6 +78,32 @@ fn persisted_page_workloads_keep_live_free_and_padding_accounting_disjoint(
         assert_eq!(
             base + raw + metadata + managers + free + unclassified,
             logical_size
+        );
+        let extension = engine
+            .context
+            .superblock()
+            .superblock_extension_address
+            .unwrap();
+        let extension = engine.context.addresses().resolve(extension).unwrap();
+        let extension_bytes: u64 = engine
+            .oh_chunk_spans(extension.get())
+            .unwrap()
+            .iter()
+            .map(|range| range.length())
+            .sum();
+        let (metadata_list, raw_list, unclassified_list) =
+            engine.space.admitted_snapshot().sections().fold(
+                (0_u64, 0_u64, 0_u64),
+                |(metadata, raw, dead), (extent, class)| match class {
+                    FreeClass::Dead => (metadata, raw, dead + extent.len()),
+                    FreeClass::Page(PageType::Meta) => (metadata + extent.len(), raw, dead),
+                    FreeClass::Page(PageType::Raw) => (metadata, raw + extent.len(), dead),
+                },
+            );
+        assert_eq!(metadata_list + raw_list, free);
+        eprintln!(
+            "CLASS ACCOUNTING {workload:?}/{step}: extension={extension_bytes} other_metadata={} metadata_list={metadata_list} raw_list={raw_list} unclassified_list={unclassified_list}",
+            metadata - extension_bytes
         );
         let (published_free, _) = page_managers::inspect(&engine, 4_096);
         assert_eq!(published_free, free);

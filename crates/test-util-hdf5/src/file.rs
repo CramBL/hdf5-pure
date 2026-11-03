@@ -1,5 +1,7 @@
 //! Files opened or created with libhdf5.
 
+#[cfg(feature = "__hdf5-1.10")]
+use core::num::NonZeroUsize;
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
@@ -12,6 +14,20 @@ use hdf5::file::LibraryVersion;
 #[track_caller]
 pub fn libhdf5_open(path: &Path) -> hdf5::File {
     hdf5::File::open(path).unwrap_or_else(|error| panic!("open {path:?}: {error}"))
+}
+
+/// Opens an existing file read-only with a native page-buffer capacity of `capacity` bytes.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot open `path` with a page buffer of `capacity` bytes.
+#[cfg(feature = "__hdf5-1.10")]
+#[track_caller]
+pub fn libhdf5_open_with_page_buffer(path: &Path, capacity: NonZeroUsize) -> hdf5::File {
+    hdf5::File::with_options()
+        .with_fapl(|properties| properties.page_buffer_size(capacity.get(), 0, 0))
+        .open(path)
+        .unwrap_or_else(|error| panic!("open {path:?}: {error}"))
 }
 
 /// A file the C library creates in the 1.8 format or newer: version 2 object

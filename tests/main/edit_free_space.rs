@@ -17,6 +17,7 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::StoredAddress;
@@ -2942,25 +2943,9 @@ fn whole_free_pages(f: &File) -> usize {
         .count()
 }
 
-/// Deleting an empty *resizable* chunked dataset on a paged file returns its
-/// chunk index, not only its object header (issue #388).
-///
-/// Such a dataset has no chunk data at all and still carries an index: this crate
-/// builds an Extensible Array eagerly for every empty resizable dataset, because
-/// an in-place append needs the index to exist before the first chunk arrives.
-/// The paged reclaim proved an index raw only where chunk data abutted it, so
-/// this shape — the one shape with no chunk data to abut — was dropped on every
-/// delete, and the raw page it sat in could never be shown to be empty.
-///
-/// The index's size is not written down anywhere, so the flat strategy measures
-/// it: the extra space its delete gives back when the deleted dataset is
-/// resizable (an index) rather than fixed-shape (no index at all, just the
-/// undefined address). That difference cancels the two object headers and the
-/// commit tail, which are the same either way.
 #[test]
 fn paged_delete_of_an_empty_extensible_dataset_reclaims_its_index() {
-    // The control: a flat persisting file has no page types to keep apart, so it
-    // reclaims every index and this difference is the index itself.
+    // The flat strategy supplies an independent index-size floor.
     let (flat, with_index) = scratch_delete_releases(
         FileSpaceStrategy::FsmAggr,
         true,
@@ -2992,9 +2977,24 @@ fn paged_delete_of_an_empty_extensible_dataset_reclaims_its_index() {
         })
         .unwrap();
     f.commit().unwrap();
-    // The index is the only thing in its raw page, so while it is live that page
-    // is not on offer — which is what makes the assertion after the delete about
-    // the index and not about a page that was already free.
+    f.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let reader = File::open(&path).unwrap();
+    let allocations = storage::empty_extensible_array_extents(&reader, &bytes);
+    let keep = storage::header_extents(
+        &reader,
+        &bytes,
+        storage::root_object_address(&reader, &bytes, "keep"),
+    );
+    storage::assert_unavailable(&reader, &allocations);
+    assert!(allocations.iter().any(|allocation| {
+        keep.iter().any(|live| {
+            allocation.start().get() / RECLAIM_PAGE == live.start().get() / RECLAIM_PAGE
+        })
+    }));
+    reader.close().unwrap();
+    let f = open_rw_on_close(&path);
+    // An index allocation shares a page with `keep`'s live header.
     assert_eq!(
         whole_free_pages(&f),
         0,
@@ -3009,12 +3009,42 @@ fn paged_delete_of_an_empty_extensible_dataset_reclaims_its_index() {
         "a paged delete must give back the chunk index too ({released} bytes for \
          a subtree whose index alone is {index_bytes})"
     );
-    assert!(
-        whole_free_pages(&f) >= 1,
-        "the raw page the index had to itself must come back whole"
-    );
+    let free = f.reusable_free_sections().unwrap();
+    let eof = f.reusable_space_stats().unwrap().logical_size();
+    for allocation in &allocations {
+        let mut cursor = allocation.start().get();
+        let end = allocation.end().get().min(eof);
+        for section in free.sections() {
+            if section.address().get() <= cursor && section.end_address().get() > cursor {
+                cursor = section.end_address().get().min(end);
+            }
+        }
+        assert!(
+            cursor >= end,
+            "original index allocation {allocation:?} is not reusable or truncated"
+        );
+    }
+    storage::assert_unavailable(&f, &keep);
     f.close().unwrap();
     file_space::assert_eof_matches_physical_size(&path);
+    let reader = File::open(&path).unwrap();
+    let report = reader.persisted_free_sections().unwrap().unwrap();
+    for allocation in allocations {
+        if allocation.start().get() >= reader.file_size() {
+            continue;
+        }
+        assert!(report.managers().iter().any(|manager| {
+            matches!(
+                manager.role(),
+                FreeSpaceManagerRole::PageSmallMetadata | FreeSpaceManagerRole::PageLargeGeneric
+            ) && manager.free_sections().sections().iter().any(|section| {
+                reader.resolve_address(section.address()).unwrap().get() <= allocation.start().get()
+                    && reader.resolve_address(section.end_address()).unwrap().get()
+                        >= allocation.end().get().min(reader.file_size())
+            })
+        }));
+    }
+    reader.close().unwrap();
 }
 
 /// The reporter's loop (issue #388): a paged persisting file that creates a
