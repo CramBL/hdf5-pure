@@ -17,6 +17,7 @@ use crate::address::StoredAddress;
 use crate::chunk_record;
 use crate::chunk_record::ChunkElementEncoding;
 use crate::chunk_record::ElementEncoding;
+use crate::chunk_record::IndexSlots;
 use crate::chunk_record::InvalidElementEncoding;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -230,27 +231,7 @@ impl ExtensibleArrayPlan {
         }
         let mut ranges = Vec::with_capacity(addresses.len());
         for (&address, length) in addresses.iter().zip(self.block_lengths()) {
-            let maximum = StoredAddress::undefined(self.widths.offsets).get();
-            if address.get() == maximum {
-                return Err(FormatError::DefinedAddressIsUndefined {
-                    address: address.get(),
-                    offset_size: self.widths.offsets.get(),
-                });
-            }
-            if address.get() > maximum {
-                return Err(FormatError::AddressTooLarge {
-                    address: address.get(),
-                    offset_size: self.widths.offsets.get(),
-                });
-            }
-            let range = AddressRange::new(address, length)?;
-            if range.end().get() > maximum {
-                return Err(FormatError::AddressTooLarge {
-                    address: range.end().get(),
-                    offset_size: self.widths.offsets.get(),
-                });
-            }
-            ranges.push(range);
+            ranges.push(self.range(address, length)?);
         }
         let mut ordered: Vec<_> = ranges
             .iter()
@@ -267,6 +248,86 @@ impl ExtensibleArrayPlan {
             }
         }
         Ok(ExtensibleArrayPlacement { plan: self, ranges })
+    }
+    /// Serializes adjacent complete blocks at the stored `address`.
+    ///
+    /// A checked whole range covers the blocks in [`blocks`](Self::blocks) order. Each block is
+    /// appended directly to one reserved output buffer. The caller establishes allocation
+    /// ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address errors of [`Self::place`] and record errors of
+    /// [`ExtensibleArrayPlacement::encoding`]. Returns [`FormatError::ValueTooLargeForPlatform`]
+    /// if the total length does not fit [`usize`], [`FormatError::AllocationFailed`] if a range,
+    /// reference, or output reservation fails, or [`FormatError::Internal`] if the ranges or
+    /// encoded length differ from the planned total.
+    pub(super) fn encode_contiguous(
+        &self,
+        slots: &IndexSlots<'_>,
+        address: StoredAddress,
+    ) -> Result<Vec<u8>, FormatError> {
+        let whole = self.range(address, self.total_length)?;
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(self.blocks.len())
+            .map_err(|source| FormatError::AllocationFailed {
+                values: self.blocks.len(),
+                source,
+            })?;
+        let mut cursor = whole.start();
+        for length in self.block_lengths() {
+            let range = AddressRange::new(cursor, length)?;
+            cursor = range.end();
+            ranges.push(range);
+        }
+        let placement = ExtensibleArrayPlacement { plan: self, ranges };
+        let encoding = placement.encoding(slots)?;
+        let length = self.total_length.to_usize()?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(length)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: length,
+                source,
+            })?;
+        for block in encoding.blocks() {
+            block.append_into(&mut output)?;
+        }
+        if cursor != whole.end() || output.len() != length {
+            return Err(FormatError::Internal(alloc::format!(
+                "contiguous EA encoding does not fill its planned {length} bytes"
+            )));
+        }
+        Ok(output)
+    }
+
+    fn range(
+        &self,
+        address: StoredAddress,
+        length: u64,
+    ) -> Result<AddressRange<StoredAddress>, FormatError> {
+        let maximum = StoredAddress::undefined(self.widths.offsets).get();
+        if address.get() == maximum {
+            return Err(FormatError::DefinedAddressIsUndefined {
+                address: address.get(),
+                offset_size: self.widths.offsets.get(),
+            });
+        }
+        if address.get() > maximum {
+            return Err(FormatError::AddressTooLarge {
+                address: address.get(),
+                offset_size: self.widths.offsets.get(),
+            });
+        }
+        let range = AddressRange::new(address, length)?;
+        if range.end().get() > maximum {
+            return Err(FormatError::AddressTooLarge {
+                address: range.end().get(),
+                offset_size: self.widths.offsets.get(),
+            });
+        }
+        Ok(range)
     }
 }
 
@@ -353,8 +414,7 @@ pub enum ExtensibleArrayBlockKind {
 /// # Errors
 ///
 /// Propagates occupancy and geometry errors from [`visit_regions`] and width errors from the
-/// header statistics. Returns [`FormatError::ValueTooLargeForPlatform`] if a header or index
-/// block length does not fit [`usize`].
+/// header statistics.
 pub(super) fn measure(
     occupancy: SlotOccupancy<'_>,
     num_slots: u64,
@@ -363,7 +423,7 @@ pub(super) fn measure(
     filtered: bool,
 ) -> Result<ExtensibleArrayLayout, FormatError> {
     let creation = ExtensibleArrayCreationParameters::canonical();
-    let (encoding, layout) = element_layout(creation, chunk_bytes, widths, filtered)?;
+    let (_, layout) = element_layout(creation, chunk_bytes, widths, filtered)?;
     let mut stats = ExtensibleArrayStats::empty(layout, num_slots);
     visit_regions(layout, occupancy, num_slots, |region| {
         match region {
@@ -389,12 +449,6 @@ pub(super) fn measure(
     })?;
     let stats = stats.with_widths(widths)?;
     Ok(ExtensibleArrayLayout {
-        encoding,
-        bits: creation.bit_geometry(),
-        geom: ExtensibleArrayGeometry::from_layout(layout)?,
-        inline: usize::from(layout.inline_elements),
-        header_len: super::header_len(widths).to_usize()?,
-        index_block_len: layout.index_block_len()?.to_usize()?,
         stats,
         total_len: stats.total_len(layout, widths)?,
     })
@@ -813,7 +867,7 @@ mod tests {
         #[case] secondary: u64,
         #[case] elements: u64,
     ) {
-        let measured = measure(
+        let ExtensibleArrayLayout { stats, total_len } = measure(
             SlotOccupancy::Dense(count),
             count,
             8,
@@ -821,19 +875,22 @@ mod tests {
             filtered,
         )
         .unwrap();
-        assert_eq!(measured.total_len, total);
-        assert_eq!(measured.stats.ndata_blks, data);
-        assert_eq!(measured.stats.nsuper_blks, secondary);
-        assert_eq!(measured.stats.max_idx_set, count);
-        assert_eq!(measured.stats.nelmts, elements);
-        assert_eq!(measured.stats.super_blk_size, 54 * secondary);
-        assert_eq!(measured.header_len, 72);
-        assert_eq!(measured.index_block_len, if filtered { 322 } else { 298 });
+        let ExtensibleArrayStats {
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        } = stats;
+        assert_eq!(total_len, total);
+        assert_eq!(ndata_blks, data);
+        assert_eq!(nsuper_blks, secondary);
+        assert_eq!(max_idx_set, count);
+        assert_eq!(nelmts, elements);
+        assert_eq!(super_blk_size, 54 * secondary);
         assert_eq!(
-            measured.stats.data_blk_size
-                + measured.stats.super_blk_size
-                + measured.header_len.to_u64()
-                + measured.index_block_len.to_u64(),
+            data_blk_size + super_blk_size + 72 + if filtered { 322 } else { 298 },
             total
         );
     }
@@ -933,7 +990,7 @@ mod tests {
     #[case::far_sparse(&[4_294_967_284], 4_294_967_285)]
     fn canonical_planning_preserves_contiguous_geometry(#[case] slots: &[u64], #[case] count: u64) {
         let planned = plan(&[32, 4, 4, 16, 10], slots, count, 8);
-        let old = extensible_array::extensible_array_layout(
+        let measured = extensible_array::extensible_array_layout(
             SlotOccupancy::Slots(slots),
             count,
             8,
@@ -942,26 +999,8 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(planned.total_len(), old.total_len);
-        assert_eq!(planned.stats(), old.stats);
-        let encoding = planned.element_encoding();
-        assert_eq!(
-            (
-                encoding.elem_size,
-                encoding.chunk_size_bytes,
-                encoding.client_id
-            ),
-            (
-                old.encoding.elem_size,
-                old.encoding.chunk_size_bytes,
-                old.encoding.client_id
-            )
-        );
-        let geometry = planned.geometry().unwrap();
-        assert_eq!(geometry.sblks, old.geom.sblks);
-        assert_eq!(geometry.direct_dblk_nelmts, old.geom.direct_dblk_nelmts);
-        assert_eq!(geometry.nsblk_addrs, old.geom.nsblk_addrs);
-        assert_eq!(geometry.first_indirect_sblk, old.geom.first_indirect_sblk);
+        assert_eq!(planned.total_len(), measured.total_len);
+        assert_eq!(planned.stats(), measured.stats);
         assert_eq!(planned.block_lengths().sum::<u64>(), planned.total_len());
         assert_eq!(
             planned.creation(),

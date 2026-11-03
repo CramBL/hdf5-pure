@@ -235,12 +235,25 @@ impl ExtensibleArrayEmission<'_> {
     /// [`usize`], [`FormatError::AllocationFailed`] if the output reservation fails, or
     /// [`FormatError::Internal`] if the encoded length differs from the planned length.
     pub fn encode_into(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        let length = self.block().length.to_usize()?;
         output.clear();
+        self.append_into(output)
+    }
+
+    /// Appends this complete block after the existing `output` bytes.
+    ///
+    /// Existing bytes are preserved, and checksums cover only this block's appended bytes. On
+    /// error, the appended bytes may be incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns the length, reservation, and encoding errors of [`Self::encode_into`].
+    pub(crate) fn append_into(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+        let length = self.block().length.to_usize()?;
+        let start = output.len();
         output
             .try_reserve_exact(length)
             .map_err(|source| FormatError::AllocationFailed {
-                values: length,
+                values: start.saturating_add(length),
                 source,
             })?;
         match self.block().kind {
@@ -249,16 +262,17 @@ impl ExtensibleArrayEmission<'_> {
             ExtensibleArrayBlockKind::Secondary => self.secondary(output)?,
             ExtensibleArrayBlockKind::Data => self.data(output)?,
         }
-        if output.len() != length {
+        if output.len().checked_sub(start) != Some(length) {
             return Err(FormatError::Internal(alloc::format!(
                 "EA encoding produced {} bytes for a complete block of {length} bytes",
-                output.len()
+                output.len().saturating_sub(start)
             )));
         }
         Ok(())
     }
 
     fn header(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+        let block_start = output.len();
         let ExtensibleArrayPlan {
             creation,
             widths,
@@ -295,11 +309,12 @@ impl ExtensibleArrayEmission<'_> {
             bytes::try_write_length(output, value, widths.lengths)?;
         }
         self.address_field(output, Some(INDEX_BLOCK))?;
-        append_checksum(output, 0);
+        append_checksum(output, block_start);
         Ok(())
     }
 
     fn index(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+        let block_start = output.len();
         self.prefix(output, &extensible_array::INDEX_BLOCK_SIGNATURE)?;
         self.elements(
             output,
@@ -311,11 +326,12 @@ impl ExtensibleArrayEmission<'_> {
             output,
             layout.direct_data_blocks() + u64::from(layout.super_blocks - layout.first_super_block),
         )?;
-        append_checksum(output, 0);
+        append_checksum(output, block_start);
         Ok(())
     }
 
     fn secondary(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+        let block_start = output.len();
         let plan = self.encoding.placement.plan;
         let descriptor = self.block();
         // Every secondary descriptor retains its complete logical range and first block offset.
@@ -360,11 +376,12 @@ impl ExtensibleArrayEmission<'_> {
             }
         }
         self.pointers(output, block.blocks)?;
-        append_checksum(output, 0);
+        append_checksum(output, block_start);
         Ok(())
     }
 
     fn data(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+        let block_start = output.len();
         let layout = self.encoding.placement.plan.layout;
         // Every data descriptor retains its complete logical slot range.
         let slots = self
@@ -377,10 +394,10 @@ impl ExtensibleArrayEmission<'_> {
         match layout.pages(slots.end - slots.start) {
             None => {
                 self.elements(output, slots.start, slots.end - slots.start)?;
-                append_checksum(output, 0);
+                append_checksum(output, block_start);
             }
             Some(pages) => {
-                append_checksum(output, 0);
+                append_checksum(output, block_start);
                 for page in 0..pages {
                     let page_start = output.len();
                     self.elements(
@@ -535,7 +552,7 @@ mod tests {
     #[case::direct(20)]
     #[case::secondary(300)]
     #[case::paged(140_000)]
-    fn contiguous_encoding_matches_existing_writer_bytes(
+    fn contiguous_and_individual_encoding_agree_for_each_block(
         #[case] count: usize,
         #[values(false, true)] filtered: bool,
     ) {
@@ -570,6 +587,29 @@ mod tests {
         .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual.len().to_u64(), plan.total_len());
+    }
+
+    #[test]
+    fn appending_blocks_preserves_the_prefix_and_each_block_checksum() {
+        let records = chunks(4, true);
+        let slots = IndexSlots::new(&records, &[0, 8, 32, 200], 201).unwrap();
+        let plan = plan([24, 8, 2, 8, 8], &slots, 8, true);
+        let addresses: Vec<_> = (0..plan.blocks().len())
+            .map(|index| StoredAddress::new(1_024 + index.to_u64() * 4_096))
+            .collect();
+        let placement = plan.place(&addresses).unwrap();
+        let encoding = placement.encoding(&slots).unwrap();
+        let mut output = vec![0xa5; 17];
+        let mut expected = Vec::new();
+        for emission in encoding.blocks() {
+            let start = output.len();
+            emission.append_into(&mut output).unwrap();
+            emission.encode_into(&mut expected).unwrap();
+            assert_eq!(&output[start..], expected);
+            assert_checksum(&output[start..]);
+        }
+        assert_eq!(&output[..17], &[0xa5; 17]);
+        assert_eq!(output.len().to_u64(), plan.total_len() + 17);
     }
 
     #[rstest]
