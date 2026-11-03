@@ -215,7 +215,7 @@ impl ObjectReferenceCount {
         record: MessageRecord<'_>,
     ) -> Result<Self, FormatError> {
         let MessageRecord {
-            msg_type,
+            msg_type: _,
             flags,
             creation_index: _,
             body,
@@ -224,22 +224,9 @@ impl ObjectReferenceCount {
         if flags.is_shared() {
             return Ok(Self::Unsupported(ObjectReferenceCountIssue::Shared));
         }
-        let Some((&version, count)) = body.split_first() else {
-            return Ok(Self::Unsupported(ObjectReferenceCountIssue::BodyLength(0)));
-        };
-        if version != MESSAGE_VERSION {
-            return Ok(Self::Unsupported(
-                ObjectReferenceCountIssue::MessageVersion(version),
-            ));
-        }
-        let Some((&bytes, _)) = count.split_first_chunk::<COUNT_LENGTH>() else {
-            return Ok(Self::Unsupported(ObjectReferenceCountIssue::BodyLength(
-                body.len()
-                    .narrow_or_else(|| FormatError::ObjectHeaderMessageTooLarge {
-                        message_type: msg_type.to_u16(),
-                        size: body.len(),
-                    })?,
-            )));
+        let message = match ObjectReferenceCountMessage::parse(body) {
+            Ok(message) => message,
+            Err(issue) => return Ok(Self::Unsupported(issue)),
         };
         let records = chunk.records();
         let start = records
@@ -250,12 +237,84 @@ impl ObjectReferenceCount {
         let range = FileRange::new(start, COUNT_LENGTH.to_u64())?;
         records.subregion(range)?;
         Ok(Self::Version2(ObjectReferenceCountField {
-            value: u32::from_le_bytes(bytes),
+            value: message.count(),
             range,
             chunk: chunk.allocation(),
             flags: Some(flags),
         }))
     }
+}
+
+/// The unsigned count in a version 0 object-reference-count message.
+///
+/// The parser reads the version byte and four-byte count defined in "The Object Reference Count
+/// Message" of the [format specification, version 4.0][spec], accepting trailing body bytes. The
+/// encoder writes only the five-byte message body. The caller checks record flags, message
+/// uniqueness, and allocation ownership separately.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::__private::ObjectReferenceCountMessage;
+///
+/// let message = ObjectReferenceCountMessage::new(0x1234_5678);
+/// let bytes = message.encode();
+/// assert_eq!(bytes, [0, 0x78, 0x56, 0x34, 0x12]);
+/// let mut padded = bytes.to_vec();
+/// padded.extend_from_slice(&[0xA5, 0x5A]);
+/// let parsed = ObjectReferenceCountMessage::parse(&padded).unwrap();
+/// assert_eq!(parsed, message);
+/// assert_eq!(parsed.encode(), bytes);
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_refcount
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectReferenceCountMessage {
+    count: u32,
+}
+
+impl ObjectReferenceCountMessage {
+    /// Creates a version 0 message with any unsigned 32-bit count, including zero.
+    pub const fn new(count: u32) -> Self {
+        Self { count }
+    }
+
+    /// Parses the version byte and count, ignoring any trailing body bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectReferenceCountIssue::BodyLength`] if `body` is empty or a version 0 body
+    /// is shorter than five bytes. Returns [`ObjectReferenceCountIssue::MessageVersion`] if the
+    /// first byte is not zero.
+    pub fn parse(body: &[u8]) -> Result<Self, ObjectReferenceCountIssue> {
+        let Some((&version, rest)) = body.split_first() else {
+            return Err(ObjectReferenceCountIssue::BodyLength(0));
+        };
+        if version != MESSAGE_VERSION {
+            return Err(ObjectReferenceCountIssue::MessageVersion(version));
+        }
+        let Some(&count) = rest.first_chunk::<COUNT_LENGTH>() else {
+            return Err(ObjectReferenceCountIssue::BodyLength(
+                body.len()
+                    .narrow_or_else(|| ObjectReferenceCountIssue::BodyLength(u16::MAX))?,
+            ));
+        };
+        Ok(Self::new(u32::from_le_bytes(count)))
+    }
+
+    /// Returns the unsigned count independently of any physical field association.
+    pub const fn count(self) -> u32 {
+        self.count
+    }
+
+    /// Serializes the version byte and little-endian count into a five-byte body.
+    pub const fn encode(self) -> [u8; MESSAGE_LENGTH] {
+        let count = self.count.to_le_bytes();
+        [MESSAGE_VERSION, count[0], count[1], count[2], count[3]]
+    }
+
+    /// The count assumed for a version 2 object header without a count message.
+    pub const IMPLICIT_ONE: Self = Self::new(1);
 }
 
 /// A decoded count and its four-byte physical field within a complete header chunk.
@@ -312,6 +371,7 @@ pub enum ObjectReferenceCountIssue {
 // "The Object Reference Count Message" of the format specification, version 4.0, defines a
 // version byte of 0 followed by an unsigned 32-bit reference count.
 const MESSAGE_VERSION: u8 = 0;
+const MESSAGE_LENGTH: usize = 5;
 const MESSAGE_COUNT_OFFSET: u64 = 1;
 const COUNT_LENGTH: usize = 4;
 
