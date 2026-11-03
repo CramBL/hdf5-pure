@@ -23,6 +23,8 @@ use hdf5_pure_space::__private::PagedSections;
 use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use test_util::allocation;
 #[cfg(feature = "deflate")]
 use test_util::btree::v2 as btree_v2;
 use test_util::fractal_heap;
@@ -793,23 +795,39 @@ fn a_v2_btree_chunk_index_is_metadata_when_reclaimed() {
     );
 }
 
-#[test]
-fn a_chunk_index_is_placed_by_the_chunk_data_that_abuts_it() {
-    assert!(index_abuts_ranges(&[(100, 60)], &[(160, 40)]));
-    assert!(index_abuts_ranges(&[(200, 60)], &[(160, 40)]));
-    assert!(index_abuts_ranges(&[(100, 60), (900, 60)], &[(160, 40)]));
-    assert!(index_abuts_ranges(&[(100, 60)], &[(180, 20), (160, 20)]));
-    assert!(!index_abuts_ranges(&[(9000, 60)], &[(160, 40)]));
-    assert!(!index_abuts_ranges(&[(100, 59)], &[(160, 40)]));
-    assert!(!index_abuts_ranges(&[], &[(160, 40)]));
-    assert!(index_abuts_ranges(&[], &[]));
-    assert!(!index_abuts_ranges(&[(160, 0)], &[(160, 40)]));
+#[rstest]
+#[case::before(&[(100, 60)], &[(160, 40)], true)]
+#[case::after(&[(200, 60)], &[(160, 40)], true)]
+#[case::unrelated_payload(&[(100, 60), (900, 60)], &[(160, 40)], true)]
+#[case::unordered(&[(100, 60)], &[(180, 20), (160, 20)], true)]
+#[case::absent(&[(9_000, 60)], &[(160, 40)], false)]
+#[case::one_byte_gap(&[(100, 59)], &[(160, 40)], false)]
+#[case::no_payload(&[], &[(160, 40)], false)]
+#[case::no_index(&[], &[], true)]
+#[case::empty_payload(&[(160, 0)], &[(160, 40)], false)]
+#[case::empty_index(&[(100, 60)], &[(160, 0)], false)]
+#[case::gap_after_witness(&[(100, 60)], &[(160, 20), (220, 20)], false)]
+#[case::gap_before_witness(&[(240, 60)], &[(160, 20), (220, 20)], false)]
+#[case::each_run(&[(100, 60), (240, 60)], &[(160, 20), (220, 20)], true)]
+#[case::payload_between_runs(&[(180, 40)], &[(160, 20), (220, 20)], true)]
+#[case::overlap(&[(100, 60)], &[(160, 30), (180, 20)], false)]
+#[case::duplicate(&[(100, 60)], &[(160, 20), (160, 20)], false)]
+#[case::gap_and_overlap(&[(100, 60)], &[(160, 30), (180, 20), (210, 20)], false)]
+fn each_complete_index_run_requires_its_own_chunk_data_witness(
+    #[case] data: &[(u64, u64)],
+    #[case] index: &[(u64, u64)],
+    #[case] expected: bool,
+    #[values(false, true)] indexed: bool,
+) {
+    let data = physical_ranges(data);
+    let data = reclaim::ChunkDataBoundaries::new(&data, indexed);
+    assert_eq!(data.abuts_index(&physical_ranges(index)), expected);
 }
 
 #[test]
 fn page_zero_detection_checks_each_index_span() {
     const PAGE: FileSpacePageSize = FileSpacePageSize::MIN;
-    let c_written = [(48u64, 80u64), (512, 512)];
+    let c_written = [(48u64, 464u64), (512, 512)];
     assert!(index_abuts_ranges(&[(1024, 512)], &c_written));
     assert!(reclaim::touches_page_zero(
         PAGE,
@@ -851,15 +869,143 @@ fn page_zero_classification_is_relative_to_the_base_address(#[values(0, 512)] us
     b.write(&path).unwrap();
     let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
-    let data = [(userblock + 1024, 512)];
-    assert!(!s.index_is_provably_raw(
-        &physical_ranges(&data),
+    let data = physical_ranges(&[(userblock + 1024, 512)]);
+    let data = reclaim::ChunkDataBoundaries::new(&data, false);
+    assert!(!s.whole_index_is_eligible_for_raw(
+        &data,
         &physical_ranges(&[(userblock + 48, 80), (userblock + 512, 512)])
     ));
-    assert!(s.index_is_provably_raw(
-        &physical_ranges(&data),
-        &physical_ranges(&[(userblock + 512, 512)])
-    ));
+    assert!(s.whole_index_is_eligible_for_raw(&data, &physical_ranges(&[(userblock + 512, 512)])));
+}
+
+#[rstest]
+#[case::no_index(&[], &[], &[])]
+#[case::contiguous(&[(960, 64)], &[(1_064, 40), (1_024, 40)], &[true, true])]
+#[case::mixed_runs(&[(960, 64), (1_280, 80)], &[(1_024, 40), (1_064, 40), (1_200, 40), (1_240, 40), (1_400, 40)], &[true, true, true, true, false])]
+#[case::unwitnessed_middle(&[(960, 64), (1_440, 80)], &[(1_400, 40), (1_200, 40), (1_024, 40)], &[true, false, true])]
+#[case::page_zero(&[(448, 32)], &[(480, 32), (512, 32)], &[false, false])]
+#[case::separated_page_zero(&[(1_024, 64)], &[(48, 80), (952, 72)], &[false, false])]
+#[case::internal_witnesses(&[(1_104, 96)], &[(1_024, 80), (1_200, 80)], &[false, false])]
+fn chunk_index_classes_keep_each_complete_allocation_and_its_run_proof(
+    #[case] data: &[(u64, u64)],
+    #[case] index: &[(u64, u64)],
+    #[case] proven: &[bool],
+    #[values(0, 512)] userblock: u64,
+    #[values(false, true)] paged: bool,
+    #[values(FreeClass::Dead, FreeClass::Page(PageType::Meta))] known: FreeClass,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index_classes.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
+    builder.create_dataset("d").with_i32_data(&[1; 100]);
+    if paged {
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::MIN),
+        );
+    }
+    builder.write(&path).unwrap();
+    let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let shifted = |ranges: &[(u64, u64)]| {
+        ranges
+            .iter()
+            .map(|&(start, length)| (userblock + start, length))
+            .collect::<Vec<_>>()
+    };
+    let data = physical_ranges(&shifted(data));
+    let mut index = physical_ranges(&shifted(index));
+    index.sort_unstable_by_key(|range| range.start());
+    let expected: Vec<_> = index
+        .iter()
+        .zip(proven)
+        .map(|(&range, &proven)| {
+            let class = if known == FreeClass::Dead && (!paged || proven) {
+                FreeClass::Page(PageType::Raw)
+            } else {
+                known
+            };
+            (range, class)
+        })
+        .collect();
+    index.reverse();
+    let mut actual = Vec::new();
+    engine.collect_chunk_index_free_spans(&data, index, known, &mut actual);
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn chunk_data_boundary_lookup_borrows_data_or_indexes_shared_witnesses() {
+    let data = physical_ranges(&[(100, 60), (100, 60), (180, 40), (220, 0)]);
+    let borrowed = reclaim::ChunkDataBoundaries::new(&data, false);
+    let indexed = reclaim::ChunkDataBoundaries::new(&data, true);
+    let reclaim::ChunkDataBoundaries::Borrowed(view) = &borrowed else {
+        panic!("expected the single-run lookup to borrow its payload ranges");
+    };
+    assert!(core::ptr::eq(view.as_ptr(), data.as_ptr()));
+    let reclaim::ChunkDataBoundaries::Indexed { starts, ends } = &indexed else {
+        panic!("expected the multi-run lookup to retain payload boundary sets");
+    };
+    assert_eq!(
+        starts
+            .iter()
+            .map(|address| address.get())
+            .collect::<Vec<_>>(),
+        [100, 180]
+    );
+    assert_eq!(
+        ends.iter().map(|address| address.get()).collect::<Vec<_>>(),
+        [160, 220]
+    );
+    assert!(borrowed.abuts_index(&physical_ranges(&[(160, 20)])));
+    assert!(indexed.abuts_index(&physical_ranges(&[(160, 20), (220, 40)])));
+    assert!(!indexed.abuts_index(&physical_ranges(&[(160, 20), (280, 40)])));
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[rstest]
+#[case::small(16)]
+#[case::many(4_096)]
+fn chunk_data_boundary_allocations_are_shared_across_run_queries(#[case] count: u64) {
+    let data = physical_ranges(
+        &(0..count)
+            .map(|slot| (100 + slot * 80, 60))
+            .collect::<Vec<_>>(),
+    );
+    let index = physical_ranges(
+        &(0..count)
+            .map(|slot| (160 + slot * 80, 20))
+            .collect::<Vec<_>>(),
+    );
+    let (borrowed, borrowed_cost) = allocation::measure(&format!("index_borrowed_{count}"), || {
+        reclaim::ChunkDataBoundaries::new(&data, false)
+    });
+    let (indexed, indexed_cost) = allocation::measure(&format!("index_boundaries_{count}"), || {
+        reclaim::ChunkDataBoundaries::new(&data, true)
+    });
+    assert!(indexed_cost.blocks > 0, "{indexed_cost:?}");
+    assert!(
+        indexed_cost.live_bytes >= 2 * count * size_of::<PhysicalAddress>() as u64,
+        "{indexed_cost:?}"
+    );
+    assert!(
+        indexed_cost.peak_bytes <= 128 * count + 1_024,
+        "{indexed_cost:?}"
+    );
+    assert_eq!(borrowed_cost.blocks, 0, "{borrowed_cost:?}");
+    assert_eq!(borrowed_cost.bytes, 0, "{borrowed_cost:?}");
+    assert_eq!(borrowed_cost.peak_bytes, 0, "{borrowed_cost:?}");
+    assert_eq!(borrowed_cost.live_bytes, 0, "{borrowed_cost:?}");
+    assert!(borrowed.abuts_index(&index[..1]));
+    let (proven, query_cost) = allocation::measure(&format!("index_queries_{count}"), || {
+        indexed.abuts_index(&index)
+    });
+    assert!(proven);
+    assert_eq!(query_cost.blocks, 0, "{query_cost:?}");
+    assert_eq!(query_cost.bytes, 0, "{query_cost:?}");
+    assert_eq!(query_cost.peak_bytes, 0, "{query_cost:?}");
+    assert_eq!(query_cost.live_bytes, 0, "{query_cost:?}");
 }
 
 #[rstest]
@@ -2118,7 +2264,8 @@ fn filter_attribute_heap(
 const UNENCODED_BLOCK_LEN: usize = 64;
 
 fn index_abuts_ranges(data: &[(u64, u64)], index: &[(u64, u64)]) -> bool {
-    reclaim::index_abuts_chunk_data(&physical_ranges(data), &physical_ranges(index))
+    let data = physical_ranges(data);
+    reclaim::ChunkDataBoundaries::new(&data, index.len() > 1).abuts_index(&physical_ranges(index))
 }
 
 fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {
