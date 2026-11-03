@@ -169,6 +169,18 @@ impl<'a> ReservationPlan<'a> {
         self.reservations.as_slice()
     }
 
+    /// Returns the reservations after the successfully emitted prefix, in request order.
+    #[cfg(any(test, doc))]
+    pub(super) fn pending(&self) -> &[PlannedReservation] {
+        &self.reservations.as_slice()[self.next..]
+    }
+
+    /// Returns the address context of the borrowed editing session.
+    #[cfg(any(test, doc))]
+    pub(super) fn addresses(&self) -> AddressContext {
+        self.engine.context.addresses()
+    }
+
     #[cfg(test)]
     pub(super) fn end(&self) -> PhysicalAddress {
         self.end
@@ -373,6 +385,11 @@ impl PlannedReservation {
 
     pub(super) fn request(&self) -> ReservationRequest {
         self.block.request().reservation()
+    }
+    /// Returns the allocation request, encoded length, and address dependency.
+    #[cfg(any(test, doc))]
+    pub(super) fn block_request(&self) -> BlockRequest {
+        self.block.request()
     }
     pub(super) fn encoding_dependency(&self) -> EncodingDependency {
         self.block.request().dependency()

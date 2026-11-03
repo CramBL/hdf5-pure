@@ -362,6 +362,8 @@ mod aggregation;
 pub(crate) mod allocation;
 mod analysis;
 mod append;
+#[cfg(any(test, doc))]
+mod array;
 pub(crate) mod attributes;
 mod block;
 mod commit;
