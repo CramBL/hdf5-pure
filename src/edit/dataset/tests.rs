@@ -361,6 +361,7 @@ fn page_creation_emits_retained_chunks_without_an_aggregate_payload_buffer(#[cas
         ..ChunkOptions::default()
     };
     let set = chunked_write::compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         &[u64::try_from(count * 256).unwrap()],
         ChunkContext::basic(&[256], 4),

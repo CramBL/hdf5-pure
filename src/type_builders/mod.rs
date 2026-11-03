@@ -1379,6 +1379,85 @@ pub(crate) fn patch_vl_refs_masked(
     }
 }
 
+/// Writes placed collection addresses into consecutive variable-length references at `offsets`.
+///
+/// Collection order and object boundaries follow [`build_global_heap_collections_from_bytes`].
+///
+/// # Errors
+///
+/// Returns [`FormatError::DataSizeMismatch`] if `raw` is not a whole number of references, or
+/// [`FormatError::Internal`] if a collection address is absent. Propagates defined-address and
+/// buffer-range errors. Earlier patches remain written if a later patch fails.
+pub(crate) fn patch_vl_refs_with_width(
+    offsets: OffsetWidth,
+    raw: &mut [u8],
+    addresses: &[u64],
+) -> Result<(), FormatError> {
+    let reference_size = VlElement::serialized_size(offsets);
+    if !raw.len().is_multiple_of(reference_size) {
+        return Err(FormatError::DataSizeMismatch {
+            expected: reference_size,
+            actual: raw.len(),
+        });
+    }
+    for index in 0..raw.len() / reference_size {
+        let address = addresses
+            .get(index / GLOBAL_HEAP_MAX_OBJECTS)
+            .ok_or_else(|| {
+                FormatError::Internal("a variable-length collection address is absent".into())
+            })?;
+        hdf5_pure_format::__private::write_defined_stored_address_at(
+            raw,
+            index * reference_size + VL_COUNT_SIZE,
+            StoredAddress::new(*address),
+            offsets,
+        )?;
+    }
+    Ok(())
+}
+
+/// Writes placed heap addresses into selected variable-length references at `offsets`.
+///
+/// The entries of `patches` identify reference starts in `raw`, in heap-object order.
+/// Collection boundaries follow [`build_global_heap_collections_from_bytes`].
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if a collection address is absent, or
+/// [`FormatError::OffsetOverflow`] if a patch position exceeds [`usize::MAX`]. Propagates
+/// defined-address and buffer-range errors. Earlier patches remain written if a later patch fails.
+pub(crate) fn patch_vl_refs_masked_with_width(
+    offsets: OffsetWidth,
+    raw: &mut [u8],
+    patches: &[usize],
+    addresses: &[u64],
+) -> Result<(), FormatError> {
+    for (ordinal, &offset) in patches.iter().enumerate() {
+        let address = addresses
+            .get(ordinal / GLOBAL_HEAP_MAX_OBJECTS)
+            .ok_or_else(|| {
+                FormatError::Internal("a variable-length collection address is absent".into())
+            })?;
+        let address_at = offset
+            .checked_add(VL_COUNT_SIZE)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: offset as u64,
+                length: VL_COUNT_SIZE as u64,
+            })?;
+        hdf5_pure_format::__private::write_defined_stored_address_at(
+            raw,
+            address_at,
+            StoredAddress::new(*address),
+            offsets,
+        )?;
+    }
+    Ok(())
+}
+
+/// The four-byte count preceding the heap ID in `H5T__vlen_disk_write`
+/// (`H5Tvlen.c`, HDF5 2.2.0).
+const VL_COUNT_SIZE: usize = 4;
+
 /// `STRSIZE` for a fixed-width string datatype whose longest value is `len`
 /// bytes, which is never zero.
 ///

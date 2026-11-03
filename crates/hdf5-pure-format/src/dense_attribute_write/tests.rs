@@ -95,6 +95,10 @@ fn dense_attribute_preparation_rejects_incoherent_creation_metadata(
     let attrs = [metadata_attribute("a", 1), metadata_attribute("b", 2)];
     assert_eq!(
         EncodedDenseAttrs::new(
+            FormatWidths {
+                offsets: DENSE_ATTR_OFFSET_WIDTH,
+                lengths: DENSE_ATTR_LENGTH_WIDTH
+            },
             &attrs,
             DenseAttrCreationOrder::Tracked {
                 indices,
@@ -113,6 +117,10 @@ fn dense_attribute_preparation_rejects_incoherent_creation_metadata(
 fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed: bool) {
     let attrs = [metadata_attribute("a", 1), metadata_attribute("b", 2)];
     let prepared = EncodedDenseAttrs::new(
+        FormatWidths {
+            offsets: DENSE_ATTR_OFFSET_WIDTH,
+            lengths: DENSE_ATTR_LENGTH_WIDTH,
+        },
         &attrs,
         DenseAttrCreationOrder::Tracked {
             indices: vec![7, 2],
@@ -140,7 +148,7 @@ fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed:
         attrs
             .iter()
             .map(|a| a
-                .serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)
+                .serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH.get())
                 .unwrap())
             .collect::<Vec<_>>()
     );
@@ -153,7 +161,15 @@ fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed:
 #[test]
 fn dense_attribute_preparation_preserves_untracked_positions() {
     let attrs = [metadata_attribute("b", 1), metadata_attribute("a", 2)];
-    let prepared = EncodedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
+    let prepared = EncodedDenseAttrs::new(
+        FormatWidths {
+            offsets: DENSE_ATTR_OFFSET_WIDTH,
+            lengths: DENSE_ATTR_LENGTH_WIDTH,
+        },
+        &attrs,
+        DenseAttrCreationOrder::Untracked,
+    )
+    .unwrap();
     assert_eq!(prepared.next_index, None);
     assert!(!prepared.indexed);
     assert!(prepared.corder_order.is_empty());
@@ -174,7 +190,15 @@ fn dense_attribute_preparation_rejects_duplicate_names() {
         metadata_attribute("duplicate", 2),
     ];
     assert_eq!(
-        EncodedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap_err(),
+        EncodedDenseAttrs::new(
+            FormatWidths {
+                offsets: DENSE_ATTR_OFFSET_WIDTH,
+                lengths: DENSE_ATTR_LENGTH_WIDTH
+            },
+            &attrs,
+            DenseAttrCreationOrder::Untracked
+        )
+        .unwrap_err(),
         FormatError::DuplicateAttributeName("duplicate".into())
     );
 }
@@ -187,7 +211,15 @@ fn dense_attribute_preparation_preserves_empty_set_metadata(
     #[case] next: Option<u16>,
     #[case] indexed: bool,
 ) {
-    let prepared = EncodedDenseAttrs::new(&[], creation).unwrap();
+    let prepared = EncodedDenseAttrs::new(
+        FormatWidths {
+            offsets: DENSE_ATTR_OFFSET_WIDTH,
+            lengths: DENSE_ATTR_LENGTH_WIDTH,
+        },
+        &[],
+        creation,
+    )
+    .unwrap();
     assert!(prepared.attributes.is_empty());
     assert!(prepared.order.is_empty());
     assert!(prepared.corder_order.is_empty());
@@ -197,7 +229,10 @@ fn dense_attribute_preparation_preserves_empty_set_metadata(
 
 #[test]
 fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
-    for record_size in [DENSE_ATTR_BTREE_RECORD, DENSE_ATTR_HUGE_BTREE_RECORD] {
+    for record_size in [
+        DENSE_ATTR_BTREE_RECORD,
+        HugeObjectRecord::size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH),
+    ] {
         let (info, depth) = format_boundary::BTreeV2NodeInfo::for_record_count(
             BTREE_V2_NODE_SIZE,
             record_size,
@@ -220,20 +255,50 @@ fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
 }
 
 #[rstest]
-#[case::undefined(u64::MAX, true)]
-#[case::overflow(u64::MAX - 1, false)]
-fn dense_attribute_plan_rejects_invalid_extent(#[case] base: u64, #[case] undefined: bool) {
-    let attrs = [metadata_attribute("a", 1)];
-    let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
+#[case::undefined(true)]
+#[case::end(false)]
+fn dense_attribute_plan_rejects_invalid_extent(
+    #[case] undefined: bool,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    #[values(false, true)] huge: bool,
+) {
+    let widths = FormatWidths {
+        offsets,
+        lengths: LengthWidth::Two,
+    };
+    let attrs = [if huge {
+        canonical_attribute("huge", 33_000)
+    } else {
+        metadata_attribute("a", 1)
+    }];
+    let plan =
+        PreparedDenseAttrs::with_widths(widths, &attrs, DenseAttrCreationOrder::Untracked, [])
+            .unwrap()
+            .finalize(
+                |reference| panic!("unexpected reference {reference:?}"),
+                |attribute| panic!("unexpected payload {attribute}"),
+            )
+            .unwrap();
+    let maximum = StoredAddress::undefined(offsets).get();
+    let base = if undefined {
+        maximum
+    } else {
+        maximum - plan.blob_len() + 1
+    };
     let expected = if undefined {
         FormatError::DefinedAddressIsUndefined {
             address: base,
-            offset_size: DENSE_ATTR_OFFSET_SIZE,
+            offset_size: offsets.get(),
         }
-    } else {
+    } else if offsets == OffsetWidth::Eight {
         FormatError::OffsetOverflow {
             offset: base,
             length: plan.blob_len(),
+        }
+    } else {
+        FormatError::AddressTooLarge {
+            address: maximum + 1,
+            offset_size: offsets.get(),
         }
     };
     assert_eq!(
@@ -253,18 +318,86 @@ fn dense_attribute_plan_rejects_invalid_extent(#[case] base: u64, #[case] undefi
 #[case::huge(vec![canonical_attribute("huge", 70_000)])]
 fn dense_attribute_plan_fills_a_valid_extent_at_the_address_limit(
     #[case] attrs: Vec<AttributeMessage>,
+    #[values(OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
 ) {
-    let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
-    let base = StoredAddress::new(u64::MAX - plan.blob_len());
+    assert_valid_extent(
+        FormatWidths {
+            offsets,
+            lengths: LengthWidth::Eight,
+        },
+        &attrs,
+    );
+}
+
+#[rstest]
+#[case::empty(vec![])]
+#[case::managed(vec![metadata_attribute("a", 1)])]
+#[case::huge(vec![canonical_attribute("huge", 33_000)])]
+fn dense_attribute_plan_fills_a_two_byte_extent_at_the_address_limit(
+    #[case] attrs: Vec<AttributeMessage>,
+) {
+    assert_valid_extent(
+        FormatWidths {
+            offsets: OffsetWidth::Two,
+            lengths: LengthWidth::Two,
+        },
+        &attrs,
+    );
+}
+
+fn assert_valid_extent(widths: FormatWidths, attrs: &[AttributeMessage]) {
+    let plan =
+        PreparedDenseAttrs::with_widths(widths, attrs, DenseAttrCreationOrder::Untracked, [])
+            .unwrap()
+            .finalize(
+                |reference| panic!("unexpected reference {reference:?}"),
+                |attribute| panic!("unexpected payload {attribute}"),
+            )
+            .unwrap();
+    let maximum = StoredAddress::undefined(widths.offsets).get();
+    let base = StoredAddress::new(maximum - plan.blob_len());
     let built = plan.build(base).unwrap();
     assert_eq!(built.blob.len() as u64, plan.blob_len());
     assert_eq!(
         built.attr_info_message,
         plan.attr_info_message(base).unwrap()
     );
-    let info = AttributeInfoMessage::parse(&built.attr_info_message, 8).unwrap();
+    let info = AttributeInfoMessage::parse(&built.attr_info_message, widths.offsets.get()).unwrap();
     assert_eq!(info.fractal_heap_address, Some(base));
-    assert!(info.btree_name_index_address.unwrap().get() < u64::MAX);
+    assert!(info.btree_name_index_address.unwrap().get() < maximum);
+}
+
+#[rstest]
+fn dense_attribute_huge_totals_fit_the_selected_length_width(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+) {
+    let attrs = [
+        canonical_attribute("a", 33_000),
+        canonical_attribute("b", 33_000),
+    ];
+    let total = attrs
+        .iter()
+        .map(|attribute| attribute.serialize_v3(offsets, 2).unwrap().len() as u64)
+        .sum::<u64>();
+    assert!(total > u64::from(u16::MAX));
+    let error = PreparedDenseAttrs::with_widths(
+        FormatWidths {
+            offsets,
+            lengths: LengthWidth::Two,
+        },
+        &attrs,
+        DenseAttrCreationOrder::Untracked,
+        [],
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        FormatError::LengthTooLarge {
+            length: total,
+            length_size: 2
+        }
+    );
 }
 
 #[rstest]

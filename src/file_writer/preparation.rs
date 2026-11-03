@@ -22,6 +22,7 @@ use crate::chunked_write::ChunkedHeader;
 use crate::chunked_write::ChunkedMeasure;
 use crate::chunked_write::CompressedChunkSet;
 use crate::chunked_write::EmptyChunkIndex;
+use crate::chunked_write::StorageAllocation;
 use crate::chunked_write::VerbatimChunks;
 use crate::chunked_write::VerbatimLayout;
 use crate::chunked_write::VerbatimPayload;
@@ -36,11 +37,14 @@ use crate::error::FormatError;
 use crate::file_emission::EmissionError;
 use crate::file_emission::Reservation;
 use crate::fill_value::FillPattern;
+use crate::filters::ChunkContext;
 use crate::libver::LibVer;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectTarget;
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{AttributeSpecs, DatasetBuilder};
+use crate::width::FormatWidths;
+use crate::width::OffsetWidth;
 
 use super::HeaderOptions;
 use super::layout::DataKind;
@@ -51,14 +55,15 @@ use super::layout::DataMeasure;
 /// The writer resolves committed datatypes, object references, and global-heap references
 /// before emission. Providers supply element bytes during emission.
 pub(super) struct PreparedDataset {
+    widths: FormatWidths,
     /// Link name in the owning group.
     pub(super) name: LinkNameBuf,
     pub(super) dt: Datatype,
     /// Where `dt` is written: in this dataset's header, or in a committed
     /// datatype object it refers to.
     pub(super) dt_location: DatatypeLocation,
-    /// The committed datatype target for `dt_location`. `dt_location`
-    /// holds the undefined address until the writer places that datatype.
+    /// The committed datatype target for `dt_location`, whose address is a zero placeholder
+    /// until the writer places that datatype.
     pub(super) committed_datatype_target: Option<ObjectTarget>,
     pub(super) ds: Dataspace,
     /// The storage source and deferred object and heap references.
@@ -84,8 +89,8 @@ impl PreparedDataset {
     /// Parses a dataset request and prepares its attributes and storage source.
     ///
     /// Returns the dataset and the global-heap collections for its variable-length attributes.
-    /// Provider payloads remain unread. Committed datatype addresses are undefined until the
-    /// writer resolves their targets.
+    /// Provider payloads remain unread. Committed datatype references have zero addresses until
+    /// the writer resolves their targets.
     ///
     /// # Errors
     ///
@@ -102,32 +107,93 @@ impl PreparedDataset {
     /// [`FormatError::DatasetProvenanceRequiresData`] for a content hash on a nonempty unallocated
     /// dataset. Propagates name, datatype, fill encoding, storage source, chunk geometry, filter
     /// option, and attribute preparation errors.
-    pub(super) fn prepare(mut db: DatasetBuilder) -> Result<(Self, Vec<VlPatch>), FormatError> {
+    pub(super) fn prepare(db: DatasetBuilder) -> Result<(Self, Vec<VlPatch>), FormatError> {
+        Self::prepare_with_widths(super::WIDTHS, db)
+    }
+
+    /// Prepares stored element, fill, and attribute bytes at the selected widths.
+    ///
+    /// Provider payloads remain unread. The writer resolves destination addresses after layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ReferenceWidthUnsupported`] for legacy references at narrow address
+    /// widths, or [`FormatError::VariableLengthProviderUnsupported`] for variable-length providers
+    /// at those widths. Returns [`FormatError::LengthTooLarge`] if a heap collection exceeds the
+    /// selected length width. Propagates the request errors of [`Self::prepare`] and errors from
+    /// stored-size calculation and variable-length conversion.
+    pub(super) fn prepare_with_widths(
+        widths: FormatWidths,
+        mut db: DatasetBuilder,
+    ) -> Result<(Self, Vec<VlPatch>), FormatError> {
         let name = super::link_name(core::mem::take(&mut db.name))?;
         let WholeFileDataset {
             metadata,
-            storage,
+            mut storage,
             committed_datatype_targets: attr_committed_datatype_targets,
         } = DatasetRequest::parse(db)?.into_whole_file()?;
         let DatasetMetadata {
             dt,
-            element_size: _,
+            element_size: canonical_element_size,
             ds: dspace,
-            extent: declared_contiguous_len,
+            extent: canonical_extent,
             attrs:
                 AttributeRequest {
-                    messages: attrs,
+                    messages: mut attrs,
                     collections,
                 },
             chunk_options,
-            fill,
+            mut fill,
             fill_time,
             committed_datatype_target,
             #[cfg(feature = "provenance")]
             provenance,
         } = metadata;
-        #[cfg(feature = "provenance")]
-        let mut attrs = attrs;
+        require_reference_width(widths, &dt)?;
+        if widths.offsets != OffsetWidth::Eight
+            && (storage.produced().is_some() || storage.chunks().is_some())
+            && hdf5_pure_format::__private::datatype_holds_variable_length(&dt)
+        {
+            return Err(FormatError::VariableLengthProviderUnsupported {
+                offset_size: widths.offsets.get(),
+            });
+        }
+        if let Some(fill) = &mut fill {
+            fill.narrow_variable_length(&dt, widths.offsets)?;
+        }
+        let declared_contiguous_len = if widths.offsets == OffsetWidth::Eight {
+            canonical_extent
+        } else {
+            let target_size =
+                hdf5_pure_format::__private::stored_element_size(&dt, widths.offsets)?;
+            (canonical_extent / canonical_element_size.get() as u64)
+                .checked_mul(u64::from(target_size.get()))
+                .ok_or(FormatError::DatasetSizeOverflow {
+                    size: canonical_extent,
+                    dimension: u64::from(target_size.get()),
+                })?
+        };
+        if let Some(mut staging) = storage.take_vl_string_staging() {
+            validate_collections(widths, &staging.collections)?;
+            hdf5_pure_format::__private::narrow_variable_length_references(
+                widths.offsets,
+                &dt,
+                storage.raw_mut()?,
+                Some(&mut staging.patch_offsets),
+            )?;
+            storage.restore_vl_string_staging(staging)?;
+        } else if storage.produced().is_none()
+            && storage.chunks().is_none()
+            && storage.allocation() != StorageAllocation::Unallocated
+        {
+            hdf5_pure_format::__private::narrow_variable_length_references(
+                widths.offsets,
+                &dt,
+                storage.raw_mut()?,
+                None,
+            )?;
+        }
+        prepare_attribute_widths(widths, &mut attrs, &collections)?;
         let maxshape = dspace.max_dimensions.clone();
         let patches = collections
             .into_iter()
@@ -141,6 +207,7 @@ impl PreparedDataset {
             provenance.map(|provenance| PendingHash::reserve(&mut attrs, provenance));
         Ok((
             Self {
+                widths,
                 name,
                 dt,
                 dt_location: match committed_datatype_target {
@@ -207,9 +274,17 @@ impl PreparedDataset {
         let (data, messages) = if self.is_chunked() {
             if self.storage.reference_targets().is_some() {
                 let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
-                let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &self.dt)?;
+                let ctx = ChunkContext::from_stored_datatype(
+                    &chunk_dims,
+                    &self.dt,
+                    hdf5_pure_format::__private::stored_element_size(
+                        &self.dt,
+                        self.widths.offsets,
+                    )?,
+                );
                 let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
                 let header = self.chunk_options.measure_header(
+                    self.widths,
                     &self.ds.dimensions,
                     ctx,
                     self.maxshape.as_deref(),
@@ -381,9 +456,14 @@ impl PreparedDataset {
     /// [`crate::filters::compress_chunk_with`] are propagated.
     pub(super) fn compress_chunks(&self) -> Result<CompressedChunkSet, FormatError> {
         let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
-        let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &self.dt)?;
+        let ctx = ChunkContext::from_stored_datatype(
+            &chunk_dims,
+            &self.dt,
+            hdf5_pure_format::__private::stored_element_size(&self.dt, self.widths.offsets)?,
+        );
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         chunked_write::compress_chunks(
+            self.widths,
             self.storage.raw(),
             &self.ds.dimensions,
             ctx,
@@ -421,6 +501,7 @@ impl PreparedDataset {
             // the assembly loop (buffered `finish` and streaming `finish_to`
             // share that one emitter, so their output is byte-identical).
             let prepared = VerbatimChunks::new(
+                self.widths,
                 &rc.meta,
                 &self.ds.dimensions,
                 &rc.chunk_dims,
@@ -492,6 +573,7 @@ impl PreparedDataset {
                 layout_message,
                 pipeline_message,
             } = chunked_write::plan_chunked_data_verbatim(
+                self.widths,
                 &rc.meta,
                 &self.ds.dimensions,
                 &rc.chunk_dims,
@@ -548,6 +630,7 @@ impl PreparedDataset {
         let storage = if let Some(rc) = self.storage.chunks() {
             PreparedChunkStorage::Verbatim {
                 chunks: VerbatimChunks::new(
+                    self.widths,
                     &rc.meta,
                     &self.ds.dimensions,
                     &rc.chunk_dims,
@@ -1189,10 +1272,24 @@ impl PreparedAttributes {
     /// if an attribute name is invalid or exceeds its encoded width. Propagates errors from
     /// [`AttributeRequest::parse`].
     pub(super) fn new(specs: &AttributeSpecs) -> Result<Self, FormatError> {
+        Self::with_widths(super::WIDTHS, specs)
+    }
+
+    /// Prepares attributes with variable-length references at `widths.offsets`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::new`] for invalid attribute requests, and the errors of
+    /// [`prepare_attribute_widths`] for unsupported references or narrow-field failures.
+    pub(super) fn with_widths(
+        widths: FormatWidths,
+        specs: &AttributeSpecs,
+    ) -> Result<Self, FormatError> {
         let AttributeRequest {
-            messages,
+            mut messages,
             collections,
         } = AttributeRequest::parse(specs)?;
+        prepare_attribute_widths(widths, &mut messages, &collections)?;
         Ok(Self {
             messages,
             committed_datatype_targets: specs.committed_datatype_targets(),
@@ -1215,6 +1312,70 @@ pub(super) struct VlPatch {
     pub(super) attr_index: usize,
 }
 
+/// Checks the creation policy for object and dataset-region references.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ReferenceWidthUnsupported`] if an address-bearing datatype is paired
+/// with two- or four-byte file offsets, including nested occurrences.
+pub(super) fn require_reference_width(
+    widths: FormatWidths,
+    datatype: &Datatype,
+) -> Result<(), FormatError> {
+    if widths.offsets != OffsetWidth::Eight
+        && hdf5_pure_format::__private::datatype_holds_object_address(datatype)
+    {
+        return Err(FormatError::ReferenceWidthUnsupported {
+            offset_size: widths.offsets.get(),
+        });
+    }
+    Ok(())
+}
+
+/// Checks existing collection byte lengths against the selected length width.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if a collection exceeds `widths.lengths`.
+fn validate_collections(widths: FormatWidths, collections: &[Vec<u8>]) -> Result<(), FormatError> {
+    let maximum = u64::MAX >> (64 - 8 * widths.lengths.get());
+    for collection in collections {
+        if collection.len() as u64 > maximum {
+            return Err(FormatError::LengthTooLarge {
+                length: collection.len() as u64,
+                length_size: widths.lengths.get(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checks attribute reference policy and converts canonical variable-length raw values.
+///
+/// # Errors
+///
+/// Returns the errors of [`validate_collections`] and [`require_reference_width`]. Propagates
+/// variable-length conversion errors for invalid layouts, buffer ranges, or addresses.
+fn prepare_attribute_widths(
+    widths: FormatWidths,
+    messages: &mut [AttributeMessage],
+    collections: &[(usize, Vec<Vec<u8>>)],
+) -> Result<(), FormatError> {
+    for (_, collections) in collections {
+        validate_collections(widths, collections)?;
+    }
+    for message in messages {
+        require_reference_width(widths, &message.datatype)?;
+        hdf5_pure_format::__private::narrow_variable_length_references(
+            widths.offsets,
+            &message.datatype,
+            &mut message.raw_data,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
@@ -1232,26 +1393,42 @@ mod tests {
     use hdf5_pure_format::__private::IndexSlots;
     use rstest::rstest;
 
+    use super::PreparedAttributes;
     use super::PreparedDataset;
     use crate::AttrValue;
+    use crate::VariableLengthType;
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+    use crate::attribute::AttributeMessage;
     use crate::chunked_write;
     use crate::chunked_write::ByteSink;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
     use crate::data_layout::ChunkedLayoutFlags;
+    use crate::dataspace::Dataspace;
+    use crate::dataspace::DataspaceType;
+    use crate::datatype::Datatype;
     use crate::error::FormatError;
     use crate::file_emission::EmissionError;
     use crate::libver::LibVer;
+    use crate::shared_message::DatatypeLocation;
     use crate::type_builders::DatasetBuilder;
+    use crate::width::FormatWidths;
+    use crate::width::LengthWidth;
+    use crate::width::OffsetWidth;
 
     #[rstest]
     #[case::contiguous(false, false)]
     #[case::fixed_array(true, false)]
     #[case::extensible_array(true, true)]
-    fn lazy_payload_reads_begin_at_emission(#[case] chunked: bool, #[case] unlimited: bool) {
+    fn lazy_payload_reads_begin_at_emission(
+        #[case] chunked: bool,
+        #[case] unlimited: bool,
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    ) {
+        let widths = FormatWidths { offsets, lengths };
         let calls = Arc::new(AtomicUsize::new(0));
         let provider = Box::new(CountingProvider(Arc::clone(&calls)));
         let mut builder = DatasetBuilder::new("values");
@@ -1279,29 +1456,47 @@ mod tests {
         } else {
             builder.with_produced_data(crate::make_i32_type(), &[4], 16, 8, provider);
         }
-        let (dataset, heaps) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, heaps) = PreparedDataset::prepare_with_widths(widths, builder).unwrap();
         assert!(heaps.is_empty());
         assert_eq!(dataset.name.as_str(), "values");
         assert_eq!(dataset.ds.dimensions, [4]);
         assert_eq!(dataset.is_chunked(), chunked);
-        let measured = dataset
-            .measure(
-                StoredAddress::new(0),
-                None,
-                None,
-                LibVer::V110,
-                super::super::HeaderOptions::PLAIN,
-            )
-            .unwrap();
+        let measured = dataset.measure(
+            StoredAddress::new(0),
+            None,
+            None,
+            LibVer::V110,
+            super::super::HeaderOptions::PLAIN.with_widths(widths),
+        );
+        if unlimited && lengths != LengthWidth::Eight {
+            assert_eq!(
+                measured.err().unwrap(),
+                FormatError::LengthTooLarge {
+                    length: u64::MAX,
+                    length_size: lengths.get()
+                }
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            return;
+        }
+        let measured = measured.unwrap();
         assert!(measured.header_len > 0);
         match measured.data.array.as_ref() {
             Some(super::super::layout::ArrayMeasure::Fixed(plan)) => {
                 assert!(!unlimited);
-                assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [28, 34]);
+                assert_eq!(
+                    plan.block_lengths().collect::<Vec<_>>(),
+                    [
+                        12 + u64::from(offsets.get()) + u64::from(lengths.get()),
+                        10 + 3 * u64::from(offsets.get())
+                    ]
+                );
             }
             Some(super::super::layout::ArrayMeasure::Extensible(plan)) => {
                 assert!(unlimited);
-                assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [72, 298]);
+                if offsets == OffsetWidth::Eight {
+                    assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [72, 298]);
+                }
             }
             Some(super::super::layout::ArrayMeasure::Empty(_)) => {
                 panic!("expected occupied array geometry")
@@ -1988,6 +2183,95 @@ mod tests {
             out.extend_from_slice(&chunks[index]);
             Ok(())
         }
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    fn narrow_reference_attributes_are_rejected_during_preparation(
+        #[case] offsets: OffsetWidth,
+        #[values(false, true)] attributes_only: bool,
+    ) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&[7]);
+        builder.set_attr_verbatim(
+            AttributeMessage {
+                name: "reference".into(),
+                datatype: crate::type_builders::make_object_reference_type(),
+                dataspace: Dataspace {
+                    space_type: DataspaceType::Scalar,
+                    rank: 0,
+                    dimensions: Vec::new(),
+                    max_dimensions: None,
+                },
+                raw_data: vec![0; 8],
+                datatype_location: DatatypeLocation::Inline,
+            },
+            None,
+        );
+        let widths = FormatWidths {
+            offsets,
+            lengths: LengthWidth::Eight,
+        };
+        let result = if attributes_only {
+            PreparedAttributes::with_widths(widths, &builder.attrs).map(|_| ())
+        } else {
+            PreparedDataset::prepare_with_widths(widths, builder).map(|_| ())
+        };
+        assert_eq!(
+            result,
+            Err(FormatError::ReferenceWidthUnsupported {
+                offset_size: offsets.get()
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    fn narrow_variable_length_providers_are_rejected_before_reads(
+        #[case] offsets: OffsetWidth,
+        #[values(false, true)] chunked: bool,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(CountingProvider(Arc::clone(&calls)));
+        let mut builder = DatasetBuilder::new("values");
+        let datatype =
+            Datatype::VariableLength(VariableLengthType::sequence(crate::make_i32_type()));
+        if chunked {
+            builder.with_raw_chunks_lazy(
+                datatype,
+                &[1],
+                None,
+                &[1],
+                NonZeroUsize::new(16).unwrap(),
+                ChunkedLayoutFlags::NONE,
+                None,
+                vec![ChunkMeta {
+                    compressed_size: 16,
+                    filter_mask: 0,
+                }],
+                provider,
+            );
+        } else {
+            builder.with_produced_data(datatype, &[1], 16, 16, provider);
+        }
+        let error = PreparedDataset::prepare_with_widths(
+            FormatWidths {
+                offsets,
+                lengths: LengthWidth::Eight,
+            },
+            builder,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            error,
+            FormatError::VariableLengthProviderUnsupported {
+                offset_size: offsets.get()
+            }
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     struct CountingProvider(Arc<AtomicUsize>);

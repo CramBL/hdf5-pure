@@ -61,7 +61,15 @@ fn contiguous_encoding_preserves_array_bytes(
     let records = records(occupied, filtered);
     let slots_view = IndexSlots::new(&records, occupied, slots).unwrap();
     let address = StoredAddress::new(4096);
-    let expected = kind.build_at(&slots_view, 8, filtered, address).unwrap();
+    let expected = kind
+        .build_at(
+            crate::file_writer::WIDTHS,
+            &slots_view,
+            8,
+            filtered,
+            address,
+        )
+        .unwrap();
     let measure = measure(kind, occupied, slots, filtered);
     assert_eq!(measure.build_at(&slots_view, address).unwrap(), expected);
 }
@@ -315,6 +323,7 @@ fn extensible_emission_retains_one_complete_block_buffer() {
 
 fn measure(kind: ChunkArrayKind, occupied: &[u64], slots: u64, filtered: bool) -> ArrayMeasure {
     ArrayMeasure::new(ChunkArrayGeometry {
+        widths: crate::file_writer::WIDTHS,
         kind,
         occupied: Cow::Borrowed(occupied),
         slots,

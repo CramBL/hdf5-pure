@@ -3152,8 +3152,9 @@ impl File {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the creation and access properties cannot be used
-    /// together. Returns the build, write, or [`File::open_rw_with_options`] error if file
-    /// creation or read-write opening fails.
+    /// together, including widths other than eight-byte addresses and lengths. Such combinations
+    /// are rejected before writing. Returns the build, write, or [`File::open_rw_with_options`]
+    /// error if file creation or read-write opening fails.
     pub fn create_with_options<P: AsRef<std::path::Path>>(
         path: P,
         create: FileCreateProperties,

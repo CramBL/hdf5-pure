@@ -12,12 +12,14 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::SessionSpace;
 
-use crate::address::StoredAddress;
+use crate::address::{BaseAddress, BaseAddressExt, StoredAddress};
 use crate::error::FormatError;
 use crate::width::FormatWidths;
 
 /// Reserves stored-address ranges by direct append or through metadata and raw aggregates.
 pub(crate) struct FileAllocation {
+    widths: FormatWidths,
+    base: BaseAddress,
     end: StoredAddress,
     aggregates: Option<ClassicAggregators>,
     space: SessionSpace,
@@ -30,6 +32,8 @@ impl FileAllocation {
     /// during construction. Active aggregate spare remains reserved.
     pub(crate) fn new(end: StoredAddress, aggregated: bool, threshold: Option<u64>) -> Self {
         Self {
+            widths: crate::file_writer::WIDTHS,
+            base: BaseAddress::ZERO,
             end,
             aggregates: aggregated.then(ClassicAggregators::new),
             space: SessionSpace::from_strategy(
@@ -38,6 +42,63 @@ impl FileAllocation {
                 FileSpacePageSize::DEFAULT,
             ),
         }
+    }
+
+    /// Starts allocation with selected widths and a physical base address.
+    ///
+    /// Aggregate and threshold behavior matches [`Self::new`]. Checks `end` in both stored and
+    /// physical coordinates before constructing the allocator.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address and arithmetic errors of [`Self::require_end`].
+    pub(crate) fn with_widths(
+        widths: FormatWidths,
+        base: BaseAddress,
+        end: StoredAddress,
+        aggregated: bool,
+        threshold: Option<u64>,
+    ) -> Result<Self, FormatError> {
+        let mut allocation = Self::new(end, aggregated, threshold);
+        allocation.widths = widths;
+        allocation.base = base;
+        allocation.require_end(end)?;
+        Ok(allocation)
+    }
+
+    /// Checks a recorded EOA in stored and physical coordinates against the address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if either coordinate exceeds the selected width,
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker, or
+    /// [`FormatError::OffsetOverflow`] if resolving the physical address exceeds [`u64::MAX`].
+    pub(crate) fn require_end(&self, end: StoredAddress) -> Result<(), FormatError> {
+        Self::require_address(self.widths, end.get())?;
+        Self::require_address(self.widths, self.base.resolve(end)?.get())
+    }
+
+    /// Checks a defined address at the selected offset width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if `address` exceeds `widths.offsets`, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+    fn require_address(widths: FormatWidths, address: u64) -> Result<(), FormatError> {
+        let undefined = StoredAddress::undefined(widths.offsets).get();
+        if address > undefined {
+            return Err(FormatError::AddressTooLarge {
+                address,
+                offset_size: widths.offsets.get(),
+            });
+        }
+        if address == undefined {
+            return Err(FormatError::DefinedAddressIsUndefined {
+                address,
+                offset_size: widths.offsets.get(),
+            });
+        }
+        Ok(())
     }
 
     /// Reserves `length` bytes for `class` and returns their stored address.
@@ -51,6 +112,8 @@ impl FileAllocation {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the reservation exceeds [`u64::MAX`], or
     /// [`FormatError::Internal`] if an active aggregate extends beyond the writer's EOA.
+    /// Returns the errors of [`Self::require_end`] if a direct reservation or complete aggregate
+    /// window exceeds the selected address width in stored or physical coordinates.
     pub(crate) fn reserve(
         &mut self,
         length: u64,
@@ -62,7 +125,7 @@ impl FileAllocation {
         if let Some(extent) = self.space.allocate(length.get(), class) {
             return Ok(extent.start());
         }
-        if let Some(aggregates) = &mut self.aggregates {
+        if let Some(mut aggregates) = self.aggregates {
             let allocation = aggregates
                 .allocate(self.end, length, class)
                 .map_err(|error| match error {
@@ -73,14 +136,19 @@ impl FileAllocation {
                         FormatError::Internal("aggregate reservation exceeds the writer EOA".into())
                     }
                 })?;
-            self.end = allocation.end_of_allocation();
+            let end = allocation.end_of_allocation();
+            self.require_end(end)?;
+            self.aggregates = Some(aggregates);
+            self.end = end;
             if let Some(end) = self.space.release_freed(self.end, allocation.released()) {
                 self.end = end;
             }
             Ok(allocation.extent().start())
         } else {
             let address = self.end;
-            self.end = self.end.checked_add(length.get())?;
+            let end = self.end.checked_add(length.get())?;
+            self.require_end(end)?;
+            self.end = end;
             Ok(address)
         }
     }
@@ -111,11 +179,13 @@ impl FileAllocation {
     /// [`u64::MAX`], [`FormatError::AddressTooLarge`] or [`FormatError::LengthTooLarge`] if a
     /// manager field exceeds its width, [`FormatError::InvalidFreeSpaceManager`] if a section
     /// exceeds the manager's size limit, or [`FormatError::Internal`] if an active aggregate
-    /// extends beyond the writer's EOA or the free-space total exceeds [`u64::MAX`].
+    /// extends beyond the writer's EOA or the free-space total exceeds [`u64::MAX`]. Returns
+    /// the errors of [`Self::require_end`] if the manager's final EOA does not fit the address
+    /// width.
     pub(crate) fn finish_persisted(
         mut self,
-        widths: FormatWidths,
     ) -> Result<(StoredAddress, Option<FileManager>), FormatError> {
+        let widths = self.widths;
         self.settle(true)?;
         let sections: Vec<_> = self
             .space
@@ -139,6 +209,7 @@ impl FileAllocation {
             SECTION_CLASS_SIMPLE,
         )?;
         self.end = section_list_address.checked_add(section_list.len() as u64)?;
+        self.require_end(self.end)?;
         Ok((
             self.end,
             Some(FileManager {
@@ -195,6 +266,8 @@ mod tests {
     use rstest::rstest;
 
     use super::FileAllocation;
+    use crate::address::BaseAddress;
+    use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::error::FormatError;
@@ -211,11 +284,18 @@ mod tests {
         #[values(2, 4, 8)] width: u8,
     ) {
         let widths = FormatWidths::from_sizes(width, width).unwrap();
-        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(threshold));
+        let mut allocation = FileAllocation::with_widths(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(48),
+            true,
+            Some(threshold),
+        )
+        .unwrap();
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         allocation.reserve(32, AllocationClass::Raw).unwrap();
         assert_eq!(allocation.space.reusable_sections().count(), 0);
-        let (end, manager) = allocation.finish_persisted(widths).unwrap();
+        let (end, manager) = allocation.finish_persisted().unwrap();
         assert_eq!(manager.is_some(), has_manager);
         if let Some(manager) = manager {
             let header = FreeSpaceManagerHeader::parse(widths, &manager.header).unwrap();
@@ -268,7 +348,7 @@ mod tests {
             112
         );
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let (_, manager) = allocation.finish_persisted(widths).unwrap();
+        let (_, manager) = allocation.finish_persisted().unwrap();
         let manager = manager.unwrap();
         let header = FreeSpaceManagerHeader::parse(widths, &manager.header).unwrap();
         let sections = hdf5_pure_format::__private::parse_section_info(
@@ -298,9 +378,7 @@ mod tests {
     fn an_empty_free_list_emits_no_manager() {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
-        let (end, manager) = allocation
-            .finish_persisted(FormatWidths::from_sizes(8, 8).unwrap())
-            .unwrap();
+        let (end, manager) = allocation.finish_persisted().unwrap();
         assert_eq!(end, StoredAddress::new(112));
         assert!(manager.is_none());
     }
@@ -314,7 +392,7 @@ mod tests {
         allocation.reserve(32, AllocationClass::Raw).unwrap();
         allocation.end = StoredAddress::new(offset);
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let error = allocation.finish_persisted(widths).unwrap_err();
+        let error = allocation.finish_persisted().unwrap_err();
         assert_eq!(
             error,
             FormatError::OffsetOverflow {
@@ -446,5 +524,88 @@ mod tests {
         );
         assert_eq!(allocation.end(), StoredAddress::new(u64::MAX));
         assert_eq!(allocation.finish().unwrap(), StoredAddress::new(u64::MAX));
+    }
+    #[rstest]
+    #[case::two(2)]
+    #[case::four(4)]
+    #[case::eight(8)]
+    fn direct_reservations_check_the_complete_range_and_eoa(#[case] width: u8) {
+        let widths = FormatWidths::from_sizes(width, 8).unwrap();
+        let undefined = StoredAddress::undefined(widths.offsets).get();
+        let start = undefined - 128;
+        let mut exact = FileAllocation::with_widths(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(start),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            exact.reserve(127, AllocationClass::Raw).unwrap(),
+            StoredAddress::new(start)
+        );
+        assert_eq!(exact.end().get(), undefined - 1);
+        let mut sentinel = FileAllocation::with_widths(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(start),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            sentinel.reserve(128, AllocationClass::Raw),
+            Err(FormatError::DefinedAddressIsUndefined {
+                address: undefined,
+                offset_size: width
+            })
+        );
+        assert_eq!(sentinel.end().get(), start);
+        let mut beyond = FileAllocation::with_widths(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(start),
+            false,
+            None,
+        )
+        .unwrap();
+        let expected = if width == 8 {
+            FormatError::OffsetOverflow {
+                offset: start,
+                length: 129,
+            }
+        } else {
+            FormatError::AddressTooLarge {
+                address: undefined + 1,
+                offset_size: width,
+            }
+        };
+        assert_eq!(beyond.reserve(129, AllocationClass::Raw), Err(expected));
+        assert_eq!(beyond.end().get(), start);
+    }
+
+    #[test]
+    fn an_aggregate_reservation_checks_the_whole_window_before_adoption() {
+        let widths = FormatWidths::from_sizes(2, 8).unwrap();
+        let start = 65_000;
+        let mut allocation = FileAllocation::with_widths(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(start),
+            true,
+            Some(1),
+        )
+        .unwrap();
+        let before = allocation.aggregates;
+        assert_eq!(
+            allocation.reserve(1, AllocationClass::Metadata),
+            Err(FormatError::AddressTooLarge {
+                address: start + 2_048,
+                offset_size: 2
+            })
+        );
+        assert_eq!(allocation.end().get(), start);
+        assert_eq!(allocation.aggregates, before);
     }
 }

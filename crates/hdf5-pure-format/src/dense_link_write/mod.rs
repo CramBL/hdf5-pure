@@ -144,7 +144,13 @@ impl DenseLinkPlan {
             .iter()
             .map(|bytes| bytes.len().to_u64())
             .collect::<Vec<_>>();
-        let heap = ManagedHeapPlan::group_links(&sizes, offset_width)?;
+        let heap = ManagedHeapPlan::group_links_with_widths(
+            &sizes,
+            FormatWidths {
+                offsets: offset_width,
+                lengths: length_width,
+            },
+        )?;
         let header = Self::heap_header(offset_width, length_width, &heap, serialized.len())?;
         let id_layout = FractalHeapIdLayout::new(&header, offset_width, length_width);
         let ids = sizes
@@ -508,7 +514,10 @@ impl DenseLinkPlan {
             tiny_objects_count: 0,
             table_width: GROUP_HEAP_TABLE_WIDTH,
             starting_block_size: GROUP_HEAP_STARTING_BLOCK_SIZE,
-            max_direct_block_size: GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE,
+            max_direct_block_size: crate::fractal_heap_write::maximum_direct_block_size(
+                GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE,
+                length_width,
+            ),
             max_heap_size: GROUP_HEAP_MAX_HEAP_SIZE_BITS,
             start_root_rows: GROUP_HEAP_START_ROOT_ROWS,
             root_block_address: StoredAddress::new(0),

@@ -1197,6 +1197,11 @@ pub enum FormatError {
     PartialEdgeSkipRequiresChunking,
     /// Path not found during group traversal.
     PathNotFound(String),
+    /// Object or dataset-region reference creation requires eight-byte addresses.
+    ReferenceWidthUnsupported {
+        /// The selected address width in bytes.
+        offset_size: u8,
+    },
     /// A dataset region extends past a dimension's current extent.
     RegionOutOfBounds {
         /// Zero-based index of the dimension.
@@ -1455,6 +1460,11 @@ pub enum FormatError {
         /// Number of elements present in the selected data.
         actual: u64,
     },
+    /// Variable-length data providers require eight-byte addresses.
+    VariableLengthProviderUnsupported {
+        /// The selected address width in bytes.
+        offset_size: u8,
+    },
     /// Variable-length data error.
     VlDataError(String),
     /// A reference belongs to an independently constructed layout.
@@ -1509,6 +1519,10 @@ impl fmt::Display for FormatError {
                 f,
                 "ZFP rate {} exceeds the {scalar_bits}-bit scalar width",
                 f64::from_bits(*rate_bits)
+            ),
+            Self::ReferenceWidthUnsupported { offset_size } => write!(
+                f,
+                "object and dataset-region reference creation does not support {offset_size}-byte offsets"
             ),
             Self::RegionOutOfBounds {
                 dimension,
@@ -2364,6 +2378,12 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidVariableLengthSubtype(subtype) => {
                 write!(f, "unsupported variable-length datatype subtype: {subtype}")
+            }
+            Self::VariableLengthProviderUnsupported { offset_size } => {
+                write!(
+                    f,
+                    "variable-length providers do not support {offset_size}-byte offsets"
+                )
             }
             Self::VariableLengthElementLimitExceeded { limit, actual } => {
                 write!(

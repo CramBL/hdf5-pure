@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `Dataset::read_raw` and related reads support variable-length elements in files with independent address and length widths, including arrays of those elements.
+- `FileCreateProperties` configures independent address and length widths of 2, 4, or 8 bytes, with matching builder setters and defaults of eight bytes each. Reads account for variable-length storage widths, including array elements.
 - `LinkPhaseChange` configures compact and dense link storage for root and nested groups, including always-dense storage and disabled compact reversion. Group inspection reports the effective policy, and repacking preserves group thresholds and stored entry estimates ([#1041](https://github.com/CramBL/hdf5-pure/pull/1041), [#1044](https://github.com/CramBL/hdf5-pure/pull/1044)).
 - `H5Element` supports fixed byte-array and fixed ASCII dataset creation, reads, and appends, preserving each datatype and element width. Its datatype accessor reports the write representation without constructing an element ([#979](https://github.com/CramBL/hdf5-pure/pull/979), [#1050](https://github.com/CramBL/hdf5-pure/pull/1050)).
 - `Dataset::append` initializes eligible empty datasets with an unallocated Extensible Array index, including through buffered appenders. Empty operations leave index and element storage unallocated ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).

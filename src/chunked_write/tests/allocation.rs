@@ -313,6 +313,7 @@ fn verbatim_preparation_retains_records_without_materializing_payloads(#[case] c
     let (prepared, measured) =
         allocation::measure(&format!("verbatim_preparation_{count}"), || {
             VerbatimChunks::new(
+                crate::file_writer::WIDTHS,
                 &meta,
                 &shape,
                 &[chunk_bytes],

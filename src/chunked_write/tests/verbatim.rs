@@ -38,6 +38,7 @@ fn prepared_verbatim_chunks_retain_records_and_shared_array_geometry(
         occupied.len()
     ];
     let mut prepared = VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &meta,
         shape,
         &dimensions,
@@ -131,6 +132,7 @@ fn assigning_verbatim_addresses_preserves_records_on_overflow(
         4
     ];
     let mut prepared = VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &meta,
         &[4],
         &[1],
@@ -174,6 +176,7 @@ fn payload_descriptor_relocation_preserves_records_and_capacity(
     #[case] overflow: bool,
 ) {
     let prepared = VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &[
             ChunkMeta {
                 compressed_size: 7,
@@ -235,6 +238,7 @@ fn verbatim_preparation_checks_stored_dimension_widths(
         filter_mask: 0,
     }];
     let result = VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &meta,
         &[1],
         &[dimension],
@@ -282,6 +286,7 @@ fn verbatim_preparation_rejects_payload_length_overflow() {
         },
     ];
     let Err(error) = VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &meta,
         &[2],
         &[1],

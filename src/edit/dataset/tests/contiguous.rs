@@ -30,6 +30,7 @@ use crate::dataset_request::PreparedFill;
 use crate::edit::WriteEngine;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
+use crate::file_writer;
 use crate::fill_value::FillPattern;
 use crate::filters::ChunkContext;
 use crate::image::WriteBuffering;
@@ -261,6 +262,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
         ..ChunkOptions::default()
     };
     let set = chunked_write::compress_chunks(
+        engine.context.widths(),
         &raw,
         &[u64::try_from(count * 256).unwrap()],
         ChunkContext::basic(&[256], 4),
@@ -441,6 +443,7 @@ pub(super) fn prepared(creation: Creation, filtered: bool) -> CompressedChunkSet
     let context = ChunkContext::from_datatype(&dimensions, &dt).unwrap();
     let element = NonZeroUsize::new(usize::try_from(context.element_size.get()).unwrap()).unwrap();
     chunked_write::compress_chunks(
+        file_writer::WIDTHS,
         storage.raw(),
         &ds.dimensions,
         context,

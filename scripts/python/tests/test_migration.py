@@ -290,6 +290,8 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "ObjectHeaderAllocationLengthMismatch", []),
         ("FormatError", "ObjectHeaderChunkOverlap", []),
         ("FormatError", "UnalignedGlobalHeapCollection", []),
+        ("FormatError", "VariableLengthProviderUnsupported", []),
+        ("FormatError", "ReferenceWidthUnsupported", []),
         (
             "FormatError",
             "UnrecognizedHeapError",

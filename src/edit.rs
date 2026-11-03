@@ -338,6 +338,7 @@ use crate::superblock::Superblock;
 #[cfg(doc)]
 use crate::type_builders::ObjectRefTarget;
 use crate::width::FormatWidths;
+use crate::width::{LengthWidth, OffsetWidth};
 
 use self::aggregation::AggregateSpace;
 use self::commit::PublicationState;
@@ -906,6 +907,9 @@ pub(crate) fn create_would_refuse_reopen(
     create: &FileCreateProperties,
     access: &FileAccessProperties,
 ) -> Option<&'static str> {
+    if create.offset_width() != OffsetWidth::Eight || create.length_width() != LengthWidth::Eight {
+        return Some("editing requires 8-byte address and length widths");
+    }
     if create.file_space_settings().is_some_and(|settings| {
         settings.strategy() == FileSpaceStrategy::Page && !settings.persist()
     }) && access.memory_strategy() == Some(MemoryStrategy::Bounded)

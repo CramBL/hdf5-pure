@@ -4,6 +4,7 @@
 //! retain allocations, object-use counts, and occupied chunk records with logical slots. The plan
 //! also retains serialized file-space managers and PAGE array block addresses. The writer
 //! serializes PAGE arrays from retained metadata. Source and provider storage have separate costs.
+//! The writer uses eight-byte address and length fields independently of the source widths.
 
 use core::num::NonZeroU64;
 
@@ -245,6 +246,7 @@ impl Object {
         match &self.inherited {
             Some(inherited) => super::HeaderOptions {
                 prefix: inherited.prefix,
+                widths: super::WIDTHS,
                 creation: &inherited.creation,
             },
             None => super::HeaderOptions::PLAIN,
@@ -573,6 +575,7 @@ impl Object {
         let dense = match &self.inherited {
             Some(inherited) => {
                 super::select_attribute_storage(
+                    super::WIDTHS,
                     attributes,
                     inherited.policy,
                     inherited.current,
@@ -1175,7 +1178,7 @@ impl<S: ObjectSource> Plan<S> {
                 )?
             }
             Kind::Committed(datatype) => {
-                super::build_committed_datatype_oh(datatype, record.references)?
+                super::build_committed_datatype_oh(super::WIDTHS, datatype, record.references)?
             }
         })
     }
@@ -1549,7 +1552,8 @@ fn reserve_metadata(
                 return Err(inconsistent().into());
             };
             record.metadata.header.length =
-                super::build_committed_datatype_oh(&datatype, record.references)?.len() as u64;
+                super::build_committed_datatype_oh(super::WIDTHS, &datatype, record.references)?
+                    .len() as u64;
         }
         let ObjectAllocation {
             header,
@@ -1591,7 +1595,10 @@ impl FileLayout {
     ) -> Result<Self, Error> {
         let extension = settings
             .map(|settings| {
-                super::file_space_extension_oh(&super::file_space_placeholder(settings))
+                super::file_space_extension_oh(
+                    super::WIDTHS,
+                    &super::file_space_placeholder(super::WIDTHS, settings),
+                )
             })
             .transpose()?;
         let (extension_span, end, managers, extension_info) = if let Some(settings) =
@@ -1610,6 +1617,7 @@ impl FileLayout {
                 small_end: _,
                 end,
             } = layout::PagedLayout::new(
+                super::WIDTHS,
                 settings.page_size(),
                 settings.persist(),
                 allocation.end(),
@@ -1678,7 +1686,7 @@ impl FileLayout {
         };
         let extension = extension_info
             .as_ref()
-            .map(super::file_space_extension_oh)
+            .map(|info| super::file_space_extension_oh(super::WIDTHS, info))
             .transpose()?
             .or(extension);
         let extension = match (extension_span, extension) {
@@ -1878,6 +1886,7 @@ mod tests {
             .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
             .collect();
         let plan = file_writer::dense_links_plan(
+            crate::file_writer::WIDTHS,
             &links,
             LinkPhaseChange::default()
                 .group_info()
@@ -2030,6 +2039,7 @@ mod tests {
             .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
             .collect();
         let plan = file_writer::dense_links_plan(
+            crate::file_writer::WIDTHS,
             &links,
             LinkPhaseChange::default()
                 .group_info()

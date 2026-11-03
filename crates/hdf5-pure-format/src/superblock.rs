@@ -54,7 +54,7 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
         SuperblockStatus::Two(flags) | SuperblockStatus::Three(flags) => flags,
     };
     let offset_width = superblock.offset_size;
-    let mut buf = Vec::with_capacity(48);
+    let mut buf = Vec::with_capacity(superblock_serialized_size(superblock.offset_size));
     buf.extend_from_slice(&HDF5_SIGNATURE);
     buf.push(superblock.version().get());
     buf.push(offset_width.get());
@@ -75,6 +75,16 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
     let checksum = checksum::jenkins_lookup3(&buf);
     buf.extend_from_slice(&checksum.to_le_bytes());
     Ok(buf)
+}
+
+/// Returns the serialized length of a version 2 or 3 superblock, including its checksum.
+///
+/// Both versions store four addresses at `offsets`, as defined in "Format Signature and
+/// Superblock" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+pub const fn superblock_serialized_size(offsets: OffsetWidth) -> usize {
+    V2_V3_FIXED_LEN + ADDRESS_COUNT * offsets.get() as usize + CHECKSUM_LEN
 }
 
 /// A candidate address in the search for the superblock signature.

@@ -265,6 +265,23 @@ pub fn write_stored_address_at(
     Ok(())
 }
 
+/// Writes a defined address into `buf` at `pos`, preserving bytes outside the field.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if `address` exceeds `width`,
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker, or
+/// [`FormatError::UnexpectedEof`] if the field extends past `buf`. Leaves `buf` unchanged on error.
+pub fn write_defined_stored_address_at(
+    buf: &mut [u8],
+    pos: usize,
+    address: StoredAddress,
+    width: OffsetWidth,
+) -> Result<(), FormatError> {
+    require_defined_offset(address.get(), width)?;
+    write_stored_address_at(buf, pos, address, width)
+}
+
 /// Appends the decoded address `addr` to `buf` as a little-endian field of `width` bytes.
 ///
 /// # Errors
@@ -298,6 +315,18 @@ pub(crate) fn try_write_defined_offset(
     val: u64,
     width: OffsetWidth,
 ) -> Result<(), FormatError> {
+    require_defined_offset(val, width)?;
+    write_offset(buf, val, width);
+    Ok(())
+}
+
+/// Checks whether `val` is a defined address at `width`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if `val` exceeds `width`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+pub(crate) fn require_defined_offset(val: u64, width: OffsetWidth) -> Result<(), FormatError> {
     let undefined = width::offset_width_max(width);
     if val > undefined {
         return Err(FormatError::AddressTooLarge {
@@ -311,7 +340,6 @@ pub(crate) fn try_write_defined_offset(
             offset_size: width.get(),
         });
     }
-    write_offset(buf, val, width);
     Ok(())
 }
 
@@ -327,13 +355,23 @@ pub(crate) fn try_write_length(
     val: u64,
     width: LengthWidth,
 ) -> Result<(), FormatError> {
+    require_length(val, width)?;
+    write_length(buf, val, width);
+    Ok(())
+}
+
+/// Checks whether `val` fits a `width`-byte length field.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if `val` exceeds `width`.
+pub(crate) fn require_length(val: u64, width: LengthWidth) -> Result<(), FormatError> {
     if !width::length_width_holds(width, val) {
         return Err(FormatError::LengthTooLarge {
             length: val,
             length_size: width.get(),
         });
     }
-    write_length(buf, val, width);
     Ok(())
 }
 

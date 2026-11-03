@@ -4,6 +4,7 @@ use crate::FileSpaceSettings;
 use crate::LinkPhaseChange;
 use crate::UserblockSize;
 use crate::libver::LibVer;
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// File-creation properties applied when writing a new HDF5 file.
 ///
@@ -32,6 +33,11 @@ use crate::libver::LibVer;
 /// or [`File::create_with_options`](crate::File::create_with_options). The
 /// equivalent [`FileBuilder`](crate::FileBuilder) methods set the same fields one
 /// at a time and interoperate freely with this.
+///
+/// Address and length widths are independent and default to eight bytes each. The typed setters
+/// support 2, 4, or 8 bytes. The writer reports an error if file content or allocation cannot fit
+/// the selected widths. Object and dataset-region reference creation, and variable-length data
+/// providers, require eight-byte addresses.
 ///
 /// Userblock and page sizes are checked when [`UserblockSize`] and
 /// [`FileSpacePageSize`](crate::FileSpacePageSize) are constructed. Constraints between settings
@@ -111,7 +117,8 @@ use crate::libver::LibVer;
 /// on the owned-handle path, mirroring `H5Fcreate(name, flags, fcpl_id, fapl_id)`. It returns an
 /// open read-write handle. The constructor rejects
 /// [`MemoryStrategy::Bounded`](crate::MemoryStrategy::Bounded) combined with nonpersistent paged
-/// settings or a userblock before writing.
+/// settings or a userblock before writing. Read-write creation currently requires eight-byte
+/// address and length widths.
 ///
 /// [`FileSpaceSettings`] configures the file-space rows below. Apply the value with
 /// [`with_file_space_settings`](Self::with_file_space_settings). The writer uses separate metadata
@@ -125,6 +132,7 @@ use crate::libver::LibVer;
 ///
 /// | HDF5 property (C API) | `hdf5-pure` | Status | Behavior |
 /// |---|---|---|---|
+/// | `H5Pset_sizes` | [`with_offset_width`](Self::with_offset_width), [`with_length_width`](Self::with_length_width) | **Genuine** (2 / 4 / 8 bytes) | Independent address and length widths, defaulting to 8 / 8. Sixteen-byte widths are unsupported. |
 /// | `H5Pset_file_space_strategy` | [`new`][space-new] | **Genuine** | Allocation strategy |
 /// | `persist` flag | [`with_persistence`][space-persist] | **Genuine** | Manager persistence |
 /// | `threshold` | [`with_threshold`][space-threshold] | **Genuine** | Section admission |
@@ -191,6 +199,7 @@ use crate::libver::LibVer;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(alias = "fcpl")]
 pub struct FileCreateProperties {
+    widths: FormatWidths,
     userblock: UserblockSize,
     libver_bounds: Option<(LibVer, LibVer)>,
     file_space_settings: Option<FileSpaceSettings>,
@@ -199,14 +208,57 @@ pub struct FileCreateProperties {
 
 impl FileCreateProperties {
     /// Constructs properties that reserve zero prefix bytes and leave format and file-space
-    /// settings unset, with default root link thresholds.
+    /// settings unset, with default root link thresholds and eight-byte addresses and lengths.
     pub const fn new() -> Self {
         Self {
+            widths: FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: LengthWidth::Eight,
+            },
             userblock: UserblockSize::NONE,
             libver_bounds: None,
             file_space_settings: None,
             root_group_link_phase_change: LinkPhaseChange::DEFAULT,
         }
+    }
+
+    /// Selects the superblock's "Size of Offsets" value independently of length fields.
+    ///
+    /// The default is [`OffsetWidth::Eight`]. libhdf5 configures this property with `H5Pset_sizes`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FileCreateProperties, LengthWidth, OffsetWidth};
+    ///
+    /// let properties = FileCreateProperties::new()
+    ///     .with_offset_width(OffsetWidth::Two)
+    ///     .with_length_width(LengthWidth::Eight);
+    /// assert_eq!(properties.offset_width(), OffsetWidth::Two);
+    /// assert_eq!(properties.length_width(), LengthWidth::Eight);
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_create_properties(properties);
+    /// builder.create_dataset("values").with_i32_data(&[1, 2]);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.superblock().offset_size, OffsetWidth::Two);
+    /// assert_eq!(file.superblock().length_size, LengthWidth::Eight);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    #[doc(alias = "H5Pset_sizes")]
+    pub const fn with_offset_width(mut self, width: OffsetWidth) -> Self {
+        self.widths.offsets = width;
+        self
+    }
+
+    /// Selects the superblock's "Size of Lengths" value independently of addresses.
+    ///
+    /// The default is [`LengthWidth::Eight`]. Unlimited dataspace maxima require eight-byte
+    /// lengths. libhdf5 configures this property with `H5Pset_sizes`.
+    #[doc(alias = "H5Pset_sizes")]
+    pub const fn with_length_width(mut self, width: LengthWidth) -> Self {
+        self.widths.lengths = width;
+        self
     }
 
     /// Sets the size of the reserved prefix before the HDF5 signature.
@@ -285,6 +337,16 @@ impl FileCreateProperties {
         self
     }
 
+    /// Returns the configured address width, defaulting to [`OffsetWidth::Eight`].
+    pub const fn offset_width(&self) -> OffsetWidth {
+        self.widths.offsets
+    }
+
+    /// Returns the configured length width, defaulting to [`LengthWidth::Eight`].
+    pub const fn length_width(&self) -> LengthWidth {
+        self.widths.lengths
+    }
+
     /// Returns the root group's configured thresholds, including the default policy when unset.
     pub const fn root_group_link_phase_change(&self) -> LinkPhaseChange {
         self.root_group_link_phase_change
@@ -306,6 +368,9 @@ impl FileCreateProperties {
     /// Return the configured library-version bounds, if any.
     pub const fn libver_bounds(&self) -> Option<(LibVer, LibVer)> {
         self.libver_bounds
+    }
+    pub(crate) const fn widths(&self) -> FormatWidths {
+        self.widths
     }
 }
 

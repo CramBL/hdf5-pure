@@ -52,6 +52,22 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
         })
 }
 
+/// Returns `true` if the datatype contains a variable-length string or sequence.
+///
+/// Examines array elements, enumeration bases, and compound members recursively.
+pub fn datatype_holds_variable_length(datatype: &Datatype) -> bool {
+    match datatype {
+        Datatype::VariableLength(_) => true,
+        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
+            datatype_holds_variable_length(base_type)
+        }
+        Datatype::Compound { members, .. } => members
+            .iter()
+            .any(|member| datatype_holds_variable_length(&member.datatype)),
+        _ => false,
+    }
+}
+
 /// Returns the nonzero size in bytes of one value stored at `offset_width`.
 ///
 /// Uses [`stored_type_size`] to account for variable-length references and array elements.
@@ -499,7 +515,9 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 /// Returns [`FormatError::OpaqueTagTooLong`] if an opaque tag exceeds 247 bytes, or
 /// [`FormatError::InvalidOpaqueTagByte`] if it contains a NUL byte, including in nested types.
 /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field, or
-/// [`FormatError::ValueTooLargeForRepresentation`] if an array rank exceeds its one-byte field.
+/// [`FormatError::ValueTooLargeForRepresentation`] if an array rank or member count exceeds its
+/// encoded field. Returns [`FormatError::CompoundFieldOutOfBounds`] if a compound member extends
+/// past the declared record size.
 pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
     serialize_datatype_with_offset_width(datatype, OffsetWidth::Eight)
 }
@@ -512,7 +530,8 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
 /// # Errors
 ///
 /// Returns the errors of [`serialize_datatype`] for invalid opaque tags, oversized array sizes,
-/// or oversized array ranks.
+/// array ranks or member counts that exceed their encoded fields, or out-of-bounds compound
+/// members.
 pub fn serialize_datatype_with_offset_width(
     datatype: &Datatype,
     offset_width: OffsetWidth,
@@ -655,11 +674,12 @@ fn serialize_datatype_into(
             header
         }
         Datatype::Compound { size, members } => {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "compound member count is written into the 2-byte member-count field of the datatype message"
-            )]
-            let num = members.len() as u16;
+            let num = members.len().narrow_or_else::<u16, _>(|| {
+                FormatError::ValueTooLargeForRepresentation {
+                    value: members.len().to_u64(),
+                    target: "u16",
+                }
+            })?;
             let bf0 = (num & 0xFF) as u8;
             let bf1 = ((num >> 8) & 0xFF) as u8;
             let mut header = append_header(
@@ -671,6 +691,18 @@ fn serialize_datatype_into(
             );
             let ob = offset_bytes_for_size(*size);
             for m in members {
+                let field_size = stored_type_size(&m.datatype, offset_width)?;
+                if m.byte_offset
+                    .checked_add(u64::from(field_size))
+                    .is_none_or(|end| end > u64::from(*size))
+                {
+                    return Err(FormatError::CompoundFieldOutOfBounds {
+                        name: m.name.clone(),
+                        offset: m.byte_offset,
+                        field_size,
+                        compound_size: *size,
+                    });
+                }
                 // Null-terminated name
                 output.extend_from_slice(m.name.as_bytes());
                 output.push(0);
@@ -686,11 +718,12 @@ fn serialize_datatype_into(
             base_type,
             members,
         } => {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "enumeration member count is written into the 2-byte member-count field of the datatype message"
-            )]
-            let num = members.len() as u16;
+            let num = members.len().narrow_or_else::<u16, _>(|| {
+                FormatError::ValueTooLargeForRepresentation {
+                    value: members.len().to_u64(),
+                    target: "u16",
+                }
+            })?;
             let bf0 = (num & 0xFF) as u8;
             let bf1 = ((num >> 8) & 0xFF) as u8;
             let mut header = append_header(

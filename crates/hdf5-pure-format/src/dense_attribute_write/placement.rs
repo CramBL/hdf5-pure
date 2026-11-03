@@ -5,16 +5,14 @@ use crate::address::StoredAddress;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::btree::v2::write::BTreeV2Placement;
 use crate::btree::v2::write::PreparedHeapId;
-use crate::btree::v2::{AttributeRecord, HugeObjectRecord};
+use crate::btree::v2::{AttributeRecord, HugeObjectDirectRecord, HugeObjectRecord};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap_write::ManagedHeapPlacement;
 use crate::message_flags::MessageFlags;
 
-use super::{
-    DENSE_ATTR_LENGTH_WIDTH, DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_UNDEFINED, DenseAttrPlan,
-};
+use super::DenseAttrPlan;
 
 /// Dense attribute storage with checked, independent block addresses.
 ///
@@ -40,6 +38,7 @@ impl<'a> DenseAttrPlacement<'a> {
             attributes,
             geometry,
         } = plan;
+        let widths = geometry.widths;
         let info = plan.placement_info(addresses)?;
         let heap_end = 1 + geometry.managed_plan.block_lengths().len();
         let heap = geometry.managed_plan.place(&addresses[1..heap_end])?;
@@ -63,31 +62,41 @@ impl<'a> DenseAttrPlacement<'a> {
             if geometry.huge_plan.is_some() {
                 indexes
                     .last()
-                    .map_or(DENSE_ATTR_UNDEFINED, |index| index.address)
+                    .map_or(StoredAddress::undefined(widths.offsets), |index| {
+                        index.address
+                    })
             } else {
-                DENSE_ATTR_UNDEFINED
+                StoredAddress::undefined(widths.offsets)
             },
         );
-        let ids =
-            FractalHeapIdLayout::new(&header, DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
+        let ids = FractalHeapIdLayout::new(&header, widths.offsets, widths.lengths);
         let mut managed = Vec::with_capacity(attributes.len() - geometry.huge_count);
         let mut huge = Vec::with_capacity(geometry.huge_count);
         let mut heap_ids = Vec::with_capacity(attributes.len());
         let mut huge_records = Vec::new();
+        let mut direct_records = Vec::new();
+        let direct = header.huge_ids_direct_with_widths(widths);
         for (attribute, huge_id) in attributes.iter().zip(&geometry.huge_id_of) {
             let id = if let Some(id) = huge_id {
-                HugeObjectRecord {
-                    address: huge_addresses[huge.len()],
-                    length: attribute.bytes.len().to_u64(),
-                    id: *id,
-                }
-                .encode(
-                    &mut huge_records,
-                    DENSE_ATTR_OFFSET_WIDTH,
-                    DENSE_ATTR_LENGTH_WIDTH,
-                )?;
+                let address = huge_addresses[huge.len()];
+                let length = attribute.bytes.len().to_u64();
                 huge.push(attribute.bytes.as_slice());
-                header.encode_huge_id(*id, DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)?
+                if direct {
+                    direct_records.push(HugeObjectDirectRecord { address, length });
+                    header.encode_huge_direct_id(address, length, widths)?
+                } else {
+                    HugeObjectRecord {
+                        address,
+                        length,
+                        id: *id,
+                    }
+                    .encode(
+                        &mut huge_records,
+                        widths.offsets,
+                        widths.lengths,
+                    )?;
+                    header.encode_huge_id(*id, widths.offsets, widths.lengths)?
+                }
             } else {
                 let id = header.encode_managed_id(
                     geometry.managed_plan.heap_offset(managed.len()),
@@ -97,6 +106,12 @@ impl<'a> DenseAttrPlacement<'a> {
                 id
             };
             heap_ids.push(id);
+        }
+        if direct {
+            direct_records.sort_unstable_by_key(|record| record.address);
+            for record in direct_records {
+                record.encode(&mut huge_records, widths.offsets, widths.lengths)?;
+            }
         }
         for &(hash, position) in &geometry.order {
             let position = position.to_usize()?;
@@ -173,20 +188,21 @@ impl<'a> DenseAttrPlacement<'a> {
             huge,
             info: _,
         } = self;
+        let widths = plan.geometry.widths;
         let heap_address = addresses[0];
         let huge_index = if plan.geometry.huge_plan.is_some() {
             indexes[1 + usize::from(plan.geometry.indexed)].address
         } else {
-            DENSE_ATTR_UNDEFINED
+            StoredAddress::undefined(widths.offsets)
         };
         let header = plan
             .heap_header(heap.root_address(), huge_index)
-            .serialize(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)?;
+            .serialize(widths.offsets, widths.lengths)?;
         let heap = heap.serialize_blocks(managed, heap_address)?;
         let indexes = indexes
             .iter()
             .map(|index| {
-                let header = index.placement.serialize_header(DENSE_ATTR_LENGTH_WIDTH)?;
+                let header = index.placement.serialize_header(widths.lengths)?;
                 let nodes = index.placement.serialize_nodes(&index.records)?;
                 Ok::<_, FormatError>(core::iter::once(Ok((index.address, header))).chain(nodes))
             })
@@ -230,19 +246,7 @@ impl DenseAttrPlan {
         }
         let mut ranges = Vec::with_capacity(expected);
         for (index, (&address, length)) in addresses.iter().zip(lengths).enumerate() {
-            if address.is_undefined(DENSE_ATTR_OFFSET_WIDTH) {
-                return Err(FormatError::DefinedAddressIsUndefined {
-                    address: address.get(),
-                    offset_size: DENSE_ATTR_OFFSET_WIDTH.get(),
-                });
-            }
-            let end = address
-                .get()
-                .checked_add(length)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: address.get(),
-                    length,
-                })?;
+            let end = self.block_end(address, length)?;
             ranges.push((address.get(), end, index));
         }
         ranges.sort_unstable();

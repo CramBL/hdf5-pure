@@ -57,6 +57,7 @@ mod file_properties;
 mod file_space_page_size;
 mod file_space_settings;
 mod file_space_strategy;
+mod file_widths;
 mod fill_compatibility;
 mod fill_value;
 mod filter_options;

@@ -129,6 +129,7 @@ fn a_created_chunk_larger_than_u32_max_bytes_is_rejected(
         StorageAllocation::Unallocated => &[],
     };
     let Err(err) = compress_chunks(
+        crate::file_writer::WIDTHS,
         raw,
         &[1],
         ChunkContext::basic(&chunk_dims, 8),
@@ -158,6 +159,7 @@ fn an_unallocated_dataset_plans_no_chunks_over_the_shape_it_declares() {
     let chunk = [100u64];
 
     let (kind, slots, span) = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &shape,
         &chunk,
         None,
@@ -171,6 +173,7 @@ fn an_unallocated_dataset_plans_no_chunks_over_the_shape_it_declares() {
     assert_eq!(span, 10);
 
     let (kind, slots, span) = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &shape,
         &chunk,
         None,
@@ -192,6 +195,7 @@ fn an_unallocated_dataset_plans_no_chunks_over_the_shape_it_declares() {
 
     // A nonempty unlimited dataspace has an allocated empty index.
     let (kind, slots, _) = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &shape,
         &chunk,
         Some(&[MaxExtent::Unlimited]),
@@ -223,6 +227,7 @@ fn chunk_index_storage_matches_the_requested_allocation(
         options.set_filter(FilterKind::Fletcher32);
     }
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &[],
         shape,
         ChunkContext::basic(chunks, 4),
@@ -327,6 +332,7 @@ fn incremental_encoding_matches_collected_chunk_bytes(
         })
         .collect::<Vec<_>>();
     let actual = compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         shape,
         ctx,
@@ -370,6 +376,7 @@ fn filtered_datasets_without_chunks_skip_gathering(
     let mut options = ChunkOptions::default();
     options.set_filter(FilterKind::Shuffle);
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &[],
         shape,
         ChunkContext::basic(&[2, 2], 2),
@@ -394,6 +401,7 @@ fn an_unallocated_dataset_encodes_no_chunk_bytes() {
     let elem = NonZeroUsize::new(4).unwrap();
 
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &[],
         &shape,
         ChunkContext::basic(&chunk, 4),
@@ -426,6 +434,7 @@ fn an_unallocated_dataset_encodes_no_chunk_bytes() {
     // The same geometry with its storage allocated is the grid this avoids.
     let raw = vec![0u8; 1000 * 4];
     let dense = compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         &shape,
         ChunkContext::basic(&chunk, 4),
@@ -446,6 +455,7 @@ fn a_dense_index_has_no_unused_byte_bound() {
     // chunk, so none of its bytes describe nothing.
     let many = (MAX_UNUSED_INDEX_BYTES / 8 + 1) as usize;
     let (kind, slots, span) = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &[many as u64],
         &[1],
         None,
@@ -474,6 +484,7 @@ fn the_index_bound_counts_unused_bytes_rather_than_slots(
     let chunk_bytes = 4096;
     let widest = MAX_UNUSED_INDEX_BYTES / elem + 1;
     let (kind, slots, span) = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &[1],
         &[1],
         Some(&[MaxExtent::Fixed(widest)]),
@@ -486,6 +497,7 @@ fn the_index_bound_counts_unused_bytes_rather_than_slots(
     assert_eq!(slots, [0]);
     assert_eq!(span, widest);
     let err = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &[1],
         &[1],
         Some(&[MaxExtent::Fixed(widest + 1)]),
@@ -510,6 +522,7 @@ fn growth_along_the_indexed_dimension_leaves_no_unused_slots() {
     // Room to grow along the dimension the dataset grows in costs no unused
     // slots however far it reaches, so it stays accepted.
     let (kind, slots, span) = plan_index_slots(
+        crate::file_writer::WIDTHS,
         &[8, 8],
         &[4, 4],
         Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(8)]),
@@ -534,6 +547,7 @@ fn an_extensible_array_rejects_a_chunk_past_the_slots_it_can_address() {
     // Two chunks a stride apart: the second sits at slot `stride`.
     let at = |stride: u64| {
         plan_index_slots(
+            crate::file_writer::WIDTHS,
             &[2, 1],
             &[1, 1],
             Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(stride)]),
@@ -643,7 +657,14 @@ fn header_lengths_and_filter_parameters_match_geometry(
     }
     let ctx = ChunkContext::basic(chunk_dims, 8);
     let header = options
-        .measure_header(shape, ctx, maxshape, FillPattern::ZERO, allocation)
+        .measure_header(
+            crate::file_writer::WIDTHS,
+            shape,
+            ctx,
+            maxshape,
+            FillPattern::ZERO,
+            allocation,
+        )
         .unwrap();
     let count = shape.iter().product::<u64>().to_usize().unwrap() * 8;
     let raw: Vec<_> = (0..count)
@@ -656,6 +677,7 @@ fn header_lengths_and_filter_parameters_match_geometry(
         })
         .collect();
     let chunks = compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         shape,
         ctx,
@@ -710,6 +732,7 @@ fn measuring_a_chunked_region_agrees_with_assembling_it() {
         let raw = f64_to_bytes(&(0..elems).map(|i| i as f64).collect::<Vec<f64>>());
         let ctx = ChunkContext::basic(chunk_dims, 8);
         let set = compress_chunks(
+            crate::file_writer::WIDTHS,
             &raw,
             shape,
             ctx,
@@ -952,6 +975,7 @@ fn a_verbatim_plan_reserves_only_the_chunks_and_the_index() {
         })
         .collect();
     let layout = plan_chunked_data_verbatim(
+        crate::file_writer::WIDTHS,
         &meta,
         &[21],
         &[7],
@@ -1013,6 +1037,7 @@ fn a_verbatim_plan_reserves_only_the_chunks_and_the_index() {
             })
             .collect();
         let layout = plan_chunked_data_verbatim(
+            crate::file_writer::WIDTHS,
             &meta,
             shape,
             &[7],
@@ -1050,6 +1075,7 @@ fn a_verbatim_plan_reserves_only_the_chunks_and_the_index() {
 #[test]
 fn a_verbatim_plan_with_no_chunks_is_refused() {
     let result = plan_chunked_data_verbatim(
+        crate::file_writer::WIDTHS,
         &[],
         &[21],
         &[7],
@@ -1077,6 +1103,7 @@ fn a_verbatim_chunk_too_large_for_its_index_field_fails() {
         filter_mask: 0,
     });
     let err = plan_chunked_data_verbatim(
+        crate::file_writer::WIDTHS,
         &meta,
         &[6],
         &[2],
@@ -1122,6 +1149,7 @@ fn a_verbatim_plan_stores_the_partial_edge_chunk_flag_it_is_given(
         chunks
     ];
     let layout = plan_chunked_data_verbatim(
+        crate::file_writer::WIDTHS,
         &meta,
         shape,
         &[7],
@@ -1508,6 +1536,7 @@ fn chunked_data_len_matches_what_assemble_produces() {
                 let dims = [chunk];
                 let maxshape = unlimited.then_some([MaxExtent::Unlimited]);
                 let set = compress_chunks(
+                    crate::file_writer::WIDTHS,
                     &raw,
                     &[elements],
                     ChunkContext::basic(&dims, 8),
@@ -1561,6 +1590,7 @@ fn direct_emission_uses_retained_chunks_and_matches_assembly(
         .flat_map(|value| value.to_le_bytes())
         .collect();
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         shape,
         ChunkContext::basic(chunk_dims, 8),
@@ -1623,6 +1653,7 @@ impl ByteSink for ChunkSlices {
 fn chunk_planning_rejects_region_address_overflow(#[case] indexed: bool) {
     let chunk_dims = if indexed { &[8][..] } else { &[16][..] };
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &[0; 16],
         &[16],
         ChunkContext::basic(chunk_dims, 1),
@@ -1657,6 +1688,7 @@ fn chunk_emission_stops_at_the_sink_error(
     #[values(false, true)] verbatim: bool,
 ) {
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &[0; 16],
         &[16],
         ChunkContext::basic(&[8], 1),
@@ -1674,6 +1706,7 @@ fn chunk_emission_stops_at_the_sink_error(
     };
     let error = if verbatim {
         let layout = plan_chunked_data_verbatim(
+            crate::file_writer::WIDTHS,
             &core::array::from_fn::<_, 2, _>(|_| ChunkMeta {
                 compressed_size: 8,
                 filter_mask: 0,
@@ -1751,6 +1784,7 @@ fn verbatim_placement_rejects_address_overflow(
         })
         .collect();
     let error = plan_chunked_data_verbatim(
+        crate::file_writer::WIDTHS,
         &meta,
         &[elements],
         &[1],
