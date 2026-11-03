@@ -304,6 +304,7 @@ pub use crate::object_header::ObjectHeaderPrefix;
 pub use crate::object_header::ObjectReferenceCount;
 pub use crate::object_header::ObjectReferenceCountField;
 pub use crate::object_header::ObjectReferenceCountIssue;
+pub use crate::object_header::ObjectReferenceCountMessage;
 pub use crate::object_header::ObjectReferenceCountObserver;
 pub use crate::object_header::ObjectTimes;
 pub use crate::object_header::ParsedObjectHeaderPrefix;

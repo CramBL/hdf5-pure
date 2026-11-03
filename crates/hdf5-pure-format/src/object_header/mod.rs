@@ -24,6 +24,7 @@ pub use observation::ObjectHeaderChunk;
 pub use reference_count::ObjectReferenceCount;
 pub use reference_count::ObjectReferenceCountField;
 pub use reference_count::ObjectReferenceCountIssue;
+pub use reference_count::ObjectReferenceCountMessage;
 pub use reference_count::ObjectReferenceCountObserver;
 
 pub use v2::AttributePhaseChange;
