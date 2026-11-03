@@ -71,6 +71,20 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
             .incoming(object.header_address().get()),
         Some(incoming)
     );
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse(name))
+        .unwrap();
+    let (removed, mut queries) = phase.removal_queries([&deletion]).unwrap();
+    let plan = removed.count_plan().unwrap().unwrap();
+    assert_eq!(plan.remaining(object), Some(incoming - 1));
+    let evidence = queries.evidence(object).unwrap().unwrap();
+    assert_eq!(
+        evidence.bound().original(),
+        u32::try_from(reported).unwrap()
+    );
+    assert_eq!(evidence.bound().incoming(), incoming);
 }
 
 #[test]

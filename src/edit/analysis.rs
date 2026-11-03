@@ -9,6 +9,7 @@ use std::sync::Arc;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectReferenceCount;
+#[cfg(doc)]
 use hdf5_pure_format::__private::ObjectReferenceCountObserver;
 use hdf5_pure_space::__private::FreeClass;
 
@@ -20,11 +21,11 @@ use crate::object_graph::{
     Expansion, HardLink, LinkIndex, ObjectGraph, ObjectId, ObjectIndex, ObjectTraversal,
     TraversalBudget, TraversalLimit,
 };
-use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 
+use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
@@ -138,52 +139,18 @@ impl<'a> AnalysisPhase<'a> {
     /// Returns parsing and source-read errors from
     /// [`ObjectHeader::parse_from_source_with_chunk_observer`], or observation errors from
     /// [`ObjectReferenceCountObserver::observe`] and [`ObjectReferenceCountObserver::finish`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "count observations do not authorize allocation retirement"
+        )
+    )]
     pub(super) fn object_reference_count(
         &mut self,
         object: ObjectId,
     ) -> Result<ObjectReferenceCount, FormatError> {
-        let Self {
-            engine,
-            counts,
-            topology: _,
-            budget: _,
-            root: _,
-            links: _,
-            references: _,
-            liveness: _,
-            allocations: _,
-            #[cfg(test)]
-                candidate_lookups: _,
-        } = self;
-        counts
-            .entry(object)
-            .or_insert_with(|| {
-                let observer = ObjectReferenceCountObserver::new(object.header_address());
-                let mut observation_error = None;
-                let header = ObjectHeader::parse_from_source_with_chunk_observer(
-                    &SourceMetadata(&engine.image()),
-                    AccessMode::ReadWrite,
-                    object.header_address(),
-                    engine.widths(),
-                    engine.addresses().effective_base(),
-                    MessageFilter::Only(&mut |kind, _| {
-                        observer.observe_message_type(kind);
-                        false
-                    }),
-                    &mut |chunk| {
-                        if observation_error.is_none() {
-                            observation_error = observer.observe(chunk).err();
-                        }
-                    },
-                )?;
-                if let Some(error) = observation_error {
-                    return Err(error);
-                }
-                observer.finish(&header)
-            })
-            .as_ref()
-            .copied()
-            .map_err(Clone::clone)
+        CountQueries::new(self.engine, &mut self.counts, None).observation(object)
     }
 
     /// Returns collection references reachable from physical object-header addresses in `roots`.

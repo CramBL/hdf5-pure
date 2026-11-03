@@ -4,17 +4,22 @@
 //! ownership, reference completeness, source freshness, and publication require separate proofs.
 
 use core::num::NonZeroU32;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hdf5_pure_format::__private::ObjectReferenceCount;
 use hdf5_pure_format::__private::ObjectReferenceCountField;
+use hdf5_pure_format::__private::ObjectReferenceCountObserver;
 
+use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
 use crate::object_graph::ObjectIndex;
+use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
+use crate::source::SourceMetadata;
 
 use super::AnalysisPhase;
 use super::CompleteTopology;
@@ -38,7 +43,121 @@ impl<'source> AnalysisPhase<'source> {
         &mut self,
         object: ObjectId,
     ) -> Result<Option<CountEvidence<'source>>, CountEvidenceError> {
-        let Some(topology) = self.topology() else {
+        self.topology();
+        let Self {
+            engine,
+            topology,
+            counts,
+            budget: _,
+            root: _,
+            links: _,
+            references: _,
+            liveness: _,
+            allocations: _,
+            #[cfg(test)]
+                candidate_lookups: _,
+        } = self;
+        CountQueries::new(engine, counts, topology.as_ref().and_then(Option::as_ref))
+            .evidence(object)
+    }
+}
+
+/// Lazy count queries borrowing the observation cache separately from the phase topology.
+///
+/// The caller can query counts while retaining a bound deletion batch or its removal plan.
+/// Observations describe original source counts, independently of graph-relative remainders.
+pub(in crate::edit) struct CountQueries<'cache, 'source> {
+    engine: &'source WriteEngine,
+    counts: &'cache mut BTreeMap<ObjectId, Result<ObjectReferenceCount, FormatError>>,
+    topology: Option<&'cache CompleteTopology<'source>>,
+}
+
+impl<'cache, 'source> CountQueries<'cache, 'source> {
+    /// Borrows a source-phase cache and defers count reads until queried.
+    ///
+    /// The caller passes the cache for `engine`'s unchanged source phase. Evidence queries check
+    /// the engine identity of any applicable `topology`.
+    pub(super) fn new(
+        engine: &'source WriteEngine,
+        counts: &'cache mut BTreeMap<ObjectId, Result<ObjectReferenceCount, FormatError>>,
+        topology: Option<&'cache CompleteTopology<'source>>,
+    ) -> Self {
+        Self {
+            engine,
+            counts,
+            topology,
+        }
+    }
+
+    /// Returns a cached raw count observation, with topology optional.
+    ///
+    /// Uses the complete-parse and failure-caching contract of
+    /// [`AnalysisPhase::object_reference_count`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors described by [`AnalysisPhase::object_reference_count`].
+    pub(in crate::edit) fn observation(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<ObjectReferenceCount, FormatError> {
+        let Self {
+            engine,
+            counts,
+            topology: _,
+        } = self;
+        counts
+            .entry(object)
+            .or_insert_with(|| {
+                let observer = ObjectReferenceCountObserver::new(object.header_address());
+                let mut observation_error = None;
+                let header = ObjectHeader::parse_from_source_with_chunk_observer(
+                    &SourceMetadata(&engine.image()),
+                    AccessMode::ReadWrite,
+                    object.header_address(),
+                    engine.widths(),
+                    engine.addresses().effective_base(),
+                    MessageFilter::Only(&mut |kind, _| {
+                        observer.observe_message_type(kind);
+                        false
+                    }),
+                    &mut |chunk| {
+                        if observation_error.is_none() {
+                            observation_error = observer.observe(chunk).err();
+                        }
+                    },
+                )?;
+                if let Some(error) = observation_error {
+                    return Err(error);
+                }
+                observer.finish(&header)
+            })
+            .as_ref()
+            .copied()
+            .map_err(Clone::clone)
+    }
+
+    /// Checks a source count against the original visible lower bound and subject classification.
+    ///
+    /// Uses the numeric and applicability requirements of [`AnalysisPhase::count_evidence`].
+    /// Engine identity is checked before producing evidence. Source-content validity remains
+    /// the caller's responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`AnalysisPhase::count_evidence`], or
+    /// [`CountEvidenceError::Topology`] if an applicable topology belongs to another engine.
+    pub(in crate::edit) fn evidence(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<Option<CountEvidence<'source>>, CountEvidenceError> {
+        let Self {
+            engine,
+            counts: _,
+            topology,
+        } = self;
+        let query_engine = *engine;
+        let Some(topology) = *topology else {
             return Ok(None);
         };
         let CompleteTopology {
@@ -66,8 +185,13 @@ impl<'source> AnalysisPhase<'source> {
         let subject = graph.object(index).value.count_subject;
         let identity = Arc::clone(identity);
         let source = *engine;
+        if !std::ptr::eq(query_engine, source) {
+            return Err(CountEvidenceError::Topology(FormatError::Internal(
+                "count queries use another source engine".into(),
+            )));
+        }
         let observed = self
-            .object_reference_count(object)
+            .observation(object)
             .map_err(CountEvidenceError::Source)?;
         let (original, field) = match observed {
             ObjectReferenceCount::ImplicitOne => (1, None),
@@ -186,7 +310,7 @@ pub(in crate::edit) enum CountEvidenceError {
     Contradiction(CountContradiction),
     /// A parsing or source-read failure while observing the declared count.
     Source(FormatError),
-    /// A discovered non-root object without a positive incoming count.
+    /// An inconsistent incoming count or a mismatched source-engine identity.
     Topology(FormatError),
 }
 
