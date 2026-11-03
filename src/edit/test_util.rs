@@ -473,14 +473,16 @@ pub(in crate::edit) fn assert_generic_large_sections(
 
 /// Deletes `victim` and checks that replacement raw data avoids its metadata pages.
 ///
-/// Creates `added` with eight [`f64`] values equal to 2.5 and checks the completed
+/// Checks the metadata class and independently identified ownership of each index allocation
+/// before deletion. Creates `added` with eight [`f64`] values equal to 2.5 and checks the completed
 /// hierarchy, dataset metadata, and persisted page policy. `keep` must contain
 /// `[1, 2, 3, 4]` as [`i32`] values in `order`.
 ///
 /// # Panics
 ///
-/// Panics if editing or reading fails, replacement raw data occupies a metadata
-/// page, or any observation differs from the expected edited fixture.
+/// Panics if editing or reading fails, ownership analysis is incomplete, an index allocation lacks
+/// metadata class or identified ownership, replacement raw data occupies a metadata page, or any
+/// observation differs from the expected edited fixture.
 pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByteOrder) {
     const PAGE: u64 = 4096;
     let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
@@ -501,6 +503,30 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByte
         .chunked_index_spans(victim_addr)
         .expect("the extensible-array index is enumerable");
     assert!(!index_spans.is_empty());
+    let allocations = s.chunked_storage_spans(victim_addr).unwrap();
+    assert_eq!(
+        allocations
+            .iter()
+            .filter(|(range, _)| index_spans.contains(range))
+            .copied()
+            .collect::<Vec<_>>(),
+        index_spans
+            .iter()
+            .map(|&range| (range, FreeClass::Page(PageType::Meta)))
+            .collect::<Vec<_>>()
+    );
+    let ownership = s.space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    for range in &index_spans {
+        assert!(
+            ownership
+                .live_metadata_space
+                .iter()
+                .any(|&(start, length)| {
+                    start <= range.start().get() && range.end().get() <= start + length
+                })
+        );
+    }
     let mut meta_pages: Vec<u64> = vec![s.context.superblock().base_address.get() / PAGE];
     for range in &index_spans {
         for p in (range.start().get() / PAGE)..=((range.end().get() - 1) / PAGE) {
