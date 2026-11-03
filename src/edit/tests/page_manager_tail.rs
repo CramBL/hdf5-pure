@@ -494,6 +494,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         .unwrap()
         .len();
     let mut rows = Vec::new();
+    let mut previous_partition: Option<(StoredAddress, Vec<Extent>)> = None;
     for round in 0..6 {
         let previous = engine.persist.as_ref().unwrap().old_blocks.clone();
         let root = engine
@@ -553,6 +554,40 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             }
             assert!(start >= end);
         }
+        let persisted = File::from_bytes(issued_bytes(&engine))
+            .unwrap()
+            .persisted_free_sections()
+            .unwrap()
+            .unwrap();
+        let persisted_free = normalized_owned(
+            persisted
+                .free_sections()
+                .sections()
+                .iter()
+                .map(|section| Extent::new(section.address(), section.length().get()).unwrap())
+                .collect(),
+        );
+        assert_eq!(persisted_free, normalized_owned(free));
+        if round == 0 {
+            let occupied = normalized_owned(owned.clone());
+            let gap = occupied
+                .windows(2)
+                .find_map(|pair| Extent::between(pair[0].end(), pair[1].start()))
+                .unwrap();
+            assert!(persisted_free.iter().any(|available| {
+                available.start() <= gap.start() && available.end() >= gap.end()
+            }));
+        }
+        let partition = normalized_owned(owned.iter().chain(&persisted_free).copied().collect());
+        if let Some((previous_eoa, mut expected)) = previous_partition.take() {
+            expected = expected
+                .into_iter()
+                .filter_map(|range| Extent::between(range.start(), range.end().min(eoa)))
+                .collect();
+            expected.extend(Extent::between(previous_eoa, eoa));
+            assert_eq!(partition, normalized_owned(expected));
+        }
+        previous_partition = Some((eoa, partition));
         rows.push([
             Value::Number(round),
             Value::Number(u64::try_from(chunks.len()).unwrap()),
@@ -561,11 +596,19 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             Value::Number(eoa.get()),
         ]);
         engine.force_sync().unwrap();
+        assert_manager_allocations_owned(&engine);
+        if round % 2 == 0 {
+            continue;
+        }
         drop(engine);
         engine = open();
         assert_eq!(
             normalized_owned(engine.persist.as_ref().unwrap().old_blocks.clone()),
             normalized_owned(owned)
+        );
+        assert_eq!(
+            normalized_owned(engine.space.reusable_sections().collect()),
+            persisted_free
         );
         assert_manager_allocations_owned(&engine);
     }
