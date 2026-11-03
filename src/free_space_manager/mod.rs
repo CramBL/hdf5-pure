@@ -4,9 +4,14 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(not(feature = "std"))]
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::FreeSection;
@@ -14,6 +19,7 @@ use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
+use hdf5_pure_format::__private::SectionInfoCounts;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::{AdmittedFreeSnapshot, ManagerKind, ManagerSections};
 
@@ -453,9 +459,54 @@ impl ManagerProjection {
         Self::from_managers(&ManagerSections::from_snapshot(snapshot), widths)
     }
 
+    /// Projects admitted sections and returns the small metadata manager's distinct sizes.
+    ///
+    /// Retains sections and measured lengths for placement and encoding. The size index supports
+    /// measurement of additional padding sections without rebuilding the base size groups.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the combined manager length exceeds [`u64::MAX`].
+    pub(crate) fn indexed(
+        snapshot: AdmittedFreeSnapshot<'_>,
+        widths: FormatWidths,
+    ) -> Result<(Self, BTreeSet<u64>), FormatError> {
+        let mut sizes = BTreeSet::new();
+        let projection = Self::from_managers_indexed(
+            &ManagerSections::from_snapshot(snapshot),
+            widths,
+            Some(&mut sizes),
+        )?;
+        Ok((projection, sizes))
+    }
+
+    /// Borrows the projected sections of `kind`, or an empty slice for an inactive manager.
+    pub(crate) fn sections(&self, kind: ManagerKind) -> &[FreeSection] {
+        self.blocks
+            .iter()
+            .find(|block| block.kind == kind)
+            .map_or(&[], |block| block.sections.as_slice())
+    }
+
+    /// Returns manager kinds and measured header/list lengths in File Space Info slot order.
+    pub(crate) fn measurements(&self) -> impl Iterator<Item = (ManagerKind, [u64; 2])> + '_ {
+        self.blocks
+            .iter()
+            .zip(self.block_lengths())
+            .map(|(block, lengths)| (block.kind, lengths))
+    }
+
     fn from_managers(
         managers: &[ManagerSections],
         widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
+        Self::from_managers_indexed(managers, widths, None)
+    }
+
+    fn from_managers_indexed(
+        managers: &[ManagerSections],
+        widths: FormatWidths,
+        mut metadata_sizes: Option<&mut BTreeSet<u64>>,
     ) -> Result<Self, FormatError> {
         let mut blocks = Vec::with_capacity(managers.len());
         for manager in managers {
@@ -467,8 +518,17 @@ impl ManagerProjection {
                     size: extent.len(),
                 })
                 .collect();
-            let sizes: Vec<_> = sections.iter().map(|section| section.size).collect();
-            let section_list_len = hdf5_pure_format::__private::section_info_len(widths, &sizes);
+            let section_list_len = if let Some(index) = metadata_sizes
+                .as_deref_mut()
+                .filter(|_| manager.kind() == ManagerKind::PagedSmallMetadata)
+            {
+                index.extend(sections.iter().map(|section| section.size));
+                SectionInfoCounts::new(sections.len() as u64, index.len() as u64)?
+                    .encoded_len(widths)?
+            } else {
+                let sizes: Vec<_> = sections.iter().map(|section| section.size).collect();
+                hdf5_pure_format::__private::section_info_len(widths, &sizes)
+            };
             let (slot, class) = manager_wire(manager.kind());
             blocks.push(ProjectedManager {
                 kind: manager.kind(),
@@ -588,6 +648,20 @@ impl ManagerProjection {
         self,
         mut place: impl FnMut([u64; 2]) -> Result<[Extent; 2], FormatError>,
     ) -> Result<ManagerPlan, FormatError> {
+        self.place_with_kind(|_, lengths| place(lengths))
+    }
+
+    /// Constructs a checked layout with manager identity passed to the placement callback.
+    ///
+    /// Uses the same allocation requirements and checks as [`Self::place`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the placement and encoding errors described by [`Self::place`].
+    pub(crate) fn place_with_kind(
+        self,
+        mut place: impl FnMut(ManagerKind, [u64; 2]) -> Result<[Extent; 2], FormatError>,
+    ) -> Result<ManagerPlan, FormatError> {
         let Self {
             blocks,
             widths,
@@ -603,10 +677,13 @@ impl ManagerProjection {
                      sections,
                      section_list_len,
                  }| {
-                    let [header, section_list] = place([
-                        hdf5_pure_format::__private::free_space_manager_header_len(widths),
-                        section_list_len,
-                    ])?;
+                    let [header, section_list] = place(
+                        kind,
+                        [
+                            hdf5_pure_format::__private::free_space_manager_header_len(widths),
+                            section_list_len,
+                        ],
+                    )?;
                     Ok(ManagerBlock {
                         kind,
                         header,

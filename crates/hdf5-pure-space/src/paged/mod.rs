@@ -1,6 +1,8 @@
 use alloc::collections::BTreeSet;
+use alloc::format;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
+use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::FileSpacePageSize;
@@ -10,6 +12,7 @@ use hdf5_pure_core::StoredAddress;
 use super::admission::AdmissionWork;
 use super::admission::OrderedReturns;
 use super::admission::TrackedSpace;
+use super::allocation::AllocationClass;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, PageParts, TRAILING_RESERVE_TAILS};
@@ -498,17 +501,65 @@ impl PagedEdit {
                 offset: capacity,
                 length: TRAILING_RESERVE_TAILS * 2,
             })?;
-        let mut available = self.clone();
-        let allocation = if appended {
-            Extent::new(eoa, capacity).ok_or(FormatError::OffsetOverflow {
+        if appended {
+            return self
+                .plan_append(threshold, eoa, freed, old_blocks)?
+                .reserve(capacity)
+                .map(Some);
+        }
+        let Some(capacity) = NonZeroU64::new(capacity) else {
+            return Ok(None);
+        };
+        self.plan_reusable_tail(
+            threshold,
+            eoa,
+            freed,
+            old_blocks,
+            ReservationRequest::new(capacity, AllocationClass::Metadata),
+        )
+    }
+
+    /// Proposes a reservation from existing free space and the state to adopt after publication.
+    ///
+    /// Returns `None` if no reusable extent fits `request`. Applies `freed` and `old_blocks` to
+    /// the proposed post-free state after selecting the reservation, so pending returns cannot
+    /// fund it. Leaves the session unchanged. The caller reserves the selected range in the live
+    /// state before writing and adopts the proposed state after successful publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the next page boundary or trailing-reserve
+    /// calculation exceeds [`u64::MAX`].
+    pub(crate) fn plan_reusable_tail(
+        &self,
+        threshold: u64,
+        eoa: StoredAddress,
+        freed: &[(Extent, FreeClass)],
+        old_blocks: &[Extent],
+        request: ReservationRequest,
+    ) -> Result<Option<PagedTail>, FormatError> {
+        eoa.get()
+            .checked_next_multiple_of(self.page_size.get())
+            .ok_or(FormatError::OffsetOverflow {
                 offset: eoa.get(),
-                length: capacity,
-            })?
+                length: self.page_size.get(),
+            })?;
+        let capacity = request.size().get();
+        capacity
+            .checked_mul(TRAILING_RESERVE_TAILS * 2)
+            .and_then(|reserve| reserve.checked_next_multiple_of(self.page_size.get()))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: capacity,
+                length: TRAILING_RESERVE_TAILS * 2,
+            })?;
+        let mut available = self.clone();
+        let allocation = if request.is_block() {
+            available.allocate_block(request)
         } else {
-            let Some(allocation) = available.allocate(capacity, PageType::Meta) else {
-                return Ok(None);
-            };
-            allocation
+            available.allocate(capacity, request.page_type())
+        };
+        let Some(allocation) = allocation else {
+            return Ok(None);
         };
         let (mut post, released_eoa) = available.post_free(
             threshold,
@@ -516,32 +567,49 @@ impl PagedEdit {
             freed.iter().copied(),
             old_blocks.iter().copied(),
         );
-        let final_eoa = if appended {
-            if let Some(extent) = Extent::between(released_eoa, eoa) {
-                post.track(extent, PageType::Raw.into());
-            }
-            let end = allocation.end();
-            let aligned = end
-                .get()
-                .checked_next_multiple_of(self.page_size.get())
-                .map(StoredAddress::new)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: end.get(),
-                    length: self.page_size.get(),
-                })?;
-            if let Some(tail) = Extent::between(end, aligned) {
-                post.track(tail, PageType::Meta.into());
-            }
-            aligned
-        } else {
-            post.release_trailing(released_eoa, capacity)
-        };
+        let final_eoa = post.release_trailing(released_eoa, capacity);
         Ok(Some(PagedTail {
             allocation,
             post,
             final_eoa,
-            appended,
+            appended: false,
+            request,
         }))
+    }
+
+    /// Proposes post-free sections before sizing storage appended at a page-aligned stored EOA.
+    ///
+    /// Includes `freed` and `old_blocks` in the proposed state, retaining free trailing bytes
+    /// below `eoa`. Leaves the session unchanged and reserves no storage. The caller sizes the
+    /// appended reservation through [`PagedAppend::reserve`] and adopts the resulting state
+    /// after successful publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the next page boundary exceeds [`u64::MAX`].
+    pub(crate) fn plan_append(
+        &self,
+        threshold: u64,
+        eoa: StoredAddress,
+        freed: &[(Extent, FreeClass)],
+        old_blocks: &[Extent],
+    ) -> Result<PagedAppend, FormatError> {
+        eoa.get()
+            .checked_next_multiple_of(self.page_size.get())
+            .ok_or(FormatError::OffsetOverflow {
+                offset: eoa.get(),
+                length: self.page_size.get(),
+            })?;
+        let (mut post, released_eoa) = self.post_free(
+            threshold,
+            eoa,
+            freed.iter().copied(),
+            old_blocks.iter().copied(),
+        );
+        if let Some(restored) = Extent::between(released_eoa, eoa) {
+            post.track(restored, PageType::Raw.into());
+        }
+        Ok(PagedAppend { eoa, post })
     }
 
     /// Builds the PAGE free-space state that a commit would publish.
@@ -711,12 +779,156 @@ impl PagedEdit {
 pub struct PagedTail {
     /// The complete metadata allocation, including any owned padding.
     pub allocation: Extent,
-    /// The final free-space state, excluding the reservation and including its page tail.
+    /// The final free-space state, including returned reservation gaps and its page tail.
     pub post: PagedPostFree,
     /// The page-aligned end of allocation to publish.
     pub final_eoa: StoredAddress,
     /// Whether the reservation begins at the previous end of allocation.
     pub appended: bool,
+    request: ReservationRequest,
+}
+
+impl PagedTail {
+    /// Returns reservation gaps to the proposed metadata free-space state.
+    ///
+    /// The caller passes ordered, disjoint padding ranges inside the complete reservation.
+    /// Adjacent ranges are coalesced, and complete free-page interiors are promoted. The
+    /// session remains unchanged until the caller adopts the proposed state after publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if ranges are unordered, overlap, extend outside the
+    /// reservation, or overlap the proposed free-space state.
+    pub fn with_metadata_padding(mut self, padding: &[Extent]) -> Result<Self, FormatError> {
+        if padding.is_empty() {
+            return Ok(self);
+        }
+        let padding = FreeList::from_sorted(padding.iter().copied()).map_err(|err| {
+            FormatError::Internal(format!("invalid PAGE allocation padding: {err}"))
+        })?;
+        let PagedPostFree {
+            page_size,
+            meta,
+            raw,
+            dead,
+            unclassified,
+        } = &mut self.post;
+        for &extent in padding.extents() {
+            if !self.allocation.range().contains(extent.range()) {
+                return Err(FormatError::Internal(
+                    "PAGE allocation padding is outside its reservation".into(),
+                ));
+            }
+            for list in [&*meta, &*raw, &*dead, &*unclassified] {
+                let index = list
+                    .extents()
+                    .partition_point(|free| free.end() <= extent.start());
+                if list
+                    .extents()
+                    .get(index)
+                    .is_some_and(|free| free.start() < extent.end())
+                {
+                    return Err(FormatError::Internal(
+                        "PAGE allocation padding overlaps free space".into(),
+                    ));
+                }
+            }
+        }
+        *meta = FreeList::from_lists([&*meta, &padding]).map_err(|err| {
+            FormatError::Internal(format!("invalid PAGE allocation padding: {err}"))
+        })?;
+        PagedEdit::promote_whole_free_pages(meta, raw, dead, *page_size);
+        Ok(self)
+    }
+
+    /// Returns the request whose placement the caller reproduces when reserving live space.
+    pub fn reservation_request(&self) -> ReservationRequest {
+        self.request
+    }
+}
+
+/// A proposed PAGE post-free state before an appended reservation has been sized.
+///
+/// Previously released trailing bytes below the input EOA remain in this state as free space.
+/// The caller measures the managers, then passes the complete capacity to [`Self::reserve`].
+/// Planning leaves the session unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::__private::StoredAddressExt;
+/// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+/// use hdf5_pure_space::__private::{Extent, SessionSpace};
+///
+/// let space = SessionSpace::from_strategy(
+///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+/// );
+/// let append = space.plan_paged_append(StoredAddress::new(8_192), &[], &[])?;
+/// assert_eq!(append.admitted_snapshot().reusable_bytes()?, 0);
+/// let tail = append.reserve(256)?;
+/// assert_eq!(tail.allocation, Extent::new(StoredAddress::new(8_192), 256).unwrap());
+/// assert_eq!(tail.final_eoa, StoredAddress::new(12_288));
+/// assert_eq!(tail.post.admitted_snapshot().reusable_bytes()?, 3_840);
+/// assert_eq!(space.admitted_snapshot().reusable_bytes()?, 0);
+/// # Ok::<(), hdf5_pure_core::FormatError>(())
+/// ```
+pub struct PagedAppend {
+    eoa: StoredAddress,
+    post: PagedPostFree,
+}
+
+impl PagedAppend {
+    /// Borrows the canonical free-space state for manager projection before reservation.
+    pub fn admitted_snapshot(&self) -> AdmittedFreeSnapshot<'_> {
+        self.post.admitted_snapshot()
+    }
+
+    /// Plans `capacity` bytes at the input EOA and returns the remaining metadata-page tail.
+    ///
+    /// The caller passes a nonzero capacity. The final EOA is page-aligned, and all addresses
+    /// remain stored, base-relative addresses. The reservation excludes the input free sections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if capacity is zero or address, trailing-reserve,
+    /// or page-alignment calculations overflow.
+    pub fn reserve(self, capacity: u64) -> Result<PagedTail, FormatError> {
+        let Self { eoa, mut post } = self;
+        capacity
+            .checked_mul(TRAILING_RESERVE_TAILS * 2)
+            .and_then(|reserve| reserve.checked_next_multiple_of(post.page_size.get()))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: capacity,
+                length: TRAILING_RESERVE_TAILS * 2,
+            })?;
+        let request = ReservationRequest::new(
+            NonZeroU64::new(capacity).ok_or(FormatError::OffsetOverflow {
+                offset: eoa.get(),
+                length: capacity,
+            })?,
+            AllocationClass::Metadata,
+        );
+        let allocation = request.place_after(eoa, None)?.extent();
+        let end = allocation.end();
+        let final_eoa = end
+            .get()
+            .checked_next_multiple_of(post.page_size.get())
+            .map(StoredAddress::new)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: end.get(),
+                length: post.page_size.get(),
+            })?;
+        if let Some(tail) = Extent::between(end, final_eoa) {
+            post.track(tail, PageType::Meta.into());
+        }
+        Ok(PagedTail {
+            allocation,
+            post,
+            final_eoa,
+            appended: true,
+            request,
+        })
+    }
 }
 
 /// Holds the free-space state a paged commit is preparing to publish.
@@ -963,6 +1175,7 @@ mod tests {
 
     mod admission;
     mod normalization;
+    mod persistence;
 
     const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
     const META: FreeClass = FreeClass::Page(PageType::Meta);

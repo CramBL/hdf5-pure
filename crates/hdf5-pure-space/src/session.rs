@@ -1,4 +1,5 @@
 use core::iter::Peekable;
+use core::num::NonZeroU64;
 
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
@@ -10,8 +11,8 @@ use super::allocation::AllocationClass;
 use super::extent::Extent;
 use super::list::{self, FreeList, FreeListError};
 use super::paged::{
-    FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedAppendSnapshot, PagedEdit,
-    PagedPostFree, PagedSections, PagedTail,
+    FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedAppend, PagedAppendSnapshot,
+    PagedEdit, PagedPostFree, PagedSections, PagedTail,
 };
 use super::persistence::ManagerKind;
 use super::reservation::{ReservationBatch, ReservationRequest};
@@ -752,6 +753,64 @@ impl SessionSpace {
         space
             .paged
             .plan_tail(space.threshold, eoa, freed, old_blocks, capacity, appended)
+    }
+
+    /// Plans a reusable metadata block with PAGE placement for its complete capacity.
+    ///
+    /// Like [`Self::plan_paged_tail`] without appending, but a block smaller than a page stays
+    /// within one page, and a block at least one page long starts on a page boundary. Returns
+    /// `None` if no durable free extent fits. Pending returns cannot fund the reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the strategy is not PAGE, or
+    /// [`FormatError::OffsetOverflow`] if address, page-boundary, or trailing-reserve calculations
+    /// overflow.
+    pub fn plan_paged_block_tail(
+        &self,
+        eoa: StoredAddress,
+        freed: &[(Extent, FreeClass)],
+        old_blocks: &[Extent],
+        capacity: NonZeroU64,
+    ) -> Result<Option<PagedTail>, FormatError> {
+        let Self::Paged(space) = self else {
+            return Err(FormatError::Internal(
+                "PAGE persistence requires PAGE session space".into(),
+            ));
+        };
+        space.paged.plan_reusable_tail(
+            space.threshold,
+            eoa,
+            freed,
+            old_blocks,
+            ReservationRequest::new(capacity, AllocationClass::Metadata).for_block(),
+        )
+    }
+
+    /// Prepares PAGE post-free sections for measurement before sizing an appended reservation.
+    ///
+    /// The caller passes a page-aligned stored `eoa`. Pending `freed` extents and `old_blocks`
+    /// become free only in the proposed state. Use [`PagedAppend::reserve`] after measurement,
+    /// and adopt the resulting state after successful publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the strategy is not PAGE, or
+    /// [`FormatError::OffsetOverflow`] if the next page boundary exceeds [`u64::MAX`].
+    pub fn plan_paged_append(
+        &self,
+        eoa: StoredAddress,
+        freed: &[(Extent, FreeClass)],
+        old_blocks: &[Extent],
+    ) -> Result<PagedAppend, FormatError> {
+        let Self::Paged(space) = self else {
+            return Err(FormatError::Internal(
+                "PAGE persistence requires PAGE session space".into(),
+            ));
+        };
+        space
+            .paged
+            .plan_append(space.threshold, eoa, freed, old_blocks)
     }
 
     /// Adopts PAGE post-free state after its publication succeeds.

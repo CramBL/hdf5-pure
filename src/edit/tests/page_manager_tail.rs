@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use hdf5_pure_format::__private::HDF5_SIGNATURE;
 use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::FreeList;
 use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::{Extent, ManagerKind, ManagerSections};
 use rstest::rstest;
@@ -412,10 +413,10 @@ fn issued_bytes(engine: &WriteEngine) -> Vec<u8> {
 }
 
 #[test]
-fn an_extension_over_the_chunk_budget_stops_before_publication() {
+fn large_measured_manager_lists_do_not_require_page_proportional_header_padding() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("chunk-budget.h5");
-    fragmented_page_file(&path, FragmentedSections::OverBudget);
+    let path = directory.path().join("large-manager.h5");
+    fragmented_page_file(&path, FragmentedSections::Large);
     let mut engine = WriteEngine::open_rw_with_strategy(
         &path,
         MetadataCacheConfig::disabled(),
@@ -427,30 +428,29 @@ fn an_extension_over_the_chunk_budget_stops_before_publication() {
     engine
         .set_write_buffering(WriteBuffering::Unbuffered)
         .unwrap();
-    let before = engine.image.disk_bytes().unwrap();
-    let free = engine.space.admitted_snapshot().reusable_bytes().unwrap();
-    assert_eq!(free, 1_600_000);
-    let blocks = engine.persist.as_ref().unwrap().old_blocks.clone();
+    assert_eq!(
+        engine.space.admitted_snapshot().reusable_bytes().unwrap(),
+        1_600_000
+    );
     let root = engine
         .context
         .addresses()
         .resolve(engine.context.superblock().root_group_address)
         .unwrap();
-    disk_log::start();
-    let error = engine
+    engine
         .commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
-        .unwrap_err();
-    assert!(
-        matches!(error, Error::Format(FormatError::NestingDepthExceeded)),
-        "{error:?}"
-    );
-    assert!(disk_log::take().is_empty());
-    assert_eq!(
-        engine.space.admitted_snapshot().reusable_bytes().unwrap(),
-        free
-    );
-    assert_eq!(engine.persist.as_ref().unwrap().old_blocks, blocks);
-    assert_eq!(engine.image.disk_bytes().unwrap(), before);
+        .unwrap();
+    let (chunks, owned) = persistence_allocations(&engine);
+    assert!(chunks.len() > 1);
+    assert!(chunks.iter().map(|chunk| chunk.len()).sum::<u64>() < 4_096);
+    assert!(owned.iter().any(|block| block.len() > 14_000_000));
+    assert_manager_allocations_owned(&engine);
+    engine.force_sync().unwrap();
+    drop(engine);
+    let engine = edit_test_util::open_engine(&path);
+    let (reopened_chunks, reopened_owned) = persistence_allocations(&engine);
+    assert_eq!(reopened_chunks, chunks);
+    assert_eq!(normalized_owned(reopened_owned), normalized_owned(owned));
 }
 
 #[rstest]
@@ -504,7 +504,8 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         engine
             .commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
             .unwrap();
-        let allocation = engine.persist.as_ref().unwrap().old_blocks[0];
+        let (actual_chunks, owned) = persistence_allocations(&engine);
+        let owned_bytes = owned.iter().map(|block| block.len()).sum::<u64>();
         let address = engine
             .context
             .addresses()
@@ -522,18 +523,11 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         let extension = chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>();
         assert!(chunks.len() > 1);
         assert!(extension < 131_072);
-        let mut cursor = allocation.start();
-        for chunk in &chunks {
-            assert_eq!(
-                engine
-                    .context
-                    .addresses()
-                    .relative(chunk.span.start())
-                    .unwrap(),
-                cursor
-            );
-            cursor = cursor.checked_add(chunk.span.length()).unwrap();
-        }
+        assert_eq!(chunks.len(), actual_chunks.len());
+        assert_eq!(
+            normalized_owned(engine.persist.as_ref().unwrap().old_blocks.clone()),
+            normalized_owned(owned.clone())
+        );
         let region = WriteEngine::gather_oh_messages(
             &engine.image(),
             address.get(),
@@ -563,20 +557,16 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             Value::Number(round),
             Value::Number(u64::try_from(chunks.len()).unwrap()),
             Value::Number(extension),
-            Value::Number(allocation.len()),
+            Value::Number(owned_bytes),
             Value::Number(eoa.get()),
         ]);
         engine.force_sync().unwrap();
         drop(engine);
         engine = open();
-        let mut recovered = engine.persist.as_ref().unwrap().old_blocks.clone();
-        recovered.sort_by_key(|extent| extent.start());
-        let mut cursor = allocation.start();
-        for block in recovered {
-            assert_eq!(block.start(), cursor);
-            cursor = block.end();
-        }
-        assert_eq!(cursor, allocation.end());
+        assert_eq!(
+            normalized_owned(engine.persist.as_ref().unwrap().old_blocks.clone()),
+            normalized_owned(owned)
+        );
         assert_manager_allocations_owned(&engine);
     }
     drop(engine);
@@ -587,7 +577,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             "commit",
             "extension chunks",
             "extension bytes",
-            "complete tail bytes",
+            "owned metadata bytes",
             "EOA",
         ],
         rows,
@@ -689,10 +679,282 @@ fn a_page_publication_reads_each_protected_extension_chunk_once(#[case] memory: 
     drop(reopened);
 }
 
+#[rstest]
+#[case::operation(false)]
+#[case::session(true)]
+fn page_manager_emission_orders_large_lists_before_later_continuations(
+    #[case] session: bool,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("manager-emission.h5");
+    let page = 131_072;
+    fragmented_page_file_with_page(&path, FragmentedSections::Continued, page);
+    let mut engine = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        memory,
+        PersistedFreeSpacePolicy::Strict,
+    )
+    .unwrap();
+    engine.set_sync_policy(SyncPolicy::OnClose);
+    engine
+        .set_write_buffering(if session {
+            WriteBuffering::Session {
+                page_size: page,
+                max_bytes: 65_536,
+            }
+        } else {
+            WriteBuffering::Operation {
+                page_size: page,
+                max_bytes: 65_536,
+            }
+        })
+        .unwrap();
+    let before = engine.image.buffering_work();
+    let initial_len = engine.image.len();
+    crate::edit::observations::reset_zeros();
+    let root = engine
+        .context
+        .addresses()
+        .resolve(engine.context.superblock().root_group_address)
+        .unwrap();
+    engine
+        .commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
+        .unwrap();
+    let pending = engine.image.buffering_work();
+    assert!(pending.pending_bytes <= 65_536);
+    engine.image.flush().unwrap();
+    let after = engine.image.buffering_work();
+    let zeros = crate::edit::observations::zero_work();
+    let (chunks, owned) = persistence_allocations(&engine);
+    assert!(chunks.len() > 1);
+    let list = owned.iter().find(|block| block.len() > 65_536).unwrap();
+    assert!(chunks.iter().any(|chunk| chunk.start() >= list.end()));
+    assert!(zeros.bytes > 0);
+    assert!(zeros.scratch_peak > 0);
+    assert!(zeros.scratch_peak <= 65_536);
+    assert_eq!(after.clean_gap_calls - before.clean_gap_calls, 0);
+    assert_eq!(after.clean_gap_bytes - before.clean_gap_bytes, 0);
+    assert!(after.flush_peak_bytes <= 65_536);
+    let appended = engine.image.len() - initial_len;
+    let owned_bytes = owned.iter().map(|block| block.len()).sum::<u64>();
+    assert_eq!(appended, owned_bytes + zeros.bytes);
+    assert!(after.write_bytes - before.write_bytes >= appended);
+    assert!(after.write_bytes - before.write_bytes <= appended + 4_096);
+    assert!(after.copied_bytes - before.copied_bytes <= 2 * appended);
+    assert!(after.copied_bytes > before.copied_bytes);
+    match memory {
+        MemoryStrategy::Bounded => assert_eq!(after.mirror_bytes, 0),
+        MemoryStrategy::Mirrored => assert_eq!(after.mirror_bytes, engine.image.len()),
+        MemoryStrategy::Auto => panic!("the case must select an explicit backing"),
+    }
+    eprintln!(
+        "{memory:?} session={session}: appended={appended}, owned={owned_bytes}, zeros={zeros:?}, work={after:?}, before={before:?}"
+    );
+    assert_manager_allocations_owned(&engine);
+}
+
+#[derive(Clone, Copy)]
+enum GappedFailure {
+    Continuation,
+    Gap,
+    Publication,
+}
+
+#[rstest]
+#[case::gap(GappedFailure::Gap)]
+#[case::continuation(GappedFailure::Continuation)]
+#[case::publication(GappedFailure::Publication)]
+fn gapped_page_publication_failures_preserve_predecessor_and_reserved_ownership(
+    #[case] failure: GappedFailure,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("gapped-failure.h5");
+    let control_path = directory.path().join("gapped-control.h5");
+    fragmented_page_file(&path, FragmentedSections::Continued);
+    fs::copy(&path, &control_path).unwrap();
+    let prepare = |path: &Path| {
+        let mut engine = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
+        engine.set_sync_policy(sync);
+        engine
+            .set_write_buffering(WriteBuffering::Unbuffered)
+            .unwrap();
+        engine
+            .set_group_attr(
+                &ObjectPathBuf::root(),
+                "audit",
+                AttrValue::U8Array(vec![19; 800]),
+            )
+            .unwrap();
+        engine
+    };
+    let mut control = prepare(&control_path);
+    disk_log::start();
+    control.commit().unwrap();
+    let writes = disk_log::take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            DiskOp::Write { offset, bytes } => Some((offset, bytes)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let (chunks, owned) = persistence_allocations(&control);
+    let target = match failure {
+        GappedFailure::Gap => {
+            let ranges = normalized_owned(owned);
+            let gap = ranges
+                .windows(2)
+                .find(|pair| pair[0].end() < pair[1].start())
+                .unwrap();
+            gap[0].end().get()
+        }
+        GappedFailure::Continuation => chunks[1].start().get(),
+        GappedFailure::Publication => control.context.signature().get(),
+    };
+    let index = writes
+        .iter()
+        .position(|(offset, _)| *offset == target)
+        .unwrap();
+    match failure {
+        GappedFailure::Gap => assert!(writes[index].1.iter().all(|byte| *byte == 0)),
+        GappedFailure::Continuation => assert!(
+            writes[index]
+                .1
+                .starts_with(object_header::CONTINUATION_SIGNATURE)
+        ),
+        GappedFailure::Publication => assert!(writes[index].1.starts_with(&HDF5_SIGNATURE)),
+    }
+    drop(control);
+    let mut engine = prepare(&path);
+    let previous = typed_sections(&engine);
+    let old_blocks = engine.persist.as_ref().unwrap().old_blocks.clone();
+    disk_log::start();
+    disk_log::fail_write_after(
+        index,
+        if matches!(failure, GappedFailure::Publication) {
+            usize::MAX
+        } else {
+            0
+        },
+    );
+    let error = engine.commit().unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected injected I/O failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    disk_log::take();
+    if !matches!(failure, GappedFailure::Publication) {
+        assert_eq!(typed_sections(&engine), previous);
+        assert_eq!(engine.persist.as_ref().unwrap().old_blocks, old_blocks);
+        let file = File::from_bytes(issued_bytes(&engine)).unwrap();
+        assert_eq!(file.root().attrs().unwrap().get("audit"), None);
+        engine
+            .set_group_attr(
+                &ObjectPathBuf::root(),
+                "audit",
+                AttrValue::U8Array(vec![19; 800]),
+            )
+            .unwrap();
+        engine.commit().unwrap();
+    }
+    assert_manager_allocations_owned(&engine);
+    if matches!(failure, GappedFailure::Publication) {
+        let error = engine.force_sync().unwrap_err();
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
+    } else {
+        engine.force_sync().unwrap();
+    }
+    drop(engine);
+    let engine = edit_test_util::open_engine(&path);
+    assert_manager_allocations_owned(&engine);
+    persistence_allocations(&engine);
+    drop(engine);
+    assert_eq!(
+        File::open(&path).unwrap().root().attrs().unwrap()["audit"],
+        AttrValue::U8Array(vec![19; 800])
+    );
+}
+
+fn persistence_allocations(engine: &WriteEngine) -> (Vec<Extent>, Vec<Extent>) {
+    let address = engine
+        .context
+        .addresses()
+        .resolve(
+            engine
+                .context
+                .superblock()
+                .superblock_extension_address
+                .unwrap(),
+        )
+        .unwrap();
+    let chunks =
+        edit_header::read_oh_chunks(engine.image(), address.get(), engine.context.addresses())
+            .unwrap()
+            .into_iter()
+            .map(|chunk| {
+                Extent::new(
+                    engine
+                        .context
+                        .addresses()
+                        .relative(chunk.span.start())
+                        .unwrap(),
+                    chunk.span.length(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+    let file = File::from_bytes(issued_bytes(engine)).unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
+    let (_, managers) = crate::free_space_manager::read_persisted_sections_source(
+        &engine.image(),
+        engine.context.widths(),
+        engine.context.addresses().effective_base(),
+        &info.manager_addrs,
+    )
+    .unwrap();
+    let mut owned = chunks.clone();
+    owned.extend(managers.into_iter().map(|range| {
+        Extent::new(
+            engine.context.addresses().relative(range.start()).unwrap(),
+            range.length(),
+        )
+        .unwrap()
+    }));
+    let page = info.page_size.get();
+    for block in &owned {
+        if block.len() < page {
+            assert_eq!(
+                block.start().get() / page,
+                (block.end().get() - 1) / page,
+                "{block:?}"
+            );
+        } else {
+            assert_eq!(block.start().get() % page, 0, "{block:?}");
+        }
+    }
+    (chunks, owned)
+}
+
+fn normalized_owned(mut owned: Vec<Extent>) -> Vec<Extent> {
+    owned.sort_unstable();
+    FreeList::from_sorted(owned).unwrap().extents().to_vec()
+}
+
 fn fragmented_page_file(path: &Path, scale: FragmentedSections) {
+    fragmented_page_file_with_page(path, scale, 4_096);
+}
+
+fn fragmented_page_file_with_page(path: &Path, scale: FragmentedSections, page: u64) {
     let count: u64 = match scale {
         FragmentedSections::Continued => 8_000,
-        FragmentedSections::OverBudget => 1_600_000,
+        FragmentedSections::Large => 1_600_000,
     };
     let mut fixture = PersistedImage::new(path, PersistedStrategy::Page, 1);
     let file = File::open_streaming(path).unwrap();
@@ -701,7 +963,8 @@ fn fragmented_page_file(path: &Path, scale: FragmentedSections) {
     let sections = (0..count)
         .map(|index| ((1 << 24) + index * 2, 1))
         .collect::<Vec<_>>();
-    let eof = ((1 << 24) + count * 2).div_ceil(4_096) * 4_096;
+    let eof = ((1 << 24) + count * 2).div_ceil(page) * page;
+    fixture.info.page_size = FileSpacePageSize::try_from(page).unwrap();
     fixture
         .bytes
         .resize(usize::try_from(count * 10 + 16_384).unwrap(), 0);
@@ -723,5 +986,5 @@ fn fragmented_page_file(path: &Path, scale: FragmentedSections) {
 
 enum FragmentedSections {
     Continued,
-    OverBudget,
+    Large,
 }

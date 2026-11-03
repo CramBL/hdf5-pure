@@ -19,6 +19,7 @@ pub use crate::paged::FreeClass;
 pub use crate::paged::PageTransition;
 pub use crate::paged::PageType;
 pub use crate::paged::PagedAllocationSnapshot;
+pub use crate::paged::PagedAppend;
 pub use crate::paged::PagedAppendSnapshot;
 pub use crate::paged::PagedPostFree;
 pub use crate::paged::PagedSections;

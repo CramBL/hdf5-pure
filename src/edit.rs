@@ -3003,12 +3003,16 @@ impl WriteEngine {
         let len = self.image.len();
         if target > len {
             let range = FileRange::new(PhysicalAddress::new(len), target - len)?;
-            #[cfg(test)]
-            observations::record_zeros(range.length(), crate::image::zeros::scratch_length(range));
-            self.image.fill_zeros(range)?;
+            self.fill_zeros(range)?;
         }
         debug_assert_eq!(self.image.len(), target);
         Ok(())
+    }
+
+    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
+        #[cfg(test)]
+        observations::record_zeros(range.length(), crate::image::zeros::scratch_length(range));
+        self.image.fill_zeros(range)
     }
 
     /// Append `bytes` at end-of-file, returning the absolute address they were

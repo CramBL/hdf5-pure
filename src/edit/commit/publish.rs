@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::ObjectHeaderAllocation;
 use hdf5_pure_space::__private as free_space;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;
@@ -27,6 +28,7 @@ use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, WriteEngine};
 use crate::edit::{PersistState, paged_persistence};
 use crate::error::{Error, FormatError};
 use crate::file_space_info::{self, NUM_FILE_FSM_MANAGERS};
+use crate::free_space_manager::EncodedManager;
 use crate::free_space_manager::ManagerProjection;
 use crate::source::Source;
 use crate::width::FormatWidths;
@@ -732,9 +734,10 @@ impl WriteEngine {
     /// Publishes the root, extension, and final per-class free sections of a persistent PAGE edit.
     ///
     /// Plans the complete metadata reservation before writing. The serialized managers and the
-    /// adopted session state include the same page tails and exclude the complete reservation,
-    /// including owned extension padding. Placement uses appended pages or space already free
-    /// before this publication. Pending object frees and superseded managers cannot fund it.
+    /// adopted session state include the same page tails and admitted gaps. Both exclude occupied
+    /// extension and manager allocations, including owned padding. Placement uses appended pages
+    /// or space already free before this publication. Pending object frees and superseded
+    /// managers cannot fund it.
     ///
     /// Writes the planned blocks before publishing their addresses in the superblock. Publishes
     /// a smaller EOA before truncating the file, and adopts the planned state after publication
@@ -800,9 +803,9 @@ impl WriteEngine {
         );
         let source = self.image();
         let predecessor = object_header::ExtensionReconstruction::read(source, old_ext_addr, base)?;
-        let ext_len =
-            object_header::build_v2_object_header(&predecessor.rewrite(widths, &placeholder)?)?
-                .len() as u64;
+        let prepared =
+            object_header::PreparedHeader::new(&predecessor.rewrite(widths, &placeholder)?)?;
+        let geometry = prepared.geometry(widths)?;
 
         let current_eoa = self.end_of_allocation()?;
         let Some(plan) = paged_persistence::PagedPersistencePlan::new(
@@ -810,8 +813,7 @@ impl WriteEngine {
             current_eoa,
             to_free.entries(),
             &old_blocks,
-            ext_len,
-            widths,
+            &geometry,
             placement == TailPlacement::ReuseOnly,
         )?
         else {
@@ -819,8 +821,10 @@ impl WriteEngine {
         };
         let (tail, extension, slots, blocks, coverage) = plan.into_parts();
         let region = coverage.reservation();
-        let ext_addr = region.start();
-        let blocks_len = region.len();
+        let ext_addr = extension
+            .first()
+            .ok_or_else(|| FormatError::Internal("a PAGE extension has no chunks".into()))?
+            .start();
         let final_eoa = tail.final_eoa;
         let reused = !tail.appended;
         let info = if blocks.is_empty() {
@@ -846,20 +850,20 @@ impl WriteEngine {
                 final_eoa,
             )
         };
-        let ext_oh = object_header::build_v2_object_header_allocation(
-            &predecessor.rewrite(widths, &info)?,
-            widths,
-            extension,
-        )?;
-        debug_assert_eq!(
-            ext_oh.len() as u64,
-            extension.len(),
-            "an encoded extension fills its planned allocation"
-        );
+        let final_header =
+            object_header::PreparedHeader::new(&predecessor.rewrite(widths, &info)?)?;
+        let final_geometry = final_header.geometry(widths)?;
+        let ext_oh = final_geometry
+            .into_placed_allocation(extension.iter().map(|allocation| allocation.range()))?;
+        let physical_region = FileRange::new(base.resolve(region.start())?, region.len())?;
+        let final_eof = base.resolve(final_eoa)?;
 
         if reused {
-            let reserved = self.space.allocate(blocks_len, AllocationClass::Metadata);
-            if reserved != Some(tail.allocation) {
+            let reserved = self
+                .space
+                .reservation_batch(1)
+                .reserve(tail.reservation_request());
+            if reserved.as_ref().map(|reservation| reservation.extent()) != Some(tail.allocation) {
                 return Err(FormatError::Internal(
                     "a PAGE tail reservation differs from its pure plan".into(),
                 )
@@ -868,17 +872,11 @@ impl WriteEngine {
         } else {
             self.begin_page(PageType::Meta)?;
         }
-        let final_eof = self.context.addresses().resolve(final_eoa)?;
-
-        // Include extension padding in the allocation recorded for future reclamation.
+        // Retain complete owned blocks for reclamation, excluding admitted free gaps.
         let new_old_blocks = coverage.into_retirement();
 
         // The extension and manager blocks remain unreferenced until superblock publication.
-        self.write_tail_block(region, ext_addr, &ext_oh)?;
-        for block in &blocks {
-            self.write_tail_block(region, block.header_address, &block.header)?;
-            self.write_tail_block(region, block.section_list_address, &block.section_list)?;
-        }
+        self.write_paged_content(region, physical_region, &ext_oh, &blocks)?;
         // Extend an appended reservation to the page-aligned EOF computed by the plan.
         if !reused {
             self.pad_zeros_to(final_eof.get())?;
@@ -909,6 +907,82 @@ impl WriteEngine {
         });
         // The rewritten managers describe persistent free sections at this file length.
         self.fsm_len = self.image.len();
+        Ok(())
+    }
+
+    /// Writes extension chunks and managers in address order, zeroing intervening free gaps.
+    ///
+    /// The caller passes the stored reservation and its resolved physical range, then completes
+    /// the content barrier before writing the superblock references.
+    ///
+    /// # Errors
+    ///
+    /// Returns source write errors, [`FormatError::OffsetOverflow`] if address calculations
+    /// overflow, or [`FormatError::Internal`] if a range or block differs from the plan.
+    fn write_paged_content(
+        &mut self,
+        reservation: FreeExtent,
+        physical: FileRange,
+        extension: &ObjectHeaderAllocation<'_>,
+        managers: &[EncodedManager],
+    ) -> Result<(), Error> {
+        let mut blocks = managers
+            .iter()
+            .flat_map(|block| {
+                [
+                    (block.header_address, block.header.as_slice()),
+                    (block.section_list_address, block.section_list.as_slice()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        blocks.sort_unstable_by_key(|(address, _)| *address);
+        let mut blocks = blocks.into_iter().peekable();
+        let mut extension = extension.encode_chunks().peekable();
+        let mut cursor = reservation.start();
+        loop {
+            let next_extension = extension.peek().map(|(address, _)| *address);
+            let next_manager = blocks.peek().map(|(address, _)| *address);
+            let Some(address) = next_extension.into_iter().chain(next_manager).min() else {
+                break;
+            };
+            if let Some(gap) = FreeExtent::between(cursor, address) {
+                let offset = gap
+                    .start()
+                    .checked_distance_from(reservation.start())
+                    .ok_or_else(|| {
+                        FormatError::Internal("a PAGE gap precedes its reservation".into())
+                    })?;
+                self.fill_zeros(FileRange::new(
+                    physical.start().checked_add(offset)?,
+                    gap.len(),
+                )?)?;
+            }
+            if next_extension == Some(address) {
+                let (address, bytes) = extension.next().ok_or_else(|| {
+                    FormatError::Internal("a PAGE extension chunk is missing".into())
+                })?;
+                self.write_tail_block(reservation, address, &bytes)?;
+                cursor = address.checked_add(bytes.len() as u64)?;
+            } else {
+                let (address, bytes) = blocks.next().ok_or_else(|| {
+                    FormatError::Internal("a PAGE manager block is missing".into())
+                })?;
+                self.write_tail_block(reservation, address, bytes)?;
+                cursor = address.checked_add(bytes.len() as u64)?;
+            }
+        }
+        if let Some(gap) = FreeExtent::between(cursor, reservation.end()) {
+            let offset = gap
+                .start()
+                .checked_distance_from(reservation.start())
+                .ok_or_else(|| {
+                    FormatError::Internal("a PAGE gap precedes its reservation".into())
+                })?;
+            self.fill_zeros(FileRange::new(
+                physical.start().checked_add(offset)?,
+                gap.len(),
+            )?)?;
+        }
         Ok(())
     }
 

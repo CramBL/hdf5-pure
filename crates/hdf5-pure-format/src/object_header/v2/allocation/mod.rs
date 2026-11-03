@@ -484,6 +484,44 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         })
     }
 
+    /// Returns the address and length widths used for chunk planning and encoding.
+    pub fn widths(&self) -> FormatWidths {
+        self.widths
+    }
+
+    /// Returns complete contiguous chunk ranges without consuming the parsed records.
+    ///
+    /// The ranges cover `allocation_len` bytes beginning at the stored, base-relative `address`.
+    /// Uses the same chunk geometry as [`Self::into_allocation`]. The caller establishes
+    /// allocation ownership, availability, and any PAGE placement policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocation-planning errors described by [`Self::into_allocation`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::{
+    ///     FormatWidths, ObjectHeaderAllocationGeometry, ObjectHeaderPrefix,
+    /// };
+    ///
+    /// let geometry = ObjectHeaderAllocationGeometry::new(
+    ///     ObjectHeaderPrefix::PLAIN,
+    ///     FormatWidths::from_sizes(8, 8)?,
+    ///     &[],
+    /// )?;
+    /// let address = StoredAddress::new(128);
+    /// let ranges = geometry.contiguous_allocations(address, 512)?;
+    /// let plan = geometry.into_allocation(address, 512)?;
+    /// assert_eq!(
+    ///     ranges.iter().map(|range| (range.start(), range.length())).collect::<Vec<_>>(),
+    ///     plan.chunks().collect::<Vec<_>>(),
+    /// );
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
     pub fn contiguous_allocations(
         &self,
         address: StoredAddress,
@@ -720,6 +758,8 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         }
         Ok(())
     }
+    /// The maximum number of complete chunks in one allocation, including chunk 0.
+    pub const MAX_CHUNKS: usize = worklist::MAX_CONTINUATIONS;
 }
 
 /// Complete chunk geometry and its planned continuation target.
