@@ -26,6 +26,8 @@ pub use reference_count::ObjectReferenceCountField;
 pub use reference_count::ObjectReferenceCountIssue;
 pub use reference_count::ObjectReferenceCountMessage;
 pub use reference_count::ObjectReferenceCountObserver;
+pub use reference_count::ObjectReferenceCountUpdate;
+pub use reference_count::ObjectReferenceCountUpdateError;
 
 pub use v2::AttributePhaseChange;
 pub use v2::MessageRecord;

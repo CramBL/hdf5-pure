@@ -1,4 +1,4 @@
-//! Object-reference-count observations and their physical field associations.
+//! Count observations, physical field associations, and prepared count updates.
 //!
 //! Version 1 headers use the prefix count defined in "Version 1 Data Object Header Prefix" of the
 //! [format specification, version 4.0][v1]. Version 2 headers are defined in "Version 2 Data Object
@@ -23,6 +23,11 @@ use super::MessageRecord;
 use super::ObjectHeader;
 use super::ObjectHeaderChunk;
 
+mod update;
+
+pub use update::ObjectReferenceCountUpdate;
+pub use update::ObjectReferenceCountUpdateError;
+
 /// Provisional count observations from one object-header parse.
 ///
 /// The caller passes the initial chunk first, then each continuation chunk once to
@@ -34,7 +39,7 @@ use super::ObjectHeaderChunk;
 /// # Examples
 ///
 /// ```
-/// use hdf5_pure_core::__private::BaseAddressExt;
+/// use hdf5_pure_core::__private::{BaseAddressExt, FileRegion};
 /// use hdf5_pure_core::PhysicalAddress;
 /// use hdf5_pure_format::{BaseAddress, FormatError, MessageType};
 /// use hdf5_pure_format::__private::{
@@ -72,6 +77,19 @@ use super::ObjectHeaderChunk;
 /// assert_eq!(field.value(), 2);
 /// assert_eq!(field.range().length(), 4);
 /// assert!(field.chunk().contains(field.range()));
+///
+/// let current = FileRegion::new(field.chunk(), &bytes)?;
+/// let update = field.update(current, 1).unwrap();
+/// let mut writes = update.writes();
+/// assert_eq!(writes.next().unwrap(), (field.range(), [1, 0, 0, 0].as_slice()));
+/// let (checksum_range, checksum_bytes) = writes.next().unwrap();
+/// let expected_records =
+///     prefix.layout.record(MessageType::OBJECT_REFERENCE_COUNT, &[0, 1, 0, 0, 0]);
+/// let expected = prefix.encode_header(&expected_records);
+/// assert_eq!(checksum_range.length(), 4);
+/// assert_eq!(checksum_range.end(), field.chunk().end());
+/// assert_eq!(checksum_bytes, &expected[expected.len() - 4..]);
+/// assert!(writes.next().is_none());
 /// # Ok::<(), FormatError>(())
 /// ```
 pub struct ObjectReferenceCountObserver {
