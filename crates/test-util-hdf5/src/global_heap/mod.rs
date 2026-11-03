@@ -5,6 +5,8 @@ use std::path::Path;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 
+pub mod attributes;
+
 /// Creates a file at `path` through libhdf5, with 8-byte addresses, lengths `sizeof_size` wide,
 /// and a userblock of `userblock` bytes.
 ///

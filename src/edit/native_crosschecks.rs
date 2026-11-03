@@ -1,6 +1,7 @@
 //! Editing and append crosschecks against libhdf5.
 
 mod append_inspection;
+mod attribute_collections;
 mod attribute_storage;
 mod edit_dense_links;
 mod edit_tracked_dense_links;

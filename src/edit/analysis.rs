@@ -22,6 +22,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 
 use super::allocation::AllocationSession;
+use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::GlobalHeapLiveness;
 use super::reclaim::{self, MAX_LINK_WALK_DEPTH};
 use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
@@ -157,6 +158,44 @@ impl<'a> AnalysisPhase<'a> {
             }
         }
         candidates
+    }
+
+    /// Returns collection candidates referenced by replaced or removed attributes of `object`.
+    ///
+    /// Records `object` and each original attribute name as candidate origins. Skips attributes
+    /// with incomplete descriptor interpretation and collections whose complete allocations
+    /// cannot be parsed in this phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`CollectionCandidates::insert`] for inconsistent candidate evidence.
+    pub(super) fn attribute_collections(
+        &mut self,
+        object: ObjectId,
+        predecessors: AttributePredecessors,
+    ) -> Result<CollectionCandidates, FormatError> {
+        let mut candidates = CollectionCandidates::default();
+        for attribute in predecessors {
+            let mut collections = BTreeSet::new();
+            let Ok(true) = self
+                .engine
+                .collect_parsed_attribute_collections(&attribute, &mut collections)
+            else {
+                continue;
+            };
+            for address in collections {
+                if let Ok(allocation) = self.collection_allocation(PhysicalAddress::new(address)) {
+                    candidates.insert(
+                        allocation,
+                        [CollectionProvenance {
+                            object,
+                            attribute: Some(attribute.name.clone()),
+                        }],
+                    )?;
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     /// Parses complete collection geometry on its first query in this phase.
@@ -640,6 +679,32 @@ pub(super) struct CollectionCandidates {
 }
 
 impl CollectionCandidates {
+    /// Merges candidates and their recorded origins from `other`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::insert`]. Entries merged before an error remain in `self`.
+    pub(super) fn extend(&mut self, other: Self) -> Result<(), FormatError> {
+        let Self {
+            session,
+            collections,
+        } = other;
+        let Some(session) = session else {
+            debug_assert!(collections.is_empty());
+            return Ok(());
+        };
+        for CollectionCandidate { range, origins } in collections.into_values() {
+            self.insert(
+                CollectionAllocation {
+                    session: session.clone(),
+                    range,
+                },
+                origins,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Merges origins for one complete allocation, preserving its original range.
     ///
     /// # Errors

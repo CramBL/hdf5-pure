@@ -22,6 +22,8 @@ use crate::writer::FileBuilder;
 #[cfg(feature = "checksum")]
 use crate::{File, FileLocking, MemoryStrategy, PersistedFreeSpacePolicy};
 
+mod predecessors;
+
 #[rstest]
 #[case::zero_maximum(0, 1)]
 #[case::reversed(7, 8)]
@@ -163,7 +165,13 @@ fn compact_rebuild_rejects_invalid_creation_metadata(
             )
         })
         .collect();
-    let Err(error) = super::prepare_compact_attrs(&region, slots, next, true) else {
+    let Err(error) = super::prepare_compact_attrs(
+        &region,
+        slots,
+        next,
+        true,
+        super::AttributePredecessors::default(),
+    ) else {
         panic!("invalid creation metadata was accepted");
     };
     let Error::Format(actual) = error else {

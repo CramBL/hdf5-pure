@@ -98,7 +98,7 @@ impl WriteEngine {
             cross_copies,
             inplace_writes,
             deleted_free,
-            deleted_collections,
+            collection_candidates,
             mut references,
         } = tree;
         let GroupHeaders {
@@ -256,7 +256,7 @@ impl WriteEngine {
         let new_root = path_addr[&ObjectPathBuf::root()];
         to_free.extend(
             AnalysisPhase::prospective(self, PhysicalAddress::new(new_root))
-                .unreferenced_collection_spans(deleted_collections),
+                .unreferenced_collection_spans(collection_candidates),
         );
         to_free.extend(
             self.superseded_heaps

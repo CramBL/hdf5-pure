@@ -1,3 +1,4 @@
+mod attribute_collections;
 mod common;
 mod crash_replay;
 mod dataset;
