@@ -803,7 +803,7 @@ impl WriteEngine {
         let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
         for (key, node) in nodes.iter_mut() {
             if node.is_new {
-                node.prepared.region = group::fresh_group_region();
+                node.prepared.region = group::fresh_group_region()?;
             } else {
                 let addr = crate::group::v2::resolve_path_any_from_source(
                     &self.opened_source(),

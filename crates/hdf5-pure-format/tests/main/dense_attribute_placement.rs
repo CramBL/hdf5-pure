@@ -53,7 +53,7 @@ fn contiguous_dense_attribute_placement_preserves_bytes(
     let contiguous = plan.build(base).unwrap();
     assert_eq!(bytes, contiguous.blob);
     assert_eq!(
-        info.serialize(hdf5_pure_core::OffsetWidth::Eight),
+        info.serialize(hdf5_pure_core::OffsetWidth::Eight).unwrap(),
         contiguous.attr_info_message
     );
 }

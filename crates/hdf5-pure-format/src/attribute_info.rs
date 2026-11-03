@@ -5,8 +5,8 @@
 
 use alloc::vec::Vec;
 
-use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes;
 
 use crate::error::FormatError;
@@ -111,10 +111,11 @@ impl AttributeInfoMessage {
     /// creation-order B-tree address, undefined while the attributes are still
     /// stored in the object header.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if an address does not fit `offset_width`.
-    pub fn serialize(&self, offset_width: OffsetWidth) -> Vec<u8> {
+    /// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds `offset_width`, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+    pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         let mut data = Vec::with_capacity(2 + 2 + 3 * usize::from(offset_width.get()));
         data.push(0); // version
         let flags = u8::from(self.max_creation_index.is_some())
@@ -123,27 +124,34 @@ impl AttributeInfoMessage {
         if let Some(max) = self.max_creation_index {
             data.extend_from_slice(&max.to_le_bytes());
         }
-        write_optional_offset(&mut data, self.fractal_heap_address, offset_width);
-        write_optional_offset(&mut data, self.btree_name_index_address, offset_width);
+        write_optional_offset(&mut data, self.fractal_heap_address, offset_width)?;
+        write_optional_offset(&mut data, self.btree_name_index_address, offset_width)?;
         if self.indexes_creation_order {
-            write_optional_offset(&mut data, self.btree_creation_order_address, offset_width);
+            write_optional_offset(&mut data, self.btree_creation_order_address, offset_width)?;
         }
-        data
+        Ok(data)
     }
 }
 
-/// Write an address, or the all-ones "undefined" value for `None`, in
-/// `offset_width` little-endian bytes.
+/// Appends an address, encoding `None` as the undefined marker at `offset_width`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds `offset_width`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
 fn write_optional_offset(
     data: &mut Vec<u8>,
     address: Option<StoredAddress>,
     offset_width: OffsetWidth,
-) {
-    bytes::write_offset(
+) -> Result<(), FormatError> {
+    bytes::try_write_decoded_address(
         data,
-        address.map_or(u64::MAX, StoredAddress::get),
+        address.map_or(
+            DecodedStoredAddress::Undefined,
+            DecodedStoredAddress::Defined,
+        ),
         offset_width,
-    );
+    )
 }
 
 #[cfg(test)]
@@ -224,7 +232,7 @@ mod tests {
                         btree_creation_order_address: (indexed && heap.is_some())
                             .then_some(StoredAddress::new(0x3000)),
                     };
-                    let bytes = msg.serialize(OffsetWidth::Eight);
+                    let bytes = msg.serialize(OffsetWidth::Eight).unwrap();
                     assert_eq!(
                         AttributeInfoMessage::parse(&bytes, 8).unwrap(),
                         msg,

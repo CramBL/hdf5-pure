@@ -7,6 +7,7 @@
 
 use alloc::vec::Vec;
 
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
@@ -74,10 +75,18 @@ pub enum DatatypeLocation {
 impl DatatypeLocation {
     /// Returns the reference a message stores in place of the datatype encoding, with an address
     /// `offset_width` bytes wide, or `None` for an inline datatype.
-    pub fn reference_bytes(&self, offset_width: OffsetWidth) -> Option<Vec<u8>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds `offset_width`, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+    pub fn reference_bytes(
+        &self,
+        offset_width: OffsetWidth,
+    ) -> Result<Option<Vec<u8>>, FormatError> {
         match self {
-            Self::Inline => None,
-            Self::Committed(addr) => Some(encode_committed_ref(*addr, offset_width)),
+            Self::Inline => Ok(None),
+            Self::Committed(addr) => encode_committed_ref(*addr, offset_width).map(Some),
         }
     }
 
@@ -178,15 +187,23 @@ const WRITE_REF_VERSION: u8 = 2;
 /// The inverse of the version 2 arm of [`parse_shared_ref_with_widths`], and the body a
 /// message record with the shared flag holds in place of its content.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `address` does not fit `offset_width`.
-pub fn encode_committed_ref(address: StoredAddress, offset_width: OffsetWidth) -> Vec<u8> {
+/// Returns [`FormatError::AddressTooLarge`] if `address` exceeds `offset_width`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+pub fn encode_committed_ref(
+    address: StoredAddress,
+    offset_width: OffsetWidth,
+) -> Result<Vec<u8>, FormatError> {
     let mut buf = Vec::with_capacity(2 + usize::from(offset_width.get()));
     buf.push(WRITE_REF_VERSION);
     buf.push(REF_TYPE_COMMITTED);
-    bytes::write_offset(&mut buf, address.get(), offset_width);
-    buf
+    bytes::try_write_decoded_address(
+        &mut buf,
+        DecodedStoredAddress::Defined(address),
+        offset_width,
+    )?;
+    Ok(buf)
 }
 
 /// The shared-reference version that admits a heap ID.
@@ -478,7 +495,7 @@ mod tests {
     #[test]
     fn encoded_references_parse_back_to_their_locations() {
         let address = StoredAddress::new(800);
-        let committed = encode_committed_ref(address, OffsetWidth::Eight);
+        let committed = encode_committed_ref(address, OffsetWidth::Eight).unwrap();
         assert_eq!(
             parse_shared_ref(&committed, 8, 8).map(|reference| reference.location),
             Ok(SharedLocation::ObjectHeader(address))

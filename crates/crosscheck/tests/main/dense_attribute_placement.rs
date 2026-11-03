@@ -142,7 +142,10 @@ fn libhdf5_reads_independently_placed_dense_attributes(
     let mut header = ObjectHeaderWriter::with_prefix(prefix);
     header.add_message(
         MessageType::ATTRIBUTE_INFO,
-        placement.attribute_info().serialize(superblock.offset_size),
+        placement
+            .attribute_info()
+            .serialize(superblock.offset_size)
+            .unwrap(),
     );
     header.add_message(MessageType::GROUP_INFO, vec![0, 0]);
     header.add_message(
@@ -153,7 +156,8 @@ fn libhdf5_reads_independently_placed_dense_attributes(
             btree_name_index_address: None,
             btree_creation_order_address: None,
         }
-        .serialize(superblock.offset_size),
+        .serialize(superblock.offset_size)
+        .unwrap(),
     );
     superblock.root_group_address = StoredAddress::new(bytes.len() as u64 - userblock);
     bytes.extend(header.serialize().unwrap());

@@ -30,7 +30,7 @@ fn compact_batches_assign_creation_indices_in_operation_order(#[case] variable: 
     };
     region.push(
         MessageType::ATTRIBUTE_INFO,
-        &info.serialize(crate::file_writer::OFFSET_WIDTH),
+        &info.serialize(crate::file_writer::OFFSET_WIDTH).unwrap(),
     );
     let value = |number| {
         if variable {

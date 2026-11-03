@@ -7,3 +7,4 @@ mod fractal_heap_placement;
 mod nested_datatype;
 mod object_header_allocation;
 mod opaque_tags;
+mod width_encoding;

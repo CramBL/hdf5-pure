@@ -122,8 +122,15 @@ impl Dataspace {
         })
     }
 
-    /// Serialize dataspace to HDF5 message bytes (v2 format).
-    pub fn serialize(&self, length_size: u8) -> Vec<u8> {
+    /// Serializes a version 2 dataspace message with `length_size`-byte dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, or
+    /// [`FormatError::LengthTooLarge`] if a dimension or maximum dimension exceeds that width.
+    /// An unlimited maximum requires eight-byte lengths.
+    pub fn serialize(&self, length_size: u8) -> Result<Vec<u8>, FormatError> {
+        let length_width = LengthWidth::try_from(length_size)?;
         let mut buf = Vec::new();
         buf.push(VERSION_TWO);
         buf.push(self.rank);
@@ -140,27 +147,14 @@ impl Dataspace {
         };
         buf.push(type_byte);
         for &dim in &self.dimensions {
-            Self::write_length(&mut buf, dim, length_size);
+            bytes::try_write_length(&mut buf, dim, length_width)?;
         }
         if let Some(ref max_dims) = self.max_dimensions {
             for &md in max_dims {
-                Self::write_length(&mut buf, max_extent_to_length(md), length_size);
+                bytes::try_write_length(&mut buf, max_extent_to_length(md), length_width)?;
             }
         }
-        buf
-    }
-
-    fn write_length(buf: &mut Vec<u8>, val: u64, size: u8) {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "size is the length byte width chosen to hold val, so each arm casts to a width that fits by construction"
-        )]
-        match size {
-            2 => buf.extend_from_slice(&(val as u16).to_le_bytes()),
-            4 => buf.extend_from_slice(&(val as u32).to_le_bytes()),
-            8 => buf.extend_from_slice(&val.to_le_bytes()),
-            _ => {}
-        }
+        Ok(buf)
     }
 
     /// Total number of elements. Scalar = 1, Null = 0.
@@ -487,7 +481,7 @@ mod tests {
             dimensions: vec![4, 6],
             max_dimensions: Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(6)]),
         };
-        let bytes = ds.serialize(8);
+        let bytes = ds.serialize(8).unwrap();
         assert_eq!(bytes[..4], [2, 2, 0x01, 1]);
         assert_eq!(bytes[20..28], u64::MAX.to_le_bytes());
         assert_eq!(bytes[28..36], 6u64.to_le_bytes());

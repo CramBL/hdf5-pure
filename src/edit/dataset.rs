@@ -702,7 +702,7 @@ impl WriteEngine {
 
         let mut grown = disk_ds.clone();
         grown.dimensions[0] = new_dim0;
-        let new_dataspace_body = grown.serialize(LENGTH_SIZE);
+        let new_dataspace_body = grown.serialize(LENGTH_SIZE)?;
 
         let chunk_dims_u32: Vec<u32> = spatial
             .iter()
@@ -2004,7 +2004,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
 
     let mut sized = file_writer::make_link(name.as_str(), StoredAddress::new(0));
     sized.creation_order = Some(0);
-    if sized.serialize(crate::file_writer::OFFSET_WIDTH).len() > OBJECT_HEADER_MESSAGE_MAX {
+    if sized.serialize(crate::file_writer::OFFSET_WIDTH)?.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "dataset name is too long to encode as a link message",
         ));

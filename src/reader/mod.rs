@@ -2235,7 +2235,7 @@ impl FileInner {
                     let parsed = LinkInfoMessage::parse_with_offset_width(&bytes, widths.offsets)?;
                     let bytes = if header.version == PADDED_HEADER_VERSION {
                         bytes
-                            .get(..parsed.serialize(widths.offsets).len())
+                            .get(..parsed.serialize(widths.offsets)?.len())
                             .ok_or_else(|| {
                                 Error::RepackUnsupported(
                                     "a group's link-info message is truncated".into(),

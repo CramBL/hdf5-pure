@@ -335,7 +335,10 @@ impl AttributeMessage {
     /// datatype, or the dataspace is longer than the 65,535 bytes its 2-byte size field can
     /// hold. Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque
     /// tag longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains
-    /// a NUL byte.
+    /// a NUL byte. Returns the errors of [`Dataspace::serialize`] for dimensions that do not fit
+    /// `length_size` bytes or an unsupported `length_size`, and the errors of
+    /// [`DatatypeLocation::reference_bytes`] for a committed-datatype address that does not fit
+    /// `offset_width` or equals its undefined marker.
     pub fn serialize(
         &self,
         offset_width: OffsetWidth,
@@ -355,7 +358,10 @@ impl AttributeMessage {
     /// datatype, or the dataspace is longer than the 65,535 bytes its 2-byte size field can
     /// hold. Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque
     /// tag longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains
-    /// a NUL byte.
+    /// a NUL byte. Returns the errors of [`Dataspace::serialize`] for dimensions that do not fit
+    /// `length_size` bytes or an unsupported `length_size`, and the errors of
+    /// [`DatatypeLocation::reference_bytes`] for a committed-datatype address that does not fit
+    /// `offset_width` or equals its undefined marker.
     pub fn serialize_v3(
         &self,
         offset_width: OffsetWidth,
@@ -376,8 +382,10 @@ impl AttributeMessage {
     ///
     /// Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque tag
     /// longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL.
+    /// Returns the errors of [`DatatypeLocation::reference_bytes`] for a committed-datatype
+    /// address that exceeds `offset_width` or equals its undefined marker.
     fn datatype_field(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
-        match self.datatype_location.reference_bytes(offset_width) {
+        match self.datatype_location.reference_bytes(offset_width)? {
             Some(reference) => Ok(reference),
             None => datatype::serialize_datatype(&self.datatype),
         }
@@ -405,7 +413,7 @@ impl AttributeMessage {
             n
         };
         let dt_bytes = self.datatype_field(offset_width)?;
-        let ds_bytes = self.dataspace.serialize(length_size);
+        let ds_bytes = self.dataspace.serialize(length_size)?;
         let name_size = self.field_size("name", &name_bytes)?;
         let datatype_size = self.field_size("datatype", &dt_bytes)?;
         let dataspace_size = self.field_size("dataspace", &ds_bytes)?;

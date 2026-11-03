@@ -192,7 +192,7 @@ impl WriteEngine {
             None => group_v1::resolve_v1_group_links_from_source(physical, symbol_table, widths, k),
         }
         .map_err(group_links::storage_error)?;
-        let mut region = fresh_group_region();
+        let mut region = fresh_group_region()?;
         for link in links {
             let body = link
                 .serialize(OFFSET_WIDTH)
@@ -407,14 +407,20 @@ fn dense_link_error(error: DenseLinkPlanError) -> Error {
 pub(super) const GROUP_INFO_BODY: [u8; 2] = [0, 0];
 
 /// Creates an empty compact-link region with Link Info and Group Info messages.
-pub(super) fn fresh_group_region() -> OhRegion {
+///
+/// # Errors
+///
+/// Propagates errors from [`LinkInfoMessage::serialize`]. All addresses in the fixed
+/// [`COMPACT_LINK_INFO`](crate::file_writer::COMPACT_LINK_INFO) message are undefined and
+/// representable at [`OFFSET_WIDTH`].
+pub(super) fn fresh_group_region() -> Result<OhRegion, FormatError> {
     let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
     region.push(
         MessageType::LINK_INFO,
-        &crate::file_writer::COMPACT_LINK_INFO.serialize(OFFSET_WIDTH),
+        &crate::file_writer::COMPACT_LINK_INFO.serialize(OFFSET_WIDTH)?,
     );
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
-    region
+    Ok(region)
 }
 
 /// Returns a region with the link storage messages of the version 1 header `object_header`, and a
@@ -482,7 +488,7 @@ fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&
     let data = message.data.as_slice();
     let len = match message.msg_type {
         MessageType::LINK_INFO => LinkInfoMessage::parse_with_offset_width(data, offset_width)?
-            .serialize(offset_width)
+            .serialize(offset_width)?
             .len(),
         MessageType::GROUP_INFO => {
             GroupPhaseChange::encoded_len(data).map_err(group_links::group_info_error)?
@@ -718,7 +724,7 @@ impl OhRegion {
             .ok_or(Error::EditUnsupported(
                 "a target group's object header has no link-info message",
             ))?;
-        *self = self.with_bytes(splice.replace_body(&info.serialize(OFFSET_WIDTH))?);
+        *self = self.with_bytes(splice.replace_body(&info.serialize(OFFSET_WIDTH)?)?);
         Ok(())
     }
 }
@@ -782,7 +788,7 @@ mod tests {
 
     #[test]
     fn bulk_link_deletion_rejects_an_absent_name() {
-        let region = super::fresh_group_region();
+        let region = super::fresh_group_region().unwrap();
         let error =
             super::remove_links_from_region(&region, &[LinkNameBuf::new("absent").unwrap()])
                 .unwrap_err();
@@ -812,7 +818,9 @@ mod tests {
         let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
         region.push(
             MessageType::LINK_INFO,
-            &file_writer::COMPACT_LINK_INFO.serialize(file_writer::OFFSET_WIDTH),
+            &file_writer::COMPACT_LINK_INFO
+                .serialize(file_writer::OFFSET_WIDTH)
+                .unwrap(),
         );
         region.push(
             MessageType::GROUP_INFO,

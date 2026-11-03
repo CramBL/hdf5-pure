@@ -152,7 +152,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
     let mut writer = ObjectHeaderWriter::new();
     writer.add_message(
         MessageType::LINK_INFO,
-        info.serialize(superblock.offset_size),
+        info.serialize(superblock.offset_size).unwrap(),
     );
     writer.add_message(MessageType::GROUP_INFO, GROUP_INFO.to_vec());
     let new_root = bytes.len() as u64 - userblock;

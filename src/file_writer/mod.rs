@@ -151,7 +151,7 @@ pub(crate) fn build_chunked_dataset_oh(
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     add_datatype(&mut w, dt, dt_location)?;
-    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
+    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE)?);
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
         crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
@@ -217,7 +217,7 @@ pub(crate) fn build_dataset_oh(
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     add_datatype(&mut w, dt, dt_location)?;
-    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE));
+    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE)?);
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
         crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
@@ -231,7 +231,7 @@ pub(crate) fn build_dataset_oh(
             data_size,
             OFFSET_WIDTH,
             LENGTH_WIDTH,
-        ),
+        )?,
     );
     add_attributes(&mut w, attrs, attr_info, header)?;
     w.serialize()
@@ -250,7 +250,7 @@ fn add_datatype(
     dt: &Datatype,
     location: &DatatypeLocation,
 ) -> Result<(), FormatError> {
-    match location.reference_bytes(OFFSET_WIDTH) {
+    match location.reference_bytes(OFFSET_WIDTH)? {
         Some(reference) => {
             w.add_message_with_flags(
                 MessageType::DATATYPE,
@@ -321,7 +321,7 @@ pub(crate) fn build_group_oh(
     group_info: GroupInfo,
 ) -> Result<Vec<u8>, FormatError> {
     group_header(
-        links.iter().map(|link| Ok(link.serialize(OFFSET_WIDTH))),
+        links.iter().map(|link| link.serialize(OFFSET_WIDTH)),
         attrs,
         attr_info,
         link_info.unwrap_or(&COMPACT_LINK_INFO),
@@ -339,7 +339,7 @@ fn group_header(
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    w.add_message(MessageType::LINK_INFO, link_info.serialize(OFFSET_WIDTH));
+    w.add_message(MessageType::LINK_INFO, link_info.serialize(OFFSET_WIDTH)?);
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
     w.add_message(MessageType::GROUP_INFO, group_info.serialize());
@@ -395,9 +395,11 @@ fn dense_links_plan(
     }
     let links = links
         .iter()
-        .map(|link| OwnedLink::parse(&link.serialize(OFFSET_WIDTH), OFFSET_WIDTH))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(link_storage_error)?;
+        .map(|link| {
+            OwnedLink::parse(&link.serialize(OFFSET_WIDTH)?, OFFSET_WIDTH)
+                .map_err(link_storage_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let storage = GroupLinkStorage::new(&COMPACT_LINK_INFO, links, OFFSET_WIDTH)
         .map_err(link_storage_error)?;
     DenseLinkPlan::new(storage, LENGTH_WIDTH)
@@ -478,7 +480,7 @@ fn add_attributes(
     if !attrs.is_empty() || matches!(header.creation, DenseAttrCreationOrder::Tracked { .. }) {
         w.add_message(
             MessageType::ATTRIBUTE_INFO,
-            compact_attribute_info_message(header.creation),
+            compact_attribute_info_message(header.creation)?,
         );
     }
     for (index, attr) in attrs.iter().enumerate() {
@@ -654,8 +656,15 @@ const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 /// for tracked attributes. Version 0 fields are defined in "The Attribute Info Message" of the
 /// [format specification, version 4.0][spec].
 ///
+/// # Errors
+///
+/// Propagates errors from [`AttributeInfoMessage::serialize`]. All storage addresses are undefined
+/// and representable at [`OFFSET_WIDTH`].
+///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
-pub(crate) fn compact_attribute_info_message(creation: &DenseAttrCreationOrder) -> Vec<u8> {
+pub(crate) fn compact_attribute_info_message(
+    creation: &DenseAttrCreationOrder,
+) -> Result<Vec<u8>, FormatError> {
     let (max_creation_index, indexes_creation_order) = match creation {
         DenseAttrCreationOrder::Tracked { max, indexed, .. } => (Some(*max), *indexed),
         DenseAttrCreationOrder::Untracked => (None, false),

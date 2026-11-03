@@ -153,7 +153,7 @@ impl Fixture {
         let root = Header::new()
             .message(Message::new(
                 MessageType::LINK_INFO,
-                &link_info.serialize(format::OffsetWidth::Eight),
+                &link_info.serialize(format::OffsetWidth::Eight).unwrap(),
             ))
             .messages(self.links)
             .build();

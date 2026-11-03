@@ -326,7 +326,8 @@ fn incomplete_attribute_liveness_preserves_exclusive_dataset_overwrite_retiremen
                     btree_name_index_address: None,
                     btree_creation_order_address: None,
                 }
-                .serialize(format::OffsetWidth::Eight),
+                .serialize(format::OffsetWidth::Eight)
+                .unwrap(),
             ),
             attribute("changed", attribute_collection),
         ],

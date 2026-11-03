@@ -587,9 +587,8 @@ impl DenseAttrPlan {
     /// [`FormatError::OffsetOverflow`] if the reserved extent exceeds `u64`.
     pub fn attr_info_message(&self, heap_address: StoredAddress) -> Result<Vec<u8>, FormatError> {
         self.extent(heap_address)?;
-        Ok(self
-            .attribute_info(heap_address)?
-            .serialize(DENSE_ATTR_OFFSET_WIDTH))
+        self.attribute_info(heap_address)?
+            .serialize(DENSE_ATTR_OFFSET_WIDTH)
     }
 
     /// Returns the creation metadata and placement addresses for the object header.

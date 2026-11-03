@@ -342,7 +342,7 @@ fn inconsistent_heap_ownership_is_returned_as_a_typed_error() {
         &Header::new()
             .message(Message::new(
                 MessageType::ATTRIBUTE_INFO,
-                &info.serialize(OffsetWidth::Eight),
+                &info.serialize(OffsetWidth::Eight).unwrap(),
             ))
             .build(),
     );
@@ -489,6 +489,7 @@ fn attribute_heap_at_superblock() -> Vec<u8> {
         btree_creation_order_address: None,
     }
     .serialize(OffsetWidth::Eight)
+    .unwrap()
 }
 
 const SUPERBLOCK_VERSION: u8 = 3;

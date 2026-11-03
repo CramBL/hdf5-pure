@@ -83,7 +83,11 @@ const VERSION_THREE: u8 = 3;
 pub const VERSION_FOUR: u8 = 4;
 
 const COMPACT_CLASS: u8 = 0;
-const CONTIGUOUS_CLASS: u8 = 1;
+/// Contiguous storage in the "Layout Class" field, defined in "The Data Layout Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+pub const CONTIGUOUS_CLASS: u8 = 1;
 
 /// Chunked storage in the "Layout Class" field, defined in "The Data Layout Message" of the
 /// [format specification, version 4.0][spec].

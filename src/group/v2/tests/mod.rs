@@ -42,14 +42,16 @@ fn indexed_hash_collisions_compare_names_before_link_targets(#[case] present: bo
         creation_order: None,
         charset: CharacterSet::Ascii,
     }
-    .serialize(OffsetWidth::Eight);
+    .serialize(OffsetWidth::Eight)
+    .unwrap();
     let mut soft = LinkMessage {
         name: names[1].into(),
         link_target: LinkTarget::soft("x".into()),
         creation_order: None,
         charset: CharacterSet::Ascii,
     }
-    .serialize(OffsetWidth::Eight);
+    .serialize(OffsetWidth::Eight)
+    .unwrap();
     *soft.last_mut().unwrap() = 0xff;
     let records: Vec<_> = (usize::from(!present)..2)
         .map(|index| {

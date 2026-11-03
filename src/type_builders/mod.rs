@@ -18,6 +18,7 @@ use crate::DeflateLevel;
 use crate::LinkPhaseChange;
 use crate::VariableLengthType;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
 use crate::compound::CompoundType;
@@ -734,8 +735,7 @@ impl AttrSpec {
         match self {
             Self::CommittedValue { value, .. } => {
                 let mut message = build_attr_message(name, value)?;
-                message.datatype_location =
-                    DatatypeLocation::Committed(crate::file_writer::UNDEF_ADDRESS);
+                message.datatype_location = DatatypeLocation::Committed(StoredAddress::ZERO);
                 Ok(message)
             }
             Self::Value(v) => build_attr_message(name, v),
@@ -750,8 +750,7 @@ impl AttrSpec {
             } => {
                 let mut message = message.clone();
                 if committed_datatype_target.is_some() {
-                    message.datatype_location =
-                        DatatypeLocation::Committed(crate::file_writer::UNDEF_ADDRESS);
+                    message.datatype_location = DatatypeLocation::Committed(StoredAddress::ZERO);
                 }
                 Ok(message)
             }

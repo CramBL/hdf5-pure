@@ -282,24 +282,37 @@ pub(crate) fn try_write_decoded_address(
             write_offset(buf, StoredAddress::undefined(width).get(), width);
             Ok(())
         }
-        DecodedStoredAddress::Defined(addr) => {
-            let val = addr.get();
-            if val > width::offset_width_max(width) {
-                return Err(FormatError::AddressTooLarge {
-                    address: val,
-                    offset_size: width.get(),
-                });
-            }
-            if addr.is_undefined(width) {
-                return Err(FormatError::DefinedAddressIsUndefined {
-                    address: val,
-                    offset_size: width.get(),
-                });
-            }
-            write_offset(buf, val, width);
-            Ok(())
-        }
+        DecodedStoredAddress::Defined(addr) => try_write_defined_offset(buf, addr.get(), width),
     }
+}
+
+/// Appends `val` as a defined little-endian address at `width`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if `val` exceeds `width`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+/// Leaves `buf` unchanged on error.
+pub(crate) fn try_write_defined_offset(
+    buf: &mut Vec<u8>,
+    val: u64,
+    width: OffsetWidth,
+) -> Result<(), FormatError> {
+    let undefined = width::offset_width_max(width);
+    if val > undefined {
+        return Err(FormatError::AddressTooLarge {
+            address: val,
+            offset_size: width.get(),
+        });
+    }
+    if val == undefined {
+        return Err(FormatError::DefinedAddressIsUndefined {
+            address: val,
+            offset_size: width.get(),
+        });
+    }
+    write_offset(buf, val, width);
+    Ok(())
 }
 
 /// Appends the length `val` to `buf` as a little-endian field of `width` bytes, as
