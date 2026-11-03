@@ -619,10 +619,10 @@ pub(crate) struct WriteEngine {
     /// to withhold and the new values are live the moment they land. This
     /// journal is how they are withheld anyway.
     ///
-    /// Written only by
-    /// [`write_inplace_journaled`](Self::write_inplace_journaled) and drained
-    /// only by [`undo_inplace_writes`](Self::undo_inplace_writes). Every
-    /// [`commit`](Self::commit) that returns leaves it empty, and one that
+    /// Prior bytes are appended by [`write_inplace_journaled`](Self::write_inplace_journaled).
+    /// Whole rollback through [`undo_inplace_writes`](Self::undo_inplace_writes) restores every
+    /// entry. Scoped completion releases or restores its suffix while preserving earlier entries.
+    /// Every [`commit`](Self::commit) that returns leaves it empty, and one that
     /// unwinds does not, which is why the next commit clears it on entry rather
     /// than trusting it.
     ///

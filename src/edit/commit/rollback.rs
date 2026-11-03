@@ -9,7 +9,17 @@ use crate::edit::WriteEngine;
 use crate::edit::aggregation::AggregateSpace;
 use crate::edit::staging::StagedEdits;
 use crate::error::Error;
+use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "journal scopes are exercised by private owner tests"
+    )
+)]
+pub(super) mod scoped;
 
 /// A saved allocator state for rollback or retention after uncertain publication.
 pub(in crate::edit) struct FreeSnapshot {
@@ -89,24 +99,49 @@ impl WriteEngine {
 
     /// Restores values recorded in the undo journal in reverse write order and clears the journal.
     ///
-    /// Every restoration is attempted, including after a write error. A successful restoration
-    /// ends with a data barrier to order the restored bytes before subsequent writes.
+    /// Every restoration is attempted, including after a write error. A nonempty successful
+    /// restoration ends with a data barrier to order the restored bytes before subsequent writes.
     ///
     /// # Errors
     ///
     /// Returns the first restoration error, or the barrier error if every restoration succeeds.
     pub(in crate::edit) fn undo_inplace_writes(&mut self) -> Result<(), Error> {
-        let journal = core::mem::take(&mut self.inplace_undo);
-        if journal.is_empty() {
-            return Ok(());
+        self.undo_inplace_since(0)
+    }
+
+    /// Restores and removes the journal suffix starting at `checkpoint`, retaining earlier entries.
+    ///
+    /// Attempts every restoration in reverse write order. A nonempty successful restoration ends
+    /// with a data barrier. At checkpoint zero, releases journal capacity before that barrier.
+    /// An empty suffix returns without a barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `checkpoint` exceeds the journal length. Returns the
+    /// first restoration error, or the barrier error if every restoration succeeds.
+    fn undo_inplace_since(&mut self, checkpoint: usize) -> Result<(), Error> {
+        if checkpoint > self.inplace_undo.len() {
+            return Err(
+                FormatError::Internal("an undo checkpoint exceeds its journal".into()).into(),
+            );
         }
+        let mut journal = core::mem::take(&mut self.inplace_undo);
+        let restore = journal.len() > checkpoint;
         let mut failed = None;
         // Different hard-link paths can overwrite the same value range. Restore the most
         // recent entry first so the original bytes are written last.
-        for (at, prior) in journal.into_iter().rev() {
+        for (at, prior) in journal.drain(checkpoint..).rev() {
             if let Err(e) = self.write_at(at, &prior) {
                 failed.get_or_insert(e);
             }
+        }
+        if checkpoint > 0 {
+            self.inplace_undo = journal;
+        } else {
+            drop(journal);
+        }
+        if !restore {
+            return Ok(());
         }
         match failed {
             Some(e) => Err(e),
