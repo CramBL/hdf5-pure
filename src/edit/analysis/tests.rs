@@ -20,6 +20,7 @@ use crate::{AttrValue, File, FileBuilder};
 mod attribute_work;
 mod attributes;
 mod collections;
+mod counts;
 mod foundations;
 
 #[rstest]
