@@ -17,6 +17,7 @@ use super::plan::{
 };
 use super::publish::AppliedTree;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::PlannedDeletion;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
 use crate::edit::group;
 use crate::edit::object_header;
@@ -146,7 +147,10 @@ impl WriteEngine {
                 })?
                 .into_prepared();
             if !deletes.is_empty() {
-                region = group::remove_links_from_region(&region, &deletes)?;
+                region = group::remove_links_from_region(
+                    &region,
+                    deletes.iter().map(PlannedDeletion::name),
+                )?;
             }
 
             for (leaf, tree) in copies {

@@ -679,12 +679,14 @@ pub(super) fn find_link_info(
 ///
 /// Returns [`Error::EditUnsupported`] if a message body extends past the region or a named link is
 /// absent. Propagates errors from reading encoded Link names.
-pub(super) fn remove_links_from_region(
+pub(super) fn remove_links_from_region<'name>(
     region: &OhRegion,
-    names: &[LinkNameBuf],
+    names: impl IntoIterator<Item = &'name LinkNameBuf>,
 ) -> Result<OhRegion, Error> {
-    let mut remaining: BTreeSet<&[u8]> =
-        names.iter().map(|name| name.as_str().as_bytes()).collect();
+    let mut remaining: BTreeSet<&[u8]> = names
+        .into_iter()
+        .map(|name| name.as_str().as_bytes())
+        .collect();
     let mut out = Vec::with_capacity(region.len());
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {

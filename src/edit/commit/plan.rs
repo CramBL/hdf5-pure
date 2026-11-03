@@ -17,6 +17,7 @@ use crate::dataset_request::ValueOverwrite;
 use crate::datatype;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::CollectionCandidates;
+use crate::edit::analysis::PlannedDeletion;
 use crate::edit::attributes::{self, AttrOp, EditedAttrs};
 use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
@@ -170,7 +171,6 @@ pub(super) struct RelocatedDataset {
 struct DirtyGroups {
     nodes: BTreeMap<ObjectPathBuf, Node>,
     add_targets: Vec<ObjectPathBuf>,
-    deleted_addrs: Vec<u64>,
     cross_copies: Vec<CopyDestination>,
 }
 
@@ -206,7 +206,8 @@ pub(super) struct PreparedGroup {
     /// Whether placement writes a heap and name index for the final link set.
     pub(super) dense_links: bool,
     pub(super) replaces: Option<ReplacedHeader>,
-    pub(super) deletes: Vec<LinkNameBuf>,
+    /// Leaf names and physical deletion targets, including any phase-bound edge identities.
+    pub(super) deletes: Vec<PlannedDeletion>,
     pub(super) copies: Vec<(LinkNameBuf, CopyTree)>,
     pub(super) writes: Vec<RelocatedDataset>,
     pub(super) attrs: EditedAttrs,
@@ -379,7 +380,6 @@ impl WriteEngine {
         let DirtyGroups {
             mut nodes,
             add_targets,
-            mut deleted_addrs,
             cross_copies,
         } = self.plan_dirty_groups(staged, moving_writes, &write_targets, &mut analysis)?;
         let headers =
@@ -400,7 +400,6 @@ impl WriteEngine {
             &mut nodes,
             &add_targets,
             &write_targets,
-            &mut deleted_addrs,
             &headers,
             moved_headers,
             &mut analysis,
@@ -700,25 +699,26 @@ impl WriteEngine {
         }
 
         let delete_targets = staged.deletes();
-        let mut deleted_addrs: Vec<u64> = Vec::new();
         for (i, d) in delete_targets.iter().enumerate() {
             let Some((parent, leaf)) = d.split_leaf() else {
                 return Err(Error::EditUnsupported("cannot delete the root group"));
             };
-            let del_addr = match analysis
+            let deletion = match analysis
                 .topology()
-                .and_then(|topology| topology.find_link(d))
+                .and_then(|topology| topology.deletion(d))
             {
-                Some((_, id)) => id.header_address().get(),
-                None => crate::group::v2::resolve_path_any_from_source(
-                    &self.opened_source(),
-                    AccessMode::ReadWrite,
-                    self.context.superblock(),
-                    self.context.widths(),
-                    &d.as_path(),
-                )?,
+                Some(deletion) => deletion,
+                None => PlannedDeletion::unresolved(
+                    leaf,
+                    PhysicalAddress::new(crate::group::v2::resolve_path_any_from_source(
+                        &self.opened_source(),
+                        AccessMode::ReadWrite,
+                        self.context.superblock(),
+                        self.context.widths(),
+                        &d.as_path(),
+                    )?),
+                ),
             };
-            deleted_addrs.push(del_addr);
             let recreated = add_targets.iter().any(|t| t == d);
             if recreated
                 && !nodes
@@ -778,13 +778,17 @@ impl WriteEngine {
                 }
             }
             ensure_ancestors(&mut nodes, &parent);
-            nodes.entry(parent).or_default().prepared.deletes.push(leaf);
+            nodes
+                .entry(parent)
+                .or_default()
+                .prepared
+                .deletes
+                .push(deletion);
         }
 
         Ok(DirtyGroups {
             nodes,
             add_targets,
-            deleted_addrs,
             cross_copies,
         })
     }
@@ -890,7 +894,6 @@ impl WriteEngine {
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         add_targets: &[ObjectPathBuf],
         write_targets: &[ObjectPathBuf],
-        deleted_addrs: &mut Vec<u64>,
         headers: &GroupHeaders,
         moved_headers: Vec<PhysicalAddress>,
         analysis: &mut AnalysisPhase<'_>,
@@ -910,16 +913,10 @@ impl WriteEngine {
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         let delete_targets = staged.deletes();
         let mut deleted_free: Vec<(FileRange, FreeClass)> = Vec::new();
-        deleted_addrs.sort_unstable();
-        deleted_addrs.dedup();
-        if !deleted_addrs.is_empty() {
-            if let Some(topology) = analysis.topology() {
-                for &address in deleted_addrs.iter() {
-                    topology.collect_free_spans(address, 0, &mut deleted_free);
-                }
-            }
-        }
-        let deleted_collections = analysis.deleted_collections(deleted_addrs);
+        let deleted_targets = analysis
+            .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
+            .collect_free_spans(&mut deleted_free);
+        let deleted_collections = analysis.deleted_collections(&deleted_targets);
         let for_copied = InvalidatedAddresses {
             removed: deleted_free.iter().map(|&(range, _)| range).collect(),
             moved: Vec::new(),
@@ -1038,7 +1035,7 @@ impl WriteEngine {
                     .prepared
                     .deletes
                     .iter()
-                    .map(LinkNameBuf::as_str)
+                    .map(|deletion| deletion.name().as_str())
                     .collect();
                 let mut names: BTreeSet<&str> = node
                     .existing_links
@@ -1063,7 +1060,10 @@ impl WriteEngine {
             let mut result = if node.prepared.deletes.is_empty() {
                 node.prepared.region.clone()
             } else {
-                group::remove_links_from_region(&node.prepared.region, &node.prepared.deletes)?
+                group::remove_links_from_region(
+                    &node.prepared.region,
+                    node.prepared.deletes.iter().map(PlannedDeletion::name),
+                )?
             };
             let mut records = Vec::with_capacity(adding.len());
             for name in adding {
