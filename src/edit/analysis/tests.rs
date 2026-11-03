@@ -22,6 +22,7 @@ mod attributes;
 mod collections;
 mod counts;
 mod foundations;
+mod reconstruction;
 
 #[rstest]
 #[case::compact(4, false)]
