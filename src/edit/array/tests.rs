@@ -15,9 +15,14 @@ use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::allocation;
 use test_util::disk_log;
+use test_util::disk_log::DiskOp;
+use test_util::disk_log::IoEvent;
+use test_util::disk_log::IoOutcome;
+use test_util::disk_log::Recording;
 use test_util::extensible_array as extensible_array_fixture;
 
 use super::ArrayIndexPlan;
+use crate::File;
 use crate::FileLocking;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
@@ -25,10 +30,13 @@ use crate::FileSpaceStrategy;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::PhysicalAddress;
+use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunked_write::ChunkArrayKind;
+use crate::dataspace::MaxExtent;
+use crate::edit::AppendBuilder;
 use crate::edit::WriteEngine;
 use crate::edit::block::BlockRequest;
 use crate::edit::block::EncodingDependency;
@@ -38,6 +46,7 @@ use crate::error::FormatError;
 use crate::extensible_array;
 use crate::fixed_array;
 use crate::image::WriteBuffering;
+use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 use crate::source::PhysicalSource;
 use crate::width::FormatWidths;
@@ -481,6 +490,116 @@ fn array_emission_rejects_incompatible_slot_tables(#[case] kind: ChunkArrayKind)
         (_, error) => panic!("{error:?}"),
     }
     assert_eq!(reservations.pending().len(), requests.len());
+}
+
+#[rstest]
+#[case::payload(0)]
+#[case::metadata(1)]
+fn failed_staged_array_writes_restore_reusable_state_and_predecessor_values(#[case] writes: usize) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("staged-array-failure.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(1)
+            .with_page_size(FileSpacePageSize::MIN),
+    );
+    builder
+        .create_dataset("d")
+        .with_i32_data(&[1; 16])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_chunks(&[16]);
+    builder.create_dataset("hole").with_i32_data(&[7; 1_024]);
+    builder.create_dataset("ceiling").with_i32_data(&[9; 16]);
+    builder.write(&path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine.sync_policy = SyncPolicy::OnClose;
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    engine.delete(&ObjectPathBuf::parse("hole")).unwrap();
+    engine.commit().unwrap();
+    let before = engine
+        .space
+        .admitted_snapshot()
+        .sections()
+        .collect::<Vec<_>>();
+    assert!(
+        engine
+            .space
+            .reusable_sections()
+            .any(|extent| extent.len() >= 64)
+    );
+    let mut append = AppendBuilder::new();
+    append.append_i32(&[2; 16]);
+    engine
+        .stage_dataset_append(&ObjectPathBuf::parse("d"), append)
+        .unwrap();
+    disk_log::start();
+    disk_log::fail_write_after(writes, 0);
+    let error = engine.commit().unwrap_err();
+    let Recording { operations, events } = disk_log::finish();
+    let failed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            IoEvent::Write {
+                requested,
+                outcome: IoOutcome::Failed(ErrorKind::Other),
+                ..
+            } => Some(*requested),
+            _ => None,
+        })
+        .collect();
+    let expected = if writes == 0 {
+        16 * size_of::<i32>()
+    } else {
+        usize::try_from(
+            ArrayIndexPlan::new(
+                ChunkArrayKind::ExtensibleArray,
+                SlotOccupancy::Dense(2),
+                2,
+                64,
+                FormatWidths::from_sizes(8, 8).unwrap(),
+                false,
+            )
+            .unwrap()
+            .requests()
+            .unwrap()[0]
+                .encoded_length(),
+        )
+        .unwrap()
+    };
+    assert_eq!(failed, [expected]);
+    if writes > 0 {
+        let payload: Vec<u8> = core::iter::repeat_n(2_i32, 16)
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        assert!(operations.iter().any(
+            |operation| matches!(operation, DiskOp::Write { bytes, .. } if bytes == &payload)
+        ));
+    }
+    let Error::Io(error) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert_eq!(
+        engine
+            .space
+            .admitted_snapshot()
+            .sections()
+            .collect::<Vec<_>>(),
+        before
+    );
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [1; 16]);
+    assert_eq!(
+        file.dataset("ceiling").unwrap().read_i32().unwrap(),
+        [9; 16]
+    );
+    file.close().unwrap();
 }
 
 #[derive(Clone, Copy)]

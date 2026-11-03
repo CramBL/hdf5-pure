@@ -26,12 +26,10 @@ use crate::{dataset::Unlimited, file_space};
 /// places through a *metadata* allocation, so finding one in a raw page means a
 /// metadata allocation landed there.
 ///
-/// Chunk-index signatures (`FAHD`/`FADB`, `EAHD`/`EAIB`/`EASB`/`EADB`) are
-/// deliberately absent from this list. A chunk index is metadata by the format's
-/// taxonomy but every writer in this crate emits it in the same run as the chunk
-/// data it indexes, so it legitimately shares a raw page; the reclaim side tags it
-/// raw to match. `TREE` is excluded for the same reason — a version 1 chunk index
-/// uses it too, so its presence is ambiguous.
+/// Chunk-index signatures (`FAHD`/`FADB`, `EAHD`/`EAIB`/`EASB`/`EADB`) are excluded because
+/// chunked dataset creation and replacement through the editor can place these blocks in raw
+/// allocations. Staged PAGE appends to committed datasets allocate their array index blocks as
+/// metadata. `TREE` is excluded because version 1 chunk indexes share that signature.
 pub const METADATA_SIGNATURES: &[&[u8; 4]] = &[
     object_header::v2::SIGNATURE,
     object_header::v2::CONTINUATION_SIGNATURE,

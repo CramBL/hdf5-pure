@@ -12,6 +12,7 @@ use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::{DenseAttrFixup, PreparedDenseAttrs};
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::PageType;
@@ -25,6 +26,7 @@ use crate::address::StoredAddressExt;
 use crate::attribute_request::PreparedAttributes;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
+use crate::chunked_write::ChunkArrayKind;
 #[cfg(doc)]
 use crate::chunked_write::PartialEdgeFiltering;
 use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
@@ -58,6 +60,7 @@ use crate::width::FormatWidths;
 
 use super::LossyTailReencoding;
 use super::append;
+use super::array::ArrayIndexPlan;
 use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::block::{BlockRequest, EncodingDependency};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
@@ -817,12 +820,10 @@ impl WriteEngine {
         }
     }
 
-    /// Writes appended chunks, a replacement index, and the grown dataset header.
+    /// Writes appended chunks, a replacement index, and the grown header of a committed dataset.
     ///
-    /// Complete chunks retain their addresses. On PAGE files, a reusable allocation is used for
-    /// both
-    /// new chunks and the index when it fits their combined length. Otherwise each is placed
-    /// separately.
+    /// Retained chunks keep their stored addresses. PAGE payload and index placement follow
+    /// [`Self::write_paged_appended_chunks`].
     ///
     /// # Errors
     ///
@@ -848,149 +849,99 @@ impl WriteEngine {
         new_chunks: &[PreparedChunk],
     ) -> Result<u64, Error> {
         let base = self.context.addresses();
-        // On PAGE files, adjacency to chunk data proves that an index occupies raw pages.
-        // Use one reusable region when it fits both. Otherwise place chunks separately and retain
-        // unproven index bytes as dead storage during reclamation.
-        let chunk_total = new_chunks.iter().try_fold(0_u64, |offset, chunk| {
-            offset
-                .checked_add(chunk.stored_size())
-                .ok_or(FormatError::OffsetOverflow {
-                    offset,
-                    length: chunk.stored_size(),
-                })
-        })?;
-        let placed_chunks = |blob_stored: StoredAddress| -> Result<Vec<ChunkRecord>, FormatError> {
-            let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
-            let mut next = blob_stored;
-            for chunk in new_chunks {
-                combined.push(ChunkRecord {
-                    address: next,
-                    stored_size: chunk.stored_size(),
-                    filter_mask: chunk.filter_mask(),
-                });
-                next = next.checked_add(chunk.stored_size())?;
-            }
-            Ok(combined)
-        };
-        let sizing = placed_chunks(StoredAddress::new(0))?;
-        let ea_len = hdf5_pure_format::__private::extensible_array_len(
-            &IndexSlots::dense(&sizing),
-            chunk_bytes,
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
-            has_filters,
-        )?;
-        let ea = |slots: &IndexSlots<'_>, at: StoredAddress| -> Result<Vec<u8>, Error> {
-            hdf5_pure_format::__private::build_extensible_array_at(
-                slots,
+        let ea_stored = if self.space.is_paged() {
+            self.write_paged_appended_chunks(chunk_bytes, has_filters, kept_chunks, new_chunks)?
+        } else {
+            let placed_chunks =
+                |blob_stored: StoredAddress| -> Result<Vec<ChunkRecord>, FormatError> {
+                    let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
+                    let mut next = blob_stored;
+                    for chunk in new_chunks {
+                        combined.push(ChunkRecord {
+                            address: next,
+                            stored_size: chunk.stored_size(),
+                            filter_mask: chunk.filter_mask(),
+                        });
+                        next = next.checked_add(chunk.stored_size())?;
+                    }
+                    Ok(combined)
+                };
+            let sizing = placed_chunks(StoredAddress::new(0))?;
+            let ea_len = hdf5_pure_format::__private::extensible_array_len(
+                &IndexSlots::dense(&sizing),
                 chunk_bytes,
                 OFFSET_WIDTH,
                 LENGTH_WIDTH,
                 has_filters,
-                at,
-            )
-            .map_err(Error::Format)
-        };
-        let blob_length = chunk_total
-            .checked_add(ea_len)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: chunk_total,
-                length: ea_len,
+            )?;
+            let ea = |slots: &IndexSlots<'_>, at: StoredAddress| -> Result<Vec<u8>, Error> {
+                hdf5_pure_format::__private::build_extensible_array_at(
+                    slots,
+                    chunk_bytes,
+                    OFFSET_WIDTH,
+                    LENGTH_WIDTH,
+                    has_filters,
+                    at,
+                )
+                .map_err(Error::Format)
+            };
+            let requests = new_chunks
+                .iter()
+                .map(|chunk| {
+                    NonZeroU64::new(chunk.stored_size())
+                        .map(|size| {
+                            BlockRequest::complete(
+                                ReservationRequest::new(size, AllocationClass::Raw),
+                                EncodingDependency::Independent,
+                            )
+                        })
+                        .ok_or(FormatError::InvalidChunkGeometry(
+                            "chunk allocation is empty",
+                        ))
+                })
+                .chain(core::iter::once(
+                    NonZeroU64::new(ea_len)
+                        .map(|size| {
+                            BlockRequest::complete(
+                                ReservationRequest::with_page_type(
+                                    size,
+                                    AllocationClass::Metadata,
+                                    PageType::Raw,
+                                ),
+                                EncodingDependency::Reservations,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            FormatError::Internal("extensible-array allocation is empty".into())
+                        }),
+                ))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut plan = self
+                .plan_blocks(&requests)
+                .map_err(ReservationFailure::into_error)?;
+            let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
+            for (chunk, reservation) in new_chunks.iter().zip(plan.reservations()) {
+                combined.push(ChunkRecord {
+                    address: base.relative(reservation.range().start())?,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
+                });
+            }
+            for chunk in new_chunks {
+                plan.write_next(chunk.bytes())?;
+            }
+            let index = plan.reservations().last().ok_or_else(|| {
+                FormatError::Internal("extensible-array reservation is absent".into())
             })?;
-        let blob = if self.space.is_paged() {
-            self.alloc_free(blob_length, AllocationClass::Raw)
-        } else {
-            None
-        };
-        let ea_stored = match blob {
-            Some(blob_stored) => {
-                // Return the reservation on any failure before placement completes.
-                let placed = (|| -> Result<StoredAddress, Error> {
-                    let combined = placed_chunks(blob_stored)?;
-                    let mut buf = Vec::with_capacity(usize::try_from(blob_length).unwrap_or(0));
-                    for chunk in new_chunks {
-                        buf.extend_from_slice(chunk.bytes());
-                    }
-                    buf.extend_from_slice(&ea(
-                        &IndexSlots::dense(&combined),
-                        blob_stored.checked_add(chunk_total)?,
-                    )?);
-                    self.place(
-                        Placement::Reused {
-                            addr: base.resolve(blob_stored)?.get(),
-                            len: blob_length,
-                        },
-                        &buf,
-                    )?;
-                    Ok(blob_stored.checked_add(chunk_total)?)
-                })();
-                match placed {
-                    Ok(ea_stored) => ea_stored,
-                    Err(e) => {
-                        self.release_raw_alloc(blob_stored, blob_length);
-                        return Err(e);
-                    }
-                }
-            }
-            None => {
-                let requests = new_chunks
-                    .iter()
-                    .map(|chunk| {
-                        NonZeroU64::new(chunk.stored_size())
-                            .map(|size| {
-                                BlockRequest::complete(
-                                    ReservationRequest::new(size, AllocationClass::Raw),
-                                    EncodingDependency::Independent,
-                                )
-                            })
-                            .ok_or(FormatError::InvalidChunkGeometry(
-                                "chunk allocation is empty",
-                            ))
-                    })
-                    .chain(core::iter::once(
-                        NonZeroU64::new(ea_len)
-                            .map(|size| {
-                                BlockRequest::complete(
-                                    ReservationRequest::with_page_type(
-                                        size,
-                                        AllocationClass::Metadata,
-                                        PageType::Raw,
-                                    ),
-                                    EncodingDependency::Reservations,
-                                )
-                            })
-                            .ok_or_else(|| {
-                                FormatError::Internal("extensible-array allocation is empty".into())
-                            }),
-                    ))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut plan = self
-                    .plan_blocks(&requests)
-                    .map_err(ReservationFailure::into_error)?;
-                let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
-                for (chunk, reservation) in new_chunks.iter().zip(plan.reservations()) {
-                    combined.push(ChunkRecord {
-                        address: base.relative(reservation.range().start())?,
-                        stored_size: chunk.stored_size(),
-                        filter_mask: chunk.filter_mask(),
-                    });
-                }
-                for chunk in new_chunks {
-                    plan.write_next(chunk.bytes())?;
-                }
-                let index = plan.reservations().last().ok_or_else(|| {
-                    FormatError::Internal("extensible-array reservation is absent".into())
-                })?;
-                debug_assert_eq!(
-                    index.encoding_dependency(),
-                    EncodingDependency::Reservations
-                );
-                let index_address = index.range().start();
-                let bytes = ea(&IndexSlots::dense(&combined), base.relative(index_address)?)?;
-                let ea_addr = plan.write_next(&bytes)?;
-                plan.finish()?;
-                base.relative(ea_addr)?
-            }
+            debug_assert_eq!(
+                index.encoding_dependency(),
+                EncodingDependency::Reservations
+            );
+            let index_address = index.range().start();
+            let bytes = ea(&IndexSlots::dense(&combined), base.relative(index_address)?)?;
+            let ea_addr = plan.write_next(&bytes)?;
+            plan.finish()?;
+            base.relative(ea_addr)?
         };
 
         #[expect(
@@ -1010,6 +961,110 @@ impl WriteEngine {
         let region = replace_layout_message(&region, &layout_body)?;
         let oh = super::object_header::build_v2_object_header(&region)?;
         self.place_object_header(&oh)
+    }
+
+    /// Writes a committed dataset's new PAGE chunks and returns its stored index address.
+    ///
+    /// Uses a reusable raw allocation for the complete new payload when available. Otherwise,
+    /// reserves one raw allocation per prepared chunk. The encoded chunk slices are written
+    /// directly. Each complete Extensible Array block is reserved as metadata through
+    /// [`ArrayIndexPlan`].
+    ///
+    /// The caller is responsible for allocation rollback and publication within the enclosing
+    /// commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] for chunk-size arithmetic, array geometry or encoding errors, or
+    /// invalid allocated addresses. Returns [`Error::Io`] if writing payload, metadata, or PAGE
+    /// padding fails, or [`Error::AllocationPublicationUncertain`] if allocation publication is
+    /// uncertain.
+    fn write_paged_appended_chunks(
+        &mut self,
+        chunk_bytes: u64,
+        has_filters: bool,
+        kept_chunks: &[ChunkRecord],
+        new_chunks: &[PreparedChunk],
+    ) -> Result<StoredAddress, Error> {
+        let base = self.context.addresses();
+        let count = kept_chunks
+            .len()
+            .checked_add(new_chunks.len())
+            .ok_or_else(|| FormatError::Internal("an appended chunk count overflows".into()))?
+            .to_u64();
+        let index = ArrayIndexPlan::new(
+            ChunkArrayKind::ExtensibleArray,
+            SlotOccupancy::Dense(count),
+            count,
+            chunk_bytes,
+            FormatWidths {
+                offsets: OFFSET_WIDTH,
+                lengths: LENGTH_WIDTH,
+            },
+            has_filters,
+        )?;
+        let metadata = index.requests()?;
+        let length = new_chunks.iter().try_fold(0_u64, |offset, chunk| {
+            offset
+                .checked_add(chunk.stored_size())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset,
+                    length: chunk.stored_size(),
+                })
+        })?;
+        let payload = if length > 0 {
+            self.alloc_free(length, AllocationClass::Raw)
+        } else {
+            None
+        };
+        let mut combined = kept_chunks.to_vec();
+        let mut requests = Vec::new();
+        if let Some(mut address) = payload {
+            for chunk in new_chunks {
+                combined.push(ChunkRecord {
+                    address,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
+                });
+                self.place(
+                    Placement::Reused {
+                        addr: base.resolve(address)?.get(),
+                        len: chunk.stored_size(),
+                    },
+                    chunk.bytes(),
+                )?;
+                address = address.checked_add(chunk.stored_size())?;
+            }
+        } else {
+            for chunk in new_chunks {
+                let length = NonZeroU64::new(chunk.stored_size()).ok_or(
+                    FormatError::InvalidChunkGeometry("chunk allocation is empty"),
+                )?;
+                requests.push(BlockRequest::complete(
+                    ReservationRequest::new(length, AllocationClass::Raw),
+                    EncodingDependency::Independent,
+                ));
+            }
+        }
+        requests.extend(metadata);
+        let mut reservations = self
+            .plan_blocks(&requests)
+            .map_err(ReservationFailure::into_error)?;
+        if payload.is_none() {
+            for (chunk, reservation) in new_chunks.iter().zip(reservations.reservations()) {
+                combined.push(ChunkRecord {
+                    address: base.relative(reservation.range().start())?,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
+                });
+            }
+            for chunk in new_chunks {
+                reservations.write_next(chunk.bytes())?;
+            }
+        }
+        let address = index.write(&IndexSlots::dense(&combined), &mut reservations)?;
+        reservations.finish()?;
+        Ok(address)
     }
 
     /// Writes a prepared dataset's chunk storage and returns its object-header bytes.
