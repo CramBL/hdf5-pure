@@ -48,6 +48,8 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+pub(crate) mod write;
+
 /// The address of an Extensible Array header, from the chunk index address of a data layout
 /// message.
 ///

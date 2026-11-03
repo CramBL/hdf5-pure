@@ -120,6 +120,19 @@ impl<'a> IndexSlots<'a> {
         self.len
     }
 
+    /// Returns the first occupied slot at or after `start`.
+    ///
+    /// Uses the ordered slot table for scattered chunks. A start beyond [`usize::MAX`] is past
+    /// every slot in this materialized index.
+    pub(crate) fn next_occupied(&self, start: u64) -> Option<u64> {
+        let start = usize::try_from(start).ok()?;
+        if self.scattered.is_empty() {
+            return (start < self.chunks.len()).then_some(start.to_u64());
+        }
+        let from = self.scattered.partition_point(|&(slot, _)| slot < start);
+        self.scattered.get(from).map(|&(slot, _)| slot.to_u64())
+    }
+
     /// Returns whether any of the `count` slots from `start` holds a chunk.
     ///
     /// An Extensible Array writer allocates only the blocks that hold a chunk. The cost is a
@@ -488,6 +501,31 @@ mod tests {
             (0..4).map(|slot| slots.at(slot)).collect::<Vec<_>>(),
             vec![None, Some(&chunks[1]), None, Some(&chunks[0])]
         );
+    }
+
+    #[rstest]
+    #[case::dense_start(&[0, 1], 2, 0, Some(0))]
+    #[case::dense_next(&[0, 1], 2, 1, Some(1))]
+    #[case::dense_end(&[0, 1], 2, 2, None)]
+    #[case::scattered_start(&[7, 2], 10, 0, Some(2))]
+    #[case::scattered_gap(&[7, 2], 10, 3, Some(7))]
+    #[case::scattered_end(&[7, 2], 10, 8, None)]
+    #[case::past_local_span(&[7, 2], 10, 1_u64 << 32, None)]
+    fn next_occupied_slot_uses_the_ordered_slot_index(
+        #[case] slot_of: &[u64],
+        #[case] len: u64,
+        #[case] start: u64,
+        #[case] expected: Option<u64>,
+    ) {
+        let chunks = [record(0x100), record(0x200)];
+        let slots = IndexSlots::new(&chunks, slot_of, len).unwrap();
+        assert_eq!(slots.next_occupied(start), expected);
+    }
+
+    #[test]
+    fn an_empty_index_has_no_next_occupied_slot() {
+        let slots = IndexSlots::new(&[], &[], 10).unwrap();
+        assert_eq!(slots.next_occupied(0), None);
     }
 
     #[rstest]

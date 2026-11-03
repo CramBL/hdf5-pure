@@ -293,6 +293,41 @@ pub enum FormatError {
         /// The number of bytes by which the HDF5 image moved earlier in the file.
         shift: u64,
     },
+    /// The supplied address count differs from the Extensible Array's planned block count.
+    ExtensibleArrayBlockCount {
+        /// The number of planned complete blocks.
+        expected: usize,
+        /// The number of supplied addresses.
+        actual: usize,
+    },
+    /// Two complete planned Extensible Array block ranges overlap.
+    ExtensibleArrayBlockOverlap {
+        /// The input index of the first overlapping block in address order.
+        first: usize,
+        /// The input index of the second overlapping block in address order.
+        second: usize,
+    },
+    /// An occupied Extensible Array slot is outside the declared span.
+    ExtensibleArraySlotBounds {
+        /// The occupied slot at or past the declared count.
+        slot: u64,
+        /// The number of declared slots.
+        slots: u64,
+    },
+    /// A sparse Extensible Array index's span differs from the declared slot count.
+    ExtensibleArraySlotCount {
+        /// The number of declared slots.
+        expected: u64,
+        /// The sparse index's slot count, including unoccupied slots.
+        actual: u64,
+    },
+    /// Explicit occupied Extensible Array slots are not strictly increasing.
+    ExtensibleArraySlotOrder {
+        /// The earlier slot in the pair.
+        previous: u64,
+        /// The slot that does not exceed `previous`.
+        current: u64,
+    },
     /// Path resolution encountered an external link, which cannot be followed.
     ExternalLinkUnsupported {
         /// The root-relative path of the external link.
@@ -2068,6 +2103,25 @@ impl fmt::Display for FormatError {
             Self::BTreeV2NodeOverlap { first, second } => {
                 write!(f, "B-tree nodes {first} and {second} overlap")
             }
+            Self::ExtensibleArrayBlockCount { expected, actual } => write!(
+                f,
+                "Extensible Array requires {expected} block addresses, got {actual}"
+            ),
+            Self::ExtensibleArrayBlockOverlap { first, second } => {
+                write!(f, "Extensible Array blocks {first} and {second} overlap")
+            }
+            Self::ExtensibleArraySlotBounds { slot, slots } => write!(
+                f,
+                "slot {slot} is outside an Extensible Array of {slots} slots"
+            ),
+            Self::ExtensibleArraySlotCount { expected, actual } => write!(
+                f,
+                "Extensible Array requires {expected} slots, got {actual}"
+            ),
+            Self::ExtensibleArraySlotOrder { previous, current } => write!(
+                f,
+                "Extensible Array slot {current} does not follow slot {previous}"
+            ),
             Self::FixedArrayBlockOverlap { header, data_block } => write!(
                 f,
                 "Fixed Array header at {header:#x} overlaps data block at {data_block:#x}"
