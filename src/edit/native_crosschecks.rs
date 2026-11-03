@@ -8,6 +8,7 @@ mod edit_tracked_dense_links;
 mod extension_records;
 mod group_link_inspection;
 mod large_page;
+mod link_patches;
 mod symbol_table_links;
 mod version_1_attributes;
 

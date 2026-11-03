@@ -15,6 +15,7 @@ use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
 use crate::access_mode::AccessMode;
+#[cfg(test)]
 use crate::address::StoredAddress;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -43,8 +44,10 @@ use super::object_header::{self, OhRegion};
 use super::reservation::ReservationFailure;
 
 mod hard_link;
+mod link_patches;
 
 pub(super) use hard_link::PreparedHardLinkRecord;
+pub(super) use link_patches::LinkPatches;
 
 impl WriteEngine {
     /// Converts the group whose version 1 object header is at `addr` to a version 2 message
@@ -535,45 +538,13 @@ pub(super) fn ensure_group_info(region: &mut OhRegion) -> Result<(), Error> {
 /// Returns [`Error::EditUnsupported`] if a message body extends past the region, the named
 /// link is absent or symbolic, or its body has bytes after the address field. Returns an
 /// address-encoding error if `new_addr` does not fit the editor's address width.
+#[cfg(test)]
 pub(super) fn patch_link_target(
     region: &mut OhRegion,
     name: &str,
     new_addr: StoredAddress,
 ) -> Result<(), Error> {
-    let mut p = 0;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::LINK {
-            if let Ok(link) =
-                LinkMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
-                && link.name == name
-            {
-                let Some(address) =
-                    LinkMessage::hard_link_address_range(&region[body..body_end], OFFSET_WIDTH)?
-                else {
-                    return Err(Error::EditUnsupported(
-                        "a group on the edited path is reached by a soft/external link",
-                    ));
-                };
-                // The editor accepts hard links only when the address is the final body field.
-                if body + address.end != body_end {
-                    return Err(Error::EditUnsupported(
-                        "a link message holds bytes past its hard link address",
-                    ));
-                }
-                hdf5_pure_format::__private::write_stored_address_at(
-                    region.bytes_mut(),
-                    body + address.start,
-                    new_addr,
-                    OFFSET_WIDTH,
-                )?;
-                return Ok(());
-            }
-        }
-        p = body_end;
-    }
-    Err(Error::EditUnsupported(
-        "expected child link not found in parent group",
-    ))
+    LinkPatches::new(region, core::iter::once(name)).patch_next(new_addr)
 }
 
 /// The creation counter for links added to one group in a commit.
@@ -764,6 +735,7 @@ mod tests {
     use crate::Error;
     use crate::FileBuilder;
     use crate::LinkPhaseChange;
+    #[cfg(test)]
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::edit::test_util as edit_test_util;

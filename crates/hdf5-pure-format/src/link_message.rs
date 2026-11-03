@@ -170,9 +170,26 @@ impl<'a> LinkPrefix<'a> {
     }
 
     fn target(&self, data: &[u8], offset_width: OffsetWidth) -> Result<LinkTarget, FormatError> {
+        Ok(self.target_view(data, offset_width)?.into_owned())
+    }
+
+    /// Parses the target, borrowing path strings from `data`.
+    ///
+    /// The caller passes the message from which this prefix was parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkType`] for an unsupported link type,
+    /// [`FormatError::InvalidSoftLinkEncoding`] for a soft target with invalid UTF-8, or
+    /// [`FormatError::UnexpectedEof`] for truncated target data.
+    fn target_view<'data>(
+        &self,
+        data: &'data [u8],
+        offset_width: OffsetWidth,
+    ) -> Result<LinkTargetView<'data>, FormatError> {
         let mut pos = self.target_pos;
         Ok(match self.link_type_code {
-            HARD_LINK => LinkTarget::Hard {
+            HARD_LINK => LinkTargetView::Hard {
                 object_header_address: StoredAddress::new(bytes::read_offset_width(
                     data,
                     pos,
@@ -184,11 +201,9 @@ impl<'a> LinkPrefix<'a> {
                 let soft_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
                 pos += 2;
                 bytes::ensure_len(data, pos, soft_len)?;
-                let target_path = String::from(
-                    core::str::from_utf8(&data[pos..pos + soft_len])
-                        .map_err(|source| FormatError::InvalidSoftLinkEncoding { source })?,
-                );
-                LinkTarget::soft(target_path)
+                let target_path = core::str::from_utf8(&data[pos..pos + soft_len])
+                    .map_err(|source| FormatError::InvalidSoftLinkEncoding { source })?;
+                LinkTargetView::Soft { target_path }
             }
             EXTERNAL_LINK => {
                 bytes::ensure_len(data, pos, 2)?;
@@ -202,7 +217,7 @@ impl<'a> LinkPrefix<'a> {
                 let start = if !ext_data.is_empty() { 1 } else { 0 };
                 let rest = &ext_data[start..];
                 let null1 = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-                let filename = String::from_utf8_lossy(&rest[..null1]).into_owned();
+                let filename = &rest[..null1];
                 let after_null1 = if null1 + 1 < rest.len() {
                     null1 + 1
                 } else {
@@ -210,8 +225,11 @@ impl<'a> LinkPrefix<'a> {
                 };
                 let rest2 = &rest[after_null1..];
                 let null2 = rest2.iter().position(|&b| b == 0).unwrap_or(rest2.len());
-                let object_path = String::from_utf8_lossy(&rest2[..null2]).into_owned();
-                LinkTarget::external(filename, object_path)
+                let object_path = &rest2[..null2];
+                LinkTargetView::External {
+                    filename,
+                    object_path,
+                }
             }
             other => return Err(FormatError::InvalidLinkType(other)),
         })
@@ -235,6 +253,43 @@ impl<'a> LinkPrefix<'a> {
             // `LinkMessage::parse`: a lookup that returned no address would report a
             // corrupt group as a missing name.
             other => Err(FormatError::InvalidLinkType(other)),
+        }
+    }
+}
+
+/// A parsed link target with borrowed symbolic paths.
+///
+/// External file and object paths are borrowed as encoded bytes. Soft paths are valid UTF-8.
+enum LinkTargetView<'a> {
+    External {
+        filename: &'a [u8],
+        object_path: &'a [u8],
+    },
+    Hard {
+        object_header_address: StoredAddress,
+    },
+    Soft {
+        target_path: &'a str,
+    },
+}
+
+impl LinkTargetView<'_> {
+    /// Copies symbolic paths, replacing invalid UTF-8 in external paths.
+    fn into_owned(self) -> LinkTarget {
+        match self {
+            Self::External {
+                filename,
+                object_path,
+            } => LinkTarget::external(
+                String::from_utf8_lossy(filename).into_owned(),
+                String::from_utf8_lossy(object_path).into_owned(),
+            ),
+            Self::Hard {
+                object_header_address,
+            } => LinkTarget::Hard {
+                object_header_address,
+            },
+            Self::Soft { target_path } => LinkTarget::soft(String::from(target_path)),
         }
     }
 }
@@ -285,6 +340,22 @@ impl LinkMessage {
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
     pub fn name_bytes(data: &[u8]) -> Result<&[u8], FormatError> {
         LinkPrefix::parse(data).map(|prefix| prefix.name)
+    }
+
+    /// Returns the stored name bytes after parsing the message's prefix and target.
+    ///
+    /// Borrows the name and symbolic targets from `data` during parsing. The returned name
+    /// preserves invalid UTF-8 bytes. Target parsing uses the same rules as
+    /// [`Self::parse_with_offset_width`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::parse_with_offset_width`] for malformed
+    /// prefixes or targets.
+    pub fn parsed_name_bytes(data: &[u8], offset_width: OffsetWidth) -> Result<&[u8], FormatError> {
+        let prefix = LinkPrefix::parse(data)?;
+        prefix.target_view(data, offset_width)?;
+        Ok(prefix.name)
     }
 
     /// Returns the object header address of the link in the Link message `data`, if it is a
@@ -568,6 +639,62 @@ mod tests {
         let mut data = build_hard_link("a", 42, 8, None, None, 1);
         data[3] = 0xff;
         assert_eq!(LinkMessage::name_bytes(&data).unwrap(), &[0xff]);
+    }
+
+    #[rstest]
+    #[case::hard(test_util::link_message::HardLink::new("name", 42).build(Widths::EIGHT))]
+    #[case::soft(test_util::link_message::SymbolicLink::soft("name", "/target").build())]
+    #[case::external(test_util::link_message::SymbolicLink::external("name", "file.h5", "/target").build())]
+    fn parsed_link_names_borrow_bytes_after_parsing_the_target(#[case] data: Vec<u8>) {
+        let name = LinkMessage::parsed_name_bytes(&data, OffsetWidth::Eight).unwrap();
+        assert_eq!(name, b"name");
+        assert_eq!(
+            name.as_ptr(),
+            LinkMessage::name_bytes(&data).unwrap().as_ptr()
+        );
+        assert_eq!(
+            LinkMessage::parse_with_offset_width(&data, OffsetWidth::Eight)
+                .unwrap()
+                .name,
+            "name"
+        );
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, Widths::new(2, 8))]
+    #[case::four(OffsetWidth::Four, Widths::FOUR)]
+    #[case::eight(OffsetWidth::Eight, Widths::EIGHT)]
+    fn parsed_link_names_read_the_supplied_address_width(
+        #[case] width: OffsetWidth,
+        #[case] widths: Widths,
+    ) {
+        let mut data = test_util::link_message::HardLink::new("name", 42).build(widths);
+        assert_eq!(
+            LinkMessage::parsed_name_bytes(&data, width).unwrap(),
+            b"name"
+        );
+        data.pop();
+        assert_eq!(
+            LinkMessage::parsed_name_bytes(&data, width).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 7 + usize::from(width.get()),
+                available: data.len()
+            },
+        );
+    }
+
+    #[rstest]
+    #[case::truncated_hard({ let mut data = test_util::link_message::HardLink::new("name", 42).build(Widths::EIGHT); data.pop(); data }, FormatError::UnexpectedEof { expected: 15, available: 14 })]
+    #[case::invalid_soft(test_util::link_message::SymbolicLink::soft_bytes("name", &[0xff]).build(), FormatError::InvalidSoftLinkEncoding { source: String::from_utf8(vec![0xff]).unwrap_err().utf8_error() })]
+    #[case::unknown_type({ let mut data = test_util::link_message::SymbolicLink::soft("name", "/target").build(); data[2] = 65; data }, FormatError::InvalidLinkType(65))]
+    fn parsed_link_names_report_target_errors(
+        #[case] data: Vec<u8>,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(
+            LinkMessage::parsed_name_bytes(&data, OffsetWidth::Eight).unwrap_err(),
+            expected,
+        );
     }
 
     fn build_hard_link(

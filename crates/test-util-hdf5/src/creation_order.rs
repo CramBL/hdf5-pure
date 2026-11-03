@@ -210,6 +210,30 @@ pub fn write_link_fixture(
     file.close().unwrap();
 }
 
+/// Writes indexed links with child-group, soft-link, and external-link siblings.
+///
+/// Uses [`write_link_fixture`] with phase-change thresholds of eight and six. Adds `child`,
+/// a soft link named `soft` to `link_0000`, and an external link named `external` to
+/// `/target` in `other.h5`.
+///
+/// # Panics
+///
+/// Panics in the cases documented by [`write_link_fixture`], or if libhdf5 cannot reopen the
+/// fixture, add its links, or close the file.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_link_relocation_fixture(path: &Path, group_path: &str, count: usize) {
+    write_link_fixture(path, group_path, count, Indexing::Yes, (8, 6));
+    let file = File::open_rw(path).unwrap();
+    let group = file.group(group_path).unwrap();
+    group.create_group("child").unwrap();
+    group.link_soft("link_0000", "soft").unwrap();
+    group
+        .link_external("other.h5", "/target", "external")
+        .unwrap();
+    drop(group);
+    file.close().unwrap();
+}
+
 /// Checks numbered dataset values through libhdf5.
 ///
 /// Expects each `link_<index>` dataset for indexes in `removed..count` to contain
