@@ -40,7 +40,10 @@ use crate::object_path::ObjectTarget;
 use crate::primitive_bytes::PrimitiveBytes;
 use crate::scaleoffset::ScaleOffset;
 use crate::shared_message::DatatypeLocation;
+use crate::vl_data::VlElement;
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 use crate::{FixedPointType, FloatingPointType};
 
 mod zfp;
@@ -1033,32 +1036,59 @@ pub(crate) fn vl_string_reference_bytes(strings: &[String]) -> Result<Vec<u8>, F
     Ok(raw)
 }
 
-/// Build the global heap collections holding the given strings, splitting them
-/// across as many collections as their count needs.
-pub(crate) fn build_global_heap_collections(strings: &[String]) -> Vec<Vec<u8>> {
+/// Builds global heap collections for strings with eight-byte length fields.
+///
+/// # Errors
+///
+/// Returns the errors of [`build_global_heap_collections_from_bytes`].
+pub(crate) fn build_global_heap_collections(
+    strings: &[String],
+) -> Result<Vec<Vec<u8>>, FormatError> {
     let objects: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
     build_global_heap_collections_from_bytes(&objects)
 }
 
-/// Build the global heap collections holding the given raw byte objects (no
-/// UTF-8 requirement), in order. Mirrors [`build_global_heap_collections`] but
-/// accepts arbitrary bytes so a faithful rewrite can carry embedded-NUL or
-/// non-UTF-8 VL payloads.
+/// Builds global heap collections for raw byte objects with eight-byte length fields.
+///
+/// Preserves object order and bytes, including embedded NULs and non-UTF-8 payloads.
 ///
 /// Objects are packed [`GLOBAL_HEAP_MAX_OBJECTS`] to a collection, so object `n` lives
 /// in collection `n / GLOBAL_HEAP_MAX_OBJECTS` at 1-based index
 /// `n % GLOBAL_HEAP_MAX_OBJECTS + 1`. [`patch_vl_refs`] and [`patch_vl_refs_masked`]
 /// resolve references with that same rule, and [`stage_vl_elements`] and
 /// [`build_attr_message`] write the matching indices.
-pub(crate) fn build_global_heap_collections_from_bytes(objects: &[&[u8]]) -> Vec<Vec<u8>> {
-    objects
-        .chunks(GLOBAL_HEAP_MAX_OBJECTS)
-        .map(|objects| {
-            hdf5_pure_format::__private::encode_global_heap_collection(LengthWidth::Eight, objects).expect(
-                "a chunk of at most GLOBAL_HEAP_MAX_OBJECTS objects fits an 8-byte length collection",
-            )
-        })
-        .collect()
+///
+/// # Errors
+///
+/// Returns the errors of [`build_global_heap_collections_with_width`] at the eight-byte width.
+pub(crate) fn build_global_heap_collections_from_bytes(
+    objects: &[&[u8]],
+) -> Result<Vec<Vec<u8>>, FormatError> {
+    build_global_heap_collections_with_width(objects, LengthWidth::Eight)
+}
+
+/// Builds collections in object order with `length_width`-byte length fields.
+///
+/// Splits objects at [`GLOBAL_HEAP_MAX_OBJECTS`] per collection.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if a padded collection exceeds `length_width`,
+/// [`FormatError::OffsetOverflow`] if collection geometry exceeds [`u64::MAX`],
+/// [`FormatError::ValueTooLargeForPlatform`] if a collection exceeds the target's [`usize`]
+/// range, or [`FormatError::AllocationFailed`] if reserving a collection buffer fails.
+fn build_global_heap_collections_with_width(
+    objects: &[&[u8]],
+    length_width: LengthWidth,
+) -> Result<Vec<Vec<u8>>, FormatError> {
+    let mut collections = Vec::with_capacity(objects.len().div_ceil(GLOBAL_HEAP_MAX_OBJECTS));
+    for objects in objects.chunks(GLOBAL_HEAP_MAX_OBJECTS) {
+        collections.push(
+            hdf5_pure_format::__private::encode_global_heap_collection(length_width, objects)
+                .map_err(FormatError::from)?,
+        );
+    }
+    Ok(collections)
 }
 
 /// Patch VL attribute references with the actual global heap collection
@@ -1146,8 +1176,8 @@ pub(crate) struct VlStringStaging {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds
-/// [`u32::MAX`].
+/// Returns the errors of [`stage_vl_payloads`] for an excessive base-element count, buffer
+/// reservation failure, or collection geometry that exceeds its encoded or host width.
 pub(crate) fn stage_vl_elements(
     elements: &[VlStringElement],
     element_size: NonZeroUsize,
@@ -1169,17 +1199,56 @@ pub(crate) fn stage_vl_elements(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds
-/// [`u32::MAX`].
+/// Returns the errors of [`stage_vl_payloads_with_widths`] at eight-byte address and length widths.
 pub(crate) fn stage_vl_payloads<'a>(
     payloads: impl ExactSizeIterator<Item = Option<&'a [u8]>>,
     element_size: NonZeroUsize,
+) -> Result<(Vec<u8>, VlStringStaging), FormatError> {
+    stage_vl_payloads_with_widths(
+        payloads,
+        element_size,
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Eight,
+        },
+    )
+}
+
+/// Stages variable-length references and heap collections at independent file widths.
+///
+/// References store a four-byte base-element count, a `widths.offsets`-byte heap address, and a
+/// four-byte object index. Heap collection lengths use `widths.lengths`. Payload byte counts
+/// are divided by `element_size` to obtain base-element counts. Null payloads have zero counts,
+/// addresses, and indexes, and are omitted from the heap collections.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds
+/// [`u32::MAX`], [`FormatError::OffsetOverflow`] if the reference byte count exceeds [`usize`], or
+/// [`FormatError::AllocationFailed`] if reserving the reference buffer fails. Returns the errors
+/// of [`build_global_heap_collections_with_width`] for collection encoding failures.
+pub(crate) fn stage_vl_payloads_with_widths<'a>(
+    payloads: impl ExactSizeIterator<Item = Option<&'a [u8]>>,
+    element_size: NonZeroUsize,
+    widths: FormatWidths,
 ) -> Result<(Vec<u8>, VlStringStaging), FormatError> {
     // Collect the non-null payloads in order; their positions become the heap
     // object indices, 1-based within each collection.
     let count = payloads.len();
     let mut objects: Vec<&[u8]> = Vec::new();
-    let mut refs = Vec::with_capacity(count * VL_REF_SIZE);
+    let reference_size = VlElement::serialized_size(widths.offsets);
+    let capacity = count
+        .checked_mul(reference_size)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: count as u64,
+            length: reference_size as u64,
+        })?;
+    let mut refs = Vec::new();
+    refs.try_reserve_exact(capacity)
+        .map_err(|source| FormatError::AllocationFailed {
+            values: capacity,
+            source,
+        })?;
     let mut patch_offsets = Vec::with_capacity(count);
     for element in payloads {
         match element {
@@ -1189,7 +1258,7 @@ pub(crate) fn stage_vl_payloads<'a>(
                 // all-ones "undefined address" value. libhdf5
                 // rejects the latter as a bad heap index when reading.
                 refs.extend_from_slice(&0u32.to_le_bytes()); // length 0
-                refs.extend_from_slice(&0u64.to_le_bytes()); // null heap address
+                refs.resize(refs.len() + usize::from(widths.offsets.get()), 0);
                 refs.extend_from_slice(&0u32.to_le_bytes()); // object index 0
             }
             Some(bytes) => {
@@ -1197,7 +1266,7 @@ pub(crate) fn stage_vl_payloads<'a>(
                 refs.extend_from_slice(
                     &vl_element_count((bytes.len() / element_size) as u64)?.to_le_bytes(),
                 );
-                refs.extend_from_slice(&0u64.to_le_bytes()); // patched later
+                refs.resize(refs.len() + usize::from(widths.offsets.get()), 0);
                 // 1-based index within this object's own collection.
                 let index = objects.len() % GLOBAL_HEAP_MAX_OBJECTS + 1;
                 #[expect(
@@ -1216,7 +1285,7 @@ pub(crate) fn stage_vl_payloads<'a>(
     Ok((
         refs,
         VlStringStaging {
-            collections: build_global_heap_collections_from_bytes(&objects),
+            collections: build_global_heap_collections_with_width(&objects, widths.lengths)?,
             patch_offsets,
         },
     ))
@@ -1233,7 +1302,7 @@ fn vl_element_count(count: u64) -> Result<u32, FormatError> {
     count.narrow()
 }
 
-/// Stage the global-heap collections for a dataset whose datatype merely
+/// Stages the global-heap collections for a dataset whose datatype merely
 /// *contains* variable-length members — a compound with a VL member, or an array
 /// of such compounds — rather than being variable-length itself.
 ///
@@ -1243,11 +1312,16 @@ fn vl_element_count(count: u64) -> Result<u32, FormatError> {
 /// zeroed outright, and a heap-backed one keeps the source's `length` field while
 /// gaining the destination's object index. The addresses stay at zero until
 /// [`patch_vl_refs_masked`] fills them in, exactly as for a top-level VL dataset.
+///
+/// # Errors
+///
+/// Returns the errors of [`build_global_heap_collections_from_bytes`] for collection encoding
+/// failures.
 pub(crate) fn stage_embedded_vl_elements(
     mut raw: Vec<u8>,
     offsets: &[usize],
     elements: &[VlStringElement],
-) -> (Vec<u8>, VlStringStaging) {
+) -> Result<(Vec<u8>, VlStringStaging), FormatError> {
     debug_assert_eq!(
         offsets.len(),
         elements.len(),
@@ -1276,13 +1350,13 @@ pub(crate) fn stage_embedded_vl_elements(
             }
         }
     }
-    (
+    Ok((
         raw,
         VlStringStaging {
-            collections: build_global_heap_collections_from_bytes(&objects),
+            collections: build_global_heap_collections_from_bytes(&objects)?,
             patch_offsets,
         },
-    )
+    ))
 }
 
 /// Patch the heap address of each VL reference named by `patch_offsets`, leaving
@@ -3262,13 +3336,8 @@ impl DatasetBuilder {
         offsets: &[usize],
         elements: &[VlStringElement],
     ) -> &mut Self {
-        let (element_bytes, staging) = stage_embedded_vl_elements(raw, offsets, elements);
-        self.datatype = Some(datatype);
-        self.set_element_bytes(element_bytes);
-        self.vl_string_staging = Some(staging);
-        if self.shape.is_none() {
-            self.shape = Some(vec![num_elements]);
-        }
+        let staged = stage_embedded_vl_elements(raw, offsets, elements);
+        self.stage_vlen_result(datatype, num_elements, staged);
         self
     }
 

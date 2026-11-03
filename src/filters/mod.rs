@@ -12,6 +12,7 @@ pub use hdf5_pure_filter::__private::FilterScratch;
 
 #[cfg(test)]
 use crate::FixedPointType;
+use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::filter_pipeline;
 use crate::filter_pipeline::FilterPipeline;
@@ -70,16 +71,26 @@ impl<'a> ChunkContext<'a> {
     /// # Errors
     ///
     /// Returns [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes per element.
-    pub fn from_datatype(
-        chunk_dims: &'a [u64],
-        dt: &crate::datatype::Datatype,
-    ) -> Result<Self, FormatError> {
-        Ok(Self {
+    pub fn from_datatype(chunk_dims: &'a [u64], dt: &Datatype) -> Result<Self, FormatError> {
+        Ok(Self::from_stored_datatype(
             chunk_dims,
-            element_size: dt.element_size()?,
+            dt,
+            dt.element_size()?,
+        ))
+    }
+
+    /// Uses the supplied stored element width and derives scalar filter types from `dt`.
+    pub(crate) fn from_stored_datatype(
+        chunk_dims: &'a [u64],
+        dt: &Datatype,
+        element_size: NonZeroU32,
+    ) -> Self {
+        Self {
+            chunk_dims,
+            element_size,
             element_type: zfp_element_type_from_datatype(dt),
             scale_offset_type: crate::scaleoffset::scale_offset_type_from_datatype(dt),
-        })
+        }
     }
 }
 

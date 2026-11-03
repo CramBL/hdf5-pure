@@ -16,6 +16,7 @@ use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
 
 use crate::bytes;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
@@ -481,7 +482,9 @@ fn header_len(lengths: LengthWidth) -> u64 {
 ///
 /// Returns [`GlobalHeapCollectionError::TooManyObjects`] if `objects` has more than
 /// [`GLOBAL_HEAP_MAX_OBJECTS`] objects, and [`GlobalHeapCollectionError::TooLarge`] if the size of
-/// the collection does not fit a length field of `length_width` bytes.
+/// the collection does not fit a length field of `length_width` bytes. Returns
+/// [`GlobalHeapCollectionError::Format`] for arithmetic overflow, a collection larger than the
+/// target's [`usize`] range, or failure to reserve the collection buffer.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 pub fn encode_global_heap_collection(
@@ -496,25 +499,31 @@ pub fn encode_global_heap_collection(
     // The length of the collection header, sig(4) + ver(1) + reserved(3) + `collection_size`, and
     // of each object header, index(2) + reference count(2) + reserved(4) + size, padded to
     // `ALIGNMENT`.
-    let header_size = (8 + usize::from(length_width.get())).next_multiple_of(ALIGNMENT);
-    let collection_size = header_size
-        + objects
-            .iter()
-            .map(|obj| header_size + obj.len().next_multiple_of(ALIGNMENT))
-            .sum::<usize>()
-        + header_size; // free space marker (full object header size)
-    let padded_collection = collection_size
-        .max(MIN_COLLECTION_SIZE)
-        .next_multiple_of(ALIGNMENT);
+    let header_size = aligned_collection_size(FIXED_HEADER_LEN + u64::from(length_width.get()))?;
+    let collection_size = objects.iter().try_fold(header_size, |size, object| {
+        add_collection_size(
+            add_collection_size(size, header_size)?,
+            aligned_collection_size(object.len().to_u64())?,
+        )
+    })?;
+    let padded_collection = aligned_collection_size(
+        add_collection_size(collection_size, header_size)?.max(MIN_COLLECTION_SIZE.to_u64()),
+    )?;
     // Every length the collection stores is at most its own size.
-    if !width::length_width_holds(length_width, padded_collection as u64) {
+    if !width::length_width_holds(length_width, padded_collection) {
         return Err(GlobalHeapCollectionError::TooLarge {
             size: padded_collection,
             length_width,
         });
     }
-
-    let mut buf = Vec::with_capacity(padded_collection);
+    let padded_collection = padded_collection.to_usize()?;
+    let header_size = header_size.to_usize()?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(padded_collection)
+        .map_err(|source| FormatError::AllocationFailed {
+            values: padded_collection,
+            source,
+        })?;
     // Header
     buf.extend_from_slice(&GCOL_SIGNATURE);
     buf.push(GCOL_VERSION);
@@ -556,13 +565,15 @@ pub fn encode_global_heap_collection(
     Ok(buf)
 }
 
-/// The error [`encode_global_heap_collection`] returns for objects one collection cannot hold.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// An error encoding a global heap collection.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GlobalHeapCollectionError {
+    /// Arithmetic, host-size conversion, or buffer reservation failed.
+    Format(FormatError),
     /// The size of the collection does not fit a length field of `length_width` bytes.
     TooLarge {
         /// The size in bytes of the collection, padding included.
-        size: usize,
+        size: u64,
         /// The width of the collection's length fields.
         length_width: LengthWidth,
     },
@@ -571,6 +582,54 @@ pub enum GlobalHeapCollectionError {
         /// The number of objects the caller passed.
         count: usize,
     },
+}
+
+impl From<FormatError> for GlobalHeapCollectionError {
+    fn from(error: FormatError) -> Self {
+        Self::Format(error)
+    }
+}
+
+impl From<GlobalHeapCollectionError> for FormatError {
+    fn from(error: GlobalHeapCollectionError) -> Self {
+        match error {
+            GlobalHeapCollectionError::Format(error) => error,
+            GlobalHeapCollectionError::TooLarge { size, length_width } => Self::LengthTooLarge {
+                length: size,
+                length_size: length_width.get(),
+            },
+            GlobalHeapCollectionError::TooManyObjects { count } => {
+                Self::ValueTooLargeForRepresentation {
+                    value: count.to_u64(),
+                    target: "u16",
+                }
+            }
+        }
+    }
+}
+
+/// Rounds a collection size up to the global heap's alignment.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the rounded size exceeds [`u64::MAX`].
+fn aligned_collection_size(size: u64) -> Result<u64, FormatError> {
+    let alignment = ALIGNMENT.to_u64();
+    let padding = (alignment - size % alignment) % alignment;
+    add_collection_size(size, padding)
+}
+
+/// Adds a header, payload, or padding length to a collection size.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+fn add_collection_size(size: u64, additional: u64) -> Result<u64, FormatError> {
+    size.checked_add(additional)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: size,
+            length: additional,
+        })
 }
 
 /// The most objects one global heap collection holds, 65,535.
@@ -690,6 +749,17 @@ mod tests {
             encode_global_heap_collection(LengthWidth::Two, &[&object]).map(|bytes| bytes.len()),
             expected
         );
+    }
+
+    #[rstest]
+    #[case::exact(u64::MAX - 7, Ok(u64::MAX - 7))]
+    #[case::first_overflow(u64::MAX - 6, Err(FormatError::OffsetOverflow { offset: u64::MAX - 6, length: 7 }))]
+    #[case::maximum(u64::MAX, Err(FormatError::OffsetOverflow { offset: u64::MAX, length: 1 }))]
+    fn collection_alignment_checks_u64_geometry(
+        #[case] size: u64,
+        #[case] expected: Result<u64, FormatError>,
+    ) {
+        assert_eq!(aligned_collection_size(size), expected);
     }
 
     #[test]

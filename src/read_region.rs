@@ -71,7 +71,7 @@ impl<'a> ReadRegion<'a> {
                 });
             }
         }
-        let element_size = crate::datatype::element_size_usize(spec.datatype())?;
+        let element_size = spec.element_size_usize()?;
         if count.contains(&0) || spec.dataspace().space_type == DataspaceType::Null {
             return Ok(Self {
                 spec,
@@ -121,7 +121,7 @@ impl<'a> ReadRegion<'a> {
         let extent = dimensions.first().copied().unwrap_or(1);
         let start = start.min(extent);
         let count = count.min(extent - start);
-        let element_size = crate::datatype::element_size_usize(spec.datatype())?;
+        let element_size = spec.element_size_usize()?;
         if count == 0
             || dimensions.contains(&0)
             || spec.dataspace().space_type == DataspaceType::Null
@@ -235,7 +235,7 @@ impl<'a> ReadRegion<'a> {
             return Ok(0);
         }
         self.axes()
-            .try_fold(u64::from(self.spec.datatype().type_size()), |end, axis| {
+            .try_fold(u64::from(self.spec.element_size()?.get()), |end, axis| {
                 sum(end, product(axis.end - 1, axis.input_stride)?)
             })
     }
@@ -272,7 +272,7 @@ impl<'a> ReadRegion<'a> {
             Selection::Elements { axes, .. } => axes,
         };
         let mut split = axes.len();
-        let mut run_len = self.spec.datatype().type_size() as u64;
+        let mut run_len = u64::from(self.spec.element_size()?.get());
         while let Some(axis) = split.checked_sub(1).and_then(|i| axes.get(i)) {
             if axis.input_stride != run_len {
                 break;

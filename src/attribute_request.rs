@@ -29,10 +29,12 @@ impl PreparedAttributes {
             .iter()
             .enumerate()
             .filter_map(|(index, (_, spec))| {
-                spec.var_len_strings()
-                    .map(|strings| (index, type_builders::build_global_heap_collections(strings)))
+                spec.var_len_strings().map(|strings| {
+                    type_builders::build_global_heap_collections(strings)
+                        .map(|collections| (index, collections))
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             messages,
             collections,

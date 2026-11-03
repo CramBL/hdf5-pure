@@ -138,5 +138,6 @@ mod userblock_base_address;
 mod vlen_chunked;
 mod vlen_metadata;
 mod vlen_string_attrs;
+mod vlen_widths;
 
 mod fail_if_unknown;

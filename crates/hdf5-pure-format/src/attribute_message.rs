@@ -387,7 +387,7 @@ impl AttributeMessage {
     fn datatype_field(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         match self.datatype_location.reference_bytes(offset_width)? {
             Some(reference) => Ok(reference),
-            None => datatype::serialize_datatype(&self.datatype),
+            None => datatype::serialize_datatype_with_offset_width(&self.datatype, offset_width),
         }
     }
 

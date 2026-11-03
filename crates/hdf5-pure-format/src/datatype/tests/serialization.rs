@@ -78,7 +78,6 @@ fn canonical_compound_array_offsets(#[case] size: u32, #[case] width: usize) {
 #[case::ordinary(vec![2, 3], 6)]
 #[case::empty_rank(vec![], 1)]
 #[case::zero_extent(vec![0, 4], 0)]
-#[case::saturated(vec![u32::MAX, 2], u32::MAX)]
 #[case::zero_after_saturation(vec![u32::MAX, 2, 0], 0)]
 fn canonical_array_sizes_preserve_constructed_models(
     #[case] dimensions: Vec<u32>,
@@ -161,7 +160,7 @@ fn appending_after_a_prefix_preserves_earlier_headers(
         size: 4,
         tag: b"first".to_vec(),
     };
-    let first_node = serialize_datatype_into(&mut output, &first).unwrap();
+    let first_node = serialize_datatype_into(&mut output, &first, OffsetWidth::Eight).unwrap();
     assert_eq!(first_node.version, DATATYPE_VERSION_ONE);
     assert_eq!(first_node.type_size, 4);
     let mut expected = prefix.to_vec();
@@ -175,13 +174,14 @@ fn appending_after_a_prefix_preserves_earlier_headers(
     assert_eq!(output, expected);
 
     let datatype = parse_datatype(&message).unwrap().0;
-    let node = serialize_datatype_into(&mut output, &datatype).unwrap();
+    let node = serialize_datatype_into(&mut output, &datatype, OffsetWidth::Eight).unwrap();
     assert_eq!(node.version, version);
     assert_eq!(node.type_size, datatype.type_size());
     expected.extend_from_slice(&message);
     assert_eq!(output, expected);
 
-    let final_node = serialize_datatype_into(&mut output, &byte_member_type()).unwrap();
+    let final_node =
+        serialize_datatype_into(&mut output, &byte_member_type(), OffsetWidth::Eight).unwrap();
     assert_eq!(final_node.version, DATATYPE_VERSION_ONE);
     assert_eq!(final_node.type_size, 1);
     expected.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
@@ -347,4 +347,124 @@ fn mixed_bytes() -> Vec<u8> {
     bytes.extend_from_slice(b"late\0\x24");
     bytes.extend_from_slice(&complex_bytes());
     bytes
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 10)]
+#[case::four(OffsetWidth::Four, 12)]
+#[case::eight(OffsetWidth::Eight, 16)]
+fn variable_length_datatype_sizes_follow_offset_width(
+    #[case] offset_width: OffsetWidth,
+    #[case] size: u32,
+) {
+    let datatype = Datatype::VariableLength(VariableLengthType::sequence(byte_member_type()));
+    let mut expected = sequence_bytes(
+        build_fixed_point(1, false, false, 0, 8),
+        DATATYPE_VERSION_ONE,
+    );
+    expected[4..8].copy_from_slice(&size.to_le_bytes());
+    assert_eq!(
+        serialize_datatype_with_offset_width(&datatype, offset_width).unwrap(),
+        expected
+    );
+    assert_eq!(
+        stored_element_size(&datatype, offset_width).unwrap().get(),
+        size
+    );
+    assert_eq!(datatype.type_size(), 16);
+    let compound = Datatype::Compound {
+        size: 32,
+        members: vec![__private::compound_member(
+            "value".into(),
+            8,
+            datatype.clone(),
+        )],
+    };
+    let mut compound_bytes = build_dt_header(COMPOUND_CLASS, DATATYPE_VERSION_THREE, [1, 0, 0], 32);
+    compound_bytes.extend_from_slice(b"value\0");
+    compound_bytes.push(8);
+    compound_bytes.extend_from_slice(&expected);
+    assert_eq!(
+        serialize_datatype_with_offset_width(&compound, offset_width).unwrap(),
+        compound_bytes
+    );
+    assert_eq!(
+        stored_element_size(&compound, offset_width).unwrap().get(),
+        32
+    );
+    let array = Datatype::Array {
+        base_type: Box::new(datatype),
+        dimensions: vec![2, 3],
+    };
+    let expected = array_bytes(expected, &[2, 3], 6 * size, DATATYPE_VERSION_THREE);
+    assert_eq!(
+        serialize_datatype_with_offset_width(&array, offset_width).unwrap(),
+        expected
+    );
+    assert_eq!(
+        stored_element_size(&array, offset_width).unwrap().get(),
+        6 * size
+    );
+}
+
+#[rstest]
+#[case::exact(array_of_opaque(u32::MAX, 1), Ok(u32::MAX))]
+#[case::beyond(array_of_opaque(2_147_483_648, 2), Err(FormatError::LengthTooLarge { length: 4_294_967_296, length_size: 4 }))]
+#[case::nested_overflow(Datatype::Array {
+    base_type: Box::new(Datatype::Array {
+        base_type: Box::new(byte_member_type()),
+        dimensions: vec![u32::MAX, 2],
+    }),
+    dimensions: vec![3],
+}, Err(FormatError::LengthTooLarge { length: 8_589_934_590, length_size: 4 }))]
+fn array_datatype_size_checks_its_fixed_width_field(
+    #[case] datatype: Datatype,
+    #[case] expected: Result<u32, FormatError>,
+) {
+    assert_eq!(
+        stored_element_size(&datatype, OffsetWidth::Two).map(NonZeroU32::get),
+        expected
+    );
+    assert_eq!(
+        serialize_datatype_with_offset_width(&datatype, OffsetWidth::Two)
+            .map(|bytes| { u32::from_le_bytes(bytes[4..8].try_into().unwrap()) }),
+        expected
+    );
+}
+
+fn array_of_opaque(base_size: u32, count: u32) -> Datatype {
+    Datatype::Array {
+        base_type: Box::new(Datatype::Opaque {
+            size: base_size,
+            tag: Vec::new(),
+        }),
+        dimensions: vec![count],
+    }
+}
+
+#[rstest]
+#[case::exact(255, Ok(255))]
+#[case::beyond(256, Err(FormatError::ValueTooLargeForRepresentation { value: 256, target: "u8" }))]
+fn array_datatype_rank_checks_its_fixed_width_field(
+    #[case] rank: usize,
+    #[case] expected: Result<u8, FormatError>,
+) {
+    let datatype = Datatype::Array {
+        base_type: Box::new(byte_member_type()),
+        dimensions: vec![1; rank],
+    };
+    assert_eq!(
+        serialize_datatype_with_offset_width(&datatype, OffsetWidth::Two).map(|bytes| {
+            assert_eq!(
+                bytes.len(),
+                9 + 4 * rank + build_fixed_point(1, false, false, 0, 8).len()
+            );
+            assert_eq!(
+                &bytes[9..9 + 4 * rank],
+                vec![1u32.to_le_bytes(); rank].concat()
+            );
+            bytes[8]
+        }),
+        expected
+    );
 }

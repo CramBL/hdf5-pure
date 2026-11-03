@@ -6,7 +6,8 @@
 //! file's bytes to the OS. Repack is the complementary answer — the same one the
 //! HDF5 C ecosystem ships as `h5repack`: it reads every surviving object and
 //! rewrites the whole file. The writer plans destination allocations, then reconstructs each
-//! object's metadata for emission under the selected file-space settings.
+//! object's metadata for emission under the selected file-space settings. Output files use
+//! eight-byte addresses and lengths.
 //!
 //! # Fidelity contract
 //!
@@ -39,7 +40,8 @@
 //!   such compounds; and nesting of either. The embedded heap references are
 //!   re-staged and the embedded object addresses resolved exactly as their
 //!   top-level counterparts are, in a single pass, while every other byte of the
-//!   element is carried through untouched.
+//!   element is carried through untouched. Embedded variable-length references require
+//!   eight-byte addresses in the source file.
 //! - Contiguous/compact **object-reference** datasets, and contiguous/compact
 //!   datatypes containing an object-reference member: each stored address is
 //!   rewritten to its target object's new location in the compacted file (null
@@ -404,7 +406,8 @@ impl RepackOptions {
 /// [`Error::TraversalLimitExceeded`] if `src` reaches more than 16,777,216 objects or hard links,
 /// or if, after the drop paths, `src` nests groups more than 128 levels deep.
 /// Returns [`Error::RepackUnsupported`] for group link filters, including those configured on
-/// compact groups before dense storage is allocated.
+/// compact groups before dense storage is allocated, or embedded variable-length references in
+/// a source with two- or four-byte addresses.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,
@@ -876,6 +879,12 @@ fn emit_dataset(
     // other pointing into the source file — reintroducing the very bug this path
     // exists to fix, and skipping the other kind's refusals with it.
     if !vlen_slots.is_empty() || !reference_slots.is_empty() {
+        if !vlen_slots.is_empty() && file.superblock().offset_size != OffsetWidth::Eight {
+            return Err(Error::RepackUnsupported(format!(
+                "dataset {:?}: embedded variable-length references with narrow offsets cannot be restaged into eight-byte offsets",
+                path.to_string()
+            )));
+        }
         emit_embedded_address_dataset(
             db,
             ds,

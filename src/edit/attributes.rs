@@ -518,7 +518,8 @@ pub(super) fn plan_attr_ops(
                 )?);
                 let collections = value
                     .var_len_strings()
-                    .map(type_builders::build_global_heap_collections);
+                    .map(type_builders::build_global_heap_collections)
+                    .transpose()?;
                 match set.get_mut(name) {
                     // Preserve the existing creation index on replacement.
                     Some(slot) => {
@@ -784,7 +785,8 @@ impl<'a> CompactBatch<'a> {
                 )?,
                 value
                     .var_len_strings()
-                    .map(type_builders::build_global_heap_collections),
+                    .map(type_builders::build_global_heap_collections)
+                    .transpose()?,
             )),
             AttrOp::Remove { .. } => None,
         };
