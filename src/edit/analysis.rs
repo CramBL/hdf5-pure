@@ -25,6 +25,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 
+use self::counts::OrdinaryCountSubject;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::GlobalHeapLiveness;
@@ -33,6 +34,14 @@ use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
 pub(super) use deletions::PlannedDeletion;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "source-count evidence does not authorize allocation retirement"
+    )
+)]
+pub(super) mod counts;
 mod deletions;
 
 /// Lazy topology, object-count, reference, and allocation queries for unchanged source contents.
@@ -129,13 +138,6 @@ impl<'a> AnalysisPhase<'a> {
     /// Returns parsing and source-read errors from
     /// [`ObjectHeader::parse_from_source_with_chunk_observer`], or observation errors from
     /// [`ObjectReferenceCountObserver::observe`] and [`ObjectReferenceCountObserver::finish`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "count observations do not authorize allocation retirement"
-        )
-    )]
     pub(super) fn object_reference_count(
         &mut self,
         object: ObjectId,
@@ -587,6 +589,7 @@ impl<'a> CompleteTopology<'a> {
             let ObjectLinks {
                 links,
                 topology_error,
+                count_subject,
             } = match cached.get(&id).cloned() {
                 Some(links) => links,
                 None => {
@@ -623,7 +626,11 @@ impl<'a> CompleteTopology<'a> {
                 })
                 .collect();
             Ok::<_, Error>(Expansion {
-                value: TopologyObject { id, names },
+                value: TopologyObject {
+                    id,
+                    names,
+                    count_subject,
+                },
                 links,
             })
         })
@@ -699,13 +706,15 @@ impl<'a> CompleteTopology<'a> {
 struct TopologyObject {
     id: ObjectId,
     names: BTreeMap<String, usize>,
+    count_subject: Option<OrdinaryCountSubject>,
 }
 
-/// Named hard links and any undefined-target error from one parsed object header.
+/// Named hard links, a compact count-subject marker, and any undefined-target error.
 #[derive(Clone)]
 struct ObjectLinks {
     links: Vec<HardLink<String, ObjectId>>,
     topology_error: Option<FormatError>,
+    count_subject: Option<OrdinaryCountSubject>,
 }
 
 impl ObjectLinks {
@@ -744,6 +753,7 @@ impl ObjectLinks {
         Ok(Self {
             links,
             topology_error,
+            count_subject: OrdinaryCountSubject::from_header(header),
         })
     }
 }
