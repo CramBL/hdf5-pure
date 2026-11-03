@@ -27,8 +27,8 @@ file sizes (absolute bytes)
 free-space sections (stored addresses, byte lengths)
   index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
   -----  -----------------  ----------------  ---------------  --------------  -----
-      0         0x000000b1        0x00000544       0x000000b1      0x00000544  yes
-      1         0x00001dc8        0x00002238       0x00001dc8      0x00002238  yes
+      0         0x000000b1        0x000013f2       0x000000b1      0x000013f2  yes
+      1         0x00002b33        0x000014cd       0x00002b33      0x000014cd  yes
       2         0x00004010        0x00003ff0       0x00004010      0x00003ff0  yes
       3         0x00008000        0x00008000       0x00008000      0x00008000  yes
 
@@ -36,8 +36,8 @@ free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
   section count                     4        4
-  section bytes                59,244   59,244
-  H5Fget_freespace                  -   59,244
+  section bytes                59,567   59,567
+  H5Fget_freespace                  -   59,567
   reported - section bytes          -        0
 
 comparison
