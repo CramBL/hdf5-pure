@@ -2057,9 +2057,8 @@ pub(crate) fn collect_chunked_storage_spans(
 /// index's own structure blocks. Callers that only need the whole footprint can
 /// concatenate the two.
 ///
-/// The split is structural, not a page-type classification. The editor places the array indexes
-/// it writes beside raw chunks, while a version 2 B-tree remains metadata. A caller reclaiming
-/// these spans assigns the page type appropriate to the index kind and its proven placement.
+/// The split describes storage structure. A caller reclaiming these spans separately establishes
+/// the PAGE class appropriate to each index kind and its proven placement.
 #[cfg(feature = "std")]
 pub(crate) struct ChunkedStorageSpans {
     pub(crate) data: Vec<AddressRange<StoredAddress>>,

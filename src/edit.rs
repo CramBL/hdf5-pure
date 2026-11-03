@@ -362,7 +362,6 @@ mod aggregation;
 pub(crate) mod allocation;
 mod analysis;
 mod append;
-#[cfg(any(test, doc))]
 mod array;
 pub(crate) mod attributes;
 mod block;
@@ -3143,26 +3142,6 @@ impl WriteEngine {
             return None;
         }
         self.space.allocate(len, class).map(|extent| extent.start())
-    }
-
-    /// Hands the stored range `[addr, addr + len)`, drawn from [`alloc_free`](Self::alloc_free)
-    /// with [`AllocationClass::Raw`], back to the list it came from.
-    ///
-    /// A caller that rejects a placement after the draw calls this, since the region would
-    /// otherwise stay out of the free lists for the rest of the session with nothing written into
-    /// it.
-    ///
-    /// A paged file takes it back into the raw list whichever list served it: a
-    /// whole page [`SessionSpace::allocate`] claimed from the metadata side for
-    /// raw data is raw from the moment it is claimed, and that call already
-    /// returns its alignment tail there. A page that ends up wholly free is
-    /// promoted out of either list by
-    /// whole-page promotion as usual.
-    fn release_raw_alloc(&mut self, addr: StoredAddress, len: u64) {
-        let Some(extent) = FreeExtent::new(addr, len) else {
-            return;
-        };
-        self.space.return_allocation(extent, AllocationClass::Raw);
     }
 
     /// Write `bytes` at the address [`reserve`](Self::reserve) handed out,
