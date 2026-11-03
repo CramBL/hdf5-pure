@@ -1,13 +1,24 @@
 use hdf5_pure_format::__private::ObjectReferenceCount;
 use rstest::rstest;
+use test_util::checksum;
 use test_util_hdf5::file;
 use test_util_hdf5::native_fixtures::Fixture;
 use test_util_hdf5::numeric::ByteOrder;
 
+use crate::File;
+use crate::MessageType;
+use crate::PhysicalAddress;
+use crate::access_mode::AccessMode;
+use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::OrdinaryCountSubject;
+use crate::edit::group::GroupInfo;
+use crate::edit::object_header;
+use crate::edit::object_header::PreparedHeader;
 use crate::edit::test_util as edit_test_util;
+use crate::object_graph::ObjectId;
+use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 
 #[rstest]
@@ -182,6 +193,87 @@ fn native_version_1_group_counts_retain_the_supported_group_subject() {
             .collect::<Vec<_>>(),
         [(Some(field), 0)]
     );
+}
+
+#[rstest]
+#[case::single(false)]
+#[case::aliased(true)]
+fn version_1_group_conversion_preserves_native_prefix_counts(
+    #[case] aliased: bool,
+    #[values(false, true)] source_only: bool,
+) {
+    let path = test_util::temp::temp_path("converted-native-counts.h5");
+    let native = file::libhdf5_create_earliest(&path);
+    let group = native.create_group("g").unwrap();
+    group
+        .new_attr::<i32>()
+        .create("marker")
+        .unwrap()
+        .write_scalar(&7)
+        .unwrap();
+    group
+        .new_dataset::<i32>()
+        .shape([1])
+        .create("value")
+        .unwrap()
+        .write_raw(&[17])
+        .unwrap();
+    drop(group);
+    if aliased {
+        native.link_hard("g", "alias").unwrap();
+    }
+    let expected = native.loc_info_by_name("g").unwrap().num_links;
+    assert_eq!(expected, if aliased { 2 } else { 1 });
+    assert_eq!(
+        native
+            .group("g")
+            .unwrap()
+            .attr("marker")
+            .unwrap()
+            .read_scalar::<i32>()
+            .unwrap(),
+        7
+    );
+    native.close().unwrap();
+    let reader = File::open(&path).unwrap();
+    let address = reader.group("g").unwrap().header_address().unwrap();
+    reader.close().unwrap();
+    let engine = if source_only {
+        WriteEngine::open_source_only(&path).unwrap()
+    } else {
+        edit_test_util::open_engine(&path)
+    };
+    let GroupInfo { region, links } = engine.reconstruct_v1_group(address).unwrap();
+    assert_eq!(links.links().len(), 1);
+    let prepared = PreparedHeader::new(&region).unwrap();
+    let geometry = prepared.geometry().unwrap();
+    let measured = *geometry.root_chunk_lengths(false).next().unwrap().start();
+    let encoded = object_header::build_v2_object_header(&region).unwrap();
+    assert_eq!(u64::try_from(encoded.len()).unwrap(), measured);
+    let checksum_at = encoded.len() - checksum::CHECKSUM;
+    assert_eq!(
+        &encoded[checksum_at..],
+        checksum::lookup3(&encoded[..checksum_at]).to_le_bytes()
+    );
+    let rebuilt =
+        ObjectHeader::parse_with_widths(&encoded, AccessMode::ReadOnly, 0, engine.widths())
+            .unwrap();
+    let count = rebuilt
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::OBJECT_REFERENCE_COUNT);
+    assert_eq!(
+        count.map(|message| message.data.as_slice()),
+        aliased.then_some(&[0, 2, 0, 0, 0][..])
+    );
+    let observed = AnalysisPhase::new(&engine)
+        .object_reference_count(ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap();
+    let ObjectReferenceCount::Version1(field) = observed else {
+        panic!("expected a native version 1 count")
+    };
+    assert_eq!(field.value(), u32::try_from(expected).unwrap());
+    assert!(encoded.len() > region.len());
 }
 
 #[derive(Clone, Copy)]

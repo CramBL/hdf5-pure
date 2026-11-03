@@ -10,6 +10,7 @@ use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
 
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
@@ -39,6 +40,7 @@ use crate::width::{FormatWidths, LengthWidth};
 use super::WriteEngine;
 use super::block::{BlockRequest, EncodingDependency};
 use super::group_links;
+use super::object_header::reference_count::HeaderCountError;
 use super::object_header::{self, OhRegion};
 use super::reservation::ReservationFailure;
 
@@ -57,6 +59,9 @@ impl WriteEngine {
     /// Link messages, the region retains those messages and any Filter Pipeline, see
     /// [`link_message_region`]. Attribute bodies are copied in both cases, with shared-message
     /// references re-encoded. Other messages, including the symbol table, are omitted.
+    ///
+    /// Appends an Object Reference Count message for a non-one prefix count unless the source
+    /// header also contains a count message. Leaves a prefix count of one implicit.
     ///
     /// # Errors
     ///
@@ -147,6 +152,7 @@ impl WriteEngine {
                 region.push(MessageType::ATTRIBUTE, &m.data);
             }
         }
+        region.preserve_v1_count(&oh)?;
         let links = group_links::inspect(&self.opened_source(), self.context.widths(), &region)?;
         Ok(GroupInfo { region, links })
     }
@@ -729,6 +735,42 @@ impl OhRegion {
         Ok(())
     }
 
+    /// Appends a count record for a supported non-one version 1 prefix count.
+    ///
+    /// The caller passes a region reconstructed from `header` without count records. Leaves the
+    /// region unchanged if the prefix count is absent or one, or if the source header contains
+    /// a count message beside its prefix count.
+    ///
+    /// # Errors
+    ///
+    /// Returns framing errors from the owned count projection, or [`FormatError::Internal`] if
+    /// the reconstructed region contains ambiguous or unsupported count records.
+    fn preserve_v1_count(&mut self, header: &ObjectHeader) -> Result<(), Error> {
+        let Some(count) = header
+            .reference_count
+            .filter(|count| *count != ObjectReferenceCountMessage::IMPLICIT_ONE.count())
+        else {
+            return Ok(());
+        };
+        if header
+            .messages
+            .iter()
+            .any(|message| message.msg_type == MessageType::OBJECT_REFERENCE_COUNT)
+        {
+            return Ok(());
+        }
+        let projection = self
+            .reference_count_mut()
+            .map_err(HeaderCountError::into_reconstructed_group_error)?;
+        debug_assert_eq!(
+            projection.count(),
+            ObjectReferenceCountMessage::IMPLICIT_ONE.count()
+        );
+        projection
+            .set(count)
+            .map_err(HeaderCountError::into_reconstructed_group_error)
+    }
+
     fn replace_link_info(&mut self, info: &LinkInfoMessage) -> Result<(), Error> {
         let splice = self
             .splice_first(MessageType::LINK_INFO)?
@@ -737,6 +779,19 @@ impl OhRegion {
             ))?;
         *self = self.with_bytes(splice.replace_body(&info.serialize(self.widths().offsets)?)?);
         Ok(())
+    }
+}
+
+impl HeaderCountError {
+    /// Maps unusable reconstructed counts to an internal error, preserving framing errors.
+    fn into_reconstructed_group_error(self) -> Error {
+        match self {
+            Self::Framing(error) => error.into(),
+            Self::Ambiguous | Self::Unsupported(_) => FormatError::Internal(
+                "a reconstructed version 1 group contains unsupported count records".into(),
+            )
+            .into(),
+        }
     }
 }
 
@@ -760,6 +815,8 @@ mod tests {
     use crate::message_flags::MessageFlags;
     use crate::message_type::MessageType;
     use crate::object_path::LinkNameBuf;
+
+    mod reference_count;
 
     #[rstest]
     #[case::ends(&["a", "c"], &["b"])]
