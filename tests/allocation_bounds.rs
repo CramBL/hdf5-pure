@@ -74,6 +74,8 @@ use test_util_hdf5::reader::ReadBackend;
 mod datatype_metadata;
 #[path = "allocation_bounds/extensible_array.rs"]
 mod extensible_array;
+#[path = "allocation_bounds/free_space.rs"]
+mod free_space;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
