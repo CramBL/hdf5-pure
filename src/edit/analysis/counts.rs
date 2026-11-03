@@ -46,6 +46,7 @@ impl<'source> AnalysisPhase<'source> {
         self.topology();
         let Self {
             engine,
+            identity: _,
             topology,
             counts,
             budget: _,

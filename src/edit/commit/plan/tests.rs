@@ -23,6 +23,7 @@ use crate::address::StoredAddressExt;
 use crate::chunked_write::StorageAllocation;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::PlannedDeletion;
+use crate::edit::analysis::RECONSTRUCTION_WORK;
 use crate::edit::dataset::MovingWrite;
 use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
@@ -292,6 +293,7 @@ fn prepared_applications_retain_their_own_staged_inputs(#[case] create: bool) {
     let second_staged = std::mem::take(&mut second.staged);
     first.begin_commit(&first_staged);
     second.begin_commit(&second_staged);
+    RECONSTRUCTION_WORK.with(|work| work.set(0));
     let CommitPreparation::Prepared(first_prepared) =
         PreparedCommit::prepare(&mut first, first_staged)
     else {
@@ -302,6 +304,37 @@ fn prepared_applications_retain_their_own_staged_inputs(#[case] create: bool) {
     else {
         panic!("expected the second staged set to prepare");
     };
+    assert_eq!(
+        RECONSTRUCTION_WORK.with(|work| work.get()),
+        if create { 2 } else { 0 }
+    );
+    if let (CommitPlan::Tree(first_tree), CommitPlan::Tree(second_tree)) =
+        (&first_prepared.plan, &second_prepared.plan)
+    {
+        let first_source = first_tree.groups[&ObjectPathBuf::root()]
+            .prepared
+            .replaces
+            .as_ref()
+            .unwrap()
+            .source();
+        let second_source = second_tree.groups[&ObjectPathBuf::root()]
+            .prepared
+            .replaces
+            .as_ref()
+            .unwrap()
+            .source();
+        assert_eq!(first_source.object(), second_source.object());
+        assert_ne!(first_source, second_source);
+        assert_eq!(
+            first_tree.groups[&ObjectPathBuf::root()]
+                .prepared
+                .replaces
+                .as_ref()
+                .unwrap()
+                .address(),
+            first_source.object().header_address().get()
+        );
+    }
     second.apply_commit(second_prepared).unwrap();
     first.apply_commit(first_prepared).unwrap();
     drop(second);

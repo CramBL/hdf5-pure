@@ -62,10 +62,11 @@ enum DeletionTarget {
     Unresolved(ObjectId),
 }
 
-/// A shared identity for matching one complete topology instance.
+/// A shared identity for a source phase's topology and reconstruction origins.
 ///
-/// Only the identity allocation is shared. Source freshness remains the caller's responsibility,
-/// including starting a new analysis phase after relevant writes.
+/// May be allocated before topology discovery succeeds. Only the identity allocation is shared.
+/// The caller establishes source freshness and starts a new analysis phase after relevant writes.
+#[derive(Debug)]
 pub(super) struct TopologyIdentity;
 
 /// Distinct edges bound to a borrowed topology, with separately resolved targets.
@@ -192,6 +193,7 @@ impl<'source> AnalysisPhase<'source> {
         }
         let Self {
             engine,
+            identity: _,
             topology,
             counts,
             budget: _,
