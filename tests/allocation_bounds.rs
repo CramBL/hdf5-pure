@@ -70,6 +70,9 @@ use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::reader::ReadBackend;
 
+#[path = "allocation_bounds/datatype_metadata.rs"]
+mod datatype_metadata;
+
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
 

@@ -27,6 +27,8 @@ use hdf5::types::TypeDescriptor;
 use hdf5::types::VarLenUnicode;
 use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::CharacterSet;
+#[cfg(target_endian = "little")]
+use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
@@ -1364,4 +1366,195 @@ fn dense_attributes_resolve_committed_and_global_heap_references_through_relocat
             "resolved"
         );
     }
+}
+
+#[rstest]
+#[case::pure_writer(false)]
+#[case::native_writer(true)]
+#[cfg(target_endian = "little")]
+fn nested_committed_datatypes_preserve_metadata_through_repack(
+    #[case] native_writer: bool,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("nested.h5");
+    let output_path = directory.path().join("nested-repacked.h5");
+    let datatype = nested_record_type();
+    let values = [
+        NestedRecord {
+            values: [[1, 2], [3, 4]],
+            tail: 5,
+        },
+        NestedRecord {
+            values: [[6, 7], [8, 9]],
+            tail: 10,
+        },
+    ];
+    let expected_data: Vec<_> = (1i32..=10).flat_map(i32::to_le_bytes).collect();
+    if native_writer {
+        let native = file::libhdf5_create_v18(&source_path);
+        let dtype = hdf5::Datatype::from_type::<NestedRecord>().unwrap();
+        native.commit_datatype("record", &dtype).unwrap();
+        native
+            .new_dataset_builder()
+            .empty_as(&dtype)
+            .shape([2])
+            .create("typed")
+            .unwrap()
+            .write_raw(&values)
+            .unwrap();
+        native
+            .new_dataset_builder()
+            .with_data(&values)
+            .create("inline")
+            .unwrap();
+        native
+            .new_attr::<NestedRecord>()
+            .create("inline")
+            .unwrap()
+            .write_scalar(&values[0])
+            .unwrap();
+        drop(dtype);
+        native.close().unwrap();
+    } else {
+        let mut builder = FileBuilder::new();
+        builder.commit_datatype("record", datatype.clone());
+        builder
+            .create_dataset("typed")
+            .with_raw_data(datatype.clone(), expected_data.clone(), 2)
+            .with_committed_datatype("record");
+        builder
+            .create_dataset("inline")
+            .with_raw_data(datatype.clone(), expected_data.clone(), 2);
+        builder.write(&source_path).unwrap();
+    }
+    let source = backend.open(&source_path).unwrap();
+    assert_eq!(source.root().named_datatype("record").unwrap(), datatype);
+    let canonical = nested_record_bytes();
+    for name in ["typed", "inline"] {
+        let dataset = source.dataset(name).unwrap();
+        assert_eq!(dataset.datatype().unwrap(), datatype);
+        assert_eq!(dataset.read_raw().unwrap(), expected_data);
+        assert_eq!(
+            hdf5_pure_format::__private::serialize_datatype(&dataset.datatype().unwrap()).unwrap(),
+            canonical
+        );
+    }
+    if native_writer {
+        assert_eq!(
+            source.root().attr_datatypes().unwrap().get("inline"),
+            Some(&datatype)
+        );
+    }
+    hdf5_pure::repack_to_path(&source, &output_path, &RepackOptions::new()).unwrap();
+    source.close().unwrap();
+    let output = backend.open(&output_path).unwrap();
+    assert_eq!(output.root().named_datatype("record").unwrap(), datatype);
+    for name in ["typed", "inline"] {
+        let dataset = output.dataset(name).unwrap();
+        assert_eq!(dataset.datatype().unwrap(), datatype);
+        assert_eq!(dataset.read_raw().unwrap(), expected_data);
+        assert_eq!(
+            hdf5_pure_format::__private::serialize_datatype(&dataset.datatype().unwrap()).unwrap(),
+            canonical
+        );
+    }
+    output.close().unwrap();
+    for path in [&source_path, &output_path] {
+        let native = hdf5::File::open(path).unwrap();
+        let expected_type = hdf5::Datatype::from_type::<NestedRecord>()
+            .unwrap()
+            .to_descriptor()
+            .unwrap();
+        for name in ["typed", "inline"] {
+            let dataset = native.dataset(name).unwrap();
+            let dtype = dataset.dtype().unwrap();
+            assert_eq!(dtype.is_committed(), name == "typed");
+            assert_eq!(dtype.to_descriptor().unwrap(), expected_type);
+            assert_eq!(dataset.read_raw::<NestedRecord>().unwrap(), values);
+        }
+        if native_writer {
+            let attribute = native.attr("inline").unwrap();
+            assert!(!attribute.dtype().unwrap().is_committed());
+            assert_eq!(
+                attribute.dtype().unwrap().to_descriptor().unwrap(),
+                expected_type
+            );
+            assert_eq!(attribute.read_scalar::<NestedRecord>().unwrap(), values[0]);
+        }
+        native.close().unwrap();
+    }
+}
+
+#[test]
+#[cfg(target_endian = "little")]
+fn nested_committed_datatype_mismatch_reports_the_dataset() {
+    let mut builder = FileBuilder::new();
+    builder.commit_datatype("record", nested_record_type());
+    let Datatype::Compound { mut members, size } = nested_record_type() else {
+        panic!("expected compound fixture");
+    };
+    members[1].datatype = hdf5_pure::make_u32_type();
+    builder
+        .create_dataset("typed")
+        .with_raw_data(Datatype::Compound { members, size }, vec![0; 20], 1)
+        .with_committed_datatype("record");
+    let error = builder.finish().unwrap_err();
+    let Error::Format(actual) = error else {
+        panic!("expected CommittedDatatypeMismatch, got {error:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::CommittedDatatypeMismatch {
+            path: "record".into(),
+            user: "dataset \"typed\"".into(),
+        }
+    );
+}
+
+#[derive(hdf5::H5Type, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[cfg(target_endian = "little")]
+struct NestedRecord {
+    values: [[i32; 2]; 2],
+    tail: i32,
+}
+
+#[cfg(target_endian = "little")]
+fn nested_record_type() -> Datatype {
+    let inner = Datatype::Array {
+        base_type: Box::new(hdf5_pure::make_i32_type()),
+        dimensions: vec![2],
+    };
+    CompoundTypeBuilder::with_size(20)
+        .field(
+            "values",
+            0,
+            Datatype::Array {
+                base_type: Box::new(inner),
+                dimensions: vec![2],
+            },
+        )
+        .field("tail", 16, hdf5_pure::make_i32_type())
+        .build()
+        .unwrap()
+}
+
+#[cfg(target_endian = "little")]
+fn nested_record_bytes() -> Vec<u8> {
+    use test_util::datatype;
+    use test_util::datatype::Class;
+
+    let mut bytes = datatype::header(Class::COMPOUND, 3, [2, 0, 0], 20);
+    bytes.extend_from_slice(b"values\0\0");
+    bytes.extend(datatype::header(Class::ARRAY, 3, [0; 3], 16));
+    bytes.extend_from_slice(&[1, 2, 0, 0, 0]);
+    bytes.extend(datatype::header(Class::ARRAY, 3, [0; 3], 8));
+    bytes.extend_from_slice(&[1, 2, 0, 0, 0]);
+    let mut integer = datatype::header(Class::FIXED_POINT, 1, [8, 0, 0], 4);
+    integer.extend_from_slice(&[0, 0, 32, 0]);
+    bytes.extend_from_slice(&integer);
+    bytes.extend_from_slice(b"tail\0\x10");
+    bytes.extend(integer);
+    bytes
 }
