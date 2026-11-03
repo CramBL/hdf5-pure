@@ -1022,11 +1022,6 @@ fn add_variable_length_root_attribute_via_edit_session() {
 
 #[test]
 fn add_variable_length_group_attribute_then_remove_then_reset_in_one_commit() {
-    // A Set/Remove/Set sequence for the same name in one commit must leave
-    // only the final value, whether or not the intermediate states are
-    // variable-length — exercising `apply_compact_attr_ops`'s pending-VL-attr
-    // bookkeeping (a plain region edit alone cannot represent an unresolved
-    // variable-length attribute).
     let path = temp::temp_path("hdf5_pure_edit_vlen_group_attr_sequence.h5");
     let mut b = FileBuilder::new();
     let mut g = b.create_group("grp");
@@ -1070,11 +1065,6 @@ fn add_variable_length_group_attribute_then_remove_then_reset_in_one_commit() {
     );
 }
 
-/// A `Set` with a variable-length value must correctly drop a *fixed-size*
-/// on-disk attribute of the same name, not just an existing pending
-/// variable-length one: `apply_compact_attr_ops`'s `remove_attr_from_region`
-/// call is otherwise only exercised by the plain `Remove` op, never by a
-/// variable-length `Set` replacing a fixed-size value.
 #[test]
 fn set_variable_length_group_attribute_over_existing_fixed_attribute_in_one_commit() {
     let path = temp::temp_path("hdf5_pure_edit_vlen_group_attr_over_fixed.h5");
@@ -1099,8 +1089,6 @@ fn set_variable_length_group_attribute_over_existing_fixed_attribute_in_one_comm
 
     let file = File::open(&path).unwrap();
     let attrs = file.root().group("grp").unwrap().attrs().unwrap();
-    // Exactly one "fields" attribute survives, holding the new value — not a
-    // leftover fixed-size copy alongside a new variable-length one.
     assert_eq!(attrs.len(), 1);
     assert_eq!(
         attrs.get("fields"),
@@ -1111,11 +1099,7 @@ fn set_variable_length_group_attribute_over_existing_fixed_attribute_in_one_comm
     );
 }
 
-/// The compact-attribute budget check counts *pending* variable-length
-/// attributes alongside attributes already resolved into the region
-/// (`compact_attr_count(&out)? + pending_vl.len()`); exactly at the boundary
-/// (6 existing fixed + 2 new variable-length = 8 = `MAX_COMPACT_ATTRS`) must
-/// still succeed, with every value intact.
+// Six fixed-width attributes and two variable-length attributes fill the compact limit.
 #[test]
 fn add_variable_length_group_attributes_at_budget_boundary_in_one_commit() {
     let path = temp::temp_path("hdf5_pure_edit_vlen_group_attr_at_budget.h5");
@@ -1129,9 +1113,6 @@ fn add_variable_length_group_attributes_at_budget_boundary_in_one_commit() {
 
     {
         let session = File::open_rw(&path).unwrap();
-        // Two elements each. A single element would read back distinctly now
-        // that the reader keeps the written shape, but this case is about the
-        // budget boundary, and two elements per attribute is what reaches it.
         session
             .group("grp")
             .unwrap()
@@ -1173,11 +1154,7 @@ fn add_variable_length_group_attributes_at_budget_boundary_in_one_commit() {
     );
 }
 
-/// One variable-length attribute past the boundary above (6 existing fixed +
-/// 3 new variable-length = 9) sends the set to a fractal heap. Since the 6
-/// existing attributes alone are under the budget, this specifically exercises
-/// the `+ pending_vl.len()` term of the count: a regression there would leave the
-/// set compact, which is what the heap assertion catches.
+// Six fixed-width attributes and three variable-length attributes exceed the compact limit.
 #[test]
 fn add_variable_length_group_attributes_over_budget_use_a_heap() {
     let path = temp::temp_path("hdf5_pure_edit_vlen_group_attr_over_budget.h5");

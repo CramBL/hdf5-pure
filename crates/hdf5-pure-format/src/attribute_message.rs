@@ -476,6 +476,57 @@ impl AttributeMessage {
     }
 }
 
+/// An [`AttributeMessage`] paired with its encoded body for eight-byte addresses and lengths.
+///
+/// The message and body are immutable until consumed. Compact writers use the body directly.
+/// Dense writers use [`PreparedDenseAttrs::from_prepared`][dense] to prepare version 3 messages
+/// and heap geometry.
+///
+/// [dense]: crate::dense_attribute_write::PreparedDenseAttrs::from_prepared
+pub struct PreparedAttributeMessage {
+    message: AttributeMessage,
+    body: Vec<u8>,
+}
+
+impl PreparedAttributeMessage {
+    /// Serializes `message` with eight-byte addresses and lengths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoding errors documented by [`AttributeMessage::serialize`].
+    pub fn new(message: AttributeMessage) -> Result<Self, FormatError> {
+        let body = message.serialize(OffsetWidth::Eight, 8)?;
+        Ok(Self { message, body })
+    }
+
+    /// Returns the message used to encode the body.
+    pub fn message(&self) -> &AttributeMessage {
+        &self.message
+    }
+
+    /// Returns the body encoded by [`AttributeMessage::serialize`].
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Returns the message and its encoded body, consuming the preparation.
+    pub fn into_parts(self) -> (AttributeMessage, Vec<u8>) {
+        (self.message, self.body)
+    }
+
+    /// Returns the message and its version 3 body, reusing the encoded fields.
+    pub(crate) fn into_v3_parts(mut self) -> (AttributeMessage, Vec<u8>) {
+        // Version 3 adds the name character set after the version 2 prefix, as defined in
+        // "The Attribute Message" of the format specification, version 4.0.
+        if self.body[0] == VERSION_TWO {
+            self.body[0] = VERSION_THREE;
+            self.body
+                .insert(V1_V2_PREFIX_SIZE, name_character_set(CharacterSet::Ascii));
+        }
+        (self.message, self.body)
+    }
+}
+
 /// Decodes an attribute's datatype and dataspace fields, and resolves a field through `resolver`
 /// where the flags byte marks it as shared.
 ///

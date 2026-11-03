@@ -28,6 +28,103 @@ use test_util_hdf5::space_ownership::{self, SharedStorage};
 use test_util_hdf5::storage;
 
 #[rstest]
+#[case::compact(4)]
+#[case::dense(32)]
+#[case::large_dense(256)]
+fn ordered_attribute_batches_preserve_values_and_creation_indices(
+    #[case] added: usize,
+    #[values(Owner::Root, Owner::Group, Owner::Dataset)] owner: Owner,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("attribute-batch.h5");
+    create_fixture(&path, owner, AttrCreationOrder::Indexed, 8, 6, 1);
+    let mut expected = HashMap::new();
+    {
+        let file = File::open_rw(&path).unwrap();
+        owner.set_attribute(
+            &file,
+            &attr_name(0),
+            AttrValue::VarLenAsciiString("superseded".into()),
+        );
+        owner.set_attribute(&file, &attr_name(0), AttrValue::I64(71));
+        expected.insert(attr_name(0), AttrValue::I64(71));
+        for index in 1..=added {
+            let value = if index % 2 == 0 {
+                AttrValue::VarLenAsciiString(format!("value{index}"))
+            } else {
+                AttrValue::I64(i64::try_from(index).unwrap())
+            };
+            owner.set_attribute(&file, &attr_name(index), value.clone());
+            expected.insert(attr_name(index), value);
+        }
+        owner.set_attribute(
+            &file,
+            "transient",
+            AttrValue::VarLenAsciiString("removed".into()),
+        );
+        owner.remove_attribute(&file, "transient");
+        owner.set_attribute(&file, "tail", AttrValue::I64(99));
+        expected.insert("tail".into(), AttrValue::I64(99));
+        file.commit().unwrap();
+    }
+    let file = File::open(&path).unwrap();
+    assert_eq!(owner.attributes(&file), expected);
+    drop(file);
+    let (_, header, width) = read_header(&path, owner);
+    let info = header
+        .messages
+        .iter()
+        .find(|record| record.msg_type == MessageType::ATTRIBUTE_INFO)
+        .unwrap();
+    let info = AttributeInfoMessage::parse_with_offset_width(&info.data, width).unwrap();
+    assert_eq!(info.fractal_heap_address.is_some(), added + 2 > 8);
+    assert_eq!(
+        info.max_creation_index,
+        Some(u16::try_from(added + 3).unwrap())
+    );
+    let native = hdf5::File::open(&path).unwrap();
+    let location = owner.location(&native);
+    let mut actual_names = location.attr_names().unwrap();
+    actual_names.sort();
+    let mut expected_names: Vec<_> = expected.keys().cloned().collect();
+    expected_names.sort();
+    assert_eq!(actual_names, expected_names);
+    for index in 0..=added {
+        let name = attr_name(index);
+        assert_eq!(
+            location.attr_info(&name).unwrap().creation_order,
+            Some(u32::try_from(index).unwrap())
+        );
+        let attribute = location.attr(&name).unwrap();
+        if index != 0 && index % 2 == 0 {
+            assert_eq!(
+                attribute.read_scalar::<VarLenAscii>().unwrap().as_str(),
+                format!("value{index}")
+            );
+        } else {
+            assert_eq!(
+                attribute.read_scalar::<i64>().unwrap(),
+                if index == 0 {
+                    71
+                } else {
+                    i64::try_from(index).unwrap()
+                }
+            );
+        }
+    }
+    assert_eq!(
+        location.attr_info("tail").unwrap().creation_order,
+        Some(u32::try_from(added + 2).unwrap())
+    );
+    assert_eq!(
+        location.attr("tail").unwrap().read_scalar::<i64>().unwrap(),
+        99
+    );
+    drop(location);
+    native.close().unwrap();
+}
+
+#[rstest]
 #[case::default_at_max(8, 6, 7, false, false)]
 #[case::default_above_max(8, 6, 8, true, false)]
 #[case::custom_below_max(32, 24, 8, false, false)]
