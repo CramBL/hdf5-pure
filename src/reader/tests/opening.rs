@@ -72,8 +72,8 @@ fn resident_opening_preserves_complete_extension_values(
 }
 
 #[rstest]
-#[case::at_limit(31, true)]
-#[case::over_limit(32, false)]
+#[case::at_limit(32, true)]
+#[case::over_limit(33, false)]
 fn streaming_opening_preserves_v1_continuation_depth(#[case] depth: usize, #[case] readable: bool) {
     let fixture = Fixture::new(HeaderVersion::NestedOne(depth), 1);
     let file = File::from_source_with_options(

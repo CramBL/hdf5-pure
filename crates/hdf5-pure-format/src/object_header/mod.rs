@@ -160,8 +160,14 @@ impl ObjectHeader {
     /// `true` for `access_mode`.
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a continuation message of a version 2 header
-    /// ends inside its fields, and [`FormatError::UndefinedContinuationAddress`] if one stores
-    /// the undefined address.
+    /// ends inside its fields. Returns [`FormatError::UndefinedContinuationAddress`] if a
+    /// continuation body contains complete address and length fields and stores the undefined
+    /// address, in either header version.
+    ///
+    /// Returns [`FormatError::NestingDepthExceeded`] if a version 1 header exceeds 256 followed
+    /// continuation references or 32 continuation hops after the root, or if a version 2 header
+    /// exceeds 256 discovered continuation references. The parser counts repeated and zero-length
+    /// targets separately, including when filtering removes every message.
     pub fn parse_with_widths(
         data: &[u8],
         access_mode: AccessMode,
@@ -487,6 +493,7 @@ impl ObjectHeader {
 
 #[cfg(test)]
 mod tests {
+    mod v1_traversal;
     use rstest::rstest;
     use test_util::checksum::CHECKSUM;
     use test_util::image::Image;
