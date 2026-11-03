@@ -12,6 +12,43 @@ use crate::shared_message::DatatypeLocation;
 use super::*;
 
 #[rstest]
+#[case::ascii_small("label", 1)]
+#[case::unicode_small("étiquette", 1)]
+#[case::ascii_managed("label", 128)]
+#[case::unicode_managed("étiquette", 128)]
+#[case::ascii_huge("label", 70_000)]
+#[case::unicode_huge("étiquette", 70_000)]
+fn prepared_attribute_bodies_produce_canonical_dense_storage(#[case] name: &str, #[case] len: u32) {
+    let attribute = canonical_attribute(name, len);
+    let expected = dense_attrs_plan(
+        std::slice::from_ref(&attribute),
+        DenseAttrCreationOrder::Untracked,
+    )
+    .unwrap()
+    .build(StoredAddress::new(0x8000))
+    .unwrap();
+    let encoded = PreparedAttributeMessage::new(attribute.clone()).unwrap();
+    assert_eq!(
+        encoded.body(),
+        attribute.serialize(OffsetWidth::Eight, 8).unwrap()
+    );
+    let (messages, prepared) =
+        PreparedDenseAttrs::from_prepared(vec![encoded], DenseAttrCreationOrder::Untracked, [])
+            .unwrap();
+    assert_eq!(messages, vec![attribute]);
+    let actual = prepared
+        .finalize(
+            |reference| panic!("unexpected reference {reference:?}"),
+            |_| panic!("unexpected payload"),
+        )
+        .unwrap()
+        .build(StoredAddress::new(0x8000))
+        .unwrap();
+    assert_eq!(actual.attr_info_message, expected.attr_info_message);
+    assert_eq!(actual.blob, expected.blob);
+}
+
+#[rstest]
 #[case::managed(8)]
 #[case::huge(70_000)]
 fn prepared_clones_retain_shared_geometry_through_finalization(#[case] len: u32) {

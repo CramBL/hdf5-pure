@@ -68,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- `File::commit` reduces repeated header copying and attribute encoding in staged attribute batches, selecting compact or dense storage before rebuilding the header. Attribute operation errors are reported in staged order ([#1072](https://github.com/CramBL/hdf5-pure/pull/1072)).
 - `FileBuilder` encodes nested datatype metadata in one buffer, reducing temporary allocations and repeated copying. Array sizes are computed during encoding ([#1064](https://github.com/CramBL/hdf5-pure/pull/1064)).
 - In-place editing through `File::commit` and immediate appends reduces temporary memory for PAGE padding with bounded zero batches. Buffering, encoded metadata, and mirror allocations remain separate, and large padding writes can require more physical I/O calls ([#1053](https://github.com/CramBL/hdf5-pure/pull/1053)).
 - `File::commit` reduces repeated pending-list scans and individual free-list insertions during threshold admission of returned allocations in flat and PAGE files. Flat admission stops buffering original returns once a run is eligible, retaining capacity allocated before eligibility ([#1051](https://github.com/CramBL/hdf5-pure/pull/1051)).

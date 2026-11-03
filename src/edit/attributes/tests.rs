@@ -22,6 +22,9 @@ use crate::writer::FileBuilder;
 #[cfg(feature = "checksum")]
 use crate::{File, FileLocking, MemoryStrategy, PersistedFreeSpacePolicy};
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod allocation;
+mod batch;
 mod predecessors;
 
 #[rstest]
@@ -89,16 +92,21 @@ fn compact_overwrite_preserves_storage_above_the_stored_maximum() {
         value: AttrValue::I64(9),
     };
     let result = super::plan_attr_ops(&engine.opened_source(), &region, &[&operation]).unwrap();
-    assert!(matches!(result.attrs, EditedAttrs::Compact(pending) if pending.is_empty()));
+    let EditedAttrs::RebuildCompact(compact) = result.attrs else {
+        panic!("expected compact storage");
+    };
+    assert!(compact.fixups.is_empty());
     assert!(!result.replaces_dense_storage);
-    assert_eq!(super::compact_attr_count(&result.region).unwrap(), 2);
-    assert_eq!(&result.region[..kept.len()], kept);
-    let (kind, body, end) = result.region.next_message(kept.len()).unwrap().unwrap();
+    let mut result_region = result.region;
+    result_region.push_bytes(&compact.records);
+    assert_eq!(super::compact_attr_count(&result_region).unwrap(), 2);
+    assert_eq!(&result_region[..kept.len()], kept);
+    let (kind, body, end) = result_region.next_message(kept.len()).unwrap().unwrap();
     assert_eq!(kind, MessageType::ATTRIBUTE);
-    let changed = AttributeMessage::parse(&result.region[body..end], 8).unwrap();
+    let changed = AttributeMessage::parse(&result_region[body..end], 8).unwrap();
     assert_eq!(changed.name, "changed");
     assert_eq!(changed.raw_data, 9i64.to_le_bytes());
-    assert_eq!(result.region.props(), region.props());
+    assert_eq!(result_region.props(), region.props());
 }
 
 #[rstest]
@@ -157,8 +165,7 @@ fn compact_rebuild_rejects_invalid_creation_metadata(
             (
                 msg.name.clone(),
                 super::AttributeSlot {
-                    msg,
-                    body: Some(body),
+                    attribute: super::SlotAttribute::Stored { message: msg, body },
                     creation_index: Some(index),
                     collections: None,
                 },

@@ -1186,7 +1186,14 @@ fn a_truncated_prefix_with_optional_blocks_is_rejected(#[case] cut: usize) {
 #[test]
 fn a_new_compact_attribute_takes_the_next_creation_index() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1)], 2);
-    let out = edit::attributes::set_attr_in_region(&region, "gamma", &AttrValue::I64(5)).unwrap();
+    let out = edit::attributes::edit_compact_region(
+        &region,
+        &[edit::attributes::AttrOp::Set {
+            name: "gamma".into(),
+            value: AttrValue::I64(5),
+        }],
+    )
+    .unwrap();
     assert_eq!(
         walk_attrs(&out),
         vec![
@@ -1271,7 +1278,14 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
     };
     let source = OhRegion::new([records(1, false), vec![0xCD; 2]].concat(), props);
 
-    let out = edit::attributes::set_attr_in_region(&source, "beta", &AttrValue::I64(2)).unwrap();
+    let out = edit::attributes::edit_compact_region(
+        &source,
+        &[edit::attributes::AttrOp::Set {
+            name: "beta".into(),
+            value: AttrValue::I64(2),
+        }],
+    )
+    .unwrap();
 
     assert_eq!(out.props(), props);
     assert_eq!(
@@ -1297,7 +1311,14 @@ fn an_overwritten_compact_attribute_keeps_its_creation_index() {
         edit::attributes::attr_creation_index(&region, "alpha").unwrap(),
         Some(0)
     );
-    let out = edit::attributes::set_attr_in_region(&region, "alpha", &AttrValue::I64(9)).unwrap();
+    let out = edit::attributes::edit_compact_region(
+        &region,
+        &[edit::attributes::AttrOp::Set {
+            name: "alpha".into(),
+            value: AttrValue::I64(9),
+        }],
+    )
+    .unwrap();
     assert_eq!(
         walk_attrs(&out),
         vec![
@@ -1318,7 +1339,13 @@ fn an_overwritten_compact_attribute_keeps_its_creation_index() {
 #[test]
 fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1), ("gamma", 2)], 3);
-    let after = edit::attributes::remove_attr_from_region(&region, "gamma", true).unwrap();
+    let after = edit::attributes::edit_compact_region(
+        &region,
+        &[edit::attributes::AttrOp::Remove {
+            name: "gamma".into(),
+        }],
+    )
+    .unwrap();
     assert_eq!(
         walk_attrs(&after),
         vec![
@@ -1332,8 +1359,14 @@ fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
         "the highest index still in use is 1, but the counter is 3"
     );
 
-    let out =
-        edit::attributes::put_attr_message(&after, "delta", &attr_body("delta", 1), None).unwrap();
+    let out = edit::attributes::edit_compact_region(
+        &after,
+        &[edit::attributes::AttrOp::Set {
+            name: "delta".into(),
+            value: AttrValue::I64(1),
+        }],
+    )
+    .unwrap();
     assert_eq!(
         edit::attributes::attr_creation_index(&out, "delta").unwrap(),
         Some(3)

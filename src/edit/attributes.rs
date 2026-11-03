@@ -5,7 +5,8 @@ use std::num::NonZeroU64;
 use std::ops::Range;
 
 use hdf5_pure_format::__private::{
-    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedDenseAttrs, RecordSplice,
+    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedAttributeMessage,
+    PreparedDenseAttrs, RecordSplice,
 };
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
@@ -17,7 +18,7 @@ use crate::attribute_policy::AttributeStorage;
 use crate::attribute_request::AttributeName;
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
-use crate::file_writer::{DenseAttrCreationOrder, LENGTH_SIZE};
+use crate::file_writer::DenseAttrCreationOrder;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -235,24 +236,7 @@ impl WriteEngine {
         attrs: EditedAttrs,
     ) -> Result<(), Error> {
         match attrs {
-            EditedAttrs::Compact(pending) => {
-                for pending in pending {
-                    let PendingVlAttr {
-                        mut msg,
-                        collections,
-                        creation_index,
-                    } = pending;
-                    let addrs = self.place_vl_collections(&collections)?;
-                    type_builders::patch_vl_refs(&mut msg.raw_data, &addrs);
-                    *region = put_attr_message(
-                        region,
-                        &msg.name,
-                        &msg.serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?,
-                        creation_index,
-                    )?;
-                }
-                Ok(())
-            }
+            EditedAttrs::Compact => Ok(()),
             EditedAttrs::RebuildCompact(mut compact) => {
                 for CompactAttrFixup { range, collections } in compact.fixups {
                     let addrs = self.place_vl_collections(&collections)?;
@@ -283,20 +267,6 @@ pub(super) enum AttrOp {
     Remove { name: String },
 }
 
-/// A compact attribute whose global heap collections are placed during commit application.
-#[derive(Clone)]
-pub(super) struct PendingVlAttr {
-    /// The attribute message with placeholder global heap references.
-    msg: crate::attribute::AttributeMessage,
-    /// The global heap collections to allocate before patching the message.
-    collections: Vec<Vec<u8>>,
-    /// The existing creation index, when it must be preserved.
-    creation_index: Option<u16>,
-}
-
-/// Compact variable-length attributes prepared by [`apply_compact_attr_ops`].
-type PendingVlAttrs = Vec<PendingVlAttr>;
-
 /// Appends compact Attribute Info metadata if the region has inline attributes and no such message.
 ///
 /// Preserves an existing Attribute Info message, including one naming dense storage.
@@ -321,63 +291,6 @@ pub(super) fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> 
         region.push(MessageType::ATTRIBUTE_INFO, &body);
     }
     Ok(())
-}
-
-/// Applies compact attribute operations and prepares variable-length values for placement.
-///
-/// Applies fixed-size values directly to a copy of `region`. Collects variable-length values
-/// for [`WriteEngine::place_edited_attrs`] to resolve their heap addresses and append their
-/// records. Clears any earlier pending value with the same name before applying each operation.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if a required attribute is absent, a record cannot be
-/// rewritten, or an encoded attribute exceeds [`OBJECT_HEADER_MESSAGE_MAX`]. Propagates
-/// attribute encoding errors.
-fn apply_compact_attr_ops(
-    region: &OhRegion,
-    ops: &[&AttrOp],
-) -> Result<(OhRegion, PendingVlAttrs), Error> {
-    let mut out = region.clone();
-    let mut pending_vl: PendingVlAttrs = Vec::new();
-    for op in ops {
-        match op {
-            AttrOp::Set { name, value } => {
-                pending_vl.retain(|a| &a.msg.name != name);
-                if let Some(strings) = value.var_len_strings() {
-                    // Read the existing creation index before removing the record.
-                    let creation_index = attr_creation_index(&out, name)?;
-                    // A new attribute may have no inline record to remove.
-                    out = remove_attr_from_region(&out, name, false)?;
-                    let msg = AttributeName::try_from(name.as_str())?.build_value(value)?;
-                    if msg
-                        .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
-                        .len()
-                        > OBJECT_HEADER_MESSAGE_MAX
-                    {
-                        return Err(Error::EditUnsupported(
-                            "attribute is too large to encode in place",
-                        ));
-                    }
-                    pending_vl.push(PendingVlAttr {
-                        msg,
-                        collections: type_builders::build_global_heap_collections(strings),
-                        creation_index,
-                    });
-                } else {
-                    out = set_attr_in_region(&out, name, value)?;
-                }
-            }
-            AttrOp::Remove { name } => {
-                let before = pending_vl.len();
-                pending_vl.retain(|a| &a.msg.name != name);
-                if pending_vl.len() == before {
-                    out = remove_attr_from_region(&out, name, true)?;
-                }
-            }
-        }
-    }
-    Ok((out, pending_vl))
 }
 
 /// A rewritten header region and the attribute storage prepared for commit application.
@@ -455,15 +368,15 @@ impl IntoIterator for AttributePredecessors {
 
 /// Attribute storage prepared for commit application.
 ///
-/// Compact edits retain records in the header region or provide a complete encoded set.
+/// Compact edits combine retained inline records with prepared records to append.
 /// Dense edits provide a complete replacement set.
 #[derive(Clone)]
 pub(super) enum EditedAttrs {
-    /// Variable-length attributes to place and append as inline records.
-    Compact(PendingVlAttrs),
+    /// Inline records already present in the header region, with no pending placement.
+    Compact,
     /// A set to rebuild into a fresh fractal heap.
     Dense(DenseAttrEdit),
-    /// A complete inline set to append after patching new global heap references.
+    /// Inline records to append after patching new global heap references.
     RebuildCompact(CompactAttrEdit),
 }
 
@@ -488,7 +401,7 @@ struct CompactAttrFixup {
 impl Default for EditedAttrs {
     /// Creates a compact result with no pending placements.
     fn default() -> Self {
-        Self::Compact(Vec::new())
+        Self::Compact
     }
 }
 
@@ -544,8 +457,9 @@ pub(super) struct DenseAttrEdit {
 
 /// Prepares attribute edits and selects compact or dense storage for the result.
 ///
-/// Compact edits preserve records of attributes whose names are absent from `ops`.
-/// New variable-length values are placed during commit application.
+/// Applies operations in staged order and reports the first operation error. Compact edits
+/// preserve records of attributes whose names are absent from `ops`. New variable-length
+/// values are placed during commit application.
 /// Retains parsed original reference-bearing values in [`AttrEdits::predecessors`] for
 /// collection analysis.
 ///
@@ -579,35 +493,7 @@ pub(super) fn plan_attr_ops(
         AttributeStorage::Compact
     };
     if current == AttributeStorage::Compact {
-        // Detect oversized values before attempting compact editing.
-        let mut oversized = false;
-        for op in ops {
-            if let AttrOp::Set { name, value } = op {
-                oversized |= AttributeName::try_from(name.as_str())?
-                    .build_value(value)?
-                    .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
-                    .len()
-                    > OBJECT_HEADER_MESSAGE_MAX;
-            }
-        }
-        if !oversized {
-            let previous_count = compact_attr_count(region)?;
-            let (out, pending_vl) = apply_compact_attr_ops(region, ops)?;
-            if policy.select(
-                current,
-                previous_count,
-                compact_attr_count(&out)? + pending_vl.len(),
-                true,
-            ) == AttributeStorage::Compact
-            {
-                return Ok(AttrEdits {
-                    region: out,
-                    attrs: EditedAttrs::Compact(pending_vl),
-                    predecessors: AttributePredecessors::compact(src, region, ops),
-                    replaces_dense_storage: false,
-                });
-            }
-        }
+        return plan_compact_batch(src, region, ops, policy);
     }
 
     // Reject flagged records before resolving attributes for a dense rebuild.
@@ -627,19 +513,20 @@ pub(super) fn plan_attr_ops(
         let first_edit = touched.insert(name.as_str());
         match op {
             AttrOp::Set { name, value } => {
-                let msg = AttributeName::try_from(name.as_str())?.build_value(value)?;
+                let attribute = SlotAttribute::Prepared(PreparedAttributeMessage::new(
+                    AttributeName::try_from(name.as_str())?.build_value(value)?,
+                )?);
                 let collections = value
                     .var_len_strings()
                     .map(type_builders::build_global_heap_collections);
                 match set.get_mut(name) {
                     // Preserve the existing creation index on replacement.
                     Some(slot) => {
-                        let original = std::mem::replace(&mut slot.msg, msg);
+                        let original = std::mem::replace(&mut slot.attribute, attribute);
                         if first_edit {
-                            predecessors.push(original);
+                            predecessors.push(original.into_message());
                         }
                         slot.collections = collections;
-                        slot.body = None;
                     }
                     None => {
                         let creation_index = tracked.then_some(next_index);
@@ -649,10 +536,9 @@ pub(super) fn plan_attr_ops(
                         set.insert(
                             name.clone(),
                             AttributeSlot {
-                                msg,
+                                attribute,
                                 collections,
                                 creation_index,
-                                body: None,
                             },
                         );
                     }
@@ -661,7 +547,7 @@ pub(super) fn plan_attr_ops(
             AttrOp::Remove { name } => {
                 if let Some(original) = set.remove(name) {
                     if first_edit {
-                        predecessors.push(original.msg);
+                        predecessors.push(original.attribute.into_message());
                     }
                 } else {
                     return Err(Error::EditUnsupported("attribute to remove was not found"));
@@ -678,24 +564,31 @@ pub(super) fn plan_attr_ops(
             replaces_dense_storage: dense_now,
         });
     }
-    if policy.select(current, previous_count, set.len(), true) == AttributeStorage::Compact {
-        for slot in set.values_mut() {
-            if slot.body.is_none() {
-                slot.body = Some(
-                    slot.msg
-                        .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?,
-                );
-            }
-        }
-        if set.values().all(|slot| {
-            slot.body
-                .as_ref()
-                .is_some_and(|body| body.len() <= OBJECT_HEADER_MESSAGE_MAX)
-        }) {
-            return prepare_compact_attrs(region, set, next_index, dense_now, predecessors);
-        }
+    if policy.select(current, previous_count, set.len(), true) == AttributeStorage::Compact
+        && set
+            .values()
+            .all(|slot| slot.attribute.body().len() <= OBJECT_HEADER_MESSAGE_MAX)
+    {
+        return prepare_compact_attrs(region, set, next_index, dense_now, predecessors);
     }
-    let region = strip_attr_messages(region)?;
+    prepare_dense_attrs(region, set, next_index, dense_now, predecessors)
+}
+
+/// Prepares the complete dense set from stored or encoded attribute values.
+///
+/// # Errors
+///
+/// Returns the metadata, geometry, and update errors of [`PreparedDenseAttrs::from_prepared`].
+/// Propagates record parsing and attribute encoding errors.
+fn prepare_dense_attrs(
+    original: &OhRegion,
+    set: BTreeMap<String, AttributeSlot>,
+    next_index: u16,
+    replaces_dense_storage: bool,
+    predecessors: AttributePredecessors,
+) -> Result<AttrEdits, Error> {
+    let tracked = original.layout().tracks_creation_order();
+    let region = strip_attr_messages(original)?;
     let mut attrs = Vec::with_capacity(set.len());
     let mut indices = Vec::with_capacity(set.len());
     let mut vl = Vec::new();
@@ -710,7 +603,7 @@ pub(super) fn plan_attr_ops(
             "a tracked object's attribute must carry a creation index"
         );
         indices.push(slot.creation_index.unwrap_or_default());
-        attrs.push(slot.msg);
+        attrs.push(slot.attribute.into_prepared()?);
     }
     let creation = if tracked {
         DenseAttrCreationOrder::Tracked {
@@ -721,42 +614,539 @@ pub(super) fn plan_attr_ops(
     } else {
         DenseAttrCreationOrder::Untracked
     };
-    // Reference patching supports inline attributes, so reject conversions of repointable values.
-    if !dense_now {
-        for attr in &attrs {
-            if crate::reference_patch::attribute_references_are_repointable(&attr.datatype) {
+    let (attrs, prepared) = PreparedDenseAttrs::from_prepared(
+        attrs,
+        creation,
+        vl.iter().map(|(attribute, _)| DenseAttrFixup::GlobalHeap {
+            attribute: *attribute,
+        }),
+    )?;
+    Ok(AttrEdits {
+        region,
+        attrs: EditedAttrs::Dense(DenseAttrEdit {
+            set: DenseAttrSet {
+                attrs,
+                prepared: Some(prepared),
+            },
+            vl,
+        }),
+        predecessors,
+        replaces_dense_storage,
+    })
+}
+
+/// Applies ordered edits before selecting storage and reconstructing compact records.
+///
+/// # Errors
+///
+/// Returns the operation and storage-planning errors documented by [`plan_attr_ops`].
+fn plan_compact_batch(
+    src: &(impl OriginalSource + ?Sized),
+    original: &OhRegion,
+    ops: &[&AttrOp],
+    policy: AttributePolicy,
+) -> Result<AttrEdits, Error> {
+    if ops.is_empty() {
+        let count = compact_attr_count(original)?;
+        if policy.select(AttributeStorage::Compact, count, count, true) == AttributeStorage::Compact
+        {
+            return Ok(AttrEdits {
+                region: original.clone(),
+                attrs: EditedAttrs::default(),
+                predecessors: AttributePredecessors::default(),
+                replaces_dense_storage: false,
+            });
+        }
+    }
+    let mut batch = CompactBatch::parse(original)?;
+    let previous_count = batch.count;
+    for (order, op) in ops.iter().enumerate() {
+        batch.apply(op, order)?;
+    }
+    let predecessors = AttributePredecessors::compact(src, original, ops);
+    let compact = batch.slots.iter().all(|slot| match &slot.value {
+        CompactValue::Prepared { attribute, .. } => {
+            attribute.body().len() <= OBJECT_HEADER_MESSAGE_MAX
+        }
+        _ => true,
+    });
+    if !batch.oversized
+        && policy.select(
+            AttributeStorage::Compact,
+            previous_count,
+            batch.count,
+            compact,
+        ) == AttributeStorage::Compact
+    {
+        return batch.into_compact(predecessors);
+    }
+    batch.into_replacement(src, policy, previous_count, predecessors)
+}
+
+/// Original record ranges and the latest staged value of each attribute name.
+///
+/// Creation indexes are updated as operations are applied. Unchanged original records are copied
+/// during reconstruction, and new global heap references are patched during placement.
+struct CompactBatch<'a> {
+    original: &'a OhRegion,
+    records: Vec<CompactRecord>,
+    names: BTreeMap<String, usize>,
+    slots: Vec<CompactSlot>,
+    /// The number of live records using each creation index.
+    indices: BTreeMap<u16, usize>,
+    counter: Option<u16>,
+    /// Whether an operation assigned a new creation index.
+    assigned: bool,
+    /// Whether any staged value requires the full attribute-decoding path.
+    oversized: bool,
+    count: usize,
+    /// The start of trailing bytes after the final complete record.
+    tail: usize,
+}
+
+impl<'a> CompactBatch<'a> {
+    /// Parses record boundaries and indexes attribute names and creation indexes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for malformed records or flagged attributes.
+    /// Propagates attribute-name parsing errors.
+    fn parse(original: &'a OhRegion) -> Result<Self, Error> {
+        let mut batch = Self {
+            original,
+            records: Vec::new(),
+            names: BTreeMap::new(),
+            slots: Vec::new(),
+            indices: BTreeMap::new(),
+            counter: find_attribute_info(original)?
+                .and_then(|(_, _, info)| info.max_creation_index),
+            assigned: false,
+            oversized: false,
+            count: 0,
+            tail: 0,
+        };
+        let mut position = 0;
+        while let Some((kind, body, end)) = original.next_message(position)? {
+            let slot = if kind == MessageType::ATTRIBUTE {
+                let name = parse_compact_attr_name(original, position, body, end)?;
+                let index = match batch.names.get(&name).copied() {
+                    Some(index) => index,
+                    None => {
+                        let index = batch.slots.len();
+                        batch.names.insert(name, index);
+                        batch.slots.push(CompactSlot {
+                            value: CompactValue::Original,
+                            indices: Vec::new(),
+                            count: 0,
+                            touched: false,
+                            order: 0,
+                        });
+                        index
+                    }
+                };
+                let slot = &mut batch.slots[index];
+                if let Some(creation) = original.creation_index(position) {
+                    slot.indices.push(creation);
+                    *batch.indices.entry(creation).or_default() += 1;
+                }
+                slot.count += 1;
+                batch.count += 1;
+                Some(index)
+            } else {
+                None
+            };
+            batch.records.push(CompactRecord {
+                range: position..end,
+                kind,
+                body,
+                slot,
+            });
+            position = end;
+        }
+        batch.tail = position;
+        Ok(batch)
+    }
+
+    /// Applies an operation and retains its position for final record ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a removed name is absent or creation indexes are
+    /// exhausted. Propagates attribute-name and encoding errors.
+    fn apply(&mut self, operation: &AttrOp, order: usize) -> Result<(), Error> {
+        let name = match operation {
+            AttrOp::Set { name, .. } | AttrOp::Remove { name } => name,
+        };
+        let prepared = match operation {
+            AttrOp::Set { name, value } => Some((
+                PreparedAttributeMessage::new(
+                    AttributeName::try_from(name.as_str())?.build_value(value)?,
+                )?,
+                value
+                    .var_len_strings()
+                    .map(type_builders::build_global_heap_collections),
+            )),
+            AttrOp::Remove { .. } => None,
+        };
+        let index = match self.names.get(name).copied() {
+            Some(index) => index,
+            None => {
+                if prepared.is_none() {
+                    return Err(Error::EditUnsupported("attribute to remove was not found"));
+                }
+                let index = self.slots.len();
+                self.names.insert(name.clone(), index);
+                self.slots.push(CompactSlot {
+                    value: CompactValue::Removed,
+                    indices: Vec::new(),
+                    count: 0,
+                    touched: false,
+                    order,
+                });
+                index
+            }
+        };
+        let slot = &mut self.slots[index];
+        match prepared {
+            Some((attribute, collections)) => {
+                self.oversized |= attribute.body().len() > OBJECT_HEADER_MESSAGE_MAX;
+                if slot.count == 0 && self.original.layout().tracks_creation_order() {
+                    let derived = self
+                        .indices
+                        .last_key_value()
+                        .map_or(0, |(&index, _)| u32::from(index) + 1);
+                    let index = u32::from(self.counter.unwrap_or(0)).max(derived).narrow_or_else(|| {
+                        Error::EditUnsupported("an object has assigned every attribute creation index its header can record")
+                    })?;
+                    self.counter = Some(bump_creation_index(index)?);
+                    self.assigned = true;
+                    slot.indices.push(index);
+                    *self.indices.entry(index).or_default() += 1;
+                } else if slot.indices.len() > 1 {
+                    for index in slot.indices.drain(1..) {
+                        if let Some(count) = self.indices.get_mut(&index) {
+                            *count -= 1;
+                            if *count == 0 {
+                                self.indices.remove(&index);
+                            }
+                        }
+                    }
+                }
+                self.count = self.count - slot.count + 1;
+                slot.count = 1;
+                slot.value = CompactValue::Prepared {
+                    attribute: Box::new(attribute),
+                    collections,
+                };
+            }
+            None => {
+                if slot.count == 0 {
+                    return Err(Error::EditUnsupported("attribute to remove was not found"));
+                }
+                self.count -= slot.count;
+                slot.count = 0;
+                slot.value = CompactValue::Removed;
+                for index in slot.indices.drain(..) {
+                    if let Some(count) = self.indices.get_mut(&index) {
+                        *count -= 1;
+                        if *count == 0 {
+                            self.indices.remove(&index);
+                        }
+                    }
+                }
+            }
+        }
+        slot.touched = true;
+        slot.order = order;
+        Ok(())
+    }
+
+    /// Copies unchanged records and prepares the surviving replacements for inline storage.
+    ///
+    /// # Errors
+    ///
+    /// Propagates Attribute Info record-splicing errors.
+    fn into_compact(self, predecessors: AttributePredecessors) -> Result<AttrEdits, Error> {
+        let Self {
+            original,
+            records,
+            names: _,
+            slots,
+            indices: _,
+            counter,
+            assigned,
+            oversized: _,
+            count: _,
+            tail,
+        } = self;
+        let layout = original.layout();
+        let mut bytes = Vec::with_capacity(original.len());
+        let mut has_info = false;
+        for CompactRecord {
+            range,
+            kind,
+            body,
+            slot,
+        } in records
+        {
+            if slot.is_some_and(|index| slots[index].touched) {
+                continue;
+            }
+            if kind == MessageType::ATTRIBUTE_INFO
+                && assigned
+                && let Ok(mut info) = AttributeInfoMessage::parse_with_offset_width(
+                    &original[body..range.end],
+                    crate::file_writer::OFFSET_WIDTH,
+                )
+            {
+                info.max_creation_index = counter;
+                info.indexes_creation_order |= layout.indexes_creation_order();
+                let splice =
+                    RecordSplice::first(layout, &original[range], MessageType::ATTRIBUTE_INFO)?
+                        .ok_or_else(|| {
+                            FormatError::Internal(
+                                "a parsed Attribute Info record is absent from its source range"
+                                    .into(),
+                            )
+                        })?;
+                splice.replace_body_into(
+                    &mut bytes,
+                    &info.serialize(crate::file_writer::OFFSET_WIDTH),
+                )?;
+                has_info = true;
+            } else {
+                bytes.extend_from_slice(&original[range]);
+            }
+        }
+        let mut slots: Vec<_> = slots
+            .into_iter()
+            .filter(|slot| slot.touched && slot.count != 0)
+            .collect();
+        slots.sort_unstable_by_key(|slot| slot.order);
+        let mut records = Vec::new();
+        let mut fixups = Vec::new();
+        for slot in slots {
+            let CompactValue::Prepared {
+                attribute,
+                collections,
+            } = slot.value
+            else {
+                return Err(FormatError::Internal(
+                    "a changed compact attribute has no prepared value".into(),
+                )
+                .into());
+            };
+            layout.write_record(
+                &mut records,
+                MessageType::ATTRIBUTE,
+                MessageFlags::NONE,
+                slot.indices.first().copied().unwrap_or(0),
+                attribute.body(),
+            );
+            if let Some(collections) = collections {
+                let end = records.len();
+                let start = end - attribute.message().raw_data.len();
+                fixups.push(CompactAttrFixup {
+                    range: start..end,
+                    collections,
+                });
+            }
+        }
+        records.extend_from_slice(&original[tail..]);
+        let mut region = original.with_bytes(bytes);
+        if assigned && !has_info {
+            let info = AttributeInfoMessage {
+                max_creation_index: counter,
+                indexes_creation_order: layout.indexes_creation_order(),
+                fractal_heap_address: None,
+                btree_name_index_address: None,
+                btree_creation_order_address: None,
+            };
+            region.push(
+                MessageType::ATTRIBUTE_INFO,
+                &info.serialize(crate::file_writer::OFFSET_WIDTH),
+            );
+        }
+        Ok(AttrEdits {
+            region,
+            attrs: EditedAttrs::RebuildCompact(CompactAttrEdit { records, fixups }),
+            predecessors,
+            replaces_dense_storage: false,
+        })
+    }
+
+    /// Decodes original attributes and prepares the final compact or dense set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if dense storage would prevent reference patching.
+    /// Propagates source-read, attribute parsing, and storage-planning errors.
+    fn into_replacement(
+        self,
+        src: &(impl OriginalSource + ?Sized),
+        policy: AttributePolicy,
+        previous_count: usize,
+        predecessors: AttributePredecessors,
+    ) -> Result<AttrEdits, Error> {
+        let (mut stored, original_next) = read_attr_slots(src, self.original)?;
+        let mut slots: Vec<_> = self.slots.into_iter().map(Some).collect();
+        let mut set = BTreeMap::new();
+        for (name, index) in self.names {
+            let slot = slots[index].take().ok_or_else(|| {
+                FormatError::Internal("a compact attribute slot was consumed twice".into())
+            })?;
+            let slot = match slot.value {
+                CompactValue::Original => stored.remove(&name).ok_or_else(|| {
+                    FormatError::Internal("an original compact attribute is absent".into())
+                })?,
+                CompactValue::Prepared {
+                    attribute,
+                    collections,
+                } => AttributeSlot {
+                    attribute: SlotAttribute::Prepared(*attribute),
+                    collections,
+                    creation_index: slot.indices.first().copied(),
+                },
+                CompactValue::Removed => continue,
+            };
+            set.insert(name, slot);
+        }
+        if set.is_empty() {
+            return Ok(AttrEdits {
+                region: strip_attr_messages(self.original)?,
+                attrs: EditedAttrs::default(),
+                predecessors,
+                replaces_dense_storage: false,
+            });
+        }
+        let next = self.counter.unwrap_or(original_next).max(original_next);
+        if policy.select(AttributeStorage::Compact, previous_count, set.len(), true)
+            == AttributeStorage::Compact
+            && set
+                .values()
+                .all(|slot| slot.attribute.body().len() <= OBJECT_HEADER_MESSAGE_MAX)
+        {
+            return prepare_compact_attrs(self.original, set, next, false, predecessors);
+        }
+        for slot in set.values() {
+            if crate::reference_patch::attribute_references_are_repointable(
+                &slot.attribute.message().datatype,
+            ) {
                 return Err(Error::EditUnsupported(
                     REFERENCE_ATTRIBUTE_WOULD_LEAVE_THE_HEADER,
                 ));
             }
         }
+        prepare_dense_attrs(self.original, set, next, false, predecessors)
     }
-    Ok(AttrEdits {
-        region,
-        attrs: EditedAttrs::Dense(DenseAttrEdit {
-            set: DenseAttrSet::new(
-                attrs,
-                creation,
-                vl.iter().map(|(attribute, _)| DenseAttrFixup::GlobalHeap {
-                    attribute: *attribute,
-                }),
-            )?,
-            vl,
-        }),
-        predecessors,
-        replaces_dense_storage: dense_now,
-    })
+}
+
+/// A complete original record and its optional attribute-name slot.
+struct CompactRecord {
+    range: Range<usize>,
+    kind: MessageType,
+    body: usize,
+    slot: Option<usize>,
+}
+
+/// The latest value and live creation indexes for one attribute name.
+struct CompactSlot {
+    value: CompactValue,
+    indices: Vec<u16>,
+    /// The number of live records for the name, including duplicate original records.
+    count: usize,
+    touched: bool,
+    /// The position of the latest operation on this name.
+    order: usize,
+}
+
+/// An unchanged original value, a prepared replacement, or a removed attribute.
+enum CompactValue {
+    Original,
+    Prepared {
+        attribute: Box<PreparedAttributeMessage>,
+        collections: Option<Vec<Vec<u8>>>,
+    },
+    Removed,
+}
+
+/// Applies compact edits for tests whose values require no global heap placement.
+///
+/// # Errors
+///
+/// Returns the parsing and operation errors of [`CompactBatch::parse`] and
+/// [`CompactBatch::apply`]. Returns [`FormatError::Internal`] if the prepared result requires
+/// heap placement. Propagates record-preparation errors from [`CompactBatch::into_compact`].
+#[cfg(test)]
+pub(super) fn edit_compact_region(region: &OhRegion, ops: &[AttrOp]) -> Result<OhRegion, Error> {
+    let mut batch = CompactBatch::parse(region)?;
+    for (order, operation) in ops.iter().enumerate() {
+        batch.apply(operation, order)?;
+    }
+    let mut edit = batch.into_compact(AttributePredecessors::default())?;
+    let EditedAttrs::RebuildCompact(compact) = edit.attrs else {
+        return Err(FormatError::Internal("a compact batch returned dense storage".into()).into());
+    };
+    if !compact.fixups.is_empty() {
+        return Err(
+            FormatError::Internal("a compact test batch requires heap placement".into()).into(),
+        );
+    }
+    edit.region.push_bytes(&compact.records);
+    Ok(edit.region)
 }
 
 /// One attribute, its creation index, and any global heap collections awaiting placement.
 struct AttributeSlot {
-    msg: crate::attribute::AttributeMessage,
+    attribute: SlotAttribute,
     /// Global heap collections to place for a new variable-length value.
     collections: Option<Vec<Vec<u8>>>,
     /// The attribute's creation index, or `None` for an untracked object.
     creation_index: Option<u16>,
-    /// The encoded message body, absent after an addition or replacement.
-    body: Option<Vec<u8>>,
+}
+
+/// A decoded attribute paired with its stored or prepared body.
+enum SlotAttribute {
+    Prepared(PreparedAttributeMessage),
+    Stored {
+        message: AttributeMessage,
+        body: Vec<u8>,
+    },
+}
+
+impl SlotAttribute {
+    fn message(&self) -> &AttributeMessage {
+        match self {
+            Self::Prepared(attribute) => attribute.message(),
+            Self::Stored { message, .. } => message,
+        }
+    }
+
+    fn body(&self) -> &[u8] {
+        match self {
+            Self::Prepared(attribute) => attribute.body(),
+            Self::Stored { body, .. } => body,
+        }
+    }
+
+    fn into_message(self) -> AttributeMessage {
+        match self {
+            Self::Prepared(attribute) => attribute.into_parts().0,
+            Self::Stored { message, .. } => message,
+        }
+    }
+
+    /// Returns the prepared encoding, serializing a stored message when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoding errors documented by [`PreparedAttributeMessage::new`].
+    fn into_prepared(self) -> Result<PreparedAttributeMessage, FormatError> {
+        match self {
+            Self::Prepared(attribute) => Ok(attribute),
+            Self::Stored { message, .. } => PreparedAttributeMessage::new(message),
+        }
+    }
 }
 
 /// Reads compact and dense attributes while retaining their encoded bodies.
@@ -835,13 +1225,15 @@ fn read_attr_slots(
     let mut slots = BTreeMap::new();
     for (index, (msg, body)) in existing.attrs.into_iter().zip(bodies).enumerate() {
         let slot = AttributeSlot {
-            msg,
-            body: Some(body),
+            attribute: SlotAttribute::Stored { message: msg, body },
             collections: None,
             creation_index: existing.creation.index_at(index),
         };
-        if let Some(previous) = slots.insert(slot.msg.name.clone(), slot) {
-            return Err(FormatError::DuplicateAttributeName(previous.msg.name).into());
+        if let Some(previous) = slots.insert(slot.attribute.message().name.clone(), slot) {
+            return Err(FormatError::DuplicateAttributeName(
+                previous.attribute.into_message().name,
+            )
+            .into());
         }
     }
     Ok((slots, next))
@@ -871,9 +1263,7 @@ fn prepare_compact_attrs(
     let mut fixups = Vec::new();
     let mut indices = BTreeSet::new();
     for slot in slots.into_values() {
-        let body = slot.body.ok_or_else(|| {
-            FormatError::Internal("a compact attribute has no prepared body".into())
-        })?;
+        let body = slot.attribute.body();
         if body.len() > OBJECT_HEADER_MESSAGE_MAX {
             return Err(Error::EditUnsupported(
                 "attribute is too large to encode in place",
@@ -905,13 +1295,15 @@ fn prepare_compact_attrs(
             MessageType::ATTRIBUTE,
             MessageFlags::NONE,
             creation_index,
-            &body,
+            body,
         );
         if let Some(collections) = slot.collections {
             let end = records.len();
-            let start = end.checked_sub(slot.msg.raw_data.len()).ok_or_else(|| {
-                FormatError::Internal("a compact attribute payload exceeds its record".into())
-            })?;
+            let start = end
+                .checked_sub(slot.attribute.message().raw_data.len())
+                .ok_or_else(|| {
+                    FormatError::Internal("a compact attribute payload exceeds its record".into())
+                })?;
             fixups.push(CompactAttrFixup {
                 range: start..end,
                 collections,
@@ -1138,29 +1530,6 @@ pub(crate) fn attribute_info_is_dense(body: &[u8]) -> bool {
     }
 }
 
-/// Replaces attributes named `name` with a compact record for `value`.
-///
-/// Preserves the existing creation index or assigns the next one for a new attribute.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if a record cannot be rewritten, creation indexes are
-/// exhausted, or the encoded body exceeds [`OBJECT_HEADER_MESSAGE_MAX`]. Propagates attribute
-/// encoding errors.
-///
-/// # Panics
-///
-/// Panics in debug builds if `value` requires global heap storage.
-pub(super) fn set_attr_in_region(
-    region: &OhRegion,
-    name: &str,
-    value: &AttrValue,
-) -> Result<OhRegion, Error> {
-    let body = encode_attr_body(name, value)?;
-    let keep = attr_creation_index(region, name)?;
-    put_attr_message(region, name, &body, keep)
-}
-
 /// Returns the first matching attribute's creation index.
 ///
 /// Returns `None` if the header is untracked or no matching record exists.
@@ -1169,6 +1538,7 @@ pub(super) fn set_attr_in_region(
 ///
 /// Returns [`Error::EditUnsupported`] if a record extends past the region or an Attribute
 /// record has nonzero flags. Returns [`Error::Format`] if a name cannot be parsed.
+#[cfg(test)]
 pub(super) fn attr_creation_index(region: &OhRegion, name: &str) -> Result<Option<u16>, Error> {
     if !region.layout().tracks_creation_order() {
         return Ok(None);
@@ -1270,142 +1640,6 @@ fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
     Ok(info.serialize(crate::file_writer::OFFSET_WIDTH))
 }
 
-/// Replaces attributes named `name` with one compact record and updates creation metadata.
-///
-/// `keep` preserves an existing creation index. `None` assigns the next unused index and
-/// updates each parsed Attribute Info message's counter. Untracked headers use index zero.
-/// Preserves unrelated bytes and the metadata of rewritten Attribute Info records.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if a record extends past the region, an Attribute record
-/// has nonzero flags, or creation indexes are exhausted. Propagates attribute-name parsing
-/// and record-splicing errors.
-///
-/// # Panics
-///
-/// Panics if `body` is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
-pub(super) fn put_attr_message(
-    region: &OhRegion,
-    name: &str,
-    body: &[u8],
-    keep: Option<u16>,
-) -> Result<OhRegion, Error> {
-    let layout = region.layout();
-    let (creation_index, new_max) = if layout.tracks_creation_order() {
-        match keep {
-            Some(index) => (index, None),
-            None => {
-                let index = next_attr_creation_index(region)?;
-                let next = index.checked_add(1).ok_or(Error::EditUnsupported(
-                    "an object has assigned every attribute creation index its header can record",
-                ))?;
-                (index, Some(next))
-            }
-        }
-    } else {
-        (0, None)
-    };
-    let new_msg = layout.record_with_creation_index(
-        MessageType::ATTRIBUTE,
-        MessageFlags::NONE,
-        creation_index,
-        body,
-    );
-
-    let mut out = Vec::with_capacity(region.len() + new_msg.len());
-    let mut p = 0;
-    while let Some((msg_type, msg_body, body_end)) = region.next_message(p)? {
-        match msg_type {
-            MessageType::ATTRIBUTE
-                if parse_compact_attr_name(region, p, msg_body, body_end)? == name =>
-            {
-                p = body_end;
-                continue;
-            }
-            // Re-encode the body to update or add the creation counter.
-            MessageType::ATTRIBUTE_INFO if new_max.is_some() => {
-                if let Ok(mut info) = AttributeInfoMessage::parse_with_offset_width(
-                    &region[msg_body..body_end],
-                    crate::file_writer::OFFSET_WIDTH,
-                ) {
-                    info.max_creation_index = new_max;
-                    info.indexes_creation_order |= layout.indexes_creation_order();
-                    let encoded = info.serialize(crate::file_writer::OFFSET_WIDTH);
-                    let splice = RecordSplice::first(
-                        layout,
-                        &region[p..body_end],
-                        MessageType::ATTRIBUTE_INFO,
-                    )?
-                    .ok_or_else(|| {
-                        FormatError::Internal(
-                            "a parsed Attribute Info record is absent from its source range"
-                                .to_owned(),
-                        )
-                    })?;
-                    splice.replace_body_into(&mut out, &encoded)?;
-                    p = body_end;
-                    continue;
-                }
-                out.extend_from_slice(&region[p..body_end]);
-            }
-            _ => out.extend_from_slice(&region[p..body_end]),
-        }
-        p = body_end;
-    }
-    out.extend_from_slice(&new_msg);
-    if p < region.len() {
-        out.extend_from_slice(&region[p..]);
-    }
-    let mut out = region.with_bytes(out);
-    // Add Attribute Info metadata if the counter has no existing record.
-    if new_max.is_some() && find_attribute_info(&out)?.is_none() {
-        let body = compact_attribute_info_body(&out)?;
-        out.push(MessageType::ATTRIBUTE_INFO, &body);
-    }
-    Ok(out)
-}
-
-/// Copies the region without Attribute records named `name`.
-///
-/// Preserves unrelated records, creation metadata, and any trailing gap.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if a record extends past the region, an Attribute record
-/// has nonzero flags, or `required` is true and the attribute is absent. Returns
-/// [`Error::Format`] if an attribute name cannot be parsed.
-pub(super) fn remove_attr_from_region(
-    region: &OhRegion,
-    name: &str,
-    required: bool,
-) -> Result<OhRegion, Error> {
-    let mut out = Vec::with_capacity(region.len());
-    let mut p = 0;
-    let mut removed = false;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        let mut skip = false;
-        if msg_type == MessageType::ATTRIBUTE {
-            let attr_name = parse_compact_attr_name(region, p, body, body_end)?;
-            if attr_name == name {
-                skip = true;
-                removed = true;
-            }
-        }
-        if !skip {
-            out.extend_from_slice(&region[p..body_end]);
-        }
-        p = body_end;
-    }
-    if p < region.len() {
-        out.extend_from_slice(&region[p..]);
-    }
-    if !removed && required {
-        return Err(Error::EditUnsupported("attribute to remove was not found"));
-    }
-    Ok(region.with_bytes(out))
-}
-
 /// Counts inline Attribute records in a compact region.
 ///
 /// # Errors
@@ -1462,15 +1696,18 @@ pub(super) fn parse_compact_attr_name(
 /// # Panics
 ///
 /// Panics in debug builds if `value` requires global heap storage.
+#[cfg(test)]
 fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
-    // Compact planning stages variable-length values separately before reaching this encoder.
     debug_assert!(
         value.var_len_strings().is_none(),
-        "a variable-length attribute must be intercepted by apply_compact_attr_ops before reaching encode_attr_message"
+        "a compact test value must not require global heap placement"
     );
     let body = AttributeName::try_from(name)?
         .build_value(value)?
-        .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?;
+        .serialize(
+            crate::file_writer::OFFSET_WIDTH,
+            crate::file_writer::LENGTH_SIZE,
+        )?;
     if body.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "group attribute is too large to encode in place",

@@ -14,7 +14,7 @@ use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::attribute_message::AttributeMessage;
+use crate::attribute_message::{AttributeMessage, PreparedAttributeMessage};
 use crate::btree::v2::AttributeRecord;
 use crate::btree::v2::BTREE_V2_ATTRIBUTE_CREATION_ORDER;
 use crate::btree::v2::BTREE_V2_ATTRIBUTE_NAME;
@@ -150,7 +150,48 @@ impl PreparedDenseAttrs {
         creation: DenseAttrCreationOrder,
         fixups: impl IntoIterator<Item = DenseAttrFixup>,
     ) -> Result<Self, FormatError> {
-        let plan = dense_attrs_plan(attrs, creation)?;
+        Self::with_plan(attrs, dense_attrs_plan(attrs, creation)?, fixups)
+    }
+
+    /// Reuses encoded messages when preparing dense storage.
+    ///
+    /// Returns the original messages in input order alongside the prepared storage.
+    /// Converts version 2 bodies to version 3 by inserting the name character set. Other
+    /// encoded fields are reused. Attribute numbers in `fixups` refer to positions in
+    /// `prepared`, with the same requirements as [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the creation-metadata and geometry errors documented by [`dense_attrs_plan`]
+    /// and the update errors documented by [`Self::new`].
+    pub fn from_prepared(
+        prepared: Vec<PreparedAttributeMessage>,
+        creation: DenseAttrCreationOrder,
+        fixups: impl IntoIterator<Item = DenseAttrFixup>,
+    ) -> Result<(Vec<AttributeMessage>, Self), FormatError> {
+        let (attrs, bodies): (Vec<_>, Vec<_>) = prepared
+            .into_iter()
+            .map(PreparedAttributeMessage::into_v3_parts)
+            .unzip();
+        let encoded = EncodedDenseAttrs::with_bodies(&attrs, creation, bodies)?;
+        let plan = encoded.into_plan()?;
+        let prepared = Self::with_plan(&attrs, plan, fixups)?;
+        Ok((attrs, prepared))
+    }
+
+    /// Prepares deferred updates within the encoded plan.
+    ///
+    /// The caller supplies the same messages in `attrs` that were encoded in `plan`, in the
+    /// same order. Attribute numbers in `fixups` refer to that order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the deferred-update errors documented by [`Self::new`].
+    fn with_plan(
+        attrs: &[AttributeMessage],
+        plan: DenseAttrPlan,
+        fixups: impl IntoIterator<Item = DenseAttrFixup>,
+    ) -> Result<Self, FormatError> {
         let mut prepared = Vec::new();
         let mut seen = BTreeSet::new();
         for fixup in fixups {
@@ -246,7 +287,7 @@ impl PreparedDenseAttrs {
     /// use hdf5_pure_format::{CharacterSet, Datatype, FormatError, StringPadding};
     /// use hdf5_pure_format::__private::{
     ///     AttributeMessage, Dataspace, DataspaceType, DatatypeLocation,
-    ///     DenseAttrCreationOrder, DenseAttrFixup, PreparedDenseAttrs,
+    ///     DenseAttrCreationOrder, DenseAttrFixup, PreparedAttributeMessage, PreparedDenseAttrs,
     /// };
     ///
     /// let attribute = AttributeMessage {
@@ -265,11 +306,13 @@ impl PreparedDenseAttrs {
     ///     raw_data: b"a".to_vec(),
     ///     datatype_location: DatatypeLocation::Inline,
     /// };
-    /// let prepared = PreparedDenseAttrs::new(
-    ///     &[attribute],
+    /// let (attributes, prepared) = PreparedDenseAttrs::from_prepared(
+    ///     vec![PreparedAttributeMessage::new(attribute)?],
     ///     DenseAttrCreationOrder::Untracked,
     ///     [DenseAttrFixup::Payload { attribute: 0 }],
     /// )?;
+    /// assert_eq!(attributes[0].name, "label");
+    /// assert_eq!(attributes[0].raw_data, b"a");
     /// let reserved = prepared.blob_len();
     /// let ready = prepared.finalize(
     ///     |reference| panic!("unexpected reference {reference:?}"),
@@ -379,7 +422,8 @@ impl PreparedDenseAttrs {
 
 /// A deferred change to one attribute's encoded bytes.
 ///
-/// Attribute positions refer to the input of [`PreparedDenseAttrs::new`].
+/// Attribute positions refer to the input order of [`PreparedDenseAttrs::new`] or
+/// [`PreparedDenseAttrs::from_prepared`].
 #[derive(Clone, Copy, Debug)]
 pub enum DenseAttrFixup {
     /// Replaces the committed datatype's file address.
@@ -445,174 +489,15 @@ pub struct DenseAttrPlan {
 /// next creation index. Returns [`FormatError::Internal`] if the counts of attributes and
 /// tracked indexes differ. Returns [`FormatError::DenseAttributeHeapTooLarge`] if managed
 /// storage exceeds the heap address space, [`FormatError::ValueTooLargeForPlatform`] if
-/// storage does not fit a `usize` or an attribute count or position does not fit a `u32`, or
-/// [`FormatError::OffsetOverflow`] if the total length exceeds `u64`.
+/// storage does not fit a [`usize`], [`FormatError::ValueTooLargeForRepresentation`] if an
+/// attribute count or position does not fit a [`u32`], or [`FormatError::OffsetOverflow`] if
+/// the total length exceeds [`u64`].
 /// Propagates other managed-heap planning errors.
 pub fn dense_attrs_plan(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
 ) -> Result<DenseAttrPlan, FormatError> {
-    let EncodedDenseAttrs {
-        attributes,
-        order,
-        corder_order,
-        next_index,
-        indexed,
-    } = EncodedDenseAttrs::new(attrs, creation)?;
-
-    // Huge object IDs start at one in attribute order. The header stores the last assigned ID.
-    // `H5HF__huge_new_id` pre-increments the counter (`H5HFhuge.c`, HDF5 2.2.0).
-    let mut huge_id_of: Vec<Option<u64>> = vec![None; attrs.len()];
-    let mut huge_count: usize = 0;
-    for (slot, attribute) in huge_id_of.iter_mut().zip(&attributes) {
-        if attribute.bytes.len() > DENSE_ATTR_MAX_MANAGED_OBJECT {
-            huge_count += 1;
-            *slot = Some(huge_count as u64);
-        }
-    }
-    let huge_total: u64 = attributes
-        .iter()
-        .zip(&huge_id_of)
-        .filter(|(_, id)| id.is_some())
-        .map(|(s, _)| s.bytes.len() as u64)
-        .sum();
-
-    // Only managed objects occupy the doubling table, so only they are planned
-    // into it. `managed_sizes` holds their sizes in attribute order, and the
-    // plan's object indices are indices into that order.
-    let managed_sizes: Vec<u64> = attributes
-        .iter()
-        .zip(&huge_id_of)
-        .filter(|(_, id)| id.is_none())
-        .map(|(s, _)| s.bytes.len() as u64)
-        .collect();
-    let managed_plan = ManagedHeapPlan::attributes(&managed_sizes, DENSE_ATTR_OFFSET_WIDTH)
-        .map_err(dense_attr_heap_error)?;
-
-    // The writer uses the same widths for every version 2 B-tree header.
-    let bthd_size =
-        format_boundary::btree_v2_header_size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
-    debug_assert_eq!(
-        bthd_size,
-        4 + 1
-            + 1
-            + 4
-            + 2
-            + 2
-            + 1
-            + 1
-            + DENSE_ATTR_OFFSET_SIZE as usize
-            + 2
-            + DENSE_ATTR_LENGTH_SIZE as usize
-            + 4
-    );
-
-    // The writer plans every index before computing subsequent offsets from the node counts.
-    // Each fixed-size leaf holds multiple records, so additional levels suffice for larger sets.
-    let name_plan = BTreeV2Plan::new(
-        BTREE_V2_ATTRIBUTE_NAME,
-        attrs.len(),
-        DENSE_ATTR_BTREE_RECORD,
-        BTREE_V2_NODE_SIZE,
-        DENSE_ATTR_OFFSET_WIDTH,
-    )
-    .expect("a 512-byte node holds 29 name records, enough to plan any count");
-    let corder_plan = indexed.then(|| {
-        BTreeV2Plan::new(
-            BTREE_V2_ATTRIBUTE_CREATION_ORDER,
-            attrs.len(),
-            DENSE_ATTR_CORDER_BTREE_RECORD,
-            BTREE_V2_NODE_SIZE,
-            DENSE_ATTR_OFFSET_WIDTH,
-        )
-        .expect("a 512-byte node holds 38 creation-order records, enough to plan any count")
-    });
-    let huge_plan = (huge_count > 0).then(|| {
-        BTreeV2Plan::new(
-            BTREE_V2_HUGE_OBJECT,
-            huge_count,
-            DENSE_ATTR_HUGE_BTREE_RECORD,
-            BTREE_V2_NODE_SIZE,
-            DENSE_ATTR_OFFSET_WIDTH,
-        )
-        .expect("a 512-byte node holds 20 huge records, enough to plan any count")
-    });
-
-    // The blob contains the heap header, managed blocks, name index, optional creation-order
-    // index, and optional huge-object index and payloads, in that order. The offsets are
-    // relative to the heap address, and the total length is independent of that address.
-    let managed_off =
-        FractalHeapHeader::serialized_size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH) as u64;
-    let btree_off = managed_off + managed_plan.region_size();
-    let name_nodes_off = btree_off + bthd_size as u64;
-    let corder_bthd_off = name_nodes_off + name_plan.nodes_size();
-    let corder_nodes_off = corder_bthd_off
-        + if corder_plan.is_some() {
-            bthd_size as u64
-        } else {
-            0
-        };
-    let huge_bthd_off = corder_nodes_off + corder_plan.as_ref().map_or(0, BTreeV2Plan::nodes_size);
-    let huge_nodes_off = huge_bthd_off + bthd_size as u64;
-    let huge_data_off = huge_nodes_off + huge_plan.as_ref().map_or(0, BTreeV2Plan::nodes_size);
-    // With no huge objects the blob ends where the huge index would have begun.
-    // With them it ends past their bytes.
-    let total_len = if huge_count > 0 {
-        huge_data_off
-            .checked_add(huge_total)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: huge_data_off,
-                length: huge_total,
-            })?
-    } else {
-        huge_bthd_off
-    };
-
-    total_len.to_usize()?;
-
-    let block_lengths = core::iter::once(managed_off)
-        .chain(managed_plan.block_lengths())
-        .chain(
-            core::iter::once(&name_plan)
-                .chain(corder_plan.iter())
-                .chain(huge_plan.iter())
-                .flat_map(|tree| core::iter::once(bthd_size.to_u64()).chain(tree.block_lengths())),
-        )
-        .chain(
-            attributes
-                .iter()
-                .zip(&huge_id_of)
-                .filter(|(_, id)| id.is_some())
-                .map(|(attribute, _)| attribute.bytes.len().to_u64()),
-        )
-        .collect();
-
-    Ok(DenseAttrPlan {
-        attributes,
-        geometry: Arc::new(DenseAttrGeometry {
-            block_lengths,
-            huge_id_of,
-            huge_count,
-            huge_total,
-            managed_plan,
-            name_plan,
-            corder_plan,
-            huge_plan,
-            order,
-            corder_order,
-            next_index,
-            indexed,
-            managed_off,
-            btree_off,
-            name_nodes_off,
-            corder_bthd_off,
-            corder_nodes_off,
-            huge_bthd_off,
-            huge_nodes_off,
-            huge_data_off,
-            total_len,
-        }),
-    })
+    EncodedDenseAttrs::new(attrs, creation)?.into_plan()
 }
 
 impl DenseAttrPlan {
@@ -1080,6 +965,45 @@ impl EncodedDenseAttrs {
         attrs: &[AttributeMessage],
         creation: DenseAttrCreationOrder,
     ) -> Result<Self, FormatError> {
+        Self::encode(attrs, creation, |attribute| {
+            attribute.serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)
+        })
+    }
+
+    /// Pairs prepared version 3 bodies with their names and creation indexes.
+    ///
+    /// The caller supplies a matching body for each message in `attrs`, in the same order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if an attribute has no corresponding body.
+    /// Returns the metadata and position-conversion errors of [`Self::encode`].
+    fn with_bodies(
+        attrs: &[AttributeMessage],
+        creation: DenseAttrCreationOrder,
+        bodies: Vec<Vec<u8>>,
+    ) -> Result<Self, FormatError> {
+        let mut bodies = bodies.into_iter();
+        Self::encode(attrs, creation, |_| {
+            bodies.next().ok_or_else(|| {
+                FormatError::Internal("a prepared dense attribute has no encoded body".into())
+            })
+        })
+    }
+
+    /// Assigns creation indexes and index order while obtaining each body's bytes through `body`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the counts of attributes and tracked indexes differ.
+    /// Returns the metadata errors documented by [`dense_attrs_plan`] for repeated names or
+    /// indexes and inconsistent counters. Returns [`FormatError::ValueTooLargeForRepresentation`]
+    /// if an attribute count or position does not fit a [`u32`]. Propagates errors from `body`.
+    fn encode(
+        attrs: &[AttributeMessage],
+        creation: DenseAttrCreationOrder,
+        mut body: impl FnMut(&AttributeMessage) -> Result<Vec<u8>, FormatError>,
+    ) -> Result<Self, FormatError> {
         let (indices, next_index, indexed) = match creation {
             DenseAttrCreationOrder::Untracked => (None, None, false),
             DenseAttrCreationOrder::Tracked {
@@ -1115,7 +1039,7 @@ impl EncodedDenseAttrs {
                 None => position,
             };
             attributes.push(EncodedDenseAttribute {
-                bytes: attribute.serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)?,
+                bytes: body(attribute)?,
                 creation_index,
             });
             order.push((
@@ -1153,6 +1077,181 @@ impl EncodedDenseAttrs {
             corder_order: if indexed { corder_order } else { Vec::new() },
             next_index,
             indexed,
+        })
+    }
+
+    /// Plans heap blocks and indexes for the encoded attributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the heap-space, platform-size, and length errors documented by [`dense_attrs_plan`].
+    fn into_plan(self) -> Result<DenseAttrPlan, FormatError> {
+        let EncodedDenseAttrs {
+            attributes,
+            order,
+            corder_order,
+            next_index,
+            indexed,
+        } = self;
+        let count = attributes.len();
+
+        // Huge object IDs start at one in attribute order. The header stores the last assigned ID.
+        // `H5HF__huge_new_id` pre-increments the counter (`H5HFhuge.c`, HDF5 2.2.0).
+        let mut huge_id_of: Vec<Option<u64>> = vec![None; count];
+        let mut huge_count: usize = 0;
+        for (slot, attribute) in huge_id_of.iter_mut().zip(&attributes) {
+            if attribute.bytes.len() > DENSE_ATTR_MAX_MANAGED_OBJECT {
+                huge_count += 1;
+                *slot = Some(huge_count as u64);
+            }
+        }
+        let huge_total: u64 = attributes
+            .iter()
+            .zip(&huge_id_of)
+            .filter(|(_, id)| id.is_some())
+            .map(|(s, _)| s.bytes.len() as u64)
+            .sum();
+
+        // Only managed objects occupy the doubling table, so only they are planned
+        // into it. `managed_sizes` holds their sizes in attribute order, and the
+        // plan's object indices are indices into that order.
+        let managed_sizes: Vec<u64> = attributes
+            .iter()
+            .zip(&huge_id_of)
+            .filter(|(_, id)| id.is_none())
+            .map(|(s, _)| s.bytes.len() as u64)
+            .collect();
+        let managed_plan = ManagedHeapPlan::attributes(&managed_sizes, DENSE_ATTR_OFFSET_WIDTH)
+            .map_err(dense_attr_heap_error)?;
+
+        // The writer uses the same widths for every version 2 B-tree header.
+        let bthd_size =
+            format_boundary::btree_v2_header_size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
+        debug_assert_eq!(
+            bthd_size,
+            4 + 1
+                + 1
+                + 4
+                + 2
+                + 2
+                + 1
+                + 1
+                + DENSE_ATTR_OFFSET_SIZE as usize
+                + 2
+                + DENSE_ATTR_LENGTH_SIZE as usize
+                + 4
+        );
+
+        // The writer plans every index before computing subsequent offsets from the node counts.
+        // Each fixed-size leaf holds multiple records, so additional levels suffice for larger
+        // sets.
+        let name_plan = BTreeV2Plan::new(
+            BTREE_V2_ATTRIBUTE_NAME,
+            count,
+            DENSE_ATTR_BTREE_RECORD,
+            BTREE_V2_NODE_SIZE,
+            DENSE_ATTR_OFFSET_WIDTH,
+        )
+        .expect("a 512-byte node holds 29 name records, enough to plan any count");
+        let corder_plan = indexed.then(|| {
+            BTreeV2Plan::new(
+                BTREE_V2_ATTRIBUTE_CREATION_ORDER,
+                count,
+                DENSE_ATTR_CORDER_BTREE_RECORD,
+                BTREE_V2_NODE_SIZE,
+                DENSE_ATTR_OFFSET_WIDTH,
+            )
+            .expect("a 512-byte node holds 38 creation-order records, enough to plan any count")
+        });
+        let huge_plan = (huge_count > 0).then(|| {
+            BTreeV2Plan::new(
+                BTREE_V2_HUGE_OBJECT,
+                huge_count,
+                DENSE_ATTR_HUGE_BTREE_RECORD,
+                BTREE_V2_NODE_SIZE,
+                DENSE_ATTR_OFFSET_WIDTH,
+            )
+            .expect("a 512-byte node holds 20 huge records, enough to plan any count")
+        });
+
+        // The blob contains the heap header, managed blocks, name index, optional creation-order
+        // index, and optional huge-object index and payloads, in that order. The offsets are
+        // relative to the heap address, and the total length is independent of that address.
+        let managed_off =
+            FractalHeapHeader::serialized_size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)
+                as u64;
+        let btree_off = managed_off + managed_plan.region_size();
+        let name_nodes_off = btree_off + bthd_size as u64;
+        let corder_bthd_off = name_nodes_off + name_plan.nodes_size();
+        let corder_nodes_off = corder_bthd_off
+            + if corder_plan.is_some() {
+                bthd_size as u64
+            } else {
+                0
+            };
+        let huge_bthd_off =
+            corder_nodes_off + corder_plan.as_ref().map_or(0, BTreeV2Plan::nodes_size);
+        let huge_nodes_off = huge_bthd_off + bthd_size as u64;
+        let huge_data_off = huge_nodes_off + huge_plan.as_ref().map_or(0, BTreeV2Plan::nodes_size);
+        // With no huge objects the blob ends where the huge index would have begun.
+        // With them it ends past their bytes.
+        let total_len = if huge_count > 0 {
+            huge_data_off
+                .checked_add(huge_total)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: huge_data_off,
+                    length: huge_total,
+                })?
+        } else {
+            huge_bthd_off
+        };
+
+        total_len.to_usize()?;
+
+        let block_lengths = core::iter::once(managed_off)
+            .chain(managed_plan.block_lengths())
+            .chain(
+                core::iter::once(&name_plan)
+                    .chain(corder_plan.iter())
+                    .chain(huge_plan.iter())
+                    .flat_map(|tree| {
+                        core::iter::once(bthd_size.to_u64()).chain(tree.block_lengths())
+                    }),
+            )
+            .chain(
+                attributes
+                    .iter()
+                    .zip(&huge_id_of)
+                    .filter(|(_, id)| id.is_some())
+                    .map(|(attribute, _)| attribute.bytes.len().to_u64()),
+            )
+            .collect();
+
+        Ok(DenseAttrPlan {
+            attributes,
+            geometry: Arc::new(DenseAttrGeometry {
+                block_lengths,
+                huge_id_of,
+                huge_count,
+                huge_total,
+                managed_plan,
+                name_plan,
+                corder_plan,
+                huge_plan,
+                order,
+                corder_order,
+                next_index,
+                indexed,
+                managed_off,
+                btree_off,
+                name_nodes_off,
+                corder_bthd_off,
+                corder_nodes_off,
+                huge_bthd_off,
+                huge_nodes_off,
+                huge_data_off,
+                total_len,
+            }),
         })
     }
 }
