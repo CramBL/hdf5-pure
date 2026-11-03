@@ -30,6 +30,7 @@ use crate::edit::{MAX_LINK_GRAPH_NODES, UNDEF, WriteEngine};
 use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, REFERENCE_TO_A_MOVED_OBJECT};
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::object_graph::ObjectId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::OriginalSource;
 use crate::type_builders::ObjectRefTarget;
@@ -147,6 +148,8 @@ struct DatasetEdits {
     inplace_writes: Vec<InPlaceWrite>,
     moving_writes: Vec<DatasetRelocation>,
     write_targets: Vec<ObjectPathBuf>,
+    /// Collection candidates from original dataset attributes.
+    collections: CollectionCandidates,
 }
 
 /// Associates a relocating dataset edit with its parent group.
@@ -190,8 +193,8 @@ pub(super) struct PreparedTree {
     pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
     pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
-    /// Collection candidates parsed before writes, awaiting prospective-root reference analysis.
-    pub(super) deleted_collections: CollectionCandidates,
+    /// Attribute and deletion candidates awaiting reference analysis from the replacement root.
+    pub(super) collection_candidates: CollectionCandidates,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
 }
@@ -355,6 +358,7 @@ impl WriteEngine {
             inplace_writes: Vec::new(),
             moving_writes: Vec::new(),
             write_targets: Vec::new(),
+            collections: CollectionCandidates::default(),
         };
         self.prepare_value_writes(staged, &mut edits, &mut analysis)?;
         self.prepare_appends(staged, &mut edits, &mut analysis)?;
@@ -363,6 +367,7 @@ impl WriteEngine {
             inplace_writes,
             moving_writes,
             write_targets,
+            mut collections,
         } = edits;
         if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
             return Ok(CommitPlan::InPlace(inplace_writes));
@@ -377,7 +382,8 @@ impl WriteEngine {
             mut deleted_addrs,
             cross_copies,
         } = self.plan_dirty_groups(staged, moving_writes, &write_targets, &mut analysis)?;
-        let headers = self.prepare_group_headers(staged, &mut nodes, &mut analysis)?;
+        let headers =
+            self.prepare_group_headers(staged, &mut nodes, &mut analysis, &mut collections)?;
         moved_headers.extend(
             headers
                 .superseded_addrs
@@ -399,6 +405,7 @@ impl WriteEngine {
             moved_headers,
             &mut analysis,
         )?;
+        collections.extend(deleted_collections)?;
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
         }
@@ -412,7 +419,7 @@ impl WriteEngine {
             cross_copies,
             inplace_writes,
             deleted_free,
-            deleted_collections,
+            collection_candidates: collections,
             references,
         }))
     }
@@ -581,6 +588,10 @@ impl WriteEngine {
                 }
                 let region = Self::gather_oh_messages(&self.image(), addr, base)?;
                 let attributes = attributes::plan_attr_ops(&self.opened_source(), &region, &ops)?;
+                edits.collections.extend(analysis.attribute_collections(
+                    ObjectId::new(PhysicalAddress::new(addr)),
+                    attributes.predecessors,
+                )?)?;
 
                 edits.moving_writes.push(DatasetRelocation {
                     parent,
@@ -782,6 +793,7 @@ impl WriteEngine {
         staged: &StagedEdits,
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         analysis: &mut AnalysisPhase<'_>,
+        collections: &mut CollectionCandidates,
     ) -> Result<GroupHeaders, Error> {
         let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
         let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
@@ -832,6 +844,12 @@ impl WriteEngine {
             if let Some(ops) = attrs_by_group.get(key) {
                 let region = std::mem::take(&mut node.prepared.region);
                 let edits = attributes::plan_attr_ops(&self.opened_source(), &region, ops)?;
+                if let Some(replaced) = &node.prepared.replaces {
+                    collections.extend(analysis.attribute_collections(
+                        ObjectId::new(PhysicalAddress::new(replaced.address())),
+                        edits.predecessors,
+                    )?)?;
+                }
                 node.prepared.region = edits.region;
                 node.prepared.attrs = edits.attrs;
                 if edits.replaces_dense_storage

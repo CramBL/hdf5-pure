@@ -386,8 +386,71 @@ pub(super) struct AttrEdits {
     pub(super) region: OhRegion,
     /// Attribute storage awaiting placement.
     pub(super) attrs: EditedAttrs,
+    /// Parsed original reference-bearing attributes replaced or removed by the edit.
+    pub(super) predecessors: AttributePredecessors,
     /// Whether the edit replaces dense storage named by the pre-commit header.
     pub(super) replaces_dense_storage: bool,
+}
+
+/// Parsed original attributes replaced or removed by an edit.
+///
+/// Only attributes whose datatypes can hold file addresses are retained. Each original value
+/// is retained once across repeated operations on its name. Allocation ownership and reference
+/// absence require separate proofs.
+#[derive(Default)]
+pub(super) struct AttributePredecessors {
+    attributes: Vec<AttributeMessage>,
+}
+
+impl AttributePredecessors {
+    /// Collects original compact attributes for the names in `ops`.
+    ///
+    /// Skips shared records and attributes that cannot be parsed. Retains the parsed prefix
+    /// if record traversal fails.
+    fn compact(src: &(impl OriginalSource + ?Sized), region: &OhRegion, ops: &[&AttrOp]) -> Self {
+        let resolver =
+            SourceResolver::new(src, AccessMode::ReadWrite, crate::file_writer::WIDTHS, None);
+        let names: BTreeSet<&str> = ops
+            .iter()
+            .map(|op| match op {
+                AttrOp::Set { name, .. } | AttrOp::Remove { name } => name.as_str(),
+            })
+            .collect();
+        let mut predecessors = Self::default();
+        let mut position = 0;
+        while let Ok(Some(record)) = region.layout().next_message(region, position) {
+            if record.msg_type == MessageType::ATTRIBUTE
+                && !record.flags.is_shared()
+                && let Ok(name) = AttributeMessage::parse_name(record.body)
+                && names.contains(name.as_str())
+                && let Ok(attribute) = AttributeMessage::parse_resolving_with_length_width(
+                    record.body,
+                    crate::file_writer::LENGTH_WIDTH,
+                    &resolver,
+                )
+            {
+                predecessors.push(attribute);
+            }
+            position = record.body_range.end;
+        }
+        predecessors
+    }
+
+    /// Retains `attribute` if its datatype can hold a file address.
+    fn push(&mut self, attribute: AttributeMessage) {
+        if crate::datatype::datatype_holds_file_address(&attribute.datatype) {
+            self.attributes.push(attribute);
+        }
+    }
+}
+
+impl IntoIterator for AttributePredecessors {
+    type Item = AttributeMessage;
+    type IntoIter = std::vec::IntoIter<AttributeMessage>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.attributes.into_iter()
+    }
 }
 
 /// Attribute storage prepared for commit application.
@@ -483,6 +546,8 @@ pub(super) struct DenseAttrEdit {
 ///
 /// Compact edits preserve records of attributes whose names are absent from `ops`.
 /// New variable-length values are placed during commit application.
+/// Retains parsed original reference-bearing values in [`AttrEdits::predecessors`] for
+/// collection analysis.
 ///
 /// Uses [`AttributePolicy`] for count transitions and defaults. For a compact set, selects
 /// dense storage when its count increases above the maximum, the maximum is zero, or a surviving
@@ -538,6 +603,7 @@ pub(super) fn plan_attr_ops(
                 return Ok(AttrEdits {
                     region: out,
                     attrs: EditedAttrs::Compact(pending_vl),
+                    predecessors: AttributePredecessors::compact(src, region, ops),
                     replaces_dense_storage: false,
                 });
             }
@@ -552,7 +618,13 @@ pub(super) fn plan_attr_ops(
     let (mut set, mut next_index) = read_attr_slots(src, region)?;
     let previous_count = set.len();
     let tracked = region.layout().tracks_creation_order();
+    let mut predecessors = AttributePredecessors::default();
+    let mut touched = BTreeSet::new();
     for op in ops {
+        let name = match op {
+            AttrOp::Set { name, .. } | AttrOp::Remove { name } => name,
+        };
+        let first_edit = touched.insert(name.as_str());
         match op {
             AttrOp::Set { name, value } => {
                 let msg = AttributeName::try_from(name.as_str())?.build_value(value)?;
@@ -562,7 +634,10 @@ pub(super) fn plan_attr_ops(
                 match set.get_mut(name) {
                     // Preserve the existing creation index on replacement.
                     Some(slot) => {
-                        slot.msg = msg;
+                        let original = std::mem::replace(&mut slot.msg, msg);
+                        if first_edit {
+                            predecessors.push(original);
+                        }
                         slot.collections = collections;
                         slot.body = None;
                     }
@@ -584,7 +659,11 @@ pub(super) fn plan_attr_ops(
                 }
             }
             AttrOp::Remove { name } => {
-                if set.remove(name).is_none() {
+                if let Some(original) = set.remove(name) {
+                    if first_edit {
+                        predecessors.push(original.msg);
+                    }
+                } else {
                     return Err(Error::EditUnsupported("attribute to remove was not found"));
                 }
             }
@@ -595,6 +674,7 @@ pub(super) fn plan_attr_ops(
         return Ok(AttrEdits {
             region: strip_attr_messages(region)?,
             attrs: EditedAttrs::default(),
+            predecessors,
             replaces_dense_storage: dense_now,
         });
     }
@@ -612,7 +692,7 @@ pub(super) fn plan_attr_ops(
                 .as_ref()
                 .is_some_and(|body| body.len() <= OBJECT_HEADER_MESSAGE_MAX)
         }) {
-            return prepare_compact_attrs(region, set, next_index, dense_now);
+            return prepare_compact_attrs(region, set, next_index, dense_now, predecessors);
         }
     }
     let region = strip_attr_messages(region)?;
@@ -663,6 +743,7 @@ pub(super) fn plan_attr_ops(
             )?,
             vl,
         }),
+        predecessors,
         replaces_dense_storage: dense_now,
     })
 }
@@ -783,6 +864,7 @@ fn prepare_compact_attrs(
     slots: BTreeMap<String, AttributeSlot>,
     next: u16,
     replaces_dense_storage: bool,
+    predecessors: AttributePredecessors,
 ) -> Result<AttrEdits, Error> {
     let layout = original.layout();
     let mut records = Vec::new();
@@ -865,6 +947,7 @@ fn prepare_compact_attrs(
     Ok(AttrEdits {
         region,
         attrs: EditedAttrs::RebuildCompact(CompactAttrEdit { records, fixups }),
+        predecessors,
         replaces_dense_storage,
     })
 }
