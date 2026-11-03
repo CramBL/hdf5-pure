@@ -1,5 +1,11 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
+use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_space::__private::PageTransition;
+use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::allocation;
@@ -42,12 +48,114 @@ use crate::fill_value::FillPattern;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::filters::ChunkContext;
 use crate::image::WriteBuffering;
+use crate::message_type::MessageType;
+use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::source::MetadataCacheConfig;
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
+
+#[rstest]
+#[case::deferred_fixed(false, false)]
+#[case::deferred_extensible(true, false)]
+#[case::empty_fixed(false, true)]
+#[case::allocated_extensible(true, true)]
+fn empty_page_creation_reserves_only_defined_index_storage(
+    #[case] unlimited: bool,
+    #[case] allocated: bool,
+    #[values(false, true)] filtered: bool,
+    #[values(false, true)] persist: bool,
+    #[values(512, 4_096)] page: u64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty-created.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(persist)
+            .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
+    );
+    builder.write(&path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    engine.begin_page(PageType::Meta).unwrap();
+    engine.append(&[17; 17]).unwrap();
+    let before_eoa = engine.end_of_allocation().unwrap();
+    assert_ne!(before_eoa.get() % page, 0);
+    assert_eq!(
+        engine
+            .space
+            .plan_transition(before_eoa, PageType::Meta)
+            .unwrap(),
+        Some(PageTransition::Unchanged)
+    );
+    let before_sections: Vec<_> = engine.space.admitted_snapshot().sections().collect();
+    let before_writes = engine.image.issued_write_order().len();
+    let mut dataset = DatasetBuilder::new("d");
+    if allocated {
+        dataset.with_i32_data(&[]).with_shape(&[0]);
+    } else {
+        dataset.with_unallocated_storage_for::<i32>(&[0]);
+    }
+    dataset.with_chunks(&[4]);
+    if unlimited {
+        dataset.with_maxshape(&[MaxExtent::Unlimited]);
+    }
+    if filtered {
+        dataset.with_shuffle();
+    }
+    let mut flat = super::flatten_dataset(dataset, LinkNameBuf::new("d").unwrap()).unwrap();
+    let bytes = engine.build_chunked_dataset(&mut flat).unwrap();
+    let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
+    assert_eq!(
+        header
+            .messages
+            .iter()
+            .filter(|message| message.msg_type == MessageType::FILTER_PIPELINE)
+            .count(),
+        usize::from(filtered)
+    );
+    let layout = header
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let DataLayout::Chunked { index, .. } = DataLayout::parse(&layout.data, 8, 8).unwrap() else {
+        panic!("expected chunked storage");
+    };
+    let address = match index {
+        ChunkIndexLayout::FixedArray { address, .. } if !unlimited => address,
+        ChunkIndexLayout::ExtensibleArray { address, .. } if unlimited => address,
+        index => panic!("unexpected chunk index: {index:?}"),
+    };
+    let has_index = unlimited && allocated;
+    assert_eq!(address.is_some(), has_index);
+    if has_index {
+        assert!(engine.image.issued_write_order().len() > before_writes);
+    } else {
+        assert_eq!(engine.end_of_allocation().unwrap(), before_eoa);
+        assert_eq!(engine.image.issued_write_order().len(), before_writes);
+        assert_eq!(
+            engine
+                .space
+                .plan_transition(before_eoa, PageType::Meta)
+                .unwrap(),
+            Some(PageTransition::Unchanged)
+        );
+        assert_eq!(
+            engine
+                .space
+                .admitted_snapshot()
+                .sections()
+                .collect::<Vec<_>>(),
+            before_sections
+        );
+    }
+}
 
 #[rstest]
 #[case::empty_fixed(Creation::Fixed(0))]
