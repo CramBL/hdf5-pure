@@ -137,6 +137,37 @@ impl WriteEngine {
         Ok(complete)
     }
 
+    /// Adds physical collection addresses from an attribute's variable-length descriptors.
+    ///
+    /// Reads descriptor bytes at the file's address width and resolves stored addresses with
+    /// the file's address context. Returns `false` for a datatype whose file addresses the
+    /// analysis cannot locate, and `true` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`HeapReferences::of`] and
+    /// [`collect_element_collections`](Self::collect_element_collections). Previously collected
+    /// addresses remain in `referenced` on error.
+    pub(super) fn collect_parsed_attribute_collections(
+        &self,
+        attribute: &AttributeMessage,
+        referenced: &mut BTreeSet<u64>,
+    ) -> Result<bool, FormatError> {
+        Ok(match HeapReferences::of(&attribute.datatype)? {
+            HeapReferences::Absent => true,
+            HeapReferences::Located(slots) => {
+                self.collect_element_collections(
+                    &attribute.raw_data,
+                    attribute.dataspace.num_elements(),
+                    &slots,
+                    referenced,
+                )?;
+                true
+            }
+            HeapReferences::Unsupported => false,
+        })
+    }
+
     /// Adds the collections that a dataset's elements and fill value refer to.
     ///
     /// Returns `true` for an object without a data layout message, and `false` if the layout,
@@ -373,19 +404,7 @@ impl WriteEngine {
             Err(FormatError::UnresolvedSharedMessage(_)) => return Ok(false),
             Err(error) => return Err(error),
         };
-        Ok(match HeapReferences::of(&attribute.datatype)? {
-            HeapReferences::Absent => true,
-            HeapReferences::Located(slots) => {
-                self.collect_element_collections(
-                    &attribute.raw_data,
-                    attribute.dataspace.num_elements(),
-                    &slots,
-                    referenced,
-                )?;
-                true
-            }
-            HeapReferences::Unsupported => false,
-        })
+        self.collect_parsed_attribute_collections(&attribute, referenced)
     }
 
     /// Adds the collections that the variable-length references at `slots` in the first `count`
@@ -504,3 +523,6 @@ fn holds_unlocated_address(datatype: &Datatype) -> bool {
 /// The number of elements the analysis reads from a contiguous dataset at a time.
 // The literal is non-zero, and the `unwrap` in a constant is evaluated at compile time.
 const ELEMENT_BATCH: NonZeroU64 = NonZeroU64::new(4096).unwrap();
+
+#[cfg(test)]
+mod tests;
