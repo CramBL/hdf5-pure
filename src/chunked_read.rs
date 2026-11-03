@@ -690,12 +690,7 @@ pub fn read_chunked_data_from_source(
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
 ) -> Result<Vec<u8>, FormatError> {
-    let (dataspace, datatype, pipeline, fill) = (
-        spec.dataspace(),
-        spec.datatype(),
-        spec.pipeline(),
-        spec.fill(),
-    );
+    let (dataspace, pipeline, fill) = (spec.dataspace(), spec.pipeline(), spec.fill());
     let total_bytes = spec.byte_len()?;
     let Some(ChunkedPlan {
         flags,
@@ -712,7 +707,7 @@ pub fn read_chunked_data_from_source(
     }
     let index = ParsedChunkIndex::new(chunks, chunk_dims_u64, ds_dims)?;
     let mut assembly = WholeAssembly::new(&index, chunk_dims_u64, ds_dims, elem_size, fill)?;
-    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
+    let ctx = spec.chunk_context(chunk_dims_u64)?;
     let mut scratch = FilterScratch::new();
     for IndexedChunk { info, .. } in index.chunks() {
         let decoded = read_decoded_chunk(
@@ -771,7 +766,7 @@ impl<'a> ChunkedPlan<'a> {
         if index.address().is_none() {
             return Ok(None);
         }
-        let elem_size = crate::datatype::element_size_usize(spec.datatype())?;
+        let elem_size = spec.element_size_usize()?;
         let (_, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, spec.dataspace())?;
         bounded_chunk_len(chunk_dims, elem_size)?;
         let chunks = collect_chunks_for_layout_from_source(
@@ -965,12 +960,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
         let widths = *widths;
         let cache = *cache;
         let pass = *pass;
-        let (dataspace, datatype, pipeline, fill) = (
-            spec.dataspace(),
-            spec.datatype(),
-            spec.pipeline(),
-            spec.fill(),
-        );
+        let (dataspace, pipeline, fill) = (spec.dataspace(), spec.pipeline(), spec.fill());
         let RawReadStorage::Chunked {
             flags,
             chunk_dimensions,
@@ -982,7 +972,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
             ));
         };
 
-        let elem_size = crate::datatype::element_size_usize(datatype)?;
+        let elem_size = spec.element_size_usize()?;
         let (_, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
         bounded_chunk_len(chunk_dims, elem_size)?;
 
@@ -1013,7 +1003,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
         let selection = parsed_index.select(region)?;
         let mut assembly = SelectedAssembly::new(selection)?;
 
-        let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
+        let ctx = spec.chunk_context(chunk_dims_u64)?;
 
         // Coalesce over selected chunks to bound spans by the region's payloads.
         let mut spans = plan_chunk_spans(
@@ -1083,7 +1073,7 @@ impl<'a, 'spec> SelectedAssembly<'a, 'spec> {
     /// errors from reading the datatype's element size.
     fn new(selection: ChunkSelection<'a, 'spec>) -> Result<Self, FormatError> {
         let region = selection.region();
-        let element_size = crate::datatype::element_size_usize(region.spec().datatype())?;
+        let element_size = region.spec().element_size_usize()?;
         let chunk_dims = selection.chunk_dims();
         let chunk_bytes = bounded_chunk_len(chunk_dims, element_size)?;
         let length = region.byte_len();
@@ -1444,12 +1434,7 @@ pub fn read_chunked_data_cached_from_source(
     widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
-    let (dataspace, datatype, pipeline, fill) = (
-        spec.dataspace(),
-        spec.datatype(),
-        spec.pipeline(),
-        spec.fill(),
-    );
+    let (dataspace, pipeline, fill) = (spec.dataspace(), spec.pipeline(), spec.fill());
     let RawReadStorage::Chunked {
         flags,
         chunk_dimensions,
@@ -1465,7 +1450,7 @@ pub fn read_chunked_data_cached_from_source(
         return spec.unallocated_buffer();
     }
 
-    let elem_size = crate::datatype::element_size_usize(datatype)?;
+    let elem_size = spec.element_size_usize()?;
     let (_, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
     let total_bytes = spec.byte_len()?;
@@ -1491,7 +1476,7 @@ pub fn read_chunked_data_cached_from_source(
 
     let mut assembly = WholeAssembly::new(&parsed_index, chunk_dims_u64, ds_dims, elem_size, fill)?;
 
-    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
+    let ctx = spec.chunk_context(chunk_dims_u64)?;
 
     // Every chunk of the dataset is wanted here; what the plan leaves out is
     // whatever the chunk cache already holds from an earlier read.
@@ -1798,7 +1783,7 @@ pub(crate) fn visit_decoded_chunks_from_source(
         return Ok(());
     };
     sort_chunks_by_address(&mut chunks);
-    let ctx = ChunkContext::from_datatype(chunk_dims_u64, spec.datatype())?;
+    let ctx = spec.chunk_context(chunk_dims_u64)?;
     let mut scratch = FilterScratch::new();
     for chunk in &chunks {
         let decoded = read_decoded_chunk(
@@ -2174,12 +2159,7 @@ pub(crate) fn read_chunked_data_cached_framed(
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     let source = frame;
-    let (dataspace, datatype, pipeline, fill) = (
-        spec.dataspace(),
-        spec.datatype(),
-        spec.pipeline(),
-        spec.fill(),
-    );
+    let (dataspace, pipeline, fill) = (spec.dataspace(), spec.pipeline(), spec.fill());
     let RawReadStorage::Chunked {
         flags,
         chunk_dimensions,
@@ -2196,7 +2176,7 @@ pub(crate) fn read_chunked_data_cached_framed(
     }
 
     // Taken once as a proven-non-zero width; see the buffered reader above.
-    let elem_width = datatype.element_size()?;
+    let elem_width = spec.element_size()?;
     let elem_size = elem_width.narrow::<NonZeroUsize>()?;
     let (_, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
@@ -2223,7 +2203,7 @@ pub(crate) fn read_chunked_data_cached_framed(
 
     let mut assembly = WholeAssembly::new(&parsed_index, chunk_dims_u64, ds_dims, elem_size, fill)?;
 
-    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
+    let ctx = spec.chunk_context(chunk_dims_u64)?;
 
     let pass = cache.begin_pass();
     // One decoder for every chunk of the dataset; see `FilterScratch`.

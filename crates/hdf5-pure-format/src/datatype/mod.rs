@@ -5,6 +5,7 @@ use alloc::string::String;
 #[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 use core::num::NonZeroUsize;
 
 use byteorder::ByteOrder;
@@ -26,7 +27,9 @@ use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
 use crate::bytes;
+use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::width::OffsetWidth;
 
 pub(crate) mod byte_order;
 pub(crate) mod layout;
@@ -47,6 +50,64 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
             value: u64::from(datatype.type_size()),
             target: "usize",
         })
+}
+
+/// Returns the nonzero size in bytes of one value stored at `offset_width`.
+///
+/// Uses [`stored_type_size`] to account for variable-length references and array elements.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ZeroSizedDatatype`] if the type occupies zero bytes, or the errors of
+/// [`stored_type_size`] if an array size exceeds its encoded field.
+pub fn stored_element_size(
+    datatype: &Datatype,
+    offset_width: OffsetWidth,
+) -> Result<NonZeroU32, FormatError> {
+    NonZeroU32::new(stored_type_size(datatype, offset_width)?)
+        .map_or_else(|| datatype.element_size(), Ok)
+}
+
+/// Returns the size in bytes of one stored value, including zero-sized types.
+///
+/// Computes variable-length reference sizes at `offset_width` and array sizes from their base
+/// types and dimensions. Uses [`Datatype::type_size`] for other types, including declared
+/// compound record sizes.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte datatype size
+/// field.
+pub fn stored_type_size(
+    datatype: &Datatype,
+    offset_width: OffsetWidth,
+) -> Result<u32, FormatError> {
+    Ok(match datatype {
+        Datatype::VariableLength(_) => {
+            SEQUENCE_LENGTH_SIZE + u32::from(offset_width.get()) + HEAP_INDEX_SIZE
+        }
+        Datatype::Array {
+            base_type,
+            dimensions,
+        } => {
+            let size = stored_type_size(base_type, offset_width)?;
+            array_type_size(size, dimensions)?
+        }
+        _ => datatype.type_size(),
+    })
+}
+
+/// Returns the stored element size as a nonzero host-sized integer.
+///
+/// # Errors
+///
+/// Returns the errors of [`stored_element_size`], or [`FormatError::ValueTooLargeForPlatform`]
+/// if the size exceeds the target's [`usize`] range.
+pub fn stored_element_size_usize(
+    datatype: &Datatype,
+    offset_width: OffsetWidth,
+) -> Result<NonZeroUsize, FormatError> {
+    stored_element_size(datatype, offset_width)?.narrow()
 }
 
 /// Parses a datatype message body and returns the type and the number of bytes read.
@@ -430,22 +491,41 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 /// bytes, recording that complete property length in the class bit field. Writes an empty tag
 /// with a zero-length property. Preserves non-ASCII tag bytes.
 ///
-/// Encodes nested descriptions into the returned buffer. Computes array sizes while encoding
-/// their base types.
+/// Encodes nested descriptions into the returned buffer with eight-byte heap addresses.
+/// Computes array sizes while encoding their base types.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::OpaqueTagTooLong`] if an opaque tag exceeds 247 bytes, or
 /// [`FormatError::InvalidOpaqueTagByte`] if it contains a NUL byte, including in nested types.
+/// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field, or
+/// [`FormatError::ValueTooLargeForRepresentation`] if an array rank exceeds its one-byte field.
 pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
+    serialize_datatype_with_offset_width(datatype, OffsetWidth::Eight)
+}
+
+/// Serializes a datatype with `offset_width`-byte heap addresses in variable-length references.
+///
+/// Encodes nested types at the same offset width. Selects member-offset field widths from the
+/// declared compound size, and computes array sizes from their encoded base types.
+///
+/// # Errors
+///
+/// Returns the errors of [`serialize_datatype`] for invalid opaque tags, oversized array sizes,
+/// or oversized array ranks.
+pub fn serialize_datatype_with_offset_width(
+    datatype: &Datatype,
+    offset_width: OffsetWidth,
+) -> Result<Vec<u8>, FormatError> {
     let mut output = Vec::new();
-    serialize_datatype_into(&mut output, datatype)?;
+    serialize_datatype_into(&mut output, datatype, offset_width)?;
     Ok(output)
 }
 
 fn serialize_datatype_into(
     output: &mut Vec<u8>,
     datatype: &Datatype,
+    offset_width: OffsetWidth,
 ) -> Result<EncodedNode, FormatError> {
     let header = match datatype {
         Datatype::FixedPoint(datatype) => {
@@ -515,7 +595,11 @@ fn serialize_datatype_into(
                 [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
                 complex.size().get(),
             );
-            header.append_child(output, &Datatype::FloatingPoint(complex.component()))?;
+            header.append_child(
+                output,
+                &Datatype::FloatingPoint(complex.component()),
+                offset_width,
+            )?;
             header
         }
         Datatype::String {
@@ -565,9 +649,9 @@ fn serialize_datatype_into(
                 VARIABLE_LENGTH_CLASS,
                 DATATYPE_VERSION_ONE,
                 [bf0, bf1, 0],
-                16,
+                stored_element_size(datatype, offset_width)?.get(),
             );
-            header.append_child(output, kind.base_type())?;
+            header.append_child(output, kind.base_type(), offset_width)?;
             header
         }
         Datatype::Compound { size, members } => {
@@ -593,7 +677,7 @@ fn serialize_datatype_into(
                 // Byte offset (variable-width)
                 output.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
                 // Recursively serialize member datatype
-                header.append_child(output, &m.datatype)?;
+                header.append_child(output, &m.datatype, offset_width)?;
             }
             header
         }
@@ -617,7 +701,7 @@ fn serialize_datatype_into(
                 *size,
             );
             // Base type
-            header.append_child(output, base_type)?;
+            header.append_child(output, base_type, offset_width)?;
             // All names (null-terminated)
             for m in members {
                 output.extend_from_slice(m.name.as_bytes());
@@ -633,20 +717,20 @@ fn serialize_datatype_into(
             base_type,
             dimensions,
         } => {
+            let rank = dimensions.len().narrow_or_else::<u8, _>(|| {
+                FormatError::ValueTooLargeForRepresentation {
+                    value: dimensions.len().to_u64(),
+                    target: "u8",
+                }
+            })?;
             let mut header =
                 append_header(output, ARRAY_CLASS, DATATYPE_VERSION_THREE, [0, 0, 0], 0);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "array rank is written into the 1-byte dimensionality field; HDF5 caps array rank well below 255"
-            )]
-            output.push(dimensions.len() as u8);
-            let mut count = 1u32;
+            output.push(rank);
             for &d in dimensions {
                 output.extend_from_slice(&d.to_le_bytes());
-                count = count.saturating_mul(d);
             }
-            let child = header.append_child(output, base_type)?;
-            header.type_size = child.type_size.saturating_mul(count);
+            let child = header.append_child(output, base_type, offset_width)?;
+            header.type_size = array_type_size(child.type_size, dimensions)?;
             header
         }
         Datatype::Reference { size, ref_type } => {
@@ -740,8 +824,9 @@ impl DatatypeHeader {
         &mut self,
         output: &mut Vec<u8>,
         datatype: &Datatype,
+        offset_width: OffsetWidth,
     ) -> Result<EncodedNode, FormatError> {
-        let child = serialize_datatype_into(output, datatype)?;
+        let child = serialize_datatype_into(output, datatype, offset_width)?;
         self.version = self.version.max(child.version);
         Ok(child)
     }
@@ -1483,6 +1568,39 @@ fn build_dt_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
     LittleEndian::write_u32(&mut buf[4..8], size);
     buf
 }
+
+/// Computes an array's stored byte size, returning zero when a dimension is zero.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if a dimension product exceeds the four-byte datatype
+/// size field.
+fn array_type_size(base_size: u32, dimensions: &[u32]) -> Result<u32, FormatError> {
+    if dimensions.contains(&0) {
+        return Ok(0);
+    }
+    dimensions.iter().try_fold(base_size, |size, &dimension| {
+        size.checked_mul(dimension)
+            .ok_or(FormatError::LengthTooLarge {
+                length: u64::from(size) * u64::from(dimension),
+                length_size: DATATYPE_SIZE_BYTES,
+            })
+    })
+}
+
+/// The four-byte sequence count written by `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 2.2.0).
+const SEQUENCE_LENGTH_SIZE: u32 = 4;
+
+/// The four-byte object index in "Global Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+const HEAP_INDEX_SIZE: u32 = 4;
+
+/// The four-byte Size field in "The Datatype Message" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const DATATYPE_SIZE_BYTES: u8 = 4;
 
 #[cfg(test)]
 mod tests;

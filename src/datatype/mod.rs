@@ -5,7 +5,13 @@ pub use hdf5_pure_core::ReferenceType;
 pub use hdf5_pure_core::StringPadding;
 
 pub(crate) use hdf5_pure_core::__private;
+#[cfg(feature = "std")]
 pub(crate) use hdf5_pure_format::__private::element_size_usize;
+#[cfg(feature = "std")]
+pub(crate) use hdf5_pure_format::__private::stored_element_size;
+#[cfg(feature = "std")]
+pub(crate) use hdf5_pure_format::__private::stored_element_size_usize;
+pub(crate) use hdf5_pure_format::__private::stored_type_size;
 
 pub(crate) fn datatype_class_name(datatype: &Datatype) -> &'static str {
     match datatype {

@@ -6984,22 +6984,25 @@ the same commit to replace it",
         Ok(types::classify_datatype(&dt))
     }
 
-    /// The size in bytes of one on-disk element of this dataset's datatype —
-    /// HDF5's datatype storage size (`H5Tget_size`).
+    /// Returns the size in bytes of one stored dataset element.
     ///
-    /// This is the byte width of a single stored element: 8 for `f64`, the
-    /// declared length for a fixed-length string, the record size for a compound
-    /// type, or the reference/descriptor size for a variable-length type (whose
-    /// payload lives separately in the file's global heaps).
+    /// Computes variable-length reference sizes with the file's offset width, and array sizes
+    /// from their stored base types and dimensions. Uses declared compound record sizes.
+    /// Variable-length payloads are stored separately in global heaps.
     ///
-    /// Multiplied by the element count from [`shape`](Self::shape), it is the
-    /// exact number of raw bytes a full [`read_raw`](Self::read_raw)
-    /// materializes. A caller reading an untrusted file can use it to bound that
-    /// allocation up front rather than trusting the file's declared extent: a
-    /// dataset can name a small element count yet a per-element size of billions
-    /// of bytes, so the product — not the count alone — is what a read allocates.
+    /// Multiplying this size by the element count from [`shape`](Self::shape) gives the byte
+    /// length of a full [`read_raw`](Self::read_raw) result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes, or
+    /// [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field. Propagates
+    /// datatype parsing errors.
     pub fn element_size(&self) -> Result<u64, Error> {
-        Ok(u64::from(self.datatype()?.type_size()))
+        Ok(u64::from(
+            crate::datatype::stored_element_size(&self.datatype()?, self.file.widths.offsets)?
+                .get(),
+        ))
     }
 
     /// Returns the dataset's fill time policy.
@@ -7135,14 +7138,21 @@ the same commit to replace it",
         let pipeline = self.filter_pipeline_parsed()?;
         // See `read_raw`: an unparseable fill value message is carried into the
         // read rather than failing it up front.
-        let elem_size = crate::datatype::element_size_usize(&dt)?;
+        let elem_size = crate::datatype::stored_element_size_usize(&dt, self.file.widths.offsets)?;
         let fill_msg = self.fill_value_message();
         let fill = match &fill_msg {
             Ok(Some(m)) => FillPattern::from_message(m, elem_size),
             Ok(None) => FillPattern::new(FillTime::IfSet, None, elem_size),
             Err(_) => FillPattern::UNKNOWN,
         };
-        let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
+        let spec = RawReadSpec::parse_with_offset_width(
+            &dl,
+            &ds,
+            &dt,
+            pipeline.as_ref(),
+            fill,
+            self.file.widths.offsets,
+        )?;
 
         // A window is cut by the *stored* element width, while a decoder slices
         // what it is handed by the width of the type it decodes — the base type,
@@ -7712,7 +7722,10 @@ the same commit to replace it",
             return Ok(Vec::new());
         }
         let dataspace = self.dataspace()?;
-        let elem_size = crate::datatype::element_size_usize(&self.datatype()?)?;
+        let elem_size = crate::datatype::stored_element_size_usize(
+            &self.datatype()?,
+            self.file.widths.offsets,
+        )?;
         // The chunk index stores base-relative addresses, in its root and in every internal
         // node, so the walk runs over a view of the file framed at the base. Every address it
         // reports stays in that frame.
@@ -7773,14 +7786,21 @@ the same commit to replace it",
         // storage looks like. Carry the uncertainty into the read and let it
         // fail there, and only there. `Dataset::fill_value` still reports the
         // parse error to a caller asking about the value.
-        let elem_size = crate::datatype::element_size_usize(&dt)?;
+        let elem_size = crate::datatype::stored_element_size_usize(&dt, self.file.widths.offsets)?;
         let fill_msg = self.fill_value_message();
         let fill = match &fill_msg {
             Ok(Some(m)) => FillPattern::from_message(m, elem_size),
             Ok(None) => FillPattern::new(FillTime::IfSet, None, elem_size),
             Err(_) => FillPattern::UNKNOWN,
         };
-        let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
+        let spec = RawReadSpec::parse_with_offset_width(
+            &dl,
+            &ds,
+            &dt,
+            pipeline.as_ref(),
+            fill,
+            self.file.widths.offsets,
+        )?;
         Ok(self.file.read_dataset_raw(spec, &self.chunk_cache)?)
     }
 
@@ -8209,7 +8229,8 @@ the same commit to replace it",
     /// memory layout, so padded compound records are supported safely.
     pub fn read_compound<T: CompoundType>(&self) -> Result<Vec<T>, Error> {
         let datatype = self.datatype()?;
-        let element_size = crate::datatype::element_size_usize(&datatype)?;
+        let element_size =
+            crate::datatype::stored_element_size_usize(&datatype, self.file.widths.offsets)?;
         if !matches!(datatype, Datatype::Compound { .. }) {
             return Err(FormatError::TypeMismatch {
                 expected: "Compound",
@@ -8261,14 +8282,22 @@ the same commit to replace it",
         let dataspace = self.dataspace()?;
         let layout = self.read_layout()?;
         let pipeline = self.filter_pipeline_parsed()?;
-        let element_size = crate::datatype::element_size_usize(&datatype)?;
+        let element_size =
+            crate::datatype::stored_element_size_usize(&datatype, self.file.widths.offsets)?;
         let fill_message = self.fill_value_message();
         let fill = match &fill_message {
             Ok(Some(message)) => FillPattern::from_message(message, element_size),
             Ok(None) => FillPattern::new(FillTime::IfSet, None, element_size),
             Err(_) => FillPattern::UNKNOWN,
         };
-        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill)?;
+        let spec = RawReadSpec::parse_with_offset_width(
+            &layout,
+            &dataspace,
+            &datatype,
+            pipeline.as_ref(),
+            fill,
+            self.file.widths.offsets,
+        )?;
         let region = request.parse(spec)?;
         Ok(self
             .file

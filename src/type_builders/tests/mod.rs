@@ -13,6 +13,9 @@ use crate::object_path::ObjectPathBuf;
 use crate::type_builders::ObjectRefPatch;
 use crate::type_builders::ObjectRefTarget;
 use crate::type_builders::{self, AttrValue, DatasetBuilder, VlStringElement};
+use crate::width::FormatWidths;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 use crate::{Error, File, FileBuilder, FormatError};
 
 mod attr_value_accessors;
@@ -255,4 +258,109 @@ fn a_string_datatype_mismatch_preserves_previous_staging() {
         builder.vl_string_staging.as_ref().unwrap().patch_offsets,
         offsets
     );
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn variable_length_staging_uses_independent_widths(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+) {
+    let (references, staging) = type_builders::stage_vl_payloads_with_widths(
+        [Some(b"abcd".as_slice()), None, Some(b"".as_slice())].into_iter(),
+        NonZeroUsize::new(2).unwrap(),
+        FormatWidths { offsets, lengths },
+    )
+    .unwrap();
+    let reference_size = 8 + usize::from(offsets.get());
+    let mut expected = vec![0; 3 * reference_size];
+    expected[..4].copy_from_slice(&2u32.to_le_bytes());
+    expected[reference_size - 4..reference_size].copy_from_slice(&1u32.to_le_bytes());
+    expected[3 * reference_size - 4..].copy_from_slice(&2u32.to_le_bytes());
+    assert_eq!(references, expected);
+    assert_eq!(staging.patch_offsets, [0, 2 * reference_size]);
+    assert_eq!(staging.collections.len(), 1);
+    let collection = &staging.collections[0];
+    assert_eq!(&collection[..8], b"GCOL\x01\0\0\0");
+    assert_eq!(collection.len(), 4096);
+    let mut size = [0; 8];
+    size[..usize::from(lengths.get())]
+        .copy_from_slice(&collection[8..8 + usize::from(lengths.get())]);
+    assert_eq!(u64::from_le_bytes(size), 4096);
+    assert_eq!(&collection[32..36], b"abcd");
+}
+
+#[rstest]
+#[case::single_payload(65_536, 1, LengthWidth::Two, 65_584)]
+#[case::repeated_borrow(65_535, 65_535, LengthWidth::Four, 4_295_950_352)]
+fn variable_length_staging_rejects_an_unrepresentable_collection(
+    #[case] payload_length: usize,
+    #[case] count: usize,
+    #[case] lengths: LengthWidth,
+    #[case] length: u64,
+) {
+    let payload = vec![1; payload_length];
+    let error = type_builders::stage_vl_payloads_with_widths(
+        core::iter::repeat_n(Some(payload.as_slice()), count),
+        NonZeroUsize::new(1).unwrap(),
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths,
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        FormatError::LengthTooLarge {
+            length,
+            length_size: lengths.get()
+        }
+    );
+}
+
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn global_heap_preparation_rejects_a_collection_larger_than_the_host() {
+    let payload = vec![1; 65_535];
+    let objects = vec![payload.as_slice(); 65_535];
+    assert_eq!(
+        type_builders::build_global_heap_collections_from_bytes(&objects),
+        Err(FormatError::ValueTooLargeForPlatform {
+            value: 4_295_950_352,
+            target: "usize"
+        }),
+    );
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 10)]
+#[case::four(OffsetWidth::Four, 12)]
+#[case::eight(OffsetWidth::Eight, 16)]
+fn variable_length_staging_rejects_a_reference_buffer_above_the_host_capacity(
+    #[case] offsets: OffsetWidth,
+    #[case] reference_size: usize,
+) {
+    let count = isize::MAX as usize / reference_size + 1;
+    let requested = count * reference_size;
+    let result = type_builders::stage_vl_payloads_with_widths(
+        core::iter::repeat_n(None, count),
+        NonZeroUsize::new(1).unwrap(),
+        FormatWidths {
+            offsets,
+            lengths: LengthWidth::Eight,
+        },
+    );
+    let Err(FormatError::AllocationFailed { values, .. }) = result else {
+        panic!("expected AllocationFailed for {requested} reference bytes");
+    };
+    assert_eq!(values, requested);
 }

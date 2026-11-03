@@ -1,23 +1,9 @@
-//! The per-dataset properties every raw read is performed against.
-//!
-//! Reading a dataset's element bytes takes five facts about the dataset — where
-//! its storage is, what shape it has, what an element is, what filters its bytes
-//! passed through, and what unallocated storage reads as — and the call chain
-//! that does it is four layers deep: the reader picks a backend, `data_read`
-//! dispatches on the layout, `chunked_read` walks the chunk index, and the
-//! assembly kernel places what it decoded. Every layer needs all five, so before
-//! this type they were threaded through as five positional parameters and the
-//! signatures reached twelve arguments.
-//!
-//! The cost of that shape was not the width; it was that adding a property meant
-//! editing roughly thirty call sites, several of them mechanically across test
-//! fixtures, where a default inserted in place of a real value compiles and
-//! passes (issue #294). A property added to [`RawReadSpec`] instead reaches every
-//! layer at once, and the sites that must decide what it is are the few that
-//! build the spec.
+//! Dataset storage, shape, filters, fill values, and stored element sizes for raw reads.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
+use core::num::NonZeroUsize;
 
 use crate::address::StoredAddress;
 #[cfg(test)]
@@ -29,23 +15,20 @@ use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
+use crate::filters::ChunkContext;
+use crate::width::OffsetWidth;
 
-/// What a raw read needs to know about the dataset it is reading.
+/// The storage and element geometry of a raw dataset read.
 ///
-/// These are properties of the *dataset*. The file-level address widths
-/// (`offset_size`, `length_size`) travel beside a spec rather than in it: they
-/// are the same for every dataset in a file, and the rest of the crate already
-/// passes them as a pair.
-///
-/// `Copy`, so a spec is handed down the call chain the way the five borrows it
-/// replaced were, with no clone and no lifetime beyond the borrows themselves.
+/// Construction derives the stored element size from the datatype and selected offset width.
+/// The reader resolves file addresses with its file context.
 #[derive(Clone, Copy)]
 pub(crate) struct RawReadSpec<'a> {
     /// Storage properties after dataset-level consistency has been established.
     storage: RawReadStorage<'a>,
     /// The dataset's shape, which fixes how many elements the read produces.
     dataspace: &'a Dataspace,
-    /// The stored element type, which fixes each element's width.
+    /// The datatype used to interpret stored elements and select filter scalar types.
     datatype: &'a Datatype,
     /// The filter pipeline stored bytes passed through, if any.
     pipeline: Option<&'a FilterPipeline>,
@@ -53,10 +36,12 @@ pub(crate) struct RawReadSpec<'a> {
     fill: FillPattern<'a>,
     /// Logical dataset byte length derived from the dataspace and datatype.
     byte_len: DatasetByteLen,
+    /// Stored bytes per element at the selected file offset width.
+    element_size: u32,
 }
 
 impl<'a> RawReadSpec<'a> {
-    /// Parses dataset properties and checks allocated storage extents.
+    /// Parses dataset properties with eight-byte heap addresses.
     ///
     /// For allocated compact and contiguous storage, construction compares the
     /// storage extent with the byte length implied by the dataspace and datatype.
@@ -68,7 +53,8 @@ impl<'a> RawReadSpec<'a> {
     /// Returns [`FormatError::OffsetOverflow`] if multiplying the element count by
     /// the datatype size overflows, or [`FormatError::LogicalDataSizeMismatch`] if
     /// a nonempty dataset's compact or allocated contiguous storage differs from
-    /// its logical byte length.
+    /// its logical byte length. Returns the errors of [`Self::parse_with_offset_width`] for an
+    /// array size that exceeds its encoded field.
     pub(crate) fn parse(
         layout: &'a DataLayout,
         dataspace: &'a Dataspace,
@@ -76,7 +62,34 @@ impl<'a> RawReadSpec<'a> {
         pipeline: Option<&'a FilterPipeline>,
         fill: FillPattern<'a>,
     ) -> Result<Self, FormatError> {
-        let byte_len = DatasetByteLen::parse(dataspace, datatype)?;
+        Self::parse_with_offset_width(
+            layout,
+            dataspace,
+            datatype,
+            pipeline,
+            fill,
+            OffsetWidth::Eight,
+        )
+    }
+
+    /// Parses stored element geometry and allocated storage extents at `offset_width`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field,
+    /// [`FormatError::OffsetOverflow`] if the logical dataset byte count exceeds [`u64::MAX`], or
+    /// [`FormatError::LogicalDataSizeMismatch`] if nonempty compact or allocated contiguous
+    /// storage differs from the logical byte count.
+    pub(crate) fn parse_with_offset_width(
+        layout: &'a DataLayout,
+        dataspace: &'a Dataspace,
+        datatype: &'a Datatype,
+        pipeline: Option<&'a FilterPipeline>,
+        fill: FillPattern<'a>,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
+        let element_size = crate::datatype::stored_type_size(datatype, offset_width)?;
+        let byte_len = DatasetByteLen::parse(dataspace, element_size)?;
         let storage = RawReadStorage::parse(layout, byte_len, dataspace.num_elements() != 0)?;
         Ok(Self {
             storage,
@@ -85,12 +98,13 @@ impl<'a> RawReadSpec<'a> {
             pipeline,
             fill,
             byte_len,
+            element_size,
         })
     }
 
     /// An unchecked spec for tests that need to drive malformed metadata farther
-    /// down the read stack. Live paths can only construct a spec through
-    /// [`Self::parse`].
+    /// down the read stack. Production readers use [`Self::parse`] or
+    /// [`Self::parse_with_offset_width`].
     #[cfg(test)]
     pub(crate) fn plain(
         layout: &'a DataLayout,
@@ -103,6 +117,7 @@ impl<'a> RawReadSpec<'a> {
             datatype,
             pipeline: None,
             fill: FillPattern::ZERO,
+            element_size: datatype.type_size(),
             byte_len: DatasetByteLen(
                 dataspace
                     .num_elements()
@@ -111,16 +126,47 @@ impl<'a> RawReadSpec<'a> {
         }
     }
 
+    /// Returns the stored element width established during construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes.
+    pub(crate) fn element_size(&self) -> Result<NonZeroU32, FormatError> {
+        NonZeroU32::new(self.element_size).map_or_else(|| self.datatype.element_size(), Ok)
+    }
+
+    /// Returns the stored element width for a materialized host buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::element_size`], or [`FormatError::ValueTooLargeForPlatform`]
+    /// if the element width exceeds the target's [`usize`] range.
+    pub(crate) fn element_size_usize(&self) -> Result<NonZeroUsize, FormatError> {
+        self.element_size()?.narrow()
+    }
+
+    /// Combines the stored element width with datatype-specific filter parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::element_size`] for a zero-sized datatype.
+    pub(crate) fn chunk_context<'b>(
+        &self,
+        dimensions: &'b [u64],
+    ) -> Result<ChunkContext<'b>, FormatError> {
+        Ok(ChunkContext::from_stored_datatype(
+            dimensions,
+            self.datatype,
+            self.element_size()?,
+        ))
+    }
+
     pub(crate) fn storage(&self) -> RawReadStorage<'a> {
         self.storage
     }
 
     pub(crate) fn dataspace(&self) -> &'a Dataspace {
         self.dataspace
-    }
-
-    pub(crate) fn datatype(&self) -> &'a Datatype {
-        self.datatype
     }
 
     pub(crate) fn pipeline(&self) -> Option<&'a FilterPipeline> {
@@ -153,7 +199,7 @@ impl<'a> RawReadSpec<'a> {
     /// element, and [`FormatError::ValueTooLargeForPlatform`] or [`FormatError::OffsetOverflow`]
     /// if the materialized dataset would be larger than this target can address.
     pub(crate) fn unallocated_buffer(&self) -> Result<Vec<u8>, FormatError> {
-        let elem_size = crate::datatype::element_size_usize(self.datatype)?;
+        let elem_size = self.element_size_usize()?;
         let total = self
             .dataspace
             .num_elements()
@@ -258,9 +304,9 @@ impl<'a> RawReadStorage<'a> {
 struct DatasetByteLen(u64);
 
 impl DatasetByteLen {
-    fn parse(dataspace: &Dataspace, datatype: &Datatype) -> Result<Self, FormatError> {
+    fn parse(dataspace: &Dataspace, element_size: u32) -> Result<Self, FormatError> {
         let num_elements = dataspace.num_elements();
-        let elem_size = u64::from(datatype.type_size());
+        let elem_size = u64::from(element_size);
         Ok(Self(num_elements.checked_mul(elem_size).ok_or(
             FormatError::OffsetOverflow {
                 offset: num_elements,
