@@ -48,6 +48,9 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+
+mod measurement_sizes;
+
 pub(crate) mod write;
 
 /// The address of an Extensible Array header, from the chunk index address of a data layout
@@ -2293,25 +2296,6 @@ pub fn encode_super_block(
     buf
 }
 
-/// Returns the length in bytes of an index block (`EAIB`): the prefix, `inline_elmts` elements,
-/// the data block and super block addresses, and the checksum.
-///
-/// [`build_extensible_array_at`] sizes the index block with it.
-pub(crate) fn index_block_len(
-    offset_width: OffsetWidth,
-    inline_elmts: usize,
-    elem_size: usize,
-    ndblk_addrs: usize,
-    nsblk_addrs: usize,
-) -> usize {
-    let os = usize::from(offset_width.get());
-    4 + 1 + 1 + os // signature + version + client id + header address
-        + inline_elmts * elem_size // inline element slots (always all written)
-        + ndblk_addrs * os // direct data-block addresses
-        + nsblk_addrs * os // super-block addresses
-        + 4 // checksum
-}
-
 /// The six statistics of an Extensible Array header, in the order the header stores them.
 ///
 /// An in-place writer that appends to an array rewrites them, and [`extensible_array_layout`] takes
@@ -2330,37 +2314,6 @@ pub struct ExtensibleArrayStats {
     pub max_idx_set: u64,
     /// The number of element slots in the index block and the allocated data blocks.
     pub nelmts: u64,
-}
-
-/// Returns the length in bytes of a data block (`EADB`) with the geometry `blocks`, paged or not.
-pub(crate) fn data_block_len(
-    blocks: DataBlockGeometry,
-    elem_size: usize,
-    offset_width: OffsetWidth,
-    blk_off_size: BlockOffsetWidth,
-) -> u64 {
-    let prefix = (4 + 1 + 1 + u64::from(offset_width.get())) + blk_off_size.bytes() as u64;
-    if blocks.is_paged() {
-        // Paged: the prefix and its checksum, then every page and its checksum.
-        prefix + 4 + blocks.npages() * (blocks.page_nelmts * elem_size as u64 + 4)
-    } else {
-        prefix + blocks.dblk_nelmts * elem_size as u64 + 4
-    }
-}
-
-/// Returns the length in bytes of a super block (`EASB`): the prefix, the page-init bitmap of
-/// paged data blocks, the data block addresses, and the checksum.
-///
-/// The length is computed in `u64`, so the counts are not narrowed to a 32-bit `usize` before
-/// they are multiplied.
-pub(crate) fn super_block_len(
-    geom: SuperBlockGeometry,
-    offset_width: OffsetWidth,
-    blk_off_size: BlockOffsetWidth,
-) -> u64 {
-    let os = u64::from(offset_width.get());
-    let header = 4 + 1 + 1 + os + blk_off_size.bytes() as u64;
-    header + geom.bitmap_size() + geom.ndblks * os + 4
 }
 
 /// Returns the header statistics of the array whose occupied slots are `occupancy`, from the
@@ -2394,7 +2347,7 @@ pub fn extensible_array_stats(
                 page_nelmts,
             };
             s.ndata_blks += 1;
-            s.data_blk_size += data_block_len(blocks, elem_size, offset_size, blk_off_size);
+            s.data_blk_size += measurement_sizes::data_block_len(blocks, elem_size, offset_size, blk_off_size);
             s.nelmts += dn;
         }
         elem += dn;
@@ -2405,13 +2358,13 @@ pub fn extensible_array_stats(
         let span = ndblks * dn;
         if occupancy.any_occupied(elem, span) {
             s.nsuper_blks += 1;
-            s.super_blk_size += super_block_len(sb, offset_size, blk_off_size);
+            s.super_blk_size += measurement_sizes::super_block_len(sb, offset_size, blk_off_size);
             let mut le = elem;
             for _ in 0..ndblks {
                 if occupancy.any_occupied(le, dn) {
                     s.ndata_blks += 1;
                     s.data_blk_size +=
-                        data_block_len(sb.blocks, elem_size, offset_size, blk_off_size);
+                        measurement_sizes::data_block_len(sb.blocks, elem_size, offset_size, blk_off_size);
                     s.nelmts += dn;
                 }
                 le += dn;
@@ -2485,7 +2438,7 @@ pub fn extensible_array_layout(
         offsets: offset_size,
         lengths: length_size,
     });
-    let index_block_len = index_block_len(
+    let index_block_len = measurement_sizes::index_block_len(
         offset_size,
         inline,
         elem_size,
@@ -4410,7 +4363,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             layout.index_block_len().unwrap(),
-            u64::try_from(index_block_len(
+            u64::try_from(measurement_sizes::index_block_len(
                 offsets,
                 usize::from(EA_IDX_BLK_ELMTS),
                 usize::from(element_size),
@@ -4427,13 +4380,13 @@ mod tests {
             assert_eq!(layout.bitmap_len(reader).unwrap(), writer.bitmap_size());
             assert_eq!(
                 layout.super_block_len(reader).unwrap(),
-                super_block_len(writer, offsets, header.block_offset_width())
+                measurement_sizes::super_block_len(writer, offsets, header.block_offset_width())
             );
             assert_eq!(
                 layout
                     .data_block_len(reader.data_block(0).unwrap())
                     .unwrap(),
-                data_block_len(
+                measurement_sizes::data_block_len(
                     writer.blocks,
                     usize::from(element_size),
                     offsets,
@@ -4472,7 +4425,7 @@ mod tests {
         assert_eq!(geometry.direct_dblk_nelmts().len(), direct_blocks);
         assert_eq!(geometry.first_indirect_sblk(), first_secondary);
         assert_eq!(
-            index_block_len(
+            measurement_sizes::index_block_len(
                 OffsetWidth::Eight,
                 usize::from(EA_IDX_BLK_ELMTS),
                 8,
