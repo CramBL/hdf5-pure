@@ -19,18 +19,18 @@ creation settings
 file
   Metric                      value
   ------------------------  -------
-  physical size (bytes)     323,584
-  logical EOF (bytes)       323,584
+  physical size (bytes)     266,240
+  logical EOF (bytes)       266,240
   top-level groups (count)       16
 
 reusable space (writable session)
   Metric              value
   ----------------  -------
-  bytes             252,113
-  sections (count)       78
+  bytes             194,765
+  sections (count)       85
 
 persisted space (last close)
   Metric              value
   ----------------  -------
-  bytes             252,113
-  sections (count)       81
+  bytes             194,765
+  sections (count)       86

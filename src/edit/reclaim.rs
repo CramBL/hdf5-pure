@@ -12,6 +12,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
+use hdf5_pure_space::__private::PageClassEvidence;
 use hdf5_pure_space::__private::PageType;
 
 use crate::access_mode::AccessMode;
@@ -684,20 +685,26 @@ impl WriteEngine {
 
     /// Appends complete index allocations and their free classes in physical address order.
     ///
-    /// The caller supplies nonempty, disjoint allocations from the same source content phase.
-    /// Each original range is appended intact. Known classes are preserved. Without PAGE, an
-    /// unclassified allocation is tagged raw.
+    /// The caller supplies nonempty, disjoint allocations from the same source content phase and
+    /// establishes their ownership separately. Each original range is appended intact. Supplied
+    /// PAGE classes are preserved. Without PAGE, an unclassified allocation is tagged raw.
     ///
-    /// Inferred raw classes require
+    /// For unclassified PAGE allocations with checked stored coordinates, the current admitted
+    /// snapshot is queried once per original allocation. A known class is used unless raw adjacency
+    /// contradicts metadata evidence. Conflicting evidence remains [`FreeClass::Dead`]. The snapshot
+    /// is borrowed during this call, and source consistency is the caller's responsibility.
+    ///
+    /// Independent raw inference requires
     /// [`whole_index_is_eligible_for_raw`](Self::whole_index_is_eligible_for_raw).
     /// Each complete allocation must be smaller than a page and wholly contained in it. Adjacent
-    /// allocations share a run witness when they occupy the same page. The joining chunk data
-    /// endpoint must lie inside that page. Other unknown allocations remain [`FreeClass::Dead`],
-    /// with whole free pages available to the existing promotion policy.
+    /// allocations share a run witness when they occupy the same page and have matching snapshot
+    /// evidence. The joining chunk data endpoint must lie inside that page. Other unknown
+    /// allocations remain [`FreeClass::Dead`], with whole free pages available to the existing
+    /// promotion policy.
     ///
-    /// For unclassified PAGE allocations, the collector checks for a small contained allocation,
-    /// whole index eligibility, and a permissible chunk data endpoint before indexing endpoints.
-    /// After those checks, a single run borrows the summaries, and multiple runs share one index.
+    /// Before indexing chunk endpoints for raw inference, checks for a small contained allocation,
+    /// whole index eligibility, and a permissible chunk data endpoint. Single-run lookup borrows
+    /// the summaries, and multiple eligible runs share one index.
     pub(super) fn collect_chunk_index_free_spans(
         &self,
         data: &[FileRange],
@@ -730,53 +737,73 @@ impl WriteEngine {
                 .is_ok_and(|stored| !stored.get().is_multiple_of(page_size.get()))
         };
         let borrowed = ChunkDataBoundaries::new(data, false);
-        if !index
+        let raw_eligible = index
             .iter()
             .any(|&range| PageAllocation::new(addresses, page_size, range).is_some())
-            || !self.whole_index_is_eligible_for_raw(&borrowed, &index)
-            || !data
-                .iter()
-                .any(|range| range.length() > 0 && (permits(range.start()) || permits(range.end())))
-        {
-            classified.extend(index.into_iter().map(|range| (range, FreeClass::Dead)));
-            return;
-        }
-        let multiple = index.windows(2).any(|pair| {
-            pair[0].end() != pair[1].start()
-                || PageAllocation::new(addresses, page_size, pair[0])
-                    .map(|allocation| allocation.page)
-                    != PageAllocation::new(addresses, page_size, pair[1])
+            && self.whole_index_is_eligible_for_raw(&borrowed, &index)
+            && data.iter().any(|range| {
+                range.length() > 0 && (permits(range.start()) || permits(range.end()))
+            });
+        let multiple = raw_eligible
+            && index.windows(2).any(|pair| {
+                pair[0].end() != pair[1].start()
+                    || PageAllocation::new(addresses, page_size, pair[0])
                         .map(|allocation| allocation.page)
-        });
+                        != PageAllocation::new(addresses, page_size, pair[1])
+                            .map(|allocation| allocation.page)
+            });
         let data = if multiple {
             ChunkDataBoundaries::new(data, true)
         } else {
             borrowed
         };
-        let mut start = 0;
-        while start < index.len() {
-            let first = PageAllocation::new(addresses, page_size, index[start]);
+        let snapshot = self.space.admitted_snapshot();
+        let mut allocations = index
+            .iter()
+            .enumerate()
+            .map(|(position, &range)| {
+                let class = addresses
+                    .relative(range.start())
+                    .ok()
+                    .and_then(|start| Extent::new(start, range.length()))
+                    .map_or(PageClassEvidence::Unknown, |extent| {
+                        snapshot.partial_page_class(extent)
+                    });
+                (
+                    position,
+                    PageAllocation::new(addresses, page_size, range),
+                    class,
+                )
+            })
+            .peekable();
+        while let Some((start, first, evidence)) = allocations.next() {
             let mut end = start + 1;
-            while end < index.len()
-                && first.is_some_and(|first| {
-                    PageAllocation::new(addresses, page_size, index[end]).is_some_and(
-                        |PageAllocation { range, page }| {
-                            first.page == page && index[end - 1].end() == range.start()
-                        },
-                    )
+            while raw_eligible
+                && evidence != PageClassEvidence::Conflict
+                && allocations.peek().is_some_and(|&(_, next, next_evidence)| {
+                    evidence == next_evidence
+                        && first.is_some_and(|first| {
+                            next.is_some_and(|PageAllocation { range, page }| {
+                                first.page == page && index[end - 1].end() == range.start()
+                            })
+                        })
                 })
             {
+                allocations.next();
                 end += 1;
             }
             let run = &index[start..end];
-            let class = match known_class {
-                FreeClass::Dead if first.is_some() && data.abuts_index(run, permits) => {
+            let raw = raw_eligible && first.is_some() && data.abuts_index(run, permits);
+            let class = match (evidence, raw) {
+                (PageClassEvidence::Conflict, _)
+                | (PageClassEvidence::Known(PageType::Meta), true)
+                | (PageClassEvidence::Unknown, false) => FreeClass::Dead,
+                (PageClassEvidence::Known(class), false) => FreeClass::Page(class),
+                (PageClassEvidence::Known(PageType::Raw) | PageClassEvidence::Unknown, true) => {
                     FreeClass::Page(PageType::Raw)
                 }
-                class => class,
             };
             classified.extend(run.iter().map(|&range| (range, class)));
-            start = end;
         }
     }
 
@@ -831,9 +858,9 @@ impl WriteEngine {
         )
         .ok()?;
         // Chunk data is raw under every writer, so its spans are raw outright. A version 2
-        // B-tree is metadata by the format's allocation taxonomy. Other index structures are raw
-        // only where this crate provably placed them beside their chunk data. An index with an
-        // unproven PAGE type is recorded as dead.
+        // B-tree is metadata by the format's allocation taxonomy. Other index structures are
+        // classified through admitted typed fragments or proven adjacency to chunk data. An index
+        // with an unproven PAGE type is recorded as dead.
         let physical = |range: AddressRange<StoredAddress>| {
             FileRange::new(base.resolve(range.start()).ok()?, range.length()).ok()
         };

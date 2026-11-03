@@ -916,7 +916,8 @@ fn chunk_index_classes_keep_each_complete_allocation_and_its_run_proof(
         );
     }
     builder.write(&path).unwrap();
-    let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.clear_page_class_facts();
     let shifted = |ranges: &[(u64, u64)]| {
         ranges
             .iter()
@@ -944,7 +945,8 @@ fn chunk_index_classes_keep_each_complete_allocation_and_its_run_proof(
     engine.collect_chunk_index_free_spans(&data, index, known, &mut actual);
     assert_eq!(actual, expected);
     drop(engine);
-    let reopened = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let mut reopened = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    reopened.clear_page_class_facts();
     let mut after_reopen = Vec::new();
     reopened.collect_chunk_index_free_spans(&data, original, known, &mut after_reopen);
     assert_eq!(after_reopen, expected);
@@ -1045,7 +1047,8 @@ fn unprovable_index_classes_do_not_build_a_payload_boundary_index(
             .with_page_size(FileSpacePageSize::MIN),
     );
     builder.write(&path).unwrap();
-    let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.clear_page_class_facts();
     let data = physical_ranges(
         &core::iter::once(first)
             .chain((1..count).map(|slot| (4_096 + slot * 1_024, 512)))
@@ -2008,6 +2011,170 @@ fn gather_page_size_matches_file_space_properties() {
     );
 }
 
+#[rstest]
+#[case::metadata(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16)], &[], &[(1_024, 64)], &[FreeClass::Page(PageType::Meta)])]
+#[case::raw(&[(Some(ManagerKind::PagedSmallRaw), 1_400, 16)], &[], &[(1_024, 64)], &[FreeClass::Page(PageType::Raw)])]
+#[case::different_page(&[(Some(ManagerKind::PagedSmallMetadata), 1_912, 16)], &[], &[(1_024, 64)], &[FreeClass::Dead])]
+#[case::unclassified(&[(None, 1_400, 16)], &[], &[(1_024, 64)], &[FreeClass::Dead])]
+#[case::conflicting(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16), (Some(ManagerKind::PagedSmallRaw), 1_450, 16)], &[(960, 68)], &[(1_028, 40)], &[FreeClass::Dead])]
+#[case::independent_disagreement(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16)], &[(960, 68)], &[(1_028, 40), (1_068, 40)], &[FreeClass::Dead, FreeClass::Dead])]
+#[case::independent_agreement(&[(Some(ManagerKind::PagedSmallRaw), 1_400, 16)], &[(960, 68)], &[(1_028, 40), (1_068, 40)], &[FreeClass::Page(PageType::Raw), FreeClass::Page(PageType::Raw)])]
+#[case::mixed_originals(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16), (Some(ManagerKind::PagedSmallRaw), 1_912, 16)], &[], &[(1_024, 28), (1_052, 82), (1_536, 64), (2_048, 32)], &[FreeClass::Page(PageType::Meta), FreeClass::Page(PageType::Meta), FreeClass::Page(PageType::Raw), FreeClass::Dead])]
+#[case::whole_free_interiors(&[(Some(ManagerKind::PagedLargeGeneric), 1_024, 512)], &[], &[(1_100, 40)], &[FreeClass::Dead])]
+#[case::partial_edges_agree(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16), (Some(ManagerKind::PagedSmallMetadata), 1_912, 16)], &[], &[(1_500, 100)], &[FreeClass::Page(PageType::Meta)])]
+#[case::partial_edges_incomplete(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16)], &[], &[(1_500, 100)], &[FreeClass::Dead])]
+#[case::partial_edges_disagree(&[(Some(ManagerKind::PagedSmallMetadata), 1_400, 16), (Some(ManagerKind::PagedSmallRaw), 1_912, 16)], &[], &[(1_500, 100)], &[FreeClass::Dead])]
+fn chunk_index_classes_use_independent_snapshot_and_payload_facts(
+    #[case] seeds: &[(Option<ManagerKind>, u64, u64)],
+    #[case] data: &[(u64, u64)],
+    #[case] index: &[(u64, u64)],
+    #[case] classes: &[FreeClass],
+    #[values(0, 512)] userblock: u64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot-index-classes.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
+    builder.create_dataset("d").with_i32_data(&[1; 100]);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::MIN),
+    );
+    builder.write(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::MIN,
+        seeds.iter().map(|&(kind, start, length)| {
+            (
+                kind,
+                FreeExtent::new(StoredAddress::new(start), length).unwrap(),
+            )
+        }),
+    )
+    .unwrap();
+    let before = engine
+        .space
+        .admitted_snapshot()
+        .sections()
+        .collect::<Vec<_>>();
+    let shifted = |ranges: &[(u64, u64)]| {
+        physical_ranges(
+            &ranges
+                .iter()
+                .map(|&(start, length)| (userblock + start, length))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let index = shifted(index);
+    let expected: Vec<_> = index.iter().copied().zip(classes.iter().copied()).collect();
+    let mut original = index.clone();
+    original.reverse();
+    let mut actual = Vec::new();
+    engine.collect_chunk_index_free_spans(&shifted(data), original, FreeClass::Dead, &mut actual);
+    assert_eq!(actual, expected);
+    assert_eq!(
+        engine
+            .space
+            .admitted_snapshot()
+            .sections()
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[rstest]
+#[case::few(16)]
+#[case::many(4_096)]
+fn canonical_index_classes_borrow_state_for_page_aligned_chunk_data(#[case] count: u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("canonical-index-cost.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("d").with_i32_data(&[1; 100]);
+    builder.write(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::MIN,
+        (0..count).map(|page| {
+            (
+                Some(ManagerKind::PagedSmallMetadata),
+                FreeExtent::new(StoredAddress::new(1_400 + page * 512), 16).unwrap(),
+            )
+        }),
+    )
+    .unwrap();
+    let index = physical_ranges(
+        &(0..count)
+            .map(|page| (1_024 + page * 512, 64))
+            .collect::<Vec<_>>(),
+    );
+    let expected: Vec<_> = index
+        .iter()
+        .map(|&range| (range, FreeClass::Page(PageType::Meta)))
+        .collect();
+    let data = physical_ranges(
+        &core::iter::once((512, 512))
+            .chain((1..count).map(|page| ((1_u64 << 32) + page * 1_024, 512)))
+            .collect::<Vec<_>>(),
+    );
+    let output = Vec::with_capacity(index.len());
+    let (actual, costs) = allocation::measure(&format!("canonical_index_classes_{count}"), || {
+        let mut output = output;
+        engine.collect_chunk_index_free_spans(&data, index, FreeClass::Dead, &mut output);
+        output
+    });
+    let (control, control_cost) =
+        allocation::measure(&format!("canonical_index_control_{count}"), || {
+            reclaim::ChunkDataBoundaries::new(&data, true)
+        });
+    assert!(control_cost.blocks > 0, "{control_cost:?}");
+    assert!(
+        control_cost.live_bytes >= 2 * count * size_of::<PhysicalAddress>() as u64,
+        "{control_cost:?}"
+    );
+    assert!(control.abuts_index(&physical_ranges(&[(1_024, 8)]), |_| true));
+    assert_eq!(actual, expected);
+    assert_eq!(costs.blocks, 0, "{costs:?}");
+    assert_eq!(costs.bytes, 0, "{costs:?}");
+    assert_eq!(costs.peak_bytes, 0, "{costs:?}");
+    assert_eq!(costs.live_bytes, 0, "{costs:?}");
+}
+
+#[test]
+fn chunk_index_classes_follow_current_admitted_fragments() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("current-index-class.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("d").with_i32_data(&[1; 100]);
+    builder.write(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let fragment = FreeExtent::new(StoredAddress::new(1_400), 16).unwrap();
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::MIN,
+        [(Some(ManagerKind::PagedSmallMetadata), fragment)],
+    )
+    .unwrap();
+    let original = physical_ranges(&[(1_024, 64)]);
+    let mut before = Vec::new();
+    engine.collect_chunk_index_free_spans(&[], original.clone(), FreeClass::Dead, &mut before);
+    assert_eq!(before, [(original[0], FreeClass::Page(PageType::Meta))]);
+    assert_eq!(
+        engine.space.allocate(16, AllocationClass::Metadata),
+        Some(fragment)
+    );
+    let mut after = Vec::new();
+    engine.collect_chunk_index_free_spans(&[], original.clone(), FreeClass::Dead, &mut after);
+    assert_eq!(after, [(original[0], FreeClass::Dead)]);
+    assert_eq!(before, [(original[0], FreeClass::Page(PageType::Meta))]);
+}
+
 fn section_covers(sections: &[FreeExtent], required: AddressRange<StoredAddress>) -> bool {
     sections
         .iter()
@@ -2345,4 +2512,12 @@ fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {
         .iter()
         .map(|&(start, length)| FileRange::new(PhysicalAddress::new(start), length).unwrap())
         .collect()
+}
+
+impl WriteEngine {
+    fn clear_page_class_facts(&mut self) {
+        if let Some(page_size) = self.space.page_size() {
+            self.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, page_size);
+        }
+    }
 }
