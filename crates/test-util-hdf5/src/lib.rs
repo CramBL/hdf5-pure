@@ -66,6 +66,8 @@ pub mod object_copy;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod page_dense;
 #[cfg(feature = "__hdf5-1.10")]
+pub mod page_managers;
+#[cfg(feature = "__hdf5-1.10")]
 pub mod page_object_headers;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod page_publication;

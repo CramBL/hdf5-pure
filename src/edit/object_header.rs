@@ -8,12 +8,17 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
+#[cfg(test)]
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
+use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::RecordSplice;
-use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest};
+use hdf5_pure_space::__private::AllocationClass;
+#[cfg(test)]
+use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::ReservationRequest;
 
 use crate::address::AddressContext;
 use crate::convert::Narrow;
@@ -122,6 +127,29 @@ impl<'a, S: Source + ?Sized> ExtensionReconstruction<'a, S> {
         info: &FileSpaceInfo,
     ) -> Result<OhRegion, Error> {
         rewrite_extension_region_bytes(&self.region, widths, info)
+    }
+}
+
+/// Owned normalized records and a stamped prefix for repeated allocation planning.
+pub(super) struct PreparedHeader {
+    prefix: ObjectHeaderPrefix,
+    records: OhRegion,
+}
+
+impl PreparedHeader {
+    pub(super) fn new(region: &OhRegion) -> Result<Self, Error> {
+        let records = normalized_header(region)?;
+        Ok(Self {
+            prefix: stamped_prefix(&records),
+            records,
+        })
+    }
+
+    pub(super) fn geometry(
+        &self,
+        widths: FormatWidths,
+    ) -> Result<ObjectHeaderAllocationGeometry<'_>, FormatError> {
+        ObjectHeaderAllocationGeometry::new(self.prefix, widths, &self.records)
     }
 }
 
@@ -892,6 +920,7 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 ///
 /// Returns [`Error::EditUnsupported`] if compact attribute metadata cannot be normalized, or
 /// [`Error::Format`] for an allocation-planning error from [`ObjectHeaderAllocation::new`].
+#[cfg(test)]
 pub(crate) fn build_v2_object_header_allocation(
     region: &OhRegion,
     widths: FormatWidths,
