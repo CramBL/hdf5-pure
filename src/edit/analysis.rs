@@ -53,6 +53,8 @@ mod deletions;
 /// result for each required reference scan.
 pub(super) struct AnalysisPhase<'a> {
     engine: &'a WriteEngine,
+    /// Shared phase identity for reconstruction origins and any discovered topology.
+    identity: Option<Arc<deletions::TopologyIdentity>>,
     topology: Option<Option<CompleteTopology<'a>>>,
     budget: TraversalBudget,
     root: Option<ObjectId>,
@@ -70,6 +72,7 @@ impl<'a> AnalysisPhase<'a> {
     pub(super) fn new(engine: &'a WriteEngine) -> Self {
         Self {
             engine,
+            identity: None,
             topology: None,
             budget: TraversalBudget::new(MAX_LINK_GRAPH_NODES as usize, usize::MAX),
             root: None,
@@ -91,12 +94,43 @@ impl<'a> AnalysisPhase<'a> {
         }
     }
 
+    /// Associates the supplied physical object identity with this analysis phase.
+    ///
+    /// The caller supplies the source object for the rebuilt records. Shares the lazily
+    /// allocated phase identity with topology discovery, without reading the source or
+    /// discovering topology.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `engine` is not the engine borrowed by this phase.
+    pub(in crate::edit) fn reconstruction_source(
+        &mut self,
+        engine: &WriteEngine,
+        object: ObjectId,
+    ) -> Result<ReconstructionSource, FormatError> {
+        if !std::ptr::eq(self.engine, engine) {
+            return Err(FormatError::Internal(
+                "a reconstructed header belongs to another source engine".into(),
+            ));
+        }
+        #[cfg(test)]
+        RECONSTRUCTION_WORK.with(|work| work.set(work.get() + 1));
+        Ok(ReconstructionSource {
+            identity: Arc::clone(
+                self.identity
+                    .get_or_insert_with(|| Arc::new(deletions::TopologyIdentity)),
+            ),
+            object,
+        })
+    }
+
     /// Returns complete topology, discovering it on the first query.
     ///
     /// Returns `None` if discovery fails, including on later queries in the same phase.
     pub(super) fn topology(&mut self) -> Option<&CompleteTopology<'a>> {
         let Self {
             engine,
+            identity,
             topology,
             budget,
             root,
@@ -121,7 +155,10 @@ impl<'a> AnalysisPhase<'a> {
                         Ok,
                     )
                     .ok()?;
-                CompleteTopology::discover_cached(engine, root, *budget, links).ok()
+                let identity = Arc::clone(
+                    identity.get_or_insert_with(|| Arc::new(deletions::TopologyIdentity)),
+                );
+                CompleteTopology::discover_cached(engine, root, *budget, links, identity).ok()
             })
             .as_ref()
     }
@@ -261,6 +298,7 @@ impl<'a> AnalysisPhase<'a> {
     ) -> Result<CollectionAllocation, FormatError> {
         let Self {
             engine,
+            identity: _,
             allocations,
             counts: _,
             topology: _,
@@ -401,6 +439,7 @@ impl<'a> AnalysisPhase<'a> {
     fn read_references(&mut self, object: ObjectId) -> Result<&ObjectReferences, Error> {
         let Self {
             engine,
+            identity: _,
             topology,
             budget: _,
             root: _,
@@ -448,6 +487,7 @@ impl<'a> AnalysisPhase<'a> {
     fn work(&self) -> AnalysisWork {
         let Self {
             engine: _,
+            identity: _,
             topology,
             budget: _,
             root: _,
@@ -500,6 +540,37 @@ impl<'a> AnalysisPhase<'a> {
     }
 }
 
+/// A physical object identity associated with one analysis phase.
+///
+/// Equality requires the same shared phase identity and the same [`ObjectId`]. The identity is
+/// shared with any complete topology discovered in that phase. Source freshness, topology
+/// completeness, allocation ownership, and permission to write require separate evidence.
+#[derive(Debug)]
+pub(in crate::edit) struct ReconstructionSource {
+    identity: Arc<deletions::TopologyIdentity>,
+    object: ObjectId,
+}
+
+impl ReconstructionSource {
+    /// Returns the physical object-header identity supplied by the caller.
+    pub(in crate::edit) fn object(&self) -> ObjectId {
+        self.object
+    }
+}
+
+impl Eq for ReconstructionSource {}
+
+impl PartialEq for ReconstructionSource {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { identity, object } = self;
+        let Self {
+            identity: other_identity,
+            object: other_object,
+        } = other;
+        Arc::ptr_eq(identity, other_identity) && object == other_object
+    }
+}
+
 /// The hard-link graph reachable from a phase root, with identities and incoming-link counts.
 ///
 /// Each object is expanded once, and each hard-link edge is counted once. Link names are indexed
@@ -532,14 +603,28 @@ impl<'a> CompleteTopology<'a> {
         budget: TraversalBudget,
     ) -> Result<Self, Error> {
         let root = ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address)?;
-        Self::discover_cached(engine, root, budget, &mut BTreeMap::new())
+        Self::discover_cached(
+            engine,
+            root,
+            budget,
+            &mut BTreeMap::new(),
+            Arc::new(deletions::TopologyIdentity),
+        )
     }
 
+    /// Discovers topology under the supplied phase identity, reusing cached adjacency.
+    ///
+    /// The caller passes cached links and an identity from the same unchanged source phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns the discovery errors described by [`Self::discover`].
     fn discover_cached(
         engine: &'a WriteEngine,
         root: ObjectId,
         budget: TraversalBudget,
         cached: &mut BTreeMap<ObjectId, ObjectLinks>,
+        identity: Arc<deletions::TopologyIdentity>,
     ) -> Result<Self, Error> {
         #[cfg(test)]
         DISCOVERY_WORK.with(|work| {
@@ -604,7 +689,7 @@ impl<'a> CompleteTopology<'a> {
         .map_err(Error::from)?;
         cached.retain(|id, _| !indices.contains_key(id));
         Ok(Self {
-            identity: Arc::new(deletions::TopologyIdentity),
+            identity,
             engine,
             graph,
             indices,
@@ -864,6 +949,7 @@ struct AnalysisWork {
 #[cfg(test)]
 std::thread_local! {
     static DISCOVERY_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    pub(in crate::edit) static RECONSTRUCTION_WORK: Cell<usize> = const { Cell::new(0) };
     static COLLECTION_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     static COLLECTION_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }

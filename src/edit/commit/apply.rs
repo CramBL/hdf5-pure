@@ -211,10 +211,11 @@ impl WriteEngine {
 
             for RelocatedDataset {
                 link: _,
-                old_header,
+                source,
                 mut write,
             } in writes
             {
+                let old_header = source.object().header_address().get();
                 let tail_allocation = if let MovingWrite::AppendedChunks {
                     old_tail_allocation,
                     ..
@@ -325,10 +326,11 @@ impl WriteEngine {
         for node in groups.values() {
             for RelocatedDataset {
                 link: _,
-                old_header: old_oh,
+                source,
                 write: mw,
             } in &node.prepared.writes
             {
+                let old_oh = source.object().header_address().get();
                 match mw {
                     MovingWrite::Contiguous {
                         old_extent: Some(extent),
@@ -368,7 +370,7 @@ impl WriteEngine {
                     }
                     _ => {}
                 }
-                if let Ok(spans) = self.oh_chunk_spans(*old_oh) {
+                if let Ok(spans) = self.oh_chunk_spans(old_oh) {
                     if matches!(
                         mw,
                         MovingWrite::AttrEdit {
@@ -377,7 +379,7 @@ impl WriteEngine {
                         }
                     ) && let Ok(region) = Self::gather_oh_messages(
                         &self.image(),
-                        *old_oh,
+                        old_oh,
                         self.context.addresses(),
                         self.context.widths(),
                     ) && let Some(storage) = self.dense_attribute_storage_spans(&region, &spans)

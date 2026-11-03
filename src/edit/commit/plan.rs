@@ -18,6 +18,7 @@ use crate::datatype;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::CollectionCandidates;
 use crate::edit::analysis::PlannedDeletion;
+use crate::edit::analysis::ReconstructionSource;
 use crate::edit::attributes::{self, AttrOp, EditedAttrs};
 use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
@@ -159,11 +160,11 @@ struct DatasetRelocation {
     edit: RelocatedDataset,
 }
 
-/// Stores a dataset replacement with its child-link name and prior header address.
+/// A dataset replacement with its child-link name and source-phase association.
 pub(super) struct RelocatedDataset {
     pub(super) link: LinkNameBuf,
-    /// Absolute address of the header being replaced.
-    pub(super) old_header: u64,
+    /// The original physical object identity bound to its analysis phase.
+    pub(super) source: ReconstructionSource,
     pub(super) write: MovingWrite,
 }
 
@@ -286,19 +287,31 @@ impl GroupAdditions {
     }
 }
 
-/// Identifies a superseded group header and any dense attribute storage to reclaim.
+/// The source association of a superseded group header and its replaced attribute storage.
 pub(super) enum ReplacedHeader {
-    /// The absolute header address of a group whose dense attributes are also replaced.
-    DenseAttributes(u64),
-    /// The absolute header address, without separate dense-attribute reclamation.
-    Header(u64),
+    /// A source group whose dense attribute storage is also replaced.
+    DenseAttributes(ReconstructionSource),
+    /// A source group without separate dense-attribute reclamation.
+    Header(ReconstructionSource),
 }
 
 impl ReplacedHeader {
     /// Returns the absolute address of the superseded header.
     pub(super) fn address(&self) -> u64 {
+        self.source().object().header_address().get()
+    }
+
+    /// Borrows the source-phase association and physical identity of the superseded header.
+    pub(super) fn source(&self) -> &ReconstructionSource {
         match self {
-            Self::DenseAttributes(address) | Self::Header(address) => *address,
+            Self::DenseAttributes(source) | Self::Header(source) => source,
+        }
+    }
+
+    /// Marks dense attribute storage for replacement, preserving the source association.
+    fn into_dense_attributes(self) -> Self {
+        match self {
+            Self::DenseAttributes(source) | Self::Header(source) => Self::DenseAttributes(source),
         }
     }
 }
@@ -394,7 +407,7 @@ impl WriteEngine {
         }
         let mut moved_headers = moving_writes
             .iter()
-            .map(|relocation| PhysicalAddress::new(relocation.edit.old_header))
+            .map(|relocation| relocation.edit.source.object().header_address())
             .collect::<Vec<_>>();
         let DirtyGroups {
             mut nodes,
@@ -493,7 +506,10 @@ impl WriteEngine {
                         parent,
                         edit: RelocatedDataset {
                             link: leaf,
-                            old_header: addr,
+                            source: analysis.reconstruction_source(
+                                self,
+                                ObjectId::new(PhysicalAddress::new(addr)),
+                            )?,
                             write: mw,
                         },
                     });
@@ -546,7 +562,8 @@ impl WriteEngine {
                 parent,
                 edit: RelocatedDataset {
                     link: leaf,
-                    old_header: addr,
+                    source: analysis
+                        .reconstruction_source(self, ObjectId::new(PhysicalAddress::new(addr)))?,
                     write: mw,
                 },
             });
@@ -616,7 +633,10 @@ impl WriteEngine {
                     parent,
                     edit: RelocatedDataset {
                         link: leaf,
-                        old_header: addr,
+                        source: analysis.reconstruction_source(
+                            self,
+                            ObjectId::new(PhysicalAddress::new(addr)),
+                        )?,
                         write: MovingWrite::AttrEdit {
                             region: attributes.region,
                             attrs: attributes.attrs,
@@ -858,7 +878,10 @@ impl WriteEngine {
                 let (region, link_names) = inspected.into_compact()?;
                 superseded_addrs.push((key.clone(), addr));
                 node.prepared.region = region;
-                node.prepared.replaces = Some(ReplacedHeader::Header(addr));
+                node.prepared.replaces = Some(ReplacedHeader::Header(
+                    analysis
+                        .reconstruction_source(self, ObjectId::new(PhysicalAddress::new(addr)))?,
+                ));
                 node.existing_links = link_names;
             }
         }
@@ -876,10 +899,12 @@ impl WriteEngine {
                 }
                 node.prepared.region = edits.region;
                 node.prepared.attrs = edits.attrs;
-                if edits.replaces_dense_storage
-                    && let Some(replaced) = &mut node.prepared.replaces
-                {
-                    *replaced = ReplacedHeader::DenseAttributes(replaced.address());
+                if edits.replaces_dense_storage {
+                    node.prepared.replaces = node
+                        .prepared
+                        .replaces
+                        .take()
+                        .map(ReplacedHeader::into_dense_attributes);
                 }
             }
         }
