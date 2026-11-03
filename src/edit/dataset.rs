@@ -1939,6 +1939,19 @@ pub(super) enum MovingWrite {
     },
 }
 
+impl MovingWrite {
+    /// Borrows the owned object-header records for this relocating edit.
+    pub(in crate::edit) fn region_mut(&mut self) -> &mut OhRegion {
+        match self {
+            Self::AppendedChunks { region, .. }
+            | Self::AttrEdit { region, .. }
+            | Self::Chunked { region, .. }
+            | Self::Compact { region, .. }
+            | Self::Contiguous { region, .. } => region,
+        }
+    }
+}
+
 /// A replacement chunk-index kind and slot mapping for a grown dataset.
 pub(super) struct AppendIndex {
     kind: ChunkIndexKind,

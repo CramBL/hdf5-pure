@@ -16,6 +16,9 @@ use crate::object_graph::ObjectIndex;
 use super::CompleteTopology;
 use super::RemovedLinks;
 
+pub(in crate::edit) use source::DeclaredCountChange;
+pub(in crate::edit) use source::SourceRemovalPlan;
+
 mod source;
 
 impl<'topology, 'source> RemovedLinks<'topology, 'source> {

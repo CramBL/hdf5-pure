@@ -37,6 +37,15 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::OriginalSource;
 use crate::type_builders::ObjectRefTarget;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "count projections are exercised by private owner tests"
+    )
+)]
+mod counts;
+
 #[cfg(test)]
 mod tests;
 
