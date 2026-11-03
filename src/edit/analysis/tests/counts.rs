@@ -33,7 +33,7 @@ fn count_queries_are_lazy_cached_and_bound_to_source_contents(
 ) {
     let path = test_util::temp::temp_path("count-cache.h5");
     let mut fixture = Fixture::new();
-    let address = fixture.append_header(vec![count_record(2)]);
+    let address = fixture.append_header(vec![Message::reference_count(2)]);
     fixture.link("a", address);
     fixture.link("b", address);
     fixture.write(&path);
@@ -84,7 +84,9 @@ fn count_queries_are_lazy_cached_and_bound_to_source_contents(
     assert_eq!(phase.object_reference_count(object).unwrap(), observed);
     assert_eq!(calls.load(Ordering::Relaxed), after_enrichment);
     drop(phase);
-    let replacement = v2::Header::new().message(count_record(9)).build();
+    let replacement = v2::Header::new()
+        .message(Message::reference_count(9))
+        .build();
     engine.write_at(address, &replacement).unwrap();
     let mut phase = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
     assert!(phase.counts.is_empty());
@@ -107,7 +109,7 @@ fn count_completeness_does_not_replace_other_phase_facts(#[case] form: CountForm
     let mut fixture = Fixture::new();
     let collection = fixture.collection(&[Object::new(1, b"value")]);
     let records = match form {
-        CountForm::Ambiguous => vec![count_record(2), count_record(3)],
+        CountForm::Ambiguous => vec![Message::reference_count(2), Message::reference_count(3)],
         CountForm::Implicit => vec![],
         CountForm::Unsupported => vec![Message::new(
             MessageType::OBJECT_REFERENCE_COUNT,
@@ -183,7 +185,7 @@ fn incomplete_parses_cache_failures_without_promoting_count_scratch(#[case] fail
         }
         Failure::Source => Message::continuation(1_000_000, 64, Widths::EIGHT),
     };
-    let address = fixture.append_header(vec![count_record(2), continuation]);
+    let address = fixture.append_header(vec![Message::reference_count(2), continuation]);
     fixture.link("a", address);
     fixture.write(&path);
     let calls = Arc::new(AtomicU64::new(0));
@@ -222,12 +224,6 @@ fn incomplete_parses_cache_failures_without_promoting_count_scratch(#[case] fail
     assert!(
         phase.topology.is_none() && phase.references.is_empty() && phase.allocations.is_empty()
     );
-}
-
-fn count_record(count: u32) -> Message {
-    let mut body = [0; 5];
-    body[1..].copy_from_slice(&count.to_le_bytes());
-    Message::new(MessageType::OBJECT_REFERENCE_COUNT, &body)
 }
 
 #[derive(Clone, Copy)]
