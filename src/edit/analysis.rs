@@ -4,6 +4,7 @@
 use core::cell::Cell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
@@ -26,6 +27,10 @@ use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::GlobalHeapLiveness;
 use super::reclaim::{self, MAX_LINK_WALK_DEPTH};
 use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
+
+pub(super) use deletions::PlannedDeletion;
+
+mod deletions;
 
 /// Lazy topology, reference, and allocation queries for unchanged source contents.
 ///
@@ -452,6 +457,7 @@ impl<'a> AnalysisPhase<'a> {
 /// Each object is expanded once, and each hard-link edge is counted once. Link names are indexed
 /// per owner. Payload-reference completeness and allocation ownership require separate proofs.
 pub(super) struct CompleteTopology<'a> {
+    identity: Arc<deletions::TopologyIdentity>,
     engine: &'a WriteEngine,
     graph: ObjectGraph<TopologyObject, ()>,
     indices: BTreeMap<ObjectId, ObjectIndex>,
@@ -545,6 +551,7 @@ impl<'a> CompleteTopology<'a> {
         .map_err(Error::from)?;
         cached.retain(|id, _| !indices.contains_key(id));
         Ok(Self {
+            identity: Arc::new(deletions::TopologyIdentity),
             engine,
             graph,
             indices,

@@ -16,11 +16,13 @@ use super::PreparedCommit;
 use crate::DeflateLevel;
 use crate::File;
 use crate::Object;
+use crate::PhysicalAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::chunked_write::StorageAllocation;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::PlannedDeletion;
 use crate::edit::dataset::MovingWrite;
 use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
@@ -134,9 +136,10 @@ fn prepared_link_names_distinguish_survivors_and_deleted_destinations(
         .map(|name| LinkNameBuf::new(name).unwrap())
         .collect();
     if delete_existing {
-        node.prepared
-            .deletes
-            .push(LinkNameBuf::new("existing").unwrap());
+        node.prepared.deletes.push(PlannedDeletion::unresolved(
+            LinkNameBuf::new("existing").unwrap(),
+            PhysicalAddress::new(100),
+        ));
     }
     let key = ObjectPathBuf::root();
     let mut nodes = BTreeMap::from([(key.clone(), node)]);
