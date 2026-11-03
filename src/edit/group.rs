@@ -58,10 +58,11 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the object is a dataset, the header stores a symbol
-    /// table beside link storage messages, the links or their storage messages are inconsistent
-    /// or cannot be reproduced, or an attribute is too large or has flags the conversion cannot
-    /// preserve. Returns [`FormatError::PathNotFound`] if the object is not a group. Returns
+    /// Returns [`Error::EditUnsupported`] if the object is a dataset, the header contains
+    /// Attribute Info, the header stores a symbol table beside link storage messages, the links
+    /// or their storage messages are inconsistent or cannot be reproduced, or an attribute is
+    /// too large or has flags the conversion cannot preserve. Returns
+    /// [`FormatError::PathNotFound`] if the object is not a group. Returns
     /// parsing and source-read errors as reported by the group, object-header, heap, and index
     /// readers.
     pub(super) fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
@@ -86,6 +87,15 @@ impl WriteEngine {
             return Err(
                 FormatError::PathNotFound(String::from("object header is not a group")).into(),
             );
+        }
+        if oh
+            .messages
+            .iter()
+            .any(|message| message.msg_type == MessageType::ATTRIBUTE_INFO)
+        {
+            return Err(Error::EditUnsupported(
+                "a version 1 group's Attribute Info message cannot be preserved by conversion",
+            ));
         }
         let mut region = match oh
             .messages
@@ -146,11 +156,11 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the object is a dataset, link metadata is
-    /// inconsistent or unsupported, or a version 2 header has no Link Info message. Dense
-    /// storage is limited to unfiltered managed objects with seven-byte heap IDs and encoded
-    /// links of at most 4096 bytes. Returns parsing and source-read errors from the object
-    /// header, heap, and index readers.
+    /// Returns [`Error::EditUnsupported`] if the object is a dataset, a version 1 header contains
+    /// Attribute Info, link metadata is inconsistent or unsupported, or a version 2 header has no
+    /// Link Info message. Dense storage is limited to unfiltered managed objects with seven-byte
+    /// heap IDs and encoded links of at most 4096 bytes. Returns parsing and source-read errors
+    /// from the object header, heap, and index readers.
     pub(super) fn inspect_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let sig = self.image().read_metadata_at(addr, 4);
         if sig.as_deref() != Ok(&b"OHDR"[..]) {

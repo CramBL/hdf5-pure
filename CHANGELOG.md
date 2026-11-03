@@ -91,6 +91,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` dropping dense attributes when converting a version 1 group header containing Attribute Info. Such conversions return `Error::EditUnsupported` before writing changes ([#1068](https://github.com/CramBL/hdf5-pure/pull/1068)).
 - Fixed `File::commit` leaving unreferenced global-heap collections allocated after variable-length attributes are replaced or removed. Reclamation requires proved collection ownership and complete analysis of surviving references ([#1063](https://github.com/CramBL/hdf5-pure/pull/1063)).
 - Fixed `File::commit` writing small object-header chunks, dense attribute metadata blocks, or persisted free-space manager blocks across PAGE boundaries, or placing large blocks at unaligned addresses ([#1056](https://github.com/CramBL/hdf5-pure/pull/1056), [#1057](https://github.com/CramBL/hdf5-pure/pull/1057), [#1065](https://github.com/CramBL/hdf5-pure/pull/1065)).
 - Fixed `Group::datasets` and related metadata reads accepting contradictory version 2 B-tree root counts, repeated nodes, incomplete link-index records, or an index with the wrong client type. Full metadata walks use a bounded work allowance ([#1058](https://github.com/CramBL/hdf5-pure/pull/1058)).

@@ -9,6 +9,7 @@ mod extension_records;
 mod group_link_inspection;
 mod large_page;
 mod symbol_table_links;
+mod version_1_attributes;
 
 mod generic_large;
 mod huge_links;
