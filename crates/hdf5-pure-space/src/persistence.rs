@@ -174,6 +174,16 @@ impl PageParts {
         }
     }
 
+    /// Returns the nonempty partial edges in stored-address order.
+    pub(super) fn edges(self) -> impl Iterator<Item = Extent> {
+        let Self {
+            leading,
+            interior: _,
+            trailing,
+        } = self;
+        [leading, trailing].into_iter().flatten()
+    }
+
     /// Returns the number of nonempty pieces.
     pub(super) fn count(&self) -> usize {
         usize::from(self.leading.is_some())

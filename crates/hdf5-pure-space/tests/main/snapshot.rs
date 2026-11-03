@@ -1,5 +1,6 @@
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+use hdf5_pure_space::__private::PageClassEvidence;
 use hdf5_pure_space::__private::{
     AllocationClass, Extent, FreeClass, ManagerKind, ManagerSections, PageTransition, PageType,
     SessionSpace,
@@ -229,4 +230,122 @@ fn proposed_page_snapshot_excludes_owned_metadata_capacity() {
     assert_eq!(managers[0].sections(), [extent(8320, 3968)]);
     assert_eq!(managers[1].kind(), ManagerKind::PagedLargeGeneric);
     assert_eq!(managers[1].sections(), [extent(4096, 4096)]);
+}
+
+#[rstest]
+#[case::metadata(&[(Some(ManagerKind::PagedSmallMetadata), 400, 16)], 100, 20, PageClassEvidence::Known(PageType::Meta))]
+#[case::raw(&[(Some(ManagerKind::PagedSmallRaw), 400, 16)], 100, 20, PageClassEvidence::Known(PageType::Raw))]
+#[case::absent(&[], 100, 20, PageClassEvidence::Unknown)]
+#[case::unclassified(&[(None, 400, 16)], 100, 20, PageClassEvidence::Unknown)]
+#[case::another_page(&[(Some(ManagerKind::PagedSmallMetadata), 912, 16)], 100, 20, PageClassEvidence::Unknown)]
+#[case::following_page(&[(Some(ManagerKind::PagedSmallMetadata), 512, 16)], 480, 32, PageClassEvidence::Unknown)]
+#[case::preceding_page(&[(Some(ManagerKind::PagedSmallMetadata), 496, 16)], 512, 16, PageClassEvidence::Unknown)]
+#[case::same_page_conflict(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16), (Some(ManagerKind::PagedSmallRaw), 400, 16)], 100, 20, PageClassEvidence::Conflict)]
+#[case::both_edges_agree(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16), (Some(ManagerKind::PagedSmallMetadata), 1_424, 16)], 100, 1_224, PageClassEvidence::Known(PageType::Meta))]
+#[case::different_edge_classes(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16), (Some(ManagerKind::PagedSmallRaw), 1_424, 16)], 100, 1_224, PageClassEvidence::Conflict)]
+#[case::missing_edge(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16)], 100, 1_224, PageClassEvidence::Unknown)]
+#[case::missing_first_edge(&[(Some(ManagerKind::PagedSmallMetadata), 1_424, 16)], 100, 1_224, PageClassEvidence::Unknown)]
+#[case::crossing_without_a_full_page(&[(Some(ManagerKind::PagedSmallMetadata), 450, 16), (Some(ManagerKind::PagedSmallMetadata), 600, 16)], 480, 64, PageClassEvidence::Known(PageType::Meta))]
+#[case::conflict_on_first_edge(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16), (Some(ManagerKind::PagedSmallRaw), 400, 16), (Some(ManagerKind::PagedSmallMetadata), 1_424, 16)], 100, 1_224, PageClassEvidence::Conflict)]
+#[case::conflict_on_last_edge(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16), (Some(ManagerKind::PagedSmallMetadata), 1_424, 16), (Some(ManagerKind::PagedSmallRaw), 1_456, 16)], 100, 1_224, PageClassEvidence::Conflict)]
+#[case::typed_and_unclassified_fragments(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16), (None, 400, 16)], 100, 20, PageClassEvidence::Known(PageType::Meta))]
+#[case::whole_free_pages(&[(Some(ManagerKind::PagedLargeGeneric), 512, 1_024)], 700, 16, PageClassEvidence::Unknown)]
+#[case::interior_of_typed_run(&[(Some(ManagerKind::PagedSmallMetadata), 100, 1_224)], 700, 16, PageClassEvidence::Unknown)]
+#[case::edge_of_typed_run(&[(Some(ManagerKind::PagedSmallMetadata), 100, 1_224)], 20, 16, PageClassEvidence::Known(PageType::Meta))]
+#[case::no_partial_edges(&[(Some(ManagerKind::PagedSmallMetadata), 50, 16)], 512, 1_024, PageClassEvidence::Unknown)]
+fn partial_page_classes_require_consistent_typed_fragments(
+    #[case] sections: &[(Option<ManagerKind>, u64, u64)],
+    #[case] start: u64,
+    #[case] length: u64,
+    #[case] expected: PageClassEvidence,
+    #[values(512, 513, 4_096)] page: u64,
+    #[values(0, 1_u64 << 32)] page_origin: u64,
+) {
+    let coordinate = |value| page_origin * page + value / 512 * page + value % 512;
+    let allocation = |start, length| {
+        extent(
+            coordinate(start),
+            coordinate(start + length) - coordinate(start),
+        )
+    };
+    let space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::try_from(page).unwrap(),
+        sections
+            .iter()
+            .map(|&(kind, start, length)| (kind, allocation(start, length))),
+    )
+    .unwrap();
+    let snapshot = space.admitted_snapshot();
+    let before = snapshot.sections().collect::<Vec<_>>();
+    let totals = (
+        snapshot.reusable_bytes().unwrap(),
+        snapshot.unclassified_bytes(),
+    );
+    assert_eq!(
+        snapshot.partial_page_class(allocation(start, length)),
+        expected
+    );
+    assert_eq!(snapshot.sections().collect::<Vec<_>>(), before);
+    assert_eq!(
+        (
+            snapshot.reusable_bytes().unwrap(),
+            snapshot.unclassified_bytes()
+        ),
+        totals
+    );
+}
+
+#[rstest]
+#[case::flat(FileSpaceStrategy::FsmAggr)]
+#[case::disabled(FileSpaceStrategy::None)]
+fn a_snapshot_without_page_geometry_cannot_establish_a_page_class(
+    #[case] strategy: FileSpaceStrategy,
+) {
+    let space = SessionSpace::from_persisted(
+        Some(strategy),
+        1,
+        FileSpacePageSize::MIN,
+        [(Some(ManagerKind::PagedSmallMetadata), extent(400, 16))],
+    )
+    .unwrap();
+    assert_eq!(
+        space
+            .admitted_snapshot()
+            .partial_page_class(extent(100, 20)),
+        PageClassEvidence::Unknown
+    );
+}
+
+#[test]
+fn a_page_class_proves_no_ownership_or_availability_outside_its_fragment() {
+    let seed = extent(400, 16);
+    let query = extent(100, 20);
+    let mut space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        1,
+        FileSpacePageSize::MIN,
+        [(Some(ManagerKind::PagedSmallMetadata), seed)],
+    )
+    .unwrap();
+    let before = space.append_snapshot();
+    assert_eq!(
+        space.admitted_snapshot().partial_page_class(query),
+        PageClassEvidence::Known(PageType::Meta)
+    );
+    assert_eq!(space.allocate(query.len(), AllocationClass::Metadata), None);
+    assert_eq!(
+        space.allocate(seed.len(), AllocationClass::Metadata),
+        Some(seed)
+    );
+    assert_eq!(
+        space.admitted_snapshot().partial_page_class(query),
+        PageClassEvidence::Unknown
+    );
+    space.restore_append(before);
+    assert_eq!(
+        space.admitted_snapshot().partial_page_class(query),
+        PageClassEvidence::Known(PageType::Meta)
+    );
 }
