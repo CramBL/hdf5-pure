@@ -1,4 +1,4 @@
-//! Phase-scoped topology, collection references, and allocation facts for an editing session.
+//! Phase-scoped topology, object counts, collection references, and allocation facts.
 
 #[cfg(test)]
 use core::cell::Cell;
@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::ObjectReferenceCount;
+use hdf5_pure_format::__private::ObjectReferenceCountObserver;
 use hdf5_pure_space::__private::FreeClass;
 
 use crate::access_mode::AccessMode;
@@ -18,6 +20,7 @@ use crate::object_graph::{
     Expansion, HardLink, LinkIndex, ObjectGraph, ObjectId, ObjectIndex, ObjectTraversal,
     TraversalBudget, TraversalLimit,
 };
+use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
@@ -32,11 +35,12 @@ pub(super) use deletions::PlannedDeletion;
 
 mod deletions;
 
-/// Lazy topology, reference, and allocation queries for unchanged source contents.
+/// Lazy topology, object-count, reference, and allocation queries for unchanged source contents.
 ///
 /// The engine remains borrowed while its facts are used. The caller establishes source consistency
-/// and starts a new phase after relevant source writes. Adjacency, reference summaries, and collection
-/// geometry are retained separately, with a completeness result for each required reference scan.
+/// and starts a new phase after relevant source writes. Adjacency, parsed count observations,
+/// reference summaries, and collection geometry are retained separately, with a completeness
+/// result for each required reference scan.
 pub(super) struct AnalysisPhase<'a> {
     engine: &'a WriteEngine,
     topology: Option<Option<CompleteTopology<'a>>>,
@@ -46,6 +50,8 @@ pub(super) struct AnalysisPhase<'a> {
     references: BTreeMap<ObjectId, ObjectReferences>,
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     allocations: BTreeMap<PhysicalAddress, Result<FileRange, FormatError>>,
+    /// Count classifications or parse failures, indexed by physical object identity.
+    counts: BTreeMap<ObjectId, Result<ObjectReferenceCount, FormatError>>,
     #[cfg(test)]
     candidate_lookups: u64,
 }
@@ -61,6 +67,7 @@ impl<'a> AnalysisPhase<'a> {
             references: BTreeMap::new(),
             liveness: None,
             allocations: BTreeMap::new(),
+            counts: BTreeMap::new(),
             #[cfg(test)]
             candidate_lookups: 0,
         }
@@ -87,6 +94,7 @@ impl<'a> AnalysisPhase<'a> {
             references: _,
             liveness: _,
             allocations: _,
+            counts: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -106,6 +114,74 @@ impl<'a> AnalysisPhase<'a> {
                 CompleteTopology::discover_cached(engine, root, *budget, links).ok()
             })
             .as_ref()
+    }
+
+    /// Returns a cached count observation at the object's physical header address.
+    ///
+    /// Parses the complete header on the first query, retaining no message bodies. Caches
+    /// successful classifications and failures for subsequent queries in this source phase.
+    /// Produces a count observation only after the parser and all chunk observations succeed.
+    /// Topology, reference completeness, and allocation facts remain independent. The caller
+    /// establishes count authority separately before retirement.
+    ///
+    /// # Errors
+    ///
+    /// Returns parsing and source-read errors from
+    /// [`ObjectHeader::parse_from_source_with_chunk_observer`], or observation errors from
+    /// [`ObjectReferenceCountObserver::observe`] and [`ObjectReferenceCountObserver::finish`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "count observations do not authorize allocation retirement"
+        )
+    )]
+    pub(super) fn object_reference_count(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<ObjectReferenceCount, FormatError> {
+        let Self {
+            engine,
+            counts,
+            topology: _,
+            budget: _,
+            root: _,
+            links: _,
+            references: _,
+            liveness: _,
+            allocations: _,
+            #[cfg(test)]
+                candidate_lookups: _,
+        } = self;
+        counts
+            .entry(object)
+            .or_insert_with(|| {
+                let observer = ObjectReferenceCountObserver::new(object.header_address());
+                let mut observation_error = None;
+                let header = ObjectHeader::parse_from_source_with_chunk_observer(
+                    &SourceMetadata(&engine.image()),
+                    AccessMode::ReadWrite,
+                    object.header_address(),
+                    engine.widths(),
+                    engine.addresses().effective_base(),
+                    MessageFilter::Only(&mut |kind, _| {
+                        observer.observe_message_type(kind);
+                        false
+                    }),
+                    &mut |chunk| {
+                        if observation_error.is_none() {
+                            observation_error = observer.observe(chunk).err();
+                        }
+                    },
+                )?;
+                if let Some(error) = observation_error {
+                    return Err(error);
+                }
+                observer.finish(&header)
+            })
+            .as_ref()
+            .copied()
+            .map_err(Clone::clone)
     }
 
     /// Returns collection references reachable from physical object-header addresses in `roots`.
@@ -217,6 +293,7 @@ impl<'a> AnalysisPhase<'a> {
         let Self {
             engine,
             allocations,
+            counts: _,
             topology: _,
             budget: _,
             root: _,
@@ -362,6 +439,7 @@ impl<'a> AnalysisPhase<'a> {
             references,
             liveness: _,
             allocations: _,
+            counts: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -408,6 +486,7 @@ impl<'a> AnalysisPhase<'a> {
             references,
             liveness,
             allocations,
+            counts: _,
             candidate_lookups,
         } = self;
         let topology = topology.as_ref().and_then(Option::as_ref);
