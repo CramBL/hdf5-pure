@@ -945,6 +945,22 @@ impl CompressedChunkSet {
         &self.chunks
     }
 
+    /// Returns object-header messages with an undefined array index address.
+    ///
+    /// Returns [`None`] for single-chunk and allocated array layouts. The writer clones the
+    /// prepared filter-pipeline message.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::header`].
+    #[cfg(feature = "std")]
+    pub(crate) fn unallocated_header(&self) -> Result<Option<ChunkedHeader>, FormatError> {
+        if !matches!(self.kind, ChunkIndexKind::Unallocated(_)) {
+            return Ok(None);
+        }
+        self.header(&[], StoredAddress::new(HADDR_UNDEF)).map(Some)
+    }
+
     /// Returns array geometry with ascending occupied-slot assignments.
     ///
     /// Returns [`None`] for unallocated and single-chunk layouts. Ordered assignments are borrowed.

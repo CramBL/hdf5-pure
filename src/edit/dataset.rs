@@ -1072,9 +1072,11 @@ impl WriteEngine {
 
     /// Writes a prepared dataset's chunk storage and returns its object-header bytes.
     ///
-    /// Chunks are encoded once before their storage is sized and allocated. For PAGE array layouts,
-    /// the writer calls [`Self::write_paged_chunk_set`]. For other layouts and non-PAGE files, the
-    /// writer selects the contiguous chunk serializer.
+    /// Chunks are encoded once before their storage is sized and allocated. For PAGE layouts with
+    /// an undefined index address, the writer constructs the layout and filter-pipeline messages
+    /// directly. For allocated PAGE array layouts, the writer calls
+    /// [`Self::write_paged_chunk_set`]. For other layouts and non-PAGE files, the writer selects the
+    /// contiguous chunk serializer.
     ///
     /// # Errors
     ///
@@ -1097,11 +1099,19 @@ impl WriteEngine {
             fill_time,
             fd.storage.allocation(),
         )?;
-        let geometry = self.space.page_size().and_then(|_| set.array_geometry());
+        let page = self.space.page_size();
+        let unallocated = if page.is_some() {
+            set.unallocated_header()?
+        } else {
+            None
+        };
+        let geometry = page.and_then(|_| set.array_geometry());
         let ChunkedHeader {
             layout_message,
             pipeline_message,
-        } = if let Some(geometry) = geometry {
+        } = if let Some(header) = unallocated {
+            header
+        } else if let Some(geometry) = geometry {
             self.write_paged_chunk_set(&set, geometry)?
         } else {
             let (_, header) = self.place_relocatable(
