@@ -5,6 +5,12 @@ use core::num::NonZeroUsize;
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::FileSpacePageSize;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::UserblockSize;
 
 /// Opens an existing file for read-only native observations.
 ///
@@ -28,6 +34,35 @@ pub fn libhdf5_open_with_page_buffer(path: &Path, capacity: NonZeroUsize) -> hdf
         .with_fapl(|properties| properties.page_buffer_size(capacity.get(), 0, 0))
         .open(path)
         .unwrap_or_else(|error| panic!("open {path:?}: {error}"))
+}
+
+/// Creates a native PAGE fixture with threshold 1 and optional persistence.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create `path` with these settings.
+#[cfg(feature = "__hdf5-1.10")]
+#[track_caller]
+pub fn libhdf5_create_page(
+    path: &Path,
+    page: FileSpacePageSize,
+    userblock: UserblockSize,
+    persist: bool,
+) -> hdf5::File {
+    hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties
+                .userblock(userblock.get())
+                .file_space_page_size(page.get())
+                .file_space_strategy(NativeStrategy::FreeSpaceManager {
+                    paged: true,
+                    persist,
+                    threshold: 1,
+                })
+        })
+        .create(path)
+        .unwrap_or_else(|error| panic!("create {path:?}: {error}"))
 }
 
 /// A file the C library creates in the 1.8 format or newer: version 2 object

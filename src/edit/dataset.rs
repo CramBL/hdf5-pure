@@ -32,6 +32,7 @@ use crate::chunked_write::ChunkedHeader;
 use crate::chunked_write::CompressedChunkSet;
 #[cfg(doc)]
 use crate::chunked_write::PartialEdgeFiltering;
+use crate::chunked_write::VerbatimChunks;
 use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
@@ -1250,17 +1251,18 @@ impl WriteEngine {
 
     /// Writes stored chunk bytes and a replacement dataset header.
     ///
-    /// The shared chunk writer plans and emits the chunk data and index at their allocated address.
-    /// Chunk sizes and filter masks are preserved. The existing header retains its messages except
-    /// for
-    /// the replaced layout and any rebuilt dense attribute storage.
+    /// For PAGE array layouts, the writer calls [`Self::write_paged_verbatim_chunks`]. For other
+    /// layouts and non-PAGE files, the writer plans a contiguous payload and index region. Chunk
+    /// sizes and filter masks are preserved. The writer replaces the header's layout and any
+    /// rebuilt dense attribute storage, preserving its other messages.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the header lacks a layout message. Returns
     /// [`Error::Format`] if chunk layout, attribute storage, or header encoding is invalid, or the
     /// built storage differs in length from its allocation. Returns [`Error::Io`] if writing the
-    /// replacement storage fails.
+    /// replacement storage fails, or [`Error::AllocationPublicationUncertain`] if allocation
+    /// publication is uncertain.
     #[expect(
         clippy::too_many_arguments,
         reason = "the verbatim rebuild combines the header, geometry, encoding, payload, and attributes"
@@ -1284,38 +1286,123 @@ impl WriteEngine {
         } = geometry;
         let element_size = *element_size;
         let maxshape = maxshape.as_deref();
-        let sizing = chunked_write::plan_chunked_data_verbatim(
+        let prepared = VerbatimChunks::new(
             meta,
             shape,
             chunk_dims,
             element_size,
             flags,
             pipeline_message,
-            StoredAddress::new(0),
+            StoredAddress::ZERO,
             maxshape,
         )?;
-        let (_addr, layout_message) =
-            self.place_relocatable(sizing.plan.total_len, AllocationClass::Raw, |stored_base| {
-                let layout = chunked_write::plan_chunked_data_verbatim(
-                    meta,
-                    shape,
-                    chunk_dims,
-                    element_size,
-                    flags,
-                    pipeline_message,
-                    stored_base,
-                    maxshape,
-                )?;
-                let mut buf =
-                    Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
-                chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)
-                    .map_err(EmissionError::into_format)?;
-                Ok((buf, layout.layout_message))
-            })?;
+        let layout_message = if self.space.page_size().is_some() && prepared.array_kind().is_some()
+        {
+            self.write_paged_verbatim_chunks(prepared, chunks)?
+        } else {
+            let sizing = prepared.into_layout()?;
+            let (_addr, layout_message) = self.place_relocatable(
+                sizing.plan.total_len,
+                AllocationClass::Raw,
+                |stored_base| {
+                    let layout = chunked_write::plan_chunked_data_verbatim(
+                        meta,
+                        shape,
+                        chunk_dims,
+                        element_size,
+                        flags,
+                        pipeline_message,
+                        stored_base,
+                        maxshape,
+                    )?;
+                    let mut buf =
+                        Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
+                    chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)
+                        .map_err(EmissionError::into_format)?;
+                    Ok((buf, layout.layout_message))
+                },
+            )?;
+            layout_message
+        };
         let mut new_region = replace_layout_message(region, &layout_message)?;
         self.append_dense_attrs(&mut new_region, dense_attrs)?;
         let oh = super::object_header::build_v2_object_header(&new_region)?;
         self.place_object_header(&oh)
+    }
+
+    /// Writes a PAGE provider payload and complete metadata index, returning its layout message.
+    ///
+    /// The prepared records must describe an array and a nonempty payload. The writer reserves one
+    /// contiguous raw allocation and separate complete metadata blocks through [`ArrayIndexPlan`].
+    /// Payload emission through [`VerbatimChunks::emit_chunks`] precedes index emission, with
+    /// stored references assigned from the reservation plan's address context.
+    ///
+    /// Complete reservations remain unavailable after partial emission. The caller is responsible
+    /// for allocation rollback and publication within the enclosing commit.
+    ///
+    /// # Working memory
+    ///
+    /// The provider scratch buffer is separate from retained source payloads, preparation and slot
+    /// metadata, index encoding buffers, and image buffering or mirroring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if array geometry is absent, the payload is empty, provider output
+    /// differs from its records, or geometry, address conversion, or encoding fails. Returns
+    /// provider errors through [`Error::Format`], [`Error::Io`] for failed writes, or
+    /// [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
+    fn write_paged_verbatim_chunks(
+        &mut self,
+        mut prepared: VerbatimChunks<'_>,
+        provider: &dyn ChunkProvider,
+    ) -> Result<Vec<u8>, Error> {
+        let ChunkArrayGeometry {
+            kind,
+            occupied,
+            slots,
+            chunk_bytes,
+            filtered,
+        } = prepared.array_geometry().ok_or_else(|| {
+            FormatError::Internal("a paged verbatim array has no index geometry".into())
+        })?;
+        let index = ArrayIndexPlan::new(
+            kind,
+            SlotOccupancy::Slots(&occupied),
+            slots,
+            chunk_bytes,
+            FormatWidths {
+                offsets: OFFSET_WIDTH,
+                lengths: LENGTH_WIDTH,
+            },
+            filtered,
+        )?;
+        drop(occupied);
+        let length = NonZeroU64::new(prepared.payload_len()).ok_or(
+            FormatError::InvalidChunkGeometry("verbatim chunk storage is empty"),
+        )?;
+        let mut requests = vec![BlockRequest::complete(
+            ReservationRequest::new(length, AllocationClass::Raw),
+            EncodingDependency::Independent,
+        )];
+        requests.extend(index.requests()?);
+        let mut reservations = self
+            .plan_blocks(&requests)
+            .map_err(ReservationFailure::into_error)?;
+        let address = reservations
+            .addresses()
+            .relative(reservations.reservations()[0].range().start())?;
+        prepared.assign_data_address(address)?;
+        reservations.write_next_with(|writer| {
+            prepared
+                .emit_chunks(provider, |bytes| writer.write(bytes))
+                .map_err(|error| match error {
+                    EmissionError::Format(error) => Error::Format(error),
+                    EmissionError::Sink(error) => error,
+                })
+        })?;
+        let address = index.write(&prepared.index_slots()?, &mut reservations)?;
+        reservations.finish()?;
+        Ok(prepared.layout_message(address)?)
     }
 
     /// Adds elements to the prepared bytes and leading dimension of a staged creation.

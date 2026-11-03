@@ -26,11 +26,11 @@ use crate::{dataset::Unlimited, file_space};
 /// places through a *metadata* allocation, so finding one in a raw page means a
 /// metadata allocation landed there.
 ///
-/// Chunk-index signatures (`FAHD`/`FADB`, `EAHD`/`EAIB`/`EASB`/`EADB`) are excluded because
-/// chunked replacement through the editor can place these blocks in raw allocations. For staged
-/// PAGE dataset creation and appends to committed datasets, the editor reserves complete array
-/// index blocks as metadata. `TREE` is excluded because version 1 chunk indexes share that
-/// signature.
+/// Chunk-index signatures (`FAHD`/`FADB`, `EAHD`/`EAIB`/`EASB`/`EADB`) are excluded because the
+/// writer can place them in raw allocations during [`FileBuilder`] output or immediate appends.
+/// For staged PAGE creation, relocating copies or overwrites, and appends to committed datasets,
+/// the editor reserves complete array index blocks as metadata. `TREE` is excluded because
+/// version 1 chunk indexes share that signature.
 pub const METADATA_SIGNATURES: &[&[u8; 4]] = &[
     object_header::v2::SIGNATURE,
     object_header::v2::CONTINUATION_SIGNATURE,
