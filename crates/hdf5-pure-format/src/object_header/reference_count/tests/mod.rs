@@ -16,6 +16,8 @@ use crate::width::FormatWidths;
 
 use super::*;
 
+mod update;
+
 #[rstest]
 #[case::zero(0, [0, 0, 0, 0, 0])]
 #[case::one(1, [0, 1, 0, 0, 0])]
