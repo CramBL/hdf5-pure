@@ -32,13 +32,6 @@ use crate::width::FormatWidths;
 
 use super::WriteEngine;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "owned count projections do not authorize source writes"
-    )
-)]
 pub(super) mod reference_count;
 
 impl WriteEngine {
