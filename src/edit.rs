@@ -235,7 +235,7 @@
 //! page type and retains partial edges as unclassified. Other manager sections remain
 //! unclassified and are excluded from allocation. The editor retains these fragments in the
 //! persisted managers, preserving page separation where the type of a partial page is unknown
-//! ([`WriteEngine::index_is_provably_raw`]).
+//! ([`WriteEngine::whole_index_is_eligible_for_raw`]).
 //!
 //! Space this editor vacates and cannot place is *dead* rather than lost
 //! (dead PAGE space): out of use, not yet reusable. A page whose every byte is
