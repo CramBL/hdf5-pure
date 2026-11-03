@@ -4,12 +4,14 @@
 #![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 use std::path::{Path, PathBuf};
 
+pub use crate::btree::v1 as btree_v1;
+pub use crate::btree::v2 as btree_v2;
+
 pub mod allocation;
 pub mod allocation_oracle;
 pub mod attribute;
 pub mod attribute_policy;
-pub mod btree_v1;
-pub mod btree_v2;
+pub mod btree;
 pub mod bytes;
 pub mod checksum;
 pub mod chunk_offsets;
