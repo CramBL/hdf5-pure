@@ -356,12 +356,12 @@ impl WriteEngine {
                                     FileRange::new(range.start(), range.length()).unwrap()
                                 }))
                                 .collect();
-                            let class = if self.index_is_provably_raw(&data, &spans) {
-                                FreeClass::Page(PageType::Raw)
-                            } else {
-                                FreeClass::Dead
-                            };
-                            to_free.extend(spans.into_iter().map(|range| (range, class)));
+                            self.collect_chunk_index_free_spans(
+                                &data,
+                                spans,
+                                FreeClass::Dead,
+                                &mut to_free,
+                            );
                         }
                     }
                     _ => {}

@@ -6,6 +6,8 @@
 //! only once it accounts for every allocation of the structure the span belongs to, and leaves a
 //! structure it cannot account for in full allocated.
 
+use std::collections::BTreeSet;
+
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_space::__private::Extent;
@@ -665,17 +667,73 @@ impl WriteEngine {
     /// excluded, as in [`collect_free_spans`](Self::collect_free_spans).
     pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(FileRange, FreeClass)>> {
         let split = self.chunked_storage_parts(addr)?;
-        let index_class = chunk_index_free_class(
-            split.index_layout,
-            self.index_is_provably_raw(&split.data, &split.index),
-        );
         let mut spans: Vec<_> = split
             .data
             .iter()
             .map(|&range| (range, FreeClass::Page(PageType::Raw)))
             .collect();
-        spans.extend(split.index.into_iter().map(|range| (range, index_class)));
+        self.collect_chunk_index_free_spans(
+            &split.data,
+            split.index,
+            chunk_index_free_class(split.index_layout, false),
+            &mut spans,
+        );
         Some(spans)
+    }
+
+    /// Appends complete index allocations and their free classes in physical address order.
+    ///
+    /// The caller supplies nonempty, disjoint allocations from the same source content phase.
+    /// Each original range is appended intact. For unclassified PAGE allocations, the whole index
+    /// must pass [`whole_index_is_eligible_for_raw`](Self::whole_index_is_eligible_for_raw), and
+    /// each contiguous run must separately abut nonempty chunk data. A run without this evidence
+    /// remains [`FreeClass::Dead`]. Known classes are preserved. Without PAGE, an unclassified
+    /// allocation is tagged raw.
+    ///
+    /// For unclassified PAGE allocations, one run borrows the chunk data summaries, and multiple
+    /// runs share one local endpoint index.
+    pub(super) fn collect_chunk_index_free_spans(
+        &self,
+        data: &[FileRange],
+        mut index: Vec<FileRange>,
+        known_class: FreeClass,
+        classified: &mut Vec<(FileRange, FreeClass)>,
+    ) {
+        if !index
+            .windows(2)
+            .all(|pair| pair[0].start() <= pair[1].start())
+        {
+            index.sort_unstable_by_key(|range| range.start());
+        }
+        if known_class != FreeClass::Dead || self.space.page_size().is_none() {
+            let class = match known_class {
+                FreeClass::Dead => FreeClass::Page(PageType::Raw),
+                class => class,
+            };
+            classified.extend(index.into_iter().map(|range| (range, class)));
+            return;
+        }
+        let multiple = index
+            .windows(2)
+            .any(|pair| pair[0].end() != pair[1].start());
+        let data = ChunkDataBoundaries::new(data, multiple);
+        let eligible = self.whole_index_is_eligible_for_raw(&data, &index);
+        let mut start = 0;
+        while start < index.len() {
+            let mut end = start + 1;
+            while end < index.len() && index[end - 1].end() == index[end].start() {
+                end += 1;
+            }
+            let run = &index[start..end];
+            let class = match known_class {
+                FreeClass::Dead if eligible && data.abuts_index(run) => {
+                    FreeClass::Page(PageType::Raw)
+                }
+                class => class,
+            };
+            classified.extend(run.iter().map(|&range| (range, class)));
+            start = end;
+        }
     }
 
     /// Returns the raw chunk data and metadata index blocks of a chunked dataset separately.
@@ -760,80 +818,32 @@ impl WriteEngine {
         })
     }
 
-    /// Whether a chunked dataset's `index` provably occupies raw pages, given the
-    /// `data` spans it accompanies. Both are absolute file offsets.
+    /// Returns whether the whole index passes the shared eligibility checks for raw pages.
     ///
-    /// A chunk index is *metadata* by the format's taxonomy, and the reference C
-    /// library allocates one as such, out of metadata pages and nowhere near the
-    /// chunk data. This crate instead lays a dataset's index down in the same run
-    /// as its chunk data, inside raw pages, so that a reader following the layout
-    /// message walks one contiguous blob. Both are valid. On a paged
-    /// file is that freeing an index records it under the page type it actually
-    /// sits in, since that decides what a later allocation may overwrite there.
+    /// On PAGE files, a nonempty index must have a nonempty chunk data allocation touching either
+    /// edge of its enclosing range. Every index allocation must resolve to stored coordinates
+    /// outside page zero, where the superblock occupies a metadata page. Adjacency at a page
+    /// boundary satisfies the endpoint check.
     ///
-    /// Nothing in the file says which writer produced it, so the index is placed
-    /// from the layout itself, by two tests it must pass together: some chunk-data
-    /// span must **abut** it, ending exactly where the index begins or beginning
-    /// exactly where it ends. No byte of it may lie in **page 0**.
+    /// [`collect_chunk_index_free_spans`](Self::collect_chunk_index_free_spans) requires this
+    /// eligibility result and an independent witness for each contiguous run. Known class evidence
+    /// is applied separately.
     ///
-    /// The abutment is this crate's single blob, and is not a layout the reference
-    /// library sets out to produce. A chunk index is metadata to that library,
-    /// allocated out of metadata pages. Those pages are allocated from the bottom
-    /// of the file, while large raw data goes above, so its index lands far below
-    /// the chunk data it indexes, with a gap between them. Measured across seven
-    /// files it wrote (Extensible and Fixed Array indexes, page sizes
-    /// 512/4096/8192, 8 to 16 chunks): the index began in page 0 every time, with
-    /// the chunk data starting at page 9 or higher, so neither join address was
-    /// within reach of it.
-    ///
-    /// The page-0 screen closes the one way that measured layout can nonetheless
-    /// satisfy the abutment. An index block that ends exactly on a page boundary
-    /// with a raw page after it, for example a Fixed Array data block that exactly fills its
-    /// page, is abutted by the first chunk in that raw page, and the whole
-    /// index run would then be filed as raw, its header included, *even though
-    /// that header sits in page 0 beside the superblock*. A later raw allocation
-    /// would land inside a metadata page, which is the page-mixing defect of
-    /// issue #261. Page 0 of a paged file always begins with the superblock, so it
-    /// is a metadata page by construction and an index with a byte in it cannot be
-    /// raw whatever abuts it. The screen costs this crate nothing: it allocates
-    /// chunk data and the indexes beside it out of raw pages. Page 0 is never wholly free because
-    /// the superblock lives there, so it is never one of them.
-    ///
-    /// The tighter rule considered instead was to require the join address to fall
-    /// *strictly inside* a page, which proves rawness outright: the byte before
-    /// the join and the byte after it are then in one page, and a page holding
-    /// chunk data is raw. It is sound, and a paged file the reference library
-    /// wrote cannot satisfy it at all, since such a file never puts raw and
-    /// metadata bytes in one page and so can only ever join them on a boundary.
-    /// It was rejected because it also rejects layouts *this* crate produces:
-    /// whenever a blob's chunk bytes total a page multiple from a page-aligned
-    /// start, its index begins on a boundary too. Measured over 100
-    /// `append_staged` commits at a 4096-byte page with 2048-byte chunks, that
-    /// stranded about 500 bytes per commit, compared with the 10 KB the abutment rule left. The
-    /// two writers produce the same geometry there and
-    /// nothing in the file distinguishes them.
-    ///
-    /// Both sides have to be admitted, not just the index that follows its data.
-    /// A staged append keeps the existing chunks where they are and places the new
-    /// ones past the index it is superseding, so from the second append onward the
-    /// dataset has chunk data on both sides of that index and the highest data
-    /// address is no longer the one beside it. A predicate that checks only whether the index
-    /// begins where the *last* chunk ends rejected every such index, and a
-    /// repeatedly appended dataset dropped one per commit (issue #388).
-    ///
-    /// An index the test does not place is [dead](FreeClass::Dead) to the caller. Its bytes are
-    /// no longer in use, but advertising space
-    /// inside a possible metadata page for raw reuse would mix the page
-    /// (issue #261), so they are reusable only once the whole page around them is
-    /// empty.
-    ///
-    /// A non-paged file has no page types to keep apart, so everything is
-    /// reclaimable there. The tag is ignored by its commit tail entirely.
-    pub(super) fn index_is_provably_raw(&self, data: &[FileRange], index: &[FileRange]) -> bool {
+    /// An empty index passes this screen. A non-PAGE file has no restriction on page classes.
+    pub(super) fn whole_index_is_eligible_for_raw(
+        &self,
+        data: &ChunkDataBoundaries<'_>,
+        index: &[FileRange],
+    ) -> bool {
         match self.space.page_size() {
             None => true,
             Some(page_size) => {
-                index_abuts_chunk_data(data, index)
+                let bounds = index
+                    .iter()
+                    .map(|range| range.start())
+                    .min()
+                    .zip(index.iter().map(|range| range.end()).max());
+                bounds.is_none_or(|(start, end)| data.abuts(start, end))
                     && index.iter().all(|range| {
                         self.context
                             .addresses()
@@ -855,7 +865,7 @@ impl WriteEngine {
     /// [`chunked_storage_spans`](Self::chunked_storage_spans), delegating to
     /// [`chunked_read::chunk_index_spans_from_source`], which enumerates the index structure's
     /// own blocks (B-tree v1/v2 nodes, or fixed- / extensible-array header, index,
-    /// super, and data blocks) and never a chunk-data address, so the shared
+    /// super, and data blocks) and never a chunk data address, so the shared
     /// kept chunk data is never freed. Base-aware and validated
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
     /// violation.
@@ -1266,29 +1276,89 @@ pub(super) fn chunk_index_free_class(index: ChunkIndexLayout, provably_raw: bool
     }
 }
 
-/// Whether some `data` span abuts the run of `index` blocks, ending exactly where
-/// the index begins or beginning exactly where it ends. The geometric half of
-/// [`WriteEngine::index_is_provably_raw`] contains the reasoning. This helper keeps the rule
-/// expressible against spans alone.
+/// Physical chunk data endpoints for one classification call.
 ///
-/// An empty index is vacuously placed: there is nothing to file.
-pub(super) fn index_abuts_chunk_data(data: &[FileRange], index: &[FileRange]) -> bool {
-    if index.is_empty() {
-        return true;
+/// Endpoint membership establishes adjacency. The caller establishes allocation ownership and
+/// keeps the lookup within the source content phase of those facts.
+pub(super) enum ChunkDataBoundaries<'a> {
+    Borrowed(&'a [FileRange]),
+    Indexed {
+        starts: BTreeSet<PhysicalAddress>,
+        ends: BTreeSet<PhysicalAddress>,
+    },
+}
+
+impl<'a> ChunkDataBoundaries<'a> {
+    /// Borrows `data`, or indexes the endpoints of its nonempty allocations when `indexed` is true.
+    ///
+    /// In the indexed form, each start and end address is stored once for repeated run queries.
+    pub(super) fn new(data: &'a [FileRange], indexed: bool) -> Self {
+        if !indexed {
+            return Self::Borrowed(data);
+        }
+        Self::Indexed {
+            starts: data
+                .iter()
+                .filter(|range| range.length() > 0)
+                .map(|range| range.start())
+                .collect(),
+            ends: data
+                .iter()
+                .filter(|range| range.length() > 0)
+                .map(|range| range.end())
+                .collect(),
+        }
     }
-    // The index as a whole: this crate writes its blocks as one run beside the
-    // chunk data, so a data span abutting either end places all of them.
-    let (Some(index_start), Some(index_end)) = (
-        index.iter().map(|range| range.start()).min(),
-        index.iter().map(|range| range.end()).max(),
-    ) else {
-        return false;
-    };
-    // A zero-length span touches an address without occupying a byte beside it,
-    // so it places nothing.
-    data.iter().any(|range| {
-        range.length() > 0 && (range.end() == index_start || range.start() == index_end)
-    })
+
+    /// Returns whether every contiguous index run has a chunk data endpoint witness.
+    ///
+    /// Each run must begin at the end of a nonempty data allocation or end at its start. Empty or
+    /// overlapping index ranges return `false`. An empty index returns `true`.
+    ///
+    /// Ordered input is queried directly. Unordered input is copied and sorted. The caller
+    /// applies whole index eligibility and page zero checks separately.
+    pub(super) fn abuts_index(&self, index: &[FileRange]) -> bool {
+        if index.is_empty() {
+            return true;
+        }
+        if index.iter().any(|range| range.length() == 0) {
+            return false;
+        }
+        let mut ordered = Vec::new();
+        let index = if index
+            .windows(2)
+            .all(|pair| pair[0].start() <= pair[1].start())
+        {
+            index
+        } else {
+            ordered.extend_from_slice(index);
+            ordered.sort_unstable_by_key(|range| range.start());
+            &ordered
+        };
+        if index.windows(2).any(|pair| pair[0].end() > pair[1].start()) {
+            return false;
+        }
+        let mut start = index[0].start();
+        for pair in index.windows(2) {
+            if pair[0].end() == pair[1].start() {
+                continue;
+            }
+            if !self.abuts(start, pair[0].end()) {
+                return false;
+            }
+            start = pair[1].start();
+        }
+        self.abuts(start, index[index.len() - 1].end())
+    }
+
+    fn abuts(&self, start: PhysicalAddress, end: PhysicalAddress) -> bool {
+        match self {
+            Self::Borrowed(data) => data
+                .iter()
+                .any(|range| range.length() > 0 && (range.end() == start || range.start() == end)),
+            Self::Indexed { starts, ends } => ends.contains(&start) || starts.contains(&end),
+        }
+    }
 }
 
 fn physical_ranges_disjoint_in_bounds(ranges: &mut [FileRange], length: u64) -> bool {
@@ -1329,8 +1399,8 @@ pub(super) fn collection_free_class(
 ///
 /// Page 0 begins at the base address with the superblock, so it is a metadata page.
 ///
-/// [`WriteEngine::index_is_provably_raw`], whose doc gives the reasoning, screens a chunk index
-/// with it. [`huge_object_free_class`] screens a run of huge objects with it, and
+/// [`WriteEngine::whole_index_is_eligible_for_raw`], whose doc gives the reasoning, screens a chunk
+/// index with it. [`huge_object_free_class`] screens a run of huge objects with it, and
 /// [`collection_free_class`] a global heap collection.
 pub(super) fn touches_page_zero(
     page_size: FileSpacePageSize,
