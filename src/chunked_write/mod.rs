@@ -877,13 +877,12 @@ pub(crate) fn chunk_index_kind(grid: &ChunkGrid, num_chunks: usize) -> ChunkInde
     }
 }
 
-/// The byte length the chunk index of `kind` would occupy for `chunks`, without
-/// building it.
+/// Returns the encoded length of the chunk index for `slots`, without allocating its bytes.
 ///
-/// Both index structures place their length beside the builder that emits it
-/// ([`extensible_array_len`](hdf5_pure_format::__private::extensible_array_len),
-/// [`fixed_array_len`](hdf5_pure_format::__private::fixed_array_len)), so a caller reserving the
-/// data region's span takes it from the same layout the emission works from.
+/// # Errors
+///
+/// Returns the geometry and length errors of
+/// [`fixed_array_len`](hdf5_pure_format::__private::fixed_array_len) for a Fixed Array.
 pub(crate) fn chunk_index_len(
     kind: ChunkArrayKind,
     slots: &IndexSlots<'_>,
@@ -891,15 +890,15 @@ pub(crate) fn chunk_index_len(
     offset_size: OffsetWidth,
     length_size: LengthWidth,
     has_filters: bool,
-) -> u64 {
+) -> Result<u64, FormatError> {
     match kind {
-        ChunkArrayKind::ExtensibleArray => hdf5_pure_format::__private::extensible_array_len(
+        ChunkArrayKind::ExtensibleArray => Ok(hdf5_pure_format::__private::extensible_array_len(
             slots,
             chunk_bytes,
             offset_size,
             length_size,
             has_filters,
-        ),
+        )),
         ChunkArrayKind::FixedArray => hdf5_pure_format::__private::fixed_array_len(
             slots,
             chunk_bytes,
@@ -1466,7 +1465,7 @@ fn chunked_region_len(
             INDEX_OFFSET_SIZE,
             INDEX_LENGTH_SIZE,
             set.has_filters,
-        ),
+        )?,
         None => 0,
     };
     let end = index_address
@@ -1831,7 +1830,7 @@ pub(crate) fn plan_chunked_data_verbatim(
                 offset_size,
                 length_size,
                 has_filters,
-            ),
+            )?,
         }),
         None => None,
     };

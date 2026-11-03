@@ -28,13 +28,11 @@ pub enum FormatError {
         /// The address field's width in bytes.
         offset_size: u8,
     },
-    /// An allocation sized from the file failed. A typed whole-dataset read
-    /// reserves its output buffer once with `try_reserve`, for as many values as
-    /// the read produces, and reports the allocator's failure here.
+    /// A buffer capacity reservation failed.
     AllocationFailed {
-        /// The number of values the reservation requested.
+        /// The number of buffer elements requested.
         values: usize,
-        /// The allocator's reason for the failure.
+        /// The reason the capacity reservation failed.
         source: TryReserveError,
     },
     /// An attribute's name, datatype, or dataspace exceeds its 2-byte length
@@ -328,6 +326,20 @@ pub enum FormatError {
     ///
     /// The string describes the filter and the failure.
     FilterError(String),
+    /// Two complete planned Fixed Array block ranges overlap.
+    FixedArrayBlockOverlap {
+        /// The header's stored start address.
+        header: u64,
+        /// The data block's stored start address.
+        data_block: u64,
+    },
+    /// The supplied Fixed Array slot count differs from the planned count.
+    FixedArrayEntryCount {
+        /// The number of planned slots, including unallocated slots.
+        expected: u64,
+        /// The number of supplied slots, including unallocated slots.
+        actual: u64,
+    },
     /// An element passed to a fixed-width string dataset or attribute exceeds
     /// its declared width. The writer rejects the element.
     FixedStringTooLong {
@@ -2055,6 +2067,13 @@ impl fmt::Display for FormatError {
             }
             Self::BTreeV2NodeOverlap { first, second } => {
                 write!(f, "B-tree nodes {first} and {second} overlap")
+            }
+            Self::FixedArrayBlockOverlap { header, data_block } => write!(
+                f,
+                "Fixed Array header at {header:#x} overlaps data block at {data_block:#x}"
+            ),
+            Self::FixedArrayEntryCount { expected, actual } => {
+                write!(f, "Fixed Array requires {expected} entries, got {actual}")
             }
             Self::FractalHeapBlockCount { expected, actual } => {
                 write!(
