@@ -1,8 +1,9 @@
-//! Incoming-count transitions within one complete, root-reachable hard-link topology.
+//! Count-removal traversal within one complete, root-reachable hard-link topology.
 //!
-//! Explicit removals and outgoing edges of non-root zero-count objects are counted separately from
-//! allocation ownership and publication. Counts describe the discovered graph. The caller
-//! establishes the absence of relevant incoming links from outside that graph before retirement.
+//! The graph adapter uses visible incoming counts. The source-bound adapter also checks declared
+//! count remainders and ordinary header subjects before outgoing propagation. Both exclude the
+//! phase root. Allocation ownership, source freshness, reference completeness, and publication
+//! remain separate obligations.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -14,6 +15,8 @@ use crate::object_graph::ObjectIndex;
 
 use super::CompleteTopology;
 use super::RemovedLinks;
+
+mod source;
 
 impl<'topology, 'source> RemovedLinks<'topology, 'source> {
     /// Plans graph-relative count changes for the identified removed edges.
