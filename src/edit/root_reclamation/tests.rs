@@ -17,6 +17,7 @@ use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::MemoryStrategy;
 use crate::Object;
+use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::edit::WriteEngine;
 use crate::image::FileImage;
@@ -57,7 +58,9 @@ fn fixed_width_root_updates_reach_stable_physical_length(
     }
     builder.write(&path).unwrap();
     let original = fs::read(&path).unwrap();
-    let options = FileAccessProperties::new().with_memory_strategy(backing);
+    let options = FileAccessProperties::new()
+        .with_memory_strategy(backing)
+        .with_sync_policy(SyncPolicy::OnClose);
     let mut file = File::open_rw_with_options(&path, options).unwrap();
     if tracked {
         file.root().delete("hole").unwrap();
