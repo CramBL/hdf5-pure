@@ -20,6 +20,9 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::counts::CountQueries;
 
+pub(in crate::edit) use counts::DeclaredCountChange;
+pub(in crate::edit) use counts::SourceRemovalPlan;
+
 #[cfg_attr(
     not(test),
     expect(

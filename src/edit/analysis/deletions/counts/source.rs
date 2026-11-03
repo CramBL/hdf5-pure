@@ -4,7 +4,10 @@
 //! Count changes remain planned values. Storage ownership, source freshness, references, and
 //! publication require separate proofs.
 
+use std::sync::Arc;
+
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::CountEvidenceError;
 use crate::edit::analysis::counts::ObjectReferenceBound;
@@ -78,6 +81,13 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
                 .map(|plan| Self { plan })
             })
             .transpose()
+    }
+
+    /// Returns whether the reconstruction origin has this plan's shared phase identity.
+    ///
+    /// Object identity, source freshness, and allocation ownership are separate conditions.
+    pub(in crate::edit) fn shares_phase(&self, source: &ReconstructionSource) -> bool {
+        Arc::ptr_eq(&self.plan.topology.identity, &source.identity)
     }
 
     /// Returns the planned graph remainder, or the original graph count for an untouched object.
