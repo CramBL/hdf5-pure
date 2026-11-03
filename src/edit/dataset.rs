@@ -879,7 +879,7 @@ impl WriteEngine {
             OFFSET_WIDTH,
             LENGTH_WIDTH,
             has_filters,
-        );
+        )?;
         let ea = |slots: &IndexSlots<'_>, at: StoredAddress| -> Result<Vec<u8>, Error> {
             hdf5_pure_format::__private::build_extensible_array_at(
                 slots,

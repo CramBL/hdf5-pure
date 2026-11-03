@@ -522,7 +522,6 @@ fn growth_along_the_indexed_dimension_leaves_no_unused_slots() {
     assert_eq!(span, 4);
 }
 
-// Two sparse chunks exercise the last addressable slot and the first slot beyond capacity.
 #[test]
 fn an_extensible_array_rejects_a_chunk_past_the_slots_it_can_address() {
     let capacity = hdf5_pure_format::__private::extensible_array_capacity();
@@ -542,10 +541,16 @@ fn an_extensible_array_rejects_a_chunk_past_the_slots_it_can_address() {
             StorageAllocation::Allocated,
         )
     };
-    let (kind, slots, span) = at(capacity - 1).expect("the last addressable slot is written");
+    let encoded_capacity = 4_295_229_428;
+    let (kind, slots, span) =
+        at(encoded_capacity - 1).expect("the final block offset fits its field");
     assert!(matches!(kind, ChunkIndexKind::ExtensibleArray));
-    assert_eq!(slots, [0, capacity - 1]);
-    assert_eq!(span, capacity);
+    assert_eq!(slots, [0, encoded_capacity - 1]);
+    assert_eq!(span, encoded_capacity);
+    assert_eq!(
+        at(capacity - 1).unwrap_err(),
+        FormatError::InvalidExtensibleArrayGeometry
+    );
     let err = at(capacity).unwrap_err();
     assert_eq!(
         err,

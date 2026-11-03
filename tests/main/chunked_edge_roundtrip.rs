@@ -4,6 +4,9 @@
 //! independently constructed version 1 B-tree files.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::Error;
+use hdf5_pure::FormatError;
+use hdf5_pure::MaxExtent;
 use hdf5_pure::{File, FileBuilder};
 use rstest::rstest;
 use test_util::chunk_offsets::MalformedChunk;
@@ -45,6 +48,25 @@ fn row_bands_clip_chunks_with_nonzero_trailing_offsets(
     );
     drop(dataset);
     file.close().unwrap();
+}
+
+#[test]
+fn an_extensible_array_rejects_an_unencodable_block_offset() {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_i32_data(&[7, 9])
+        .with_shape(&[2, 1])
+        .with_chunks(&[1, 1])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(8_589_934_579)]);
+    let error = builder.finish().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Format(FormatError::InvalidExtensibleArrayGeometry)
+        ),
+        "{error:?}"
+    );
 }
 
 /// Write a flat row-major `f64` dataset with the given shape and chunk shape,

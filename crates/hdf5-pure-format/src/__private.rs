@@ -136,7 +136,6 @@ pub use crate::extensible_array::encode_super_block;
 pub use crate::extensible_array::extensible_array_capacity;
 pub use crate::extensible_array::extensible_array_layout;
 pub use crate::extensible_array::extensible_array_len;
-pub use crate::extensible_array::extensible_array_stats;
 pub use crate::extensible_array::write::ExtensibleArrayBlock;
 pub use crate::extensible_array::write::ExtensibleArrayBlockKind;
 pub use crate::extensible_array::write::ExtensibleArrayEmission;
