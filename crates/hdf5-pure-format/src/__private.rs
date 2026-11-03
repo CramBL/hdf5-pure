@@ -163,6 +163,8 @@ pub use crate::fixed_array::FixedArrayHeader;
 pub use crate::fixed_array::FixedArrayHeaderLocator;
 pub use crate::fixed_array::FixedArrayPageBitmap;
 pub use crate::fixed_array::FixedArrayPageRef;
+pub use crate::fixed_array::FixedArrayPlacement;
+pub use crate::fixed_array::FixedArrayPlan;
 pub use crate::fixed_array::FixedArrayUnpaged;
 pub use crate::fixed_array::build_fixed_array_at;
 pub use crate::fixed_array::fixed_array_len;

@@ -282,6 +282,8 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidNumericBitRange",
             "BTreeV2NodeCount",
             "BTreeV2NodeOverlap",
+            "FixedArrayBlockOverlap",
+            "FixedArrayEntryCount",
             "FractalHeapBlockCount",
             "FractalHeapBlockOverlap",
             "InvalidFractalHeapBlockOffset",
