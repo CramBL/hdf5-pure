@@ -882,7 +882,9 @@ pub(crate) fn chunk_index_kind(grid: &ChunkGrid, num_chunks: usize) -> ChunkInde
 /// # Errors
 ///
 /// Returns the geometry and length errors of
-/// [`fixed_array_len`](hdf5_pure_format::__private::fixed_array_len) for a Fixed Array.
+/// [`fixed_array_len`](hdf5_pure_format::__private::fixed_array_len) or
+/// [`extensible_array_len`](hdf5_pure_format::__private::extensible_array_len) for the selected
+/// index kind.
 pub(crate) fn chunk_index_len(
     kind: ChunkArrayKind,
     slots: &IndexSlots<'_>,
@@ -892,13 +894,13 @@ pub(crate) fn chunk_index_len(
     has_filters: bool,
 ) -> Result<u64, FormatError> {
     match kind {
-        ChunkArrayKind::ExtensibleArray => Ok(hdf5_pure_format::__private::extensible_array_len(
+        ChunkArrayKind::ExtensibleArray => hdf5_pure_format::__private::extensible_array_len(
             slots,
             chunk_bytes,
             offset_size,
             length_size,
             has_filters,
-        )),
+        ),
         ChunkArrayKind::FixedArray => hdf5_pure_format::__private::fixed_array_len(
             slots,
             chunk_bytes,
@@ -1258,7 +1260,7 @@ pub(crate) fn plan_index_slots(
                 INDEX_OFFSET_SIZE,
                 INDEX_LENGTH_SIZE,
                 has_filters,
-            )
+            )?
             .stats
             .nelmts
         }

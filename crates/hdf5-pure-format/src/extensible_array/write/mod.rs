@@ -8,6 +8,7 @@ use hdf5_pure_core::AddressRange;
 use super::DataBlock;
 use super::ExtensibleArrayCreationParameters;
 use super::ExtensibleArrayGeometry;
+use super::ExtensibleArrayLayout;
 use super::ExtensibleArrayStats;
 use super::Layout;
 use super::SlotOccupancy;
@@ -97,113 +98,60 @@ impl ExtensibleArrayPlan {
         widths: FormatWidths,
         filtered: bool,
     ) -> Result<Self, FormatError> {
-        let occupancy = Occupancy::new(occupancy, num_slots)?;
-        let encoding = chunk_record::chunk_element_encoding(chunk_bytes, widths.offsets, filtered);
-        let element_size = encoding
-            .elem_size
-            .narrow_or_else(|| FormatError::InvalidExtensibleArrayGeometry)?;
-        let elements = ElementEncoding::new(widths.offsets, encoding.client_id, element_size)
-            .map_err(|error| match error {
-                InvalidElementEncoding::Client(client) => {
-                    FormatError::InvalidExtensibleArrayClient(client)
-                }
-                InvalidElementEncoding::EntrySize => FormatError::InvalidExtensibleArrayGeometry,
-            })?;
-        let layout = creation.layout(elements);
+        let (encoding, layout) = element_layout(creation, chunk_bytes, widths, filtered)?;
         let mut blocks = vec_blocks(layout, widths)?;
-        let mut stats = ExtensibleArrayStats {
-            nsuper_blks: 0,
-            super_blk_size: 0,
-            ndata_blks: 0,
-            data_blk_size: 0,
-            max_idx_set: num_slots,
-            nelmts: u64::from(layout.inline_elements),
-        };
-        let mut covered = num_slots <= u64::from(layout.inline_elements);
-        for (pointer, block) in layout.direct_blocks().enumerate() {
-            let block = block?;
-            let slots = layout.slots(block.offset, block.elements)?;
-            covered |= num_slots <= slots.end;
-            if occupancy
-                .next(slots.start)
-                .is_some_and(|slot| slot < slots.end)
-            {
-                push_data(
+        let mut stats = ExtensibleArrayStats::empty(layout, num_slots);
+        visit_regions(layout, occupancy, num_slots, |region| {
+            match region {
+                Region::Direct { block, pointer } => push_data(
                     &mut blocks,
                     &mut stats,
                     layout,
                     block,
-                    (INDEX_BLOCK, pointer.to_u64()),
-                )?;
+                    (INDEX_BLOCK, pointer),
+                )?,
+                Region::Secondary {
+                    block,
+                    pointer,
+                    data,
+                } => {
+                    let mut pending = Vec::new();
+                    for data in data {
+                        pending
+                            .try_reserve(1)
+                            .map_err(|source| FormatError::AllocationFailed {
+                                values: pending.len().saturating_add(1),
+                                source,
+                            })?;
+                        pending.push(data?);
+                    }
+                    if pending.is_empty() {
+                        return Ok(());
+                    }
+                    let secondary = blocks
+                        .len()
+                        .checked_add(pending.len())
+                        .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
+                    for (data, pointer) in pending {
+                        push_data(&mut blocks, &mut stats, layout, data, (secondary, pointer))?;
+                    }
+                    let (length, slots) = stats.secondary(layout, block)?;
+                    push(
+                        &mut blocks,
+                        ExtensibleArrayBlock {
+                            kind: ExtensibleArrayBlockKind::Secondary,
+                            length,
+                            slots: Some(slots),
+                            offset: Some(block.offset),
+                            parent: Some((INDEX_BLOCK, pointer)),
+                        },
+                    )?;
+                }
             }
-        }
-        for index in layout.first_super_block..layout.super_blocks {
-            if covered {
-                break;
-            }
-            let block = layout.super_block(index)?;
-            let first = layout.first_slot(block.offset)?;
-            covered =
-                num_slots > first && (num_slots - 1 - first) / block.block_elements < block.blocks;
-            let pending = selected_data(occupancy, layout, block)?;
-            if pending.is_empty() {
-                continue;
-            }
-            let secondary = blocks
-                .len()
-                .checked_add(pending.len())
-                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
-            for (data, pointer) in pending {
-                push_data(&mut blocks, &mut stats, layout, data, (secondary, pointer))?;
-            }
-            let length = layout.super_block_len(block)?;
-            let slots = layout.slots(
-                block.offset,
-                super::product(block.blocks, block.block_elements)?,
-            )?;
-            let descriptor = ExtensibleArrayBlock {
-                kind: ExtensibleArrayBlockKind::Secondary,
-                length,
-                slots: Some(slots),
-                offset: Some(block.offset),
-                parent: Some((INDEX_BLOCK, u64::from(index - layout.first_super_block))),
-            };
-            push(&mut blocks, descriptor)?;
-            stats.nsuper_blks = super::sum([stats.nsuper_blks, 1])?;
-            stats.super_blk_size = super::sum([stats.super_blk_size, length])?;
-        }
-        if !covered {
-            return Err(FormatError::InvalidExtensibleArrayGeometry);
-        }
-        let ExtensibleArrayStats {
-            nsuper_blks,
-            super_blk_size,
-            ndata_blks,
-            data_blk_size,
-            max_idx_set,
-            nelmts,
-        } = stats;
-        for length in [
-            nsuper_blks,
-            super_blk_size,
-            ndata_blks,
-            data_blk_size,
-            max_idx_set,
-            nelmts,
-        ] {
-            if !width::length_width_holds(widths.lengths, length) {
-                return Err(FormatError::LengthTooLarge {
-                    length,
-                    length_size: widths.lengths.get(),
-                });
-            }
-        }
-        let total_length = super::sum([
-            super::header_len(widths),
-            layout.index_block_len()?,
-            super_blk_size,
-            data_blk_size,
-        ])?;
+            Ok(())
+        })?;
+        let stats = stats.with_widths(widths)?;
+        let total_length = stats.total_len(layout, widths)?;
         Ok(Self {
             creation,
             widths,
@@ -400,6 +348,58 @@ pub enum ExtensibleArrayBlockKind {
     Data,
 }
 
+/// Computes canonical header statistics and wire lengths through the shared region traversal.
+///
+/// # Errors
+///
+/// Propagates occupancy and geometry errors from [`visit_regions`] and width errors from the
+/// header statistics. Returns [`FormatError::ValueTooLargeForPlatform`] if a header or index
+/// block length does not fit [`usize`].
+pub(super) fn measure(
+    occupancy: SlotOccupancy<'_>,
+    num_slots: u64,
+    chunk_bytes: u64,
+    widths: FormatWidths,
+    filtered: bool,
+) -> Result<ExtensibleArrayLayout, FormatError> {
+    let creation = ExtensibleArrayCreationParameters::canonical();
+    let (encoding, layout) = element_layout(creation, chunk_bytes, widths, filtered)?;
+    let mut stats = ExtensibleArrayStats::empty(layout, num_slots);
+    visit_regions(layout, occupancy, num_slots, |region| {
+        match region {
+            Region::Direct { block, pointer: _ } => {
+                stats.data(layout, block)?;
+            }
+            Region::Secondary {
+                block,
+                pointer: _,
+                data,
+            } => {
+                let mut allocated = false;
+                for data in data {
+                    stats.data(layout, data?.0)?;
+                    allocated = true;
+                }
+                if allocated {
+                    stats.secondary(layout, block)?;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    let stats = stats.with_widths(widths)?;
+    Ok(ExtensibleArrayLayout {
+        encoding,
+        bits: creation.bit_geometry(),
+        geom: ExtensibleArrayGeometry::from_layout(layout)?,
+        inline: usize::from(layout.inline_elements),
+        header_len: super::header_len(widths).to_usize()?,
+        index_block_len: layout.index_block_len()?.to_usize()?,
+        stats,
+        total_len: stats.total_len(layout, widths)?,
+    })
+}
+
 /// Occupied slots within the declared span, with explicit slots in strictly increasing order.
 #[derive(Clone, Copy)]
 struct Occupancy<'a>(SlotOccupancy<'a>);
@@ -449,6 +449,207 @@ impl<'a> Occupancy<'a> {
     }
 }
 
+fn element_layout(
+    creation: ExtensibleArrayCreationParameters,
+    chunk_bytes: u64,
+    widths: FormatWidths,
+    filtered: bool,
+) -> Result<(ChunkElementEncoding, Layout), FormatError> {
+    let encoding = chunk_record::chunk_element_encoding(chunk_bytes, widths.offsets, filtered);
+    let ChunkElementEncoding {
+        chunk_size_bytes: _,
+        elem_size,
+        client_id,
+    } = encoding;
+    let element_size = elem_size.narrow_or_else(|| FormatError::InvalidExtensibleArrayGeometry)?;
+    let elements = ElementEncoding::new(widths.offsets, client_id, element_size).map_err(
+        |error| match error {
+            InvalidElementEncoding::Client(client) => {
+                FormatError::InvalidExtensibleArrayClient(client)
+            }
+            InvalidElementEncoding::EntrySize => FormatError::InvalidExtensibleArrayGeometry,
+        },
+    )?;
+    Ok((encoding, creation.layout(elements)))
+}
+
+/// Visits occupied direct blocks and the secondary regions needed to cover `num_slots`.
+///
+/// Each secondary region includes a lazy cursor over its occupied data blocks. The cursor may
+/// be empty.
+///
+/// # Errors
+///
+/// Propagates errors from occupancy checks, block geometry, or `visit`. Returns
+/// [`FormatError::InvalidExtensibleArrayGeometry`] if the declared span exceeds the hierarchy.
+fn visit_regions(
+    layout: Layout,
+    occupancy: SlotOccupancy<'_>,
+    num_slots: u64,
+    mut visit: impl FnMut(Region<'_>) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    let occupancy = Occupancy::new(occupancy, num_slots)?;
+    let mut covered = num_slots <= u64::from(layout.inline_elements);
+    for (pointer, block) in layout.direct_blocks().enumerate() {
+        let block = block?;
+        let DataBlock {
+            offset,
+            elements,
+            libhdf5_offset: _,
+        } = block;
+        let slots = layout.slots(offset, elements)?;
+        covered |= num_slots <= slots.end;
+        if occupancy
+            .next(slots.start)
+            .is_some_and(|slot| slot < slots.end)
+        {
+            visit(Region::Direct {
+                block,
+                pointer: pointer.to_u64(),
+            })?;
+        }
+    }
+    for index in layout.first_super_block..layout.super_blocks {
+        if covered {
+            break;
+        }
+        let block = layout.super_block(index)?;
+        let SuperBlock {
+            offset,
+            blocks,
+            block_elements,
+        } = block;
+        let first = layout.first_slot(offset)?;
+        covered = num_slots > first && (num_slots - 1 - first) / block_elements < blocks;
+        visit(Region::Secondary {
+            block,
+            pointer: u64::from(index - layout.first_super_block),
+            data: SelectedData::new(occupancy, layout, block)?,
+        })?;
+    }
+    if !covered {
+        return Err(FormatError::InvalidExtensibleArrayGeometry);
+    }
+    Ok(())
+}
+
+/// An occupied direct block or a secondary region with its selected data cursor.
+enum Region<'a> {
+    Direct {
+        block: DataBlock,
+        pointer: u64,
+    },
+    Secondary {
+        block: SuperBlock,
+        pointer: u64,
+        data: SelectedData<'a>,
+    },
+}
+
+impl ExtensibleArrayStats {
+    fn empty(layout: Layout, num_slots: u64) -> Self {
+        Self {
+            nsuper_blks: 0,
+            super_blk_size: 0,
+            ndata_blks: 0,
+            data_blk_size: 0,
+            max_idx_set: num_slots,
+            nelmts: u64::from(layout.inline_elements),
+        }
+    }
+
+    /// Adds a complete data block's counts and returns its checked length and logical slots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the block offset exceeds its
+    /// field width or the length, slots, or statistics overflow [`u64`].
+    fn data(&mut self, layout: Layout, block: DataBlock) -> Result<(u64, Range<u64>), FormatError> {
+        let DataBlock {
+            offset,
+            elements,
+            libhdf5_offset: _,
+        } = block;
+        let offset_len = usize::from(layout.block_offset_len);
+        if offset.to_le_bytes()[offset_len..]
+            .iter()
+            .any(|&byte| byte != 0)
+        {
+            return Err(FormatError::InvalidExtensibleArrayGeometry);
+        }
+        let length = layout.data_block_len(block)?;
+        let slots = layout.slots(offset, elements)?;
+        self.ndata_blks = super::sum([self.ndata_blks, 1])?;
+        self.data_blk_size = super::sum([self.data_blk_size, length])?;
+        self.nelmts = super::sum([self.nelmts, elements])?;
+        Ok((length, slots))
+    }
+
+    /// Adds a secondary block's counts and returns its complete length and logical slots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if its length, logical range, or
+    /// accumulated statistics overflow [`u64`].
+    fn secondary(
+        &mut self,
+        layout: Layout,
+        block: SuperBlock,
+    ) -> Result<(u64, Range<u64>), FormatError> {
+        let SuperBlock {
+            offset,
+            blocks,
+            block_elements,
+        } = block;
+        let length = layout.super_block_len(block)?;
+        let slots = layout.slots(offset, super::product(blocks, block_elements)?)?;
+        self.nsuper_blks = super::sum([self.nsuper_blks, 1])?;
+        self.super_blk_size = super::sum([self.super_blk_size, length])?;
+        Ok((length, slots))
+    }
+
+    /// Checks that every header statistic fits the encoded length width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LengthTooLarge`] if a statistic exceeds `widths.lengths`.
+    fn with_widths(self, widths: FormatWidths) -> Result<Self, FormatError> {
+        let Self {
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        } = self;
+        for length in [
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        ] {
+            if !width::length_width_holds(widths.lengths, length) {
+                return Err(FormatError::LengthTooLarge {
+                    length,
+                    length_size: widths.lengths.get(),
+                });
+            }
+        }
+        Ok(self)
+    }
+
+    fn total_len(self, layout: Layout, widths: FormatWidths) -> Result<u64, FormatError> {
+        super::sum([
+            super::header_len(widths),
+            layout.index_block_len()?,
+            self.super_blk_size,
+            self.data_blk_size,
+        ])
+    }
+}
+
 fn vec_blocks(
     layout: Layout,
     widths: FormatWidths,
@@ -471,31 +672,64 @@ fn vec_blocks(
     ])
 }
 
-fn selected_data(
-    occupancy: Occupancy<'_>,
+/// A cursor over occupied data blocks and their pointer slots in one secondary region.
+struct SelectedData<'a> {
+    occupancy: Occupancy<'a>,
     layout: Layout,
     block: SuperBlock,
-) -> Result<Vec<(DataBlock, u64)>, FormatError> {
-    let first = layout.first_slot(block.offset)?;
-    let mut pending = Vec::new();
-    let mut next = occupancy.next(first);
-    while let Some(slot) = next {
-        let local = (slot - first) / block.block_elements;
-        if local >= block.blocks {
-            break;
-        }
-        let data = block.data_block(local)?;
-        let slots = layout.slots(data.offset, data.elements)?;
-        pending
-            .try_reserve(1)
-            .map_err(|source| FormatError::AllocationFailed {
-                values: pending.len().saturating_add(1),
-                source,
-            })?;
-        pending.push((data, local));
-        next = occupancy.next(slots.end);
+    first: u64,
+    next: Option<u64>,
+}
+
+impl<'a> SelectedData<'a> {
+    fn new(
+        occupancy: Occupancy<'a>,
+        layout: Layout,
+        block: SuperBlock,
+    ) -> Result<Self, FormatError> {
+        let first = layout.first_slot(block.offset)?;
+        Ok(Self {
+            occupancy,
+            layout,
+            block,
+            first,
+            next: occupancy.next(first),
+        })
     }
-    Ok(pending)
+}
+
+impl Iterator for SelectedData<'_> {
+    type Item = Result<(DataBlock, u64), FormatError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self {
+            occupancy,
+            layout,
+            block,
+            first,
+            next,
+        } = self;
+        let slot = next.take()?;
+        let SuperBlock {
+            offset: _,
+            blocks,
+            block_elements,
+        } = *block;
+        let local = (slot - *first) / block_elements;
+        if local >= blocks {
+            return None;
+        }
+        Some((|| {
+            let data = block.data_block(local)?;
+            let DataBlock {
+                offset,
+                elements,
+                libhdf5_offset: _,
+            } = data;
+            *next = occupancy.next(layout.slots(offset, elements)?.end);
+            Ok((data, local))
+        })())
+    }
 }
 
 fn push_data(
@@ -505,27 +739,17 @@ fn push_data(
     block: DataBlock,
     parent: (usize, u64),
 ) -> Result<(), FormatError> {
-    let offset_len = usize::from(layout.block_offset_len);
-    if block.offset.to_le_bytes()[offset_len..]
-        .iter()
-        .any(|&byte| byte != 0)
-    {
-        return Err(FormatError::InvalidExtensibleArrayGeometry);
-    }
-    let length = layout.data_block_len(block)?;
+    let (length, slots) = stats.data(layout, block)?;
     push(
         blocks,
         ExtensibleArrayBlock {
             kind: ExtensibleArrayBlockKind::Data,
             length,
-            slots: Some(layout.slots(block.offset, block.elements)?),
+            slots: Some(slots),
             offset: Some(block.offset),
             parent: Some(parent),
         },
     )?;
-    stats.ndata_blks = super::sum([stats.ndata_blks, 1])?;
-    stats.data_blk_size = super::sum([stats.data_blk_size, length])?;
-    stats.nelmts = super::sum([stats.nelmts, block.elements])?;
     Ok(())
 }
 
@@ -573,6 +797,134 @@ mod tests {
     }
 
     #[rstest]
+    #[case::empty(0, false, 370, 0, 0, 4)]
+    #[case::filtered_empty(0, true, 394, 0, 0, 4)]
+    #[case::first_data_block(5, false, 520, 1, 0, 20)]
+    #[case::filtered_data_block(5, true, 640, 1, 0, 20)]
+    #[case::second_data_block(21, false, 798, 2, 0, 52)]
+    #[case::filtered_second_data_block(21, true, 1_110, 2, 0, 52)]
+    #[case::first_secondary(300, false, 3_010, 7, 1, 308)]
+    #[case::filtered_secondary(300, true, 4_858, 7, 1, 308)]
+    fn one_shot_measurement_preserves_wire_lengths_and_statistics(
+        #[case] count: u64,
+        #[case] filtered: bool,
+        #[case] total: u64,
+        #[case] data: u64,
+        #[case] secondary: u64,
+        #[case] elements: u64,
+    ) {
+        let measured = measure(
+            SlotOccupancy::Dense(count),
+            count,
+            8,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+            filtered,
+        )
+        .unwrap();
+        assert_eq!(measured.total_len, total);
+        assert_eq!(measured.stats.ndata_blks, data);
+        assert_eq!(measured.stats.nsuper_blks, secondary);
+        assert_eq!(measured.stats.max_idx_set, count);
+        assert_eq!(measured.stats.nelmts, elements);
+        assert_eq!(measured.stats.super_blk_size, 54 * secondary);
+        assert_eq!(measured.header_len, 72);
+        assert_eq!(measured.index_block_len, if filtered { 322 } else { 298 });
+        assert_eq!(
+            measured.stats.data_blk_size
+                + measured.stats.super_blk_size
+                + measured.header_len.to_u64()
+                + measured.index_block_len.to_u64(),
+            total
+        );
+    }
+
+    #[rstest]
+    #[case::order(&[2, 1], 3, 8, FormatError::ExtensibleArraySlotOrder { previous: 2, current: 1 })]
+    #[case::bounds(&[4], 4, 8, FormatError::ExtensibleArraySlotBounds { slot: 4, slots: 4 })]
+    #[case::length(&[], 65_536, 2, FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
+    #[case::geometry(&[], u64::MAX, 8, FormatError::InvalidExtensibleArrayGeometry)]
+    #[case::block_offset(&[4_296_000_000], 4_296_000_001, 8, FormatError::InvalidExtensibleArrayGeometry)]
+    fn one_shot_measurement_returns_checked_geometry_failures(
+        #[case] slots: &[u64],
+        #[case] count: u64,
+        #[case] lengths: u8,
+        #[case] expected: FormatError,
+    ) {
+        let error = measure(
+            SlotOccupancy::Slots(slots),
+            count,
+            8,
+            FormatWidths::from_sizes(8, lengths).unwrap(),
+            false,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, expected);
+    }
+
+    #[rstest]
+    #[case::first_child(&[0])]
+    #[case::last_child(&[1_023])]
+    #[case::separated_children(&[0, 1_023])]
+    fn sparse_region_iteration_visits_only_selected_data_blocks(#[case] local: &[u64]) {
+        let (_, layout) = element_layout(
+            ExtensibleArrayCreationParameters::canonical(),
+            8,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+            false,
+        )
+        .unwrap();
+        let block = layout.super_block(20).unwrap();
+        assert_eq!(block.blocks, 1_024);
+        let first = layout.first_slot(block.offset).unwrap();
+        let slots: Vec<_> = local
+            .iter()
+            .map(|&local| first + local * block.block_elements)
+            .collect();
+        let occupancy =
+            Occupancy::new(SlotOccupancy::Slots(&slots), slots.last().unwrap() + 1).unwrap();
+        let selected = SelectedData::new(occupancy, layout, block)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|&(data, local)| (data.offset, local))
+                .collect::<Vec<_>>(),
+            local
+                .iter()
+                .map(|&local| (block.offset + local * block.block_elements, local))
+                .collect::<Vec<_>>()
+        );
+        let mut regions = 0;
+        let mut data = 0;
+        visit_regions(
+            layout,
+            SlotOccupancy::Slots(&slots),
+            slots.last().unwrap() + 1,
+            |region| {
+                if let Region::Secondary {
+                    data: selected,
+                    block: _,
+                    pointer: _,
+                } = region
+                {
+                    regions += 1;
+                    for item in selected {
+                        item?;
+                        data += 1;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(regions, 17);
+        assert_eq!(data, local.len());
+    }
+
+    #[rstest]
     #[case::empty(&[], 0)]
     #[case::inline(&[0, 3], 4)]
     #[case::direct(&[4, 19, 20, 51, 52, 83], 84)]
@@ -588,7 +940,8 @@ mod tests {
             planned.widths().offsets,
             planned.widths().lengths,
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(planned.total_len(), old.total_len);
         assert_eq!(planned.stats(), old.stats);
         let encoding = planned.element_encoding();

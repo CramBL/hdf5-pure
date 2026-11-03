@@ -48,7 +48,7 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
-
+#[cfg(test)]
 mod measurement_sizes;
 
 pub(crate) mod write;
@@ -2125,7 +2125,7 @@ impl SuperBlockGeometry {
 
 /// The slots of an Extensible Array that hold a chunk.
 ///
-/// [`extensible_array_stats`] counts the blocks that hold a chunk and [`build_extensible_array_at`]
+/// [`extensible_array_layout`] counts the blocks that hold a chunk and [`build_extensible_array_at`]
 /// builds them, and the length the first computes must equal the length the second builds. Both
 /// test the same `SlotOccupancy`.
 #[derive(Clone, Copy)]
@@ -2316,65 +2316,6 @@ pub struct ExtensibleArrayStats {
     pub nelmts: u64,
 }
 
-/// Returns the header statistics of the array whose occupied slots are `occupancy`, from the
-/// blocks [`build_extensible_array_at`] allocates for them.
-///
-/// The caller passes `idx_blk_elmts`, `bits`, and `geom` from the same header.
-pub fn extensible_array_stats(
-    geom: &ExtensibleArrayGeometry,
-    idx_blk_elmts: u64,
-    bits: ExtensibleArrayBitGeometry,
-    elem_size: usize,
-    offset_size: OffsetWidth,
-    max_idx_set: u64,
-    occupancy: SlotOccupancy<'_>,
-) -> ExtensibleArrayStats {
-    let page_nelmts = bits.page_nelmts().get();
-    let blk_off_size = bits.block_offset_width();
-    let mut s = ExtensibleArrayStats {
-        nsuper_blks: 0,
-        super_blk_size: 0,
-        ndata_blks: 0,
-        data_blk_size: 0,
-        max_idx_set,
-        nelmts: idx_blk_elmts,
-    };
-    let mut elem = idx_blk_elmts;
-    for &dn in &geom.direct_dblk_nelmts {
-        if occupancy.any_occupied(elem, dn) {
-            let blocks = DataBlockGeometry {
-                dblk_nelmts: dn,
-                page_nelmts,
-            };
-            s.ndata_blks += 1;
-            s.data_blk_size += measurement_sizes::data_block_len(blocks, elem_size, offset_size, blk_off_size);
-            s.nelmts += dn;
-        }
-        elem += dn;
-    }
-    for j in 0..geom.nsblk_addrs {
-        let sb = geom.super_block_at(j, page_nelmts);
-        let (ndblks, dn) = (sb.ndblks, sb.blocks.dblk_nelmts);
-        let span = ndblks * dn;
-        if occupancy.any_occupied(elem, span) {
-            s.nsuper_blks += 1;
-            s.super_blk_size += measurement_sizes::super_block_len(sb, offset_size, blk_off_size);
-            let mut le = elem;
-            for _ in 0..ndblks {
-                if occupancy.any_occupied(le, dn) {
-                    s.ndata_blks += 1;
-                    s.data_blk_size +=
-                        measurement_sizes::data_block_len(sb.blocks, elem_size, offset_size, blk_off_size);
-                    s.nelmts += dn;
-                }
-                le += dn;
-            }
-        }
-        elem += span;
-    }
-    s
-}
-
 /// The layout of an Extensible Array that does not depend on its address: the element encoding,
 /// the geometry, and the lengths.
 ///
@@ -2398,6 +2339,20 @@ pub struct ExtensibleArrayLayout {
 
 /// Returns the layout of the Extensible Array of `num_slots` slots whose occupied slots are
 /// `occupancy`.
+///
+/// The creation parameters are [`ExtensibleArrayCreationParameters::canonical`]. Measurement
+/// retains creation geometry tables, with no descriptor for each allocated block.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ExtensibleArraySlotBounds`] if an occupied slot is outside the
+/// declared span, [`FormatError::ExtensibleArraySlotCount`] if a sparse index's span differs
+/// from `num_slots`, or [`FormatError::ExtensibleArraySlotOrder`] if explicit slots are not
+/// strictly increasing. Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the span,
+/// block offsets, or complete lengths exceed the creation geometry or checked `u64` arithmetic,
+/// [`FormatError::LengthTooLarge`] if a header statistic does not fit `length_size`, or
+/// [`FormatError::ValueTooLargeForPlatform`] if a header or index block length does not fit
+/// [`usize`].
 pub fn extensible_array_layout(
     occupancy: SlotOccupancy<'_>,
     num_slots: u64,
@@ -2405,69 +2360,17 @@ pub fn extensible_array_layout(
     offset_size: OffsetWidth,
     length_size: LengthWidth,
     has_filters: bool,
-) -> ExtensibleArrayLayout {
-    let encoding = chunk_record::chunk_element_encoding(chunk_bytes, offset_size, has_filters);
-    let ChunkElementEncoding {
-        elem_size,
-        client_id,
-        ..
-    } = encoding;
-
-    // The reader derives its geometry the same way.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "element record size written into the 1-byte EA header field selected for this file"
-    )]
-    let geom_header = ExtensibleArrayHeader {
-        client_id,
-        element_size: elem_size as u8,
-        bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
-        idx_blk_elmts: EA_IDX_BLK_ELMTS,
-        min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
-        super_blk_min_data_ptrs: EA_SUPER_BLK_MIN_DATA_PTRS,
-        max_idx_set: 0,
-        index_block_address: StoredAddress::new(0),
-    };
-    // The selected element encoding matches the address width, and the constant
-    // writer parameters satisfy the checked layout's bounds.
-    let geom = ExtensibleArrayGeometry::from_header(&geom_header, offset_size)
-        .expect("the writer's Extensible Array geometry is representable");
-    let inline = geom_header.idx_blk_elmts as usize;
-
-    let header_len = ExtensibleArrayHeader::serialized_size_with_widths(FormatWidths {
-        offsets: offset_size,
-        lengths: length_size,
-    });
-    let index_block_len = measurement_sizes::index_block_len(
-        offset_size,
-        inline,
-        elem_size,
-        geom.direct_dblk_nelmts.len(),
-        geom.nsblk_addrs,
-    );
-
-    let stats = extensible_array_stats(
-        &geom,
-        u64::from(geom_header.idx_blk_elmts),
-        geom_header.bit_geometry(),
-        elem_size,
-        offset_size,
-        num_slots,
+) -> Result<ExtensibleArrayLayout, FormatError> {
+    write::measure(
         occupancy,
-    );
-    let total_len =
-        (header_len + index_block_len) as u64 + stats.data_blk_size + stats.super_blk_size;
-
-    ExtensibleArrayLayout {
-        encoding,
-        bits: geom_header.bit_geometry(),
-        geom,
-        inline,
-        header_len,
-        index_block_len,
-        stats,
-        total_len,
-    }
+        num_slots,
+        chunk_bytes,
+        FormatWidths {
+            offsets: offset_size,
+            lengths: length_size,
+        },
+        has_filters,
+    )
 }
 
 /// Returns the length in bytes of the Extensible Array [`build_extensible_array_at`] builds for
@@ -2475,22 +2378,26 @@ pub fn extensible_array_layout(
 ///
 /// A caller that reserves the span of an array before writing it, such as an in-place writer
 /// that places an array in freed space, takes the length from here.
+///
+/// # Errors
+///
+/// Returns the geometry and width errors of [`extensible_array_layout`].
 pub fn extensible_array_len(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
     offset_size: OffsetWidth,
     length_size: LengthWidth,
     has_filters: bool,
-) -> u64 {
-    extensible_array_layout(
+) -> Result<u64, FormatError> {
+    Ok(extensible_array_layout(
         SlotOccupancy::Sparse(slots),
-        slots.len() as u64,
+        slots.len().to_u64(),
         chunk_bytes,
         offset_size,
         length_size,
         has_filters,
-    )
-    .total_len
+    )?
+    .total_len)
 }
 
 /// Builds the Extensible Array for `slots` at `ea_address`: the header, the index block, and the
@@ -2507,7 +2414,8 @@ pub fn extensible_array_len(
 /// Returns [`FormatError::Internal`] if the stored size of a chunk does not fit the chunk size
 /// field, and [`FormatError::ValueTooLargeForPlatform`] if the length of the blocks or the count of
 /// a block that holds a chunk does not fit a `usize`. Returns [`FormatError::OffsetOverflow`] if
-/// the array's exclusive end exceeds [`u64::MAX`].
+/// the array's exclusive end exceeds [`u64::MAX`]. Propagates the geometry and width errors of
+/// [`extensible_array_layout`].
 pub fn build_extensible_array_at(
     slots: &IndexSlots<'_>,
     chunk_bytes: u64,
@@ -2525,7 +2433,7 @@ pub fn build_extensible_array_at(
         offset_size,
         length_size,
         has_filters,
-    );
+    )?;
     ea_address.checked_add(layout.total_len)?;
     let ChunkElementEncoding {
         chunk_size_bytes,
@@ -2570,7 +2478,7 @@ pub fn build_extensible_array_at(
     let mut elem_cursor: u64 = inline as u64;
 
     // The data blocks the index block addresses. A block is written only where it holds a chunk,
-    // as in `extensible_array_stats`, which applies the same test.
+    // as in `extensible_array_layout`, which applies the same test.
     let occupancy = SlotOccupancy::Sparse(slots);
     for &dblk_nelmts in &geom.direct_dblk_nelmts {
         if !occupancy.any_occupied(elem_cursor, dblk_nelmts) {
@@ -3308,17 +3216,6 @@ mod tests {
 
     #[test]
     fn extensible_array_stats_matches_what_it_builds() {
-        let geom_header = ExtensibleArrayHeader {
-            client_id: 0,
-            element_size: 8,
-            bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
-            idx_blk_elmts: 4,
-            min_dblk_nelmts: 16,
-            super_blk_min_data_ptrs: 4,
-            max_idx_set: 0,
-            index_block_address: StoredAddress::new(0),
-        };
-        let geom = ExtensibleArrayGeometry::from_header(&geom_header, OffsetWidth::Eight).unwrap();
         for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 131056, 140000] {
             let chunks: Vec<ChunkRecord> = (0..n)
                 .map(|i| ChunkRecord {
@@ -3347,15 +3244,16 @@ mod tests {
                 max_idx_set: stat(4),
                 nelmts: stat(5),
             };
-            let computed = super::extensible_array_stats(
-                &geom,
-                u64::from(geom_header.idx_blk_elmts),
-                geom_header.bit_geometry(),
+            let computed = super::extensible_array_layout(
+                SlotOccupancy::Dense(n),
+                n,
                 8,
                 OffsetWidth::Eight,
-                n,
-                SlotOccupancy::Dense(n),
-            );
+                LengthWidth::Eight,
+                false,
+            )
+            .unwrap()
+            .stats;
             assert_eq!(computed, built, "stats mismatch at n={n}");
         }
     }
@@ -3384,7 +3282,8 @@ mod tests {
                 offset_size,
                 length_size,
                 has_filters,
-            );
+            )
+            .unwrap();
             let built = build_extensible_array_at(
                 &IndexSlots::dense(&chunks),
                 chunk_bytes,
@@ -3442,6 +3341,7 @@ mod tests {
                     LengthWidth::Eight,
                     true,
                 )
+                .unwrap()
                 .encoding
                 .chunk_size_bytes
             })
@@ -3721,6 +3621,7 @@ mod tests {
             LengthWidth::Eight,
             false,
         )
+        .unwrap()
         .stats;
         let header = fixture.header().unwrap();
         let mut ranges = vec![header.range(), header.index_block().unwrap().parse_range()];
@@ -4901,7 +4802,8 @@ mod tests {
             filter_mask: 0,
         }; 2];
         let slots = IndexSlots::dense(&chunks);
-        let length = extensible_array_len(&slots, 8, OffsetWidth::Eight, LengthWidth::Eight, false);
+        let length =
+            extensible_array_len(&slots, 8, OffsetWidth::Eight, LengthWidth::Eight, false).unwrap();
         let start = u64::MAX - length + u64::from(overflow);
         let result = build_extensible_array_at(
             &slots,

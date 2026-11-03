@@ -385,6 +385,7 @@ mod tests {
             WIDTHS.lengths,
             has_filters,
         )
+        .unwrap()
         .stats;
         let mut reads = source.reads.into_inner();
         assert_eq!(
@@ -584,6 +585,7 @@ mod tests {
             WIDTHS.lengths,
             has_filters,
         )
+        .unwrap()
         .stats;
         assert_eq!(
             spans.len().to_u64(),

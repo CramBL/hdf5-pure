@@ -7,8 +7,6 @@ use crate::width::OffsetWidth;
 
 /// Returns the length in bytes of an index block (`EAIB`): the prefix, `inline_elmts` elements,
 /// the data block and super block addresses, and the checksum.
-///
-/// [`super::build_extensible_array_at`] sizes the index block with it.
 pub(crate) fn index_block_len(
     offset_width: OffsetWidth,
     inline_elmts: usize,
