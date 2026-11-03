@@ -198,8 +198,19 @@ impl WriteEngine {
                 path_addr.insert(dataset_path, oh_addr);
             }
 
+            let group_children = children.remove(key).unwrap_or_default();
+            let mut patches = group::LinkPatches::new(
+                &mut region,
+                writes.iter().map(|write| write.link.as_str()).chain(
+                    group_children.iter().filter_map(|child| match child {
+                        ChildLink::Replace { leaf, .. } => Some(leaf.as_str()),
+                        ChildLink::Insert { .. } => None,
+                    }),
+                ),
+            );
+
             for RelocatedDataset {
-                link,
+                link: _,
                 old_header,
                 mut write,
             } in writes
@@ -215,31 +226,25 @@ impl WriteEngine {
                 };
                 let new_header = self.write_moving(overwrites, write)?;
                 tail_allocations.extend(tail_allocation);
-                group::patch_link_target(
-                    &mut region,
-                    link.as_str(),
-                    base.relative(PhysicalAddress::new(new_header))?,
-                )?;
+                patches.patch_next(base.relative(PhysicalAddress::new(new_header))?)?;
                 relocations.insert(old_header, new_header);
             }
 
-            for child in children.remove(key).into_iter().flatten() {
+            for child in group_children {
                 match child {
                     ChildLink::Insert { path, leaf } => {
                         let mut record = additions.take(&leaf)?;
                         record
                             .patch_target(base.relative(PhysicalAddress::new(path_addr[&path]))?)?;
-                        region.push_bytes(record.as_bytes());
+                        patches.push_bytes(record.as_bytes());
                     }
-                    ChildLink::Replace { path, leaf } => {
-                        group::patch_link_target(
-                            &mut region,
-                            leaf.as_str(),
-                            base.relative(PhysicalAddress::new(path_addr[&path]))?,
-                        )?;
+                    ChildLink::Replace { path, leaf: _ } => {
+                        patches
+                            .patch_next(base.relative(PhysicalAddress::new(path_addr[&path]))?)?;
                     }
                 }
             }
+            drop(patches);
             additions.finish(&mut region)?;
 
             self.place_edited_attrs(&mut region, attrs)?;
