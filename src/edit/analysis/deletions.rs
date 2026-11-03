@@ -166,7 +166,9 @@ impl<'source> AnalysisPhase<'source> {
         &mut self,
         deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,
     ) -> Result<RemovedLinks<'_, 'source>, Error> {
-        self.removal_queries(deletions).map(|(removed, _)| removed)
+        self.removal_queries(deletions)
+            .map(|(removed, _)| removed)
+            .map_err(Error::from)
     }
 
     /// Returns bound deletions and lazy count queries over separate phase fields.
@@ -177,11 +179,12 @@ impl<'source> AnalysisPhase<'source> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] for the topology-identity errors of [`RemovedLinks::bind`].
+    /// Returns [`FormatError::Internal`] for the topology-identity errors described by
+    /// [`RemovedLinks::bind`].
     pub(in crate::edit) fn removal_queries<'deletion>(
         &mut self,
         deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,
-    ) -> Result<(RemovedLinks<'_, 'source>, CountQueries<'_, 'source>), Error> {
+    ) -> Result<(RemovedLinks<'_, 'source>, CountQueries<'_, 'source>), FormatError> {
         let mut deletions = deletions.into_iter().peekable();
         let has_deletions = deletions.peek().is_some();
         if has_deletions {
