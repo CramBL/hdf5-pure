@@ -236,6 +236,7 @@ pub use crate::free_space_manager::FreeSpaceManagerSectionListView;
 pub use crate::free_space_manager::SECTION_CLASS_LARGE;
 pub use crate::free_space_manager::SECTION_CLASS_SIMPLE;
 pub use crate::free_space_manager::SECTION_CLASS_SMALL;
+pub use crate::free_space_manager::SectionInfoCounts;
 pub use crate::free_space_manager::free_space_manager_header_len;
 pub use crate::free_space_manager::free_space_manager_len;
 pub use crate::free_space_manager::parse_section_info;

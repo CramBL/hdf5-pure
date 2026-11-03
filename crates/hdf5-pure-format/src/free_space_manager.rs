@@ -955,7 +955,7 @@ pub fn serialize_free_space_manager_with_allocation(
             widths.lengths.get()
         )));
     }
-    let mut fsse = SectionFields::written(widths, sections.len()).encode_list(
+    let mut fsse = SectionFields::written(widths, sections.len().to_u64()).encode_list(
         widths.offsets,
         fshd_addr,
         &size_sets(sections),
@@ -1037,6 +1037,81 @@ pub fn section_info_len(widths: FormatWidths, section_sizes: &[u64]) -> u64 {
     section_list_len(widths, sets, section_sizes.len())
 }
 
+/// Consistent section and distinct-size counts for section-list measurement.
+///
+/// Both counts are zero for an empty list. A nonempty list has at least one size group and
+/// at most one group per section. Use [`Self::encoded_len`] to measure the writer's section-list
+/// framing at the output field widths.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::__private::FormatWidths;
+/// use hdf5_pure_format::__private::SectionInfoCounts;
+///
+/// let widths = FormatWidths::from_sizes(8, 8)?;
+/// let same_size = SectionInfoCounts::new(3, 1)?;
+/// let distinct_sizes = SectionInfoCounts::new(3, 3)?;
+/// assert_eq!(same_size.encoded_len(widths)?, 53);
+/// assert_eq!(distinct_sizes.encoded_len(widths)?, 71);
+/// # Ok::<(), hdf5_pure_core::FormatError>(())
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SectionInfoCounts {
+    sections: u64,
+    size_groups: u64,
+}
+
+impl SectionInfoCounts {
+    /// Creates counts for `sections` section records of `size_groups` distinct lengths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFreeSpaceSectionCounts`] if exactly one count is zero,
+    /// or if `size_groups` exceeds `sections`.
+    pub fn new(sections: u64, size_groups: u64) -> Result<Self, FormatError> {
+        if (sections == 0) != (size_groups == 0) || size_groups > sections {
+            return Err(FormatError::InvalidFreeSpaceSectionCounts {
+                sections,
+                size_groups,
+            });
+        }
+        Ok(Self {
+            sections,
+            size_groups,
+        })
+    }
+
+    /// Returns the section-list encoding length before allocation padding, in bytes.
+    ///
+    /// Uses the field widths of [`serialize_free_space_manager`] and includes the section-list
+    /// prefix and checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the encoded length exceeds [`u64::MAX`].
+    pub fn encoded_len(self, widths: FormatWidths) -> Result<u64, FormatError> {
+        let Self {
+            sections,
+            size_groups,
+        } = self;
+        let fields = SectionFields::written(widths, sections);
+        let fixed = (section_list_prefix_len(widths.offsets) + CHECKSUM_LEN).to_u64();
+        size_groups
+            .checked_mul(fields.set_len().to_u64())
+            .and_then(|sets| {
+                sections
+                    .checked_mul(fields.section_len().to_u64())
+                    .and_then(|records| sets.checked_add(records))
+            })
+            .and_then(|payload| fixed.checked_add(payload))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: fixed,
+                length: sections,
+            })
+    }
+}
+
 /// Returns a section-list capacity sufficient for at most `max_sections` sections.
 ///
 /// Counts each section as a separate size group, so the capacity covers every grouping of
@@ -1050,21 +1125,7 @@ pub fn section_info_capacity(
     widths: FormatWidths,
     max_sections: usize,
 ) -> Result<u64, FormatError> {
-    let SectionFields {
-        count,
-        size,
-        offset,
-    } = SectionFields::written(widths, max_sections);
-    let per_section = (count + size + offset + SECTION_CLASS_LEN).to_u64();
-    let fixed = (section_list_prefix_len(widths.offsets) + CHECKSUM_LEN).to_u64();
-    max_sections
-        .to_u64()
-        .checked_mul(per_section)
-        .and_then(|payload| payload.checked_add(fixed))
-        .ok_or(FormatError::OffsetOverflow {
-            offset: fixed,
-            length: max_sections.to_u64(),
-        })
+    SectionInfoCounts::new(max_sections.to_u64(), max_sections.to_u64())?.encoded_len(widths)
 }
 
 /// Parses the section list of the manager `header` describes, at the start of `data`, into its free
@@ -1135,12 +1196,22 @@ struct SectionFields {
 impl SectionFields {
     /// Returns the widths of the fields of the section list [`serialize_free_space_manager`]
     /// writes at `widths` for a manager of `sections` sections.
-    fn written(widths: FormatWidths, sections: usize) -> Self {
+    fn written(widths: FormatWidths, sections: u64) -> Self {
         Self {
-            count: enc_size(sections.to_u64()),
+            count: enc_size(sections),
             size: enc_size(written_max_section_size(widths.lengths).get()),
             offset: AddressSpaceBits::written(widths.offsets).offset_width(),
         }
+    }
+
+    /// Returns the combined count and section-size field width of one size group, in bytes.
+    fn set_len(self) -> usize {
+        self.count + self.size
+    }
+
+    /// Returns the combined address and class field width of one section record, in bytes.
+    fn section_len(self) -> usize {
+        self.offset + SECTION_CLASS_LEN
     }
 
     /// Returns the most sections a section list of `list_len` bytes holds at these widths, in a
@@ -1295,14 +1366,10 @@ fn size_sets(sections: &[FreeSection]) -> BTreeMap<u64, Vec<StoredAddress>> {
 /// Returns the length in bytes of the section list [`serialize_free_space_manager`] writes at
 /// `widths` for `sections` sections of `sets` distinct sizes.
 fn section_list_len(widths: FormatWidths, sets: usize, sections: usize) -> u64 {
-    let SectionFields {
-        count,
-        size,
-        offset,
-    } = SectionFields::written(widths, sections);
+    let fields = SectionFields::written(widths, sections.to_u64());
     (section_list_prefix_len(widths.offsets)
-        + sets * (count + size)
-        + sections * (offset + SECTION_CLASS_LEN)
+        + sets * fields.set_len()
+        + sections * fields.section_len()
         + CHECKSUM_LEN)
         .to_u64()
 }
@@ -1414,6 +1481,121 @@ mod tests {
     use test_util::free_space;
 
     use super::*;
+
+    #[rstest]
+    #[case::empty(widths(8, 8), 0, 0, 17)]
+    #[case::one(widths(8, 8), 1, 1, 35)]
+    #[case::one_group(widths(8, 8), 3, 1, 53)]
+    #[case::distinct_sizes(widths(8, 8), 3, 3, 71)]
+    #[case::two_byte_fields(widths(2, 2), 3, 2, 26)]
+    #[case::four_byte_fields(widths(4, 4), 3, 2, 38)]
+    #[case::four_byte_lengths(widths(8, 4), 3, 2, 54)]
+    #[case::four_byte_offsets(widths(4, 8), 3, 2, 46)]
+    #[case::two_byte_lengths(widths(8, 2), 3, 2, 50)]
+    #[case::two_byte_offsets(widths(2, 8), 3, 2, 38)]
+    #[case::last_one_byte_count(widths(8, 8), 255, 1, 2_321)]
+    #[case::first_two_byte_count(widths(8, 8), 256, 1, 2_331)]
+    #[case::last_two_byte_count(widths(8, 8), 65_535, 1, 589_842)]
+    #[case::first_three_byte_count(widths(8, 8), 65_536, 1, 589_852)]
+    #[case::last_four_byte_count(widths(8, 8), (1 << 32) - 1, 1, 38_654_705_684)]
+    #[case::first_five_byte_count(widths(8, 8), 1 << 32, 1, 38_654_705_694)]
+    #[case::eight_byte_count(widths(8, 8), 1 << 56, 1, 648_518_346_341_351_457)]
+    fn section_counts_measure_current_wire_fields(
+        #[case] widths: FormatWidths,
+        #[case] sections: u64,
+        #[case] size_groups: u64,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(
+            SectionInfoCounts::new(sections, size_groups)
+                .unwrap()
+                .encoded_len(widths)
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::one_section(1, 1, free_space::single_section_info(), 0)]
+    #[case::two_sizes(2, 2, free_space::two_section_info(), 0)]
+    #[case::allocated_padding(10, 9, free_space::oversized_section_list(), 9)]
+    fn section_counts_match_known_native_lengths(
+        #[case] sections: u64,
+        #[case] size_groups: u64,
+        #[case] observed: Vec<u8>,
+        #[case] padding: u64,
+    ) {
+        assert_eq!(
+            SectionInfoCounts::new(sections, size_groups)
+                .unwrap()
+                .encoded_len(widths(8, 8))
+                .unwrap()
+                + padding,
+            observed.len().to_u64()
+        );
+    }
+
+    #[rstest]
+    #[case::groups_without_sections(0, 1)]
+    #[case::sections_without_groups(1, 0)]
+    #[case::too_many_groups(3, 4)]
+    fn section_counts_reject_impossible_groups(#[case] sections: u64, #[case] size_groups: u64) {
+        assert_eq!(
+            SectionInfoCounts::new(sections, size_groups).unwrap_err(),
+            FormatError::InvalidFreeSpaceSectionCounts {
+                sections,
+                size_groups
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::records(u64::MAX, 1)]
+    #[case::groups(u64::MAX, u64::MAX)]
+    #[case::sum((u64::MAX - 33) / 9 + 1, 1)]
+    fn section_counts_reject_unrepresentable_lengths(
+        #[case] sections: u64,
+        #[case] size_groups: u64,
+    ) {
+        assert_eq!(
+            SectionInfoCounts::new(sections, size_groups)
+                .unwrap()
+                .encoded_len(widths(8, 8))
+                .unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: 17,
+                length: sections
+            }
+        );
+    }
+
+    #[test]
+    fn section_counts_measure_the_largest_length_without_materializing_sections() {
+        let sections = (u64::MAX - 33) / 9;
+        assert_eq!(
+            SectionInfoCounts::new(sections, 1)
+                .unwrap()
+                .encoded_len(widths(8, 8))
+                .unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn section_capacity_preserves_platform_count_limits() {
+        let result = section_info_capacity(widths(8, 8), usize::MAX);
+        if usize::BITS == 64 {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::OffsetOverflow {
+                    offset: 17,
+                    length: u64::MAX
+                }
+            );
+        } else {
+            assert_eq!(result.unwrap(), 90_194_313_212);
+        }
+    }
 
     #[rstest]
     #[case::two(2, 2, 15)]
@@ -2159,6 +2341,11 @@ mod tests {
             .map(|(&size, i)| section(0x1000 + i * 0x4000, size))
             .collect();
 
+        let size_groups = sizes.iter().collect::<BTreeSet<_>>().len().to_u64();
+        let measured = SectionInfoCounts::new(sizes.len().to_u64(), size_groups)
+            .unwrap()
+            .encoded_len(widths)
+            .unwrap();
         let (fshd, fsse) = serialize_free_space_manager(
             widths,
             &sections,
@@ -2168,6 +2355,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(fsse.len().to_u64(), measured);
         let header = FreeSpaceManagerHeader::parse(widths, &fshd).unwrap();
         assert_eq!(
             (fshd.len() as u64, fsse.len() as u64),

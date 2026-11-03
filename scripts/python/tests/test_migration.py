@@ -277,6 +277,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "DenseLinkBlockOverlap", []),
         ("FormatError", "FractalHeapBlockCount", []),
         ("FormatError", "FractalHeapBlockOverlap", []),
+        ("FormatError", "InvalidFreeSpaceSectionCounts", []),
         ("FormatError", "InvalidObjectHeaderChunkLength", []),
         ("FormatError", "ObjectHeaderAllocationLengthMismatch", []),
         ("FormatError", "ObjectHeaderChunkOverlap", []),

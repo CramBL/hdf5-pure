@@ -289,6 +289,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidFractalHeapGeometry",
             "InvalidFractalHeapIdFlags",
             "InvalidFractalHeapIdLength",
+            "InvalidFreeSpaceSectionCounts",
             "InvalidGroupInfoFlags",
             "InvalidGroupInfoLength",
             "InvalidGroupInfoThresholds",

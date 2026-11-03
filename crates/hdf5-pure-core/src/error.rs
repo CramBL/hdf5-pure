@@ -711,6 +711,15 @@ pub enum FormatError {
     ///
     /// The string describes the condition.
     InvalidFreeSpaceManager(String),
+    /// The number of size groups is inconsistent with the number of sections.
+    ///
+    /// Both counts must be zero, or both must be positive with at most one group per section.
+    InvalidFreeSpaceSectionCounts {
+        /// The supplied number of section records.
+        sections: u64,
+        /// The supplied number of distinct section lengths.
+        size_groups: u64,
+    },
     /// Invalid global heap collection signature.
     InvalidGlobalHeapSignature,
     /// Invalid global heap version.
@@ -1730,6 +1739,15 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidFreeSpaceManager(reason) => {
                 write!(f, "invalid free-space manager: {reason}")
+            }
+            Self::InvalidFreeSpaceSectionCounts {
+                sections,
+                size_groups,
+            } => {
+                write!(
+                    f,
+                    "a section list with {sections} sections cannot have {size_groups} size groups"
+                )
             }
             Self::EnumBaseNotInteger => {
                 write!(
