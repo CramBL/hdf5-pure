@@ -3661,7 +3661,7 @@ mod tests {
 
     /// Returns the records of the index block and of each block and page that holds a slot below
     /// the header's "Max Index Set", each parsed from the range its reference returns.
-    fn records_in(
+    pub(super) fn records_in(
         image: FileRegion<'_>,
         locator: ExtensibleArrayHeaderLocator,
         chunk_byte_size: u64,

@@ -120,6 +120,13 @@ impl<'a> IndexSlots<'a> {
         self.len
     }
 
+    /// Returns occupied records in the caller's original chunk order.
+    ///
+    /// The order may differ from logical slot order for scattered chunks.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &ChunkRecord> {
+        self.chunks.iter()
+    }
+
     /// Returns the first occupied slot at or after `start`.
     ///
     /// Uses the ordered slot table for scattered chunks. A start beyond [`usize::MAX`] is past
