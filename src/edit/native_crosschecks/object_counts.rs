@@ -85,6 +85,51 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
         u32::try_from(reported).unwrap()
     );
     assert_eq!(evidence.bound().incoming(), incoming);
+    let source = phase.source_count_plan([&deletion]).unwrap().unwrap();
+    assert_eq!(source.graph_remaining(object), Some(incoming - 1));
+    assert_eq!(
+        source.declared_remaining(object),
+        Some(u32::try_from(reported).unwrap() - 1)
+    );
+    assert_eq!(source.counted_zero_objects().count(), 0);
+    assert_eq!(source.retained_objects().collect::<Vec<_>>(), [object]);
+    let changes = source.changes().collect::<Vec<_>>();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(
+        changes[0].bound().original(),
+        u32::try_from(reported).unwrap()
+    );
+    assert_eq!(changes[0].bound().field(), Some(field));
+    assert_eq!(changes[0].remaining(), u32::try_from(reported).unwrap() - 1);
+    drop(source);
+    if matches!(usage, Usage::HardLinks) {
+        let alias = phase
+            .topology()
+            .unwrap()
+            .deletion(&ObjectPathBuf::parse("bb"))
+            .unwrap();
+        let source = phase
+            .source_count_plan([&deletion, &alias])
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.graph_remaining(object), Some(0));
+        assert_eq!(source.declared_remaining(object), Some(0));
+        assert_eq!(
+            source
+                .counted_zero_objects()
+                .map(|object| object.id())
+                .collect::<Vec<_>>(),
+            [object]
+        );
+    }
+    assert_eq!(phase.object_reference_count(object).unwrap(), observed);
+    assert_eq!(
+        phase
+            .topology()
+            .unwrap()
+            .incoming(object.header_address().get()),
+        Some(incoming)
+    );
 }
 
 #[test]
@@ -115,6 +160,28 @@ fn native_version_1_group_counts_retain_the_supported_group_subject() {
         panic!("expected ordinary group count evidence")
     };
     assert_eq!(ordinary.subject(), OrdinaryCountSubject::Group);
+    let topology = phase.topology().unwrap();
+    let deletions = [
+        topology.deletion(&ObjectPathBuf::parse("g")).unwrap(),
+        topology.deletion(&ObjectPathBuf::parse("alias")).unwrap(),
+    ];
+    let source = phase.source_count_plan(&deletions).unwrap().unwrap();
+    assert_eq!(source.graph_remaining(object), Some(0));
+    assert_eq!(source.declared_remaining(object), Some(0));
+    assert_eq!(
+        source
+            .counted_zero_objects()
+            .map(|object| object.id())
+            .collect::<Vec<_>>(),
+        [object]
+    );
+    assert_eq!(
+        source
+            .changes()
+            .map(|change| (change.bound().field(), change.remaining()))
+            .collect::<Vec<_>>(),
+        [(Some(field), 0)]
+    );
 }
 
 #[derive(Clone, Copy)]

@@ -310,8 +310,15 @@ pub(in crate::edit) enum CountEvidenceError {
     Contradiction(CountContradiction),
     /// A parsing or source-read failure while observing the declared count.
     Source(FormatError),
-    /// An inconsistent incoming count or a mismatched source-engine identity.
+    /// An inconsistent topology or count state, or mismatched source-bound evidence.
     Topology(FormatError),
+}
+
+impl From<FormatError> for CountEvidenceError {
+    /// Classifies a structural planning failure as a topology error.
+    fn from(error: FormatError) -> Self {
+        Self::Topology(error)
+    }
 }
 
 /// The physical object and counts that establish an observed undercount.
