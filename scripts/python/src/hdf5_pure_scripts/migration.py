@@ -287,6 +287,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "ExtensibleArraySlotBounds",
             "ExtensibleArraySlotCount",
             "ExtensibleArraySlotOrder",
+            "ExtensibleArrayUnplannedSlot",
             "FixedArrayBlockOverlap",
             "FixedArrayEntryCount",
             "FractalHeapBlockCount",

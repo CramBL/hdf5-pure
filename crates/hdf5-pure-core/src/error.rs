@@ -328,6 +328,11 @@ pub enum FormatError {
         /// The slot that does not exceed `previous`.
         current: u64,
     },
+    /// An occupied Extensible Array slot has no planned storage.
+    ExtensibleArrayUnplannedSlot {
+        /// The occupied slot outside the planned data blocks.
+        slot: u64,
+    },
     /// Path resolution encountered an external link, which cannot be followed.
     ExternalLinkUnsupported {
         /// The root-relative path of the external link.
@@ -2122,6 +2127,9 @@ impl fmt::Display for FormatError {
                 f,
                 "Extensible Array slot {current} does not follow slot {previous}"
             ),
+            Self::ExtensibleArrayUnplannedSlot { slot } => {
+                write!(f, "Extensible Array slot {slot} has no planned data block")
+            }
             Self::FixedArrayBlockOverlap { header, data_block } => write!(
                 f,
                 "Fixed Array header at {header:#x} overlaps data block at {data_block:#x}"

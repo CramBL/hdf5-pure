@@ -280,6 +280,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("FormatError", "ExtensibleArraySlotBounds", []),
         ("FormatError", "ExtensibleArraySlotCount", []),
         ("FormatError", "ExtensibleArraySlotOrder", []),
+        ("FormatError", "ExtensibleArrayUnplannedSlot", []),
         ("FormatError", "FixedArrayBlockOverlap", []),
         ("FormatError", "FixedArrayEntryCount", []),
         ("FormatError", "FractalHeapBlockCount", []),

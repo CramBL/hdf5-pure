@@ -22,6 +22,11 @@ use crate::error::FormatError;
 use crate::width;
 use crate::width::FormatWidths;
 
+mod encode;
+
+pub use encode::ExtensibleArrayEmission;
+pub use encode::ExtensibleArrayEncoding;
+
 /// The complete blocks selected by an Extensible Array's creation geometry and occupied slots.
 ///
 /// Each paged data block has one descriptor, including its prefix, pages, and checksums. Block
