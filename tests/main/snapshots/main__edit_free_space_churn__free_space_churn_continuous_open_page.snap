@@ -44,9 +44,9 @@ high water
 reuse
   Metric                                count
   ------------------------------------  -----
-  epoch writes growing physical file       30
-  epoch writes without physical growth     61
-  post-churn writes without growth         61
+  epoch writes growing physical file       29
+  epoch writes without physical growth     62
+  post-churn writes without growth         62
 
 deletion waves
   wave  after-epoch  live-before  deleted  live-after    physical     logical   reusable    pressure
@@ -57,16 +57,16 @@ deletion waves
      4           39           26        4          22  30,830,592  30,830,592  5,913,997  24,916,595
      5           43           26        4          22  30,830,592  30,830,592  5,914,935  24,915,657
      6           47           26        4          22  30,830,592  30,830,592  5,915,665  24,914,927
-     7           51           26        4          22  30,830,592  30,830,592  5,914,900  24,915,692
-     8           55           26        4          22  30,457,856  30,457,856  5,540,984  24,916,872
-     9           59           26        4          22  30,412,800  30,412,800  5,493,960  24,918,840
-    10           63           26        4          22  30,412,800  30,412,800  5,492,250  24,920,550
-    11           67           26        4          22  30,412,800  30,412,800  5,490,571  24,922,229
-    12           71           26        4          22  30,412,800  30,412,800  5,489,627  24,923,173
-    13           75           26        4          22  30,412,800  30,412,800  5,488,519  24,924,281
-    14           79           26        4          22  30,412,800  30,412,800  5,489,553  24,923,247
-    15           83           26        4          22  30,056,448  30,056,448  5,131,758  24,924,690
-    16           87           26        4          22  30,220,288  30,220,288  5,295,276  24,925,012
+     7           51           26        4          22  30,830,592  30,830,592  5,914,553  24,916,039
+     8           55           26        4          22  30,457,856  30,457,856  5,540,095  24,917,761
+     9           59           26        4          22  30,412,800  30,412,800  5,493,549  24,919,251
+    10           63           26        4          22  30,412,800  30,412,800  5,490,768  24,922,032
+    11           67           26        4          22  30,412,800  30,412,800  5,488,241  24,924,559
+    12           71           26        4          22  30,412,800  30,412,800  5,487,299  24,925,501
+    13           75           26        4          22  30,412,800  30,412,800  5,487,354  24,925,446
+    14           79           26        4          22  30,412,800  30,412,800  5,486,936  24,925,864
+    15           83           26        4          22  30,175,232  30,175,232  5,249,691  24,925,541
+    16           87           26        4          22  30,175,232  30,175,232  5,249,407  24,925,825
 
 reopen checkpoints
   #  reason  after-epoch  physical  persisted-free  recovered-free
@@ -76,11 +76,11 @@ reopen checkpoints
 final
   Metric                              value
   -----------------------------  ----------
-  physical file size (bytes)     30,220,288
-  logical size (bytes)           30,220,288
-  reusable free (bytes)           2,023,902
-  reusable free regions (count)         137
-  pressure (bytes)               28,196,386
+  physical file size (bytes)     30,175,232
+  logical size (bytes)           30,175,232
+  reusable free (bytes)           1,978,034
+  reusable free regions (count)         141
+  pressure (bytes)               28,197,198
   live epochs (count)                    25
 
 coverage: object/group layout
@@ -129,7 +129,7 @@ coverage: filtered contents
 persisted space after writer close
   Metric                           value
   --------------------------  ----------
-  physical file size (bytes)  30,220,288
-  logical EOF (bytes)         30,220,288
-  free bytes                   2,023,902
-  sections (count)                   159
+  physical file size (bytes)  30,175,232
+  logical EOF (bytes)         30,175,232
+  free bytes                   1,978,034
+  sections (count)                   160
