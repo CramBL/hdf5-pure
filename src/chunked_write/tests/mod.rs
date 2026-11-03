@@ -20,6 +20,7 @@ use crate::read_spec::RawReadSpec;
 mod allocation;
 
 mod partial_edge;
+mod verbatim;
 mod zfp;
 
 fn make_f64_type() -> Datatype {

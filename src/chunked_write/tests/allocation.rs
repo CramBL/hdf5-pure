@@ -6,17 +6,22 @@
 
 use core::mem;
 
+use hdf5_pure_format::__private::ChunkRecord;
 use rstest::rstest;
 use test_util::allocation;
 use test_util::filtered_chunks::WORKLOADS;
 use test_util::filtered_chunks::Workload;
 
+use super::super::ChunkMeta;
 use super::super::ChunkOptions;
 use super::super::FilterKind;
+use super::super::VerbatimChunks;
 use super::super::gathering::ChunkTraversal;
 use crate::File;
 use crate::FileBuilder;
 use crate::FillTime;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::chunked_write;
 use crate::convert;
 use crate::data_layout::ChunkedLayoutFlags;
@@ -290,4 +295,50 @@ fn expected_chunk(workload: Workload, raw: &[u8], index: usize) -> Vec<u8> {
         }
     }
     expected
+}
+
+#[rstest]
+#[case::small(512)]
+#[case::large(4_096)]
+fn verbatim_preparation_retains_records_without_materializing_payloads(#[case] count: usize) {
+    let chunk_bytes = 1_048_576_u64;
+    let meta = vec![
+        ChunkMeta {
+            compressed_size: chunk_bytes,
+            filter_mask: 0
+        };
+        count
+    ];
+    let shape = [u64::try_from(count).unwrap() * chunk_bytes];
+    let (prepared, measured) =
+        allocation::measure(&format!("verbatim_preparation_{count}"), || {
+            VerbatimChunks::new(
+                &meta,
+                &shape,
+                &[chunk_bytes],
+                convert::nz(1),
+                ChunkedLayoutFlags::NONE,
+                None,
+                StoredAddress::ZERO,
+                None,
+            )
+            .unwrap()
+        });
+    assert_eq!(prepared.payload_len(), shape[0]);
+    assert_eq!(prepared.records.len(), count);
+    assert!(
+        measured.live_bytes >= u64::try_from(count * mem::size_of::<ChunkRecord>()).unwrap(),
+        "{measured:?}"
+    );
+    assert!(
+        measured.peak_bytes <= u64::try_from(count * 40 + 4_096).unwrap(),
+        "{measured:?}"
+    );
+    let (geometry, lookup) =
+        allocation::measure(&format!("verbatim_array_geometry_{count}"), || {
+            prepared.array_geometry().unwrap()
+        });
+    assert_eq!(geometry.slots, u64::try_from(count).unwrap());
+    assert_eq!(lookup.blocks, 0, "{lookup:?}");
+    assert_eq!(lookup.peak_bytes, 0, "{lookup:?}");
 }

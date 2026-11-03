@@ -978,21 +978,13 @@ impl CompressedChunkSet {
             index_slots,
             pipeline_message: _,
         } = self;
-        let kind = kind.array_kind()?;
-        let occupied = if slot_of_chunk.windows(2).all(|pair| pair[0] <= pair[1]) {
-            Cow::Borrowed(slot_of_chunk.as_slice())
-        } else {
-            let mut slots = slot_of_chunk.clone();
-            slots.sort_unstable();
-            Cow::Owned(slots)
-        };
-        Some(ChunkArrayGeometry {
-            kind,
-            occupied,
-            slots: *index_slots,
-            chunk_bytes: self.full_chunk_bytes(),
-            filtered: *has_filters,
-        })
+        Some(ChunkArrayGeometry::new(
+            kind.array_kind()?,
+            slot_of_chunk,
+            *index_slots,
+            self.full_chunk_bytes(),
+            *has_filters,
+        ))
     }
 
     /// Returns object-header messages for the assigned stored addresses.
@@ -1071,8 +1063,8 @@ impl CompressedChunkSet {
 
 /// Address-independent array geometry and ordered occupied-slot assignments.
 ///
-/// The writer obtains this geometry from [`CompressedChunkSet::array_geometry`] and assigns
-/// chunk addresses separately.
+/// The writer obtains this geometry from [`CompressedChunkSet::array_geometry`] or
+/// [`VerbatimChunks::array_geometry`] and assigns chunk addresses separately.
 #[cfg(feature = "std")]
 pub(crate) struct ChunkArrayGeometry<'a> {
     /// The array representation selected from the maximum chunk grid.
@@ -1085,6 +1077,33 @@ pub(crate) struct ChunkArrayGeometry<'a> {
     pub(crate) chunk_bytes: u64,
     /// Whether records include stored sizes and filter masks.
     pub(crate) filtered: bool,
+}
+
+#[cfg(feature = "std")]
+impl<'a> ChunkArrayGeometry<'a> {
+    /// Borrows ordered slot assignments or sorts an owned copy.
+    fn new(
+        kind: ChunkArrayKind,
+        occupied: &'a [u64],
+        slots: u64,
+        chunk_bytes: u64,
+        filtered: bool,
+    ) -> Self {
+        let occupied = if occupied.windows(2).all(|pair| pair[0] <= pair[1]) {
+            Cow::Borrowed(occupied)
+        } else {
+            let mut slots = occupied.to_vec();
+            slots.sort_unstable();
+            Cow::Owned(slots)
+        };
+        Self {
+            kind,
+            occupied,
+            slots,
+            chunk_bytes,
+            filtered,
+        }
+    }
 }
 
 /// The scalar geometry of a chunk array containing no stored chunks.
@@ -1763,6 +1782,242 @@ impl ByteSink for Vec<u8> {
     }
 }
 
+/// Prepared records and index geometry for existing encoded chunks.
+///
+/// The writer copies chunk metadata into owned records, retaining logical slot assignments and
+/// a borrowed filter pipeline. Payload bytes are supplied separately through [`ChunkProvider`].
+pub(crate) struct VerbatimChunks<'a> {
+    records: Vec<ChunkRecord>,
+    data_address: StoredAddress,
+    chunk_dims: Vec<u32>,
+    element_size: NonZeroUsize,
+    flags: ChunkedLayoutFlags,
+    pipeline_message: Option<&'a [u8]>,
+    kind: ChunkIndexKind,
+    /// Logical slots in input metadata order.
+    slot_of_chunk: Vec<u64>,
+    /// The logical slot span, including unallocated positions.
+    index_slots: u64,
+    chunk_bytes: u64,
+    payload_len: u64,
+}
+
+impl<'a> VerbatimChunks<'a> {
+    /// Prepares contiguous chunk records and index geometry at `data_address`.
+    ///
+    /// `meta` follows dense chunk-grid order. The writer borrows `pipeline_message` and stores
+    /// chunk dimensions narrowed to [`u32`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChunkedReadError`] if `meta` is empty, its length differs from the
+    /// grid, or a filtered stored size exceeds its index field. Returns
+    /// [`FormatError::OffsetOverflow`] if the payload size or stored exclusive end exceeds
+    /// [`u64::MAX`], or [`FormatError::ValueTooLargeForRepresentation`] if a chunk dimension does
+    /// not fit [`u32`]. Returns grid and capacity errors from [`plan_index_slots`].
+    pub(crate) fn new(
+        meta: &[ChunkMeta],
+        shape: &[u64],
+        chunk_dims: &[u64],
+        element_size: NonZeroUsize,
+        flags: ChunkedLayoutFlags,
+        pipeline_message: Option<&'a [u8]>,
+        data_address: StoredAddress,
+        maxshape: Option<&[MaxExtent]>,
+    ) -> Result<Self, FormatError> {
+        if meta.is_empty() {
+            return Err(FormatError::ChunkedReadError(
+                "a verbatim chunked dataset requires at least one chunk".into(),
+            ));
+        }
+        let mut payload_len = 0_u64;
+        let mut records = Vec::with_capacity(meta.len());
+        for chunk in meta {
+            records.push(ChunkRecord {
+                address: data_address.checked_add(payload_len)?,
+                stored_size: chunk.compressed_size,
+                filter_mask: chunk.filter_mask,
+            });
+            payload_len = payload_len.checked_add(chunk.compressed_size).ok_or(
+                FormatError::OffsetOverflow {
+                    offset: payload_len,
+                    length: chunk.compressed_size,
+                },
+            )?;
+        }
+        let chunk_bytes = full_chunk_bytes(chunk_dims.iter().copied(), element_size);
+        let (kind, slot_of_chunk, index_slots) = plan_index_slots(
+            shape,
+            chunk_dims,
+            maxshape,
+            chunk_bytes,
+            pipeline_message.is_some(),
+            StorageAllocation::Allocated,
+        )?;
+        if slot_of_chunk.len() != meta.len() {
+            return Err(FormatError::ChunkedReadError(format!(
+                "a verbatim chunked dataset of shape {shape:?} holds {} chunks, not the \
+                 {} it was given",
+                slot_of_chunk.len(),
+                meta.len(),
+            )));
+        }
+        if kind.array_kind().is_some() {
+            check_chunks_fit_index(meta, chunk_bytes, pipeline_message.is_some())?;
+        }
+        let mut dimensions = Vec::with_capacity(chunk_dims.len());
+        for &dimension in chunk_dims {
+            dimensions.push(dimension.narrow()?);
+        }
+        data_address.checked_add(payload_len)?;
+        Ok(Self {
+            records,
+            data_address,
+            chunk_dims: dimensions,
+            element_size,
+            flags,
+            pipeline_message,
+            kind,
+            slot_of_chunk,
+            index_slots,
+            chunk_bytes,
+            payload_len,
+        })
+    }
+
+    /// Reassigns contiguous chunk addresses in place.
+    ///
+    /// The writer retains the record vector's capacity, stored sizes, filter masks, and logical
+    /// slot assignments. On error, the payload start and all records remain unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the new stored exclusive end exceeds
+    /// [`u64::MAX`].
+    #[cfg(any(test, doc))]
+    pub(crate) fn assign_data_address(
+        &mut self,
+        address: StoredAddress,
+    ) -> Result<(), FormatError> {
+        address.checked_add(self.payload_len)?;
+        let mut cursor = address;
+        for record in &mut self.records {
+            record.address = cursor;
+            cursor = cursor.checked_add(record.stored_size)?;
+        }
+        self.data_address = address;
+        Ok(())
+    }
+
+    /// Returns the checked sum of stored chunk sizes, excluding index metadata.
+    pub(crate) fn payload_len(&self) -> u64 {
+        self.payload_len
+    }
+
+    /// Returns array geometry for the records, or [`None`] for a single-chunk layout.
+    ///
+    /// Occupied-slot ordering follows [`ChunkArrayGeometry::new`].
+    #[cfg(all(feature = "std", any(test, doc)))]
+    pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
+        Some(ChunkArrayGeometry::new(
+            self.kind.array_kind()?,
+            &self.slot_of_chunk,
+            self.index_slots,
+            self.chunk_bytes,
+            self.pipeline_message.is_some(),
+        ))
+    }
+
+    /// Returns a borrowed logical-slot view over the prepared records.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`IndexSlots::new`].
+    pub(crate) fn index_slots(&self) -> Result<IndexSlots<'_>, FormatError> {
+        IndexSlots::new(&self.records, &self.slot_of_chunk, self.index_slots)
+    }
+
+    /// Serializes a Data Layout message for the records and stored index address.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ChunkIndexKind::layout_message`].
+    pub(crate) fn layout_message(&self, index: StoredAddress) -> Result<Vec<u8>, FormatError> {
+        self.kind.layout_message(
+            self.flags,
+            &self.chunk_dims,
+            self.element_size,
+            &self.records,
+            index,
+            self.pipeline_message.is_some(),
+        )
+    }
+
+    /// Plans a contiguous region with its index after the payload.
+    ///
+    /// The record and slot vectors are moved into [`VerbatimPlan`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the complete region's length or stored exclusive
+    /// end exceeds [`u64::MAX`]. Returns index sizing and encoding errors from [`chunk_index_len`],
+    /// [`Self::index_slots`], and [`Self::layout_message`].
+    fn plan_at(self) -> Result<VerbatimLayout, FormatError> {
+        let index_address = self.data_address.checked_add(self.payload_len())?;
+        let has_filters = self.pipeline_message.is_some();
+        let index = match self.kind.array_kind() {
+            Some(array) => Some(VerbatimIndexPlan {
+                kind: array,
+                address: index_address,
+                has_filters,
+                chunk_bytes: self.chunk_bytes,
+                len: chunk_index_len(
+                    array,
+                    &self.index_slots()?,
+                    self.chunk_bytes,
+                    INDEX_OFFSET_SIZE,
+                    INDEX_LENGTH_SIZE,
+                    has_filters,
+                )?,
+            }),
+            None => None,
+        };
+        let total_len = self
+            .payload_len
+            .checked_add(index.as_ref().map_or(0, |index| index.len))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: self.payload_len,
+                length: index.as_ref().map_or(0, |index| index.len),
+            })?;
+        self.data_address.checked_add(total_len)?;
+        let layout_message = self.layout_message(index_address)?;
+        let Self {
+            records,
+            data_address: _,
+            chunk_dims: _,
+            element_size: _,
+            flags: _,
+            pipeline_message,
+            kind: _,
+            slot_of_chunk,
+            index_slots,
+            chunk_bytes: _,
+            payload_len: _,
+        } = self;
+        Ok(VerbatimLayout {
+            plan: VerbatimPlan {
+                chunks: records,
+                slot_of_chunk,
+                index_slots,
+                index,
+                total_len,
+            },
+            layout_message,
+            pipeline_message: pipeline_message.map(<[u8]>::to_vec),
+        })
+    }
+}
+
 /// Where the chunk index goes and how long it is, without its bytes.
 ///
 /// The index is built once, by [`emit_chunked_data_verbatim`], at the moment it
@@ -1823,8 +2078,10 @@ pub(crate) struct VerbatimLayout {
 /// Returns the [`VerbatimLayout`] of a dense set of chunks in row-major grid order, planned from
 /// their sizes and filter masks alone.
 ///
-/// The layout is the same whether the chunks are later buffered or streamed. The caller passes
-/// each partial edge chunk unfiltered where [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`]
+/// The writer prepares records through [`VerbatimChunks::new`] and plans the index immediately
+/// after their payload. The layout is the same whether the chunks are buffered or streamed.
+/// The caller passes each partial edge chunk unfiltered where
+/// [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`]
 /// is `true` for `flags`: the layout message stores `flags` as given, and the plan records each
 /// chunk as `meta` describes it.
 ///
@@ -1834,8 +2091,9 @@ pub(crate) struct VerbatimLayout {
 /// than the grid over `shape`, or holds a chunk too large for the chunk size field of a filtered
 /// index. Returns [`FormatError::OffsetOverflow`] if the complete region's length or stored
 /// exclusive end exceeds [`u64::MAX`]. The region includes the chunk bytes and their index.
-/// Returns the errors of [`plan_index_slots`] and [`IndexSlots::new`] for the index, and of
-/// [`DataLayout::encode_chunked`] for the layout message.
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a chunk dimension does not fit
+/// [`u32`]. Returns the errors of [`plan_index_slots`] and [`IndexSlots::new`] for the index, and
+/// of [`DataLayout::encode_chunked`] for the layout message.
 pub(crate) fn plan_chunked_data_verbatim(
     meta: &[ChunkMeta],
     shape: &[u64],
@@ -1846,121 +2104,17 @@ pub(crate) fn plan_chunked_data_verbatim(
     data_address: StoredAddress,
     maxshape: Option<&[MaxExtent]>,
 ) -> Result<VerbatimLayout, FormatError> {
-    if meta.is_empty() {
-        return Err(FormatError::ChunkedReadError(
-            "a verbatim chunked dataset requires at least one chunk".into(),
-        ));
-    }
-    let num_chunks = meta.len();
-    let has_filters = pipeline_message.is_some();
-
-    // Walk a running cursor instead of pushing bytes; each address is a pure
-    // function of the preceding chunk sizes, mirroring the buffered builder.
-    let mut cursor: u64 = 0;
-    let mut written_chunks = Vec::with_capacity(num_chunks);
-
-    for m in meta {
-        let address = data_address.checked_add(cursor)?;
-        let compressed_size = m.compressed_size;
-        written_chunks.push(ChunkRecord {
-            address,
-            stored_size: compressed_size,
-            filter_mask: m.filter_mask,
-        });
-        // The one length here a file supplies: a verbatim plan's chunk sizes come from the source
-        // dataset's index, so the running sum is checked before it offsets an address.
-        cursor = cursor
-            .checked_add(compressed_size)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: cursor,
-                length: compressed_size,
-            })?;
-    }
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk dimensions written into the on-disk u32 dimension fields selected for this file"
-    )]
-    let chunk_dims_u32: Vec<u32> = chunk_dims.iter().map(|&d| d as u32).collect();
-    let offset_size = INDEX_OFFSET_SIZE;
-    let length_size = INDEX_LENGTH_SIZE;
-
-    // The chunks arrived in dense grid order; where each one's index element
-    // sits is the maximum grid's business, and the same decision the encode path
-    // makes (`plan_index_slots`).
-    let chunk_bytes = full_chunk_bytes(chunk_dims.iter().copied(), element_size);
-    let (kind, slot_of_chunk, index_slots) = plan_index_slots(
+    VerbatimChunks::new(
+        meta,
         shape,
         chunk_dims,
-        maxshape,
-        chunk_bytes,
-        has_filters,
-        // A verbatim payload is the chunks the source held. Its own count is
-        // checked against the plan's just below, so an empty one is reported
-        // rather than quietly re-planned as an unallocated dataset.
-        StorageAllocation::Allocated,
-    )?;
-    if slot_of_chunk.len() != num_chunks {
-        return Err(FormatError::ChunkedReadError(format!(
-            "a verbatim chunked dataset of shape {shape:?} holds {} chunks, not the \
-             {num_chunks} it was given",
-            slot_of_chunk.len(),
-        )));
-    }
-    if kind.array_kind().is_some() {
-        check_chunks_fit_index(meta, chunk_bytes, has_filters)?;
-    }
-
-    // The index sits immediately after the chunk bytes. Its length is taken from
-    // the index's own layout rather than from a build of it, so this planner
-    // touches no index bytes either — which is what lets `write_chunked_relocatable`
-    // plan at a provisional address purely to size the region.
-    let index_address = data_address.checked_add(cursor)?;
-    let index = match kind.array_kind() {
-        Some(array) => Some(VerbatimIndexPlan {
-            kind: array,
-            address: index_address,
-            has_filters,
-            chunk_bytes,
-            len: chunk_index_len(
-                array,
-                &IndexSlots::new(&written_chunks, &slot_of_chunk, index_slots)?,
-                chunk_bytes,
-                offset_size,
-                length_size,
-                has_filters,
-            )?,
-        }),
-        None => None,
-    };
-    cursor = cursor
-        .checked_add(index.as_ref().map_or(0, |i| i.len))
-        .ok_or(FormatError::OffsetOverflow {
-            offset: cursor,
-            length: index.as_ref().map_or(0, |i| i.len),
-        })?;
-    data_address.checked_add(cursor)?;
-
-    let layout_message = kind.layout_message(
-        flags,
-        &chunk_dims_u32,
         element_size,
-        &written_chunks,
-        index_address,
-        has_filters,
-    )?;
-
-    Ok(VerbatimLayout {
-        plan: VerbatimPlan {
-            chunks: written_chunks,
-            slot_of_chunk,
-            index_slots,
-            index,
-            total_len: cursor,
-        },
-        layout_message,
-        pipeline_message: pipeline_message.map(<[u8]>::to_vec),
-    })
+        flags,
+        pipeline_message,
+        data_address,
+        maxshape,
+    )?
+    .plan_at()
 }
 
 /// Checks that the chunk size field of a filtered chunk index holds the stored size of every chunk
