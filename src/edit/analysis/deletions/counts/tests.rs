@@ -19,6 +19,8 @@ use crate::object_graph::TraversalBudget;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 
+use super::LinkRemovalPlan;
+
 #[rstest]
 #[case::one_alias(&["first"], 1)]
 #[case::final_aliases(&["first", "second"], 0)]
@@ -404,6 +406,140 @@ fn empty_batch_has_no_count_plan_or_topology_pass() {
             .is_none()
     );
     assert_eq!(DISCOVERY_WORK.with(Cell::get), (0, 0));
+}
+
+#[rstest]
+#[case::retained(false)]
+#[case::released(true)]
+fn decrement_criteria_control_outgoing_propagation_before_queueing(#[case] release: bool) {
+    let path = test_util::temp::temp_path("count-criterion.h5");
+    let mut fixture = Fixture::new();
+    let child = fixture.append_header(Vec::new());
+    let owner = fixture.append_header(vec![global_heap_fixture::hard_link("child", child)]);
+    fixture.link("owner", owner);
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let topology = phase.topology().unwrap();
+    let edge = topology.find_link(&ObjectPathBuf::parse("owner")).unwrap();
+    let initializations = Cell::new(0);
+    let decrements = Cell::new(0);
+    let plan = LinkRemovalPlan::build(
+        topology,
+        vec![edge],
+        |index| {
+            initializations.set(initializations.get() + 1);
+            let object = topology.graph.object(index).value.id;
+            Ok::<_, FormatError>((
+                topology.incoming(object.header_address().get()).unwrap(),
+                release || object != id(owner),
+            ))
+        },
+        |(remaining, eligible)| {
+            decrements.set(decrements.get() + 1);
+            *remaining = remaining.checked_sub(1).unwrap();
+            Ok(*remaining == 0 && *eligible)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plan.zero
+            .iter()
+            .map(|&index| topology.graph.object(index).value.id)
+            .collect::<Vec<_>>(),
+        if release {
+            vec![id(owner), id(child)]
+        } else {
+            Vec::new()
+        }
+    );
+    assert_eq!(plan.remaining.len(), if release { 2 } else { 1 });
+    assert_eq!(initializations.get(), if release { 2 } else { 1 });
+    assert_eq!(decrements.get(), if release { 2 } else { 1 });
+    assert_eq!(plan.work.initial_edges, 1);
+    assert_eq!(plan.work.objects, if release { 2 } else { 0 });
+    assert_eq!(plan.work.outgoing_edges, usize::from(release));
+    assert_eq!(plan.work.decrements, decrements.get());
+}
+
+#[rstest]
+#[case::initialize(CriterionStage::Initialize)]
+#[case::decrement(CriterionStage::Decrement)]
+#[case::target_lookup(CriterionStage::Lookup)]
+fn criterion_failures_are_returned_without_visiting_outgoing_edges(#[case] stage: CriterionStage) {
+    let path = test_util::temp::temp_path("count-criterion-error.h5");
+    let mut fixture = Fixture::new();
+    let child = fixture.append_header(Vec::new());
+    let owner = fixture.append_header(vec![global_heap_fixture::hard_link("child", child)]);
+    fixture.link("owner", owner);
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let topology = phase.topology().unwrap();
+    let mut edge = topology.find_link(&ObjectPathBuf::parse("owner")).unwrap();
+    if stage == CriterionStage::Lookup {
+        edge.1 = id(u64::MAX);
+    }
+    let initializations = Cell::new(0);
+    let decrements = Cell::new(0);
+    let Err(error) = LinkRemovalPlan::build(
+        topology,
+        vec![edge],
+        |_| {
+            initializations.set(initializations.get() + 1);
+            if stage == CriterionStage::Initialize {
+                Err(CriterionError(FormatError::OffsetOverflow {
+                    offset: 17,
+                    length: 23,
+                }))
+            } else {
+                Ok(1_u32)
+            }
+        },
+        |_| {
+            decrements.set(decrements.get() + 1);
+            Err::<bool, _>(CriterionError(FormatError::OffsetOverflow {
+                offset: 17,
+                length: 23,
+            }))
+        },
+    ) else {
+        panic!("expected the criterion failure")
+    };
+    let expected = if stage == CriterionStage::Lookup {
+        FormatError::Internal("a removed link target is absent from its topology".into())
+    } else {
+        FormatError::OffsetOverflow {
+            offset: 17,
+            length: 23,
+        }
+    };
+    assert_eq!(error, CriterionError(expected));
+    assert_eq!(
+        initializations.get(),
+        usize::from(stage != CriterionStage::Lookup)
+    );
+    assert_eq!(
+        decrements.get(),
+        usize::from(stage == CriterionStage::Decrement)
+    );
+    assert_eq!(topology.incoming(child), Some(1));
+    assert_eq!(topology.incoming(owner), Some(1));
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CriterionError(FormatError);
+
+impl From<FormatError> for CriterionError {
+    fn from(error: FormatError) -> Self {
+        Self(error)
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CriterionStage {
+    Decrement,
+    Initialize,
+    Lookup,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

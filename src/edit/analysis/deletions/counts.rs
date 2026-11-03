@@ -40,62 +40,52 @@ impl<'topology, 'source> RemovedLinks<'topology, 'source> {
     }
 }
 
-/// Sparse remaining counts and non-root objects that reach zero within one borrowed topology.
+/// Sparse count states and eligible non-root transitions within one borrowed topology.
 ///
-/// Each zero-count object's outgoing adjacency is visited once. Explicitly removed edges are
-/// excluded from those decrements. Positive-count cycles remain outside the zero-count set.
+/// With the default graph adapter, zero is the queueing criterion for [`u32`] incoming counts.
+/// For other count states, the caller supplies the eligibility criterion to [`Self::build`].
+/// Each queued object's outgoing adjacency is visited once, excluding explicitly removed edges
+/// from those decrements. Positive cycles remain outside the default graph plan's zero-count set.
 /// Allocation ownership, source freshness, references, and publication require separate proofs.
-pub(in crate::edit) struct LinkRemovalPlan<'topology, 'source> {
+pub(in crate::edit) struct LinkRemovalPlan<'topology, 'source, Count = u32> {
     topology: &'topology CompleteTopology<'source>,
-    remaining: BTreeMap<ObjectIndex, u32>,
+    remaining: BTreeMap<ObjectIndex, Count>,
     zero: Vec<ObjectIndex>,
     #[cfg(test)]
     work: RemovalWork,
 }
 
 impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
+    /// Uses original graph incoming counts and checked decrements as the propagation criterion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if an explicit target is outside the topology, an
+    /// incoming count is missing, or removals exceed the original count.
     fn new(
         topology: &'topology CompleteTopology<'source>,
         edges: Vec<(LinkIndex, ObjectId)>,
     ) -> Result<Self, FormatError> {
-        let mut plan = Self {
+        Self::build(
             topology,
-            remaining: BTreeMap::new(),
-            zero: Vec::new(),
-            #[cfg(test)]
-            work: RemovalWork::default(),
-        };
-        for &(_, object) in &edges {
-            let index = topology.indices.get(&object).copied().ok_or_else(|| {
-                FormatError::Internal("a removed link target is absent from its topology".into())
-            })?;
-            #[cfg(test)]
-            {
-                plan.work.initial_edges += 1;
-            }
-            plan.remove_incoming(index)?;
-        }
-        let mut next = 0;
-        while let Some(&index) = plan.zero.get(next) {
-            next += 1;
-            #[cfg(test)]
-            {
-                plan.work.objects += 1;
-            }
-            for (position, link) in topology.graph.object(index).links.iter().enumerate() {
-                #[cfg(test)]
-                {
-                    plan.work.outgoing_edges += 1;
-                }
-                if edges
-                    .binary_search_by_key(&LinkIndex::new(index, position), |&(edge, _)| edge)
-                    .is_err()
-                {
-                    plan.remove_incoming(link.target)?;
-                }
-            }
-        }
-        Ok(plan)
+            edges,
+            |index| {
+                let object = topology.graph.object(index).value.id;
+                topology
+                    .incoming(object.header_address().get())
+                    .ok_or_else(|| {
+                        FormatError::Internal("a removed link target has no incoming count".into())
+                    })
+            },
+            |count| {
+                *count = count.checked_sub(1).ok_or_else(|| {
+                    FormatError::Internal(
+                        "removed links exceed their target's incoming count".into(),
+                    )
+                })?;
+                Ok(*count == 0)
+            },
+        )
     }
 
     /// Returns an object's remaining graph-relative incoming count, including for the phase root.
@@ -131,34 +121,101 @@ impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
         } = self;
         zero.iter().map(|&index| ZeroLinkObject { topology, index })
     }
+}
 
-    fn remove_incoming(&mut self, index: ObjectIndex) -> Result<(), FormatError> {
-        let Self {
+impl<'topology, 'source, Count> LinkRemovalPlan<'topology, 'source, Count> {
+    /// Builds sparse count states with caller-supplied initialization and decrement criteria.
+    ///
+    /// The caller passes edges sorted by identity, with each physical edge once and its matching
+    /// target. Calls `initial` once on first touching an object, then `decrement` for each removed
+    /// incoming edge. The decrement callback returns `true` only when the object first becomes
+    /// eligible, after establishing the required conditions.
+    ///
+    /// Eligible non-root objects are queued before their remaining outgoing edges are visited.
+    /// Already explicit removals are skipped during propagation. The original topology remains
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from `initial` or `decrement`. Converts [`FormatError::Internal`] into `E`
+    /// if an explicit target is outside the topology.
+    fn build<E: From<FormatError>>(
+        topology: &'topology CompleteTopology<'source>,
+        edges: Vec<(LinkIndex, ObjectId)>,
+        mut initial: impl FnMut(ObjectIndex) -> Result<Count, E>,
+        mut decrement: impl FnMut(&mut Count) -> Result<bool, E>,
+    ) -> Result<Self, E> {
+        let mut plan = Self {
             topology,
+            remaining: BTreeMap::new(),
+            zero: Vec::new(),
+            #[cfg(test)]
+            work: RemovalWork::default(),
+        };
+        for &(_, object) in &edges {
+            let index = topology.indices.get(&object).copied().ok_or_else(|| {
+                FormatError::Internal("a removed link target is absent from its topology".into())
+            })?;
+            #[cfg(test)]
+            {
+                plan.work.initial_edges += 1;
+            }
+            plan.remove_incoming(index, &mut initial, &mut decrement)?;
+        }
+        let mut next = 0;
+        while let Some(&index) = plan.zero.get(next) {
+            next += 1;
+            #[cfg(test)]
+            {
+                plan.work.objects += 1;
+            }
+            for (position, link) in topology.graph.object(index).links.iter().enumerate() {
+                #[cfg(test)]
+                {
+                    plan.work.outgoing_edges += 1;
+                }
+                if edges
+                    .binary_search_by_key(&LinkIndex::new(index, position), |&(edge, _)| edge)
+                    .is_err()
+                {
+                    plan.remove_incoming(link.target, &mut initial, &mut decrement)?;
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Updates one sparse count state before queueing an eligible non-root transition.
+    ///
+    /// The callbacks follow the requirements of [`Self::build`]. Initialization runs only for a
+    /// vacant count entry. Queue insertion follows a successful eligibility check.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from `initial` or `decrement`.
+    fn remove_incoming<E: From<FormatError>>(
+        &mut self,
+        index: ObjectIndex,
+        initial: &mut impl FnMut(ObjectIndex) -> Result<Count, E>,
+        decrement: &mut impl FnMut(&mut Count) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        let Self {
+            topology: _,
             remaining,
             zero,
             #[cfg(test)]
             work,
         } = self;
-        let object = topology.graph.object(index).value.id;
         let count = match remaining.entry(index) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(
-                topology
-                    .incoming(object.header_address().get())
-                    .ok_or_else(|| {
-                        FormatError::Internal("a removed link target has no incoming count".into())
-                    })?,
-            ),
+            Entry::Vacant(entry) => entry.insert(initial(index)?),
         };
-        *count = count.checked_sub(1).ok_or_else(|| {
-            FormatError::Internal("removed links exceed their target's incoming count".into())
-        })?;
+        let reaches_zero = decrement(count)?;
         #[cfg(test)]
         {
             work.decrements += 1;
         }
-        if *count == 0 && index != ObjectIndex::ROOT {
+        if reaches_zero && index != ObjectIndex::ROOT {
             zero.push(index);
         }
         Ok(())
