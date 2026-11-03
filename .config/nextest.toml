@@ -174,7 +174,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^libver_matrix::/) |
     test(/^libver_output::/) |
     test(/^matio_crosscheck::/) |
-    test(/^object_header_v1_malformed::/) |
+    test(/^object_header::v1::malformed::/) |
     test(/^repack::/) |
     test(/^userblock_base_address::/)
 ) | (package(hdf5-pure) & test(/^repack::native_crosschecks::/))
