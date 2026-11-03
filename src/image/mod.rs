@@ -61,6 +61,12 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 #[cfg(test)]
 use test_util::disk_log;
@@ -1553,6 +1559,8 @@ pub(crate) struct CountingImage {
     read_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Optional counter for read attempts, including failures and empty reads.
     read_calls: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Optional maximum requested read length, including failed requests.
+    read_peak: Option<Arc<AtomicU64>>,
     syncs: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1567,6 +1575,7 @@ impl CountingImage {
             inner,
             read_bytes,
             read_calls: None,
+            read_peak: None,
             syncs,
         }
     }
@@ -1577,6 +1586,14 @@ impl CountingImage {
         read_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         self.read_calls = Some(read_calls);
+        self
+    }
+
+    /// Enables recording the largest [`Source::read_at`] request length in `peak`.
+    ///
+    /// Updates the maximum before the inner read, including failed requests.
+    pub(crate) fn with_read_peak(mut self, peak: Arc<AtomicU64>) -> Self {
+        self.read_peak = Some(peak);
         self
     }
 
@@ -1593,6 +1610,9 @@ impl Source for CountingImage {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+        if let Some(peak) = &self.read_peak {
+            peak.fetch_max(buf.len() as u64, Ordering::Relaxed);
+        }
         self.read_bytes
             .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
         if let Some(read_calls) = &self.read_calls {

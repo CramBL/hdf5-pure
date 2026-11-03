@@ -90,7 +90,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `File::commit` leaving unreferenced global-heap collections allocated after variable-length attributes are replaced or removed. Reclamation requires proved collection ownership and complete analysis of surviving references.
+- Fixed `File::commit` leaving unreferenced global-heap collections allocated after variable-length attributes are replaced or removed. Reclamation requires proved collection ownership and complete analysis of surviving references ([#1063](https://github.com/CramBL/hdf5-pure/pull/1063)).
 - Fixed `File::commit` writing small group and dataset object headers or dense attribute metadata blocks across PAGE boundaries, or placing large blocks at unaligned addresses ([#1056](https://github.com/CramBL/hdf5-pure/pull/1056), [#1057](https://github.com/CramBL/hdf5-pure/pull/1057)).
 - Fixed `Group::datasets` and related metadata reads accepting contradictory version 2 B-tree root counts, repeated nodes, incomplete link-index records, or an index with the wrong client type. Full metadata walks use a bounded work allowance ([#1058](https://github.com/CramBL/hdf5-pure/pull/1058)).
 - Fixed `Group::datasets` and chunk enumeration returning duplicate entries through repeated version 1 B-tree nodes. Metadata walks reject repeated nodes and inconsistent child levels, with a bounded work allowance ([#1054](https://github.com/CramBL/hdf5-pure/pull/1054)).

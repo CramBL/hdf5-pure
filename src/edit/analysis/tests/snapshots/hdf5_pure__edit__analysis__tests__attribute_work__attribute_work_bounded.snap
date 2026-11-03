@@ -1,0 +1,55 @@
+---
+source: src/edit/analysis/tests/attribute_work.rs
+expression: report.finish()
+---
+Configuration
+  Property  Value
+  --------  -------
+  Backing   Bounded
+
+Predecessor descriptors and candidates
+  Metric                              Value
+  ----------------------------------  -----
+  Touched original descriptors           16
+  Encoded message-region input bytes  1,110
+  Prepared owner encoding bytes          37
+  Prepared owner encoding capacity       37
+  Unique collection allocations           1
+  Collection allocation parses            1
+  Original allocation bytes           4,096
+  Recorded attribute origins             16
+  Capture source read attempts            3
+  Capture source requested bytes        816
+
+One prospective source phase
+  Metric                                   Value
+  -------------------------------------  -------
+  Objects parsed for links                     3
+  Objects parsed for references                3
+  Reference summary objects                    3
+  Retained collection references               1
+  Cached root liveness results                 1
+  Candidate membership lookups                 2
+  Reference payload bytes                131,072
+  Source read attempts                        11
+  Source requested bytes                 131,404
+  Largest source read request             65,536
+  Additional reads for later candidates        0
+
+Complete commit I/O and buffering
+  Metric                         Value
+  ---------------------------  -------
+  Source read attempts              60
+  Source requested bytes       138,543
+  Largest source read request   65,536
+  Issued write calls                 2
+  Issued write bytes             2,096
+  Pending byte runs                  0
+  Pending byte capacity              0
+  Flush buffer peak bytes        2,048
+  Flush buffer peak capacity     2,048
+  Clean-gap read calls               0
+  Clean-gap read bytes               0
+  Explicit buffering copies      2,202
+  Resident mirror bytes              0
+  Resident mirror capacity           0

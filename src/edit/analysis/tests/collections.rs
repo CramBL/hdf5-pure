@@ -216,10 +216,12 @@ fn new_source_phase_reexamines_values_at_the_same_root_after_write_and_restore()
         BTreeSet::from([first])
     );
     drop(before);
+    let snapshot = engine.snapshot_free();
     engine
         .image
         .write_at(payload.get(), &second_reference)
         .unwrap();
+    engine.restore_free(snapshot);
     let mut after = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
     assert_eq!(
         after

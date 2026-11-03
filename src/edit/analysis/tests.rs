@@ -17,6 +17,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 use crate::{AttrValue, File, FileBuilder};
 
+mod attribute_work;
 mod attributes;
 mod collections;
 mod foundations;
