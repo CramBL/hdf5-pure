@@ -13,6 +13,7 @@ use test_util::global_heap;
 use test_util::global_heap::Object;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType;
+use test_util::object_header::v2::Header;
 use test_util_hdf5::global_heap_fixture;
 use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
@@ -107,6 +108,68 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
     assert_eq!(prospective.work().reference_objects, 1);
     assert_eq!(prospective.work().liveness_results, 1);
     assert_eq!(prospective.work().candidate_lookups, 1);
+}
+
+#[test]
+fn allocator_restoration_does_not_restore_attribute_reference_facts() {
+    let path = test_util::temp::temp_path("attribute-source-phase.h5");
+    let mut fixture = Fixture::new();
+    let first = fixture.collection(&[Object::new(1, b"before")]);
+    let second = fixture.collection(&[Object::new(1, b"after!")]);
+    let original = Header::new().message(attribute("one", first)).build();
+    let replacement = Header::new().message(attribute("one", second)).build();
+    assert_eq!(original.len(), replacement.len());
+    let owner = fixture.image.append(&original);
+    let owner = u64::try_from(owner).unwrap();
+    fixture.link("owner", owner);
+    fixture.write(&path);
+    let mut engine = edit_test_util::open_engine(&path);
+    let root = engine.context.superblock().root_group_address;
+    let region =
+        WriteEngine::gather_oh_messages(engine.image(), owner, engine.context.addresses()).unwrap();
+    let edited = attributes::plan_attr_ops(
+        &engine.opened_source(),
+        &region,
+        &[&AttrOp::Remove { name: "one".into() }],
+    )
+    .unwrap();
+    let mut predecessor = AnalysisPhase::new(&engine);
+    let candidates = predecessor
+        .attribute_collections(
+            ObjectId::new(PhysicalAddress::new(owner)),
+            edited.predecessors,
+        )
+        .unwrap();
+    let range = candidates.collections[&PhysicalAddress::new(first)].range;
+    assert_eq!(
+        predecessor
+            .collections_reachable_from([Fixture::ROOT])
+            .unwrap()
+            .referenced_collections,
+        BTreeSet::from([first])
+    );
+    drop(predecessor);
+    let snapshot = engine.snapshot_free();
+    engine.image.write_at(owner, &replacement).unwrap();
+    engine.restore_free(snapshot);
+    assert_eq!(engine.context.superblock().root_group_address, root);
+    let mut prospective = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
+    assert_eq!(
+        prospective.unreferenced_collection_spans(candidates),
+        [(range, FreeClass::Page(PageType::Raw))]
+    );
+    let references = prospective.liveness.as_ref().unwrap().as_ref().unwrap();
+    assert!(references.analysis_complete);
+    assert_eq!(references.referenced_collections, BTreeSet::from([second]));
+    drop(prospective);
+    engine.image.write_at(owner, &original).unwrap();
+    assert_eq!(
+        AnalysisPhase::new(&engine)
+            .collections_reachable_from([Fixture::ROOT])
+            .unwrap()
+            .referenced_collections,
+        BTreeSet::from([first])
+    );
 }
 
 #[rstest]
@@ -222,7 +285,8 @@ enum UnknownEvidence {
     Element,
 }
 
-fn attribute(name: &str, collection: u64) -> Message {
+/// Returns a scalar string Attribute record referring to object 1 in `collection`.
+pub(super) fn attribute(name: &str, collection: u64) -> Message {
     Message::new(
         MessageType::ATTRIBUTE,
         &Attribute::new(
