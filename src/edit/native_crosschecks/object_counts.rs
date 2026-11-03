@@ -76,6 +76,10 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
     );
     assert_eq!(evidence.bound().incoming(), incoming);
     assert_eq!(evidence.bound().field(), Some(field));
+    assert_eq!(
+        evidence.bound().header_allocation().unwrap().range(),
+        field.chunk()
+    );
     assert!(evidence.bound().matches(phase.topology().unwrap()));
     match (usage, evidence) {
         (Usage::HardLinks, CountEvidence::Ordinary(ordinary)) => {
@@ -127,6 +131,10 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
     assert_eq!(detached.updates().len(), 1);
     assert_eq!(detached.updates()[0].object(), object);
     assert_eq!(detached.updates()[0].field(), field);
+    assert_eq!(
+        detached.updates()[0].header_allocation().unwrap().range(),
+        field.chunk()
+    );
     assert_eq!(
         detached.updates()[0].count().get(),
         u32::try_from(reported).unwrap() - 1

@@ -4,11 +4,15 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectReferenceCount;
 use rstest::rstest;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType;
+use test_util::object_header::v1;
+use test_util::object_header::v2;
+use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture;
 use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
@@ -27,6 +31,7 @@ use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 
+use super::HeaderCountAllocation;
 use super::*;
 
 #[rstest]
@@ -386,4 +391,226 @@ enum Subject {
     MissingDatasetMessage,
     RepeatedDatasetMessage,
     Unclassified,
+}
+
+#[rstest]
+#[case::version_1(HeaderForm::Version1)]
+#[case::version_2(HeaderForm::Version2)]
+#[case::continuation(HeaderForm::Continuation)]
+fn complete_header_allocations_remain_independent_of_payload_ownership(#[case] form: HeaderForm) {
+    let path = test_util::temp::temp_path("count-header-allocation.h5");
+    let mut fixture = Fixture::new();
+    let (root, allocation) = match form {
+        HeaderForm::Continuation => {
+            let child =
+                v2::continuation_chunk(&[Message::reference_count(2)], v2::HeaderFlags::default());
+            let address = u64::try_from(fixture.image.append(&child)).unwrap();
+            (
+                v2::Header::new()
+                    .continuation(usize::try_from(address).unwrap(), &child, Widths::EIGHT)
+                    .build(),
+                Some(
+                    FileRange::new(
+                        PhysicalAddress::new(address),
+                        u64::try_from(child.len()).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        }
+        HeaderForm::Version1 => (
+            v1::Header::new()
+                .reference_count(2)
+                .message(Message::nil(8))
+                .build(),
+            None,
+        ),
+        HeaderForm::Version2 => (
+            v2::Header::new()
+                .message(Message::reference_count(2))
+                .build(),
+            None,
+        ),
+    };
+    let allocation = allocation.unwrap_or_else(|| {
+        FileRange::new(
+            PhysicalAddress::new(u64::try_from(fixture.image.as_bytes().len()).unwrap()),
+            u64::try_from(root.len()).unwrap(),
+        )
+        .unwrap()
+    });
+    let address = u64::try_from(fixture.image.append(&root)).unwrap();
+    fixture.link("a", address);
+    fixture.link("b", address);
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let object = ObjectId::new(PhysicalAddress::new(address));
+    let mut phase = AnalysisPhase::new(&engine);
+    let observed = phase.object_reference_count(object).unwrap();
+    let field = match observed {
+        ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field) => field,
+        other => panic!("expected explicit count, got {other:?}"),
+    };
+    assert_eq!(field.value(), 2);
+    assert_eq!(field.chunk(), allocation);
+    let bound = phase.count_evidence(object).unwrap().unwrap();
+    assert_eq!(
+        bound.bound().header_allocation().unwrap().range(),
+        allocation
+    );
+    let mut storage = Vec::new();
+    assert_eq!(engine.collect_object_storage(object, &mut storage), None);
+    assert!(storage.is_empty());
+    assert_eq!(phase.object_reference_count(object).unwrap(), observed);
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse("a"))
+        .unwrap();
+    let plan = phase.source_count_plan([&deletion]).unwrap().unwrap();
+    let detached = plan.surviving_counts(&engine).unwrap();
+    assert_eq!(detached.updates().len(), 1);
+    assert_eq!(
+        detached.updates()[0].header_allocation().unwrap().range(),
+        allocation
+    );
+    assert_eq!(detached.updates()[0].count().get(), 1);
+}
+
+#[rstest]
+#[case::empty(AllocationGeometry::Empty)]
+#[case::field_only(AllocationGeometry::FieldOnly)]
+#[case::duplicate(AllocationGeometry::Duplicate)]
+#[case::overlap(AllocationGeometry::Overlap)]
+#[case::missing(AllocationGeometry::Missing)]
+#[case::truncated(AllocationGeometry::Truncated)]
+#[case::zero_length(AllocationGeometry::ZeroLength)]
+#[case::unordered(AllocationGeometry::Unordered)]
+fn header_allocation_summary_requires_complete_disjoint_bounded_chunks(
+    #[case] geometry: AllocationGeometry,
+) {
+    let path = test_util::temp::temp_path("count-allocation-geometry.h5");
+    let mut fixture = Fixture::new();
+    let address = fixture.append_header(vec![Message::reference_count(2)]);
+    fixture.link("a", address);
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let ObjectReferenceCount::Version2(field) = phase
+        .object_reference_count(ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap()
+    else {
+        panic!("expected version 2 framing")
+    };
+    let mut eof = field.chunk().end().get() + 8;
+    let extra = FileRange::new(field.chunk().end(), 8).unwrap();
+    let mut allocations = match geometry {
+        AllocationGeometry::Duplicate => vec![field.chunk(), field.chunk()],
+        AllocationGeometry::Empty => vec![],
+        AllocationGeometry::FieldOnly => vec![field.range()],
+        AllocationGeometry::Missing => vec![extra],
+        AllocationGeometry::Overlap => vec![
+            field.chunk(),
+            FileRange::new(field.chunk().start().checked_add(1).unwrap(), 1).unwrap(),
+        ],
+        AllocationGeometry::Truncated => {
+            eof = field.chunk().end().get() - 1;
+            vec![field.chunk()]
+        }
+        AllocationGeometry::Unordered => vec![extra, field.chunk()],
+        AllocationGeometry::ZeroLength => vec![
+            field.chunk(),
+            FileRange::new(field.chunk().end(), 0).unwrap(),
+        ],
+    };
+    let owned = HeaderCountAllocation::new(field, &mut allocations, eof);
+    assert_eq!(
+        owned.map(HeaderCountAllocation::range),
+        matches!(geometry, AllocationGeometry::Unordered).then_some(field.chunk())
+    );
+    assert_eq!(field.value(), 2);
+}
+
+#[test]
+fn overlapping_chunk_allocations_preserve_counts_and_topology_without_ownership() {
+    let path = test_util::temp::temp_path("count-overlapping-chunks.h5");
+    let mut fixture = Fixture::new();
+    let child = v2::continuation_chunk(&[Message::nil(8)], v2::HeaderFlags::default());
+    let header = |target| {
+        v2::Header::new()
+            .message(Message::reference_count(2))
+            .message(Message::new(MessageType::NIL, &child))
+            .continuation(target, &child, Widths::EIGHT)
+            .build()
+    };
+    let placeholder = header(0);
+    let child_at = placeholder
+        .windows(child.len())
+        .position(|bytes| bytes == child)
+        .unwrap();
+    let address = fixture.image.as_bytes().len();
+    let root = header(address + child_at);
+    let parent_range = FileRange::new(
+        PhysicalAddress::new(u64::try_from(address).unwrap()),
+        u64::try_from(root.len()).unwrap(),
+    )
+    .unwrap();
+    let child_range = FileRange::new(
+        PhysicalAddress::new(u64::try_from(address + child_at).unwrap()),
+        u64::try_from(child.len()).unwrap(),
+    )
+    .unwrap();
+    assert!(parent_range.contains(child_range) && parent_range != child_range);
+    fixture.image.append(&root);
+    fixture.link("a", u64::try_from(address).unwrap());
+    fixture.link("b", u64::try_from(address).unwrap());
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let object = ObjectId::new(parent_range.start());
+    let mut phase = AnalysisPhase::new(&engine);
+    let ObjectReferenceCount::Version2(field) = phase.object_reference_count(object).unwrap()
+    else {
+        panic!("expected version 2 framing")
+    };
+    assert_eq!(field.value(), 2);
+    assert_eq!(field.chunk(), parent_range);
+    let evidence = phase.count_evidence(object).unwrap().unwrap();
+    assert_eq!(evidence.bound().header_allocation(), None);
+    assert_eq!(evidence.bound().original(), 2);
+    assert_eq!(
+        phase
+            .topology()
+            .unwrap()
+            .incoming(u64::try_from(address).unwrap()),
+        Some(2)
+    );
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse("a"))
+        .unwrap();
+    let plan = phase.source_count_plan([&deletion]).unwrap().unwrap();
+    let detached = plan.surviving_counts(&engine).unwrap();
+    assert_eq!(detached.updates().len(), 1);
+    assert_eq!(detached.updates()[0].header_allocation(), None);
+    assert_eq!(detached.updates()[0].count().get(), 1);
+}
+
+#[derive(Clone, Copy)]
+enum AllocationGeometry {
+    Duplicate,
+    Empty,
+    FieldOnly,
+    Missing,
+    Overlap,
+    Truncated,
+    Unordered,
+    ZeroLength,
+}
+
+#[derive(Clone, Copy)]
+enum HeaderForm {
+    Continuation,
+    Version1,
+    Version2,
 }
