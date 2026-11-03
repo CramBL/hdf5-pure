@@ -1110,6 +1110,12 @@ impl SectionInfoCounts {
                 length: sections,
             })
     }
+    /// Returns the writer's section-count field width in bytes, including for an empty list.
+    ///
+    /// The width depends on the total section count and is at least one byte.
+    pub fn count_width(self) -> usize {
+        enc_size(self.sections)
+    }
 }
 
 /// Returns a section-list capacity sufficient for at most `max_sections` sections.
@@ -1511,6 +1517,28 @@ mod tests {
                 .unwrap()
                 .encoded_len(widths)
                 .unwrap(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::empty(0, 1)]
+    #[case::last_one_byte(255, 1)]
+    #[case::first_two_bytes(256, 2)]
+    #[case::first_three_bytes(65_536, 3)]
+    #[case::first_four_bytes(1 << 24, 4)]
+    #[case::first_five_bytes(1 << 32, 5)]
+    #[case::first_six_bytes(1 << 40, 6)]
+    #[case::first_seven_bytes(1 << 48, 7)]
+    #[case::first_eight_bytes(1 << 56, 8)]
+    fn section_counts_expose_the_total_count_field_width(
+        #[case] sections: u64,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(
+            SectionInfoCounts::new(sections, u64::from(sections != 0))
+                .unwrap()
+                .count_width(),
             expected
         );
     }
