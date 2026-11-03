@@ -5,6 +5,26 @@ use std::path::PathBuf;
 
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::OffsetWidth;
+
+crate::hdf5_1_10_series_tests! {
+    /// Returns eight bytes for legacy object-reference storage in HDF5 1.10 fixtures.
+    // H5T__init_package and H5T_set_loc in H5T.c, HDF5 1.10.11, keep legacy object references
+    // at eight bytes.
+    pub fn legacy_reference_storage_size(_offsets: OffsetWidth) -> u64 {
+        8
+    }
+}
+
+crate::hdf5_1_12_tests! {
+    /// Returns the file address width in bytes for legacy object-reference storage.
+    // H5T__ref_set_loc in H5Tref.c, HDF5 1.12.3, sets legacy object-reference storage
+    // to the address width.
+    pub fn legacy_reference_storage_size(offsets: OffsetWidth) -> u64 {
+        u64::from(offsets.get())
+    }
+}
 
 /// The file a copy reads its source from.
 #[derive(Clone, Copy, Debug)]

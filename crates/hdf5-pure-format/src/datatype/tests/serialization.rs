@@ -468,3 +468,59 @@ fn array_datatype_rank_checks_its_fixed_width_field(
         expected
     );
 }
+
+#[rstest]
+#[case::exact(65_535, Ok(65_535))]
+#[case::beyond(65_536, Err(FormatError::ValueTooLargeForRepresentation { value: 65_536, target: "u16" }))]
+fn datatype_member_counts_check_their_fixed_width_fields(
+    #[case] count: usize,
+    #[case] expected: Result<u16, FormatError>,
+    #[values(false, true)] enumeration: bool,
+) {
+    let datatype = if enumeration {
+        Datatype::Enumeration {
+            size: 1,
+            base_type: Box::new(byte_member_type()),
+            members: (0..count)
+                .map(|index| __private::enum_member(index.to_string(), vec![0]))
+                .collect(),
+        }
+    } else {
+        Datatype::Compound {
+            size: u32::try_from(count).unwrap(),
+            members: (0..count)
+                .map(|index| {
+                    __private::compound_member(index.to_string(), index as u64, byte_member_type())
+                })
+                .collect(),
+        }
+    };
+    assert_eq!(
+        serialize_datatype_with_offset_width(&datatype, OffsetWidth::Two)
+            .map(|bytes| u16::from_le_bytes(bytes[1..3].try_into().unwrap())),
+        expected
+    );
+}
+
+#[rstest]
+#[case::exact(15, Ok(15))]
+#[case::beyond(16, Err(FormatError::CompoundFieldOutOfBounds { name: "value".into(), offset: 16, field_size: 1, compound_size: 16 }))]
+#[case::wrapped(256, Err(FormatError::CompoundFieldOutOfBounds { name: "value".into(), offset: 256, field_size: 1, compound_size: 16 }))]
+#[case::overflow(u64::MAX, Err(FormatError::CompoundFieldOutOfBounds { name: "value".into(), offset: u64::MAX, field_size: 1, compound_size: 16 }))]
+fn compound_member_offsets_fit_the_declared_storage(
+    #[case] offset: u64,
+    #[case] expected: Result<u8, FormatError>,
+) {
+    let datatype = Datatype::Compound {
+        size: 16,
+        members: vec![__private::compound_member(
+            "value".into(),
+            offset,
+            byte_member_type(),
+        )],
+    };
+    assert_eq!(
+        serialize_datatype_with_offset_width(&datatype, OffsetWidth::Two).map(|bytes| bytes[14]),
+        expected
+    );
+}

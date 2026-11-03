@@ -88,6 +88,7 @@ use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
     self, AttrSpec, AttributeSpecs, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder,
 };
+use crate::vl_data::VlElement;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -104,9 +105,9 @@ mod preparation;
 #[cfg(feature = "std")]
 pub(crate) mod source;
 
-/// The width of every address in a file this crate writes.
+/// The default width of file addresses.
 pub(crate) const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
-/// The width of every length in a file this crate writes.
+/// The default width of file length fields.
 pub(crate) const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
 /// [`OFFSET_WIDTH`] and [`LENGTH_WIDTH`] as one [`FormatWidths`].
 pub(crate) const WIDTHS: FormatWidths = FormatWidths {
@@ -117,7 +118,8 @@ pub(crate) const WIDTHS: FormatWidths = FormatWidths {
 pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
 pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
-const SUPERBLOCK_SIZE: usize = 48;
+const SUPERBLOCK_SIZE: usize =
+    hdf5_pure_format::__private::superblock_serialized_size(OFFSET_WIDTH);
 
 /// The Link Info message of a group that keeps its links in its object header and
 /// does not track their creation order.
@@ -150,8 +152,11 @@ pub(crate) fn build_chunked_dataset_oh(
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    add_datatype(&mut w, dt, dt_location)?;
-    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE)?);
+    add_datatype(&mut w, dt, dt_location, header.widths.offsets)?;
+    w.add_message(
+        MessageType::DATASPACE,
+        ds.serialize(header.widths.lengths.get())?,
+    );
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
         crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
@@ -216,8 +221,11 @@ pub(crate) fn build_dataset_oh(
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    add_datatype(&mut w, dt, dt_location)?;
-    w.add_message(MessageType::DATASPACE, ds.serialize(LENGTH_SIZE)?);
+    add_datatype(&mut w, dt, dt_location, header.widths.offsets)?;
+    w.add_message(
+        MessageType::DATASPACE,
+        ds.serialize(header.widths.lengths.get())?,
+    );
     w.add_message_with_flags(
         MessageType::FILL_VALUE,
         crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
@@ -229,8 +237,8 @@ pub(crate) fn build_dataset_oh(
             contiguous_layout_version(libver),
             data_addr,
             data_size,
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
+            header.widths.offsets,
+            header.widths.lengths,
         )?,
     );
     add_attributes(&mut w, attrs, attr_info, header)?;
@@ -249,8 +257,9 @@ fn add_datatype(
     w: &mut ObjectHeaderWriter,
     dt: &Datatype,
     location: &DatatypeLocation,
+    offset_width: OffsetWidth,
 ) -> Result<(), FormatError> {
-    match location.reference_bytes(OFFSET_WIDTH)? {
+    match location.reference_bytes(offset_width)? {
         Some(reference) => {
             w.add_message_with_flags(
                 MessageType::DATATYPE,
@@ -260,7 +269,7 @@ fn add_datatype(
         }
         None => w.add_message_with_flags(
             MessageType::DATATYPE,
-            hdf5_pure_format::__private::serialize_datatype(dt)?,
+            hdf5_pure_format::__private::serialize_datatype_with_offset_width(dt, offset_width)?,
             MessageFlags::CONSTANT,
         ),
     }
@@ -280,13 +289,15 @@ fn add_datatype(
 /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the datatype message exceeds the
 /// object-header message size limit.
 pub(crate) fn build_committed_datatype_oh(
+    widths: FormatWidths,
     dt: &Datatype,
     references: u32,
 ) -> Result<Vec<u8>, FormatError> {
+    preparation::require_reference_width(widths, dt)?;
     let mut w = ObjectHeaderWriter::new();
     w.add_message_with_flags(
         MessageType::DATATYPE,
-        hdf5_pure_format::__private::serialize_datatype(dt)?,
+        hdf5_pure_format::__private::serialize_datatype_with_offset_width(dt, widths.offsets)?,
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
     if references > 1 {
@@ -314,6 +325,7 @@ pub(crate) fn build_committed_datatype_oh(
 /// encoding, or [`FormatError::ObjectHeaderMessageTooLarge`] if a message exceeds the
 /// object-header message size limit.
 pub(crate) fn build_group_oh(
+    widths: FormatWidths,
     links: &[LinkMessage],
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
@@ -321,12 +333,12 @@ pub(crate) fn build_group_oh(
     group_info: GroupInfo,
 ) -> Result<Vec<u8>, FormatError> {
     group_header(
-        links.iter().map(|link| link.serialize(OFFSET_WIDTH)),
+        links.iter().map(|link| link.serialize(widths.offsets)),
         attrs,
         attr_info,
         link_info.unwrap_or(&COMPACT_LINK_INFO),
         group_info,
-        HeaderOptions::PLAIN,
+        HeaderOptions::PLAIN.with_widths(widths),
     )
 }
 
@@ -339,7 +351,10 @@ fn group_header(
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    w.add_message(MessageType::LINK_INFO, link_info.serialize(OFFSET_WIDTH)?);
+    w.add_message(
+        MessageType::LINK_INFO,
+        link_info.serialize(header.widths.offsets)?,
+    );
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
     w.add_message(MessageType::GROUP_INFO, group_info.serialize());
@@ -360,11 +375,12 @@ fn group_header(
 /// length differs from the reservation. Propagates errors from [`dense_links_plan`] and
 /// [`DenseLinkPlan::serialize`].
 fn dense_links_image(
+    widths: FormatWidths,
     links: &[LinkMessage],
     (address, reserved): (StoredAddress, usize),
     phase_change: GroupPhaseChange,
 ) -> Result<DenseLinkImage, FormatError> {
-    let plan = dense_links_plan(links, phase_change)?
+    let plan = dense_links_plan(widths, links, phase_change)?
         .ok_or_else(|| FormatError::Internal("a reserved dense group has compact links".into()))?;
     let image = plan.serialize(address).map_err(dense_link_error)?;
     if image.bytes.len() != reserved {
@@ -387,6 +403,7 @@ fn dense_links_image(
 /// indexes exceed their supported size, or [`FormatError::DuplicateLinkName`] if link names
 /// repeat. Propagates errors from link parsing and heap planning.
 fn dense_links_plan(
+    widths: FormatWidths,
     links: &[LinkMessage],
     phase_change: GroupPhaseChange,
 ) -> Result<Option<DenseLinkPlan>, FormatError> {
@@ -396,13 +413,13 @@ fn dense_links_plan(
     let links = links
         .iter()
         .map(|link| {
-            OwnedLink::parse(&link.serialize(OFFSET_WIDTH)?, OFFSET_WIDTH)
+            OwnedLink::parse(&link.serialize(widths.offsets)?, widths.offsets)
                 .map_err(link_storage_error)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let storage = GroupLinkStorage::new(&COMPACT_LINK_INFO, links, OFFSET_WIDTH)
+    let storage = GroupLinkStorage::new(&COMPACT_LINK_INFO, links, widths.offsets)
         .map_err(link_storage_error)?;
-    DenseLinkPlan::new(storage, LENGTH_WIDTH)
+    DenseLinkPlan::new(storage, widths.lengths)
         .map(Some)
         .map_err(dense_link_error)
 }
@@ -480,13 +497,13 @@ fn add_attributes(
     if !attrs.is_empty() || matches!(header.creation, DenseAttrCreationOrder::Tracked { .. }) {
         w.add_message(
             MessageType::ATTRIBUTE_INFO,
-            compact_attribute_info_message(header.creation)?,
+            compact_attribute_info_message(header.creation, header.widths.offsets)?,
         );
     }
     for (index, attr) in attrs.iter().enumerate() {
         w.add_message_record(
             MessageType::ATTRIBUTE,
-            attr.serialize(OFFSET_WIDTH, LENGTH_SIZE)?,
+            attr.serialize(header.widths.offsets, header.widths.lengths.get())?,
             MessageFlags::NONE,
             header.creation.index_at(index).unwrap_or_default(),
         );
@@ -498,6 +515,7 @@ fn add_attributes(
 #[derive(Clone, Copy)]
 pub(crate) struct HeaderOptions<'a> {
     prefix: ObjectHeaderPrefix,
+    widths: FormatWidths,
     /// Creation indexes in the serialized attribute order, with their counter and indexing policy.
     creation: &'a DenseAttrCreationOrder,
 }
@@ -506,8 +524,14 @@ impl HeaderOptions<'_> {
     /// An untracked header with no optional prefix fields.
     pub(crate) const PLAIN: Self = Self {
         prefix: ObjectHeaderPrefix::PLAIN,
+        widths: WIDTHS,
         creation: &DenseAttrCreationOrder::Untracked,
     };
+    /// Selects the file widths for header messages and references.
+    pub(crate) const fn with_widths(mut self, widths: FormatWidths) -> Self {
+        self.widths = widths;
+        self
+    }
 }
 
 /// Returns the link name `name` spells.
@@ -554,6 +578,7 @@ pub(crate) fn finalize_dense_attrs(
     prepared: PreparedDenseAttrs,
     attrs: &[AttributeMessage],
 ) -> Result<DenseAttrPlan, FormatError> {
+    let widths = prepared.widths();
     let attribute = |index: usize| {
         attrs.get(index).ok_or_else(|| {
             FormatError::Internal("a prepared dense attribute is absent during finalization".into())
@@ -575,7 +600,9 @@ pub(crate) fn finalize_dense_attrs(
             } => {
                 let offset = collection
                     .checked_mul(dense_attribute_write::GLOBAL_HEAP_MAX_OBJECTS)
-                    .and_then(|element| element.checked_mul(type_builders::VL_REF_SIZE))
+                    .and_then(|element| {
+                        element.checked_mul(VlElement::serialized_size(widths.offsets))
+                    })
                     .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
                     .ok_or_else(|| {
                         FormatError::Internal(
@@ -583,8 +610,8 @@ pub(crate) fn finalize_dense_attrs(
                         )
                     })?;
                 // `H5T__vlen_disk_write` writes the sequence length before the heap address
-                // (`H5Tvlen.c`, HDF5 2.2.0). This writer uses eight-byte addresses.
-                bytes::read_offset_width(&attribute(index)?.raw_data, offset, OFFSET_WIDTH)
+                // (`H5Tvlen.c`, HDF5 2.2.0).
+                bytes::read_offset_width(&attribute(index)?.raw_data, offset, widths.offsets)
                     .map(StoredAddress::new)
                     .map_err(|error| match error {
                         FormatError::UnexpectedEof { .. } => FormatError::Internal(
@@ -610,7 +637,20 @@ pub(crate) fn finalize_dense_attrs(
 /// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
 /// is longer than its 2-byte size field can hold.
 pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, FormatError> {
+    needs_dense_attrs_with_widths(WIDTHS, attrs)
+}
+
+/// Selects compact or dense attribute storage after measuring at `widths`.
+///
+/// # Errors
+///
+/// Propagates attribute serialization errors from [`AttributeMessage::serialize`].
+fn needs_dense_attrs_with_widths(
+    widths: FormatWidths,
+    attrs: &[AttributeMessage],
+) -> Result<bool, FormatError> {
     select_attribute_storage(
+        widths,
         attrs,
         AttributePolicy::DEFAULT,
         AttributeStorage::Compact,
@@ -628,6 +668,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 ///
 /// Propagates attribute encoding errors when measuring a compact candidate.
 fn select_attribute_storage(
+    widths: FormatWidths,
     attrs: &[AttributeMessage],
     policy: AttributePolicy,
     current: AttributeStorage,
@@ -637,7 +678,7 @@ fn select_attribute_storage(
         return Ok(AttributeStorage::Dense);
     }
     for attr in attrs {
-        if attr.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len() > OBJECT_HEADER_MESSAGE_MAX {
+        if attr.serialize(widths.offsets, widths.lengths.get())?.len() > OBJECT_HEADER_MESSAGE_MAX {
             return Ok(AttributeStorage::Dense);
         }
     }
@@ -664,6 +705,7 @@ const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
 pub(crate) fn compact_attribute_info_message(
     creation: &DenseAttrCreationOrder,
+    offset_width: OffsetWidth,
 ) -> Result<Vec<u8>, FormatError> {
     let (max_creation_index, indexes_creation_order) = match creation {
         DenseAttrCreationOrder::Tracked { max, indexed, .. } => (Some(*max), *indexed),
@@ -676,10 +718,10 @@ pub(crate) fn compact_attribute_info_message(
         btree_name_index_address: None,
         btree_creation_order_address: None,
     }
-    .serialize(OFFSET_WIDTH)
+    .serialize(offset_width)
 }
 
-/// The undefined address at the [`OFFSET_SIZE`] address width this writer emits.
+/// The undefined address at the default [`OFFSET_SIZE`] width.
 ///
 /// The writer stores it in a data layout message for a dataset with no storage
 /// allocated, and in an object reference whose path it places nowhere. The
@@ -697,6 +739,7 @@ pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OffsetW
 /// the root group, writes a fractal heap and a name index. Limits encoded dense link messages
 /// to 4096 bytes and omits creation-order tracking.
 pub struct FileWriter {
+    widths: FormatWidths,
     root_datasets: Vec<DatasetBuilder>,
     root_attrs: AttributeSpecs,
     root_committed: Vec<CommittedDatatype>,
@@ -722,6 +765,7 @@ impl Default for FileWriter {
 impl FileWriter {
     pub fn new() -> Self {
         Self {
+            widths: WIDTHS,
             root_datasets: Vec::new(),
             root_attrs: AttributeSpecs::default(),
             root_committed: Vec::new(),
@@ -764,23 +808,27 @@ impl FileWriter {
         self
     }
 
-    /// Replace *every* file-creation property with what `properties` carries,
-    /// including the ones it leaves unset — handing over a property list is
-    /// asking for it to define the creation properties in full, which is what
-    /// [`FileBuilder::with_create_properties`] documents.
+    /// Replaces all creation properties, including widths and defaults for unset settings.
     ///
-    /// Written as one assignment per field rather than as a run of `if let
-    /// Some(..)` calls to the individual setters, because those skip the fields
-    /// the list does not carry: a bound set before the call would survive it and
-    /// go on selecting the on-disk format for a list that names no version at
-    /// all.
-    ///
-    /// [`FileBuilder::with_create_properties`]: crate::FileBuilder::with_create_properties
+    /// See [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties).
     pub(crate) fn apply_create_properties(&mut self, properties: &FileCreateProperties) {
+        self.widths = properties.widths();
         self.userblock_size = properties.userblock();
         self.libver_bounds = properties.libver_bounds();
         self.file_space_settings = properties.file_space_settings();
         self.root_link_phase_change = properties.root_group_link_phase_change();
+    }
+
+    /// Sets the address width independently of length fields.
+    pub fn with_offset_width(&mut self, width: OffsetWidth) -> &mut Self {
+        self.widths.offsets = width;
+        self
+    }
+
+    /// Sets the length width independently of address fields.
+    pub fn with_length_width(&mut self, width: LengthWidth) -> &mut Self {
+        self.widths.lengths = width;
+        self
     }
 
     /// The format to write, being the newest this crate produces that the
@@ -945,6 +993,12 @@ impl FileWriter {
         Ok(())
     }
 
+    /// Serializes the staged file into memory at its configured widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the format errors of [`Self::finish_to_sink`] for preparation, layout, reservation,
+    /// or serialization failures.
     pub fn finish(self) -> Result<Vec<u8>, FormatError> {
         let mut buf = Vec::new();
         self.finish_to_sink(&mut buf)
@@ -966,6 +1020,9 @@ impl FileWriter {
         self,
         sink: &mut S,
     ) -> Result<(), EmissionError<S::Error>> {
+        let widths = self.widths;
+        let superblock_size =
+            hdf5_pure_format::__private::superblock_serialized_size(widths.offsets);
         let libver = self.resolve_libver()?;
         let file_space = self.file_space_settings;
         let reuse_threshold = match file_space {
@@ -977,11 +1034,13 @@ impl FileWriter {
         };
         let aggregated = reuse_threshold.is_some()
             || file_space.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Aggr);
-        let mut allocation = FileAllocation::new(
-            StoredAddress::new(SUPERBLOCK_SIZE as u64),
+        let mut allocation = FileAllocation::with_widths(
+            widths,
+            BaseAddress::new(self.userblock_size.get()),
+            StoredAddress::new(superblock_size as u64),
             aggregated,
             reuse_threshold,
-        );
+        )?;
 
         // File-space settings are recorded in a File Space Info message, which
         // arrived with HDF5 1.10. Refused beside the bounds themselves rather
@@ -1033,7 +1092,9 @@ impl FileWriter {
         // is independent of the file layout, so build it up front and place it
         // after all other content below.
         let ext_oh = file_space
-            .map(|settings| file_space_extension_oh(&file_space_placeholder(settings)))
+            .map(|settings| {
+                file_space_extension_oh(widths, &file_space_placeholder(widths, settings))
+            })
             .transpose()?;
         // The writer needs final manager addresses and EOA for persistent File Space Info.
         // Retain the settings for the rewrite after placement.
@@ -1077,11 +1138,12 @@ impl FileWriter {
         ///
         /// Propagates errors from [`PreparedDataset::prepare`].
         fn flatten_dataset(
+            widths: FormatWidths,
             builder: DatasetBuilder,
             datasets: &mut Vec<PreparedDataset>,
             heaps: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
-            let (dataset, patches) = PreparedDataset::prepare(builder)?;
+            let (dataset, patches) = PreparedDataset::prepare_with_widths(widths, builder)?;
             let index = datasets.len();
             datasets.push(dataset);
             heaps.push(patches);
@@ -1115,6 +1177,7 @@ impl FileWriter {
         }
 
         fn flatten_group(
+            widths: FormatWidths,
             g: FinishedGroup,
             all_ds: &mut Vec<PreparedDataset>,
             groups: &mut Vec<GrpFlat>,
@@ -1135,15 +1198,17 @@ impl FileWriter {
                 messages: gattrs,
                 committed_datatype_targets: attr_committed_datatype_targets,
                 heaps: patches,
-            } = PreparedAttributes::new(&attrs)?;
+            } = PreparedAttributes::with_widths(widths, &attrs)?;
             let committed_idx = flatten_committed(group_committed, committed)?;
             let mut ds_idx = Vec::new();
             for db in datasets {
-                ds_idx.push(flatten_dataset(db, all_ds, ds_vl)?);
+                ds_idx.push(flatten_dataset(widths, db, all_ds, ds_vl)?);
             }
             let mut sub_grp_idx = Vec::new();
             for sg in sub_groups {
-                sub_grp_idx.push(flatten_group(sg, all_ds, groups, committed, grp_vl, ds_vl)?);
+                sub_grp_idx.push(flatten_group(
+                    widths, sg, all_ds, groups, committed, grp_vl, ds_vl,
+                )?);
             }
             let gi = groups.len();
             groups.push(GrpFlat {
@@ -1165,11 +1230,12 @@ impl FileWriter {
         let root_committed_indices = flatten_committed(self.root_committed, &mut committed)?;
 
         for db in self.root_datasets {
-            root_ds_indices.push(flatten_dataset(db, &mut all_ds, &mut ds_vl)?);
+            root_ds_indices.push(flatten_dataset(widths, db, &mut all_ds, &mut ds_vl)?);
         }
 
         for g in self.groups.into_iter() {
             root_group_indices.push(flatten_group(
+                widths,
                 g,
                 &mut all_ds,
                 &mut groups,
@@ -1211,7 +1277,7 @@ impl FileWriter {
             messages: mut root_attrs,
             committed_datatype_targets: root_attr_committed_datatype_targets,
             heaps: vl_root,
-        } = PreparedAttributes::new(&self.root_attrs)?;
+        } = PreparedAttributes::with_widths(widths, &self.root_attrs)?;
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
         //
@@ -1332,7 +1398,7 @@ impl FileWriter {
         // every other header, which is sized against dummy addresses and rebuilt.
         let committed_oh: Vec<Vec<u8>> = committed
             .iter()
-            .map(|ct| build_committed_datatype_oh(&ct.dt, ct.references))
+            .map(|ct| build_committed_datatype_oh(widths, &ct.dt, ct.references))
             .collect::<Result<_, _>>()?;
 
         /// Everything a link can name, paired with the address assigned to it.
@@ -1393,14 +1459,14 @@ impl FileWriter {
         let dummy_ct_addrs = vec![StoredAddress::new(0); committed.len()];
         let dummy_grp_addrs = vec![StoredAddress::new(0); groups.len()];
 
-        let root_dense = needs_dense_attrs(&root_attrs)?;
+        let root_dense = needs_dense_attrs_with_widths(widths, &root_attrs)?;
         let group_dense: Vec<bool> = groups
             .iter()
-            .map(|g| needs_dense_attrs(&g.attrs))
+            .map(|g| needs_dense_attrs_with_widths(widths, &g.attrs))
             .collect::<Result<_, _>>()?;
         let ds_dense: Vec<bool> = all_ds
             .iter()
-            .map(|d| needs_dense_attrs(&d.attrs))
+            .map(|d| needs_dense_attrs_with_widths(widths, &d.attrs))
             .collect::<Result<_, _>>()?;
 
         /// Checks compact message lengths before chunk compression.
@@ -1409,9 +1475,12 @@ impl FileWriter {
         ///
         /// Returns [`FormatError::AttributeMessageTooLarge`] if a compact message exceeds the
         /// object-header size limit. Propagates attribute encoding errors.
-        fn check_compact_attrs(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
+        fn check_compact_attrs(
+            widths: FormatWidths,
+            attrs: &[AttributeMessage],
+        ) -> Result<(), FormatError> {
             for a in attrs {
-                let size = a.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len();
+                let size = a.serialize(widths.offsets, widths.lengths.get())?.len();
                 if size > OBJECT_HEADER_MESSAGE_MAX {
                     return Err(FormatError::AttributeMessageTooLarge {
                         name: a.name.clone(),
@@ -1428,13 +1497,14 @@ impl FileWriter {
         /// Propagates compact attribute encoding and size errors, or errors from
         /// [`PreparedDenseAttrs::new`] for dense storage.
         fn prepare_dense(
+            widths: FormatWidths,
             attrs: &[AttributeMessage],
             dense: bool,
             patches: &[VlPatch],
             payload: Option<usize>,
         ) -> Result<Option<PreparedDenseAttrs>, FormatError> {
             if !dense {
-                check_compact_attrs(attrs)?;
+                check_compact_attrs(widths, attrs)?;
                 return Ok(None);
             }
             let fixups = patches
@@ -1448,13 +1518,19 @@ impl FileWriter {
                         .then_some(DenseAttrFixup::CommittedDatatype { attribute })
                 }))
                 .chain(payload.map(|attribute| DenseAttrFixup::Payload { attribute }));
-            PreparedDenseAttrs::new(attrs, DenseAttrCreationOrder::Untracked, fixups).map(Some)
+            PreparedDenseAttrs::with_widths(
+                widths,
+                attrs,
+                DenseAttrCreationOrder::Untracked,
+                fixups,
+            )
+            .map(Some)
         }
-        let root_dense_plan = prepare_dense(&root_attrs, root_dense, &vl_root, None)?;
+        let root_dense_plan = prepare_dense(widths, &root_attrs, root_dense, &vl_root, None)?;
         let group_dense_plans = groups
             .iter()
             .enumerate()
-            .map(|(i, group)| prepare_dense(&group.attrs, group_dense[i], &grp_vl[i], None))
+            .map(|(i, group)| prepare_dense(widths, &group.attrs, group_dense[i], &grp_vl[i], None))
             .collect::<Result<Vec<_>, _>>()?;
         let ds_dense_plans = all_ds
             .iter()
@@ -1464,7 +1540,7 @@ impl FileWriter {
                 let payload = dataset.pending_hash.as_ref().map(|hash| hash.attribute);
                 #[cfg(not(feature = "provenance"))]
                 let payload = None;
-                prepare_dense(&dataset.attrs, ds_dense[i], &ds_vl[i], payload)
+                prepare_dense(widths, &dataset.attrs, ds_dense[i], &ds_vl[i], payload)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -1497,7 +1573,7 @@ impl FileWriter {
         let mut collection_sections = layout::CollectionSections::default();
         let early_gcol_size = if let Some((page_size, _, _)) = paged {
             let mut placements = layout::PagedCollections::new(
-                StoredAddress::new(SUPERBLOCK_SIZE as u64),
+                StoredAddress::new(superblock_size as u64),
                 page_size,
             );
             let mut place = |collections: &[Vec<u8>]| -> Result<Vec<u64>, FormatError> {
@@ -1513,24 +1589,30 @@ impl FileWriter {
             };
             for patch in &vl_root {
                 let addrs = place(&patch.collections)?;
-                type_builders::patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
+                type_builders::patch_vl_refs_with_width(
+                    widths.offsets,
+                    &mut root_attrs[patch.attr_index].raw_data,
+                    &addrs,
+                )?;
             }
             for (gi, patches) in grp_vl.iter().enumerate() {
                 for patch in patches {
                     let addrs = place(&patch.collections)?;
-                    type_builders::patch_vl_refs(
+                    type_builders::patch_vl_refs_with_width(
+                        widths.offsets,
                         &mut groups[gi].attrs[patch.attr_index].raw_data,
                         &addrs,
-                    );
+                    )?;
                 }
             }
             for (di, patches) in ds_vl.iter().enumerate() {
                 for patch in patches {
                     let addrs = place(&patch.collections)?;
-                    type_builders::patch_vl_refs(
+                    type_builders::patch_vl_refs_with_width(
+                        widths.offsets,
                         &mut all_ds[di].attrs[patch.attr_index].raw_data,
                         &addrs,
-                    );
+                    )?;
                 }
             }
             for (i, dataset) in all_ds.iter_mut().enumerate() {
@@ -1539,11 +1621,12 @@ impl FileWriter {
                 }
                 if let Some(staging) = dataset.storage.take_vl_string_staging() {
                     let addrs = place(&staging.collections)?;
-                    type_builders::patch_vl_refs_masked(
+                    type_builders::patch_vl_refs_masked_with_width(
+                        widths.offsets,
                         dataset.storage.raw_mut()?,
                         &staging.patch_offsets,
                         &addrs,
-                    );
+                    )?;
                     dataset.storage.restore_vl_string_staging(staging)?;
                     early_gcol.push(i);
                 }
@@ -1551,7 +1634,7 @@ impl FileWriter {
             collection_sections = placements.sections;
             placements
                 .end
-                .checked_distance_from(StoredAddress::new(SUPERBLOCK_SIZE as u64))
+                .checked_distance_from(StoredAddress::new(superblock_size as u64))
                 .ok_or_else(|| {
                     FormatError::Internal("collection placement precedes the superblock".into())
                 })?
@@ -1569,17 +1652,18 @@ impl FileWriter {
                     &mut aggregate_collection_addresses,
                     aggregated,
                 )?;
-                type_builders::patch_vl_refs_masked(
+                type_builders::patch_vl_refs_masked_with_width(
+                    widths.offsets,
                     all_ds[i].storage.raw_mut()?,
                     &staging.patch_offsets,
                     &addrs,
-                );
+                )?;
                 all_ds[i].storage.restore_vl_string_staging(staging)?;
                 early_gcol.push(i);
             }
             allocation
                 .end()
-                .checked_distance_from(StoredAddress::new(SUPERBLOCK_SIZE as u64))
+                .checked_distance_from(StoredAddress::new(superblock_size as u64))
                 .ok_or_else(|| {
                     FormatError::Internal("collection allocation precedes the superblock".into())
                 })?
@@ -1730,6 +1814,7 @@ impl FileWriter {
             let dummy_links =
                 dummy_tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
             let link_plan = dense_links_plan(
+                widths,
                 &dummy_links,
                 g.link_phase_change.group_info()?.phase_change(),
             )?;
@@ -1749,6 +1834,7 @@ impl FileWriter {
                 .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
                 .transpose()?;
             let oh = build_group_oh(
+                widths,
                 &dummy_links,
                 &g.attrs,
                 attr_info.as_deref(),
@@ -1764,6 +1850,7 @@ impl FileWriter {
             &root_group_indices,
         );
         let root_link_plan = dense_links_plan(
+            widths,
             &root_dummy_links,
             self.root_link_phase_change.group_info()?.phase_change(),
         )?;
@@ -1781,6 +1868,7 @@ impl FileWriter {
             .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
             .transpose()?;
         let root_oh_size = build_group_oh(
+            widths,
             &root_dummy_links,
             &root_attrs,
             root_attr_info.as_deref(),
@@ -1813,7 +1901,7 @@ impl FileWriter {
                 chunk_sets[i].as_ref(),
                 dense_attr_info.as_deref(),
                 libver,
-                HeaderOptions::PLAIN,
+                HeaderOptions::PLAIN.with_widths(widths),
             )?;
             if is_chunked[i] {
                 dummy_cursor = dummy_cursor.checked_add(measured.data.length()?)?;
@@ -1834,11 +1922,13 @@ impl FileWriter {
                 Ok(addr)
             };
         if paged.is_some() {
-            allocation = FileAllocation::new(
-                StoredAddress::new(SUPERBLOCK_SIZE as u64 + early_gcol_size),
+            allocation = FileAllocation::with_widths(
+                widths,
+                BaseAddress::new(self.userblock_size.get()),
+                StoredAddress::new(superblock_size as u64 + early_gcol_size),
                 false,
                 None,
-            );
+            )?;
         }
         let reserve = |allocation: &mut FileAllocation,
                        header: u64,
@@ -2073,6 +2163,7 @@ impl FileWriter {
         /// changes shape with a property that is supposed to change only where
         /// its bytes land.
         fn build_ds_ohs(
+            widths: FormatWidths,
             all_ds: &[PreparedDataset],
             ds_layouts: &[DsLayout<'_>],
             ds_dense_blobs: &[Option<DenseAttrBlob>],
@@ -2088,7 +2179,7 @@ impl FileWriter {
                         .as_ref()
                         .map(|blob| blob.attr_info_message.as_slice()),
                     libver,
-                    HeaderOptions::PLAIN,
+                    HeaderOptions::PLAIN.with_widths(widths),
                 )?;
                 oh_bytes.push(oh);
             }
@@ -2106,6 +2197,7 @@ impl FileWriter {
         let root_link_image = root_link_span
             .map(|span| {
                 dense_links_image(
+                    widths,
                     &tables.links(
                         &root_ds_indices,
                         &root_committed_indices,
@@ -2122,6 +2214,7 @@ impl FileWriter {
             .map(|(group, &span)| {
                 span.map(|span| {
                     dense_links_image(
+                        widths,
                         &tables.links(
                             &group.ds_indices,
                             &group.committed_indices,
@@ -2172,6 +2265,7 @@ impl FileWriter {
                 small_end: small_raw_end,
                 end: eoa_pre_fsm,
             } = layout::PagedLayout::new(
+                widths,
                 page_size,
                 persist_paged,
                 allocation.end(),
@@ -2219,7 +2313,8 @@ impl FileWriter {
                     })?;
             let eof_addr2 = base.resolve(eoa_pre_fsm)?.get();
 
-            let ds_oh_bytes = build_ds_ohs(&all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
+            allocation.require_end(eoa_pre_fsm)?;
+            let ds_oh_bytes = build_ds_ohs(widths, &all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
             debug_assert_eq!(
                 ds_oh_bytes.iter().map(|b| b.len()).collect::<Vec<_>>(),
                 actual_ds_oh_sizes
@@ -2239,7 +2334,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info)?,
+                    hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 oh.serialize()?
@@ -2257,8 +2352,8 @@ impl FileWriter {
                     superblock_version(libver),
                     SuperblockStatusFlags::new(),
                 )?,
-                offset_size: OFFSET_WIDTH,
-                length_size: LENGTH_WIDTH,
+                offset_size: widths.offsets,
+                length_size: widths.lengths,
                 base_address: base,
                 eof_address: eof_addr2,
                 root_group_address: root_group_addr,
@@ -2311,6 +2406,7 @@ impl FileWriter {
                 &root_group_indices,
             );
             let root_oh = build_group_oh(
+                widths,
                 &root_links,
                 &root_attrs,
                 root_dense_blob
@@ -2336,6 +2432,7 @@ impl FileWriter {
             for (gi, g) in groups.iter().enumerate() {
                 let links = tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
                 let oh = build_group_oh(
+                    widths,
                     &links,
                     &g.attrs,
                     group_dense_blobs[gi]
@@ -2493,7 +2590,11 @@ impl FileWriter {
                     &mut aggregate_collection_addresses,
                     aggregated,
                 )?;
-                type_builders::patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
+                type_builders::patch_vl_refs_with_width(
+                    widths.offsets,
+                    &mut root_attrs[patch.attr_index].raw_data,
+                    &addrs,
+                )?;
             }
             for (gi, patches) in grp_vl.iter().enumerate() {
                 for patch in patches {
@@ -2503,10 +2604,11 @@ impl FileWriter {
                         &mut aggregate_collection_addresses,
                         aggregated,
                     )?;
-                    type_builders::patch_vl_refs(
+                    type_builders::patch_vl_refs_with_width(
+                        widths.offsets,
                         &mut groups[gi].attrs[patch.attr_index].raw_data,
                         &addrs,
-                    );
+                    )?;
                 }
             }
             for (di, patches) in ds_vl.iter().enumerate() {
@@ -2517,10 +2619,11 @@ impl FileWriter {
                         &mut aggregate_collection_addresses,
                         aggregated,
                     )?;
-                    type_builders::patch_vl_refs(
+                    type_builders::patch_vl_refs_with_width(
+                        widths.offsets,
                         &mut all_ds[di].attrs[patch.attr_index].raw_data,
                         &addrs,
-                    );
+                    )?;
                 }
             }
             // Patch dataset-element references in the contiguous bytes held in prepared storage.
@@ -2546,7 +2649,12 @@ impl FileWriter {
                         &mut aggregate_collection_addresses,
                         aggregated,
                     )?;
-                    type_builders::patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);
+                    type_builders::patch_vl_refs_masked_with_width(
+                        widths.offsets,
+                        bytes,
+                        &staging.patch_offsets,
+                        &addrs,
+                    )?;
                     #[cfg(feature = "provenance")]
                     if let Some(hash) = d.pending_hash.take() {
                         hash.complete(&mut d.attrs, bytes)?;
@@ -2569,7 +2677,7 @@ impl FileWriter {
         // are kept here; each dataset's data is emitted directly from
         // `ds_layouts` in the assembly loop (a streamed dataset has no data
         // bytes to keep at all).
-        let ds_oh_bytes2 = build_ds_ohs(&all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
+        let ds_oh_bytes2 = build_ds_ohs(widths, &all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
 
         let actual_ds_oh_sizes2: Vec<usize> = ds_oh_bytes2.iter().map(|b| b.len()).collect();
         debug_assert_eq!(actual_ds_oh_sizes, actual_ds_oh_sizes2);
@@ -2603,8 +2711,8 @@ impl FileWriter {
                 superblock_version(libver),
                 SuperblockStatusFlags::new(),
             )?,
-            offset_size: OFFSET_WIDTH,
-            length_size: LENGTH_WIDTH,
+            offset_size: widths.offsets,
+            length_size: widths.lengths,
             base_address: base,
             eof_address: eof_addr2,
             root_group_address: root_group_addr,
@@ -2657,7 +2765,7 @@ impl FileWriter {
                     .iter()
             })
             .scan(
-                StoredAddress::new(SUPERBLOCK_SIZE as u64),
+                StoredAddress::new(superblock_size as u64),
                 |cursor, collection| {
                     Some(
                         (if aggregated {
@@ -2726,6 +2834,7 @@ impl FileWriter {
             &root_group_indices,
         );
         let root_oh = build_group_oh(
+            widths,
             &root_links,
             &root_attrs,
             root_dense_blob
@@ -2821,7 +2930,7 @@ impl FileWriter {
             (Some(_), Some(settings)) => {
                 let info = match &manager {
                     Some(manager) => file_space_info::persistent_single_manager(
-                        OFFSET_WIDTH,
+                        widths.offsets,
                         settings.strategy(),
                         settings.threshold(),
                         settings.page_size(),
@@ -2829,7 +2938,7 @@ impl FileWriter {
                         cursor2,
                     ),
                     None => file_space_info::persistent_empty(
-                        OFFSET_WIDTH,
+                        widths.offsets,
                         settings.strategy(),
                         settings.threshold(),
                         settings.page_size(),
@@ -2839,7 +2948,7 @@ impl FileWriter {
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info)?,
+                    hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info)?,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                 );
                 Some(oh.serialize()?)
@@ -2904,6 +3013,7 @@ impl FileWriter {
                 let g = &groups[gi];
                 let links = tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
                 let oh = build_group_oh(
+                    widths,
                     &links,
                     &g.attrs,
                     group_dense_blobs[gi]
@@ -2957,7 +3067,7 @@ impl FileWriter {
 ///
 /// Persistent manager addresses and the end of allocation are undefined until
 /// placement is complete.
-fn file_space_placeholder(settings: FileSpaceSettings) -> FileSpaceInfo {
+fn file_space_placeholder(widths: FormatWidths, settings: FileSpaceSettings) -> FileSpaceInfo {
     if settings.persist() {
         file_space_info::persistent_placeholder(
             settings.strategy(),
@@ -2966,7 +3076,7 @@ fn file_space_placeholder(settings: FileSpaceSettings) -> FileSpaceInfo {
         )
     } else {
         file_space_info::non_persistent(
-            OFFSET_WIDTH,
+            widths.offsets,
             settings.strategy(),
             settings.threshold(),
             settings.page_size(),
@@ -2980,14 +3090,17 @@ fn file_space_placeholder(settings: FileSpaceSettings) -> FileSpaceInfo {
 ///
 /// Returns [`FormatError::LengthTooLarge`] or [`FormatError::AddressTooLarge`] if a value of
 /// `info` does not fit its field at the writer's widths.
-fn file_space_extension_oh(info: &FileSpaceInfo) -> Result<Vec<u8>, FormatError> {
+fn file_space_extension_oh(
+    widths: FormatWidths,
+    info: &FileSpaceInfo,
+) -> Result<Vec<u8>, FormatError> {
     let mut oh = ObjectHeaderWriter::new();
     // The flags libhdf5 writes for this message (`H5Fsuper.c`,
     // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
     // still opens the file.
     oh.add_message_with_flags(
         MessageType::FILE_SPACE_INFO,
-        hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, info)?,
+        hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info)?,
         MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
     );
     oh.serialize()

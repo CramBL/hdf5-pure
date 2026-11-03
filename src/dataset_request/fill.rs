@@ -8,6 +8,7 @@ use crate::datatype::Datatype;
 #[cfg(feature = "std")]
 use crate::element::H5Element;
 use crate::error::FormatError;
+use crate::width::OffsetWidth;
 
 /// A fill element and its typed or source-derived storage encoding, pending preparation.
 #[derive(Clone, Debug)]
@@ -80,6 +81,27 @@ impl PreparedFill {
             return Err(FormatError::FillValueDatatypeMismatch);
         }
         Ok(Self { bytes })
+    }
+
+    /// Converts variable-length fill references from eight-byte heap addresses to `offsets`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`narrow_variable_length_references`][narrow] for invalid element
+    /// layouts, buffer ranges, or heap addresses.
+    ///
+    /// [narrow]: hdf5_pure_format::__private::narrow_variable_length_references
+    pub(crate) fn narrow_variable_length(
+        &mut self,
+        datatype: &Datatype,
+        offsets: OffsetWidth,
+    ) -> Result<(), FormatError> {
+        hdf5_pure_format::__private::narrow_variable_length_references(
+            offsets,
+            datatype,
+            &mut self.bytes,
+            None,
+        )
     }
 
     /// Returns the complete encoded fill element.

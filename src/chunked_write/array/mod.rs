@@ -11,13 +11,10 @@ use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_emission::EmissionError;
-use crate::width::FormatWidths;
 
 use super::ChunkArrayGeometry;
 use super::ChunkArrayKind;
 use super::EmptyChunkIndex;
-use super::INDEX_LENGTH_SIZE;
-use super::INDEX_OFFSET_SIZE;
 
 /// Address-independent block geometry for an allocated chunk array.
 ///
@@ -37,6 +34,7 @@ impl ArrayMeasure {
     /// Propagates errors from [`ExtensibleArrayPlan::new`] and [`FixedArrayPlan::new`].
     pub(crate) fn new(geometry: ChunkArrayGeometry<'_>) -> Result<Self, FormatError> {
         let ChunkArrayGeometry {
+            widths,
             kind,
             occupied,
             slots,
@@ -45,6 +43,7 @@ impl ArrayMeasure {
         } = geometry;
         if occupied.is_empty() {
             return Ok(Self::Empty(EmptyChunkIndex::new(
+                widths,
                 kind,
                 chunk_bytes,
                 slots,
@@ -52,6 +51,7 @@ impl ArrayMeasure {
             )));
         }
         Self::plan(ChunkArrayGeometry {
+            widths,
             kind,
             occupied,
             slots,
@@ -236,16 +236,13 @@ impl ArrayMeasure {
     /// Propagates errors from [`ExtensibleArrayPlan::new`] and [`FixedArrayPlan::new`].
     fn plan(geometry: ChunkArrayGeometry<'_>) -> Result<Self, FormatError> {
         let ChunkArrayGeometry {
+            widths,
             kind,
             occupied,
             slots,
             chunk_bytes,
             filtered,
         } = geometry;
-        let widths = FormatWidths {
-            offsets: INDEX_OFFSET_SIZE,
-            lengths: INDEX_LENGTH_SIZE,
-        };
         Ok(match kind {
             ChunkArrayKind::ExtensibleArray => Self::Extensible(ExtensibleArrayPlan::new(
                 ExtensibleArrayCreationParameters::canonical(),

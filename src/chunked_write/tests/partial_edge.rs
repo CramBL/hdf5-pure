@@ -50,6 +50,7 @@ fn a_chunk_set_skipping_partial_edge_filtering_stores_only_its_partial_edge_chun
     let ctx = ChunkContext::basic(chunk_dims, 4);
 
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         shape,
         ctx,
@@ -79,6 +80,7 @@ fn a_raw_partial_edge_chunk_holds_a_whole_chunk_padded_with_the_fill_value(
 ) {
     let fill_bytes = fill.map(i32::to_le_bytes);
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &i32_element_bytes(&[6]),
         &[6],
         ChunkContext::basic(&[4], 4),
@@ -101,6 +103,7 @@ fn the_default_policy_filters_every_chunk_and_stores_no_layout_flag() {
     let ctx = ChunkContext::basic(&[4], 4);
 
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &raw,
         &[10],
         ctx,
@@ -151,6 +154,7 @@ fn the_sizing_and_assembly_passes_store_the_same_layout_flags(
     let options = edge_filters.options(chunk_dims, policy);
     let ctx = ChunkContext::basic(chunk_dims, 4);
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &i32_element_bytes(shape),
         shape,
         ctx,
@@ -162,7 +166,14 @@ fn the_sizing_and_assembly_passes_store_the_same_layout_flags(
     )
     .unwrap();
     let header = options
-        .measure_header(shape, ctx, maxshape, FillPattern::ZERO, allocation)
+        .measure_header(
+            crate::file_writer::WIDTHS,
+            shape,
+            ctx,
+            maxshape,
+            FillPattern::ZERO,
+            allocation,
+        )
         .unwrap();
 
     let measured = measure_chunked_at(&set, StoredAddress::new(BASE)).unwrap();
@@ -181,6 +192,7 @@ fn the_sizing_and_assembly_passes_store_the_same_layout_flags(
 #[test]
 fn a_raw_single_chunk_stores_its_size_in_the_filtered_single_chunk_index() {
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         &i32_element_bytes(&[5]),
         &[5],
         ChunkContext::basic(&[8], 4),

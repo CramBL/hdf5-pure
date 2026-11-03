@@ -65,6 +65,7 @@ mod signature;
 mod sohm;
 mod superblock;
 mod symbol_table;
+mod variable_length_write;
 mod width;
 
 pub use hdf5_pure_core::BaseAddress;

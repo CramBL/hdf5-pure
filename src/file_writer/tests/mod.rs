@@ -549,7 +549,7 @@ impl ByteSink for SparseSink {
 
 #[test]
 fn a_committed_datatype_header_holds_only_its_type() {
-    let bytes = build_committed_datatype_oh(&type_builders::make_i32_type(), 1).unwrap();
+    let bytes = build_committed_datatype_oh(WIDTHS, &type_builders::make_i32_type(), 1).unwrap();
     let hdr =
         ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
 
@@ -574,7 +574,7 @@ fn a_committed_datatype_header_holds_only_its_type() {
 
 #[test]
 fn a_committed_datatype_header_records_a_count_above_one() {
-    let bytes = build_committed_datatype_oh(&type_builders::make_i32_type(), 4).unwrap();
+    let bytes = build_committed_datatype_oh(WIDTHS, &type_builders::make_i32_type(), 4).unwrap();
     let hdr =
         ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
 

@@ -25,7 +25,7 @@ use super::*;
 fn planned_links_parse_at_each_supported_address_width(
     #[case] policy: u8,
     #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
-    #[values(LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
     #[values(0, 512)] physical_base: u64,
 ) {
     let storage = storage(12, policy, offsets, 0);
@@ -203,18 +203,19 @@ fn output_extent_is_checked_at_the_address_field_boundary() {
     );
 }
 
-#[test]
-fn two_byte_lengths_reject_the_group_heap_maximum_direct_block_size() {
-    let error = DenseLinkPlan::new(storage(0, 0, OffsetWidth::Eight, 0), LengthWidth::Two)
-        .err()
-        .unwrap();
-    assert_eq!(
-        error,
-        DenseLinkPlanError::Format(FormatError::LengthTooLarge {
-            length: GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE,
-            length_size: 2
-        })
-    );
+#[rstest]
+#[case::two(LengthWidth::Two, 32_768)]
+#[case::four(LengthWidth::Four, GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE)]
+#[case::eight(LengthWidth::Eight, GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE)]
+fn group_heap_direct_block_sizes_fit_the_length_width(
+    #[case] lengths: LengthWidth,
+    #[case] maximum: u64,
+) {
+    let plan = DenseLinkPlan::new(storage(0, 0, OffsetWidth::Eight, 0), lengths).unwrap();
+    let image = plan.serialize(StoredAddress::new(0)).unwrap();
+    let header = FractalHeapHeader::parse_bytes(&image.bytes, OffsetWidth::Eight, lengths).unwrap();
+    assert_eq!(header.max_direct_block_size, maximum);
+    assert_eq!(image.bytes.len() as u64, plan.serialized_len());
 }
 
 #[test]

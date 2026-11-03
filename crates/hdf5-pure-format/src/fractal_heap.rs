@@ -12,6 +12,7 @@ use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::btree::v2::HugeObjectDirectRecord;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -577,6 +578,42 @@ impl FractalHeapHeader {
         self.encode_id(FractalHeapIdType::Huge, Some(huge_id), "huge object key")
     }
 
+    /// Encodes an unfiltered huge object's address and length directly into its heap ID.
+    ///
+    /// Direct IDs are defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a filtered heap, or
+    /// [`FormatError::Internal`] if the ID cannot hold a direct address and length. Propagates
+    /// defined-address and length errors from [`HugeObjectDirectRecord::encode`].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+    pub(crate) fn encode_huge_direct_id(
+        &self,
+        address: StoredAddress,
+        length: u64,
+        widths: FormatWidths,
+    ) -> Result<Vec<u8>, FormatError> {
+        if self.filtering.is_filtered() {
+            return Err(FormatError::UnsupportedFilteredHeapObject);
+        }
+        if !self.huge_ids_direct_with_widths(widths) {
+            return Err(FormatError::Internal(
+                "an address was encoded into a heap ID that holds a B-tree key".into(),
+            ));
+        }
+        let mut id = Vec::with_capacity(usize::from(self.heap_id_length));
+        id.push(FractalHeapIdType::Huge.first_byte());
+        HugeObjectDirectRecord { address, length }.encode(
+            &mut id,
+            widths.offsets,
+            widths.lengths,
+        )?;
+        id.resize(usize::from(self.heap_id_length), 0);
+        Ok(id)
+    }
+
     /// Returns a heap ID of `id_type` whose bytes after the first store `payload` little-endian.
     ///
     /// A `payload` of `None` is one too wide for the ID, and the error names it as `what`.
@@ -625,14 +662,24 @@ impl FractalHeapHeader {
 
     /// Returns whether huge heap IDs store object addresses and lengths at `widths`.
     pub fn huge_ids_direct_with_widths(&self, widths: FormatWidths) -> bool {
-        let avail = usize::from(self.heap_id_length).saturating_sub(1);
-        let offset_size = usize::from(widths.offsets.get());
-        let length_size = usize::from(widths.lengths.get());
         if self.filtering.is_filtered() {
+            let avail = usize::from(self.heap_id_length).saturating_sub(1);
+            let offset_size = usize::from(widths.offsets.get());
+            let length_size = usize::from(widths.lengths.get());
             avail >= offset_size + length_size + 4 + length_size
         } else {
-            avail >= offset_size + length_size
+            Self::unfiltered_huge_ids_direct(self.heap_id_length, widths)
         }
+    }
+
+    /// Returns `true` if an unfiltered heap ID can hold its prefix, address, and length.
+    ///
+    /// The fields are defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+    pub(crate) fn unfiltered_huge_ids_direct(heap_id_length: u16, widths: FormatWidths) -> bool {
+        usize::from(heap_id_length).saturating_sub(HEAP_ID_PREFIX_BYTES)
+            >= usize::from(widths.offsets.get()) + usize::from(widths.lengths.get())
     }
 }
 
@@ -1725,6 +1772,12 @@ const FRACTAL_HEAP_FILTER_MASK_LEN: u64 = 4;
 // "Fractal Heap", format specification version 4.0, defines a four-byte checksum after the
 // optional filter information.
 const FRACTAL_HEAP_CHECKSUM_LEN: usize = 4;
+
+/// The version-and-type byte of a heap ID, defined in "Fractal Heap" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const HEAP_ID_PREFIX_BYTES: usize = 1;
 
 #[cfg(test)]
 mod tests {

@@ -23,6 +23,7 @@ use crate::file_create_properties::FileCreateProperties;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
 use crate::object_path::ObjectTarget;
+use crate::width::{LengthWidth, OffsetWidth};
 
 /// Builder for creating a new HDF5 file.
 ///
@@ -154,18 +155,19 @@ impl FileBuilder {
     /// Replaces every file-creation property, including the root group's link policy.
     ///
     /// The writer resets properties left unset in `properties` to their defaults, including
-    /// library-version bounds. Apply a shared [`FileCreateProperties`] first, then override
-    /// individual properties for this file with setters.
+    /// library-version bounds and both file widths. Apply a shared [`FileCreateProperties`] first,
+    /// then override individual properties for this file with setters.
     ///
     /// # Examples
     ///
     /// ```
     /// use hdf5_pure::UserblockSize;
-    /// use hdf5_pure::{FileBuilder, FileCreateProperties, LibVer};
+    /// use hdf5_pure::{File, FileBuilder, FileCreateProperties, LengthWidth, LibVer, OffsetWidth};
     ///
     /// let mut builder = FileBuilder::new();
     /// builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    /// // Reset the bounds to the default format.
+    /// builder.with_offset_width(OffsetWidth::Two).with_length_width(LengthWidth::Four);
+    /// // Reset the format bounds and both widths.
     /// builder.with_create_properties(
     ///     FileCreateProperties::new().with_userblock(UserblockSize::MIN),
     /// );
@@ -173,10 +175,32 @@ impl FileBuilder {
     ///
     /// let bytes = builder.finish().unwrap();
     /// assert_eq!(bytes[512 + 8], 3); // version 3 superblock after the userblock
+    /// let file = File::from_bytes(bytes)?;
+    /// assert_eq!(file.superblock().offset_size, OffsetWidth::Eight);
+    /// assert_eq!(file.superblock().length_size, LengthWidth::Eight);
+    /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     #[doc(alias = "fcpl")]
     pub fn with_create_properties(&mut self, properties: FileCreateProperties) -> &mut Self {
         self.writer.apply_create_properties(&properties);
+        self
+    }
+
+    /// Sets the address width, independently of the length width.
+    ///
+    /// The default is [`OffsetWidth::Eight`]. See [`FileCreateProperties::with_offset_width`]
+    /// for supported widths and [`Self::with_create_properties`] for replacement behavior.
+    pub fn with_offset_width(&mut self, width: OffsetWidth) -> &mut Self {
+        self.writer.with_offset_width(width);
+        self
+    }
+
+    /// Sets the length width, independently of the address width.
+    ///
+    /// The default is [`LengthWidth::Eight`]. See [`FileCreateProperties::with_length_width`]
+    /// for dataspace limits and [`Self::with_create_properties`] for replacement behavior.
+    pub fn with_length_width(&mut self, width: LengthWidth) -> &mut Self {
+        self.writer.with_length_width(width);
         self
     }
 
@@ -363,7 +387,8 @@ impl FileBuilder {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the staged content cannot be serialized, including a
-    /// variable-length element count greater than [`u32::MAX`].
+    /// variable-length element count greater than [`u32::MAX`] or a field that exceeds the
+    /// configured address or length width.
     pub fn finish(self) -> Result<Vec<u8>, Error> {
         Ok(self.writer.finish()?)
     }

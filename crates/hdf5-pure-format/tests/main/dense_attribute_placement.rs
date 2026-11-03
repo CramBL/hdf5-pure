@@ -2,10 +2,17 @@ use std::borrow::Cow;
 
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::FormatError;
+use hdf5_pure_core::LengthWidth;
+use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
+use hdf5_pure_format::__private::BTreeV2Header;
+use hdf5_pure_format::__private::BTreeV2Layout;
+use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::HugeObjectRecordContext;
+use hdf5_pure_format::__private::HugeObjectTrackerRecord;
 use hdf5_pure_format::__private::{
     AttributeMessage, Dataspace, DataspaceType, DatatypeLocation, DenseAttrBlockKind,
-    DenseAttrCreationOrder, DenseAttrFixup, DenseAttrPlan, PreparedDenseAttrs,
+    DenseAttrCreationOrder, DenseAttrFixup, DenseAttrPlan, FormatWidths, PreparedDenseAttrs,
 };
 use hdf5_pure_format::{CharacterSet, Datatype, StringPadding};
 use rstest::rstest;
@@ -178,30 +185,105 @@ fn dense_attribute_placement_rejects_incomplete_or_overlapping_ranges(
 }
 
 #[rstest]
-#[case::undefined(u64::MAX, true)]
-#[case::overflow(u64::MAX - 1, false)]
+#[case::undefined(true)]
+#[case::end(false)]
 fn dense_attribute_placement_rejects_invalid_extents(
-    #[case] address: u64,
     #[case] undefined: bool,
+    #[values(OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
     #[values(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)] component: usize,
 ) {
-    let pending = prepared(&[8, 70_000, 80_000], Some(true));
+    assert_invalid_extent(
+        FormatWidths {
+            offsets,
+            lengths: LengthWidth::Eight,
+        },
+        &[8, 70_000, 80_000],
+        component,
+        undefined,
+    );
+}
+
+#[rstest]
+#[case::undefined(true)]
+#[case::end(false)]
+fn dense_attribute_two_byte_placement_rejects_invalid_extents(
+    #[case] undefined: bool,
+    #[values(0, 1, 2, 3, 4, 5, 6, 7, 8)] component: usize,
+) {
+    assert_invalid_extent(
+        FormatWidths {
+            offsets: OffsetWidth::Two,
+            lengths: LengthWidth::Two,
+        },
+        &[8, 33_000],
+        component,
+        undefined,
+    );
+}
+
+fn assert_invalid_extent(widths: FormatWidths, sizes: &[u32], component: usize, undefined: bool) {
+    let pending = prepared_with_widths(widths, sizes, Some(true));
     let plan = finalize(pending.clone());
-    let mut addresses = (0..plan.block_lengths().len())
-        .map(|index| StoredAddress::new(index as u64 * 100_000))
+    let mut cursor = 0;
+    let mut addresses = plan
+        .block_lengths()
+        .map(|length| {
+            let start = StoredAddress::new(cursor);
+            cursor += length;
+            start
+        })
         .collect::<Vec<_>>();
     let length = plan.block_lengths().nth(component).unwrap();
+    let maximum = StoredAddress::undefined(widths.offsets).get();
+    let address = if undefined { maximum } else { maximum - 1 };
     addresses[component] = StoredAddress::new(address);
     let expected = if undefined {
         FormatError::DefinedAddressIsUndefined {
             address,
-            offset_size: 8,
+            offset_size: widths.offsets.get(),
         }
-    } else {
+    } else if widths.offsets == OffsetWidth::Eight {
         FormatError::OffsetOverflow {
             offset: address,
             length,
         }
+    } else {
+        FormatError::AddressTooLarge {
+            address: address + length,
+            offset_size: widths.offsets.get(),
+        }
+    };
+    assert_eq!(pending.attribute_info(&addresses).unwrap_err(), expected);
+    assert_eq!(plan.place(&addresses).err().unwrap(), expected);
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two)]
+#[case::four(OffsetWidth::Four)]
+fn dense_attribute_placement_rejects_unrepresentable_starts(
+    #[case] offsets: OffsetWidth,
+    #[values(0, 1, 2, 3, 4, 5, 6, 7, 8)] component: usize,
+) {
+    let widths = FormatWidths {
+        offsets,
+        lengths: LengthWidth::Two,
+    };
+    let pending = prepared_with_widths(widths, &[8, 33_000], Some(true));
+    let plan = finalize(pending.clone());
+    let mut cursor = 0;
+    let mut addresses = plan
+        .block_lengths()
+        .map(|length| {
+            let start = StoredAddress::new(cursor);
+            cursor += length;
+            start
+        })
+        .collect::<Vec<_>>();
+    let address = StoredAddress::undefined(offsets).get() + 1;
+    addresses[component] = StoredAddress::new(address);
+    let expected = FormatError::AddressTooLarge {
+        address,
+        offset_size: offsets.get(),
     };
     assert_eq!(pending.attribute_info(&addresses).unwrap_err(), expected);
     assert_eq!(plan.place(&addresses).err().unwrap(), expected);
@@ -217,13 +299,32 @@ fn dense_attribute_placement_rejects_invalid_extents(
 #[case::huge_header(6)]
 #[case::huge_node(7)]
 #[case::huge_payload(8)]
-fn dense_attribute_placement_accepts_the_maximum_exclusive_end(#[case] component: usize) {
-    let plan = finalize(prepared(&[8, 70_000], Some(true)));
-    let mut addresses = (0..plan.block_lengths().len())
-        .map(|index| StoredAddress::new(index as u64 * 100_000))
+fn dense_attribute_placement_accepts_the_maximum_exclusive_end(
+    #[case] component: usize,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+) {
+    let (lengths, huge) = if offsets == OffsetWidth::Two {
+        (LengthWidth::Two, 33_000)
+    } else {
+        (LengthWidth::Eight, 70_000)
+    };
+    let plan = finalize(prepared_with_widths(
+        FormatWidths { offsets, lengths },
+        &[8, huge],
+        Some(true),
+    ));
+    let mut cursor = 0;
+    let mut addresses = plan
+        .block_lengths()
+        .map(|length| {
+            let start = StoredAddress::new(cursor);
+            cursor += length;
+            start
+        })
         .collect::<Vec<_>>();
     let length = plan.block_lengths().nth(component).unwrap();
-    addresses[component] = StoredAddress::new(u64::MAX - length);
+    let maximum = StoredAddress::undefined(offsets).get();
+    addresses[component] = StoredAddress::new(maximum - length);
     let placed = plan.place(&addresses).unwrap();
     let blocks = placed
         .serialize_blocks()
@@ -235,7 +336,7 @@ fn dense_attribute_placement_accepts_the_maximum_exclusive_end(#[case] component
         .collect::<Vec<_>>();
     assert_eq!(
         blocks[component].0.get() + blocks[component].1.len() as u64,
-        u64::MAX
+        maximum
     );
 }
 
@@ -285,8 +386,111 @@ fn finalized_payloads_use_the_prepared_placement(#[case] size: u32) {
     }));
 }
 
+#[test]
+fn direct_huge_tracker_records_follow_addresses_in_an_independent_placement() {
+    let widths = FormatWidths {
+        offsets: OffsetWidth::Four,
+        lengths: LengthWidth::Two,
+    };
+    let plan = finalize(prepared_with_widths(widths, &[32_723, 32_723], Some(true)));
+    assert_eq!(
+        plan.block_kinds()
+            .filter(|kind| *kind == DenseAttrBlockKind::HugeObject)
+            .count(),
+        2
+    );
+    let lengths = plan.block_lengths().collect::<Vec<_>>();
+    let mut cursor = 0;
+    let mut addresses = lengths
+        .iter()
+        .map(|length| {
+            let address = StoredAddress::new(cursor);
+            cursor += length;
+            address
+        })
+        .collect::<Vec<_>>();
+    let last = addresses.len() - 1;
+    assert_eq!(lengths[last], lengths[last - 1]);
+    addresses.swap(last - 1, last);
+    let placed = plan.place(&addresses).unwrap();
+    let blocks = placed
+        .serialize_blocks()
+        .unwrap()
+        .map(|block| {
+            let block = block.unwrap();
+            (block.address, block.bytes)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
+            .count(),
+        2
+    );
+    assert!(
+        blocks
+            .iter()
+            .any(|(_, bytes)| matches!(bytes, Cow::Owned(_)))
+    );
+    let heap =
+        FractalHeapHeader::parse_bytes(&blocks[0].1, widths.offsets, widths.lengths).unwrap();
+    assert_eq!(heap.huge_objects_count, 2);
+    assert!(heap.huge_ids_direct_with_widths(widths));
+    let header = blocks
+        .iter()
+        .find(|(address, _)| *address == heap.btree_huge_objects_address)
+        .unwrap();
+    let tracker =
+        BTreeV2Header::parse(&header.1, 0, widths.offsets.get(), widths.lengths.get()).unwrap();
+    let decoder = HugeObjectRecordContext::new(&heap, widths)
+        .unwrap()
+        .resolve(&tracker)
+        .unwrap();
+    let layout = BTreeV2Layout::new(&tracker, widths.offsets).unwrap();
+    let root = layout.root().unwrap();
+    let data = blocks
+        .iter()
+        .find(|(address, _)| *address == root.address())
+        .unwrap();
+    let node = root.parse(&data.1).unwrap();
+    let records = (0..node.record_count())
+        .map(|index| {
+            let HugeObjectTrackerRecord::Direct(record) =
+                decoder.parse(node.record(index).unwrap()).unwrap()
+            else {
+                panic!("expected a direct huge-object record");
+            };
+            (record.address, record.length)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records,
+        [
+            (addresses[last], lengths[last]),
+            (addresses[last - 1], lengths[last - 1])
+        ]
+    );
+}
+
 fn prepared(sizes: &[u32], creation: Option<bool>) -> PreparedDenseAttrs {
-    PreparedDenseAttrs::new(
+    prepared_with_widths(
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Eight,
+        },
+        sizes,
+        creation,
+    )
+}
+
+fn prepared_with_widths(
+    widths: FormatWidths,
+    sizes: &[u32],
+    creation: Option<bool>,
+) -> PreparedDenseAttrs {
+    PreparedDenseAttrs::with_widths(
+        widths,
         &sizes
             .iter()
             .enumerate()

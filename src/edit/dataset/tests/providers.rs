@@ -140,6 +140,7 @@ fn empty_provider_storage_is_rejected_before_reservation() {
         2
     ];
     let prepared = VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &meta,
         &[2],
         &[1],
@@ -303,6 +304,7 @@ fn provider_emission_reuses_one_buffer_without_collecting_payloads(#[case] count
         count
     ];
     let layout = crate::chunked_write::plan_chunked_data_verbatim(
+        crate::file_writer::WIDTHS,
         &meta,
         &[u64::try_from(count * 1_024).unwrap()],
         &[1_024],
@@ -401,6 +403,7 @@ fn prepared(count: usize, length: usize) -> VerbatimChunks<'static> {
         count
     ];
     VerbatimChunks::new(
+        crate::file_writer::WIDTHS,
         &meta,
         &[u64::try_from(count * length).unwrap()],
         &[u64::try_from(length).unwrap()],

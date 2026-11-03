@@ -14,7 +14,7 @@ use crate::convert::{self, Narrow};
 use crate::error::FormatError;
 use crate::fractal_heap_block::{CHECKSUM_LEN, DIRECT_SIGNATURE, INDIRECT_SIGNATURE, VERSION};
 use crate::fractal_heap_geometry::FractalHeapGeometry;
-use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// The attribute-heap row width, `H5O_FHEAP_MAN_WIDTH` in `H5Oprivate.h` (HDF5 2.2.0).
 pub const ATTRIBUTE_HEAP_TABLE_WIDTH: u16 = 4;
@@ -224,7 +224,7 @@ impl ManagedHeapPlan {
         Ok(plan)
     }
 
-    /// Lays out objects with the attribute-heap geometry.
+    /// Lays out objects with the attribute-heap geometry and eight-byte length fields.
     ///
     /// libhdf5 sets this geometry in `H5A__dense_create` in `H5Adense.c` (HDF5 2.2.0).
     /// The object-size limit is [`attribute_heap_max_managed_object`].
@@ -239,17 +239,40 @@ impl ManagedHeapPlan {
         sizes: &[u64],
         offset_width: OffsetWidth,
     ) -> Result<Self, ManagedHeapPlanError> {
+        Self::attributes_with_widths(
+            sizes,
+            FormatWidths {
+                offsets: offset_width,
+                lengths: LengthWidth::Eight,
+            },
+        )
+    }
+
+    /// Lays out attribute objects with direct blocks bounded by the selected length width.
+    ///
+    /// Uses the attribute-heap geometry of [`Self::attributes`], with a smaller direct-block
+    /// maximum when necessary to fit `widths.lengths`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedHeapPlanError::ObjectSize`] if an object is empty or exceeds the managed
+    /// payload capacity at `widths`. Returns the heap-space and host-size errors of
+    /// [`Self::attributes`].
+    pub fn attributes_with_widths(
+        sizes: &[u64],
+        widths: FormatWidths,
+    ) -> Result<Self, ManagedHeapPlanError> {
         let geometry = FractalHeapGeometry::new(
             ATTRIBUTE_HEAP_TABLE_WIDTH,
             ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
-            ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
+            maximum_direct_block_size(ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE, widths.lengths),
             ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS,
         )
         .map_err(|_error| ManagedHeapPlanError::Geometry)?;
-        Self::new(sizes, offset_width, geometry)
+        Self::new(sizes, widths.offsets, geometry)
     }
 
-    /// Lays out objects with the group-link heap geometry and managed-object limit.
+    /// Lays out group-link objects with eight-byte length fields and the managed-object limit.
     ///
     /// libhdf5 sets these parameters in `H5G__dense_create` in `H5Gdense.c` (HDF5 2.2.0).
     ///
@@ -263,6 +286,27 @@ impl ManagedHeapPlan {
         sizes: &[u64],
         offset_width: OffsetWidth,
     ) -> Result<Self, ManagedHeapPlanError> {
+        Self::group_links_with_widths(
+            sizes,
+            FormatWidths {
+                offsets: offset_width,
+                lengths: LengthWidth::Eight,
+            },
+        )
+    }
+
+    /// Lays out group links with direct blocks bounded by the selected length width.
+    ///
+    /// Uses the group-link geometry and object-size limit of [`Self::group_links`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::group_links`] for invalid object sizes, heap-space bounds,
+    /// or host-size bounds.
+    pub fn group_links_with_widths(
+        sizes: &[u64],
+        widths: FormatWidths,
+    ) -> Result<Self, ManagedHeapPlanError> {
         if let Some(&size) = sizes
             .iter()
             .find(|&&size| size == 0 || size > GROUP_HEAP_MAX_MANAGED_OBJECT)
@@ -275,11 +319,11 @@ impl ManagedHeapPlan {
         let geometry = FractalHeapGeometry::new(
             GROUP_HEAP_TABLE_WIDTH,
             GROUP_HEAP_STARTING_BLOCK_SIZE,
-            GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE,
+            maximum_direct_block_size(GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE, widths.lengths),
             GROUP_HEAP_MAX_HEAP_SIZE_BITS,
         )
         .map_err(|_error| ManagedHeapPlanError::Geometry)?;
-        Self::new(sizes, offset_width, geometry)
+        Self::new(sizes, widths.offsets, geometry)
     }
 
     /// Returns each complete block's serialized length in placement order.
@@ -1016,6 +1060,11 @@ fn place(region: &mut [u8], offset: u64, data: &[u8]) -> Result<(), FormatError>
         })?
         .copy_from_slice(data);
     Ok(())
+}
+
+/// Caps the direct-block maximum at the largest power of two representable by `lengths`.
+pub(crate) fn maximum_direct_block_size(maximum: u64, lengths: LengthWidth) -> u64 {
+    maximum.min(1u64 << (u32::from(lengths.get()) * u8::BITS - 1))
 }
 
 #[cfg(test)]

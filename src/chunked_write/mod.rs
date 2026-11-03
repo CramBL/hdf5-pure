@@ -46,6 +46,7 @@ use crate::filters::FilterScratch;
 use crate::layout_info::FilterId;
 use crate::prepared_chunk::PreparedChunk;
 use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
+use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -61,18 +62,6 @@ test_util_hdf5::hdf5_1_10_tests! {
     #[cfg(test)]
     mod native_crosschecks;
 }
-
-/// The on-disk address and length widths every chunk index *this module* writes
-/// uses. Named so the path that sizes an index and the path that emits it cannot
-/// read different values.
-///
-/// Not the only such pair: the in-place Extensible Array rebuild in `edit`
-/// reads `file_writer::OFFSET_SIZE` / `LENGTH_SIZE`, which carry the same
-/// meaning and the same values. Both are what this crate's superblock declares,
-/// and `edit` refuses a file whose superblock disagrees, so the two cannot drift
-/// apart within one file.
-const INDEX_OFFSET_SIZE: OffsetWidth = OffsetWidth::Eight;
-const INDEX_LENGTH_SIZE: LengthWidth = LengthWidth::Eight;
 
 /// Which filter, and the parameters that are the caller's to choose.
 ///
@@ -463,6 +452,7 @@ impl ChunkOptions {
     /// count exceeds [`usize::MAX`].
     pub(crate) fn measure_header(
         &self,
+        widths: FormatWidths,
         shape: &[u64],
         ctx: ChunkContext<'_>,
         maxshape: Option<&[MaxExtent]>,
@@ -472,6 +462,7 @@ impl ChunkOptions {
         let pipeline = self.build_pipeline(&ctx, fill)?;
         let element_size = ctx.element_size.narrow::<NonZeroUsize>()?;
         let (kind, _, _) = plan_index_slots(
+            widths,
             shape,
             ctx.chunk_dims,
             maxshape,
@@ -486,6 +477,7 @@ impl ChunkOptions {
             .collect::<Result<Vec<u32>, _>>()?;
         Ok(ChunkedHeader {
             layout_message: kind.layout_message(
+                widths,
                 self.layout_flags(),
                 &chunk_dims,
                 element_size,
@@ -754,6 +746,7 @@ impl ChunkArrayKind {
     /// Propagates array-index serialization errors.
     fn build_at(
         self,
+        widths: FormatWidths,
         slots: &IndexSlots<'_>,
         chunk_bytes: u64,
         has_filters: bool,
@@ -763,16 +756,16 @@ impl ChunkArrayKind {
             Self::ExtensibleArray => hdf5_pure_format::__private::build_extensible_array_at(
                 slots,
                 chunk_bytes,
-                INDEX_OFFSET_SIZE,
-                INDEX_LENGTH_SIZE,
+                widths.offsets,
+                widths.lengths,
                 has_filters,
                 address,
             ),
             Self::FixedArray => hdf5_pure_format::__private::build_fixed_array_at(
                 slots,
                 chunk_bytes,
-                INDEX_OFFSET_SIZE,
-                INDEX_LENGTH_SIZE,
+                widths.offsets,
+                widths.lengths,
                 has_filters,
                 address,
             ),
@@ -804,6 +797,7 @@ impl ChunkIndexKind {
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     fn layout_message(
         self,
+        widths: FormatWidths,
         flags: ChunkedLayoutFlags,
         chunk_dims: &[u32],
         element_size: NonZeroUsize,
@@ -843,8 +837,8 @@ impl ChunkIndexKind {
             element_size,
             info,
             address,
-            INDEX_OFFSET_SIZE,
-            INDEX_LENGTH_SIZE,
+            widths.offsets,
+            widths.lengths,
         )
     }
 }
@@ -908,6 +902,7 @@ pub(crate) fn chunk_index_len(
 /// object-header preparation, and array encoding use separate operations. For consecutive placement,
 /// [`plan_chunked_at`] constructs the index for [`ChunkedPlan::emit`].
 pub(crate) struct CompressedChunkSet {
+    widths: FormatWidths,
     /// The chunks as the writer stores them, in dense row-major grid order.
     chunks: Vec<PreparedChunk>,
     chunk_dims_u32: Vec<u32>,
@@ -1064,6 +1059,7 @@ impl CompressedChunkSet {
     /// Otherwise, the writer copies and sorts the assignments.
     pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
         let Self {
+            widths: _,
             chunks: _,
             chunk_dims_u32: _,
             element_size: _,
@@ -1075,6 +1071,7 @@ impl CompressedChunkSet {
             pipeline_message: _,
         } = self;
         Some(ChunkArrayGeometry::new(
+            self.widths,
             kind.array_kind()?,
             slot_of_chunk,
             *index_slots,
@@ -1129,6 +1126,7 @@ impl CompressedChunkSet {
     /// or chunk-slot assignments.
     pub(crate) fn empty_index(&self) -> Option<EmptyChunkIndex> {
         let Self {
+            widths,
             chunks,
             chunk_dims_u32,
             element_size,
@@ -1143,6 +1141,7 @@ impl CompressedChunkSet {
             return None;
         }
         Some(EmptyChunkIndex {
+            widths: *widths,
             kind: kind.array_kind()?,
             chunk_bytes: full_chunk_bytes(
                 chunk_dims_u32.iter().map(|&dimension| u64::from(dimension)),
@@ -1182,6 +1181,7 @@ impl CompressedChunkSet {
 /// The writer obtains this geometry from [`CompressedChunkSet::array_geometry`] or
 /// [`VerbatimChunks::array_geometry`] and assigns chunk addresses separately.
 pub(crate) struct ChunkArrayGeometry<'a> {
+    pub(crate) widths: FormatWidths,
     /// The array representation selected from the maximum chunk grid.
     pub(crate) kind: ChunkArrayKind,
     /// Occupied logical slots in ascending order.
@@ -1197,6 +1197,7 @@ pub(crate) struct ChunkArrayGeometry<'a> {
 impl<'a> ChunkArrayGeometry<'a> {
     /// Borrows ordered slot assignments or sorts an owned copy.
     fn new(
+        widths: FormatWidths,
         kind: ChunkArrayKind,
         occupied: &'a [u64],
         slots: u64,
@@ -1211,6 +1212,7 @@ impl<'a> ChunkArrayGeometry<'a> {
             Cow::Owned(slots)
         };
         Self {
+            widths,
             kind,
             occupied,
             slots,
@@ -1223,6 +1225,7 @@ impl<'a> ChunkArrayGeometry<'a> {
 /// The scalar geometry of a chunk array containing no stored chunks.
 #[derive(Clone, Copy)]
 pub(crate) struct EmptyChunkIndex {
+    widths: FormatWidths,
     kind: ChunkArrayKind,
     /// The unfiltered byte length of a full chunk.
     chunk_bytes: u64,
@@ -1235,12 +1238,14 @@ pub(crate) struct EmptyChunkIndex {
 impl EmptyChunkIndex {
     /// Records scalar geometry for an array index with no stored chunks.
     pub(crate) fn new(
+        widths: FormatWidths,
         kind: ChunkArrayKind,
         chunk_bytes: u64,
         slots: u64,
         has_filters: bool,
     ) -> Self {
         Self {
+            widths,
             kind,
             chunk_bytes,
             slots,
@@ -1259,8 +1264,8 @@ impl EmptyChunkIndex {
             self.kind,
             &IndexSlots::new(&[], &[], self.slots)?,
             self.chunk_bytes,
-            INDEX_OFFSET_SIZE,
-            INDEX_LENGTH_SIZE,
+            self.widths.offsets,
+            self.widths.lengths,
             self.has_filters,
         )
     }
@@ -1268,12 +1273,14 @@ impl EmptyChunkIndex {
     /// Returns array geometry with no occupied slots.
     pub(crate) fn geometry(self) -> ChunkArrayGeometry<'static> {
         let Self {
+            widths,
             kind,
             chunk_bytes,
             slots,
             has_filters,
         } = self;
         ChunkArrayGeometry {
+            widths,
             kind,
             occupied: Cow::Borrowed(&[]),
             slots,
@@ -1350,6 +1357,7 @@ impl EmptyChunkIndex {
 /// errors of [`ChunkOptions::build_pipeline`] for the filters, and of
 /// [`PreparedChunk::encode_dataset`] for the chunks.
 pub(crate) fn compress_chunks(
+    widths: FormatWidths,
     raw_data: &[u8],
     shape: &[u64],
     ctx: ChunkContext<'_>,
@@ -1384,6 +1392,7 @@ pub(crate) fn compress_chunks(
     // refusing after splitting and compressing the whole dataset would do all
     // that work to reach the same answer.
     let (kind, slot_of_chunk, index_slots) = plan_index_slots(
+        widths,
         shape,
         chunk_dims,
         maxshape,
@@ -1430,6 +1439,7 @@ pub(crate) fn compress_chunks(
     }
 
     Ok(CompressedChunkSet {
+        widths,
         chunks,
         chunk_dims_u32,
         element_size,
@@ -1453,6 +1463,7 @@ pub(crate) fn compress_chunks(
 /// Returns [`FormatError::ChunkedReadError`] if the index exceeds its addressable capacity or the
 /// unused-element byte budget. Propagates chunk-grid and platform-size conversion errors.
 pub(crate) fn plan_index_slots(
+    widths: FormatWidths,
     shape: &[u64],
     chunk_dims: &[u64],
     maxshape: Option<&[MaxExtent]>,
@@ -1537,7 +1548,7 @@ pub(crate) fn plan_index_slots(
     };
     let encoding = hdf5_pure_format::__private::chunk_element_encoding(
         chunk_bytes,
-        INDEX_OFFSET_SIZE,
+        widths.offsets,
         has_filters,
     );
     let allocated = match kind {
@@ -1565,8 +1576,8 @@ pub(crate) fn plan_index_slots(
                 SlotOccupancy::Slots(sorted_slots),
                 index_slots,
                 chunk_bytes,
-                INDEX_OFFSET_SIZE,
-                INDEX_LENGTH_SIZE,
+                widths.offsets,
+                widths.lengths,
                 has_filters,
             )?
             .stats
@@ -1654,6 +1665,7 @@ fn chunk_index_bytes(
         Some(index) => index.build_at(index_address)?,
         None => match set.kind.array_kind() {
             Some(kind) => kind.build_at(
+                set.widths,
                 &set.index_slots(written_chunks)?,
                 set.full_chunk_bytes(),
                 set.has_filters,
@@ -1688,6 +1700,7 @@ fn chunk_index_layout(
     index_address: StoredAddress,
 ) -> Result<Vec<u8>, FormatError> {
     set.kind.layout_message(
+        set.widths,
         set.flags,
         &set.chunk_dims_u32,
         set.element_size,
@@ -1818,8 +1831,8 @@ fn chunked_region_len(
             array,
             &set.index_slots(written_chunks)?,
             set.full_chunk_bytes(),
-            INDEX_OFFSET_SIZE,
-            INDEX_LENGTH_SIZE,
+            set.widths.offsets,
+            set.widths.lengths,
             set.has_filters,
         )?,
         None => 0,
@@ -1921,6 +1934,7 @@ pub fn build_chunked_data_at_ext(
     fill: FillPattern<'_>,
 ) -> Result<ChunkedDataResult, FormatError> {
     let set = compress_chunks(
+        crate::file_writer::WIDTHS,
         raw_data,
         shape,
         ctx,
@@ -2037,6 +2051,7 @@ impl ByteSink for Vec<u8> {
 /// The writer copies chunk metadata into owned records, retaining logical slot assignments and
 /// a borrowed filter pipeline. Payload bytes are supplied separately through [`ChunkProvider`].
 pub(crate) struct VerbatimChunks<'a> {
+    widths: FormatWidths,
     records: Vec<ChunkRecord>,
     data_address: StoredAddress,
     chunk_dims: Vec<u32>,
@@ -2066,6 +2081,7 @@ impl<'a> VerbatimChunks<'a> {
     /// [`u64::MAX`], or [`FormatError::ValueTooLargeForRepresentation`] if a chunk dimension does
     /// not fit [`u32`]. Returns grid and capacity errors from [`plan_index_slots`].
     pub(crate) fn new(
+        widths: FormatWidths,
         meta: &[ChunkMeta],
         shape: &[u64],
         chunk_dims: &[u64],
@@ -2097,6 +2113,7 @@ impl<'a> VerbatimChunks<'a> {
         }
         let chunk_bytes = full_chunk_bytes(chunk_dims.iter().copied(), element_size);
         let (kind, slot_of_chunk, index_slots) = plan_index_slots(
+            widths,
             shape,
             chunk_dims,
             maxshape,
@@ -2113,7 +2130,7 @@ impl<'a> VerbatimChunks<'a> {
             )));
         }
         if kind.array_kind().is_some() {
-            check_chunks_fit_index(meta, chunk_bytes, pipeline_message.is_some())?;
+            check_chunks_fit_index(widths, meta, chunk_bytes, pipeline_message.is_some())?;
         }
         let mut dimensions = Vec::with_capacity(chunk_dims.len());
         for &dimension in chunk_dims {
@@ -2121,6 +2138,7 @@ impl<'a> VerbatimChunks<'a> {
         }
         data_address.checked_add(payload_len)?;
         Ok(Self {
+            widths,
             records,
             data_address,
             chunk_dims: dimensions,
@@ -2174,6 +2192,7 @@ impl<'a> VerbatimChunks<'a> {
     /// Occupied-slot ordering follows [`ChunkArrayGeometry::new`].
     pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
         Some(ChunkArrayGeometry::new(
+            self.widths,
             self.kind.array_kind()?,
             &self.slot_of_chunk,
             self.index_slots,
@@ -2198,6 +2217,7 @@ impl<'a> VerbatimChunks<'a> {
     /// Returns the errors of [`ChunkIndexKind::layout_message`].
     pub(crate) fn layout_message(&self, index: StoredAddress) -> Result<Vec<u8>, FormatError> {
         self.kind.layout_message(
+            self.widths,
             self.flags,
             &self.chunk_dims,
             self.element_size,
@@ -2226,6 +2246,7 @@ impl<'a> VerbatimChunks<'a> {
     /// Moves the record and slot vectors into [`VerbatimPayload`].
     pub(crate) fn into_payload(self) -> VerbatimPayload {
         let Self {
+            widths: _,
             records,
             data_address: _,
             chunk_dims: _,
@@ -2260,6 +2281,7 @@ impl<'a> VerbatimChunks<'a> {
         let has_filters = self.pipeline_message.is_some();
         let index = match self.kind.array_kind() {
             Some(array) => Some(VerbatimIndexPlan {
+                widths: self.widths,
                 kind: array,
                 address: index_address,
                 has_filters,
@@ -2268,8 +2290,8 @@ impl<'a> VerbatimChunks<'a> {
                     array,
                     &self.index_slots()?,
                     self.chunk_bytes,
-                    INDEX_OFFSET_SIZE,
-                    INDEX_LENGTH_SIZE,
+                    self.widths.offsets,
+                    self.widths.lengths,
                     has_filters,
                 )?,
             }),
@@ -2285,6 +2307,7 @@ impl<'a> VerbatimChunks<'a> {
         self.data_address.checked_add(total_len)?;
         let layout_message = self.layout_message(index_address)?;
         let Self {
+            widths: _,
             records,
             data_address: _,
             chunk_dims: _,
@@ -2396,15 +2419,13 @@ impl VerbatimPayload {
 /// caller reserve the data region's span from a plan made at a provisional address
 /// and then discard that plan: nothing was built to arrive at the number.
 struct VerbatimIndexPlan {
+    widths: FormatWidths,
     /// Which array to build. `ChunkIndexKind::SingleChunk` cannot appear here:
     /// the layout that writes no index is the `None` case of the field holding
     /// this, not a third variant of it.
     kind: ChunkArrayKind,
     address: StoredAddress,
-    /// Whether the element records carry a compressed size and filter mask. The
-    /// address and length widths are not fields: every chunk index this module
-    /// writes uses `INDEX_OFFSET_SIZE` / `INDEX_LENGTH_SIZE`, and reading them
-    /// at the emit is one fewer value that could be set wrong here.
+    /// Whether element records store a compressed size and filter mask.
     has_filters: bool,
     /// The unfiltered byte size of one whole chunk, which sizes the element's
     /// compressed-size field. Carried on the plan for the same reason
@@ -2466,6 +2487,7 @@ pub(crate) struct VerbatimLayout {
 /// [`u32`]. Returns the errors of [`plan_index_slots`] and [`IndexSlots::new`] for the index, and
 /// of [`DataLayout::encode_chunked`] for the layout message.
 pub(crate) fn plan_chunked_data_verbatim(
+    widths: FormatWidths,
     meta: &[ChunkMeta],
     shape: &[u64],
     chunk_dims: &[u64],
@@ -2476,6 +2498,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     maxshape: Option<&[MaxExtent]>,
 ) -> Result<VerbatimLayout, FormatError> {
     VerbatimChunks::new(
+        widths,
         meta,
         shape,
         chunk_dims,
@@ -2496,6 +2519,7 @@ pub(crate) fn plan_chunked_data_verbatim(
 /// Returns [`FormatError::ChunkedReadError`] if a chunk is too large for the field of an index
 /// over chunks of `chunk_bytes` bytes.
 fn check_chunks_fit_index(
+    widths: FormatWidths,
     meta: &[ChunkMeta],
     chunk_bytes: u64,
     has_filters: bool,
@@ -2504,7 +2528,7 @@ fn check_chunks_fit_index(
         return Ok(());
     }
     let encoding =
-        hdf5_pure_format::__private::chunk_element_encoding(chunk_bytes, INDEX_OFFSET_SIZE, true);
+        hdf5_pure_format::__private::chunk_element_encoding(chunk_bytes, widths.offsets, true);
     match meta
         .iter()
         .enumerate()
@@ -2548,8 +2572,8 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
                 hdf5_pure_format::__private::build_extensible_array_at(
                     &slots,
                     index.chunk_bytes,
-                    INDEX_OFFSET_SIZE,
-                    INDEX_LENGTH_SIZE,
+                    index.widths.offsets,
+                    index.widths.lengths,
                     index.has_filters,
                     index.address,
                 )?
@@ -2557,8 +2581,8 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
             ChunkArrayKind::FixedArray => hdf5_pure_format::__private::build_fixed_array_at(
                 &slots,
                 index.chunk_bytes,
-                INDEX_OFFSET_SIZE,
-                INDEX_LENGTH_SIZE,
+                index.widths.offsets,
+                index.widths.lengths,
                 index.has_filters,
                 index.address,
             )?,

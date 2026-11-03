@@ -1112,6 +1112,7 @@ impl WriteEngine {
         let fill_time = fd.fill_time;
         let fill = FillPattern::from_value(fd.fill.as_ref().map(PreparedFill::as_bytes), elem);
         let set = chunked_write::compress_chunks(
+            crate::file_writer::WIDTHS,
             fd.storage.raw(),
             &fd.ds.dimensions,
             ctx,
@@ -1252,6 +1253,7 @@ impl WriteEngine {
         geometry: ChunkArrayGeometry<'_>,
     ) -> Result<ChunkedHeader, Error> {
         let ChunkArrayGeometry {
+            widths,
             kind,
             occupied,
             slots,
@@ -1263,10 +1265,7 @@ impl WriteEngine {
             SlotOccupancy::Slots(&occupied),
             slots,
             chunk_bytes,
-            FormatWidths {
-                offsets: OFFSET_WIDTH,
-                lengths: LENGTH_WIDTH,
-            },
+            widths,
             filtered,
         )?;
         drop(occupied);
@@ -1497,6 +1496,7 @@ impl WriteEngine {
         let element_size = *element_size;
         let maxshape = maxshape.as_deref();
         let prepared = VerbatimChunks::new(
+            crate::file_writer::WIDTHS,
             meta,
             shape,
             chunk_dims,
@@ -1516,6 +1516,7 @@ impl WriteEngine {
                 AllocationClass::Raw,
                 |stored_base| {
                     let layout = chunked_write::plan_chunked_data_verbatim(
+                        crate::file_writer::WIDTHS,
                         meta,
                         shape,
                         chunk_dims,
@@ -1567,6 +1568,7 @@ impl WriteEngine {
         provider: &dyn ChunkProvider,
     ) -> Result<Vec<u8>, Error> {
         let ChunkArrayGeometry {
+            widths,
             kind,
             occupied,
             slots,
@@ -1580,10 +1582,7 @@ impl WriteEngine {
             SlotOccupancy::Slots(&occupied),
             slots,
             chunk_bytes,
-            FormatWidths {
-                offsets: OFFSET_WIDTH,
-                lengths: LENGTH_WIDTH,
-            },
+            widths,
             filtered,
         )?;
         drop(occupied);
@@ -2358,6 +2357,7 @@ fn try_rebuild_index_in_place(
         .collect();
     // Map the current dense grid onto the index slots of the maximum shape.
     let (_, slot_of_chunk, index_slots) = crate::chunked_write::plan_index_slots(
+        crate::file_writer::WIDTHS,
         &ds.dimensions,
         spatial,
         ds.max_dimensions.as_deref(),

@@ -1294,6 +1294,32 @@ impl HugeObjectDirectRecord {
     pub const fn size(offset_width: OffsetWidth, length_width: LengthWidth) -> u16 {
         offset_width.get() as u16 + length_width.get() as u16
     }
+
+    /// Appends the address and length of an unfiltered, directly accessed huge object.
+    ///
+    /// The record is type 3 in "Version 2 B-trees" of the [format specification, version
+    /// 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if the address exceeds `offsets`,
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker, or
+    /// [`FormatError::LengthTooLarge`] if the length exceeds `lengths`. Leaves `buf` unchanged on
+    /// error.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+    pub(crate) fn encode(
+        &self,
+        buf: &mut Vec<u8>,
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+    ) -> Result<(), FormatError> {
+        bytes::require_defined_offset(self.address.get(), offsets)?;
+        bytes::require_length(self.length, lengths)?;
+        bytes::write_offset(buf, self.address.get(), offsets);
+        bytes::write_length(buf, self.length, lengths);
+        Ok(())
+    }
 }
 
 impl HugeObjectRecord {
@@ -3379,6 +3405,28 @@ mod tests {
                 length: 700,
             })
         );
+    }
+
+    #[rstest]
+    #[case::exact(65_534, 65_535, Ok(vec![0xa5, 0xfe, 0xff, 0xff, 0xff]))]
+    #[case::undefined(65_535, 1, Err(FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 }))]
+    #[case::address(65_536, 1, Err(FormatError::AddressTooLarge { address: 65_536, offset_size: 2 }))]
+    #[case::length(1, 65_536, Err(FormatError::LengthTooLarge { length: 65_536, length_size: 2 }))]
+    fn direct_huge_record_fields_are_checked_before_appending(
+        #[case] address: u64,
+        #[case] length: u64,
+        #[case] expected: Result<Vec<u8>, FormatError>,
+    ) {
+        let record = HugeObjectDirectRecord {
+            address: StoredAddress::new(address),
+            length,
+        };
+        let mut bytes = vec![0xa5];
+        let result = record.encode(&mut bytes, OffsetWidth::Two, LengthWidth::Two);
+        if result.is_err() {
+            assert_eq!(bytes, [0xa5]);
+        }
+        assert_eq!(result.map(|()| bytes), expected);
     }
 
     #[test]
