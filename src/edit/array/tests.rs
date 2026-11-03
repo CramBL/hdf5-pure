@@ -23,11 +23,14 @@ use test_util::extensible_array as extensible_array_fixture;
 
 use super::ArrayIndexPlan;
 use crate::File;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::FileLocking;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::MemoryStrategy;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::PersistedFreeSpacePolicy;
 use crate::PhysicalAddress;
 use crate::SyncPolicy;
@@ -47,6 +50,7 @@ use crate::extensible_array;
 use crate::fixed_array;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::source::MetadataCacheConfig;
 use crate::source::PhysicalSource;
 use crate::width::FormatWidths;
