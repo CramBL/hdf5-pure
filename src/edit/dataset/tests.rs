@@ -57,6 +57,8 @@ use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
 
+mod providers;
+
 #[rstest]
 #[case::deferred_fixed(false, false)]
 #[case::deferred_extensible(true, false)]

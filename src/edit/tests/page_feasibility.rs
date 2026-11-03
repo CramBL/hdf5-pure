@@ -395,23 +395,34 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     )
     .unwrap();
     let index_spans = engine.chunked_index_spans(chunks_addr).unwrap();
+    assert!(owned.analysis_complete);
+    assert_eq!(index_spans.len(), 2);
     let metadata_pages = owned
         .live_metadata_space
         .iter()
-        .filter(|&&(at, len)| {
-            !index_spans.contains(&FileRange::new(PhysicalAddress::new(at), len).unwrap())
-        })
         .filter(|&&(at, _)| at >= original.len() as u64)
         .flat_map(|&(at, len)| {
             (at - userblock) / page_size..=(at + len - 1 - userblock) / page_size
         })
         .collect::<BTreeSet<_>>();
     assert!(raw_pages.is_disjoint(&metadata_pages));
-    assert!(
-        index_spans
-            .iter()
-            .all(|range| raw_pages.contains(&((range.start().get() - userblock) / page_size)))
-    );
+    for &allocation in &index_spans {
+        assert!(allocation.length() > 0);
+        assert!(allocation.start().get() >= original.len() as u64);
+        assert!(owned.live_metadata_space.iter().any(|&(at, len)| {
+            FileRange::new(PhysicalAddress::new(at), len)
+                .unwrap()
+                .contains(allocation)
+        }));
+        let first = (allocation.start().get() - userblock) / page_size;
+        let last = (allocation.end().get() - 1 - userblock) / page_size;
+        assert!((first..=last).all(|page| metadata_pages.contains(&page)));
+        if allocation.length() < page_size {
+            assert_eq!(first, last);
+        } else {
+            assert_eq!((allocation.start().get() - userblock) % page_size, 0);
+        }
+    }
     assert!(
         raw_pages
             .iter()

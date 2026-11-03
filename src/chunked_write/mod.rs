@@ -1707,19 +1707,31 @@ pub(crate) struct ChunkMeta {
     pub(crate) filter_mask: u32,
 }
 
-/// Yields one chunk's already-compressed bytes on demand. Called once per grid
-/// slot, in ascending slot order, during the streaming assembly pass — so a
-/// repacked dataset never holds more than a single chunk's bytes at a time.
+/// Supplies stored chunks or contiguous data blocks on demand.
 ///
-/// `Send + Sync` is required so that a [`DatasetBuilder`](crate::type_builders::DatasetBuilder)
-/// holding a boxed provider — and thus the public `FileBuilder` — keeps its
-/// `Send`/`Sync` auto-traits. Real providers own an `Arc<File>`, which is both.
+/// Chunked emitters request bytes in dense chunk-grid order. For contiguous data produced with
+/// [`with_produced_data`](crate::type_builders::DatasetBuilder::with_produced_data),
+/// the emitter requests consecutive blocks.
+///
+/// The emitter reuses one scratch buffer. Provider-owned payloads and source caches have separate
+/// storage.
+///
+/// `Send + Sync` preserves the auto traits of a
+/// [`DatasetBuilder`](crate::type_builders::DatasetBuilder) holding a boxed provider.
 pub(crate) trait ChunkProvider: Send + Sync {
-    /// Append grid slot `index`'s compressed bytes to `out`, which the emitter
-    /// hands over empty. It is the same buffer on every call, so an
-    /// implementation that appends costs one allocation for the whole dataset
-    /// rather than one per chunk. The resulting length must equal the matching
-    /// [`ChunkMeta::compressed_size`]; the emitter checks it.
+    /// Appends block `index` to the empty scratch buffer `out`.
+    ///
+    /// For chunked emission, `index` is a dense grid position and the returned length must equal
+    /// the matching [`ChunkMeta::compressed_size`]. For contiguous produced data, `index` is a
+    /// consecutive block number and the length must be the smaller of the declared block size and
+    /// the remaining byte count.
+    ///
+    /// The writer passes the same buffer on each call. Implementations can retain its capacity by
+    /// appending bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the provider's [`FormatError`] if the bytes cannot be supplied.
     fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError>;
 }
 
@@ -1894,7 +1906,7 @@ impl<'a> VerbatimChunks<'a> {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the new stored exclusive end exceeds
     /// [`u64::MAX`].
-    #[cfg(any(test, doc))]
+    #[cfg(any(feature = "std", test, doc))]
     pub(crate) fn assign_data_address(
         &mut self,
         address: StoredAddress,
@@ -1914,10 +1926,16 @@ impl<'a> VerbatimChunks<'a> {
         self.payload_len
     }
 
+    /// Returns the array representation, or [`None`] for a single-chunk layout.
+    #[cfg(feature = "std")]
+    pub(crate) fn array_kind(&self) -> Option<ChunkArrayKind> {
+        self.kind.array_kind()
+    }
+
     /// Returns array geometry for the records, or [`None`] for a single-chunk layout.
     ///
     /// Occupied-slot ordering follows [`ChunkArrayGeometry::new`].
-    #[cfg(all(feature = "std", any(test, doc)))]
+    #[cfg(feature = "std")]
     pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
         Some(ChunkArrayGeometry::new(
             self.kind.array_kind()?,
@@ -1953,6 +1971,20 @@ impl<'a> VerbatimChunks<'a> {
         )
     }
 
+    /// Streams checked provider output in record order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the provider, length, and callback errors of [`visit_verbatim_chunks`].
+    #[cfg(feature = "std")]
+    pub(crate) fn emit_chunks<E>(
+        &self,
+        provider: &dyn ChunkProvider,
+        emit: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        visit_verbatim_chunks(provider, &self.records, emit)
+    }
+
     /// Plans a contiguous region with its index after the payload.
     ///
     /// The record and slot vectors are moved into [`VerbatimPlan`].
@@ -1962,7 +1994,7 @@ impl<'a> VerbatimChunks<'a> {
     /// Returns [`FormatError::OffsetOverflow`] if the complete region's length or stored exclusive
     /// end exceeds [`u64::MAX`]. Returns index sizing and encoding errors from [`chunk_index_len`],
     /// [`Self::index_slots`], and [`Self::layout_message`].
-    fn plan_at(self) -> Result<VerbatimLayout, FormatError> {
+    pub(crate) fn into_layout(self) -> Result<VerbatimLayout, FormatError> {
         let index_address = self.data_address.checked_add(self.payload_len())?;
         let has_filters = self.pipeline_message.is_some();
         let index = match self.kind.array_kind() {
@@ -2114,7 +2146,7 @@ pub(crate) fn plan_chunked_data_verbatim(
         data_address,
         maxshape,
     )?
-    .plan_at()
+    .into_layout()
 }
 
 /// Checks that the chunk size field of a filtered chunk index holds the stored size of every chunk
@@ -2150,9 +2182,9 @@ fn check_chunks_fit_index(
 
 /// Writes a planned verbatim dataset's chunks and index in order.
 ///
-/// Reads each chunk from `provider` into one reusable buffer. The output is byte-for-byte
-/// identical to the concatenation described by [`plan_chunked_data_verbatim`]. The writer builds
-/// the chunk index after writing the chunks, so a serialization failure can leave partial output.
+/// The writer visits provider output through [`visit_verbatim_chunks`], then serializes the
+/// chunk index. The output is byte-for-byte identical to the concatenation described by
+/// [`plan_chunked_data_verbatim`]. A serialization failure can leave partial output.
 ///
 /// # Errors
 ///
@@ -2165,23 +2197,7 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
     plan: &VerbatimPlan,
     provider: &dyn ChunkProvider,
 ) -> Result<(), EmissionError<S::Error>> {
-    // One buffer for the whole dataset: it grows to the largest chunk and is
-    // reused, so the streaming path's allocation count does not scale with the
-    // chunk count.
-    let mut chunk = Vec::new();
-    for (i, slot) in plan.chunks.iter().enumerate() {
-        chunk.clear();
-        provider.chunk_bytes(i, &mut chunk)?;
-        if chunk.len() as u64 != slot.stored_size {
-            return Err(FormatError::ChunkedReadError(
-                "verbatim chunk provider returned a chunk whose size differs from the \
-                 planned size"
-                    .into(),
-            )
-            .into());
-        }
-        sink.put(&chunk).map_err(EmissionError::Sink)?;
-    }
+    visit_verbatim_chunks(provider, &plan.chunks, |bytes| sink.put(bytes))?;
 
     // The index is built here, once, rather than by the planner: a caller may
     // plan the same region more than once (at a provisional address to size it, then
@@ -2218,6 +2234,38 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
             .into());
         }
         sink.put(&bytes).map_err(EmissionError::Sink)?;
+    }
+    Ok(())
+}
+
+/// Visits checked provider output in input record order.
+///
+/// The writer clears one scratch buffer for each provider call and invokes `emit` only after the
+/// returned byte length matches the record. Stops at the first provider, length, or callback error.
+///
+/// # Errors
+///
+/// Returns [`EmissionError::Format`] with [`FormatError::ChunkedReadError`] if a returned length
+/// differs from its record. Returns provider errors as [`EmissionError::Format`] and callback
+/// errors as [`EmissionError::Sink`].
+fn visit_verbatim_chunks<E>(
+    provider: &dyn ChunkProvider,
+    records: &[ChunkRecord],
+    mut emit: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), EmissionError<E>> {
+    let mut chunk = Vec::new();
+    for (i, slot) in records.iter().enumerate() {
+        chunk.clear();
+        provider.chunk_bytes(i, &mut chunk)?;
+        if chunk.len() as u64 != slot.stored_size {
+            return Err(FormatError::ChunkedReadError(
+                "verbatim chunk provider returned a chunk whose size differs from the \
+                 planned size"
+                    .into(),
+            )
+            .into());
+        }
+        emit(&chunk).map_err(EmissionError::Sink)?;
     }
     Ok(())
 }
