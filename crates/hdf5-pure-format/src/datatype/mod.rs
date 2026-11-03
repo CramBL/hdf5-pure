@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+#[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
@@ -429,12 +430,24 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 /// bytes, recording that complete property length in the class bit field. Writes an empty tag
 /// with a zero-length property. Preserves non-ASCII tag bytes.
 ///
+/// Encodes nested descriptions into the returned buffer. Computes array sizes while encoding
+/// their base types.
+///
 /// # Errors
 ///
 /// Returns [`FormatError::OpaqueTagTooLong`] if an opaque tag exceeds 247 bytes, or
 /// [`FormatError::InvalidOpaqueTagByte`] if it contains a NUL byte, including in nested types.
 pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
-    Ok(match datatype {
+    let mut output = Vec::new();
+    serialize_datatype_into(&mut output, datatype)?;
+    Ok(output)
+}
+
+fn serialize_datatype_into(
+    output: &mut Vec<u8>,
+    datatype: &Datatype,
+) -> Result<EncodedNode, FormatError> {
+    let header = match datatype {
         Datatype::FixedPoint(datatype) => {
             let layout = datatype.layout();
             let mut bf0 = padding_bits(layout.low_padding(), layout.high_padding());
@@ -444,15 +457,16 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
             if layout.signed() {
                 bf0 |= 0x08;
             }
-            let mut buf = build_header(
+            let header = append_header(
+                output,
                 FIXED_POINT_CLASS,
                 DATATYPE_VERSION_ONE,
                 [bf0, 0, 0],
                 datatype.size().get(),
             );
-            buf.extend_from_slice(&layout.bit_offset().to_le_bytes());
-            buf.extend_from_slice(&layout.bit_precision().to_le_bytes());
-            buf
+            output.extend_from_slice(&layout.bit_offset().to_le_bytes());
+            output.extend_from_slice(&layout.bit_precision().to_le_bytes());
+            header
         }
         Datatype::FloatingPoint(datatype) => {
             let layout = datatype.layout();
@@ -477,30 +491,32 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
                     DATATYPE_VERSION_THREE
                 }
             };
-            let mut buf = build_header(
+            let header = append_header(
+                output,
                 FLOATING_POINT_CLASS,
                 version,
                 [bf0, layout.sign_location(), 0],
                 datatype.size().get(),
             );
-            buf.extend_from_slice(&layout.bit_offset().to_le_bytes());
-            buf.extend_from_slice(&layout.bit_precision().to_le_bytes());
-            buf.push(layout.exponent_location());
-            buf.push(layout.exponent_size());
-            buf.push(layout.mantissa_location());
-            buf.push(layout.mantissa_size());
-            buf.extend_from_slice(&layout.exponent_bias().to_le_bytes());
-            buf
+            output.extend_from_slice(&layout.bit_offset().to_le_bytes());
+            output.extend_from_slice(&layout.bit_precision().to_le_bytes());
+            output.push(layout.exponent_location());
+            output.push(layout.exponent_size());
+            output.push(layout.mantissa_location());
+            output.push(layout.mantissa_size());
+            output.extend_from_slice(&layout.exponent_bias().to_le_bytes());
+            header
         }
         Datatype::Complex(complex) => {
-            let mut buf = build_header(
+            let mut header = append_header(
+                output,
                 COMPLEX_CLASS,
                 DATATYPE_VERSION_FIVE,
                 [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
                 complex.size().get(),
             );
-            append_datatype(&mut buf, &Datatype::FloatingPoint(complex.component()))?;
-            buf
+            header.append_child(output, &Datatype::FloatingPoint(complex.component()))?;
+            header
         }
         Datatype::String {
             size,
@@ -517,7 +533,13 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
                 CharacterSet::Utf8 => 1,
             };
             let bf0 = pad_val | (cs_val << 4);
-            build_header(STRING_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size)
+            append_header(
+                output,
+                STRING_CLASS,
+                DATATYPE_VERSION_ONE,
+                [bf0, 0, 0],
+                *size,
+            )
         }
         Datatype::VariableLength(kind) => {
             let (bf0, bf1) = match kind {
@@ -538,14 +560,15 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
                     )
                 }
             };
-            let mut buf = build_header(
+            let mut header = append_header(
+                output,
                 VARIABLE_LENGTH_CLASS,
                 DATATYPE_VERSION_ONE,
                 [bf0, bf1, 0],
                 16,
             );
-            append_datatype(&mut buf, kind.base_type())?;
-            buf
+            header.append_child(output, kind.base_type())?;
+            header
         }
         Datatype::Compound { size, members } => {
             #[expect(
@@ -555,19 +578,24 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
             let num = members.len() as u16;
             let bf0 = (num & 0xFF) as u8;
             let bf1 = ((num >> 8) & 0xFF) as u8;
-            let mut buf =
-                build_header(COMPOUND_CLASS, DATATYPE_VERSION_THREE, [bf0, bf1, 0], *size);
+            let mut header = append_header(
+                output,
+                COMPOUND_CLASS,
+                DATATYPE_VERSION_THREE,
+                [bf0, bf1, 0],
+                *size,
+            );
             let ob = offset_bytes_for_size(*size);
             for m in members {
                 // Null-terminated name
-                buf.extend_from_slice(m.name.as_bytes());
-                buf.push(0);
+                output.extend_from_slice(m.name.as_bytes());
+                output.push(0);
                 // Byte offset (variable-width)
-                buf.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
+                output.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
                 // Recursively serialize member datatype
-                append_datatype(&mut buf, &m.datatype)?;
+                header.append_child(output, &m.datatype)?;
             }
-            buf
+            header
         }
         Datatype::Enumeration {
             size,
@@ -581,45 +609,45 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
             let num = members.len() as u16;
             let bf0 = (num & 0xFF) as u8;
             let bf1 = ((num >> 8) & 0xFF) as u8;
-            let mut buf = build_header(
+            let mut header = append_header(
+                output,
                 ENUMERATION_CLASS,
                 DATATYPE_VERSION_THREE,
                 [bf0, bf1, 0],
                 *size,
             );
             // Base type
-            append_datatype(&mut buf, base_type)?;
+            header.append_child(output, base_type)?;
             // All names (null-terminated)
             for m in members {
-                buf.extend_from_slice(m.name.as_bytes());
-                buf.push(0);
+                output.extend_from_slice(m.name.as_bytes());
+                output.push(0);
             }
             // All values
             for m in members {
-                buf.extend_from_slice(&m.value);
+                output.extend_from_slice(&m.value);
             }
-            buf
+            header
         }
         Datatype::Array {
             base_type,
             dimensions,
         } => {
-            let mut buf = build_header(
-                ARRAY_CLASS,
-                DATATYPE_VERSION_THREE,
-                [0, 0, 0],
-                datatype.type_size(),
-            );
+            let mut header =
+                append_header(output, ARRAY_CLASS, DATATYPE_VERSION_THREE, [0, 0, 0], 0);
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "array rank is written into the 1-byte dimensionality field; HDF5 caps array rank well below 255"
             )]
-            buf.push(dimensions.len() as u8);
+            output.push(dimensions.len() as u8);
+            let mut count = 1u32;
             for &d in dimensions {
-                buf.extend_from_slice(&d.to_le_bytes());
+                output.extend_from_slice(&d.to_le_bytes());
+                count = count.saturating_mul(d);
             }
-            append_datatype(&mut buf, base_type)?;
-            buf
+            let child = header.append_child(output, base_type)?;
+            header.type_size = child.type_size.saturating_mul(count);
+            header
         }
         Datatype::Reference { size, ref_type } => {
             let bf0 = match ref_type {
@@ -631,60 +659,103 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
                 )]
                 _ => unreachable!("core reference kind lacks an HDF5 encoder"),
             };
-            build_header(REFERENCE_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size)
+            append_header(
+                output,
+                REFERENCE_CLASS,
+                DATATYPE_VERSION_ONE,
+                [bf0, 0, 0],
+                *size,
+            )
         }
         Datatype::Time(datatype) => {
             let bf0 = u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
-            let mut buf = build_header(
+            let header = append_header(
+                output,
                 TIME_CLASS,
                 DATATYPE_VERSION_ONE,
                 [bf0, 0, 0],
                 datatype.size().get(),
             );
-            buf.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
-            buf
+            output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
+            header
         }
         Datatype::BitField(datatype) => {
             let bf0 = padding_bits(datatype.low_padding(), datatype.high_padding())
                 | u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
-            let mut buf = build_header(
+            let header = append_header(
+                output,
                 BIT_FIELD_CLASS,
                 DATATYPE_VERSION_ONE,
                 [bf0, 0, 0],
                 datatype.size().get(),
             );
-            buf.extend_from_slice(&datatype.bit_offset().to_le_bytes());
-            buf.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
-            buf
+            output.extend_from_slice(&datatype.bit_offset().to_le_bytes());
+            output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
+            header
         }
         Datatype::Opaque { size, tag } => {
             let tag = OpaqueTagWire::encode(tag)?;
-            let mut buf = build_header(
+            let header = append_header(
+                output,
                 OPAQUE_CLASS,
                 DATATYPE_VERSION_ONE,
                 [tag.encoded_len, 0, 0],
                 *size,
             );
-            buf.extend_from_slice(tag.logical);
-            buf.resize(DATATYPE_HEADER_SIZE + usize::from(tag.encoded_len), 0);
-            buf
+            output.extend_from_slice(tag.logical);
+            output.resize(
+                header.offset + DATATYPE_HEADER_SIZE + usize::from(tag.encoded_len),
+                0,
+            );
+            header
         }
         #[expect(
             clippy::unreachable,
             reason = "the version-locked core crate defines only the matched datatype variants"
         )]
         _ => unreachable!("core datatype variant lacks an HDF5 encoder"),
-    })
+    };
+    Ok(header.finish(output))
 }
 
-// `H5O__dtype_decode_helper` checks that a container's datatype version is at least its
-// highest child version (H5Odtype.c, HDF5 2.2.0).
-fn append_datatype(buf: &mut Vec<u8>, datatype: &Datatype) -> Result<(), FormatError> {
-    let encoded = serialize_datatype(datatype)?;
-    let version = (buf[0] >> DATATYPE_VERSION_SHIFT).max(encoded[0] >> DATATYPE_VERSION_SHIFT);
-    buf[0] = (buf[0] & DATATYPE_CLASS_MASK) | (version << DATATYPE_VERSION_SHIFT);
-    buf.extend_from_slice(&encoded);
-    Ok(())
+/// The effective version and element size of a completely serialized datatype.
+struct EncodedNode {
+    version: u8,
+    type_size: u32,
+}
+
+/// A header's destination offset and pending version and element size.
+///
+/// The offset remains valid as the destination grows.
+struct DatatypeHeader {
+    offset: usize,
+    version: u8,
+    type_size: u32,
+}
+
+impl DatatypeHeader {
+    // `H5O__dtype_decode_helper` checks that a container's datatype version is at least its
+    // highest child version (H5Odtype.c, HDF5 2.2.0).
+    fn append_child(
+        &mut self,
+        output: &mut Vec<u8>,
+        datatype: &Datatype,
+    ) -> Result<EncodedNode, FormatError> {
+        let child = serialize_datatype_into(output, datatype)?;
+        self.version = self.version.max(child.version);
+        Ok(child)
+    }
+
+    fn finish(self, output: &mut [u8]) -> EncodedNode {
+        output[self.offset] =
+            (output[self.offset] & DATATYPE_CLASS_MASK) | (self.version << DATATYPE_VERSION_SHIFT);
+        output[self.offset + 4..self.offset + DATATYPE_HEADER_SIZE]
+            .copy_from_slice(&self.type_size.to_le_bytes());
+        EncodedNode {
+            version: self.version,
+            type_size: self.type_size,
+        }
+    }
 }
 
 /// An opaque tag with a checked aligned property length and borrowed logical bytes.
@@ -924,14 +995,26 @@ const HIGH_PADDING_BIT: u8 = 0x04;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const FLOAT_INTERNAL_PADDING_BIT: u8 = 0x08;
 
-fn build_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; 8];
-    buf[0] = (class & 0x0F) | ((version & 0x0F) << 4);
-    buf[1] = bf[0];
-    buf[2] = bf[1];
-    buf[3] = bf[2];
-    buf[4..8].copy_from_slice(&size.to_le_bytes());
-    buf
+fn append_header(
+    output: &mut Vec<u8>,
+    class: u8,
+    version: u8,
+    bf: [u8; 3],
+    size: u32,
+) -> DatatypeHeader {
+    let offset = output.len();
+    output.extend_from_slice(&[
+        (class & 0x0F) | ((version & 0x0F) << 4),
+        bf[0],
+        bf[1],
+        bf[2],
+    ]);
+    output.extend_from_slice(&size.to_le_bytes());
+    DatatypeHeader {
+        offset,
+        version,
+        type_size: size,
+    }
 }
 
 enum VariableLengthMetadata {
