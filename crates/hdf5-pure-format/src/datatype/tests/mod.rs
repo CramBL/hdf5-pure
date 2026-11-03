@@ -4,6 +4,7 @@ use rstest::rstest;
 use super::*;
 
 mod complex;
+mod serialization;
 
 #[cfg(feature = "std")]
 mod display;
