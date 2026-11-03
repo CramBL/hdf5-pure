@@ -20,6 +20,8 @@ use super::CompleteTopology;
 use super::LinkRemovalPlan;
 use super::RemovedLinks;
 
+mod surviving;
+
 impl<'source> AnalysisPhase<'source> {
     /// Plans removals using both visible graph counts and matching declared-count evidence.
     ///

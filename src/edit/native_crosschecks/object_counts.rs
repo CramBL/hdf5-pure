@@ -122,6 +122,15 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
     );
     assert_eq!(changes[0].bound().field(), Some(field));
     assert_eq!(changes[0].remaining(), u32::try_from(reported).unwrap() - 1);
+    let detached = source.surviving_counts(&engine).unwrap();
+    assert!(detached.same_session(&engine));
+    assert_eq!(detached.updates().len(), 1);
+    assert_eq!(detached.updates()[0].object(), object);
+    assert_eq!(detached.updates()[0].field(), field);
+    assert_eq!(
+        detached.updates()[0].count().get(),
+        u32::try_from(reported).unwrap() - 1
+    );
     drop(source);
     if matches!(usage, Usage::HardLinks) {
         let alias = phase

@@ -49,10 +49,11 @@ mod deletions;
 
 /// Lazy topology, object-count, reference, and allocation queries for unchanged source contents.
 ///
-/// The engine remains borrowed while its facts are used. The caller establishes source consistency
-/// and starts a new phase after relevant source writes. Adjacency, parsed count observations,
-/// reference summaries, and collection geometry are retained separately, with a completeness
-/// result for each required reference scan.
+/// Queries borrow the engine for the phase. The caller establishes source consistency and starts
+/// a new phase after relevant source writes. Owned count metadata can be retained after the phase
+/// is dropped, with source freshness and write permissions established separately. Adjacency,
+/// parsed count observations, reference summaries, and collection geometry are retained separately,
+/// with a completeness result for each required reference scan.
 pub(super) struct AnalysisPhase<'a> {
     engine: &'a WriteEngine,
     /// Shared phase identity for reconstruction origins and any discovered topology.
