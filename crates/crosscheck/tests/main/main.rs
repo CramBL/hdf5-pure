@@ -55,6 +55,7 @@ mod enum_attr;
 mod enum_base;
 mod extensible_array;
 mod extensible_array_chunks;
+mod extensible_array_placement;
 mod external_storage;
 mod file_space;
 mod file_space_admission;

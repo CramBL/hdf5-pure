@@ -140,27 +140,6 @@ impl<'a> IndexSlots<'a> {
         self.scattered.get(from).map(|&(slot, _)| slot.to_u64())
     }
 
-    /// Returns whether any of the `count` slots from `start` holds a chunk.
-    ///
-    /// An Extensible Array writer allocates only the blocks that hold a chunk. The cost is a
-    /// binary search over the scattered slots, whatever `count` is.
-    pub(crate) fn any_occupied(&self, start: u64, count: u64) -> bool {
-        // A slot past `usize::MAX` is unoccupied. An Extensible Array spans about 2^33 slots, more
-        // than a 32-bit `usize` holds.
-        let Ok(start) = usize::try_from(start) else {
-            return false;
-        };
-        let end = usize::try_from(count)
-            .ok()
-            .and_then(|c| start.checked_add(c))
-            .unwrap_or(usize::MAX);
-        if self.scattered.is_empty() {
-            return start < self.chunks.len().min(end);
-        }
-        let from = self.scattered.partition_point(|&(s, _)| s < start);
-        self.scattered.get(from).is_some_and(|&(s, _)| s < end)
-    }
-
     /// Returns the chunk at `slot`, or `None` where no chunk occupies it.
     pub(crate) fn at(&self, slot: usize) -> Option<&ChunkRecord> {
         if self.scattered.is_empty() {
