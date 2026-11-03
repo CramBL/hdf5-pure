@@ -7,6 +7,8 @@ use core::num::NonZeroU32;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectReferenceCount;
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 use hdf5_pure_format::__private::ObjectReferenceCountObserver;
@@ -67,9 +69,10 @@ impl<'source> AnalysisPhase<'source> {
 ///
 /// The caller can query counts while retaining a bound deletion batch or its removal plan.
 /// Observations describe original source counts, independently of graph-relative remainders.
+/// Complete header allocation geometry is retained separately from count classification.
 pub(in crate::edit) struct CountQueries<'cache, 'source> {
     engine: &'source WriteEngine,
-    counts: &'cache mut BTreeMap<ObjectId, Result<ObjectReferenceCount, FormatError>>,
+    counts: &'cache mut BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     topology: Option<&'cache CompleteTopology<'source>>,
 }
 
@@ -80,7 +83,7 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
     /// the engine identity of any applicable `topology`.
     pub(super) fn new(
         engine: &'source WriteEngine,
-        counts: &'cache mut BTreeMap<ObjectId, Result<ObjectReferenceCount, FormatError>>,
+        counts: &'cache mut BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
         topology: Option<&'cache CompleteTopology<'source>>,
     ) -> Self {
         Self {
@@ -102,40 +105,7 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
         &mut self,
         object: ObjectId,
     ) -> Result<ObjectReferenceCount, FormatError> {
-        let Self {
-            engine,
-            counts,
-            topology: _,
-        } = self;
-        counts
-            .entry(object)
-            .or_insert_with(|| {
-                let observer = ObjectReferenceCountObserver::new(object.header_address());
-                let mut observation_error = None;
-                let header = ObjectHeader::parse_from_source_with_chunk_observer(
-                    &SourceMetadata(&engine.image()),
-                    AccessMode::ReadWrite,
-                    object.header_address(),
-                    engine.widths(),
-                    engine.addresses().effective_base(),
-                    MessageFilter::Only(&mut |kind, _| {
-                        observer.observe_message_type(kind);
-                        false
-                    }),
-                    &mut |chunk| {
-                        if observation_error.is_none() {
-                            observation_error = observer.observe(chunk).err();
-                        }
-                    },
-                )?;
-                if let Some(error) = observation_error {
-                    return Err(error);
-                }
-                observer.finish(&header)
-            })
-            .as_ref()
-            .copied()
-            .map_err(Clone::clone)
+        self.summary(object).map(|summary| summary.count)
     }
 
     /// Checks a source count against the original visible lower bound and subject classification.
@@ -191,9 +161,10 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
                 "count queries use another source engine".into(),
             )));
         }
-        let observed = self
-            .observation(object)
-            .map_err(CountEvidenceError::Source)?;
+        let CountObservation {
+            count: observed,
+            allocation,
+        } = self.summary(object).map_err(CountEvidenceError::Source)?;
         let (original, field) = match observed {
             ObjectReferenceCount::ImplicitOne => (1, None),
             ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field) => {
@@ -217,11 +188,33 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
             original,
             incoming,
             field,
+            allocation,
         };
         Ok(Some(match subject {
             Some(subject) => CountEvidence::Ordinary(OrdinaryObjectCount { bound, subject }),
             None => CountEvidence::Retained(bound),
         }))
+    }
+
+    /// Returns a cached count classification and its independent optional header geometry.
+    ///
+    /// Reads the complete header on the first query and caches successful summaries and failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parsing and observation errors of [`CountObservation::read`].
+    fn summary(&mut self, object: ObjectId) -> Result<CountObservation, FormatError> {
+        let Self {
+            engine,
+            counts,
+            topology: _,
+        } = self;
+        counts
+            .entry(object)
+            .or_insert_with(|| CountObservation::read(engine, object))
+            .as_ref()
+            .copied()
+            .map_err(Clone::clone)
     }
 }
 
@@ -262,9 +255,10 @@ impl OrdinaryObjectCount<'_> {
 /// A positive declared count at least as large as the visible incoming count in one topology.
 ///
 /// Retains the original value and physical field, or an implicit one without a field. Both the
-/// engine and topology identities are retained. References from outside the discovered graph,
-/// source consistency, allocation ownership, reference completeness, and publication conditions
-/// require separate proofs.
+/// engine and topology identities are retained. Optional complete header allocation geometry is
+/// checked independently of the count and header-subject classification. References from outside
+/// the discovered graph, source consistency, allocation ownership, reference completeness, and
+/// publication conditions require separate proofs.
 pub(in crate::edit) struct ObjectReferenceBound<'source> {
     source: &'source WriteEngine,
     topology: Arc<TopologyIdentity>,
@@ -272,6 +266,7 @@ pub(in crate::edit) struct ObjectReferenceBound<'source> {
     original: NonZeroU32,
     incoming: NonZeroU32,
     field: Option<ObjectReferenceCountField>,
+    allocation: Option<HeaderCountAllocation>,
 }
 
 impl ObjectReferenceBound<'_> {
@@ -301,6 +296,13 @@ impl ObjectReferenceBound<'_> {
     /// Returns the original physical count field, or `None` for an implicit one.
     pub(in crate::edit) fn field(&self) -> Option<ObjectReferenceCountField> {
         self.field
+    }
+
+    /// Returns the independently checked complete allocation containing an explicit count, if any.
+    ///
+    /// The count bound is preserved when allocation geometry cannot be established.
+    pub(in crate::edit) fn header_allocation(&self) -> Option<HeaderCountAllocation> {
+        self.allocation
     }
 }
 
@@ -366,6 +368,106 @@ impl OrdinaryCountSubject {
             (false, 1, 1, 1) => Some(Self::Dataset),
             _ => None,
         }
+    }
+}
+
+/// A count classification and an independently checked optional header allocation.
+///
+/// The count classification is preserved when complete allocation geometry cannot be established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CountObservation {
+    count: ObjectReferenceCount,
+    allocation: Option<HeaderCountAllocation>,
+}
+
+impl CountObservation {
+    /// Reads count and allocation summaries through one complete object-header parse.
+    ///
+    /// Collects declared chunk ranges temporarily and retains only the count-containing allocation
+    /// after checking their geometry. Requires the full parse and every count observation to
+    /// succeed before returning either summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`ObjectHeader::parse_from_source_with_chunk_observer`],
+    /// [`ObjectReferenceCountObserver::observe`], or [`ObjectReferenceCountObserver::finish`].
+    fn read(engine: &WriteEngine, object: ObjectId) -> Result<Self, FormatError> {
+        let observer = ObjectReferenceCountObserver::new(object.header_address());
+        let mut observation_error = None;
+        let mut allocations = Vec::new();
+        let header = ObjectHeader::parse_from_source_with_chunk_observer(
+            &SourceMetadata(&engine.image()),
+            AccessMode::ReadWrite,
+            object.header_address(),
+            engine.widths(),
+            engine.addresses().effective_base(),
+            MessageFilter::Only(&mut |kind, _| {
+                observer.observe_message_type(kind);
+                false
+            }),
+            &mut |chunk| {
+                allocations.push(chunk.allocation());
+                if observation_error.is_none() {
+                    observation_error = observer.observe(chunk).err();
+                }
+            },
+        )?;
+        if let Some(error) = observation_error {
+            return Err(error);
+        }
+        let count = observer.finish(&header)?;
+        let allocation = match count {
+            ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field) => {
+                HeaderCountAllocation::new(field, &mut allocations, engine.image.len())
+            }
+            ObjectReferenceCount::Ambiguous
+            | ObjectReferenceCount::ImplicitOne
+            | ObjectReferenceCount::Unsupported(_) => None,
+        };
+        Ok(Self { count, allocation })
+    }
+}
+
+/// A complete declared header chunk containing a supported physical count field.
+///
+/// The object's declared header chunks are nonempty, mutually disjoint, and within the source
+/// extent observed at construction. This range exactly matches the field's containing chunk,
+/// including framing, padding, and any checksum. Other objects' storage, allocation availability,
+/// source freshness, and write permissions require separate evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::edit) struct HeaderCountAllocation {
+    range: FileRange,
+}
+
+impl HeaderCountAllocation {
+    /// Checks declared chunk geometry and selects the complete count-containing allocation.
+    ///
+    /// The caller passes every complete chunk allocation from one successful header parse.
+    /// Sorts `allocations` once. Returns `None` if a range is empty, past `eof`, or overlapping,
+    /// or if the field's complete chunk is missing or inconsistent with its field range.
+    fn new(
+        field: ObjectReferenceCountField,
+        allocations: &mut [FileRange],
+        eof: u64,
+    ) -> Option<Self> {
+        allocations.sort_unstable_by_key(|range| range.start());
+        if allocations
+            .iter()
+            .any(|range| range.length() == 0 || range.end() > PhysicalAddress::new(eof))
+            || allocations.windows(2).any(|pair| pair[0].overlaps(pair[1]))
+        {
+            return None;
+        }
+        let index = allocations
+            .binary_search_by_key(&field.chunk().start(), |range| range.start())
+            .ok()?;
+        let &range = allocations.get(index)?;
+        (range == field.chunk() && range.contains(field.range())).then_some(Self { range })
+    }
+
+    /// Returns the complete physical allocation of the count-containing header chunk.
+    pub(in crate::edit) fn range(self) -> FileRange {
+        self.range
     }
 }
 
