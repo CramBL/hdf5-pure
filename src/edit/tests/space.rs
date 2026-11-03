@@ -821,7 +821,10 @@ fn each_complete_index_run_requires_its_own_chunk_data_witness(
 ) {
     let data = physical_ranges(data);
     let data = reclaim::ChunkDataBoundaries::new(&data, indexed);
-    assert_eq!(data.abuts_index(&physical_ranges(index)), expected);
+    assert_eq!(
+        data.abuts_index(&physical_ranges(index), |_| true),
+        expected
+    );
 }
 
 #[test]
@@ -880,12 +883,18 @@ fn page_zero_classification_is_relative_to_the_base_address(#[values(0, 512)] us
 
 #[rstest]
 #[case::no_index(&[], &[], &[])]
-#[case::contiguous(&[(960, 64)], &[(1_064, 40), (1_024, 40)], &[true, true])]
-#[case::mixed_runs(&[(960, 64), (1_280, 80)], &[(1_024, 40), (1_064, 40), (1_200, 40), (1_240, 40), (1_400, 40)], &[true, true, true, true, false])]
-#[case::unwitnessed_middle(&[(960, 64), (1_440, 80)], &[(1_400, 40), (1_200, 40), (1_024, 40)], &[true, false, true])]
+#[case::contiguous(&[(960, 68)], &[(1_068, 40), (1_028, 40)], &[true, true])]
+#[case::mixed_runs(&[(960, 68), (1_284, 80)], &[(1_028, 40), (1_068, 40), (1_204, 40), (1_244, 40), (1_400, 40)], &[true, true, true, true, false])]
+#[case::unwitnessed_middle(&[(960, 68), (1_440, 80)], &[(1_400, 40), (1_200, 40), (1_028, 40)], &[true, false, true])]
 #[case::page_zero(&[(448, 32)], &[(480, 32), (512, 32)], &[false, false])]
 #[case::separated_page_zero(&[(1_024, 64)], &[(48, 80), (952, 72)], &[false, false])]
 #[case::internal_witnesses(&[(1_104, 96)], &[(1_024, 80), (1_200, 80)], &[false, false])]
+#[case::within_page_after(&[(1_088, 64)], &[(1_024, 64)], &[true])]
+#[case::boundary_before(&[(512, 512)], &[(1_024, 64)], &[false])]
+#[case::boundary_after(&[(1_024, 512)], &[(952, 72)], &[false])]
+#[case::crossing_allocation(&[(900, 52)], &[(952, 96)], &[false])]
+#[case::crossing_run(&[(900, 52)], &[(952, 72), (1_024, 64)], &[true, false])]
+#[case::whole_pages(&[(4_096, 64)], &[(1_024, 3_072)], &[false])]
 fn chunk_index_classes_keep_each_complete_allocation_and_its_run_proof(
     #[case] data: &[(u64, u64)],
     #[case] index: &[(u64, u64)],
@@ -930,9 +939,15 @@ fn chunk_index_classes_keep_each_complete_allocation_and_its_run_proof(
         })
         .collect();
     index.reverse();
+    let original = index.clone();
     let mut actual = Vec::new();
     engine.collect_chunk_index_free_spans(&data, index, known, &mut actual);
     assert_eq!(actual, expected);
+    drop(engine);
+    let reopened = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let mut after_reopen = Vec::new();
+    reopened.collect_chunk_index_free_spans(&data, original, known, &mut after_reopen);
+    assert_eq!(after_reopen, expected);
 }
 
 #[test]
@@ -958,9 +973,9 @@ fn chunk_data_boundary_lookup_borrows_data_or_indexes_shared_witnesses() {
         ends.iter().map(|address| address.get()).collect::<Vec<_>>(),
         [160, 220]
     );
-    assert!(borrowed.abuts_index(&physical_ranges(&[(160, 20)])));
-    assert!(indexed.abuts_index(&physical_ranges(&[(160, 20), (220, 40)])));
-    assert!(!indexed.abuts_index(&physical_ranges(&[(160, 20), (280, 40)])));
+    assert!(borrowed.abuts_index(&physical_ranges(&[(160, 20)]), |_| true));
+    assert!(indexed.abuts_index(&physical_ranges(&[(160, 20), (220, 40)]), |_| true));
+    assert!(!indexed.abuts_index(&physical_ranges(&[(160, 20), (280, 40)]), |_| true));
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -997,15 +1012,71 @@ fn chunk_data_boundary_allocations_are_shared_across_run_queries(#[case] count: 
     assert_eq!(borrowed_cost.bytes, 0, "{borrowed_cost:?}");
     assert_eq!(borrowed_cost.peak_bytes, 0, "{borrowed_cost:?}");
     assert_eq!(borrowed_cost.live_bytes, 0, "{borrowed_cost:?}");
-    assert!(borrowed.abuts_index(&index[..1]));
+    assert!(borrowed.abuts_index(&index[..1], |_| true));
     let (proven, query_cost) = allocation::measure(&format!("index_queries_{count}"), || {
-        indexed.abuts_index(&index)
+        indexed.abuts_index(&index, |boundary| !boundary.get().is_multiple_of(512))
     });
     assert!(proven);
     assert_eq!(query_cost.blocks, 0, "{query_cost:?}");
     assert_eq!(query_cost.bytes, 0, "{query_cost:?}");
     assert_eq!(query_cost.peak_bytes, 0, "{query_cost:?}");
     assert_eq!(query_cost.live_bytes, 0, "{query_cost:?}");
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[rstest]
+#[case::page_zero("page_zero", (1_024, 64), &[(48, 80), (952, 72)])]
+#[case::whole_pages("whole_pages", (960, 64), &[(1_024, 512), (1_536, 512)])]
+#[case::crossing("crossing", (900, 100), &[(1_000, 48), (1_512, 48)])]
+#[case::boundary_only("boundary_only", (512, 512), &[(1_024, 64), (1_536, 64)])]
+fn unprovable_index_classes_do_not_build_a_payload_boundary_index(
+    #[case] label: &str,
+    #[case] first: (u64, u64),
+    #[case] index: &[(u64, u64)],
+    #[values(16, 4_096)] count: u64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("negative_index_classes.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("d").with_i32_data(&[1; 100]);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::MIN),
+    );
+    builder.write(&path).unwrap();
+    let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let data = physical_ranges(
+        &core::iter::once(first)
+            .chain((1..count).map(|slot| (4_096 + slot * 1_024, 512)))
+            .collect::<Vec<_>>(),
+    );
+    let index = physical_ranges(index);
+    let expected: Vec<_> = index
+        .iter()
+        .map(|&range| (range, FreeClass::Dead))
+        .collect();
+    let output = Vec::with_capacity(index.len());
+    let (actual, costs) = allocation::measure(&format!("unprovable_index_{label}_{count}"), || {
+        let mut output = output;
+        engine.collect_chunk_index_free_spans(&data, index, FreeClass::Dead, &mut output);
+        output
+    });
+    let (control, control_cost) =
+        allocation::measure(&format!("index_control_{label}_{count}"), || {
+            reclaim::ChunkDataBoundaries::new(&data, true)
+        });
+    assert!(control_cost.blocks > 0, "{control_cost:?}");
+    assert!(
+        control_cost.live_bytes >= 2 * count * size_of::<PhysicalAddress>() as u64,
+        "{control_cost:?}"
+    );
+    assert!(control.abuts_index(&physical_ranges(&[(first.0 + first.1, 8)]), |_| true));
+    assert_eq!(actual, expected);
+    assert_eq!(costs.blocks, 0, "{costs:?}");
+    assert_eq!(costs.bytes, 0, "{costs:?}");
+    assert_eq!(costs.peak_bytes, 0, "{costs:?}");
+    assert_eq!(costs.live_bytes, 0, "{costs:?}");
 }
 
 #[rstest]
@@ -2265,7 +2336,8 @@ const UNENCODED_BLOCK_LEN: usize = 64;
 
 fn index_abuts_ranges(data: &[(u64, u64)], index: &[(u64, u64)]) -> bool {
     let data = physical_ranges(data);
-    reclaim::ChunkDataBoundaries::new(&data, index.len() > 1).abuts_index(&physical_ranges(index))
+    reclaim::ChunkDataBoundaries::new(&data, index.len() > 1)
+        .abuts_index(&physical_ranges(index), |_| true)
 }
 
 fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {

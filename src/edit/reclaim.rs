@@ -15,6 +15,7 @@ use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 
 use crate::access_mode::AccessMode;
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
@@ -684,14 +685,19 @@ impl WriteEngine {
     /// Appends complete index allocations and their free classes in physical address order.
     ///
     /// The caller supplies nonempty, disjoint allocations from the same source content phase.
-    /// Each original range is appended intact. For unclassified PAGE allocations, the whole index
-    /// must pass [`whole_index_is_eligible_for_raw`](Self::whole_index_is_eligible_for_raw), and
-    /// each contiguous run must separately abut nonempty chunk data. A run without this evidence
-    /// remains [`FreeClass::Dead`]. Known classes are preserved. Without PAGE, an unclassified
-    /// allocation is tagged raw.
+    /// Each original range is appended intact. Known classes are preserved. Without PAGE, an
+    /// unclassified allocation is tagged raw.
     ///
-    /// For unclassified PAGE allocations, one run borrows the chunk data summaries, and multiple
-    /// runs share one local endpoint index.
+    /// Inferred raw classes require
+    /// [`whole_index_is_eligible_for_raw`](Self::whole_index_is_eligible_for_raw).
+    /// Each complete allocation must be smaller than a page and wholly contained in it. Adjacent
+    /// allocations share a run witness when they occupy the same page. The joining chunk data
+    /// endpoint must lie inside that page. Other unknown allocations remain [`FreeClass::Dead`],
+    /// with whole free pages available to the existing promotion policy.
+    ///
+    /// For unclassified PAGE allocations, the collector checks for a small contained allocation,
+    /// whole index eligibility, and a permissible chunk data endpoint before indexing endpoints.
+    /// After those checks, a single run borrows the summaries, and multiple runs share one index.
     pub(super) fn collect_chunk_index_free_spans(
         &self,
         data: &[FileRange],
@@ -705,28 +711,66 @@ impl WriteEngine {
         {
             index.sort_unstable_by_key(|range| range.start());
         }
-        if known_class != FreeClass::Dead || self.space.page_size().is_none() {
+        let Some(page_size) = self
+            .space
+            .page_size()
+            .filter(|_| known_class == FreeClass::Dead)
+        else {
             let class = match known_class {
                 FreeClass::Dead => FreeClass::Page(PageType::Raw),
                 class => class,
             };
             classified.extend(index.into_iter().map(|range| (range, class)));
             return;
+        };
+        let addresses = self.context.addresses();
+        let permits = |boundary| {
+            addresses
+                .relative(boundary)
+                .is_ok_and(|stored| !stored.get().is_multiple_of(page_size.get()))
+        };
+        let borrowed = ChunkDataBoundaries::new(data, false);
+        if !index
+            .iter()
+            .any(|&range| PageAllocation::new(addresses, page_size, range).is_some())
+            || !self.whole_index_is_eligible_for_raw(&borrowed, &index)
+            || !data
+                .iter()
+                .any(|range| range.length() > 0 && (permits(range.start()) || permits(range.end())))
+        {
+            classified.extend(index.into_iter().map(|range| (range, FreeClass::Dead)));
+            return;
         }
-        let multiple = index
-            .windows(2)
-            .any(|pair| pair[0].end() != pair[1].start());
-        let data = ChunkDataBoundaries::new(data, multiple);
-        let eligible = self.whole_index_is_eligible_for_raw(&data, &index);
+        let multiple = index.windows(2).any(|pair| {
+            pair[0].end() != pair[1].start()
+                || PageAllocation::new(addresses, page_size, pair[0])
+                    .map(|allocation| allocation.page)
+                    != PageAllocation::new(addresses, page_size, pair[1])
+                        .map(|allocation| allocation.page)
+        });
+        let data = if multiple {
+            ChunkDataBoundaries::new(data, true)
+        } else {
+            borrowed
+        };
         let mut start = 0;
         while start < index.len() {
+            let first = PageAllocation::new(addresses, page_size, index[start]);
             let mut end = start + 1;
-            while end < index.len() && index[end - 1].end() == index[end].start() {
+            while end < index.len()
+                && first.is_some_and(|first| {
+                    PageAllocation::new(addresses, page_size, index[end]).is_some_and(
+                        |PageAllocation { range, page }| {
+                            first.page == page && index[end - 1].end() == range.start()
+                        },
+                    )
+                })
+            {
                 end += 1;
             }
             let run = &index[start..end];
             let class = match known_class {
-                FreeClass::Dead if eligible && data.abuts_index(run) => {
+                FreeClass::Dead if first.is_some() && data.abuts_index(run, permits) => {
                     FreeClass::Page(PageType::Raw)
                 }
                 class => class,
@@ -843,15 +887,14 @@ impl WriteEngine {
                     .map(|range| range.start())
                     .min()
                     .zip(index.iter().map(|range| range.end()).max());
-                bounds.is_none_or(|(start, end)| data.abuts(start, end))
-                    && index.iter().all(|range| {
-                        self.context
-                            .addresses()
-                            .relative(range.start())
-                            .is_ok_and(|stored| {
-                                !touches_page_zero(page_size, [(stored, range.length())])
-                            })
-                    })
+                index.iter().all(|range| {
+                    self.context
+                        .addresses()
+                        .relative(range.start())
+                        .is_ok_and(|stored| {
+                            !touches_page_zero(page_size, [(stored, range.length())])
+                        })
+                }) && bounds.is_none_or(|(start, end)| data.abuts(start, end))
             }
         }
     }
@@ -1263,6 +1306,42 @@ impl WriteEngine {
     }
 }
 
+/// A nonempty physical range shorter than a page and contained in one page.
+///
+/// The caller supplies the complete allocation and establishes its ownership. This geometry
+/// establishes containment, with the PAGE class determined separately.
+#[derive(Clone, Copy)]
+struct PageAllocation {
+    /// The original complete physical allocation range.
+    range: FileRange,
+    /// The page number relative to the file's address base.
+    page: u64,
+}
+
+impl PageAllocation {
+    /// Checks containment using the stored coordinates of the first and last byte.
+    ///
+    /// Returns `None` for an empty range, a range of at least one page, an address below the
+    /// file's base, or endpoints in different pages. Ownership and PAGE class are established
+    /// by the caller.
+    fn new(
+        addresses: AddressContext,
+        page_size: FileSpacePageSize,
+        range: FileRange,
+    ) -> Option<Self> {
+        if range.length() == 0 || range.length() >= page_size.get() {
+            return None;
+        }
+        let start = addresses.relative(range.start()).ok()?.get();
+        let last = addresses
+            .relative(PhysicalAddress::new(range.end().get().checked_sub(1)?))
+            .ok()?
+            .get();
+        let page = start / page_size.get();
+        (page == last / page_size.get()).then_some(Self { range, page })
+    }
+}
+
 /// Returns the PAGE free-space class of a chunk index after its physical placement is known.
 ///
 /// Version 2 B-tree headers and nodes are metadata allocations. The other index structures this
@@ -1312,12 +1391,17 @@ impl<'a> ChunkDataBoundaries<'a> {
 
     /// Returns whether every contiguous index run has a chunk data endpoint witness.
     ///
-    /// Each run must begin at the end of a nonempty data allocation or end at its start. Empty or
-    /// overlapping index ranges return `false`. An empty index returns `true`.
+    /// Each run must begin at the end of a nonempty data allocation or end at its start, and
+    /// `permits` must accept the joining physical address. Empty or overlapping index ranges
+    /// return `false`. An empty index returns `true`.
     ///
     /// Ordered input is queried directly. Unordered input is copied and sorted. The caller
-    /// applies whole index eligibility and page zero checks separately.
-    pub(super) fn abuts_index(&self, index: &[FileRange]) -> bool {
+    /// checks complete allocation geometry, whole index eligibility, and page zero separately.
+    pub(super) fn abuts_index(
+        &self,
+        index: &[FileRange],
+        permits: impl Fn(PhysicalAddress) -> bool,
+    ) -> bool {
         if index.is_empty() {
             return true;
         }
@@ -1343,20 +1427,34 @@ impl<'a> ChunkDataBoundaries<'a> {
             if pair[0].end() == pair[1].start() {
                 continue;
             }
-            if !self.abuts(start, pair[0].end()) {
+            if !self.abuts_where(start, pair[0].end(), &permits) {
                 return false;
             }
             start = pair[1].start();
         }
-        self.abuts(start, index[index.len() - 1].end())
+        self.abuts_where(start, index[index.len() - 1].end(), &permits)
     }
 
     fn abuts(&self, start: PhysicalAddress, end: PhysicalAddress) -> bool {
+        self.abuts_where(start, end, |_| true)
+    }
+
+    fn abuts_where(
+        &self,
+        start: PhysicalAddress,
+        end: PhysicalAddress,
+        permits: impl Fn(PhysicalAddress) -> bool,
+    ) -> bool {
+        let before = permits(start);
+        let after = permits(end);
         match self {
-            Self::Borrowed(data) => data
-                .iter()
-                .any(|range| range.length() > 0 && (range.end() == start || range.start() == end)),
-            Self::Indexed { starts, ends } => ends.contains(&start) || starts.contains(&end),
+            Self::Borrowed(data) => data.iter().any(|range| {
+                range.length() > 0
+                    && ((before && range.end() == start) || (after && range.start() == end))
+            }),
+            Self::Indexed { starts, ends } => {
+                (before && ends.contains(&start)) || (after && starts.contains(&end))
+            }
         }
     }
 }
