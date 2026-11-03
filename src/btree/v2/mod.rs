@@ -360,7 +360,7 @@ mod tests {
 
     use hdf5_pure_format::__private::BTreeV2Plan;
     use hdf5_pure_format::__private::{BTREE_V2_LINK_NAME, BTREE_V2_NODE_SIZE};
-    use test_util::btree_v2;
+    use test_util::btree::v2 as btree_v2;
     use test_util::image::Image;
     use test_util::widths::Widths;
 

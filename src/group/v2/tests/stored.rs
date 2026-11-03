@@ -2,7 +2,7 @@ use core::cell::Cell;
 
 use hdf5_pure_format::__private::FractalHeapHeaderLocator;
 use rstest::rstest;
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;

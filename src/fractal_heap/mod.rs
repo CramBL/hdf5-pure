@@ -1900,8 +1900,8 @@ mod tests {
         #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let mut heap = HugeHeap::new(false, None, 0);
-        let header =
-            test_util::btree_v2::Header::new(tree_type, size, HUGE_NODE_AT, 1).build(Widths::EIGHT);
+        let header = test_util::btree::v2::Header::new(tree_type, size, HUGE_NODE_AT, 1)
+            .build(Widths::EIGHT);
         heap.image[HUGE_TRACKER_AT as usize..HUGE_TRACKER_AT as usize + header.len()]
             .copy_from_slice(&header);
         assert_eq!(
@@ -2001,33 +2001,33 @@ mod tests {
             bytes[16..24].copy_from_slice(&key.to_le_bytes());
             bytes
         };
-        let header = test_util::btree_v2::Header::new(BTREE_V2_HUGE_OBJECT, 24, HUGE_NODE_AT, 1)
+        let header = test_util::btree::v2::Header::new(BTREE_V2_HUGE_OBJECT, 24, HUGE_NODE_AT, 1)
             .node_size(256)
             .depth(1)
             .total_records(3)
             .build(Widths::EIGHT);
         let children = [
-            test_util::btree_v2::Child {
+            test_util::btree::v2::Child {
                 address: if cycle { HUGE_NODE_AT } else { 384 },
                 records: 1,
                 records_width: 1,
                 subtree: None,
             },
-            test_util::btree_v2::Child {
+            test_util::btree::v2::Child {
                 address: 640,
                 records: 1,
                 records_width: 1,
                 subtree: None,
             },
         ];
-        let root = test_util::btree_v2::internal(
+        let root = test_util::btree::v2::internal(
             BTREE_V2_HUGE_OBJECT,
             &[record(2)],
             &children,
             Widths::EIGHT,
         );
-        let first = test_util::btree_v2::leaf(BTREE_V2_HUGE_OBJECT, &[record(1)]);
-        let last = test_util::btree_v2::leaf(BTREE_V2_HUGE_OBJECT, &[record(3)]);
+        let first = test_util::btree::v2::leaf(BTREE_V2_HUGE_OBJECT, &[record(1)]);
+        let last = test_util::btree::v2::leaf(BTREE_V2_HUGE_OBJECT, &[record(3)]);
         heap.image[HUGE_TRACKER_AT as usize..HUGE_TRACKER_AT as usize + header.len()]
             .copy_from_slice(&header);
         heap.image[HUGE_NODE_AT as usize..HUGE_NODE_AT as usize + root.len()]
@@ -2305,7 +2305,7 @@ mod tests {
         }
 
         fn write_tracker(&mut self, records: Vec<Vec<u8>>) {
-            let header = test_util::btree_v2::Header::new(
+            let header = test_util::btree::v2::Header::new(
                 self.tree_type,
                 u16::try_from(records[0].len()).unwrap(),
                 HUGE_NODE_AT,
@@ -2313,7 +2313,7 @@ mod tests {
             )
             .node_size(256)
             .build(Widths::EIGHT);
-            let node = test_util::btree_v2::leaf(self.tree_type, &records);
+            let node = test_util::btree::v2::leaf(self.tree_type, &records);
             let at = (self.base + HUGE_TRACKER_AT) as usize;
             self.image[at..at + header.len()].copy_from_slice(&header);
             let at = (self.base + HUGE_NODE_AT) as usize;

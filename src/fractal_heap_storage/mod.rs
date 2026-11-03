@@ -678,7 +678,7 @@ mod tests {
     use hdf5_pure_format::__private::FractalHeapFiltering;
     use hdf5_pure_format::__private::FractalHeapSectionClass;
 
-    use test_util::btree_v2;
+    use test_util::btree::v2 as btree_v2;
     use test_util::fractal_heap;
     use test_util::free_space;
     use test_util::widths::Widths;

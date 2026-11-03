@@ -599,7 +599,7 @@ mod tests {
 
     use hdf5_pure_core::MetadataBytes;
     use rstest::rstest;
-    use test_util::btree_v1;
+    use test_util::btree::v1 as btree_v1;
     use test_util::widths::Widths;
 
     use super::*;

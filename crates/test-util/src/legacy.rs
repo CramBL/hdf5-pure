@@ -3,8 +3,8 @@
 //! Each image has a version 0 superblock, version 1 object headers, eight-byte
 //! addresses and lengths, and little-endian numeric payloads.
 
-use crate::btree_v1;
-use crate::btree_v1::NodeType;
+use crate::btree::v1 as btree_v1;
+use crate::btree::v1::NodeType;
 use crate::data_layout;
 use crate::dataspace;
 use crate::dataspace::Flags;

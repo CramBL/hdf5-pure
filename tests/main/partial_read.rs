@@ -15,7 +15,7 @@ use hdf5_pure::Source;
 use hdf5_pure::StringPadding;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
-use test_util::btree_v1;
+use test_util::btree::v1 as btree_v1;
 use test_util::data_layout;
 use test_util::dataspace;
 use test_util::datatype;

@@ -349,7 +349,7 @@ fn legacy_group_btree_header_truncation_precedes_an_invalid_signature() {
         u64::from_le_bytes(image[0x78..0x80].try_into().unwrap()),
         0x888
     );
-    assert_eq!(&image[0x88..0x8c], test_util::btree_v1::SIGNATURE);
+    assert_eq!(&image[0x88..0x8c], test_util::btree::v1::SIGNATURE);
     assert_eq!(&image[0x888..0x88c], &[0xf0, 0x3f, 0, 0]);
     assert_eq!(image.len() - 0x888, 18);
     let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();

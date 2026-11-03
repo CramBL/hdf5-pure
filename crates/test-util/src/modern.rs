@@ -3,7 +3,7 @@
 //! Each image has a version 3 superblock, version 2 object headers, eight-byte
 //! addresses and lengths, and little-endian contiguous numeric datasets.
 
-use crate::btree_v2;
+use crate::btree::v2 as btree_v2;
 use crate::bytes;
 use crate::checksum;
 use crate::data_layout;

@@ -504,7 +504,7 @@ impl Fixture {
             id.push(5);
         }
         id.resize(usize::from(header.heap_id_length), 0);
-        let tracker = test_util::btree_v2::Header::new(
+        let tracker = test_util::btree::v2::Header::new(
             tree_type,
             u16::try_from(record.len()).unwrap(),
             512,
