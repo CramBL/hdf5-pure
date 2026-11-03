@@ -21,7 +21,7 @@ use hdf5_pure_format::__private::{
     self as convert, BTreeV1ChunkNode, BTreeV1ChunkNodeBytes, Narrow,
 };
 use test_util::allocation;
-use test_util::btree_v1;
+use test_util::btree::v1 as btree_v1;
 use test_util::widths::Widths;
 
 use source::SourceMetadata;

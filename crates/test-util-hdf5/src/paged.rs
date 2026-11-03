@@ -12,8 +12,9 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
+use test_util::btree::v2 as btree_v2;
 use test_util::{
-    btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
+    bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
 };
 
 use crate::{dataset::Unlimited, file_space};

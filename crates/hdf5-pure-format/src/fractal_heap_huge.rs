@@ -292,7 +292,7 @@ impl FractalHeapHugeObjectLayout {
     /// #     BTREE_V2_HUGE_OBJECT, FormatWidths, FractalHeapHeader, FractalHeapHugeObjectId,
     /// #     FractalHeapHugeObjectLayout, HugeIndirectKeyEncoding, LengthWidth, OffsetWidth,
     /// # };
-    /// # use test_util::{btree_v2, fractal_heap, widths::Widths};
+    /// # use test_util::{btree::v2 as btree_v2, fractal_heap, widths::Widths};
     /// # let encoded = fractal_heap::Header::new(u64::MAX).build(Widths::EIGHT);
     /// # let mut header = FractalHeapHeader::parse_bytes(
     /// #     &encoded, OffsetWidth::Eight, LengthWidth::Eight,

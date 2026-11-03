@@ -12,7 +12,7 @@
 //! use fewer reach it by size, and say so.
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::fractal_heap;
 use test_util_hdf5::dense_attr;
 

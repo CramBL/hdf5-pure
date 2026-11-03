@@ -157,7 +157,7 @@ impl BTreeV2Layout {
     /// #     BTreeV2CollectionRoot, BTreeV2Header, BTreeV2Layout, BTREE_V2_LINK_NAME, OffsetWidth,
     /// # };
     /// # use hdf5_pure_format::FormatError;
-    /// # use test_util::{btree_v2, widths::Widths};
+    /// # use test_util::{btree::v2 as btree_v2, widths::Widths};
     /// # let header_bytes = btree_v2::Header::new(BTREE_V2_LINK_NAME, 11, 512, 0)
     /// #     .build(Widths::EIGHT);
     /// # let header = BTreeV2Header::parse(&header_bytes, 0, 8, 8)?;
@@ -349,7 +349,7 @@ impl<'a> BTreeV2Node<'a> {
     /// #     BTreeV2Header, BTreeV2Layout, BTREE_V2_ATTRIBUTE_NAME, OffsetWidth,
     /// # };
     /// # use hdf5_pure_format::FormatError;
-    /// # use test_util::{btree_v2, widths::Widths};
+    /// # use test_util::{btree::v2 as btree_v2, widths::Widths};
     /// # let header_bytes = btree_v2::Header::new(BTREE_V2_ATTRIBUTE_NAME, 17, 512, 1)
     /// #     .build(Widths::EIGHT);
     /// # let header = BTreeV2Header::parse(&header_bytes, 0, 8, 8)?;
@@ -2170,7 +2170,7 @@ const NAME_HASH_LEN: u16 = 4;
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::btree_v2;
+    use test_util::btree::v2 as btree_v2;
     use test_util::bytes as test_bytes;
     use test_util::widths::Widths;
 

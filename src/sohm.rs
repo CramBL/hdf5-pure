@@ -217,7 +217,7 @@ fn index_for_read(
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::btree_v2;
+    use test_util::btree::v2 as btree_v2;
     use test_util::fractal_heap;
     use test_util::sohm;
     use test_util::widths::Widths;

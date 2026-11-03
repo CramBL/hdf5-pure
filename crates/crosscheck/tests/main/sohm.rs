@@ -34,7 +34,7 @@ use hdf5_pure::MemoryStrategy;
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
 use rstest::rstest;
 use tempfile::TempDir;
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::bytes;
 #[cfg(target_endian = "little")]
 use test_util::sohm as shared_fixture;

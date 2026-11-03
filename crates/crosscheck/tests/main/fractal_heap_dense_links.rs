@@ -106,7 +106,7 @@ fn borrowed_nodes_search_c_written_name_indexes(
     let base = if relocated { 512 } else { 0 };
     let mut bytes = vec![0; base];
     bytes.extend_from_slice(&original);
-    let at = test_util::bytes::sole_signature(&bytes, test_util::btree_v2::SIGNATURE);
+    let at = test_util::bytes::sole_signature(&bytes, test_util::btree::v2::SIGNATURE);
     let header = BTreeV2Header::parse(&bytes, at, 8, 8).unwrap();
     assert_eq!(header.tree_type, BTREE_V2_LINK_NAME);
     assert_eq!(header.total_records, count as u64);
@@ -344,7 +344,7 @@ fn indexed_matches_validate_only_the_selected_path(
     if invalid_pointer {
         let start = root.address().get() as usize;
         let pointer = start
-            + test_util::btree_v2::NODE_PREFIX
+            + test_util::btree::v2::NODE_PREFIX
             + usize::from(header.num_records_in_root) * usize::from(header.record_size);
         bytes[pointer..pointer + usize::from(OffsetWidth::Eight.get())].fill(0xff);
         test_util::checksum::restamp(&mut bytes, start, root.encoded_len().unwrap());
@@ -421,8 +421,8 @@ fn dense_operations_reject_malformed_name_indexes(
     let mut bytes = std::fs::read(&path).unwrap();
     let (at, header) = dense_index(&bytes);
     assert_eq!(header.depth, 0);
-    let start =
-        usize::try_from(header.root_node_address.get()).unwrap() + test_util::btree_v2::NODE_PREFIX;
+    let start = usize::try_from(header.root_node_address.get()).unwrap()
+        + test_util::btree::v2::NODE_PREFIX;
     let end = start + usize::from(header.num_records_in_root) * usize::from(header.record_size);
     let records: Vec<_> = bytes[start..end]
         .chunks_exact(usize::from(header.record_size))
@@ -435,7 +435,7 @@ fn dense_operations_reject_malformed_name_indexes(
                 .to_vec()
         })
         .collect();
-    test_util::btree_v2::replace_leaf_records(
+    test_util::btree::v2::replace_leaf_records(
         &mut bytes,
         at,
         match fault {
@@ -567,7 +567,7 @@ fn dense_lookup_preserves_replacement_character_names(
         bytes[name_at] = 0xff;
         let (_, header) = dense_index(&bytes);
         assert_eq!(header.depth, 0);
-        let start = header.root_node_address.get() as usize + test_util::btree_v2::NODE_PREFIX;
+        let start = header.root_node_address.get() as usize + test_util::btree::v2::NODE_PREFIX;
         let end = start + usize::from(header.num_records_in_root) * usize::from(header.record_size);
         let old_hash = hdf5_pure_format::__private::jenkins_lookup3(b"d0");
         let hash = hdf5_pure_format::__private::jenkins_lookup3(&[0xff, b'0']);
@@ -584,7 +584,7 @@ fn dense_lookup_preserves_replacement_character_names(
             u32::from_le_bytes(record[..LINK_NAME_HASH_LEN].try_into().unwrap())
         });
         bytes[start..end].copy_from_slice(&records.concat());
-        let node_at = start - test_util::btree_v2::NODE_PREFIX;
+        let node_at = start - test_util::btree::v2::NODE_PREFIX;
         test_util::checksum::restamp(&mut bytes, node_at, end + INDEX_CHECKSUM_LEN - node_at);
         repair_direct_heap_checksum(&mut bytes);
         std::fs::write(&path, bytes).unwrap();
@@ -657,7 +657,7 @@ fn repair_direct_heap_checksum(bytes: &mut [u8]) {
 }
 
 fn dense_index(bytes: &[u8]) -> (usize, BTreeV2Header) {
-    let at = test_util::bytes::sole_signature(bytes, test_util::btree_v2::SIGNATURE);
+    let at = test_util::bytes::sole_signature(bytes, test_util::btree::v2::SIGNATURE);
     (at, BTreeV2Header::parse(bytes, at, 8, 8).unwrap())
 }
 
@@ -688,8 +688,8 @@ impl Source for DenseNodeCountingSource {
                 expected: end as u64,
                 available: self.len(),
             })?;
-        if bytes.starts_with(test_util::btree_v2::LEAF_SIGNATURE)
-            || bytes.starts_with(test_util::btree_v2::INTERNAL_SIGNATURE)
+        if bytes.starts_with(test_util::btree::v2::LEAF_SIGNATURE)
+            || bytes.starts_with(test_util::btree::v2::INTERNAL_SIGNATURE)
         {
             self.node_reads.fetch_add(1, Ordering::Relaxed);
         }
@@ -1017,7 +1017,7 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
     assert_eq!(layout.geometry(), &geometry);
     assert_eq!(geometry.block_size_for_row(0), Ok(starting_block_size));
     assert_eq!(geometry.row_offset(1), Ok(starting_block_size * 4));
-    let index_at = test_util::bytes::sole_signature(&bytes, test_util::btree_v2::SIGNATURE);
+    let index_at = test_util::bytes::sole_signature(&bytes, test_util::btree::v2::SIGNATURE);
     let tree_header = BTreeV2Header::parse(&bytes, index_at, 8, 8).unwrap();
     assert_eq!(
         tree_header.tree_type,
@@ -1218,7 +1218,7 @@ fn c_written_tiny_ids_borrow_their_inline_objects(#[values(false, true)] streami
     assert_eq!(header.heap_id_length, 7);
     assert_eq!(header.tiny_objects_count, 16);
     assert_eq!(header.managed_objects_count, 0);
-    let index_at = test_util::bytes::sole_signature(&image, test_util::btree_v2::SIGNATURE);
+    let index_at = test_util::bytes::sole_signature(&image, test_util::btree::v2::SIGNATURE);
     let tree_header = BTreeV2Header::parse(&image, index_at, 2, 8).unwrap();
     assert_eq!(tree_header.tree_type, BTREE_V2_LINK_NAME);
     assert_eq!(tree_header.depth, 0);

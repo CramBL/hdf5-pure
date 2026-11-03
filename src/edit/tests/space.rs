@@ -24,7 +24,7 @@ use hdf5_pure_space::__private::ReturnedExtents;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
 #[cfg(feature = "deflate")]
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::fractal_heap;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space::persisted::ManagerSlot;

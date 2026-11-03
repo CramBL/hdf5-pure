@@ -100,7 +100,7 @@ fn collect_index_storage(
 #[cfg(test)]
 mod tests {
     use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
-    use test_util::btree_v2;
+    use test_util::btree::v2 as btree_v2;
     use test_util::widths::Widths;
 
     use super::*;

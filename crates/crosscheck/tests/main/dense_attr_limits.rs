@@ -13,7 +13,7 @@ use std::time::Duration;
 use hdf5_pure::{AttrValue, FileBuilder};
 use rstest::rstest;
 
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::bytes;
 use test_util::checksum;
 use test_util::fractal_heap;

@@ -506,7 +506,7 @@ pub(crate) const SYMBOLIC_LINK: u32 = 2;
 mod tests {
     use hdf5_pure_format::__private as format;
     use rstest::rstest;
-    use test_util::btree_v1;
+    use test_util::btree::v1 as btree_v1;
     use test_util::image::Image;
     use test_util::local_heap;
     use test_util::symbol_table;
