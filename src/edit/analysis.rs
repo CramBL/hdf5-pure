@@ -25,6 +25,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 
+use self::counts::CountObservation;
 use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
 use super::allocation::AllocationSession;
@@ -65,8 +66,8 @@ pub(super) struct AnalysisPhase<'a> {
     references: BTreeMap<ObjectId, ObjectReferences>,
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     allocations: BTreeMap<PhysicalAddress, Result<FileRange, FormatError>>,
-    /// Count classifications or parse failures, indexed by physical object identity.
-    counts: BTreeMap<ObjectId, Result<ObjectReferenceCount, FormatError>>,
+    /// Count observations, optional header allocation facts, and cached parse failures.
+    counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     #[cfg(test)]
     candidate_lookups: u64,
 }

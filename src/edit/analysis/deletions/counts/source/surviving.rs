@@ -8,6 +8,7 @@ use hdf5_pure_format::__private::ObjectReferenceCountField;
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::ReconstructionSource;
+use crate::edit::analysis::counts::HeaderCountAllocation;
 use crate::edit::analysis::deletions::TopologyIdentity;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
@@ -68,6 +69,7 @@ impl SourceRemovalPlan<'_, '_> {
                     object: bound.object(),
                     field,
                     count,
+                    allocation: bound.header_allocation(),
                 })
             })
             .collect::<Result<Vec<_>, CountHandoffError>>()?;
@@ -85,8 +87,8 @@ impl SourceRemovalPlan<'_, '_> {
 /// Owned original fields and positive declared remainders from one source phase.
 ///
 /// The caller may drop the borrowed plan and phase while retaining this batch. The original
-/// observed count is preserved in each copied field. Source freshness, storage ownership, and
-/// permission to write require separate evidence.
+/// observed count and any independent header allocation fact are preserved for each entry.
+/// Source freshness, storage ownership, and permission to write require separate evidence.
 pub(in crate::edit) struct SurvivingCounts {
     source: Option<CountSource>,
     updates: Vec<SurvivingCount>,
@@ -123,10 +125,13 @@ impl SurvivingCounts {
 }
 
 /// An original explicit field paired with its physical object and positive planned remainder.
+///
+/// Optional allocation geometry describes only the complete chunk containing that field.
 pub(in crate::edit) struct SurvivingCount {
     object: ObjectId,
     field: ObjectReferenceCountField,
     count: NonZeroU32,
+    allocation: Option<HeaderCountAllocation>,
 }
 
 impl SurvivingCount {
@@ -143,6 +148,11 @@ impl SurvivingCount {
     /// Returns the positive declared remainder after the planned removals.
     pub(in crate::edit) fn count(&self) -> NonZeroU32 {
         self.count
+    }
+
+    /// Returns the original checked complete header allocation, if available.
+    pub(in crate::edit) fn header_allocation(&self) -> Option<HeaderCountAllocation> {
+        self.allocation
     }
 }
 
