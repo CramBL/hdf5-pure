@@ -1,6 +1,6 @@
 //! Malformed-file construction and fixture loading for regression tests.
 
-use crate::btree_v1;
+use crate::btree::v1 as btree_v1;
 use crate::bytes;
 use crate::image::Image;
 use crate::legacy;

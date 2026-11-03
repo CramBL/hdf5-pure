@@ -6,7 +6,7 @@
 
 use crate::attribute;
 use crate::attribute::Attribute;
-use crate::btree_v2;
+use crate::btree::v2 as btree_v2;
 use crate::bytes;
 use crate::checksum;
 use crate::data_layout;

@@ -14,7 +14,7 @@ use hdf5_pure_format::__private::{
     AccessMode, BTreeV1Node, FormatWidths, LocalHeapDataSegment, LocalHeapLocator, ObjectHeader,
     SymbolTableMessage, SymbolTableNode, SymbolTableNodeLocator,
 };
-use test_util::btree_v1;
+use test_util::btree::v1 as btree_v1;
 
 /// A complete file image and format parameters for symbol-table group fixtures.
 pub struct Fixture<'a> {

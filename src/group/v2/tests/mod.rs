@@ -1,7 +1,7 @@
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 
 use ::test_util;
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::widths::Widths;
 
 use super::*;

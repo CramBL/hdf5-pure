@@ -1,6 +1,6 @@
 //! Independent malformed files with unaligned chunk-index offsets.
 
-use crate::btree_v1;
+use crate::btree::v1 as btree_v1;
 use crate::data_layout;
 use crate::dataspace;
 use crate::datatype;

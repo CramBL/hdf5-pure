@@ -479,7 +479,7 @@ mod tests {
     use hdf5_pure_format::__private::AttributeRecord;
     use hdf5_pure_format::__private::ObjectHeaderPrefix;
     use rstest::rstest;
-    use test_util::btree_v2;
+    use test_util::btree::v2 as btree_v2;
     use test_util::bytes as test_bytes;
     use test_util::checksum as test_checksum;
     use test_util::dataspace;

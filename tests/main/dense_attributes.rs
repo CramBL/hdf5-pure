@@ -5,7 +5,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use rstest::rstest;
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::checksum;
 use test_util::dense_attributes::ChecksumUpdate;
 use test_util::dense_attributes::Fixture;

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use hdf5_pure_format::__private::{BTreeV1ChunkNode, BTreeV1Node};
 use rstest::rstest;
-use test_util::btree_v1;
+use test_util::btree::v1 as btree_v1;
 use test_util::temp;
 use test_util_hdf5::__private::c_object;
 use test_util_hdf5::file;

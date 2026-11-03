@@ -11,7 +11,7 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
-use test_util::btree_v2;
+use test_util::btree::v2 as btree_v2;
 use test_util::widths::Widths;
 
 use crate::AddressRange;
@@ -557,7 +557,7 @@ impl RootChildFields {
         let length = node.encoded_len().unwrap();
         let view = node.parse(&bytes[start..]).unwrap();
         let records = view.record_count();
-        let prefix = test_util::btree_v2::NODE_PREFIX;
+        let prefix = test_util::btree::v2::NODE_PREFIX;
         let records_length = records * usize::from(header.record_size);
         let children_length = length - prefix - records_length - test_util::checksum::CHECKSUM;
         let leaf_capacity = (header.node_size

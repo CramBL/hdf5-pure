@@ -9,7 +9,8 @@ use hdf5_pure_format::__private::{
 };
 use hdf5_pure_format::{CharacterSet, Datatype, StringPadding};
 use rstest::rstest;
-use test_util::{btree_v2, fractal_heap};
+use test_util::btree::v2 as btree_v2;
+use test_util::fractal_heap;
 
 #[rstest]
 #[case::empty(vec![])]
