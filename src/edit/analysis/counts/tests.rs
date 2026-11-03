@@ -1,4 +1,8 @@
+use core::cell::Cell;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectReferenceCount;
@@ -10,10 +14,18 @@ use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
 
 use crate::Datatype;
+use crate::FileLocking;
 use crate::FixedPointType;
+use crate::edit::analysis::DISCOVERY_WORK;
+use crate::edit::analysis::PlannedDeletion;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
+use crate::image::CountingImage;
+use crate::image::HandleImage;
 use crate::object_graph::TraversalBudget;
+use crate::object_path::LinkNameBuf;
+use crate::object_path::ObjectPathBuf;
+use crate::source::MetadataCacheConfig;
 
 use super::*;
 
@@ -188,8 +200,133 @@ fn a_cached_source_failure_supplies_no_count_bound() {
         panic!("expected the cached source failure")
     };
     assert_eq!(error, CountEvidenceError::Source(failure.clone()));
-    assert_eq!(phase.counts[&object], Err(failure));
+    assert_eq!(phase.counts[&object], Err(failure.clone()));
     assert_eq!(phase.topology().unwrap().incoming(address), Some(1));
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse("alias0"))
+        .unwrap();
+    let (removed, mut queries) = phase.removal_queries([&deletion]).unwrap();
+    let Err(error) = queries.evidence(object) else {
+        panic!("expected the cached source failure")
+    };
+    assert_eq!(error, CountEvidenceError::Source(failure));
+    assert_eq!(
+        removed.count_plan().unwrap().unwrap().remaining(object),
+        Some(0)
+    );
+}
+
+#[test]
+fn bound_deletions_and_lazy_count_queries_share_disjoint_phase_fields() {
+    let path = test_util::temp::temp_path("count-query-view.h5");
+    let address = write_fixture(&path, Subject::Dataset, Some(7), 2);
+    let calls = Arc::new(AtomicU64::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, len| {
+        Ok(Box::new(
+            CountingImage::new(
+                Box::new(HandleImage::new(
+                    handle,
+                    len,
+                    MetadataCacheConfig::disabled(),
+                )),
+                bytes.clone(),
+                Arc::default(),
+            )
+            .with_read_calls(calls.clone()),
+        ))
+    })
+    .unwrap();
+    let mut phase = AnalysisPhase::new(&engine);
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse("alias0"))
+        .unwrap();
+    DISCOVERY_WORK.with(|work| work.set((0, 0)));
+    calls.store(0, Ordering::Relaxed);
+    bytes.store(0, Ordering::Relaxed);
+    let (removed, mut queries) = phase.removal_queries([&deletion]).unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(queries.counts.is_empty());
+    let object = ObjectId::new(PhysicalAddress::new(address));
+    let evidence = queries.evidence(object).unwrap().unwrap();
+    assert_eq!(evidence.bound().original(), 7);
+    assert_eq!(evidence.bound().incoming(), 2);
+    assert!(evidence.bound().matches(queries.topology.unwrap()));
+    let reads = calls.load(Ordering::Relaxed);
+    let read_bytes = bytes.load(Ordering::Relaxed);
+    assert!(reads > 0 && read_bytes > 0);
+    let plan = removed.count_plan().unwrap().unwrap();
+    assert_eq!(plan.remaining(object), Some(1));
+    assert_eq!(plan.zero_link_objects().count(), 0);
+    assert_eq!(
+        queries
+            .evidence(object)
+            .unwrap()
+            .unwrap()
+            .bound()
+            .original(),
+        7
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), reads);
+    assert_eq!(bytes.load(Ordering::Relaxed), read_bytes);
+    assert_eq!(queries.counts.len(), 1);
+    assert_eq!(DISCOVERY_WORK.with(Cell::get), (0, 0));
+}
+
+#[rstest]
+#[case::empty(false)]
+#[case::incomplete(true)]
+fn deletion_query_views_do_not_promote_inapplicable_count_facts(#[case] incomplete: bool) {
+    let path = test_util::temp::temp_path("inapplicable-count-view.h5");
+    let address = write_fixture(&path, Subject::Dataset, Some(1), 1);
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    if incomplete {
+        phase.budget = TraversalBudget::new(1, usize::MAX);
+    }
+    let object = ObjectId::new(PhysicalAddress::new(address));
+    let deletion =
+        PlannedDeletion::unresolved(LinkNameBuf::new("alias0").unwrap(), object.header_address());
+    let deletions = incomplete.then_some(&deletion);
+    let (removed, mut queries) = phase.removal_queries(deletions).unwrap();
+    assert!(queries.topology.is_none());
+    assert!(queries.evidence(object).unwrap().is_none());
+    assert!(queries.counts.is_empty());
+    assert!(removed.count_plan().unwrap().is_none());
+    let ObjectReferenceCount::Version2(field) = queries.observation(object).unwrap() else {
+        panic!("expected explicit framing")
+    };
+    assert_eq!(field.value(), 1);
+}
+
+#[test]
+fn count_query_views_reject_a_topology_from_another_engine() {
+    let first_path = test_util::temp::temp_path("first-count-view.h5");
+    let second_path = test_util::temp::temp_path("second-count-view.h5");
+    let address = write_fixture(&first_path, Subject::Dataset, Some(2), 2);
+    assert_eq!(
+        write_fixture(&second_path, Subject::Dataset, Some(7), 2),
+        address
+    );
+    let first = edit_test_util::open_engine(&first_path);
+    let second = edit_test_util::open_engine(&second_path);
+    let mut phase = AnalysisPhase::new(&second);
+    let mut counts = BTreeMap::new();
+    let mut queries = CountQueries::new(&first, &mut counts, phase.topology());
+    let Err(error) = queries.evidence(ObjectId::new(PhysicalAddress::new(address))) else {
+        panic!("expected a source identity mismatch")
+    };
+    assert_eq!(
+        error,
+        CountEvidenceError::Topology(FormatError::Internal(
+            "count queries use another source engine".into()
+        ))
+    );
+    assert!(queries.counts.is_empty());
 }
 
 fn write_fixture(path: &Path, subject: Subject, count: Option<u32>, aliases: u32) -> u64 {
