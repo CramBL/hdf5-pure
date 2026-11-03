@@ -1,0 +1,241 @@
+//! Declared counts checked against visible hard-link counts within one source phase.
+//!
+//! Header-subject classification and topology identity are retained with each bound. Allocation
+//! ownership, reference completeness, source freshness, and publication require separate proofs.
+
+use core::num::NonZeroU32;
+use std::sync::Arc;
+
+use hdf5_pure_format::__private::ObjectReferenceCount;
+use hdf5_pure_format::__private::ObjectReferenceCountField;
+
+use crate::edit::WriteEngine;
+use crate::error::FormatError;
+use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
+use crate::object_graph::ObjectIndex;
+use crate::object_header::ObjectHeader;
+
+use super::AnalysisPhase;
+use super::CompleteTopology;
+use super::deletions::TopologyIdentity;
+
+impl<'source> AnalysisPhase<'source> {
+    /// Returns a positive declared count consistent with this topology's visible lower bound.
+    ///
+    /// Requires complete topology and a non-root object within it. Returns `None` for missing
+    /// applicable topology, root or outside objects, and ambiguous or unsupported observations.
+    /// Preserves excess counts and the original physical field, when present.
+    /// Header-subject classification remains separate from the numeric bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountEvidenceError::Contradiction`] if the observed count is below the positive
+    /// visible incoming count, [`CountEvidenceError::Topology`] if a discovered non-root object
+    /// lacks a positive incoming count, or [`CountEvidenceError::Source`] for errors from
+    /// [`Self::object_reference_count`].
+    pub(in crate::edit) fn count_evidence(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<Option<CountEvidence<'source>>, CountEvidenceError> {
+        let Some(topology) = self.topology() else {
+            return Ok(None);
+        };
+        let CompleteTopology {
+            identity,
+            engine,
+            graph,
+            indices,
+            incoming,
+        } = topology;
+        let Some(&index) = indices.get(&object) else {
+            return Ok(None);
+        };
+        if index == ObjectIndex::ROOT {
+            return Ok(None);
+        }
+        let Some(incoming) = incoming
+            .get(&object.header_address().get())
+            .copied()
+            .and_then(NonZeroU32::new)
+        else {
+            return Err(CountEvidenceError::Topology(FormatError::Internal(
+                "a discovered non-root object has no positive incoming count".into(),
+            )));
+        };
+        let subject = graph.object(index).value.count_subject;
+        let identity = Arc::clone(identity);
+        let source = *engine;
+        let observed = self
+            .object_reference_count(object)
+            .map_err(CountEvidenceError::Source)?;
+        let (original, field) = match observed {
+            ObjectReferenceCount::ImplicitOne => (1, None),
+            ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field) => {
+                (field.value(), Some(field))
+            }
+            ObjectReferenceCount::Ambiguous | ObjectReferenceCount::Unsupported(_) => {
+                return Ok(None);
+            }
+        };
+        let original = NonZeroU32::new(original)
+            .filter(|&count| count >= incoming)
+            .ok_or(CountEvidenceError::Contradiction(CountContradiction {
+                object,
+                observed: original,
+                incoming: incoming.get(),
+            }))?;
+        let bound = ObjectReferenceBound {
+            source,
+            topology: identity,
+            object,
+            original,
+            incoming,
+            field,
+        };
+        Ok(Some(match subject {
+            Some(subject) => CountEvidence::Ordinary(OrdinaryObjectCount { bound, subject }),
+            None => CountEvidence::Retained(bound),
+        }))
+    }
+}
+
+/// A source-declared count bound with its separate header-subject classification.
+pub(in crate::edit) enum CountEvidence<'source> {
+    /// A bound paired with a recognized dataset or group header shape.
+    Ordinary(OrdinaryObjectCount<'source>),
+    /// A bound without a supported dataset or group subject classification.
+    Retained(ObjectReferenceBound<'source>),
+}
+
+impl<'source> CountEvidence<'source> {
+    /// Borrows the declared count and visible lower bound for either subject class.
+    pub(in crate::edit) fn bound(&self) -> &ObjectReferenceBound<'source> {
+        match self {
+            Self::Ordinary(ordinary) => &ordinary.bound,
+            Self::Retained(bound) => bound,
+        }
+    }
+}
+
+/// A declared count bound for a header with the recognized dataset or group message shape.
+///
+/// The classification describes message presence and multiplicity. Allocation geometry and
+/// retirement eligibility require separate evidence.
+pub(in crate::edit) struct OrdinaryObjectCount<'source> {
+    bound: ObjectReferenceBound<'source>,
+    subject: OrdinaryCountSubject,
+}
+
+impl OrdinaryObjectCount<'_> {
+    /// Returns the recognized header shape used to classify this count.
+    pub(in crate::edit) fn subject(&self) -> OrdinaryCountSubject {
+        self.subject
+    }
+}
+
+/// A positive declared count at least as large as the visible incoming count in one topology.
+///
+/// Retains the original value and physical field, or an implicit one without a field. Both the
+/// engine and topology identities are retained. References from outside the discovered graph,
+/// source consistency, allocation ownership, reference completeness, and publication conditions
+/// require separate proofs.
+pub(in crate::edit) struct ObjectReferenceBound<'source> {
+    source: &'source WriteEngine,
+    topology: Arc<TopologyIdentity>,
+    object: ObjectId,
+    original: NonZeroU32,
+    incoming: NonZeroU32,
+    field: Option<ObjectReferenceCountField>,
+}
+
+impl ObjectReferenceBound<'_> {
+    /// Returns whether both the engine and topology identities match.
+    ///
+    /// Identity equality is separate from source-content validity.
+    pub(in crate::edit) fn matches(&self, topology: &CompleteTopology<'_>) -> bool {
+        Arc::ptr_eq(&self.topology, &topology.identity)
+            && std::ptr::eq(self.source, topology.engine)
+    }
+
+    /// Returns the physical object-header identity associated with the counts.
+    pub(in crate::edit) fn object(&self) -> ObjectId {
+        self.object
+    }
+
+    /// Returns the original positive declared count, including an implicit one.
+    pub(in crate::edit) fn original(&self) -> u32 {
+        self.original.get()
+    }
+
+    /// Returns the positive incoming count in the matching root-reachable topology.
+    pub(in crate::edit) fn incoming(&self) -> u32 {
+        self.incoming.get()
+    }
+
+    /// Returns the original physical count field, or `None` for an implicit one.
+    pub(in crate::edit) fn field(&self) -> Option<ObjectReferenceCountField> {
+        self.field
+    }
+}
+
+/// A count contradiction, source observation failure, or internal topology inconsistency.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::edit) enum CountEvidenceError {
+    /// An observed count below the positive visible incoming count.
+    Contradiction(CountContradiction),
+    /// A parsing or source-read failure while observing the declared count.
+    Source(FormatError),
+    /// A discovered non-root object without a positive incoming count.
+    Topology(FormatError),
+}
+
+/// The physical object and counts that establish an observed undercount.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::edit) struct CountContradiction {
+    pub(in crate::edit) object: ObjectId,
+    pub(in crate::edit) observed: u32,
+    pub(in crate::edit) incoming: u32,
+}
+
+/// A dataset or group message shape recognized from the already parsed header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::edit) enum OrdinaryCountSubject {
+    Dataset,
+    Group,
+}
+
+impl OrdinaryCountSubject {
+    /// Classifies a group marker without dataset descriptors, or a unique dataset descriptor set.
+    ///
+    /// Requires exactly one datatype, dataspace, and layout message without a group marker for a
+    /// dataset. Returns `None` for all other shapes. Interprets message types without parsing
+    /// their bodies again.
+    pub(super) fn from_header(header: &ObjectHeader) -> Option<Self> {
+        let mut datatype = 0_u8;
+        let mut dataspace = 0_u8;
+        let mut layout = 0_u8;
+        for message in &header.messages {
+            let count = match message.msg_type {
+                MessageType::DATATYPE => &mut datatype,
+                MessageType::DATASPACE => &mut dataspace,
+                MessageType::DATA_LAYOUT => &mut layout,
+                _ => continue,
+            };
+            *count = count.saturating_add(1);
+        }
+        match (
+            crate::group::v2::is_group(header),
+            datatype,
+            dataspace,
+            layout,
+        ) {
+            (true, 0, 0, 0) => Some(Self::Group),
+            (false, 1, 1, 1) => Some(Self::Dataset),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

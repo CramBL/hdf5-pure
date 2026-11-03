@@ -53,6 +53,28 @@ impl Message {
         Self::new(MessageType::OBJECT_HEADER_CONTINUATION, &pointer)
     }
 
+    /// Returns a version 0 Object Reference Count message with no flags set.
+    ///
+    /// Stores `count` as four little-endian bytes after the version byte. The message is defined
+    /// in "The Object Reference Count Message" of the [format specification, version 4.0][spec].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use test_util::object_header::{Message, MessageType};
+    ///
+    /// let message = Message::reference_count(0x1234_5678);
+    /// assert_eq!(message.msg_type, MessageType::OBJECT_REFERENCE_COUNT);
+    /// assert_eq!(message.data, [0, 0x78, 0x56, 0x34, 0x12]);
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_refcount
+    pub fn reference_count(count: u32) -> Self {
+        let mut body = [REFERENCE_COUNT_VERSION; REFERENCE_COUNT_LEN];
+        body[REFERENCE_COUNT_PREFIX_LEN..].copy_from_slice(&count.to_le_bytes());
+        Self::new(MessageType::OBJECT_REFERENCE_COUNT, &body)
+    }
+
     pub fn with_flags(mut self, flags: MessageFlags) -> Self {
         self.flags = flags;
         self
@@ -132,3 +154,9 @@ impl core::ops::BitOr for MessageFlags {
         Self(self.0 | other.0)
     }
 }
+
+// "The Object Reference Count Message" of the format specification, version 4.0, defines a
+// version byte of 0 followed by an unsigned 32-bit reference count.
+const REFERENCE_COUNT_VERSION: u8 = 0;
+const REFERENCE_COUNT_PREFIX_LEN: usize = 1;
+const REFERENCE_COUNT_LEN: usize = 5;

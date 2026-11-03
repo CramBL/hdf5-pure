@@ -11,6 +11,7 @@ use crate::PhysicalAddress;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::DISCOVERY_WORK;
 use crate::edit::analysis::PlannedDeletion;
+use crate::edit::analysis::counts::CountEvidenceError;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
@@ -368,6 +369,16 @@ fn inconsistent_original_counts_return_an_internal_error(
     } else {
         topology.incoming.remove(&value);
     }
+    let Err(error) = phase.count_evidence(id(value)) else {
+        panic!("expected an inconsistent topology count error");
+    };
+    let CountEvidenceError::Topology(FormatError::Internal(actual)) = error else {
+        panic!("expected a topology Internal error, got {error:?}");
+    };
+    assert_eq!(
+        actual,
+        "a discovered non-root object has no positive incoming count"
+    );
     let Err(error) = phase.removed_links([&deletion]).unwrap().count_plan() else {
         panic!("expected an inconsistent count error");
     };
