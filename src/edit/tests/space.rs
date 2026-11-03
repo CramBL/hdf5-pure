@@ -60,6 +60,7 @@ use crate::edit::WriteEngine;
 use crate::edit::aggregation::AggregateSpace;
 use crate::edit::commit::PublicationPurpose;
 use crate::edit::reclaim;
+use crate::edit::reclaim::ObjectStorageKind;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_lock::FileLocking;
@@ -72,6 +73,7 @@ use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorage;
 use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::free_space_manager;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::source::BytesSource;
@@ -476,6 +478,21 @@ fn reclamation_retains_storage_after_heap_validation_fails(
     } = write_rejected_heap_owner(&path, &object, damage);
 
     let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let mut collected = Vec::new();
+    let kind =
+        session.collect_object_storage(ObjectId::new(header_spans[0].start()), &mut collected);
+    if reclaim_other {
+        assert_eq!(kind, Some(ObjectStorageKind::Group));
+        let mut expected = reclaim::meta_spans(header_spans.clone())
+            .chain(index.iter().copied())
+            .collect::<Vec<_>>();
+        expected.sort_unstable_by_key(|&(range, _)| range.start());
+        collected.sort_unstable_by_key(|&(range, _)| range.start());
+        assert_eq!(collected, expected);
+    } else {
+        assert_eq!(kind, None);
+        assert!(collected.is_empty());
+    }
     session.delete(&object).unwrap();
     session.commit().unwrap();
 
@@ -556,9 +573,9 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
 
     let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let DenseAttributeOwner {
+        addr,
         header_spans,
         storage,
-        ..
     } = dense_attribute_owner(&session, &object);
     for &(addr, len) in &heap {
         assert!(
@@ -569,6 +586,17 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
             "the filtered heap allocation ({addr}, {len}) is in {storage:?}"
         );
     }
+    let mut collected = Vec::new();
+    assert_eq!(
+        session.collect_object_storage(ObjectId::new(PhysicalAddress::new(addr)), &mut collected),
+        Some(ObjectStorageKind::Group)
+    );
+    let mut expected = reclaim::meta_spans(header_spans.clone())
+        .chain(storage.iter().copied())
+        .collect::<Vec<_>>();
+    expected.sort_unstable_by_key(|&(range, _)| range.start());
+    collected.sort_unstable_by_key(|&(range, _)| range.start());
+    assert_eq!(collected, expected);
     session.assert_ownership_covers_storage(&storage, true);
     session.delete(&object).unwrap();
     session.commit().unwrap();
