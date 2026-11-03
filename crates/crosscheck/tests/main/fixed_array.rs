@@ -1,5 +1,6 @@
 #![cfg(feature = "__hdf5-1.10")]
 
+use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
@@ -8,7 +9,23 @@ use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
+use hdf5_pure::File;
 use hdf5_pure::FormatError;
+use hdf5_pure::PhysicalAddress;
+use hdf5_pure::StoredAddress;
+use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::BaseAddress;
+use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::ChunkRecord;
+use hdf5_pure_format::__private::FixedArrayHeaderLocator;
+use hdf5_pure_format::__private::FixedArrayPlan;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::LengthWidth;
+use hdf5_pure_format::__private::OffsetWidth;
 use rstest::rstest;
 
 use test_util::bytes;
@@ -104,6 +121,127 @@ fn pure_reads_the_fixed_array_libhdf5_writes(
     );
 }
 
+#[rstest]
+#[case::unpaged(64, 4, None)]
+#[case::paged(1025, 1, None)]
+#[case::sparse_pages(2049, 1, Some(PLACED_SPARSE_WRITES))]
+fn native_reads_independently_placed_complete_fixed_array_blocks(
+    #[case] len: usize,
+    #[case] chunk: usize,
+    #[case] sparse: Option<&'static [Range<usize>]>,
+    #[values(false, true)] deflate: bool,
+    #[values((Sizeof::Bytes2, OffsetWidth::Two), (Sizeof::Bytes4, OffsetWidth::Four), (Sizeof::Bytes8, OffsetWidth::Eight))]
+    widths: (Sizeof, OffsetWidth),
+    #[values(0, 512)] userblock: u64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("placed-fixed-array.h5");
+    let fixture = Fixture {
+        len,
+        chunk,
+        deflate,
+        sparse,
+    };
+    fixture.libhdf5_create(
+        &path,
+        SizeofInfo {
+            sizeof_addr: widths.0,
+            sizeof_size: widths.0,
+        },
+        userblock,
+    );
+    let original_chunks = array_index::libhdf5_chunks(&path, userblock);
+    let mut image = fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(array_index::pure_chunks(&file), original_chunks);
+    let stored_header = file
+        .relative_address(PhysicalAddress::new(
+            u64::try_from(bytes::sole_signature(&image, b"FAHD")).unwrap(),
+        ))
+        .unwrap();
+    let mut superblock = file.superblock().clone();
+    let widths = FormatWidths {
+        offsets: widths.1,
+        lengths: LengthWidth::try_from(widths.1.get()).unwrap(),
+    };
+    let base = BaseAddress::new(file.resolve_address(StoredAddress::ZERO).unwrap().get());
+    let source = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), u64::try_from(image.len()).unwrap()).unwrap(),
+        &image,
+    )
+    .unwrap();
+    let parsed = FixedArrayHeaderLocator::new(widths, base, stored_header)
+        .parse(source)
+        .unwrap();
+    let count = u64::try_from(len.div_ceil(chunk)).unwrap();
+    let chunk_bytes = u64::try_from(chunk * size_of::<i32>()).unwrap();
+    let plan = FixedArrayPlan::new(count, chunk_bytes, widths, deflate).unwrap();
+    assert_eq!(
+        plan.block_lengths().collect::<Vec<_>>(),
+        [
+            parsed.range().length(),
+            parsed.data_block().unwrap().range().length()
+        ]
+    );
+    let slots: Vec<_> = original_chunks
+        .iter()
+        .map(|record| record.offset()[0] / u64::try_from(chunk).unwrap())
+        .collect();
+    let chunks: Vec<_> = original_chunks
+        .iter()
+        .map(|record| ChunkRecord {
+            address: file
+                .relative_address(PhysicalAddress::new(record.address()))
+                .unwrap(),
+            stored_size: record.size(),
+            filter_mask: record.filter_mask(),
+        })
+        .collect();
+    let slots = IndexSlots::new(&chunks, &slots, count).unwrap();
+    let data_at = file
+        .relative_address(PhysicalAddress::new(file.file_size() + 4096))
+        .unwrap();
+    let placed = plan.place(stored_header, data_at).unwrap();
+    let ranges: Vec<_> = placed
+        .blocks()
+        .map(|(address, length)| {
+            FileRange::new(file.resolve_address(address).unwrap(), length).unwrap()
+        })
+        .collect();
+    assert!(ranges[0].end().get() + 4096 < ranges[1].start().get());
+    let blocks = placed.serialize_blocks(&slots).unwrap();
+    let end = ranges[1].end().get();
+    superblock.eof_address = end;
+    file.close().unwrap();
+    image.resize(usize::try_from(end).unwrap(), 0);
+    for (range, (_, bytes)) in ranges.iter().zip(blocks) {
+        let start = usize::try_from(range.start().get()).unwrap();
+        assert_eq!(u64::try_from(bytes.len()).unwrap(), range.length());
+        image[start..usize::try_from(range.end().get()).unwrap()].copy_from_slice(&bytes);
+    }
+    let superblock = format::serialize_superblock(&superblock).unwrap();
+    let start = usize::try_from(userblock).unwrap();
+    image[start..start + superblock.len()].copy_from_slice(&superblock);
+    fs::write(&path, &image).unwrap();
+    let native = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        fixture.writes().expected()
+    );
+    native.close().unwrap();
+    assert_eq!(
+        array_index::libhdf5_chunks(&path, userblock),
+        original_chunks
+    );
+    let pure = File::open(&path).unwrap();
+    assert_eq!(
+        pure.dataset("d").unwrap().read_i32().unwrap(),
+        fixture.writes().expected()
+    );
+    assert_eq!(array_index::pure_chunks(&pure), original_chunks);
+    pure.close().unwrap();
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Corruption {
     HeaderVersion,
@@ -171,3 +309,5 @@ fn pure_rejects_a_corrupted_fixed_array_libhdf5_writes(
     };
     assert_eq!(err, expected);
 }
+
+const PLACED_SPARSE_WRITES: &[Range<usize>] = &[0..4, 2048..2049];
