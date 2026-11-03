@@ -7,8 +7,17 @@ use hdf5_pure_space::__private::{
     AllocationClass, Extent, PageTransition, PageType, ReservationRequest, SessionSpace,
 };
 use rstest::rstest;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use test_util::allocation;
 use test_util::disk_log;
+use test_util::disk_log::DiskOp;
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::FileLocking;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::MemoryStrategy;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::PersistedFreeSpacePolicy;
 use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
 };
@@ -17,6 +26,8 @@ use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::source::MetadataCacheConfig;
 use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
@@ -374,6 +385,349 @@ fn emission_length_mismatch_preserves_the_pending_reservation() {
     plan.write_next(&[3; 16]).unwrap();
     plan.finish().unwrap();
     assert_eq!(engine.image().read_exact_at(start, 16).unwrap(), [3; 16]);
+}
+
+#[rstest]
+#[case::append(FileSpaceStrategy::None, false)]
+#[case::aggregate(FileSpaceStrategy::Aggr, false)]
+#[case::reused_flat(FileSpaceStrategy::FsmAggr, true)]
+#[case::page(FileSpaceStrategy::Page, false)]
+#[case::reused_page(FileSpaceStrategy::Page, true)]
+fn streamed_reservations_keep_complete_capacity_and_following_blocks(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] reused: bool,
+    #[values(0, 4_096)] base: u64,
+    #[values(0, 16)] encoded: usize,
+) {
+    let (_directory, mut engine) = engine(strategy, base);
+    let start = engine.image.len();
+    if reused {
+        engine.append(&[13; 128]).unwrap();
+        engine
+            .space
+            .return_allocation(extent(start - base, 128), AllocationClass::Raw);
+    }
+    let requests = [
+        BlockRequest::new(
+            request(64, PageType::Raw),
+            u64::try_from(encoded).unwrap(),
+            EncodingDependency::Independent,
+        )
+        .unwrap(),
+        BlockRequest::complete(
+            request(8, PageType::Meta).for_block(),
+            EncodingDependency::Independent,
+        ),
+    ];
+    let mut plan = engine
+        .plan_blocks(&requests)
+        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+    let ranges: Vec<_> = plan
+        .reservations()
+        .iter()
+        .map(|reservation| reservation.range())
+        .collect();
+    let result = plan
+        .write_next_with(|writer| {
+            writer.write(&[17; 5][..encoded.min(5)])?;
+            writer.write(&[])?;
+            writer.write(&[19; 11][..encoded.saturating_sub(5)])
+        })
+        .unwrap();
+    assert_eq!(result, ranges[0].start());
+    assert_eq!(plan.next, 1);
+    assert_eq!(plan.reservations().len(), 2);
+    assert!(!plan.failed);
+    assert_eq!(plan.write_next(&[23; 8]).unwrap(), ranges[1].start());
+    plan.finish().unwrap();
+    let mut expected = vec![if reused { 13 } else { 0 }; 64];
+    expected[..encoded.min(5)].fill(17);
+    expected[encoded.min(5)..encoded].fill(19);
+    assert_eq!(
+        engine.image().read_exact_at(result.get(), 64).unwrap(),
+        expected
+    );
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(ranges[1].start().get(), 8)
+            .unwrap(),
+        [23; 8]
+    );
+    assert!(
+        engine
+            .space
+            .reusable_sections()
+            .all(|extent| extent.end().get() <= result.get() - base
+                || extent.start().get() >= result.get() - base + 64)
+    );
+}
+
+#[rstest]
+#[case::short(7, false, "a placement reserved 16 bytes but built 15")]
+#[case::excess(9, false, "a placement reserved 16 bytes but built 17")]
+#[case::suppressed_excess(9, true, "reserved encoding has an earlier failed write")]
+fn incomplete_streamed_encodings_retain_their_failed_reservation(
+    #[case] last: usize,
+    #[case] suppress: bool,
+    #[case] expected: &str,
+) {
+    let (_directory, mut engine) = engine(FileSpaceStrategy::FsmAggr, 0);
+    engine.aggregation = None;
+    let start = engine.append(&[13; 128]).unwrap();
+    engine.space = flat(&[(start, 128)]);
+    let requests = [request(16, PageType::Raw), request(16, PageType::Raw)];
+    let mut plan = planned(&mut engine, &requests);
+    let error = plan
+        .write_next_with(|writer| {
+            writer.write(&[17; 8])?;
+            let result = writer.write(&vec![19; last]);
+            if suppress {
+                result.ok();
+                Ok(())
+            } else {
+                result
+            }
+        })
+        .unwrap_err();
+    match error {
+        Error::Format(FormatError::Internal(reason)) if suppress => assert_eq!(reason, expected),
+        Error::Format(FormatError::SerializationError(reason)) if !suppress => {
+            assert_eq!(reason, expected)
+        }
+        error => panic!("unexpected error: {error:?}"),
+    }
+    assert_eq!(plan.next, 0);
+    assert!(plan.failed);
+    let error = plan.write_next(&[23; 16]).unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == "reservation plan has an earlier failed write"),
+        "{error:?}"
+    );
+    drop(plan);
+    assert_eq!(engine.image().read_exact_at(start, 8).unwrap(), [17; 8]);
+    assert_eq!(
+        engine.image().read_exact_at(start + 16, 16).unwrap(),
+        [13; 16]
+    );
+    assert_eq!(
+        engine.space.reusable_sections().collect::<Vec<_>>(),
+        [extent(start + 32, 96)]
+    );
+}
+
+#[rstest]
+#[case::appended(false)]
+#[case::reused(true)]
+fn failed_streamed_writes_keep_source_prefixes_after_allocator_rollback(
+    #[case] reused: bool,
+    #[values(false, true)] suppress: bool,
+) {
+    let (directory, mut engine) = engine(FileSpaceStrategy::FsmAggr, 0);
+    engine.aggregation = None;
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    let start = engine.image.len();
+    if reused {
+        engine.append(&[13; 64]).unwrap();
+        engine.space = flat(&[(start, 64)]);
+    }
+    let snapshot = engine.snapshot_free();
+    let requests = [request(16, PageType::Raw), request(16, PageType::Raw)];
+    let mut plan = planned(&mut engine, &requests);
+    disk_log::start();
+    disk_log::fail_write_after(1, 3);
+    let error = plan
+        .write_next_with(|writer| {
+            writer.write(&[17; 8])?;
+            let result = writer.write(&[19; 8]);
+            if !suppress {
+                return result;
+            }
+            let error = result.unwrap_err();
+            let Error::Io(error) = error else {
+                panic!("expected an injected write failure, got {error:?}");
+            };
+            assert_eq!(error.kind(), ErrorKind::Other);
+            assert_eq!(error.to_string(), "injected disk write failure");
+            let error = writer.write(&[23; 8]).unwrap_err();
+            assert!(
+                matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == "reserved encoding has an earlier failed write"),
+                "{error:?}"
+            );
+            Ok(())
+        })
+        .unwrap_err();
+    let operations = disk_log::take();
+    match error {
+        Error::Format(FormatError::Internal(reason)) if suppress => {
+            assert_eq!(reason, "reserved encoding has an earlier failed write");
+        }
+        Error::Io(error) if !suppress => {
+            assert_eq!(error.kind(), ErrorKind::Other);
+            assert_eq!(error.to_string(), "injected disk write failure");
+        }
+        error => panic!("unexpected error: {error:?}"),
+    }
+    assert_eq!(
+        operations,
+        [
+            DiskOp::Write {
+                offset: start,
+                bytes: vec![17; 8]
+            },
+            DiskOp::Write {
+                offset: start + 8,
+                bytes: vec![19; 3]
+            }
+        ]
+    );
+    assert_eq!(plan.next, 0);
+    assert!(plan.failed);
+    drop(plan);
+    let remaining = if reused {
+        vec![extent(start + 32, 32)]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        engine.space.reusable_sections().collect::<Vec<_>>(),
+        remaining
+    );
+    engine.restore_free(snapshot);
+    assert_eq!(
+        engine.space.reusable_sections().collect::<Vec<_>>(),
+        if reused {
+            vec![extent(start, 64)]
+        } else {
+            Vec::new()
+        }
+    );
+    drop(engine);
+    assert_eq!(
+        std::fs::read(directory.path().join("reservations.h5")).unwrap()
+            [usize::try_from(start).unwrap()..usize::try_from(start + 11).unwrap()],
+        [17, 17, 17, 17, 17, 17, 17, 17, 19, 19, 19]
+    );
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[rstest]
+#[case::small(8)]
+#[case::many(128)]
+fn bounded_unbuffered_emission_keeps_heap_below_payload_size(#[case] count: usize) {
+    let (directory, engine) = engine(FileSpaceStrategy::None, 0);
+    drop(engine);
+    let mut engine = WriteEngine::open_rw_with_strategy(
+        &directory.path().join("reservations.h5"),
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        MemoryStrategy::Bounded,
+        PersistedFreeSpacePolicy::Tolerant,
+    )
+    .unwrap();
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    let chunk = vec![17; 8_192];
+    let length = u64::try_from(count * chunk.len()).unwrap();
+    let requests = [request(length, PageType::Raw)];
+    let mut plan = planned(&mut engine, &requests);
+    let start = plan.reservations()[0].range().start().get();
+    let before = plan.engine.image.buffering_work();
+    let (address, measured) = allocation::measure(&format!("streamed_reservation_{count}"), || {
+        plan.write_next_with(|writer| {
+            for _ in 0..count {
+                writer.write(&chunk)?;
+            }
+            Ok(())
+        })
+        .unwrap()
+    });
+    assert_eq!(address.get(), start);
+    let after = plan.engine.image.buffering_work();
+    assert_eq!(
+        after.write_calls - before.write_calls,
+        u64::try_from(count).unwrap()
+    );
+    assert_eq!(after.write_bytes - before.write_bytes, length);
+    assert_eq!(after.mirror_bytes, 0);
+    assert_eq!(after.mirror_capacity, 0);
+    assert_eq!(after.pending_bytes, 0);
+    assert!(
+        measured.peak_bytes < length / 4,
+        "{measured:?}, payload={length}"
+    );
+    plan.finish().unwrap();
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(start, usize::try_from(length).unwrap())
+            .unwrap(),
+        vec![17; usize::try_from(length).unwrap()]
+    );
+    let (copied, control) = allocation::measure(&format!("assembled_reservation_{count}"), || {
+        chunk.repeat(count)
+    });
+    assert_eq!(u64::try_from(copied.len()).unwrap(), length);
+    assert!(control.live_bytes >= length, "{control:?}");
+}
+
+#[rstest]
+#[case::before_output(false)]
+#[case::after_prefix(true)]
+fn producer_errors_keep_streamed_reservations_unavailable(#[case] prefix: bool) {
+    let (_directory, mut engine) = engine(FileSpaceStrategy::FsmAggr, 0);
+    engine.aggregation = None;
+    let start = engine.append(&[13; 64]).unwrap();
+    engine.space = flat(&[(start, 64)]);
+    let requests = [request(16, PageType::Raw)];
+    let mut plan = planned(&mut engine, &requests);
+    let error = plan
+        .write_next_with(|writer| {
+            if prefix {
+                writer.write(&[17; 8])?;
+            }
+            Err(FormatError::Internal("injected producer error".into()).into())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == "injected producer error"),
+        "{error:?}"
+    );
+    assert!(plan.failed);
+    assert_eq!(plan.next, 0);
+    drop(plan);
+    assert_eq!(
+        engine.space.reusable_sections().collect::<Vec<_>>(),
+        [extent(start + 16, 48)]
+    );
+    assert_eq!(
+        engine.image().read_exact_at(start, 8).unwrap(),
+        [if prefix { 17 } else { 13 }; 8]
+    );
+}
+
+#[test]
+fn uncertain_publication_rejects_a_stream_before_calling_its_producer() {
+    let (_directory, mut engine) = engine(FileSpaceStrategy::None, 0);
+    let requests = [request(16, PageType::Raw)];
+    let mut plan = planned(&mut engine, &requests);
+    plan.engine.context.allocations.make_uncertain();
+    let mut called = false;
+    let error = plan
+        .write_next_with(|_| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::AllocationPublicationUncertain),
+        "{error:?}"
+    );
+    assert!(!called);
+    assert_eq!(plan.next, 0);
 }
 
 fn engine(strategy: FileSpaceStrategy, userblock: u64) -> (tempfile::TempDir, WriteEngine) {

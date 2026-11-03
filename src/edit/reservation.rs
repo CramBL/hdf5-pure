@@ -69,6 +69,28 @@ impl<'a> ReservationPlan<'a> {
     /// no allocation remains or a prior write failed. Returns address-conversion, padding, and I/O
     /// errors encountered during placement.
     pub(super) fn write_next(&mut self, bytes: &[u8]) -> Result<PhysicalAddress, Error> {
+        self.next_reservation()?.block.region(bytes)?;
+        self.write_next_with(|writer| writer.write(bytes))
+    }
+
+    /// Writes the next encoding from slices supplied by a producer.
+    ///
+    /// The producer must write exactly the planned encoding length through
+    /// [`ReservedEncoding::write`]. The caller retains complete allocation capacity on success
+    /// and failure. After a producer, padding, or content error, further writes through the plan
+    /// return an error. Catching a writer error in the producer also prevents completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain,
+    /// [`FormatError::SerializationError`] if the emitted length differs from the planned length,
+    /// or [`FormatError::Internal`] if no allocation remains or a prior write failed. Returns
+    /// errors from the producer, padding, or content writes.
+    pub(super) fn write_next_with(
+        &mut self,
+        emit: impl FnOnce(&mut ReservedEncoding<'_>) -> Result<(), Error>,
+    ) -> Result<PhysicalAddress, Error> {
+        self.next_reservation()?;
         let Self {
             engine,
             reservations,
@@ -78,40 +100,31 @@ impl<'a> ReservationPlan<'a> {
             unresolved: _,
             work: _,
         } = self;
-        engine.context.allocations.available()?;
-        if *failed {
-            return Err(FormatError::Internal(
-                "reservation plan has an earlier failed write".into(),
-            )
-            .into());
-        }
-        let reservation = reservations.as_slice().get(*next).ok_or_else(|| {
-            FormatError::Internal("reservation plan has no pending allocation".into())
-        })?;
-        let region = reservation.block.region(bytes)?;
-        let addr = region.range().start().get();
-        let len = region.range().length();
-        let placement = match reservation.placement {
-            Placement::Aggregated { end, .. } => Placement::Aggregated { addr, len, end },
-            Placement::Appended { .. } => Placement::Appended { addr, len },
-            Placement::Reused { .. } => Placement::Reused { addr, len },
-        };
+        let reservation = &reservations.as_slice()[*next];
+        let PlannedReservation {
+            placement: _,
+            block,
+            transition,
+        } = reservation;
         let result = Self::prepare_transition(
             engine,
-            reservation.request().page_type(),
-            reservation.transition,
+            block.request().reservation().page_type(),
+            *transition,
         )
-        .and_then(|()| engine.place(placement, region.bytes()))
-        .and_then(|address| {
-            if engine.image.len() < reservation.range().end().get() {
-                engine.pad_zeros_to(reservation.range().end().get())?;
-            }
-            Ok(address)
+        .and_then(|()| {
+            let mut writer = ReservedEncoding {
+                cursor: block.encoding().start().get(),
+                engine,
+                reservation,
+                failed: false,
+            };
+            emit(&mut writer)?;
+            writer.finish()
         });
         match result {
             Ok(address) => {
                 *next += 1;
-                Ok(PhysicalAddress::new(address))
+                Ok(address)
             }
             Err(error) => {
                 *failed = true;
@@ -169,6 +182,25 @@ impl<'a> ReservationPlan<'a> {
     #[cfg(test)]
     pub(super) fn unresolved(&self) -> Option<&ReusableReservation> {
         self.unresolved.as_ref()
+    }
+
+    /// Borrows the next reservation after checking publication and write state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain,
+    /// or [`FormatError::Internal`] if no allocation remains or a prior write failed.
+    fn next_reservation(&self) -> Result<&PlannedReservation, Error> {
+        self.engine.context.allocations.available()?;
+        if self.failed {
+            return Err(FormatError::Internal(
+                "reservation plan has an earlier failed write".into(),
+            )
+            .into());
+        }
+        self.reservations.as_slice().get(self.next).ok_or_else(|| {
+            FormatError::Internal("reservation plan has no pending allocation".into()).into()
+        })
     }
 
     fn into_scalar(self) -> Result<Placement, Error> {
@@ -344,6 +376,125 @@ impl PlannedReservation {
     }
     pub(super) fn encoding_dependency(&self) -> EncodingDependency {
         self.block.request().dependency()
+    }
+}
+
+/// A borrowed writer limited to one reservation's encoding range.
+///
+/// The producer writes consecutive slices through [`Self::write`]. After a failed write, further
+/// writes and completion return an error, including when the producer catches the write error.
+pub(super) struct ReservedEncoding<'a> {
+    engine: &'a mut WriteEngine,
+    reservation: &'a PlannedReservation,
+    cursor: u64,
+    failed: bool,
+}
+
+impl ReservedEncoding<'_> {
+    /// Writes an entire slice at the current encoding position.
+    ///
+    /// After an error, further writes and completion return an error. A partial I/O write can
+    /// change source bytes before failing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SerializationError`] if the slice exceeds the remaining encoding
+    /// length, or [`FormatError::Internal`] if a prior write failed. Returns errors encountered
+    /// during the content write.
+    pub(super) fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let Self {
+            engine,
+            reservation,
+            cursor,
+            failed,
+        } = self;
+        if *failed {
+            return Err(FormatError::Internal(
+                "reserved encoding has an earlier failed write".into(),
+            )
+            .into());
+        }
+        let PlannedReservation {
+            placement,
+            block,
+            transition: _,
+        } = *reservation;
+        let encoding = block.encoding();
+        let length = bytes.len() as u64;
+        if length > encoding.end().get() - *cursor {
+            *failed = true;
+            return Err(FormatError::SerializationError(format!(
+                "a placement reserved {} bytes but built {}",
+                encoding.length(),
+                u128::from(*cursor - encoding.start().get()) + u128::from(length),
+            ))
+            .into());
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let end = *cursor + length;
+        let placement = match *placement {
+            Placement::Aggregated { .. } => Placement::Aggregated {
+                addr: *cursor,
+                len: length,
+                end,
+            },
+            Placement::Appended { .. } => Placement::Appended {
+                addr: *cursor,
+                len: length,
+            },
+            Placement::Reused { .. } => Placement::Reused {
+                addr: *cursor,
+                len: length,
+            },
+        };
+        match engine.place(placement, bytes) {
+            Ok(_) => {
+                *cursor = end;
+                Ok(())
+            }
+            Err(error) => {
+                *failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn finish(self) -> Result<PhysicalAddress, Error> {
+        let Self {
+            engine,
+            reservation,
+            cursor,
+            failed,
+        } = self;
+        if failed {
+            return Err(FormatError::Internal(
+                "reserved encoding has an earlier failed write".into(),
+            )
+            .into());
+        }
+        let PlannedReservation {
+            placement,
+            block,
+            transition: _,
+        } = reservation;
+        let encoding = block.encoding();
+        if cursor != encoding.end().get() {
+            return Err(FormatError::SerializationError(format!(
+                "a placement reserved {} bytes but built {}",
+                encoding.length(),
+                cursor - encoding.start().get(),
+            ))
+            .into());
+        }
+        if let Placement::Aggregated { end, .. } = *placement {
+            AggregateSpace::place(engine.image.as_mut(), cursor, &[], end)?;
+        }
+        if engine.image.len() < block.allocation().end().get() {
+            engine.pad_zeros_to(block.allocation().end().get())?;
+        }
+        Ok(encoding.start())
     }
 }
 
