@@ -18,6 +18,7 @@ use crate::object_path::ObjectPathBuf;
 
 use super::AnalysisPhase;
 use super::CompleteTopology;
+use super::counts::CountQueries;
 
 #[cfg_attr(
     not(test),
@@ -77,6 +78,48 @@ pub(in crate::edit) struct RemovedLinks<'topology, 'source> {
     unresolved: Vec<ObjectId>,
 }
 
+impl<'topology, 'source> RemovedLinks<'topology, 'source> {
+    /// Checks topology identities and retains each removed physical edge once.
+    ///
+    /// The caller supplies the applicable topology. Target-only unresolved records are retained
+    /// separately from identified edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if an identified edge belongs to a different topology
+    /// instance, including when no complete topology is supplied.
+    fn bind<'deletion>(
+        topology: Option<&'topology CompleteTopology<'source>>,
+        deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,
+    ) -> Result<Self, FormatError> {
+        let mut removed = Self {
+            topology,
+            edges: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        for deletion in deletions {
+            match &deletion.target {
+                DeletionTarget::Complete {
+                    topology: identity,
+                    edge,
+                    object,
+                } => {
+                    if !topology.is_some_and(|topology| Arc::ptr_eq(identity, &topology.identity)) {
+                        return Err(FormatError::Internal(
+                            "a removed link belongs to another analysis topology".into(),
+                        ));
+                    }
+                    removed.edges.push((*edge, *object));
+                }
+                DeletionTarget::Unresolved(object) => removed.unresolved.push(*object),
+            }
+        }
+        removed.edges.sort_unstable_by_key(|&(edge, _)| edge);
+        removed.edges.dedup_by_key(|entry| entry.0);
+        Ok(removed)
+    }
+}
+
 impl RemovedLinks<'_, '_> {
     /// Appends allocations selected by reclamation policy and returns distinct physical targets.
     ///
@@ -123,38 +166,49 @@ impl<'source> AnalysisPhase<'source> {
         &mut self,
         deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,
     ) -> Result<RemovedLinks<'_, 'source>, Error> {
+        self.removal_queries(deletions).map(|(removed, _)| removed)
+    }
+
+    /// Returns bound deletions and lazy count queries over separate phase fields.
+    ///
+    /// Discovers topology only for nonempty input. An empty batch has no applicable topology in
+    /// either returned view. Defers count reads until queried, using the existing phase cache.
+    /// The caller can retain or consume the deletion batch while using the count-query view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] for the topology-identity errors of [`RemovedLinks::bind`].
+    pub(in crate::edit) fn removal_queries<'deletion>(
+        &mut self,
+        deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,
+    ) -> Result<(RemovedLinks<'_, 'source>, CountQueries<'_, 'source>), Error> {
         let mut deletions = deletions.into_iter().peekable();
-        let topology = if deletions.peek().is_some() {
-            self.topology()
+        let has_deletions = deletions.peek().is_some();
+        if has_deletions {
+            self.topology();
+        }
+        let Self {
+            engine,
+            topology,
+            counts,
+            budget: _,
+            root: _,
+            links: _,
+            references: _,
+            liveness: _,
+            allocations: _,
+            #[cfg(test)]
+                candidate_lookups: _,
+        } = self;
+        let topology = if has_deletions {
+            topology.as_ref().and_then(Option::as_ref)
         } else {
             None
         };
-        let mut removed = RemovedLinks {
-            topology,
-            edges: Vec::new(),
-            unresolved: Vec::new(),
-        };
-        for deletion in deletions {
-            match &deletion.target {
-                DeletionTarget::Complete {
-                    topology: identity,
-                    edge,
-                    object,
-                } => {
-                    if !topology.is_some_and(|topology| Arc::ptr_eq(identity, &topology.identity)) {
-                        return Err(FormatError::Internal(
-                            "a removed link belongs to another analysis topology".into(),
-                        )
-                        .into());
-                    }
-                    removed.edges.push((*edge, *object));
-                }
-                DeletionTarget::Unresolved(object) => removed.unresolved.push(*object),
-            }
-        }
-        removed.edges.sort_unstable_by_key(|&(edge, _)| edge);
-        removed.edges.dedup_by_key(|entry| entry.0);
-        Ok(removed)
+        Ok((
+            RemovedLinks::bind(topology, deletions)?,
+            CountQueries::new(engine, counts, topology),
+        ))
     }
 }
 
