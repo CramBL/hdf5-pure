@@ -32,6 +32,7 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_space::__private::AllocationClass;
@@ -308,12 +309,11 @@ pub(crate) fn build_committed_datatype_oh(
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
     );
     if references > 1 {
-        let mut refcount = Vec::with_capacity(5);
-        refcount.push(0); // version
-        refcount.extend_from_slice(&references.to_le_bytes());
         w.add_message_with_flags(
             MessageType::OBJECT_REFERENCE_COUNT,
-            refcount,
+            ObjectReferenceCountMessage::new(references)
+                .encode()
+                .to_vec(),
             MessageFlags::FORBID_SHARING,
         );
     }
