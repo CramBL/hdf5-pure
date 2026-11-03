@@ -59,7 +59,7 @@ impl GroupLinkStorage {
         if flags & LINK_INFO_RESERVED_FLAGS != 0 {
             return Err(LinkStorageError::Flags(flags));
         }
-        if info.serialize(offset_width).len() != data.len() {
+        if info.serialize(offset_width)?.len() != data.len() {
             return Err(LinkStorageError::TrailingBytes);
         }
         Self::new(&info, links, offset_width)
@@ -1010,7 +1010,10 @@ mod tests {
         assert_eq!(LinkMessage::parse(bytes, 8).unwrap(), message);
         assert_eq!(owned.encoded_len(OffsetWidth::Eight).unwrap(), bytes.len());
         assert_eq!(owned.clone().serialize(OffsetWidth::Eight).unwrap(), bytes);
-        assert_eq!(message.clone().serialize(OffsetWidth::Eight), bytes);
+        assert_eq!(
+            message.clone().serialize(OffsetWidth::Eight).unwrap(),
+            bytes
+        );
     }
 
     #[rstest]
@@ -1055,7 +1058,7 @@ mod tests {
             creation_order: Some(7),
             charset: CharacterSet::Utf8,
         };
-        let bytes = original.serialize(OffsetWidth::Eight);
+        let bytes = original.serialize(OffsetWidth::Eight).unwrap();
         let link = OwnedLink::parse(&bytes, OffsetWidth::Eight).unwrap();
         assert_eq!(link.serialize(OffsetWidth::Eight).unwrap(), bytes);
         assert_eq!(
@@ -1283,7 +1286,7 @@ mod tests {
     ) {
         let original = info(policy, dense);
         let links = vec![hard_link(b"a".to_vec(), policy.next_index().map(|_| 3))];
-        let bytes = original.serialize(width);
+        let bytes = original.serialize(width).unwrap();
         let storage = GroupLinkStorage::parse(&bytes, links.clone(), width).unwrap();
         assert_eq!(storage.info(), original);
         assert_eq!(storage.links(), links);
@@ -1325,7 +1328,7 @@ mod tests {
             storage.info().btree_creation_order_address,
             policy.is_indexed().then_some(None)
         );
-        let compact = storage.info().serialize(OffsetWidth::Eight);
+        let compact = storage.info().serialize(OffsetWidth::Eight).unwrap();
         let reparsed =
             GroupLinkStorage::parse(&compact, storage.links().to_vec(), OffsetWidth::Eight)
                 .unwrap();
@@ -1556,7 +1559,9 @@ mod tests {
 
     #[test]
     fn reserved_link_info_flags_and_trailing_bytes_are_rejected() {
-        let mut bytes = info(LinkCreationPolicy::Untracked, false).serialize(OffsetWidth::Eight);
+        let mut bytes = info(LinkCreationPolicy::Untracked, false)
+            .serialize(OffsetWidth::Eight)
+            .unwrap();
         bytes[1] = 4;
         assert_eq!(
             GroupLinkStorage::parse(&bytes, vec![], OffsetWidth::Eight).unwrap_err(),

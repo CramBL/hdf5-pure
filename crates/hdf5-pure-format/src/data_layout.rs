@@ -144,19 +144,24 @@ impl DataLayout {
     /// data at `address`.
     ///
     /// A dataset with no storage allocated has the undefined address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if `address` exceeds `offset_width` and is not
+    /// [`u64::MAX`], or [`FormatError::LengthTooLarge`] if `size` exceeds `length_width`.
     pub fn encode_contiguous(
         version: LayoutVersion,
         address: StoredAddress,
         size: u64,
         offset_width: OffsetWidth,
         length_width: LengthWidth,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, FormatError> {
         let mut buf = Vec::new();
         buf.push(version.get());
         buf.push(LAYOUT_CLASS_CONTIGUOUS);
-        bytes::write_offset(&mut buf, address.get(), offset_width);
-        bytes::write_length(&mut buf, size, length_width);
-        buf
+        bytes::try_write_offset(&mut buf, address.get(), offset_width)?;
+        bytes::try_write_length(&mut buf, size, length_width)?;
+        Ok(buf)
     }
 
     /// Returns the body of a version 4 chunked data layout message, for chunks of
@@ -177,7 +182,9 @@ impl DataLayout {
     ///
     /// Returns [`FormatError::InvalidChunkGeometry`] if `chunk_dims` has more
     /// than 254 dimensions, which with the element size do not fit the 1-byte
-    /// Dimensionality field.
+    /// Dimensionality field. Returns [`FormatError::AddressTooLarge`] if `address` exceeds
+    /// `offset_width` and is not [`u64::MAX`], or [`FormatError::LengthTooLarge`] if a filtered
+    /// single chunk's stored size exceeds `length_width`.
     pub fn encode_chunked(
         flags: ChunkedLayoutFlags,
         chunk_dims: &[u32],
@@ -213,7 +220,7 @@ impl DataLayout {
                     filter_mask,
                 }) = filtered
                 {
-                    bytes::write_length(&mut buf, filtered_size, length_width);
+                    bytes::try_write_length(&mut buf, filtered_size, length_width)?;
                     buf.extend_from_slice(&filter_mask.to_le_bytes());
                 }
             }
@@ -226,7 +233,7 @@ impl DataLayout {
                 buf.extend_from_slice(&ExtensibleArrayCreationParameters::canonical().encode());
             }
         }
-        bytes::write_offset(&mut buf, address.get(), offset_width);
+        bytes::try_write_offset(&mut buf, address.get(), offset_width)?;
         Ok(buf)
     }
 
@@ -1391,7 +1398,8 @@ mod tests {
             24,
             offset_width,
             length_width,
-        );
+        )
+        .unwrap();
         assert_eq!(message[0], version.get());
         assert_eq!(
             DataLayout::parse_with_widths(
@@ -1417,7 +1425,8 @@ mod tests {
             0,
             OffsetWidth::Four,
             LengthWidth::Eight,
-        );
+        )
+        .unwrap();
         assert_eq!(
             DataLayout::parse(&message, 4, 8).unwrap(),
             DataLayout::Contiguous {

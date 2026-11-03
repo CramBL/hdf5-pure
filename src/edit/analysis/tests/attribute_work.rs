@@ -384,7 +384,8 @@ fn link_info() -> Message {
             btree_name_index_address: None,
             btree_creation_order_address: None,
         }
-        .serialize(format::OffsetWidth::Eight),
+        .serialize(format::OffsetWidth::Eight)
+        .unwrap(),
     )
 }
 

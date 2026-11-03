@@ -328,7 +328,8 @@ mod tests {
                 btree_name_index_address: None,
                 btree_creation_order_address: None,
             }
-            .serialize(OffsetWidth::Eight),
+            .serialize(OffsetWidth::Eight)
+            .unwrap(),
         );
         let bytes = writer.serialize().unwrap();
         let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
@@ -367,7 +368,8 @@ mod tests {
                 btree_name_index_address: None,
                 btree_creation_order_address: None,
             }
-            .serialize(OffsetWidth::Eight),
+            .serialize(OffsetWidth::Eight)
+            .unwrap(),
         );
         let bytes = writer.serialize().unwrap();
         let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();

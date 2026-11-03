@@ -218,7 +218,7 @@ impl WriteEngine {
         reservations.finish()?;
         Ok(placement
             .attribute_info()
-            .serialize(crate::file_writer::OFFSET_WIDTH))
+            .serialize(crate::file_writer::OFFSET_WIDTH)?)
     }
 
     /// Places prepared attribute storage and appends its header records.
@@ -911,7 +911,7 @@ impl<'a> CompactBatch<'a> {
                         })?;
                 splice.replace_body_into(
                     &mut bytes,
-                    &info.serialize(crate::file_writer::OFFSET_WIDTH),
+                    &info.serialize(crate::file_writer::OFFSET_WIDTH)?,
                 )?;
                 has_info = true;
             } else {
@@ -964,7 +964,7 @@ impl<'a> CompactBatch<'a> {
             };
             region.push(
                 MessageType::ATTRIBUTE_INFO,
-                &info.serialize(crate::file_writer::OFFSET_WIDTH),
+                &info.serialize(crate::file_writer::OFFSET_WIDTH)?,
             );
         }
         Ok(AttrEdits {
@@ -1317,7 +1317,7 @@ fn prepare_compact_attrs(
         btree_name_index_address: None,
         btree_creation_order_address: None,
     }
-    .serialize(crate::file_writer::OFFSET_WIDTH);
+    .serialize(crate::file_writer::OFFSET_WIDTH)?;
     let mut region = strip_attr_messages(original)?;
     if let Some((start, body, _)) = find_attribute_info(original)? {
         let splice = RecordSplice::first(
@@ -1637,7 +1637,7 @@ fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
         btree_name_index_address: None,
         btree_creation_order_address: None,
     };
-    Ok(info.serialize(crate::file_writer::OFFSET_WIDTH))
+    Ok(info.serialize(crate::file_writer::OFFSET_WIDTH)?)
 }
 
 /// Counts inline Attribute records in a compact region.

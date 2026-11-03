@@ -452,7 +452,9 @@ impl FractalHeapHeader {
     /// # Errors
     ///
     /// Returns [`FormatError::UnsupportedFilteredHeapObject`] if
-    /// [`filtering`](Self::filtering) is [`FractalHeapFiltering::Filtered`].
+    /// [`filtering`](Self::filtering) is [`FractalHeapFiltering::Filtered`],
+    /// [`FormatError::AddressTooLarge`] if an address exceeds `offset_width` and is not
+    /// [`u64::MAX`], or [`FormatError::LengthTooLarge`] if a length field exceeds `length_width`.
     pub fn serialize(
         &self,
         offset_width: OffsetWidth,
@@ -493,14 +495,14 @@ impl FractalHeapHeader {
         buf.extend_from_slice(&0u16.to_le_bytes());
         buf.push(flags);
         buf.extend_from_slice(&max_managed_object_size.to_le_bytes());
-        bytes::write_length(&mut buf, next_huge_object_id, length_width);
-        bytes::write_offset(&mut buf, btree_huge_objects_address.get(), offset_width);
-        bytes::write_length(&mut buf, free_space_in_managed_blocks, length_width);
-        bytes::write_offset(
+        bytes::try_write_length(&mut buf, next_huge_object_id, length_width)?;
+        bytes::try_write_offset(&mut buf, btree_huge_objects_address.get(), offset_width)?;
+        bytes::try_write_length(&mut buf, free_space_in_managed_blocks, length_width)?;
+        bytes::try_write_offset(
             &mut buf,
             managed_block_free_space_manager_address.get(),
             offset_width,
-        );
+        )?;
         for length in [
             managed_space,
             allocated_managed_space,
@@ -511,14 +513,14 @@ impl FractalHeapHeader {
             tiny_objects_size,
             tiny_objects_count,
         ] {
-            bytes::write_length(&mut buf, length, length_width);
+            bytes::try_write_length(&mut buf, length, length_width)?;
         }
         buf.extend_from_slice(&table_width.to_le_bytes());
-        bytes::write_length(&mut buf, starting_block_size, length_width);
-        bytes::write_length(&mut buf, max_direct_block_size, length_width);
+        bytes::try_write_length(&mut buf, starting_block_size, length_width)?;
+        bytes::try_write_length(&mut buf, max_direct_block_size, length_width)?;
         buf.extend_from_slice(&max_heap_size.to_le_bytes());
         buf.extend_from_slice(&start_root_rows.to_le_bytes());
-        bytes::write_offset(&mut buf, root_block_address.get(), offset_width);
+        bytes::try_write_offset(&mut buf, root_block_address.get(), offset_width)?;
         buf.extend_from_slice(&current_rows_in_root_indirect_block.to_le_bytes());
         let checksum = crate::checksum::jenkins_lookup3(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());

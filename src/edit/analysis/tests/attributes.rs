@@ -56,7 +56,8 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
             btree_name_index_address: None,
             btree_creation_order_address: None,
         }
-        .serialize(format::OffsetWidth::Eight),
+        .serialize(format::OffsetWidth::Eight)
+        .unwrap(),
     )]);
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);

@@ -886,7 +886,7 @@ pub(super) fn modernize_shared_reference(
     let reference = crate::shared_message::parse_shared_ref_with_widths(body, widths)?;
     Ok(match reference.location {
         crate::shared_message::SharedLocation::ObjectHeader(addr) => {
-            crate::shared_message::encode_committed_ref(addr, widths.offsets)
+            crate::shared_message::encode_committed_ref(addr, widths.offsets)?
         }
         crate::shared_message::SharedLocation::SohmHeap(id) => {
             crate::shared_message::encode_sohm_ref(&id)

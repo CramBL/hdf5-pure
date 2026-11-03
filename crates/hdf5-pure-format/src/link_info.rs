@@ -8,8 +8,8 @@
 
 use alloc::vec::Vec;
 
-use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
@@ -110,7 +110,12 @@ impl LinkInfoMessage {
     /// The Flags byte has bit 0 set where [`max_creation_order`](Self::max_creation_order) is
     /// `Some`, and bit 1 where [`btree_creation_order_address`](Self::btree_creation_order_address)
     /// is. An address of `None` is stored as the undefined address.
-    pub fn serialize(&self, offset_width: OffsetWidth) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds `offset_width`, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+    pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         let Self {
             max_creation_order,
             fractal_heap_address,
@@ -131,18 +136,21 @@ impl LinkInfoMessage {
             data.extend_from_slice(&max.to_le_bytes());
         }
         let mut address = |address: Option<StoredAddress>| {
-            bytes::write_offset(
+            bytes::try_write_decoded_address(
                 &mut data,
-                address.map_or(u64::MAX, StoredAddress::get),
+                address.map_or(
+                    DecodedStoredAddress::Undefined,
+                    DecodedStoredAddress::Defined,
+                ),
                 offset_width,
-            );
+            )
         };
-        address(fractal_heap_address);
-        address(btree_name_index_address);
+        address(fractal_heap_address)?;
+        address(btree_name_index_address)?;
         if let Some(btree_creation_order_address) = btree_creation_order_address {
-            address(btree_creation_order_address);
+            address(btree_creation_order_address)?;
         }
-        data
+        Ok(data)
     }
 }
 
@@ -271,7 +279,10 @@ mod tests {
         #[case] message: LinkInfoMessage,
     ) {
         assert_eq!(
-            LinkInfoMessage::parse(&message.serialize(offset_width), offset_width.get()),
+            LinkInfoMessage::parse(
+                &message.serialize(offset_width).unwrap(),
+                offset_width.get()
+            ),
             Ok(message)
         );
     }
@@ -286,6 +297,6 @@ mod tests {
         };
         let mut expected = vec![0, 0];
         expected.extend_from_slice(&[0xFF; 16]);
-        assert_eq!(message.serialize(OffsetWidth::Eight), expected);
+        assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), expected);
     }
 }

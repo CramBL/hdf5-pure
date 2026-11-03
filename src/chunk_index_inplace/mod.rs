@@ -1093,7 +1093,7 @@ impl Located {
             self.offset_width,
             self.client_id,
             self.ea_bits.block_offset_width(),
-        );
+        )?;
         let allocation = file.allocate(&super_block, AllocationClass::Metadata)?;
         #[cfg(test)]
         alloc_probe::note_super_block();

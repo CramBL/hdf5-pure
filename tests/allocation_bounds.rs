@@ -107,7 +107,8 @@ fn parsing_ten_thousand_hard_link_messages_has_bounded_allocations() {
         btree_name_index_address: None,
         btree_creation_order_address: None,
     }
-    .serialize(OffsetWidth::Eight);
+    .serialize(OffsetWidth::Eight)
+    .unwrap();
 
     let (storage, measured) = allocation::measure("hard_link_messages_parse_and_assemble", || {
         let mut links = Vec::with_capacity(LINK_COUNT);

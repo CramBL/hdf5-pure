@@ -391,7 +391,7 @@ fn dense_inspection_rejects_inconsistent_index_metadata(
 }
 
 #[rstest]
-#[case::duplicate_info(|region: &mut OhRegion| region.push(MessageType::LINK_INFO, &crate::file_writer::COMPACT_LINK_INFO.serialize(OffsetWidth::Eight)), "a group has repeated link-info messages")]
+#[case::duplicate_info(|region: &mut OhRegion| region.push(MessageType::LINK_INFO, &crate::file_writer::COMPACT_LINK_INFO.serialize(OffsetWidth::Eight).unwrap()), "a group has repeated link-info messages")]
 #[case::duplicate_group_info(|region: &mut OhRegion| region.push(MessageType::GROUP_INFO, &[0, 0]), "a group has repeated group-info messages")]
 #[case::symbol_table(|region: &mut OhRegion| region.push(MessageType::SYMBOL_TABLE, &[0; 16]), "a group mixes symbol-table storage with modern link storage")]
 #[case::group_info_flags(|region: &mut OhRegion| {
@@ -662,11 +662,14 @@ fn fixture(storage: GroupLinkStorage, dense: bool) -> (Vec<u8>, OhRegion) {
             .serialize(StoredAddress::new(0))
             .unwrap();
         source.extend_from_slice(&image.bytes);
-        region.push(MessageType::LINK_INFO, &image.info.serialize(offset_width));
+        region.push(
+            MessageType::LINK_INFO,
+            &image.info.serialize(offset_width).unwrap(),
+        );
     } else {
         region.push(
             MessageType::LINK_INFO,
-            &storage.info().serialize(storage.offset_width()),
+            &storage.info().serialize(storage.offset_width()).unwrap(),
         );
         for link in storage.links() {
             region.push(
@@ -862,7 +865,7 @@ fn track_dense_root(path: &Path, indexed: bool) {
         .unwrap();
     let region = region.with_bytes(
         splice
-            .replace_body(&image.info.serialize(OffsetWidth::Eight))
+            .replace_body(&image.info.serialize(OffsetWidth::Eight).unwrap())
             .unwrap(),
     );
     let header = crate::edit::object_header::build_v2_object_header(&region).unwrap();

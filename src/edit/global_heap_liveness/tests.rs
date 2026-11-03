@@ -184,7 +184,7 @@ fn with_engine(base: UserblockSize, inspect: impl FnOnce(&WriteEngine)) {
     let root = Header::new()
         .message(Message::new(
             MessageType::LINK_INFO,
-            &link_info.serialize(OffsetWidth::Eight),
+            &link_info.serialize(OffsetWidth::Eight).unwrap(),
         ))
         .build();
     let mut image = Image::new();

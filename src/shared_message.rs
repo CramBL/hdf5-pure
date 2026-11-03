@@ -278,10 +278,10 @@ mod tests {
         let mut header = v2::Header::new()
             .message(Message::new(RecordType::DATASPACE, &[1, 2, 3]))
             .build();
-        let mut reference = encode_committed_ref(StoredAddress::new(64), widths.offsets);
+        let mut reference = encode_committed_ref(StoredAddress::new(64), widths.offsets).unwrap();
         let expected = match invalid {
             InvalidReference::AddressOverflow => {
-                reference = encode_committed_ref(StoredAddress::new(u64::MAX), widths.offsets);
+                reference[2..].fill(0xFF);
                 FormatError::OffsetOverflow {
                     offset: u64::MAX,
                     length: if base == 0 { 4 } else { base as u64 },
@@ -357,7 +357,7 @@ mod tests {
         };
         let file = File::from_bytes(image).unwrap();
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let reference = encode_committed_ref(StoredAddress::new(address), widths.offsets);
+        let reference = test_util::datatype::committed_reference(address);
         let error = file.with_opened_source(|source| {
             SourceResolver::with_resident(source, AccessMode::ReadOnly, widths, None)
                 .unwrap()

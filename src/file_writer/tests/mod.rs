@@ -693,7 +693,8 @@ fn a_dataset_naming_a_committed_type_stores_a_reference_to_it() {
     );
     assert_eq!(
         msg.data,
-        crate::shared_message::encode_committed_ref(StoredAddress::new(type_addr), OFFSET_WIDTH),
+        crate::shared_message::encode_committed_ref(StoredAddress::new(type_addr), OFFSET_WIDTH)
+            .unwrap(),
         "the reference must name the object the link resolves to"
     );
 }

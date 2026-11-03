@@ -449,7 +449,7 @@ fn exhausted_dense_creation_counters_reject_the_batch_before_writing(
             let mut info =
                 LinkInfoMessage::parse_with_offset_width(record.body, OffsetWidth::Eight).unwrap();
             info.max_creation_order = Some(u64::try_from(i64::MAX).unwrap());
-            let serialized = info.serialize(OffsetWidth::Eight);
+            let serialized = info.serialize(OffsetWidth::Eight).unwrap();
             let range = record.body_range;
             bytes[range].copy_from_slice(&serialized);
             replaced = true;

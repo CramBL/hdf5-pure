@@ -220,7 +220,8 @@ fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
         &crate::shared_message::encode_committed_ref(
             StoredAddress::new(248),
             crate::file_writer::OFFSET_WIDTH,
-        ),
+        )
+        .unwrap(),
     );
     bytes[3] = MessageFlags::SHARED.get();
     let tree = verbatim_copy(plain_region(bytes), DenseAttrSet::default());
@@ -673,7 +674,7 @@ fn read_object_with_messages(
 
 #[test]
 fn fresh_group_region_pairs_link_info_with_group_info() {
-    let types = region_types(&edit::group::fresh_group_region());
+    let types = region_types(&edit::group::fresh_group_region().unwrap());
     assert_eq!(types, vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]);
 }
 
@@ -884,7 +885,7 @@ fn link_creation_indexing_preserves_index_addresses_while_updating_the_counter()
 
 #[test]
 fn an_untracked_group_numbers_none_of_its_links() {
-    let mut region = edit::group::fresh_group_region();
+    let mut region = edit::group::fresh_group_region().unwrap();
     let before = region.clone();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
     assert_eq!(order.take().unwrap(), None);
@@ -912,7 +913,7 @@ fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
 
 #[test]
 fn ensure_group_info_is_idempotent() {
-    let mut region = edit::group::fresh_group_region();
+    let mut region = edit::group::fresh_group_region().unwrap();
     let before = region.clone();
     edit::group::ensure_group_info(&mut region).unwrap();
     assert_eq!(*region, *before);
@@ -1241,7 +1242,8 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
             btree_name_index_address: None,
             btree_creation_order_address: None,
         }
-        .serialize(OFFSET_WIDTH);
+        .serialize(OFFSET_WIDTH)
+        .unwrap();
         let first_info = layout.record_with_creation_index(
             MessageType::ATTRIBUTE_INFO,
             MessageFlags::FORBID_SHARING,
@@ -1611,7 +1613,7 @@ fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
         BaseAddress::new(UB),
         "userblock file must have base == UB"
     );
-    sb.root_group_address = StoredAddress::undefined(OffsetWidth::Eight);
+    sb.root_group_address = StoredAddress::new(u64::MAX - 1);
     let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
     data[off..off + bytes.len()].copy_from_slice(&bytes);
     std::fs::write(&path, &data).unwrap();
@@ -1619,7 +1621,7 @@ fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
     let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
         session.context.superblock().root_group_address,
-        StoredAddress::undefined(OffsetWidth::Eight)
+        StoredAddress::new(u64::MAX - 1)
     );
     let err = crate::group::v2::resolve_path_any_from_source(
         &session.opened_source(),
@@ -1632,7 +1634,7 @@ fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
     .unwrap_err();
     match err {
         Error::Format(FormatError::OffsetOverflow { offset, length }) => {
-            assert_eq!(offset, u64::MAX);
+            assert_eq!(offset, u64::MAX - 1);
             assert_eq!(length, UB);
         }
         other => panic!("expected root-group address overflow, got {other:?}"),
@@ -1907,13 +1909,13 @@ fn verbatim_copy(region: OhRegion, dense_attrs: DenseAttrSet) -> CopyTree {
 fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     let mut nodes = CopyTreeBuilder::default();
     let leaf = CopyNode::Group {
-        region: edit::group::fresh_group_region(),
+        region: edit::group::fresh_group_region().unwrap(),
         links: Vec::new(),
         dense_attrs: DenseAttrSet::new(vec![leaf_attr], DenseAttrCreationOrder::Untracked, [])
             .unwrap(),
     };
     let root = (0..depth).fold(leaf, |child, _| {
-        let mut region = edit::group::fresh_group_region();
+        let mut region = edit::group::fresh_group_region().unwrap();
         region
             .push_link("g", StoredAddress::new(UNDEF), None)
             .unwrap();
@@ -1958,7 +1960,8 @@ fn plain_region(bytes: Vec<u8>) -> OhRegion {
 
 fn hard_link_region(trailing: &[u8]) -> OhRegion {
     let mut body = file_writer::make_link("child", StoredAddress::new(0x1000))
-        .serialize(crate::file_writer::OFFSET_WIDTH);
+        .serialize(crate::file_writer::OFFSET_WIDTH)
+        .unwrap();
     body.extend_from_slice(trailing);
     plain_region(message_record(MessageType::LINK, &body))
 }
@@ -2079,7 +2082,7 @@ fn attr_region_in(props: ObjectHeaderPrefix, attrs: &[(&str, u16)], max: u16) ->
     };
     let mut record = layout.record(
         MessageType::ATTRIBUTE_INFO,
-        &info.serialize(crate::file_writer::OFFSET_WIDTH),
+        &info.serialize(crate::file_writer::OFFSET_WIDTH).unwrap(),
     );
     record[3] = MessageFlags::FORBID_SHARING.get();
     region.push_bytes(&record);

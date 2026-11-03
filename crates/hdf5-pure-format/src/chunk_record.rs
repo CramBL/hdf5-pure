@@ -223,7 +223,9 @@ pub fn chunk_element_encoding(
 /// # Errors
 ///
 /// Returns [`FormatError::Internal`] if the index is filtered and `chunk_size_bytes` is more than 8
-/// or the stored size does not fit `chunk_size_bytes` bytes.
+/// or the stored size does not fit `chunk_size_bytes` bytes. Returns
+/// [`FormatError::AddressTooLarge`] if the chunk address exceeds `offset_size`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
 pub(crate) fn write_chunk_element(
     buf: &mut Vec<u8>,
     chunk: &ChunkRecord,
@@ -231,7 +233,11 @@ pub(crate) fn write_chunk_element(
     has_filters: bool,
     chunk_size_bytes: usize,
 ) -> Result<(), FormatError> {
-    bytes::write_offset(buf, chunk.address.get(), offset_size);
+    bytes::try_write_decoded_address(
+        buf,
+        DecodedStoredAddress::Defined(chunk.address),
+        offset_size,
+    )?;
     if has_filters {
         let stored_size = chunk.stored_size.to_le_bytes();
         let low = low_bytes(&stored_size, chunk_size_bytes).ok_or_else(|| {

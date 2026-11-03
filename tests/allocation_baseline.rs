@@ -177,7 +177,8 @@ fn hard_link_messages_match_recorded_figures(profiler: &heapscope::Profiler) {
         btree_name_index_address: None,
         btree_creation_order_address: None,
     }
-    .serialize(OffsetWidth::Eight);
+    .serialize(OffsetWidth::Eight)
+    .unwrap();
 
     let (storage, measured) = allocation::measure_with_profiler(
         profiler,

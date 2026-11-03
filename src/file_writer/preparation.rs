@@ -9,6 +9,7 @@ use hdf5_pure_format::__private::IndexSlots;
 use crate::FillTime;
 use crate::address::BaseAddress;
 use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
 use crate::attribute_request::PreparedAttributes as AttributeRequest;
 use crate::chunked_write;
@@ -42,7 +43,6 @@ use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{AttributeSpecs, DatasetBuilder};
 
 use super::HeaderOptions;
-use super::UNDEF_ADDRESS;
 use super::layout::DataKind;
 use super::layout::DataMeasure;
 
@@ -144,7 +144,7 @@ impl PreparedDataset {
                 name,
                 dt,
                 dt_location: match committed_datatype_target {
-                    Some(_) => DatatypeLocation::Committed(UNDEF_ADDRESS),
+                    Some(_) => DatatypeLocation::Committed(StoredAddress::ZERO),
                     None => DatatypeLocation::Inline,
                 },
                 committed_datatype_target,

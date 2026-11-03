@@ -28,22 +28,23 @@ use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::signature::HDF5_SIGNATURE;
-use crate::width;
 use crate::width::FormatWidths;
 use crate::width::OffsetWidth;
 
 /// Serializes `superblock` in the version 2 and 3 layout.
 ///
-/// Writes the two width bytes, the consistency flags, the four addresses at the width
-/// `offset_size` gives, and the Jenkins lookup3 checksum over the bytes before it. An absent
-/// superblock extension address is written as the undefined address.
+/// Writes the two width bytes, the consistency flags, the four addresses at
+/// [`offset_size`](Superblock::offset_size), and the Jenkins lookup3 checksum over the preceding
+/// bytes. Encodes an absent superblock extension address as undefined.
 /// Writes base and end-of-file addresses as absolute values, and root and extension addresses
 /// as encoded base-relative values.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedVersion`] if the version is 0 or 1, and
-/// [`FormatError::Internal`] if an address does not fit the offset width.
+/// Returns [`FormatError::UnsupportedVersion`] if the version is 0 or 1,
+/// [`FormatError::AddressTooLarge`] if an address exceeds the offset width, or
+/// [`FormatError::DefinedAddressIsUndefined`] if the base, end-of-file, or root address equals
+/// that width's undefined marker. An extension address of [`u64::MAX`] is encoded as undefined.
 pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatError> {
     let status = superblock.status();
     let flags = match status {
@@ -59,33 +60,17 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
     buf.push(offset_width.get());
     buf.push(superblock.length_size.get());
     buf.push(flags);
-    write_address(
+    write_address(&mut buf, offset_width, superblock.base_address.get())?;
+    bytes::try_write_offset(
         &mut buf,
-        offset_width,
-        "base",
-        superblock.base_address.get(),
-    )?;
-    write_address(
-        &mut buf,
-        offset_width,
-        "superblock extension",
         superblock
             .superblock_extension_address
             .unwrap_or(StoredAddress::undefined(offset_width))
             .get(),
-    )?;
-    write_address(
-        &mut buf,
         offset_width,
-        "end-of-file",
-        superblock.eof_address,
     )?;
-    write_address(
-        &mut buf,
-        offset_width,
-        "root group object header",
-        superblock.root_group_address.get(),
-    )?;
+    write_address(&mut buf, offset_width, superblock.eof_address)?;
+    write_address(&mut buf, offset_width, superblock.root_group_address.get())?;
     // checksum
     let checksum = checksum::jenkins_lookup3(&buf);
     buf.extend_from_slice(&checksum.to_le_bytes());
@@ -435,20 +420,8 @@ impl SuperblockCandidateFields {
     }
 }
 
-fn write_address(
-    buf: &mut Vec<u8>,
-    width: OffsetWidth,
-    field: &str,
-    address: u64,
-) -> Result<(), FormatError> {
-    if !width::offset_width_holds(width, address) {
-        return Err(FormatError::Internal(format!(
-            "the superblock's {field} address {address:#x} does not fit a {}-byte field",
-            width.get()
-        )));
-    }
-    bytes::write_offset(buf, address, width);
-    Ok(())
+fn write_address(buf: &mut Vec<u8>, width: OffsetWidth, address: u64) -> Result<(), FormatError> {
+    bytes::try_write_defined_offset(buf, address, width)
 }
 
 const FIRST_CANDIDATE: u64 = 0;
@@ -797,16 +770,10 @@ mod tests {
         assert_eq!(parsed.superblock_extension_address, None);
         let root_at = fields.eof_address_at + LEGACY_ROOT_FIELDS_AFTER_EOF * width_bytes;
         let mut encoded = Vec::new();
-        write_address(
-            &mut encoded,
-            width,
-            "root group object header",
-            parsed.root_group_address.get(),
-        )
-        .unwrap();
+        write_address(&mut encoded, width, parsed.root_group_address.get()).unwrap();
         assert_eq!(encoded, data[root_at..root_at + width_bytes]);
         encoded.clear();
-        write_address(&mut encoded, width, "end-of-file", parsed.eof_address).unwrap();
+        write_address(&mut encoded, width, parsed.eof_address).unwrap();
         assert_eq!(
             encoded,
             data[fields.eof_address_at..fields.eof_address_at + width_bytes]
@@ -936,24 +903,72 @@ mod tests {
     }
 
     #[rstest]
-    #[case::end_of_file_address(
-        |sb: &mut Superblock| sb.eof_address = 0x1_0000,
-        "the superblock's end-of-file address 0x10000 does not fit a 2-byte field"
+    #[case::base_address_beyond(
+        |sb: &mut Superblock| sb.base_address = BaseAddress::new(0x1_0000),
+        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 }
     )]
-    fn a_value_wider_than_its_field_returns_an_internal_error(
-        #[case] widen: fn(&mut Superblock),
-        #[case] detail: &str,
+    #[case::base_address_marker(
+        |sb: &mut Superblock| sb.base_address = BaseAddress::new(0xffff),
+        FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 }
+    )]
+    #[case::base_address_maximum(
+        |sb: &mut Superblock| sb.base_address = BaseAddress::new(u64::MAX),
+        FormatError::AddressTooLarge { address: u64::MAX, offset_size: 2 }
+    )]
+    #[case::eof_address_beyond(
+        |sb: &mut Superblock| sb.eof_address = 0x1_0000,
+        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 }
+    )]
+    #[case::eof_address_marker(
+        |sb: &mut Superblock| sb.eof_address = 0xffff,
+        FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 }
+    )]
+    #[case::eof_address_maximum(
+        |sb: &mut Superblock| sb.eof_address = u64::MAX,
+        FormatError::AddressTooLarge { address: u64::MAX, offset_size: 2 }
+    )]
+    #[case::root_group_address_beyond(
+        |sb: &mut Superblock| sb.root_group_address = StoredAddress::new(0x1_0000),
+        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 }
+    )]
+    #[case::root_group_address_marker(
+        |sb: &mut Superblock| sb.root_group_address = StoredAddress::new(0xffff),
+        FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 }
+    )]
+    #[case::root_group_address_maximum(
+        |sb: &mut Superblock| sb.root_group_address = StoredAddress::new(u64::MAX),
+        FormatError::AddressTooLarge { address: u64::MAX, offset_size: 2 }
+    )]
+    fn mandatory_addresses_outside_the_defined_range_are_rejected(
+        #[case] set_address: fn(&mut Superblock),
+        #[case] expected: FormatError,
     ) {
         let mut sb = parse(&build(
             SuperblockVersion::Two,
             OffsetWidth::Two,
             LengthWidth::Two,
         ));
-        widen(&mut sb);
-        assert_eq!(
-            serialize_superblock(&sb),
-            Err(FormatError::Internal(detail.into()))
-        );
+        set_address(&mut sb);
+        assert_eq!(serialize_superblock(&sb), Err(expected));
+    }
+
+    #[rstest]
+    #[case::base(|sb: &mut Superblock, value| sb.base_address = BaseAddress::new(value))]
+    #[case::end_of_file(|sb: &mut Superblock, value| sb.eof_address = value)]
+    #[case::root(|sb: &mut Superblock, value| sb.root_group_address = StoredAddress::new(value))]
+    fn mandatory_addresses_preserve_the_largest_defined_value(
+        #[case] set_address: fn(&mut Superblock, u64),
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+    ) {
+        let mut superblock = parse(&build(SuperblockVersion::Two, width, LengthWidth::Eight));
+        let value = StoredAddress::undefined(width).get() - 1;
+        set_address(&mut superblock, value);
+        let encoded = serialize_superblock(&superblock).unwrap();
+        superblock.checksum = Some(test_util::checksum::lookup3(
+            &encoded[..encoded.len() - CHECKSUM_LEN],
+        ));
+        assert_eq!(parse(&encoded), superblock);
+        checksum::verify_trailing(&encoded).unwrap();
     }
 
     #[rstest]

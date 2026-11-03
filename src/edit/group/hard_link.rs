@@ -43,7 +43,7 @@ impl PreparedHardLinkRecord {
     ) -> Result<Self, Error> {
         let mut link = file_writer::make_link(name.as_str(), StoredAddress::new(0));
         link.creation_order = creation_order;
-        let body = link.serialize(file_writer::OFFSET_WIDTH);
+        let body = link.serialize(file_writer::OFFSET_WIDTH)?;
         if body.len() > OBJECT_HEADER_MESSAGE_MAX {
             return Err(Error::EditUnsupported(
                 "a new hard link message exceeds the object-header message size limit",

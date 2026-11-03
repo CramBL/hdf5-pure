@@ -1197,7 +1197,8 @@ mod tests {
                 &crate::shared_message::encode_committed_ref(
                     base.relative(PhysicalAddress::new(TYPE_AT)).unwrap(),
                     crate::file_writer::OFFSET_WIDTH,
-                ),
+                )
+                .unwrap(),
             );
             shared[3] = MessageFlags::SHARED.get();
             let mut layout = vec![3u8, 0];
