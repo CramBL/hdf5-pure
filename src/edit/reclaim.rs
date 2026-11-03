@@ -49,6 +49,15 @@ use super::analysis::CompleteTopology;
 use super::copy::ObjModel;
 use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
 
+/// The recognized object shape after collecting its supported storage.
+///
+/// Ownership completeness and retirement eligibility require separate evidence.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum ObjectStorageKind {
+    Dataset,
+    Group,
+}
+
 struct ChunkedStorageParts {
     data: Vec<FileRange>,
     index: Vec<FileRange>,
@@ -414,27 +423,16 @@ impl WriteEngine {
         CompleteTopology::discover(self).ok()
     }
 
-    /// Appends to `out` the span and free class of every block the object at `addr` owns, and for
-    /// a group those of its whole subtree, for reclamation after a delete.
+    /// Appends supported storage selected by the single-incoming-link deletion policy.
     ///
-    /// The walk accounts for an object header, a contiguous dataset's data block, a chunked
-    /// dataset's chunk index and chunks through
-    /// [`chunked_storage_spans`](Self::chunked_storage_spans), a dense attribute set, and a group's
-    /// links and subtree, compact or dense. An object it cannot account for in full, such as one
-    /// with a header that is not version 2 or a chunk index that cannot be walked in full,
-    /// contributes nothing and is not descended into,
-    /// so `out` never holds a region still in use. A dense set's indexes join `out` only once the
-    /// whole index set is accounted for, and its fractal heap only once the heap's ownership is
-    /// proven. A group's link storage and the objects its links reach are separate: either can be
-    /// reclaimed without the other. The walk excludes the global heap collections the objects
-    /// refer to, since objects can share a collection, and the commit frees those it leaves
-    /// unreferenced through [`AnalysisPhase::unreferenced_collection_spans`].
-    /// The walk stops at [`MAX_LINK_WALK_DEPTH`] against a hard-link cycle.
+    /// Requires a count of one in `incoming` before collecting an object's storage. For a
+    /// recognized group, visits children in topology order, stopping at [`MAX_LINK_WALK_DEPTH`].
+    /// Counts describe the root-reachable topology, and the caller establishes deletion and
+    /// publication conditions.
     ///
-    /// `incoming` holds the file-wide hard-link count of each object header address, from
-    /// [`count_incoming_hard_links`](Self::count_incoming_hard_links). An object is reclaimed, and
-    /// a group descended into, only when its count is 1, so deleting one of several hard links
-    /// leaves the object and everything below it allocated.
+    /// Uses [`Self::collect_object_storage`] for each eligible object's physical allocations and
+    /// free classes. The caller screens shared global heap collections separately through
+    /// [`AnalysisPhase::unreferenced_collection_spans`].
     pub(super) fn collect_free_spans(
         &self,
         addr: u64,
@@ -449,8 +447,6 @@ impl WriteEngine {
         // walk works in absolute file offsets. The stored address `read_object`
         // returns for a contiguous data block is converted to an absolute offset
         // before it is bounds-checked or recorded.
-        let base = self.context.addresses();
-        let file_len = self.image().len();
         if depth >= MAX_LINK_WALK_DEPTH {
             return;
         }
@@ -461,11 +457,37 @@ impl WriteEngine {
         if incoming.incoming(addr) != Some(1) {
             return;
         }
+        if self.collect_object_storage(ObjectId::new(PhysicalAddress::new(addr)), out)
+            == Some(ObjectStorageKind::Group)
+        {
+            for child in incoming.children(addr) {
+                self.collect_free_spans(child, depth + 1, incoming, out);
+            }
+        }
+    }
+
+    /// Appends supported complete physical allocations owned by one object.
+    ///
+    /// Retains allocation boundaries and free classes in the caller's batch. Collects the
+    /// object's own header, dataset storage, and independently proven dense metadata allocations.
+    /// Group children and referenced global heap collections are handled separately by the caller.
+    /// Incoming-link counts, reference completeness, and publication conditions require separate
+    /// proofs before retirement.
+    ///
+    /// Returns the recognized [`ObjectStorageKind`], which may accompany partial storage. For
+    /// example, dense indexes can be collected while heap ownership remains unproven. Returns
+    /// `None` without appending if the object is unsupported, its header allocations cannot be
+    /// read, or its chunk storage cannot be fully enumerated.
+    pub(super) fn collect_object_storage(
+        &self,
+        object: ObjectId,
+        out: &mut Vec<(FileRange, FreeClass)>,
+    ) -> Option<ObjectStorageKind> {
+        let addr = object.header_address().get();
+        let base = self.context.addresses();
+        let file_len = self.image().len();
         // The header's own chunks. If they cannot be mapped, account for nothing.
-        let spans = match self.oh_chunk_spans(addr) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let spans = self.oh_chunk_spans(addr).ok()?;
         let region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok();
         let attribute_storage = region
             .as_ref()
@@ -476,20 +498,14 @@ impl WriteEngine {
         {
             let link_storage =
                 self.dense_group_storage_spans(&spans, attribute_storage.as_deref(), &link_info);
-            self.collect_group_spans(
-                depth,
-                incoming,
-                &spans,
-                attribute_storage.as_deref(),
-                link_storage.as_deref(),
-                incoming.children(addr),
-                out,
-            );
-            return;
+            self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+            out.extend(link_storage.into_iter().flatten());
+            return Some(ObjectStorageKind::Group);
         }
         match Self::read_object(&self.opened_source(), AccessMode::ReadWrite, addr) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
                 self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+                Some(ObjectStorageKind::Dataset)
             }
             Ok(ObjModel::DatasetContiguous {
                 data_addr,
@@ -510,17 +526,11 @@ impl WriteEngine {
                         }
                     }
                 }
+                Some(ObjectStorageKind::Dataset)
             }
             Ok(ObjModel::Group { .. }) => {
-                self.collect_group_spans(
-                    depth,
-                    incoming,
-                    &spans,
-                    attribute_storage.as_deref(),
-                    None,
-                    incoming.children(addr),
-                    out,
-                );
+                self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+                Some(ObjectStorageKind::Group)
             }
             // A chunked dataset: reclaim its chunk index and chunk data blocks
             // alongside its header. `chunked_storage_spans` returns `None` for
@@ -529,12 +539,12 @@ impl WriteEngine {
             // bounds/overlap check), leaving the whole dataset as dead bytes and not freeing a
             // region that might still be in use.
             Ok(ObjModel::DatasetChunked { .. }) => {
-                if let Some(storage) = self.chunked_storage_spans(addr) {
-                    self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
-                    // Already page-typed: chunk data is raw, and the index class follows its
-                    // format allocation type or proven physical placement.
-                    out.extend(storage);
-                }
+                let storage = self.chunked_storage_spans(addr)?;
+                self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+                // Already page-typed: chunk data is raw, and the index class follows its
+                // format allocation type or proven physical placement.
+                out.extend(storage);
+                Some(ObjectStorageKind::Dataset)
             }
             // A truly unsupported object (one `read_object` cannot model): leave
             // its bytes in place because its extent is unknown.
@@ -550,28 +560,7 @@ impl WriteEngine {
             // behaviour nor this one accounted for the whole object. This leak is
             // the price of stating the rejection once, in the one function both the
             // copy planner and this walk read objects through.
-            Err(_) => {}
-        }
-    }
-
-    /// Appends the storage a group owns to `out`, then collects the storage of each child in
-    /// `children` one level deeper.
-    fn collect_group_spans(
-        &self,
-        depth: u32,
-        incoming: &CompleteTopology<'_>,
-        header_spans: &[FileRange],
-        attribute_storage: Option<&[(FileRange, FreeClass)]>,
-        link_storage: Option<&[(FileRange, FreeClass)]>,
-        children: impl IntoIterator<Item = u64>,
-        out: &mut Vec<(FileRange, FreeClass)>,
-    ) {
-        self.append_object_metadata_spans(out, header_spans, attribute_storage);
-        out.extend(link_storage.into_iter().flatten().copied());
-        // The recursion works in absolute offsets, matching `incoming`'s
-        // keys and `oh_chunk_spans`.
-        for child in children {
-            self.collect_free_spans(child, depth + 1, incoming, out);
+            Err(_) => None,
         }
     }
 
@@ -1670,6 +1659,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    mod single_object;
 
     #[rstest]
     #[case::huge_objects_apart_from_metadata_are_raw(

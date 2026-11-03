@@ -29,6 +29,7 @@ use crate::edit::SpaceOwnership;
 use crate::edit::WriteEngine;
 use crate::edit::object_header;
 use crate::edit::reclaim;
+use crate::edit::reclaim::ObjectStorageKind;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_writer::OFFSET_WIDTH;
@@ -37,6 +38,7 @@ use crate::free_space_manager;
 use crate::image::WriteBuffering;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
@@ -229,6 +231,19 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
             "{span:?} is not in {link_storage:?}"
         );
     }
+
+    let mut own_storage = Vec::new();
+    assert_eq!(
+        session.collect_object_storage(ObjectId::new(PhysicalAddress::new(addr)), &mut own_storage),
+        Some(ObjectStorageKind::Group)
+    );
+    let mut expected_own = reclaim::meta_spans(header_spans.clone())
+        .chain(link_storage.iter().copied())
+        .collect::<Vec<_>>();
+    expected_own.sort_unstable_by_key(|&(range, _)| range.start());
+    own_storage.sort_unstable_by_key(|&(range, _)| range.start());
+    assert_eq!(own_storage, expected_own);
+    assert!(data_blocks.iter().all(|block| !own_storage.contains(block)));
 
     let mut expected: Vec<(FileRange, FreeClass)> = reclaim::meta_spans(header_spans)
         .chain(link_storage)
