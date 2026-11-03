@@ -783,7 +783,7 @@ pub fn continuation_block_messages(block: &[u8]) -> Result<Range<usize>, FormatE
 const OCHK_SIGNATURE: [u8; 4] = *b"OCHK";
 
 /// The length in bytes of the checksum that ends a chunk.
-const CHECKSUM_LEN: usize = 4;
+pub(super) const CHECKSUM_LEN: usize = 4;
 
 /// The version of a version 2 object header, from the same section as
 /// [`OH_FLAG_CREATION_ORDER_TRACKED`].
