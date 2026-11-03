@@ -19,6 +19,15 @@ use crate::object_path::ObjectPathBuf;
 use super::AnalysisPhase;
 use super::CompleteTopology;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "graph-relative count transitions do not authorize allocation retirement"
+    )
+)]
+mod counts;
+
 /// A leaf name paired with its physical target and any complete-topology edge identity.
 ///
 /// An identified edge belongs to the particular topology instance that resolved it. A target
