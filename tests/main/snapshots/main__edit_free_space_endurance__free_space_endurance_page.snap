@@ -26,11 +26,11 @@ file
 reusable space (writable session)
   Metric              value
   ----------------  -------
-  bytes             252,859
-  sections (count)       77
+  bytes             252,113
+  sections (count)       78
 
 persisted space (last close)
   Metric              value
   ----------------  -------
-  bytes             252,859
+  bytes             252,113
   sections (count)       81
