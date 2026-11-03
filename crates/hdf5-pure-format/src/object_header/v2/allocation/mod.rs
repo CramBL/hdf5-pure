@@ -210,6 +210,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
 ///
 /// Borrows the source records and retains the ranges of the non-NIL records. Planning keeps
 /// those records in chunk 0, in source order, with their flags and creation indices.
+/// Use [`Self::contiguous_allocations`] to inspect chunk ranges before consuming the geometry.
 #[derive(Debug)]
 pub struct ObjectHeaderAllocationGeometry<'a> {
     prefix: ObjectHeaderPrefix,
@@ -483,6 +484,19 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         })
     }
 
+    pub fn contiguous_allocations(
+        &self,
+        address: StoredAddress,
+        allocation_len: u64,
+    ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
+        let allocation_len = Self::allocation_len(self.widths, address, allocation_len)?;
+        let (_, chunks) = self.plan_chunks(address, allocation_len)?;
+        chunks
+            .into_iter()
+            .map(|chunk| AddressRange::new(chunk.address, chunk.len.to_u64()))
+            .collect()
+    }
+
     /// Returns the complete chunk 0 length ranges that can represent the retained records.
     ///
     /// With `continued`, includes space for a continuation record. The ranges include the header
@@ -520,6 +534,20 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         address: StoredAddress,
         allocation_len: usize,
     ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
+        let (root_width, chunks) = self.plan_chunks(address, allocation_len)?;
+        Ok(ObjectHeaderAllocation {
+            geometry: self,
+            root_width,
+            chunks,
+            allocation_len,
+        })
+    }
+
+    fn plan_chunks(
+        &self,
+        address: StoredAddress,
+        allocation_len: usize,
+    ) -> Result<(UintWidth, Vec<Chunk>), FormatError> {
         let prefix = self.prefix;
         let widths = self.widths;
         let records_len = self.records_len;
@@ -564,12 +592,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
                 chunk = next;
             }
             chunks.push(chunk);
-            return Ok(ObjectHeaderAllocation {
-                geometry: self,
-                root_width,
-                chunks,
-                allocation_len,
-            });
+            return Ok((root_width, chunks));
         }
         Err(FormatError::Internal(format!(
             "a {allocation_len}-byte allocation cannot represent an object header with {records_len} message bytes"

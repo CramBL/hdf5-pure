@@ -80,6 +80,22 @@ fn continued_padding_matches_independent_bytes(
         &messages,
     )
     .unwrap();
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::with_layout(layout),
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &messages,
+    )
+    .unwrap();
+    let allocations = geometry
+        .contiguous_allocations(StoredAddress::new(128), allocation.to_u64())
+        .unwrap();
+    assert_eq!(
+        allocations
+            .iter()
+            .map(|range| (range.start(), range.length()))
+            .collect::<Vec<_>>(),
+        plan.chunks().collect::<Vec<_>>()
+    );
     let chunks = plan.chunks().collect::<Vec<_>>();
     let actual = plan.encode();
     let mut expected = Vec::new();
