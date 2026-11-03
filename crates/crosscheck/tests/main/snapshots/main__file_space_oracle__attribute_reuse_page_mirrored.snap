@@ -1,0 +1,72 @@
+---
+source: crates/crosscheck/tests/main/test_util/file_space.rs
+expression: report
+---
+Configuration
+  Property                   Value
+  -------------------------  --------
+  Memory strategy            Mirrored
+  Attribute owner            Root
+  Initial attribute storage  Compact
+
+Workload
+  Metric                          Value
+  -----------------------------  ------
+  Replacement commits                12
+  Payload bytes per replacement  24,000
+  Guard bytes                     8,192
+
+Confirmed session state
+  Phase                  File bytes  Reusable bytes  Reusable extents
+  ---------------------  ----------  --------------  ----------------
+  native fixture             16,384           3,310                 1
+  four replacements          69,632          36,221                 6
+  six and reopen             69,632          36,203                 6
+  twelve replacements        69,632          36,203                 6
+  removed                    20,480          11,175                 5
+  restored after reopen      45,056          11,627                 6
+
+checkpoint
+  measurement  value
+  -----------  --------------------------
+  case         attribute collection reuse
+  checkpoint   restored
+
+file-space properties
+  property                  hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  strategy                       PAGE     PAGE
+  persistence                    true     true
+  threshold (bytes)                 1        1
+  page size (bytes)             4,096    4,096
+  base / userblock (bytes)          0        0
+
+file sizes (absolute bytes)
+  Metric                    bytes
+  -----------------------  ------
+  hdf5-pure stored EOF     45,056
+  libhdf5 H5Fget_filesize  45,056
+  physical file            45,056
+
+free-space sections (stored addresses, byte lengths)
+  index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
+  -----  -----------------  ----------------  ---------------  --------------  -----
+      0         0x000000d8        0x00000087       0x000000d8      0x00000087  yes
+      1         0x0000026b        0x000002af       0x0000026b      0x000002af  yes
+      2         0x000007db        0x00000825       0x000007db      0x00000825  yes
+      3         0x00001000        0x00001000       0x00001000      0x00001000  yes
+      4         0x00004000        0x00001000       0x00004000      0x00001000  yes
+      5         0x0000adf0        0x00000210       0x0000adf0      0x00000210  yes
+
+free-space totals
+  measurement               hdf5-pure  libhdf5
+  ------------------------  ---------  -------
+  section count                     6        6
+  section bytes                11,627   11,627
+  H5Fget_freespace                  -   11,627
+  reported - section bytes          -        0
+
+comparison
+  measurement              value
+  -----------------------  -----
+  exact section map equal  true

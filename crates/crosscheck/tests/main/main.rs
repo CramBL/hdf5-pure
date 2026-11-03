@@ -38,6 +38,7 @@ mod dense_huge_objects;
 mod dense_link_write;
 mod edit;
 mod edit_append_inplace;
+mod edit_attribute_collections;
 mod edit_attribute_phase_change;
 mod edit_creation_order;
 mod edit_dense_attr;
