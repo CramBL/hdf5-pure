@@ -16,10 +16,15 @@ use crate::metadata_source::MetadataSource;
 use crate::width::FormatWidths;
 
 mod observation;
+mod reference_count;
 mod v1;
 mod v2;
 
 pub use observation::ObjectHeaderChunk;
+pub use reference_count::ObjectReferenceCount;
+pub use reference_count::ObjectReferenceCountField;
+pub use reference_count::ObjectReferenceCountIssue;
+pub use reference_count::ObjectReferenceCountObserver;
 
 pub use v2::AttributePhaseChange;
 pub use v2::MessageRecord;
