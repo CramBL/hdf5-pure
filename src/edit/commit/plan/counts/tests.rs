@@ -68,6 +68,8 @@ use super::HeaderCountError;
 use super::PreparedCounts;
 use super::PreparedGroup;
 
+mod combined;
+
 test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
 }
@@ -165,6 +167,7 @@ fn count_projection_reaches_each_prepared_header_form(#[case] replacement: Repla
     let prepared = PreparedCounts::new(Some(&plan), [&mut group]).unwrap();
     assert_eq!(prepared.updates.len(), 1);
     let disposition = prepared.apply().unwrap();
+    assert!(disposition.unchanged.is_empty());
     assert_eq!(disposition.rebuilt.len(), 1);
     assert!(disposition.source.is_empty() && disposition.opaque.is_empty());
     assert_eq!(disposition.rebuilt[0].bound().original(), 2);
@@ -261,6 +264,7 @@ fn record_projection_preserves_local_geometry_and_opaque_disposition(
         .unwrap()
         .apply()
         .unwrap();
+    assert!(result.unchanged.is_empty());
     let mut expected = original;
     match record {
         Record::Implicit => {
@@ -302,7 +306,10 @@ fn record_projection_preserves_local_geometry_and_opaque_disposition(
 #[case::source(Failure::Source)]
 #[case::repeated(Failure::Repeated)]
 #[case::framing(Failure::Framing)]
-fn late_projection_failures_leave_every_local_buffer_unchanged(#[case] failure: Failure) {
+fn late_projection_failures_leave_every_local_buffer_unchanged(
+    #[case] failure: Failure,
+    #[values(false, true)] combined: bool,
+) {
     let path = test_util::temp::temp_path("prepared-count-failures.h5");
     let foreign_path = test_util::temp::temp_path("foreign-count-failures.h5");
     let mut fixture = Fixture::new();
@@ -372,9 +379,29 @@ fn late_projection_failures_leave_every_local_buffer_unchanged(#[case] failure: 
             .deletion(&ObjectPathBuf::parse(path))
             .unwrap()
     });
-    let plan = phase.source_count_plan(&deletions).unwrap().unwrap();
-    let Err(error) = PreparedCounts::new(Some(&plan), &mut groups) else {
-        panic!("expected a count projection failure")
+    let (error, remaining) = if combined {
+        let added = phase.added_copy_users([]).unwrap().unwrap();
+        let plan = phase.net_count_plan(&deletions, &added).unwrap().unwrap();
+        let Err(error) = PreparedCounts::combined(&plan, &mut groups) else {
+            panic!("expected a combined count projection failure")
+        };
+        (
+            error,
+            plan.changes()
+                .map(|change| change.remaining())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        let plan = phase.source_count_plan(&deletions).unwrap().unwrap();
+        let Err(error) = PreparedCounts::new(Some(&plan), &mut groups) else {
+            panic!("expected a count projection failure")
+        };
+        (
+            error,
+            plan.changes()
+                .map(|change| change.remaining())
+                .collect::<Vec<_>>(),
+        )
     };
     match failure {
         Failure::Original => assert_eq!(
@@ -416,12 +443,7 @@ fn late_projection_failures_leave_every_local_buffer_unchanged(#[case] failure: 
             .collect::<Vec<_>>(),
         before
     );
-    assert_eq!(
-        plan.changes()
-            .map(|change| change.remaining())
-            .collect::<Vec<_>>(),
-        [1, 1]
-    );
+    assert_eq!(remaining, [1, 1]);
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -486,6 +508,7 @@ fn count_projection_keeps_empty_work_allocation_free(#[case] changed: bool, #[ca
         .unwrap()
     });
     let disposition = projection.apply().unwrap();
+    assert!(disposition.unchanged.is_empty());
     assert_eq!(disposition.rebuilt.len(), 0);
     assert_eq!(disposition.source.len(), usize::from(changed && known));
     assert_eq!(
@@ -581,6 +604,7 @@ fn one_index_projects_reversed_headers_without_copying_record_buffers(#[case] co
     assert!(measured.bytes < (count * 1_024) as u64, "{measured}");
     let disposition = prepared.apply().unwrap();
     assert_eq!(disposition.rebuilt.len(), count);
+    assert!(disposition.unchanged.is_empty());
     assert!(disposition.source.is_empty() && disposition.opaque.is_empty());
     let prefix = v2::message_record(&Message::reference_count(1), v2::HeaderFlags::default());
     for (group, pointer) in groups.iter_mut().zip(pointers) {

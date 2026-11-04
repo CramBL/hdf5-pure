@@ -1,11 +1,17 @@
+use hdf5_pure_format::__private::MessageRecordLayout;
 use rstest::rstest;
 use test_util::object_header::Message;
+use test_util::object_header::v2;
 use test_util_hdf5::file;
+use test_util_hdf5::numeric::ByteOrder;
 
 use crate::AttrValue;
 use crate::MessageType;
+use crate::access_mode::AccessMode;
+use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
+use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
 use crate::edit::group;
@@ -15,6 +21,7 @@ use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 
 use super::super::super::ReplacedHeader;
+use super::super::CountDisposition;
 use super::super::PreparedCounts;
 use super::super::PreparedGroup;
 
@@ -86,15 +93,25 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
         .unwrap()
         .deletion(&ObjectPathBuf::parse("g"))
         .unwrap();
-    let plan = phase.source_count_plan([&deletion]).unwrap().unwrap();
-    let disposition = PreparedCounts::new(Some(&plan), [&mut prepared])
+    let added = phase.added_copy_users([]).unwrap().unwrap();
+    let plan = phase.net_count_plan([&deletion], &added).unwrap().unwrap();
+    let CountDisposition {
+        rebuilt,
+        source,
+        opaque,
+        unchanged,
+    } = PreparedCounts::combined(&plan, [&mut prepared])
         .unwrap()
         .apply()
         .unwrap();
-    assert_eq!(disposition.rebuilt.len(), 1);
-    assert!(disposition.source.is_empty() && disposition.opaque.is_empty());
-    assert_eq!(disposition.rebuilt[0].bound().original(), 2);
-    assert_eq!(disposition.rebuilt[0].remaining(), 1);
+    assert_eq!(rebuilt.len(), 1);
+    assert!(source.is_empty() && opaque.is_empty());
+    assert!(unchanged.is_empty());
+    let OriginalCount::Topology(evidence) = rebuilt[0].original() else {
+        panic!("expected topology-bound count evidence")
+    };
+    assert_eq!(evidence.bound().original(), 2);
+    assert_eq!(rebuilt[0].remaining(), 1);
     let mut position = 0;
     let at = loop {
         let (kind, body, end) = prepared.region.next_message(position).unwrap().unwrap();
@@ -108,16 +125,7 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
     expected[at + 1] = 1;
     assert_eq!(&prepared.region[..], expected);
     assert_eq!(prepared.region.reference_count_mut().unwrap().count(), 1);
-    assert_eq!(
-        plan.changes()
-            .next()
-            .unwrap()
-            .bound()
-            .field()
-            .unwrap()
-            .value(),
-        2
-    );
+    assert_eq!(plan.changes().next().unwrap().field().unwrap().value(), 2);
     drop(engine);
     let native = file::libhdf5_open(&path);
     assert_eq!(native.loc_info_by_name("g").unwrap().num_links, 2);
@@ -135,6 +143,142 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
             .unwrap(),
         7
     );
+    native.close().unwrap();
+}
+
+#[rstest]
+#[case::named(true)]
+#[case::unnamed(false)]
+fn native_copy_users_project_combined_counts_without_source_writes(#[case] named: bool) {
+    let path = test_util::temp::temp_path("native-combined-counts.h5");
+    let native = file::libhdf5_create_v18(&path);
+    let datatype = ByteOrder::LittleEndian.i32_datatype();
+    native.commit_datatype("type", &datatype).unwrap();
+    let dataset = native
+        .new_dataset_builder()
+        .empty_as(&datatype)
+        .shape([1])
+        .create("data")
+        .unwrap();
+    dataset.write(&[17_i32]).unwrap();
+    assert!(dataset.dtype().unwrap().is_committed());
+    drop(dataset);
+    assert_eq!(native.loc_info_by_name("type").unwrap().num_links, 2);
+    if !named {
+        native.unlink("type").unwrap();
+    }
+    drop(datatype);
+    native.close().unwrap();
+    let engine = edit_test_util::open_engine(&path);
+    let disk = engine.disk_bytes().unwrap();
+    let mut phase = AnalysisPhase::new(&engine);
+    let (_, data) = phase
+        .topology()
+        .unwrap()
+        .find_link(&ObjectPathBuf::parse("data"))
+        .unwrap();
+    let tree = WriteEngine::read_copy_subtree(
+        &engine.opened_source(),
+        AccessMode::ReadWrite,
+        data.header_address().get(),
+        false,
+        engine.widths(),
+    )
+    .unwrap();
+    let copy = phase.copy_users(&tree).unwrap().unwrap();
+    let added = phase
+        .added_copy_users([Some(&copy), Some(&copy)])
+        .unwrap()
+        .unwrap();
+    let (target, users) = added.users().next().unwrap();
+    assert_eq!(users.get(), 2);
+    let original = if named { 2 } else { 1 };
+    let source = phase.reconstruction_source(&engine, target).unwrap();
+    let mut prepared = PreparedGroup {
+        region: super::gather(&engine, target.header_address().get()),
+        replaces: Some(ReplacedHeader::Header(source)),
+        ..PreparedGroup::default()
+    };
+    let mut expected = prepared.region.to_vec();
+    let mut position = 0;
+    let mut count_body = None;
+    while let Some((kind, body, end)) = prepared.region.next_message(position).unwrap() {
+        if kind == MessageType::OBJECT_REFERENCE_COUNT {
+            count_body = Some(body..end);
+        }
+        position = end;
+    }
+    if let Some(body) = count_body.clone() {
+        assert_eq!(
+            &expected[body.clone()],
+            Message::reference_count(original).data
+        );
+        expected[body].copy_from_slice(&Message::reference_count(3).data);
+    } else {
+        assert_eq!(original, 1);
+        assert_eq!(
+            prepared.region.layout(),
+            MessageRecordLayout::from_header_flags(v2::HeaderFlags::default().0)
+        );
+        expected.splice(
+            position..position,
+            v2::message_record(&Message::reference_count(3), v2::HeaderFlags::default()),
+        );
+    }
+    let deletion = named.then(|| {
+        phase
+            .topology()
+            .unwrap()
+            .deletion(&ObjectPathBuf::parse("type"))
+            .unwrap()
+    });
+    let plan = phase
+        .net_count_plan(deletion.as_ref(), &added)
+        .unwrap()
+        .unwrap();
+    let CountDisposition {
+        rebuilt,
+        source,
+        opaque,
+        unchanged,
+    } = PreparedCounts::combined(&plan, [&mut prepared])
+        .unwrap()
+        .apply()
+        .unwrap();
+    assert_eq!(rebuilt.len(), 1);
+    assert!(source.is_empty() && opaque.is_empty() && unchanged.is_empty());
+    assert_eq!(rebuilt[0].remaining(), 3);
+    match rebuilt[0].original() {
+        OriginalCount::Topology(original) => {
+            assert!(named);
+            assert_eq!(original.bound().field().unwrap().value(), 2);
+        }
+        OriginalCount::Referenced(original) => {
+            assert!(!named);
+            assert_eq!(original.minimum(), None);
+            assert_eq!(
+                original.field().map(|field| field.value()),
+                count_body.map(|_| 1)
+            );
+        }
+    }
+    assert_eq!(&prepared.region[..], expected);
+    assert_eq!(engine.disk_bytes().unwrap(), disk);
+    drop((rebuilt, source, opaque, unchanged));
+    drop(plan);
+    drop(added);
+    drop(copy);
+    drop(tree);
+    drop(phase);
+    drop(engine);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(
+        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        [17]
+    );
+    if named {
+        assert_eq!(native.loc_info_by_name("type").unwrap().num_links, 2);
+    }
     native.close().unwrap();
 }
 
@@ -202,18 +346,32 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
         .unwrap()
         .deletion(&ObjectPathBuf::parse("self"))
         .unwrap();
-    let plan = phase.source_count_plan([&deletion]).unwrap().unwrap();
-    assert_eq!(plan.counted_zero_objects().count(), 0);
-    assert_eq!(plan.graph_remaining(root), Some(0));
-    assert_eq!(plan.declared_remaining(root), Some(ROOT_REFERENCE_COUNT));
-    let result = PreparedCounts::new(Some(&plan), [&mut prepared])
+    let added = phase.added_copy_users([]).unwrap().unwrap();
+    let plan = phase.net_count_plan([&deletion], &added).unwrap().unwrap();
+    let removals = plan.removals().unwrap();
+    assert_eq!(removals.counted_zero_objects().count(), 0);
+    assert_eq!(removals.graph_remaining(root), Some(0));
+    assert_eq!(
+        removals.declared_remaining(root),
+        Some(ROOT_REFERENCE_COUNT)
+    );
+    let CountDisposition {
+        rebuilt,
+        source,
+        opaque,
+        unchanged,
+    } = PreparedCounts::combined(&plan, [&mut prepared])
         .unwrap()
         .apply()
         .unwrap();
-    assert_eq!(result.rebuilt.len(), 1);
-    assert!(result.source.is_empty() && result.opaque.is_empty());
-    assert_eq!(result.rebuilt[0].bound().object(), root);
-    assert_eq!(result.rebuilt[0].remaining(), ROOT_REFERENCE_COUNT);
+    assert_eq!(rebuilt.len(), 1);
+    assert!(source.is_empty() && opaque.is_empty());
+    assert!(unchanged.is_empty());
+    let OriginalCount::Topology(evidence) = rebuilt[0].original() else {
+        panic!("expected topology-bound count evidence")
+    };
+    assert_eq!(evidence.bound().object(), root);
+    assert_eq!(rebuilt[0].remaining(), ROOT_REFERENCE_COUNT);
     assert_eq!(&prepared.region[..], expected);
     assert_eq!(engine.disk_bytes().unwrap(), disk);
     drop(engine);
