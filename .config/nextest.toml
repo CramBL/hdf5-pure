@@ -143,7 +143,10 @@ package(hdf5-pure-crosscheck) & (
     test(/^edit_header_times::/) |
     test(/^edit_reference_repointing::/) |
     test(/^edit_userblock::/)
-) | (package(hdf5-pure) & test(/^edit::native_crosschecks::/))
+) | (package(hdf5-pure) & (
+    test(/^edit::native_crosschecks::/) |
+    test(/^edit::attributes::native_crosschecks::/)
+))
 '''
 test-group = "editing"
 

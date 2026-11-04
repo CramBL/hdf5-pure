@@ -195,6 +195,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "Datatype": {"Complex"},
         "FormatError": {
             "AddressTooLarge",
+            "AttributeWidthsMismatch",
             "ChunkElementSizeMismatch",
             "SuperblockStatusFlagsTooWide",
             "ComplexSizeOverflow",

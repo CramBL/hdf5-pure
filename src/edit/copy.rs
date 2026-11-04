@@ -172,9 +172,9 @@ impl WriteEngine {
 
         // Read dense attributes into owned messages and check that they can be serialized.
         let dense_attrs = if dense {
-            let stored = attributes::read_object_attrs(src, access_mode, addr)?;
+            let stored = attributes::read_object_attrs(src, access_mode, addr, widths)?;
             let set = attributes::dense_attr_set(&region, stored)?;
-            DenseAttrSet::new(set.attrs, set.creation, [])?
+            DenseAttrSet::new(widths, set.attrs, set.creation, [])?
         } else {
             DenseAttrSet::default()
         };
@@ -692,16 +692,15 @@ impl CopyNode {
                         ));
                     }
                     // Resolve the attribute's shared datatype and dataspace fields before screening.
-                    let attr =
-                        crate::attribute::AttributeMessage::parse_resolving_with_length_width(
-                            &region[body..body_end],
-                            widths.lengths,
-                            resolver,
-                        )
-                        .map_err(|source| Error::CopyScreenUnreadable {
-                            message: MessageType::ATTRIBUTE,
-                            source,
-                        })?;
+                    let attr = crate::attribute::AttributeMessage::parse_resolving_with_widths(
+                        &region[body..body_end],
+                        widths,
+                        resolver,
+                    )
+                    .map_err(|source| Error::CopyScreenUnreadable {
+                        message: MessageType::ATTRIBUTE,
+                        source,
+                    })?;
                     super::screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
                 }
                 _ => {}

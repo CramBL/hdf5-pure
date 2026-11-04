@@ -609,6 +609,7 @@ fn scan_object<S: OriginalSource + ?Sized>(
                 // for compact attributes too, to carry creation-order metadata.
                 MessageType::ATTRIBUTE_INFO
                     if crate::edit::attributes::attribute_info_is_dense(
+                        widths.offsets,
                         &region[body..body_end],
                     ) =>
                 {
@@ -620,13 +621,11 @@ fn scan_object<S: OriginalSource + ?Sized>(
                 // the object unproven rather than proven reference-free.
                 MessageType::ATTRIBUTE if shared => out.fully_read = false,
                 MessageType::ATTRIBUTE => {
-                    let Ok((attr, data_off)) =
-                        AttributeMessage::parse_resolving_at_with_length_width(
-                            &region[body..body_end],
-                            widths.lengths,
-                            &resolver,
-                        )
-                    else {
+                    let Ok((attr, data_off)) = AttributeMessage::parse_resolving_at_with_widths(
+                        &region[body..body_end],
+                        widths,
+                        &resolver,
+                    ) else {
                         out.fully_read = false;
                         p = body_end;
                         continue;

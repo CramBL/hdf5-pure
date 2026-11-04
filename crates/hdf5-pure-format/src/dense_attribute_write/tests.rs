@@ -12,6 +12,98 @@ use crate::shared_message::DatatypeLocation;
 use super::*;
 
 #[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn prepared_attribute_widths_reach_dense_geometry(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let attribute = canonical_attribute("label", 3);
+    let prepared = PreparedAttributeMessage::with_widths(widths, attribute.clone()).unwrap();
+    let expected = test_util::attribute::Attribute::new(
+        "label",
+        &test_util::datatype::fixed_string(3),
+        &test_util::dataspace::scalar(),
+        b"yyy",
+    )
+    .flags(test_util::attribute::Flags::NONE)
+    .build();
+    assert_eq!(prepared.body(), expected);
+    let (messages, dense) =
+        PreparedDenseAttrs::from_prepared(vec![prepared], DenseAttrCreationOrder::Untracked, [])
+            .unwrap();
+    assert_eq!(messages, [attribute]);
+    assert_eq!(dense.widths(), widths);
+}
+
+#[rstest]
+#[case::offsets(
+    OffsetWidth::Two,
+    LengthWidth::Eight,
+    OffsetWidth::Four,
+    LengthWidth::Eight
+)]
+#[case::lengths(
+    OffsetWidth::Eight,
+    LengthWidth::Two,
+    OffsetWidth::Eight,
+    LengthWidth::Four
+)]
+#[case::both(
+    OffsetWidth::Four,
+    LengthWidth::Two,
+    OffsetWidth::Two,
+    LengthWidth::Four
+)]
+fn prepared_attributes_reject_mixed_widths(
+    #[case] expected_offsets: OffsetWidth,
+    #[case] expected_lengths: LengthWidth,
+    #[case] actual_offsets: OffsetWidth,
+    #[case] actual_lengths: LengthWidth,
+) {
+    let first = PreparedAttributeMessage::with_widths(
+        FormatWidths {
+            offsets: expected_offsets,
+            lengths: expected_lengths,
+        },
+        canonical_attribute("first", 1),
+    )
+    .unwrap();
+    let second = PreparedAttributeMessage::with_widths(
+        FormatWidths {
+            offsets: actual_offsets,
+            lengths: actual_lengths,
+        },
+        canonical_attribute("second", 1),
+    )
+    .unwrap();
+    let Err(error) = PreparedDenseAttrs::from_prepared(
+        vec![first, second],
+        DenseAttrCreationOrder::Untracked,
+        [],
+    ) else {
+        panic!("expected AttributeWidthsMismatch");
+    };
+    assert_eq!(
+        error,
+        FormatError::AttributeWidthsMismatch {
+            expected_offset_size: expected_offsets.get(),
+            expected_length_size: expected_lengths.get(),
+            actual_offset_size: actual_offsets.get(),
+            actual_length_size: actual_lengths.get()
+        }
+    );
+}
+
+#[rstest]
 #[case::ascii_small("label", 1)]
 #[case::unicode_small("étiquette", 1)]
 #[case::ascii_managed("label", 128)]

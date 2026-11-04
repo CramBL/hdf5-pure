@@ -244,6 +244,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     [
         ("Datatype", "Complex", []),
         ("Datatype", "Unknown", ["Datatype: variants changed", "Datatype: variant_order changed"]),
+        ("FormatError", "AttributeWidthsMismatch", []),
         ("FormatError", "ComplexSizeOverflow", []),
         ("FormatError", "InvalidComplexFlags", []),
         ("FormatError", "InvalidComplexParent", []),

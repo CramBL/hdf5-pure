@@ -190,30 +190,42 @@ impl PreparedDenseAttrs {
     /// Returns the original messages in input order alongside the prepared storage.
     /// Converts version 2 bodies to version 3 by inserting the name character set. Other
     /// encoded fields are reused. Attribute numbers in `fixups` refer to positions in
-    /// `prepared`, with the same requirements as [`Self::new`].
+    /// `prepared`, with the same requirements as [`Self::new`]. All messages must have been
+    /// prepared at the same file widths. Uses eight-byte addresses and lengths for an empty input.
     ///
     /// # Errors
     ///
     /// Returns the creation-metadata and geometry errors documented by [`dense_attrs_plan`]
-    /// and the update errors documented by [`Self::new`].
+    /// and the update errors documented by [`Self::new`]. Returns
+    /// [`FormatError::AttributeWidthsMismatch`] if any message's widths differ from the first.
     pub fn from_prepared(
         prepared: Vec<PreparedAttributeMessage>,
         creation: DenseAttrCreationOrder,
         fixups: impl IntoIterator<Item = DenseAttrFixup>,
     ) -> Result<(Vec<AttributeMessage>, Self), FormatError> {
-        let (attrs, bodies): (Vec<_>, Vec<_>) = prepared
-            .into_iter()
-            .map(PreparedAttributeMessage::into_v3_parts)
-            .unzip();
-        let encoded = EncodedDenseAttrs::with_bodies(
+        let widths = prepared.first().map_or(
             FormatWidths {
                 offsets: DENSE_ATTR_OFFSET_WIDTH,
                 lengths: DENSE_ATTR_LENGTH_WIDTH,
             },
-            &attrs,
-            creation,
-            bodies,
-        )?;
+            PreparedAttributeMessage::widths,
+        );
+        for attribute in &prepared {
+            let actual = attribute.widths();
+            if actual != widths {
+                return Err(FormatError::AttributeWidthsMismatch {
+                    expected_offset_size: widths.offsets.get(),
+                    expected_length_size: widths.lengths.get(),
+                    actual_offset_size: actual.offsets.get(),
+                    actual_length_size: actual.lengths.get(),
+                });
+            }
+        }
+        let (attrs, bodies): (Vec<_>, Vec<_>) = prepared
+            .into_iter()
+            .map(PreparedAttributeMessage::into_v3_parts)
+            .unzip();
+        let encoded = EncodedDenseAttrs::with_bodies(widths, &attrs, creation, bodies)?;
         let plan = encoded.into_plan()?;
         let prepared = Self::with_plan(&attrs, plan, fixups)?;
         Ok((attrs, prepared))

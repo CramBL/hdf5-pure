@@ -19,7 +19,7 @@ use crate::message_type::MessageType;
 use crate::shared_message::DatatypeLocation;
 use crate::shared_message::SharedResolver;
 use crate::shared_message::Unresolvable;
-use crate::width::{LengthWidth, OffsetWidth};
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// An Attribute message: the name, datatype, dataspace, and data of one attribute.
 ///
@@ -41,7 +41,8 @@ pub struct AttributeMessage {
     /// The attribute's dataspace.
     pub dataspace: Dataspace,
     /// The attribute's element bytes as the message stores them, the number of elements times the
-    /// size of the datatype.
+    /// stored element size. Variable-length references and arrays of them occupy a size that
+    /// depends on the file's address width.
     pub raw_data: Vec<u8>,
     /// Whether the message refers to a committed datatype for [`datatype`](Self::datatype).
     pub datatype_location: DatatypeLocation,
@@ -134,7 +135,7 @@ impl AttributeMessage {
     ///
     /// A message whose datatype or dataspace is shared cannot be parsed this way. Use
     /// [`parse_resolving_with_length_width`](Self::parse_resolving_with_length_width) where the
-    /// file is available.
+    /// file is available. Assumes eight-byte file addresses for variable-length element storage.
     ///
     /// # Errors
     ///
@@ -147,6 +148,39 @@ impl AttributeMessage {
         length_width: LengthWidth,
     ) -> Result<AttributeMessage, FormatError> {
         Self::parse_resolving_with_length_width(data, length_width, &Unresolvable)
+    }
+
+    /// Parses an attribute body with independently selected address and length widths.
+    ///
+    /// Reads dataspace dimensions at `widths.lengths` and sizes variable-length element storage
+    /// at `widths.offsets`. Shared datatype or dataspace fields require
+    /// [`Self::parse_resolving_with_widths`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnresolvedSharedMessage`] if either field is shared, or the parsing
+    /// errors of [`Self::parse_resolving_at_with_widths`].
+    pub fn parse_with_widths(
+        data: &[u8],
+        widths: FormatWidths,
+    ) -> Result<AttributeMessage, FormatError> {
+        Self::parse_resolving_with_widths(data, widths, &Unresolvable)
+    }
+
+    /// Parses an attribute body and resolves its shared datatype or dataspace fields.
+    ///
+    /// The caller supplies a `resolver` for the same file as `widths`. Reads variable-length
+    /// element storage at `widths.offsets` and dataspace dimensions at `widths.lengths`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parsing and resolution errors of [`Self::parse_resolving_at_with_widths`].
+    pub fn parse_resolving_with_widths(
+        data: &[u8],
+        widths: FormatWidths,
+        resolver: &dyn SharedResolver,
+    ) -> Result<AttributeMessage, FormatError> {
+        Self::parse_resolving_at_with_widths(data, widths, resolver).map(|(message, _)| message)
     }
 
     /// Parses an attribute message, and resolves its datatype or dataspace through `resolver`
@@ -169,7 +203,7 @@ impl AttributeMessage {
     /// Parses an attribute message using the file's validated length width.
     ///
     /// The parser resolves a datatype or dataspace through `resolver` where the flags byte marks
-    /// the field as shared.
+    /// the field as shared. Assumes eight-byte file addresses for variable-length element storage.
     ///
     /// # Errors
     ///
@@ -217,7 +251,7 @@ impl AttributeMessage {
     /// Parses an attribute message and returns the offset at which the element bytes start.
     ///
     /// The parser uses the file's validated length width and resolves shared datatype or dataspace
-    /// fields through `resolver`.
+    /// fields through `resolver`. Assumes eight-byte file addresses for variable-length elements.
     ///
     /// # Errors
     ///
@@ -229,19 +263,48 @@ impl AttributeMessage {
         length_width: LengthWidth,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
+        Self::parse_resolving_at_with_widths(
+            data,
+            FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: length_width,
+            },
+            resolver,
+        )
+    }
+
+    /// Parses an attribute body and returns the byte offset of its element storage.
+    ///
+    /// Resolves shared datatype and dataspace fields through `resolver`. Reads dimensions at
+    /// `widths.lengths` and sizes variable-length element storage at `widths.offsets`. The returned
+    /// offset is relative to the start of `data`, including any version 1 field padding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidAttributeVersion`] if the version is unsupported,
+    /// [`FormatError::InvalidAttributeFlags`] for unsupported flags, or
+    /// [`FormatError::UnexpectedEof`] if a field is truncated. Returns
+    /// [`FormatError::OffsetOverflow`] if the element count times its stored size exceeds
+    /// [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if it exceeds [`usize::MAX`].
+    /// Propagates datatype, dataspace, stored-element-size, and resolver errors.
+    pub fn parse_resolving_at_with_widths(
+        data: &[u8],
+        widths: FormatWidths,
+        resolver: &dyn SharedResolver,
+    ) -> Result<(AttributeMessage, usize), FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let version = data[0];
 
         match version {
-            VERSION_ONE => Self::parse_v1(data, length_width),
-            VERSION_TWO | VERSION_THREE => Self::parse_fields(data, length_width, resolver),
+            VERSION_ONE => Self::parse_v1(data, widths),
+            VERSION_TWO | VERSION_THREE => Self::parse_fields(data, widths, resolver),
             _ => Err(FormatError::InvalidAttributeVersion(version)),
         }
     }
 
     fn parse_v1(
         data: &[u8],
-        length_width: LengthWidth,
+        widths: FormatWidths,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         // version(1) + reserved(1) + name_size(2) + datatype_size(2) + dataspace_size(2) = 8
         bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
@@ -265,11 +328,11 @@ impl AttributeMessage {
         // Dataspace (padded to 8-byte boundary)
         bytes::ensure_len(data, pos, dataspace_size)?;
         let dataspace =
-            Dataspace::parse_with_length_width(&data[pos..pos + dataspace_size], length_width)?;
+            Dataspace::parse_with_length_width(&data[pos..pos + dataspace_size], widths.lengths)?;
         pos += pad8(dataspace_size);
 
         // Raw data: `num_elements` × `type_size` bytes
-        let raw_data = compute_raw_data(data, pos, &dataspace, &datatype)?;
+        let raw_data = compute_raw_data(data, pos, &dataspace, &datatype, widths.offsets)?;
 
         Ok((
             AttributeMessage {
@@ -294,7 +357,7 @@ impl AttributeMessage {
     /// and value-size errors documented by [`Self::parse_resolving_with_length_width`].
     fn parse_fields(
         data: &[u8],
-        length_width: LengthWidth,
+        widths: FormatWidths,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         let AttributeFields {
@@ -305,8 +368,8 @@ impl AttributeMessage {
             data_offset,
         } = AttributeFields::parse(data)?;
         let (datatype, dataspace, datatype_location) =
-            decode_type_and_space(datatype, dataspace, flags, length_width, resolver)?;
-        let raw_data = compute_raw_data(data, data_offset, &dataspace, &datatype)?;
+            decode_type_and_space(datatype, dataspace, flags, widths.lengths, resolver)?;
+        let raw_data = compute_raw_data(data, data_offset, &dataspace, &datatype, widths.offsets)?;
         Ok((
             AttributeMessage {
                 name: extract_name(name),
@@ -510,14 +573,16 @@ impl<'a> AttributeFields<'a> {
     }
 }
 
-/// An [`AttributeMessage`] paired with its encoded body for eight-byte addresses and lengths.
+/// An [`AttributeMessage`] paired with its encoded body and file widths.
 ///
 /// The message and body are immutable until consumed. Compact writers use the body directly.
 /// Dense writers use [`PreparedDenseAttrs::from_prepared`][dense] to prepare version 3 messages
-/// and heap geometry.
+/// and heap geometry at the retained file widths. [`Self::new`] selects eight-byte addresses and
+/// lengths, and [`Self::with_widths`] accepts each width independently.
 ///
 /// [dense]: crate::dense_attribute_write::PreparedDenseAttrs::from_prepared
 pub struct PreparedAttributeMessage {
+    widths: FormatWidths,
     message: AttributeMessage,
     body: Vec<u8>,
 }
@@ -529,8 +594,70 @@ impl PreparedAttributeMessage {
     ///
     /// Returns the encoding errors documented by [`AttributeMessage::serialize`].
     pub fn new(message: AttributeMessage) -> Result<Self, FormatError> {
-        let body = message.serialize(OffsetWidth::Eight, 8)?;
-        Ok(Self { message, body })
+        Self::with_widths(
+            FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: LengthWidth::Eight,
+            },
+            message,
+        )
+    }
+
+    /// Serializes `message` and retains the selected widths for dense-storage planning.
+    ///
+    /// The caller supplies raw element bytes already encoded at `widths.offsets`. This operation
+    /// encodes metadata and copies those bytes into the message body.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoding errors of [`AttributeMessage::serialize`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, Datatype, FormatError, LengthWidth,
+    ///     OffsetWidth, VariableLengthType};
+    ///
+    /// let widths = format::FormatWidths {
+    ///     offsets: OffsetWidth::Two,
+    ///     lengths: LengthWidth::Four,
+    /// };
+    /// let message = format::AttributeMessage {
+    ///     name: "empty".into(),
+    ///     datatype: Datatype::VariableLength(VariableLengthType::sequence(Datatype::Opaque {
+    ///         size: 1,
+    ///         tag: vec![],
+    ///     })),
+    ///     dataspace: format::Dataspace {
+    ///         space_type: format::DataspaceType::Scalar,
+    ///         rank: 0,
+    ///         dimensions: vec![],
+    ///         max_dimensions: None,
+    ///     },
+    ///     raw_data: vec![0; 10],
+    ///     datatype_location: format::DatatypeLocation::Inline,
+    /// };
+    /// let prepared = format::PreparedAttributeMessage::with_widths(widths, message.clone())?;
+    /// let parsed = format::AttributeMessage::parse_with_widths(prepared.body(), widths)?;
+    /// assert_eq!(parsed, message);
+    /// assert_eq!(parsed.raw_data.len(), 10);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn with_widths(
+        widths: FormatWidths,
+        message: AttributeMessage,
+    ) -> Result<Self, FormatError> {
+        let body = message.serialize(widths.offsets, widths.lengths.get())?;
+        Ok(Self {
+            widths,
+            message,
+            body,
+        })
+    }
+
+    /// Returns the file widths used to serialize the retained body.
+    pub(crate) fn widths(&self) -> FormatWidths {
+        self.widths
     }
 
     /// Returns the message used to encode the body.
@@ -639,9 +766,10 @@ fn compute_raw_data(
     pos: usize,
     dataspace: &Dataspace,
     datatype: &Datatype,
+    offsets: OffsetWidth,
 ) -> Result<Vec<u8>, FormatError> {
     let num_elements = dataspace.num_elements();
-    let elem_size = u64::from(datatype.type_size());
+    let elem_size = u64::from(datatype::stored_type_size(datatype, offsets)?);
     let expected_size = num_elements
         .checked_mul(elem_size)
         .ok_or(FormatError::OffsetOverflow {
