@@ -1,5 +1,6 @@
 //! Builds HDF5 images with global heap references and version 2 object headers.
 
+use core::num::NonZeroU32;
 use std::path::Path;
 
 use hdf5_pure::CharacterSet;
@@ -102,6 +103,7 @@ pub struct Fixture {
     /// The bytes of the file, including unlinked global heap collections and object headers.
     pub image: Image,
     links: Vec<Message>,
+    root_count: Option<NonZeroU32>,
 }
 
 impl Fixture {
@@ -113,7 +115,14 @@ impl Fixture {
         Self {
             image,
             links: Vec::new(),
+            root_count: None,
         }
+    }
+
+    /// Sets the explicit root reference count for [`Self::write`].
+    pub fn with_root_reference_count(mut self, count: NonZeroU32) -> Self {
+        self.root_count = Some(count);
+        self
     }
 
     /// Appends a global heap collection and returns its address in the image.
@@ -143,7 +152,12 @@ impl Fixture {
     /// # Panics
     ///
     /// Panics if the root header exceeds the reserved space or the file cannot be written.
-    pub fn write(mut self, path: &Path) {
+    pub fn write(self, path: &Path) {
+        let Self {
+            mut image,
+            links,
+            root_count,
+        } = self;
         let link_info = format::LinkInfoMessage {
             max_creation_order: None,
             fractal_heap_address: None,
@@ -155,16 +169,17 @@ impl Fixture {
                 MessageType::LINK_INFO,
                 &link_info.serialize(format::OffsetWidth::Eight).unwrap(),
             ))
-            .messages(self.links)
+            .messages(root_count.map(|count| Message::reference_count(count.get())))
+            .messages(links)
             .build();
         assert!(
             root.len() <= ROOT_HEADER_SPACE,
             "the root header outgrows its space"
         );
-        self.image.place(Self::ROOT as usize, &root);
-        let eof = self.image.as_bytes().len() as u64;
-        self.image.place(0, &superblock().eof_address(eof).build());
-        std::fs::write(path, self.image.build()).unwrap();
+        image.place(Self::ROOT as usize, &root);
+        let eof = image.as_bytes().len() as u64;
+        image.place(0, &superblock().eof_address(eof).build());
+        std::fs::write(path, image.build()).unwrap();
     }
 
     /// The address of the root group's object header, directly after the superblock.
