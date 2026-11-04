@@ -170,6 +170,8 @@ impl ArrayIndexPlanRef<'_> {
         let first = starts.first().copied().ok_or_else(|| {
             FormatError::Internal("an array index has no header reservation".into())
         })?;
+        #[cfg(test)]
+        super::observations::record_index_encoding();
         match self {
             Self::Extensible(plan) => {
                 let placement = plan.place(&starts)?;
@@ -177,6 +179,8 @@ impl ArrayIndexPlanRef<'_> {
                 let mut bytes = Vec::new();
                 for block in encoding.blocks() {
                     block.encode_into(&mut bytes)?;
+                    #[cfg(test)]
+                    super::observations::record_index(bytes.len(), bytes.capacity());
                     reservations.write_next(&bytes)?;
                 }
             }
@@ -188,6 +192,8 @@ impl ArrayIndexPlanRef<'_> {
                     .into());
                 };
                 for (_, bytes) in plan.place(*header, *data)?.serialize_blocks(slots)? {
+                    #[cfg(test)]
+                    super::observations::record_index(bytes.len(), bytes.capacity());
                     reservations.write_next(&bytes)?;
                 }
             }

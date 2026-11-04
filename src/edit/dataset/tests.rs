@@ -61,6 +61,8 @@ mod contiguous;
 mod fragmented;
 pub(in crate::edit) mod lifecycle;
 mod providers;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod resources;
 
 #[rstest]
 #[case::deferred_fixed(false, false)]

@@ -1662,6 +1662,13 @@ fn chunk_index_bytes(
             None => Vec::new(),
         },
     };
+    #[cfg(all(test, feature = "std"))]
+    {
+        if !index.is_empty() {
+            crate::edit::observations::record_index_encoding();
+        }
+        crate::edit::observations::record_index(index.len(), index.capacity());
+    }
     Ok((
         index,
         chunk_index_layout(set, written_chunks, index_address)?,

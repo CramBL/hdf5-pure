@@ -137,6 +137,8 @@ impl PreparedChunk {
             },
             ChunkEncoding::Raw => ChunkFiltering::Raw,
         };
+        #[cfg(all(test, feature = "std"))]
+        crate::edit::observations::record_chunk(logical.len(), logical.capacity(), false);
         Ok(Self {
             bytes: logical,
             filtering,
@@ -157,8 +159,11 @@ impl PreparedChunk {
         logical: &[u8],
     ) -> Result<Self, FormatError> {
         Self::check_logical_length(ctx, logical.len())?;
+        let bytes = filters::compress_chunk_with(scratch, logical, pipeline, ctx)?;
+        #[cfg(all(test, feature = "std"))]
+        crate::edit::observations::record_chunk(bytes.len(), bytes.capacity(), true);
         Ok(Self {
-            bytes: filters::compress_chunk_with(scratch, logical, pipeline, ctx)?,
+            bytes,
             filtering: ChunkFiltering::Filtered { filter_mask: 0 },
         })
     }
