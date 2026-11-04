@@ -58,5 +58,5 @@ fn preparation_reads_counts_from_native_headers(
             &test_util::checksum::lookup3(&patched[..footer]).to_le_bytes()
         );
     }
-    assert_eq!(prepared.bounds.phase.engine.disk_bytes().unwrap(), before);
+    assert_eq!(prepared.engine.disk_bytes().unwrap(), before);
 }
