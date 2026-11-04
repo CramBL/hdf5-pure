@@ -1,4 +1,4 @@
-//! Planned graph and declared count remainders with source-bound eligibility for propagation.
+//! Planned graph remainders and declared net counts with source-bound propagation criteria.
 //!
 //! Only ordinary non-root objects with matching evidence and both remainders at zero are queued.
 //! Count changes remain planned values. Storage ownership, source freshness, references, and
@@ -20,6 +20,7 @@ use super::CompleteTopology;
 use super::LinkRemovalPlan;
 use super::RemovedLinks;
 
+mod added;
 mod surviving;
 
 impl<'source> AnalysisPhase<'source> {
@@ -44,11 +45,12 @@ impl<'source> AnalysisPhase<'source> {
     }
 }
 
-/// Planned graph and declared remainders with eligibility checked before child propagation.
+/// Planned graph remainders and declared net counts with checked propagation eligibility.
 ///
 /// Original source counts, fields, and topology remain unchanged. Only recognized ordinary
 /// non-root objects with zero graph and declared remainders are eligible. Allocation and
 /// publication decisions remain the caller's responsibility.
+/// Declared counts include prospective additions when supplied.
 pub(in crate::edit) struct SourceRemovalPlan<'topology, 'source> {
     plan: LinkRemovalPlan<'topology, 'source, SourceCountState<'source>>,
 }
@@ -115,7 +117,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
         ))
     }
 
-    /// Returns the planned declared remainder for a touched object with count evidence.
+    /// Returns the planned declared net count for a touched object with count evidence.
     ///
     /// Returns `None` for untouched or outside objects, or when no count evidence was supplied.
     pub(in crate::edit) fn declared_remaining(&self, object: ObjectId) -> Option<u32> {
@@ -163,7 +165,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
             .map(|(&index, _)| topology.graph.object(index).value.id)
     }
 
-    /// Returns original bounds and planned declared remainders for touched objects with evidence.
+    /// Returns original bounds and planned declared net counts for touched objects with evidence.
     ///
     /// Includes retained subjects with known counts, in topology index order. These numeric
     /// projections require separate source-write and publication permissions.
@@ -205,7 +207,7 @@ impl CountedZeroObject<'_, '_> {
     }
 }
 
-/// A planned declared remainder paired with its unchanged original count bound.
+/// A planned declared net count paired with its unchanged original count bound.
 ///
 /// The projection describes a numeric change independently of permission to write the field.
 pub(in crate::edit) struct DeclaredCountChange<'plan, 'source> {
@@ -219,7 +221,7 @@ impl<'source> DeclaredCountChange<'_, 'source> {
         self.bound
     }
 
-    /// Returns the declared count after the planned removals.
+    /// Returns the declared count after the planned removals and any supplied additions.
     pub(in crate::edit) fn remaining(&self) -> u32 {
         self.remaining
     }
