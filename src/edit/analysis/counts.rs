@@ -32,6 +32,7 @@ use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
 mod added_users;
+pub(super) mod balance;
 mod referenced;
 
 impl<'source> AnalysisPhase<'source> {
