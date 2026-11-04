@@ -3,8 +3,10 @@
 use std::collections::BTreeMap;
 
 use crate::edit::analysis::DeclaredCountChange;
+use crate::edit::analysis::NetCountPlan;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::SourceRemovalPlan;
+use crate::edit::analysis::counts::changes::{CountChange, OriginalCount};
 use crate::edit::object_header::reference_count::HeaderCount;
 use crate::edit::object_header::reference_count::HeaderCountError;
 use crate::object_graph::ObjectId;
@@ -15,7 +17,7 @@ use super::RelocatedDataset;
 /// Exclusive checked count views with planned values and retained change dispositions.
 ///
 /// Construction leaves owned records unchanged. Application updates or inserts selected local
-/// count records. Each original change value is retained in its replacement disposition.
+/// count records. Each original change value is retained in its local projection disposition.
 /// Source-write and retirement permissions are established separately.
 pub(super) struct PreparedCounts<'region, Change> {
     updates: Vec<(HeaderCount<'region>, u32)>,
@@ -62,6 +64,57 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, DeclaredCountChange<'plan,
     }
 }
 
+impl<'region, 'plan, 'source> PreparedCounts<'region, CountChange<'plan, 'source>> {
+    /// Prepares local net-count updates while retaining each target's original typed evidence.
+    ///
+    /// Retains unchanged counts separately without querying their local records. Skips group
+    /// iteration for empty or entirely unchanged work. Empty work requires no heap allocation.
+    /// Retaining nonempty unchanged evidence may allocate.
+    ///
+    /// Matches changed targets through the shared predecessor index and checks their original
+    /// counts. Construction leaves every owned record unchanged. Source writes, retirement,
+    /// source freshness, and publication require separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountProjectionError::Phase`] for a predecessor from another phase,
+    /// [`CountProjectionError::Repeated`] for repeated predecessor identities,
+    /// [`CountProjectionError::Region`] for invalid matching framing, or
+    /// [`CountProjectionError::Original`] if a supported local count differs from its original
+    /// source-bound count.
+    pub(super) fn combined(
+        plan: &'plan NetCountPlan<'_, 'source>,
+        groups: impl IntoIterator<Item = &'region mut PreparedGroup>,
+    ) -> Result<Self, CountProjectionError> {
+        let mut unchanged = Vec::new();
+        let changes = plan.evidence_changes().filter_map(|change| {
+            let (object, original) = match change.original() {
+                OriginalCount::Referenced(original) => (original.object(), original.original()),
+                OriginalCount::Topology(original) => {
+                    let bound = original.bound();
+                    (bound.object(), bound.original())
+                }
+            };
+            let remaining = change.remaining();
+            if original == remaining {
+                unchanged.push(change);
+                return None;
+            }
+            Some((
+                CountValues {
+                    object,
+                    original,
+                    remaining,
+                },
+                change,
+            ))
+        });
+        let mut prepared = Self::project(changes, groups, |source| plan.shares_phase(source))?;
+        prepared.disposition.unchanged = unchanged;
+        Ok(prepared)
+    }
+}
+
 impl<'region, Change> PreparedCounts<'region, Change> {
     /// Creates an empty projection with no heap allocation.
     fn empty() -> Self {
@@ -71,6 +124,7 @@ impl<'region, Change> PreparedCounts<'region, Change> {
                 rebuilt: Vec::new(),
                 source: Vec::new(),
                 opaque: Vec::new(),
+                unchanged: Vec::new(),
             },
         }
     }
@@ -185,7 +239,7 @@ impl<'region, Change> PreparedCounts<'region, Change> {
     }
 }
 
-/// Original change values partitioned by their replacement-record disposition.
+/// Original change values partitioned by their local projection disposition.
 ///
 /// Source writes and retirement require separate permissions for every disposition.
 pub(super) struct CountDisposition<Change> {
@@ -195,6 +249,8 @@ pub(super) struct CountDisposition<Change> {
     pub(super) source: Vec<Change>,
     /// Changes with ambiguous or unsupported replacement counts and their exact reasons.
     pub(super) opaque: Vec<(Change, HeaderCountError)>,
+    /// Targets whose planned count equals the original count, without a local record query.
+    pub(super) unchanged: Vec<Change>,
 }
 
 /// A physical predecessor identity with its original and planned declared counts.

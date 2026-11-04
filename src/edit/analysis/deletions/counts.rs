@@ -23,6 +23,8 @@ use super::CompleteTopology;
 use super::PlannedDeletion;
 use super::RemovedLinks;
 
+pub(in crate::edit) use net::NetCountPlan;
+
 mod added;
 mod net;
 mod ownership;
