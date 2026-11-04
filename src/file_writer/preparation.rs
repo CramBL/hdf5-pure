@@ -233,6 +233,68 @@ impl PreparedDataset {
                 None,
             )
         };
+        self.measure_prepared(
+            data_address,
+            data,
+            messages,
+            dense_attr_info,
+            libver,
+            header,
+        )
+    }
+
+    /// Measures a dataset and retains records for its occupied chunk array.
+    ///
+    /// The descriptor is [`None`] for contiguous storage, unresolved object references, single
+    /// chunks, and arrays without stored chunks. Copies encoded chunk metadata or moves prepared
+    /// provider records and logical slots into the descriptor. The writer reads provider payloads
+    /// during emission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::measure`] for contiguous storage and unresolved references.
+    /// Propagates chunk preparation, array planning, header serialization, and descriptor errors.
+    #[cfg(feature = "std")]
+    pub(super) fn measure_source(
+        &self,
+        data_address: StoredAddress,
+        chunk_set: Option<&CompressedChunkSet>,
+        dense_attr_info: Option<&[u8]>,
+        libver: LibVer,
+        header: HeaderOptions<'_>,
+    ) -> Result<(DatasetMeasure, Option<VerbatimPayload>), FormatError> {
+        if !self.is_chunked() || self.storage.reference_targets().is_some() {
+            return self
+                .measure(data_address, chunk_set, dense_attr_info, libver, header)
+                .map(|measure| (measure, None));
+        }
+        let prepared = self.prepare_chunks(data_address, chunk_set)?;
+        let (messages, data) = prepared.measure()?;
+        let measured = self.measure_prepared(
+            data_address,
+            data,
+            Some((messages.layout_message, messages.pipeline_message)),
+            dense_attr_info,
+            libver,
+            header,
+        )?;
+        Ok((measured, prepared.into_array_payload()?))
+    }
+
+    /// Serializes the header to measure its length and retains the supplied storage geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::build_header`].
+    fn measure_prepared(
+        &self,
+        data_address: StoredAddress,
+        data: DataMeasure,
+        messages: Option<(Vec<u8>, Option<Vec<u8>>)>,
+        dense_attr_info: Option<&[u8]>,
+        libver: LibVer,
+        header: HeaderOptions<'_>,
+    ) -> Result<DatasetMeasure, FormatError> {
         let header_len = self
             .build_header(
                 data_address,
@@ -466,37 +528,127 @@ impl PreparedDataset {
         data_address: StoredAddress,
         chunk_set: Option<&CompressedChunkSet>,
     ) -> Result<(ChunkedHeader, DataMeasure), FormatError> {
-        if let Some(rc) = self.storage.chunks() {
-            let prepared = VerbatimChunks::new(
-                &rc.meta,
-                &self.ds.dimensions,
-                &rc.chunk_dims,
-                rc.element_size,
-                rc.flags,
-                rc.pipeline_message.as_deref(),
-                data_address,
-                self.maxshape.as_deref(),
-            )?;
-            let data = DataMeasure::chunked(prepared.payload_len(), prepared.array_geometry())?;
-            data_address.checked_add(data.length()?)?;
-            Ok((
-                ChunkedHeader {
-                    layout_message: prepared
-                        .layout_message(data_address.checked_add(prepared.payload_len())?)?,
-                    pipeline_message: rc.pipeline_message.clone(),
-                },
-                data,
-            ))
+        self.prepare_chunks(data_address, chunk_set)?.measure()
+    }
+
+    /// Prepares provider metadata or borrows a retained encoded chunk set.
+    ///
+    /// The writer reads provider payloads during emission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if required encoded chunks are absent. Propagates
+    /// provider metadata errors from [`VerbatimChunks::new`].
+    fn prepare_chunks<'a>(
+        &'a self,
+        data_address: StoredAddress,
+        chunk_set: Option<&'a CompressedChunkSet>,
+    ) -> Result<PreparedChunks<'a>, FormatError> {
+        let storage = if let Some(rc) = self.storage.chunks() {
+            PreparedChunkStorage::Verbatim {
+                chunks: VerbatimChunks::new(
+                    &rc.meta,
+                    &self.ds.dimensions,
+                    &rc.chunk_dims,
+                    rc.element_size,
+                    rc.flags,
+                    rc.pipeline_message.as_deref(),
+                    data_address,
+                    self.maxshape.as_deref(),
+                )?,
+                pipeline: rc.pipeline_message.as_deref(),
+            }
         } else {
-            let set = chunk_set.ok_or_else(|| {
+            PreparedChunkStorage::Encoded(chunk_set.ok_or_else(|| {
                 FormatError::Internal("an encoded dataset has no prepared chunk set".into())
-            })?;
-            let (raw_length, header) = set.measure_payload_at(data_address)?;
-            let data = DataMeasure::chunked(raw_length, set.array_geometry())?;
-            data_address.checked_add(data.length()?)?;
-            Ok((header, data))
+            })?)
+        };
+        Ok(PreparedChunks {
+            data_address,
+            storage,
+        })
+    }
+}
+
+/// Prepared chunk storage at a stored payload start.
+///
+/// Encoded chunks and filter-pipeline bytes are borrowed. Provider records are owned.
+struct PreparedChunks<'a> {
+    data_address: StoredAddress,
+    storage: PreparedChunkStorage<'a>,
+}
+
+impl PreparedChunks<'_> {
+    /// Measures storage and prepares layout and pipeline messages.
+    ///
+    /// Provider-backed measurement checks the complete payload and array end before constructing
+    /// header buffers. Planning array geometry may allocate. Encoded measurement prepares headers
+    /// through [`CompressedChunkSet::measure_payload_at`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the payload or array end exceeds [`u64::MAX`].
+    /// Propagates array planning and layout serialization errors.
+    fn measure(&self) -> Result<(ChunkedHeader, DataMeasure), FormatError> {
+        let Self {
+            data_address,
+            storage,
+        } = self;
+        Ok(match storage {
+            PreparedChunkStorage::Encoded(chunks) => {
+                let (raw_length, header) = chunks.measure_payload_at(*data_address)?;
+                let data = DataMeasure::chunked(raw_length, chunks.array_geometry())?;
+                data_address.checked_add(data.length()?)?;
+                (header, data)
+            }
+            PreparedChunkStorage::Verbatim { chunks, pipeline } => {
+                let data = DataMeasure::chunked(chunks.payload_len(), chunks.array_geometry())?;
+                data_address.checked_add(data.length()?)?;
+                (
+                    ChunkedHeader {
+                        layout_message: chunks
+                            .layout_message(data_address.checked_add(chunks.payload_len())?)?,
+                        pipeline_message: pipeline.map(<[u8]>::to_vec),
+                    },
+                    data,
+                )
+            }
+        })
+    }
+
+    /// Captures records and logical slots for an occupied array.
+    ///
+    /// Moves prepared provider vectors or copies metadata from encoded storage. Returns [`None`]
+    /// for storage without an occupied array.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoded metadata errors of [`CompressedChunkSet::array_payload_at`].
+    #[cfg(feature = "std")]
+    fn into_array_payload(self) -> Result<Option<VerbatimPayload>, FormatError> {
+        let Self {
+            data_address,
+            storage,
+        } = self;
+        match storage {
+            PreparedChunkStorage::Encoded(chunks) => chunks.array_payload_at(data_address),
+            PreparedChunkStorage::Verbatim {
+                chunks,
+                pipeline: _,
+            } => Ok(chunks.array_kind().map(|_| chunks.into_payload())),
         }
     }
+}
+
+/// Borrowed encoded storage or prepared provider records for chunk measurement.
+enum PreparedChunkStorage<'a> {
+    /// A retained set of encoded chunks.
+    Encoded(&'a CompressedChunkSet),
+    /// Owned chunk records with a borrowed filter-pipeline message.
+    Verbatim {
+        chunks: VerbatimChunks<'a>,
+        pipeline: Option<&'a [u8]>,
+    },
 }
 
 /// Header length and storage geometry for reserving a dataset's file regions.
@@ -764,6 +916,29 @@ pub(super) fn emit_empty_index<S: ByteSink>(
 ) -> Result<(), EmissionError<S::Error>> {
     index
         .write_at(address, |address, bytes| {
+            put_array_block(sink, base, address, bytes)
+        })
+        .map_err(flatten_emission_error)
+}
+
+/// Serializes consecutive array blocks through the checked sink adapter.
+///
+/// The caller positions `sink` at the resolved physical start of `address`. A failure can leave
+/// partial output. Chunk records are supplied through `slots`. Payload providers remain separate.
+///
+/// # Errors
+///
+/// Returns output errors as [`EmissionError::Sink`]. Propagates array planning, slot, encoding,
+/// and physical-range errors as [`EmissionError::Format`].
+pub(super) fn emit_array<S: ByteSink>(
+    sink: &mut S,
+    base: BaseAddress,
+    measure: &ArrayMeasure,
+    slots: &IndexSlots<'_>,
+    address: StoredAddress,
+) -> Result<(), EmissionError<S::Error>> {
+    measure
+        .write_consecutive(slots, address, |address, bytes| {
             put_array_block(sink, base, address, bytes)
         })
         .map_err(flatten_emission_error)
@@ -1388,6 +1563,106 @@ mod tests {
             emitted.peak_bytes <= records as u64 + 2 * largest + blocks * 128 + 16_384,
             "{emitted}"
         );
+    }
+
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::fixed(false, false, "fixed_provider_measurement_overflow")]
+    #[case::fixed_filtered(false, true, "filtered_fixed_provider_measurement_overflow")]
+    #[case::extensible(true, false, "extensible_provider_measurement_overflow")]
+    #[case::extensible_filtered(true, true, "filtered_extensible_provider_measurement_overflow")]
+    fn provider_measurement_rejects_index_overflow_before_allocating_headers(
+        #[case] unlimited: bool,
+        #[case] filtered: bool,
+        #[case] region: &str,
+    ) {
+        use test_util::allocation;
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let pipeline = filtered.then(|| test_util::filter_pipeline::user_filter(true));
+        assert!(!pipeline.as_ref().is_some_and(Vec::is_empty));
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_raw_chunks_lazy(
+            crate::make_i32_type(),
+            &[4],
+            unlimited.then_some(&[crate::MaxExtent::Unlimited][..]),
+            &[2],
+            NonZeroUsize::new(4).unwrap(),
+            ChunkedLayoutFlags::NONE,
+            pipeline,
+            vec![
+                ChunkMeta {
+                    compressed_size: 8,
+                    filter_mask: u32::from(filtered)
+                };
+                2
+            ],
+            Box::new(CountingProvider(Arc::clone(&reads))),
+        );
+        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let address = StoredAddress::new(u64::MAX - 16);
+        let prepared = dataset.prepare_chunks(address, None).unwrap();
+        let records = [
+            ChunkRecord {
+                address,
+                stored_size: 8,
+                filter_mask: u32::from(filtered),
+            },
+            ChunkRecord {
+                address: address.checked_add(8).unwrap(),
+                stored_size: 8,
+                filter_mask: u32::from(filtered),
+            },
+        ];
+        let slots = IndexSlots::new(&records, &[0, 1], 2).unwrap();
+        let widths = super::super::WIDTHS;
+        let index = if unlimited {
+            format::build_extensible_array_at(
+                &slots,
+                8,
+                widths.offsets,
+                widths.lengths,
+                filtered,
+                StoredAddress::ZERO,
+            )
+        } else {
+            format::build_fixed_array_at(
+                &slots,
+                8,
+                widths.offsets,
+                widths.lengths,
+                filtered,
+                StoredAddress::ZERO,
+            )
+        }
+        .unwrap();
+        let length = 16 + u64::try_from(index.len()).unwrap();
+        let (control, positive) =
+            allocation::measure("provider_measurement_overflow_control", || {
+                vec![0_u8; 1_024]
+            });
+        assert!(positive.blocks > 0, "{positive}");
+        assert_eq!(positive.peak_bytes, 1_024, "{positive}");
+        assert_eq!(positive.live_bytes, 1_024, "{positive}");
+        drop(control);
+        let (error, measured) = allocation::measure(region, || prepared.measure().err().unwrap());
+        assert_eq!(
+            error,
+            FormatError::OffsetOverflow {
+                offset: address.get(),
+                length
+            }
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(measured.live_bytes, 0, "{measured}");
+        if unlimited {
+            assert!(measured.peak_bytes > 0, "{measured}");
+            assert!(measured.peak_bytes <= 4_096, "{measured}");
+        } else {
+            assert_eq!(measured.blocks, 0, "{measured}");
+            assert_eq!(measured.bytes, 0, "{measured}");
+            assert_eq!(measured.peak_bytes, 0, "{measured}");
+        }
     }
 
     #[rstest]

@@ -164,6 +164,65 @@ fn assigning_verbatim_addresses_preserves_records_on_overflow(
     }
 }
 
+#[cfg(feature = "std")]
+#[rstest]
+#[case::above_four_gibibytes(1 << 40, false)]
+#[case::last_valid(u64::MAX - 16, false)]
+#[case::overflow(u64::MAX - 15, true)]
+fn payload_descriptor_relocation_preserves_records_and_capacity(
+    #[case] address: u64,
+    #[case] overflow: bool,
+) {
+    let prepared = VerbatimChunks::new(
+        &[
+            ChunkMeta {
+                compressed_size: 7,
+                filter_mask: 1,
+            },
+            ChunkMeta {
+                compressed_size: 9,
+                filter_mask: 2,
+            },
+        ],
+        &[2, 1],
+        &[1, 1],
+        convert::nz(8),
+        ChunkedLayoutFlags::NONE,
+        Some(&[]),
+        StoredAddress::new(512),
+        Some(&[MaxExtent::Fixed(2), MaxExtent::Fixed(8)]),
+    )
+    .unwrap();
+    let mut payload = prepared.into_payload();
+    let before = payload.records.clone();
+    let records = payload.records.as_ptr();
+    let capacity = payload.records.capacity();
+    let slots = payload.slot_of_chunk.clone();
+    let result = payload.assign_data_address(StoredAddress::new(address));
+    if overflow {
+        assert_eq!(
+            result.unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: address,
+                length: 16
+            }
+        );
+        assert_eq!(payload.records, before);
+    } else {
+        result.unwrap();
+        let mut expected = before;
+        expected[0].address = StoredAddress::new(address);
+        expected[1].address = StoredAddress::new(address + 7);
+        assert_eq!(payload.records, expected);
+    }
+    assert_eq!(payload.records.as_ptr(), records);
+    assert_eq!(payload.records.capacity(), capacity);
+    assert_eq!(payload.slot_of_chunk, slots);
+    assert_eq!(payload.slot_of_chunk, [0, 8]);
+    assert_eq!(payload.index_slots, 16);
+    assert_eq!(payload.len(), 16);
+}
+
 #[rstest]
 #[case::largest(u64::from(u32::MAX), false)]
 #[case::too_wide(u64::from(u32::MAX) + 1, true)]

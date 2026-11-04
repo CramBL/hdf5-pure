@@ -1,7 +1,8 @@
 //! File layout and emission from an indexed source of object metadata.
 //!
-//! The writer reconstructs individual objects during planning and emission. The retained plan
-//! contains allocations, object-use counts, and serialized file-space managers.
+//! The writer reconstructs individual objects during planning and emission. Per-object records
+//! retain allocations, object-use counts, and occupied chunk records with logical slots. The plan
+//! also retains serialized file-space managers. Source and provider storage have separate costs.
 
 use core::num::NonZeroU64;
 
@@ -41,6 +42,7 @@ use crate::attribute::AttributeMessage;
 use crate::chunked_write::ByteSink;
 use crate::chunked_write::CompressedChunkSet;
 use crate::chunked_write::EmptyChunkIndex;
+use crate::chunked_write::VerbatimPayload;
 use crate::convert::Narrow;
 use crate::datatype::Datatype;
 use crate::error::Error;
@@ -308,10 +310,10 @@ impl Object {
             .as_ref()
             .map(|dense| dense.attr_info_message(StoredAddress::ZERO))
             .transpose()?;
-        let (header, data, data_measure, links, dense_links) = match &self.kind {
+        let (header, data, data_measure, array_payload, links, dense_links) = match &self.kind {
             Kind::Dataset(dataset) => {
                 let chunks = self.chunks()?;
-                let measured = dataset.measure(
+                let (measured, array_payload) = dataset.measure_source(
                     StoredAddress::ZERO,
                     chunks.as_ref(),
                     info.as_deref(),
@@ -325,6 +327,7 @@ impl Object {
                         length: measured.data.length()?,
                     }),
                     measured.data,
+                    array_payload,
                     None,
                     None,
                 )
@@ -368,6 +371,7 @@ impl Object {
                     header.len() as u64,
                     None,
                     layout::DataMeasure::new(0, layout::DataKind::Contiguous),
+                    None,
                     plan.as_ref().map(|plan| Allocation {
                         address: StoredAddress::ZERO,
                         length: plan.serialized_len(),
@@ -382,6 +386,7 @@ impl Object {
                 0,
                 None,
                 layout::DataMeasure::new(0, layout::DataKind::Contiguous),
+                None,
                 None,
                 None,
             ),
@@ -404,6 +409,7 @@ impl Object {
             },
             data,
             data_measure,
+            array_payload: array_payload.map(Box::new),
             dense_links,
             heaps,
             references: 1,
@@ -633,8 +639,9 @@ enum Kind {
 
 /// Stored allocations and file metadata for emission from a retained source.
 ///
-/// Object metadata is reconstructed from `source` for layout checks and emission. Each record
-/// holds allocation spans and counts. Serialized file-space managers are retained.
+/// Object metadata is reconstructed from `source` for layout checks and emission. Records retain
+/// allocation spans, counts, and metadata for occupied chunk arrays. Serialized file-space
+/// managers are retained.
 pub(crate) struct Plan<S> {
     source: S,
     records: Vec<Record>,
@@ -769,8 +776,9 @@ impl<S: ObjectSource> Plan<S> {
     /// Writes allocations in address order while reconstructing one source object at a time.
     ///
     /// The working object is retained across adjacent allocations of that object. Chunk providers
-    /// supply verbatim payloads during data emission. The writer encodes chunks when emitting
-    /// a header or data region.
+    /// supply verbatim payloads during data emission. With a retained descriptor, the writer
+    /// serializes the array from its chunk records. For reconstructed encoded storage, the writer
+    /// prepares chunks when emitting a header or data region.
     ///
     /// # Errors
     ///
@@ -904,25 +912,7 @@ impl<S: ObjectSource> Plan<S> {
                             let Kind::Dataset(dataset) = &mut object.kind else {
                                 return Err(inconsistent().into());
                             };
-                            if dataset.is_chunked() {
-                                dataset
-                                    .build_chunked(
-                                        span.address,
-                                        chunks.as_ref(),
-                                        &self.records[*index].data_measure,
-                                        self.records[*index]
-                                            .data_measure
-                                            .array_address(span.address)?,
-                                    )?
-                                    .data
-                                    .emit(&mut sink, BaseAddress::ZERO, &dataset.storage)
-                                    .map_err(emission_error)?;
-                            } else {
-                                dataset
-                                    .contiguous_data()
-                                    .emit(&mut sink, BaseAddress::ZERO, &dataset.storage)
-                                    .map_err(emission_error)?;
-                            }
+                            self.records[*index].emit_data(&mut sink, dataset, chunks.as_ref())?;
                         }
                         _ => return Err(inconsistent().into()),
                     }
@@ -1279,6 +1269,8 @@ struct Record {
     data: Option<Allocation>,
     /// Payload length, storage kind, and retained array block geometry.
     data_measure: layout::DataMeasure,
+    /// Chunk records and logical slots for an occupied array, excluding encoded bytes.
+    array_payload: Option<Box<VerbatimPayload>>,
     /// Relative name-index geometry for the dense links in `metadata`.
     dense_links: Option<DenseLinks>,
     heaps: Vec<Allocation>,
@@ -1288,6 +1280,81 @@ struct Record {
 }
 
 impl Record {
+    /// Relocates retained chunk records before storing the data allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if retained records have no data allocation or their
+    /// payload length differs from the measurement. Propagates relocation errors from
+    /// [`VerbatimPayload::assign_data_address`].
+    fn assign_data(&mut self, data: Option<Allocation>) -> Result<(), FormatError> {
+        if let Some(payload) = &mut self.array_payload {
+            payload.assign_data_address(data.ok_or_else(inconsistent)?.address)?;
+            if payload.len() != self.data_measure.payload_length() {
+                return Err(inconsistent());
+            }
+        }
+        self.data = data;
+        Ok(())
+    }
+
+    /// Writes a data allocation using retained array records when available.
+    ///
+    /// The caller positions `sink` at the data allocation's start. With a retained descriptor,
+    /// provider-backed output uses its records for payload checks and array serialization.
+    /// Encoded payloads are borrowed from `chunks`. Source reconstruction and encoding are separate
+    /// operations. A failure can leave partial output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if required allocations, array
+    /// geometry, or encoded chunks are absent. Propagates payload planning, provider,
+    /// serialization, and output errors.
+    fn emit_data(
+        &self,
+        sink: &mut impl ByteSink<Error = std::io::Error>,
+        dataset: &PreparedDataset,
+        chunks: Option<&CompressedChunkSet>,
+    ) -> Result<(), Error> {
+        let address = self.data.ok_or_else(inconsistent)?.address;
+        if !dataset.is_chunked() {
+            return dataset
+                .contiguous_data()
+                .emit(sink, BaseAddress::ZERO, &dataset.storage)
+                .map_err(emission_error);
+        }
+        if let Some(payload) = &self.array_payload {
+            if let Some(source) = dataset.storage.chunks() {
+                payload
+                    .emit_payload(sink, source.provider.0.as_ref())
+                    .map_err(emission_error)?;
+            } else {
+                chunks.ok_or_else(inconsistent)?.emit_payload(sink)?;
+            }
+            super::preparation::emit_array(
+                sink,
+                BaseAddress::ZERO,
+                self.data_measure.array.as_ref().ok_or_else(inconsistent)?,
+                &payload.index_slots()?,
+                self.data_measure
+                    .array_address(address)?
+                    .ok_or_else(inconsistent)?,
+            )
+            .map_err(emission_error)
+        } else {
+            dataset
+                .build_chunked(
+                    address,
+                    chunks,
+                    &self.data_measure,
+                    self.data_measure.array_address(address)?,
+                )?
+                .data
+                .emit(sink, BaseAddress::ZERO, &dataset.storage)
+                .map_err(emission_error)
+        }
+    }
+
     /// Returns dense link addresses from the reserved span and relative geometry.
     ///
     /// # Errors
@@ -1436,7 +1503,7 @@ impl FileLayout {
                 |_, placed| Ok(placed),
             )?;
             for (record, placed) in records.iter_mut().zip(data) {
-                record.data = placed;
+                record.assign_data(placed)?;
             }
             let info = settings.persist().then(|| {
                 file_space_info::persistent_managers(
@@ -1456,7 +1523,7 @@ impl FileLayout {
         } else {
             for record in &mut *records {
                 if record.data.is_some() {
-                    record.data = record.data_measure.reserve(&mut allocation)?;
+                    record.assign_data(record.data_measure.reserve(&mut allocation)?)?;
                 }
             }
             let layout::ClassicLayout {
@@ -1636,7 +1703,10 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use hdf5_pure_format::__private as format;
+    use hdf5_pure_format::__private::ChunkRecord;
     use hdf5_pure_format::__private::DenseLinkPlan;
+    use hdf5_pure_format::__private::IndexSlots;
     use hdf5_pure_format::__private::LinkCreationPolicy;
     use hdf5_pure_format::__private::LinkInfoMessage;
     use hdf5_pure_format::__private::OwnedLink;
@@ -1666,6 +1736,8 @@ mod tests {
     use crate::address::StoredAddressExt;
     use crate::chunked_write::ChunkMeta;
     use crate::chunked_write::ChunkProvider;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use crate::chunked_write::VerbatimPayload;
     use crate::data_layout::ChunkIndexLayout;
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::data_layout::DataLayout;
@@ -2163,13 +2235,21 @@ mod tests {
     #[case::persistent(Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true)))]
     #[case::page(Some(FileSpaceSettings::new(FileSpaceStrategy::Page)))]
     #[case::persistent_page(Some(FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true)))]
-    fn verbatim_payloads_are_read_once_after_metadata_planning(
+    fn array_descriptors_preserve_payload_reads_and_values(
         #[case] settings: Option<FileSpaceSettings>,
+        #[values(false, true)] encoded: bool,
+        #[values(false, true)] unlimited: bool,
     ) {
         let reads = Arc::new(Mutex::new(Vec::new()));
+        let loads = Arc::new(AtomicUsize::new(0));
         let plan = Plan::new(
             ChunkSource {
                 reads: Arc::clone(&reads),
+                loads: Arc::clone(&loads),
+                encoded,
+                unlimited,
+                chunks: 2,
+                chunk_elements: 2,
             },
             settings,
             None,
@@ -2177,8 +2257,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*reads.lock().unwrap(), Vec::<usize>::new());
-        let file = File::from_bytes(plan.finish().unwrap()).unwrap();
-        assert_eq!(*reads.lock().unwrap(), [0, 1]);
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert!(plan.records[0].array_payload.is_some());
+        let record = &plan.records[0];
+        let payload = record.data.unwrap().address;
+        let width = if encoded { 12 } else { 8 };
+        let records = [
+            ChunkRecord {
+                address: payload,
+                stored_size: width,
+                filter_mask: 0,
+            },
+            ChunkRecord {
+                address: payload.checked_add(width).unwrap(),
+                stored_size: width,
+                filter_mask: 0,
+            },
+        ];
+        let slots = IndexSlots::new(&records, &[0, 1], 2).unwrap();
+        let array = payload.checked_add(width * 2).unwrap();
+        let expected = if unlimited {
+            format::build_extensible_array_at(
+                &slots,
+                8,
+                super::super::OFFSET_WIDTH,
+                super::super::LENGTH_WIDTH,
+                encoded,
+                array,
+            )
+        } else {
+            format::build_fixed_array_at(
+                &slots,
+                8,
+                super::super::OFFSET_WIDTH,
+                super::super::LENGTH_WIDTH,
+                encoded,
+                array,
+            )
+        }
+        .unwrap();
+        let image = plan.finish().unwrap();
+        let at = usize::try_from(array.get()).unwrap();
+        assert_eq!(&image[at..at + expected.len()], expected);
+        let file = File::from_bytes(image).unwrap();
+        assert_eq!(
+            *reads.lock().unwrap(),
+            if encoded { vec![] } else { vec![0, 1] }
+        );
+        assert_eq!(loads.load(Ordering::Relaxed), 2);
         assert_eq!(file.file_space_settings().unwrap(), settings);
         assert_eq!(file.root().datasets().unwrap(), ["values"]);
         let dataset = file.dataset("values").unwrap();
@@ -2187,8 +2313,77 @@ mod tests {
         assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4]);
     }
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[rstest]
+    #[case::provider_small(false, 16, "provider_array_records")]
+    #[case::provider_large(false, 128, "many_provider_array_records")]
+    #[case::encoded_small(true, 16, "encoded_array_records")]
+    #[case::encoded_large(true, 128, "many_encoded_array_records")]
+    fn array_descriptor_planning_bounds_retained_and_active_storage(
+        #[case] encoded: bool,
+        #[case] chunks: usize,
+        #[case] region: &str,
+    ) {
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let source = ChunkSource {
+            reads: Arc::clone(&reads),
+            loads: Arc::clone(&loads),
+            encoded,
+            unlimited: false,
+            chunks,
+            chunk_elements: 128,
+        };
+        let (control, positive) =
+            allocation::measure("array_descriptor_control", || vec![0_u8; 1_024]);
+        assert!(positive.blocks > 0, "{positive}");
+        assert_eq!(positive.peak_bytes, 1_024, "{positive}");
+        drop(control);
+        let (plan, measured) = allocation::measure(region, || {
+            Plan::new(source, None, None, LibVer::V110).unwrap()
+        });
+        let descriptors = chunks * (mem::size_of::<ChunkRecord>() + mem::size_of::<u64>());
+        let retained = plan.records.capacity() * mem::size_of::<Record>()
+            + descriptors
+            + mem::size_of::<VerbatimPayload>();
+        let payload_bytes = chunks * 128 * 4;
+        assert_eq!(measured.live_bytes, retained as u64, "{measured}");
+        assert!(measured.live_bytes >= descriptors as u64, "{measured}");
+        assert!(measured.peak_bytes >= measured.live_bytes, "{measured}");
+        assert!(
+            measured.peak_bytes <= (retained + payload_bytes * 4 + 65_536) as u64,
+            "{measured}"
+        );
+        assert!(reads.lock().unwrap().is_empty());
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        let file = File::from_bytes(plan.finish().unwrap()).unwrap();
+        assert_eq!(loads.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *reads.lock().unwrap(),
+            if encoded {
+                vec![]
+            } else {
+                (0..chunks).collect()
+            }
+        );
+        let dataset = file.dataset("values").unwrap();
+        assert_eq!(dataset.shape().unwrap(), [(chunks * 128) as u64]);
+        assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![128]));
+        assert_eq!(
+            dataset.read_i32().unwrap(),
+            (1..=chunks * 128)
+                .map(|value| i32::try_from(value).unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
+
     struct ChunkSource {
         reads: Arc<Mutex<Vec<usize>>>,
+        loads: Arc<AtomicUsize>,
+        encoded: bool,
+        unlimited: bool,
+        chunks: usize,
+        chunk_elements: usize,
     }
 
     impl ObjectSource for ChunkSource {
@@ -2204,24 +2399,47 @@ mod tests {
                     LinkCreationPolicy::Untracked,
                 )?);
             }
+            let Self {
+                reads,
+                loads,
+                encoded,
+                unlimited,
+                chunks,
+                chunk_elements,
+            } = self;
+            loads.fetch_add(1, Ordering::Relaxed);
             let mut builder = DatasetBuilder::new("values");
+            if *encoded {
+                let values: Vec<_> = (1..=chunks * chunk_elements)
+                    .map(|value| i32::try_from(value).unwrap())
+                    .collect();
+                builder
+                    .with_i32_data(&values)
+                    .with_chunks(&[*chunk_elements as u64])
+                    .with_fletcher32();
+                if *unlimited {
+                    builder.with_maxshape(&[MaxExtent::Unlimited]);
+                }
+                return Ok(Object::dataset(builder)?);
+            }
             builder.with_raw_chunks_lazy(
                 crate::make_i32_type(),
-                &[4],
-                None,
-                &[2],
+                &[(chunks * chunk_elements) as u64],
+                unlimited.then_some(&[MaxExtent::Unlimited][..]),
+                &[*chunk_elements as u64],
                 NonZeroUsize::new(4).unwrap(),
                 ChunkedLayoutFlags::NONE,
                 None,
                 vec![
                     ChunkMeta {
-                        compressed_size: 8,
+                        compressed_size: (chunk_elements * 4) as u64,
                         filter_mask: 0
                     };
-                    2
+                    *chunks
                 ],
                 Box::new(CountingChunks {
-                    reads: Arc::clone(&self.reads),
+                    reads: Arc::clone(reads),
+                    chunk_elements: *chunk_elements,
                 }),
             );
             Ok(Object::dataset(builder)?)
@@ -2241,16 +2459,18 @@ mod tests {
 
     struct CountingChunks {
         reads: Arc<Mutex<Vec<usize>>>,
+        chunk_elements: usize,
     }
 
     impl ChunkProvider for CountingChunks {
         fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
-            let chunks = [[1_i32, 2], [3, 4]];
-            let chunk = chunks
-                .get(index)
-                .ok_or_else(|| FormatError::Internal("the test source has two chunks".into()))?;
-            self.reads.lock().unwrap().push(index);
-            for value in chunk {
+            let Self {
+                reads,
+                chunk_elements,
+            } = self;
+            reads.lock().unwrap().push(index);
+            for element in 0..*chunk_elements {
+                let value = i32::try_from(index * chunk_elements + element + 1).unwrap();
                 out.extend_from_slice(&value.to_le_bytes());
             }
             Ok(())
