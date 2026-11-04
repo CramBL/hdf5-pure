@@ -381,7 +381,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 mod group_links;
 pub(crate) mod object_header;
 #[cfg(test)]
-mod observations;
+pub(crate) mod observations;
 mod paged_persistence;
 mod reclaim;
 mod reservation;

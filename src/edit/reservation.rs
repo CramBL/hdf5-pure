@@ -69,6 +69,8 @@ impl<'a> ReservationPlan<'a> {
             }
             if plan.engine.fresh_page_boundary.is_none() {
                 let addresses = plan.engine.context.addresses();
+                #[cfg(test)]
+                super::observations::record_preferred_probe();
                 let mut batch = plan.engine.space.reservation_batch(1);
                 let reservation = batch.reserve(preferred.reservation());
                 batch.finish();
@@ -342,6 +344,8 @@ impl<'a> ReservationPlan<'a> {
                 .space
                 .reservation_batch(if reuse { requests.len() } else { 0 })
         };
+        #[cfg(test)]
+        let request_count = requests.len();
         let result = requests.try_for_each(|request| {
             let planned = Self::reserve_one(
                 &mut batch,
@@ -356,6 +360,8 @@ impl<'a> ReservationPlan<'a> {
             Ok(())
         });
         *work = batch.finish();
+        #[cfg(test)]
+        super::observations::record_reservations(request_count, *work);
         if aggregate {
             engine.aggregation = aggregation;
         }
