@@ -18,6 +18,8 @@ use super::list::{self, FreeList, FreeListError};
 use super::persistence::{ManagerKind, PageParts, TRAILING_RESERVE_TAILS};
 use super::reservation::{ReservationBatch, ReservationRequest};
 use super::snapshot::AdmittedFreeSnapshot;
+use super::snapshot::RetainedExtent;
+use super::snapshot::RetainedKind;
 
 mod admission;
 
@@ -403,6 +405,32 @@ impl PagedEdit {
     /// Borrows classified and unclassified admitted extents and their cached byte totals.
     pub(crate) fn admitted_snapshot(&self) -> AdmittedFreeSnapshot<'_> {
         AdmittedFreeSnapshot::paged(self.page_size, &self.meta, &self.raw, &self.unclassified)
+    }
+
+    /// Borrows exact dead, unclassified, and pending padding extents without global sorting.
+    pub(crate) fn retained_extents(&self) -> impl Iterator<Item = RetainedExtent> + '_ {
+        self.dead
+            .extents()
+            .iter()
+            .copied()
+            .map(|extent| RetainedExtent::new(extent, RetainedKind::Dead))
+            .chain(
+                self.unclassified
+                    .extents()
+                    .iter()
+                    .copied()
+                    .map(|extent| RetainedExtent::new(extent, RetainedKind::Unclassified)),
+            )
+            .chain(
+                self.meta_pad.iter().copied().map(|extent| {
+                    RetainedExtent::new(extent, RetainedKind::Padding(PageType::Meta))
+                }),
+            )
+            .chain(
+                self.raw_pad.iter().copied().map(|extent| {
+                    RetainedExtent::new(extent, RetainedKind::Padding(PageType::Raw))
+                }),
+            )
     }
 
     /// Returns the start of the free run that reaches `eoa` across all PAGE lists.
