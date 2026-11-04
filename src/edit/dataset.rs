@@ -70,6 +70,7 @@ use super::block::{BlockRequest, EncodingDependency};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
 use super::reservation::ReservationChoice;
 use super::reservation::ReservationFailure;
+use super::reservation::ReservationPlan;
 use super::retirement::ChunkAllocation;
 use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
@@ -1087,17 +1088,18 @@ impl WriteEngine {
 
     /// Writes a prepared dataset's chunk storage and returns its object-header bytes.
     ///
-    /// Chunks are encoded once before their storage is sized and allocated. For PAGE layouts with
-    /// an undefined index address, the writer constructs the layout and filter-pipeline messages
-    /// directly. For allocated PAGE array layouts, the writer calls
-    /// [`Self::write_paged_chunk_set`]. For other layouts and non-PAGE files, the writer calls
-    /// [`Self::write_contiguous_chunk_set`].
+    /// Chunks are encoded once before placement. The writer calls [`Self::write_array_chunk_set`]
+    /// for allocated PAGE array layouts and for nonempty flat array layouts with reusable space
+    /// when a fresh PAGE boundary is not pending. For PAGE layouts with an undefined index address,
+    /// the writer constructs the layout and filter-pipeline messages directly. For other layouts,
+    /// the writer calls [`Self::write_contiguous_chunk_set`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the filter context or pipeline is invalid, chunks cannot be
     /// encoded, the header or attributes cannot be serialized, or allocation geometry is invalid.
     /// Returns [`Error::Io`] if writing chunk storage, attributes, or allocation padding fails.
+    /// Returns [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
     fn build_chunked_dataset(&mut self, fd: &mut FlatDataset) -> Result<Vec<u8>, Error> {
         let chunk_dims = fd.chunk_options.resolve_chunk_dims(&fd.ds.dimensions);
         let ctx = ChunkContext::from_datatype(&chunk_dims, &fd.dt)?;
@@ -1120,14 +1122,22 @@ impl WriteEngine {
         } else {
             None
         };
-        let geometry = page.and_then(|_| set.array_geometry());
+        let geometry = if page.is_some()
+            || (!set.chunks().is_empty()
+                && self.fresh_page_boundary.is_none()
+                && self.space.reusable_sections().next().is_some())
+        {
+            set.array_geometry()
+        } else {
+            None
+        };
         let ChunkedHeader {
             layout_message,
             pipeline_message,
         } = if let Some(header) = unallocated {
             header
         } else if let Some(geometry) = geometry {
-            self.write_paged_chunk_set(&set, geometry)?
+            self.write_array_chunk_set(&set, geometry)?
         } else {
             self.write_contiguous_chunk_set(&set)?
         };
@@ -1206,22 +1216,32 @@ impl WriteEngine {
         Ok(plan.into_header())
     }
 
-    /// Writes a prepared PAGE chunk set with independent metadata array blocks.
+    /// Writes retained chunks and encodes their array index at reserved addresses.
     ///
-    /// The caller obtains `geometry` from `set`. For a nonempty payload, the writer reserves one
-    /// raw allocation and writes the retained encoded chunk slices into it. The writer reserves each
-    /// complete index block through [`ArrayIndexPlan`]'s metadata requests. The returned messages
-    /// refer to the chosen stored addresses.
+    /// The caller obtains `geometry` from `set`. For a nonempty payload, the writer prefers one raw
+    /// allocation, including the index in flat files. When attempting reuse, the writer reserves each
+    /// chunk separately if the preferred allocation cannot be reserved. In PAGE files and the flat
+    /// fallback, the writer reserves each complete index block through [`ArrayIndexPlan`]'s metadata
+    /// requests. The writer encodes chunk records from the chosen stored addresses, sizes, filter
+    /// masks, and logical slots.
     ///
-    /// The caller is responsible for allocation rollback and publication within the enclosing
-    /// commit.
+    /// Complete capacity remains reserved after partial emission. The caller handles allocation
+    /// rollback and reference publication within the enclosing commit.
+    ///
+    /// # Working memory
+    ///
+    /// The caller retains raw input and encoded chunks, with compression scratch allocated during
+    /// their preparation. Placement allocates requests, reservations, and chunk records. Index
+    /// preparation allocates slot lookup storage and encoding buffers. The writer submits retained
+    /// chunk slices through the reservation plan. Operation buffering and backend mirroring have
+    /// separate storage, and physical write grouping depends on operation buffering.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] for invalid geometry, addresses, slot records, or header encoding.
     /// Returns [`Error::Io`] if writing payload, metadata, or padding fails, or
     /// [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
-    fn write_paged_chunk_set(
+    fn write_array_chunk_set(
         &mut self,
         set: &CompressedChunkSet,
         geometry: ChunkArrayGeometry<'_>,
@@ -1253,41 +1273,164 @@ impl WriteEngine {
                     length: chunk.stored_size(),
                 })
         })?;
-        let mut requests = Vec::new();
-        if let Some(size) = NonZeroU64::new(length) {
-            requests.push(BlockRequest::complete(
-                ReservationRequest::new(size, AllocationClass::Raw),
-                EncodingDependency::Independent,
-            ));
-        }
-        requests.extend(index.requests()?);
-        let mut reservations = self
-            .plan_blocks(&requests)
-            .map_err(ReservationFailure::into_error)?;
-        let mut records = Vec::with_capacity(set.chunks().len());
-        if length > 0 {
-            let mut cursor = reservations
+        let metadata = index.requests()?;
+        let paged = self.space.is_paged();
+        let (choice, mut reservations) = self.plan_created_array_storage(set, length, &metadata)?;
+        if !paged && choice == ReservationChoice::Preferred {
+            let address = reservations
                 .addresses()
                 .relative(reservations.reservations()[0].range().start())?;
-            for chunk in set.chunks() {
-                records.push(ChunkRecord {
-                    address: cursor,
-                    stored_size: chunk.stored_size(),
-                    filter_mask: chunk.filter_mask(),
-                });
-                cursor = cursor.checked_add(chunk.stored_size())?;
+            let plan = chunked_write::plan_chunked_at(set, address)?;
+            if plan.data_len != reservations.reservations()[0].range().length() {
+                return Err(FormatError::Internal(
+                    "chunked creation length differs from its reservation".into(),
+                )
+                .into());
             }
-            reservations.write_next_with(|writer| {
-                for chunk in set.chunks() {
-                    writer.write(chunk.bytes())?;
+            reservations.write_next_with(|writer| plan.emit(|bytes| writer.write(bytes)))?;
+            reservations.finish()?;
+            return Ok(plan.into_header());
+        }
+        let mut records = Vec::with_capacity(set.chunks().len());
+        if length > 0 {
+            match choice {
+                ReservationChoice::Preferred => {
+                    let mut cursor = reservations
+                        .addresses()
+                        .relative(reservations.reservations()[0].range().start())?;
+                    for chunk in set.chunks() {
+                        records.push(ChunkRecord {
+                            address: cursor,
+                            stored_size: chunk.stored_size(),
+                            filter_mask: chunk.filter_mask(),
+                        });
+                        cursor = cursor.checked_add(chunk.stored_size())?;
+                    }
+                    reservations.write_next_with(|writer| {
+                        set.chunks()
+                            .iter()
+                            .try_for_each(|chunk| writer.write(chunk.bytes()))
+                    })?;
                 }
-                Ok(())
-            })?;
+                ReservationChoice::Fallback => {
+                    for (chunk, reservation) in set.chunks().iter().zip(reservations.reservations())
+                    {
+                        records.push(ChunkRecord {
+                            address: reservations
+                                .addresses()
+                                .relative(reservation.range().start())?,
+                            stored_size: chunk.stored_size(),
+                            filter_mask: chunk.filter_mask(),
+                        });
+                    }
+                    for chunk in set.chunks() {
+                        reservations.write_next(chunk.bytes())?;
+                    }
+                }
+            }
         }
         let slots = set.index_slots(&records)?;
         let address = index.write(&slots, &mut reservations)?;
         reservations.finish()?;
         Ok(set.header(&records, address)?)
+    }
+
+    /// Reserves a compound payload or separate chunks with complete array index capacity.
+    ///
+    /// The caller passes the total stored chunk length as `length` and metadata requests from the
+    /// same [`ArrayIndexPlan`]. The preferred raw allocation includes metadata in flat files.
+    /// In PAGE files, the writer reserves metadata blocks separately.
+    ///
+    /// When reuse is available and a fresh PAGE boundary is not pending, the writer tries the
+    /// preferred allocation through [`Self::plan_blocks_with_fallback`]. On a miss, the
+    /// writer constructs independent chunk requests once. With no reusable raw space in PAGE
+    /// files, or no reusable space in flat files, the writer plans the preferred shape directly.
+    /// The caller handles rollback and publication for the complete plan, including partial
+    /// reservation failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the preferred length overflows or a fallback chunk has zero
+    /// stored length. Propagates reservation errors from [`Self::plan_blocks`] and
+    /// [`Self::plan_blocks_with_fallback`].
+    fn plan_created_array_storage(
+        &mut self,
+        set: &CompressedChunkSet,
+        length: u64,
+        metadata: &[BlockRequest],
+    ) -> Result<(ReservationChoice, ReservationPlan<'_>), Error> {
+        let paged = self.space.is_paged();
+        let dependency = if paged {
+            EncodingDependency::Independent
+        } else {
+            EncodingDependency::Allocation
+        };
+        let reuse = self.fresh_page_boundary.is_none()
+            && if paged {
+                self.space.largest(AllocationClass::Raw) > 0
+            } else {
+                self.space.reusable_sections().next().is_some()
+            };
+        let preferred = if paged {
+            length
+        } else {
+            metadata.iter().try_fold(length, |offset, request| {
+                offset
+                    .checked_add(request.encoded_length())
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset,
+                        length: request.encoded_length(),
+                    })
+            })?
+        };
+        if let Some(size) = NonZeroU64::new(preferred)
+            && reuse
+        {
+            self.plan_blocks_with_fallback(
+                BlockRequest::complete(
+                    ReservationRequest::new(size, AllocationClass::Raw),
+                    dependency,
+                ),
+                if paged { metadata } else { &[] },
+                || {
+                    let mut requests = set
+                        .chunks()
+                        .iter()
+                        .map(|chunk| {
+                            Ok(BlockRequest::complete(
+                                ReservationRequest::new(
+                                    NonZeroU64::new(chunk.stored_size()).ok_or(
+                                        FormatError::InvalidChunkGeometry(
+                                            "chunk allocation is empty",
+                                        ),
+                                    )?,
+                                    AllocationClass::Raw,
+                                ),
+                                EncodingDependency::Independent,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, FormatError>>()?;
+                    if !paged {
+                        requests.extend_from_slice(metadata);
+                    }
+                    Ok(requests)
+                },
+            )
+        } else {
+            let mut requests = Vec::new();
+            if let Some(size) = NonZeroU64::new(preferred) {
+                requests.push(BlockRequest::complete(
+                    ReservationRequest::new(size, AllocationClass::Raw),
+                    dependency,
+                ));
+            }
+            if paged {
+                requests.extend_from_slice(metadata);
+            }
+            self.plan_blocks(&requests)
+                .map(|plan| (ReservationChoice::Preferred, plan))
+        }
+        .map_err(ReservationFailure::into_error)
     }
 
     /// Places attributes selected for dense storage during dataset preparation.

@@ -418,7 +418,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
     );
 }
 
-fn prepared(creation: Creation, filtered: bool) -> CompressedChunkSet {
+pub(super) fn prepared(creation: Creation, filtered: bool) -> CompressedChunkSet {
     let mut builder = DatasetBuilder::new("d");
     creation.configure(&mut builder, filtered);
     let FlatDataset {
