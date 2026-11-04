@@ -308,7 +308,7 @@ impl Object {
             .as_ref()
             .map(|dense| dense.attr_info_message(StoredAddress::ZERO))
             .transpose()?;
-        let (header, data, chunked, links, empty_index, dense_links) = match &self.kind {
+        let (header, data, data_measure, links, dense_links) = match &self.kind {
             Kind::Dataset(dataset) => {
                 let chunks = self.chunks()?;
                 let measured = dataset.measure(
@@ -322,11 +322,10 @@ impl Object {
                     measured.header_len as u64,
                     Some(Allocation {
                         address: StoredAddress::ZERO,
-                        length: measured.data_len,
+                        length: measured.data.length()?,
                     }),
-                    dataset.is_chunked(),
+                    measured.data,
                     None,
-                    chunks.as_ref().and_then(CompressedChunkSet::empty_index),
                     None,
                 )
             }
@@ -368,19 +367,24 @@ impl Object {
                 (
                     header.len() as u64,
                     None,
-                    false,
+                    layout::DataMeasure::new(0, layout::DataKind::Contiguous),
                     plan.as_ref().map(|plan| Allocation {
                         address: StoredAddress::ZERO,
                         length: plan.serialized_len(),
                     }),
-                    None,
                     link_info
                         .as_ref()
                         .map(|info| DenseLinks::new(info, group_info.phase_change()))
                         .transpose()?,
                 )
             }
-            Kind::Committed(_) => (0, None, false, None, None, None),
+            Kind::Committed(_) => (
+                0,
+                None,
+                layout::DataMeasure::new(0, layout::DataKind::Contiguous),
+                None,
+                None,
+            ),
         };
         let preflight = !heaps.is_empty()
             || dense.is_some()
@@ -399,8 +403,7 @@ impl Object {
                 links,
             },
             data,
-            chunked,
-            empty_index,
+            data_measure,
             dense_links,
             heaps,
             references: 1,
@@ -826,7 +829,8 @@ impl<S: ObjectSource> Plan<S> {
                 spans.push((
                     span,
                     record
-                        .empty_index
+                        .data_measure
+                        .empty_index()
                         .map_or(Part::Data(index), Part::EmptyIndex),
                 ));
             }
@@ -942,7 +946,7 @@ impl<S: ObjectSource> Plan<S> {
                 check_length(&self.attributes(&object, span)?, span)?;
             }
             if let (Kind::Dataset(dataset), Some(span)) = (&object.kind, record.data) {
-                let length = if record.chunked {
+                let length = if record.data_measure.is_chunked() {
                     dataset
                         .build_chunked(span.address, chunks.as_ref())?
                         .data
@@ -1073,6 +1077,11 @@ impl<S: ObjectSource> Plan<S> {
                     .is_chunked()
                     .then(|| dataset.measure_chunked(address, chunks))
                     .transpose()?;
+                if let Some(measured) = &measured {
+                    if measured.data_len != record.data_measure.length()? {
+                        return Err(inconsistent().into());
+                    }
+                }
                 let messages =
                     measured.map(|measured| (measured.layout_message, measured.pipeline_message));
                 dataset.build_header(
@@ -1250,9 +1259,8 @@ impl DenseLinks {
 struct Record {
     metadata: ObjectAllocation,
     data: Option<Allocation>,
-    chunked: bool,
-    /// Geometry for an array index with no stored chunks.
-    empty_index: Option<EmptyChunkIndex>,
+    /// Payload length, storage kind, and retained array block geometry.
+    data_measure: layout::DataMeasure,
     /// Relative name-index geometry for the dense links in `metadata`.
     dense_links: Option<DenseLinks>,
     heaps: Vec<Allocation>,
@@ -1274,17 +1282,6 @@ impl Record {
             (None, None) => Ok(None),
             _ => Err(inconsistent()),
         }
-    }
-
-    fn measure(&self) -> layout::DataMeasure {
-        layout::DataMeasure::new(
-            self.data.map_or(0, |span| span.length),
-            if self.chunked {
-                layout::DataKind::Chunked
-            } else {
-                layout::DataKind::Contiguous
-            },
-        )
     }
 }
 
@@ -1400,10 +1397,9 @@ impl FileLayout {
         let (extension_span, end, managers, extension_info) = if let Some(settings) =
             settings.filter(|settings| settings.strategy() == FileSpaceStrategy::Page)
         {
-            let measures: Vec<_> = records.iter().map(Record::measure).collect();
             let layout::PagedLayout {
                 extension,
-                data: _,
+                data,
                 small: _,
                 large: _,
                 slots,
@@ -1417,13 +1413,13 @@ impl FileLayout {
                 settings.persist(),
                 allocation.end(),
                 extension.as_ref().map_or(0, |bytes| bytes.len() as u64),
-                measures.iter().copied(),
+                records.iter().map(|record| &record.data_measure),
                 collections.ok_or_else(inconsistent)?.sections,
-                |index, placed| {
-                    records[index].data = placed;
-                    Ok(())
-                },
+                |_, placed| Ok(placed),
             )?;
+            for (record, placed) in records.iter_mut().zip(data) {
+                record.data = placed;
+            }
             let info = settings.persist().then(|| {
                 file_space_info::persistent_managers(
                     FileSpaceStrategy::Page,
@@ -1442,7 +1438,7 @@ impl FileLayout {
         } else {
             for record in &mut *records {
                 if record.data.is_some() {
-                    record.data = record.measure().reserve(&mut allocation)?;
+                    record.data = record.data_measure.reserve(&mut allocation)?;
                 }
             }
             let layout::ClassicLayout {
@@ -1899,7 +1895,7 @@ mod tests {
             .iter()
             .take(count)
             .map(|record| {
-                assert_eq!(record.empty_index.is_none(), unallocated);
+                assert_eq!(record.data_measure.empty_index().is_none(), unallocated);
                 if unallocated {
                     assert_eq!(record.data.unwrap().length, 0);
                     None
@@ -1960,6 +1956,54 @@ mod tests {
             };
             assert_eq!(actual, address);
         }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[rstest]
+    #[case::small(32, "empty_array_geometry", "empty_array_geometry_control")]
+    #[case::large(128, "many_empty_array_geometry", "many_empty_array_geometry_control")]
+    fn empty_array_planning_retains_scalar_geometry(
+        #[case] count: usize,
+        #[case] region: &'static str,
+        #[case] control_region: &'static str,
+    ) {
+        let loads = Arc::new((0..=count).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+        let (control, positive) =
+            allocation::measure(control_region, || std::hint::black_box(vec![0_u8; 1024]));
+        assert!(positive.blocks > 0, "{positive}");
+        assert!(positive.peak_bytes >= 1024, "{positive}");
+        drop(control);
+        let (plan, measured) = allocation::measure(region, || {
+            Plan::new(
+                EmptyTree {
+                    count,
+                    filtered: false,
+                    unallocated: false,
+                    loads: Arc::clone(&loads),
+                },
+                None,
+                None,
+                LibVer::V110,
+            )
+            .unwrap()
+        });
+        let retained = (plan.records.capacity() * mem::size_of::<Record>()) as u64;
+        assert_eq!(measured.live_bytes, retained, "{measured}");
+        assert!(measured.peak_bytes >= retained, "{measured}");
+        assert!(measured.peak_bytes <= retained + 262_144, "{measured}");
+        for record in &plan.records[..count] {
+            assert!(record.data_measure.empty_index().is_some());
+            assert_eq!(record.data_measure.length().unwrap(), 370);
+            assert_eq!(record.data.unwrap().length, 370);
+        }
+        assert_eq!(
+            loads
+                .iter()
+                .take(count)
+                .map(|value| value.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            vec![1; count]
+        );
     }
 
     struct EmptyTree {

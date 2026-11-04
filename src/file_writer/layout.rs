@@ -3,13 +3,20 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
+use hdf5_pure_format::__private::ExtensibleArrayPlan;
+use hdf5_pure_format::__private::FixedArrayPlan;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::SectionInfoCounts;
+use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ManagerKind;
 
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
+use crate::chunked_write::ChunkArrayGeometry;
+use crate::chunked_write::ChunkArrayKind;
+use crate::chunked_write::EmptyChunkIndex;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
@@ -89,19 +96,75 @@ pub(super) struct ObjectAllocation {
     pub(super) links: Option<Allocation>,
 }
 
-/// A dataset region's byte length and storage kind.
+/// A dataset's payload length, storage kind, and optional array geometry.
 ///
-/// Chunked regions include their chunk index.
-#[derive(Clone, Copy)]
+/// The writer retains array block lengths separately from the chunk payload length.
 pub(super) struct DataMeasure {
-    length: u64,
+    /// The payload length, excluding the index when `array` is present.
+    raw_length: u64,
     kind: DataKind,
+    /// Address-independent geometry for an allocated chunk array.
+    pub(super) array: Option<ArrayMeasure>,
 }
 
 impl DataMeasure {
-    /// Records the payload length, including the index for chunked storage.
-    pub(super) fn new(length: u64, kind: DataKind) -> Self {
-        Self { length, kind }
+    /// Records a complete data-region length.
+    pub(super) fn new(raw_length: u64, kind: DataKind) -> Self {
+        Self {
+            raw_length,
+            kind,
+            array: None,
+        }
+    }
+
+    /// Measures chunked storage from its payload length and optional array geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the combined payload and index length exceeds
+    /// [`u64::MAX`]. Propagates array planning and length errors.
+    pub(super) fn chunked(
+        raw_length: u64,
+        geometry: Option<ChunkArrayGeometry<'_>>,
+    ) -> Result<Self, FormatError> {
+        let measure = Self {
+            raw_length,
+            kind: DataKind::Chunked,
+            array: geometry.map(ArrayMeasure::new).transpose()?,
+        };
+        measure.length()?;
+        Ok(measure)
+    }
+
+    /// Returns whether the region uses a chunked layout.
+    pub(super) fn is_chunked(&self) -> bool {
+        matches!(self.kind, DataKind::Chunked)
+    }
+
+    /// Returns scalar geometry for an allocated array with no stored chunks.
+    pub(super) fn empty_index(&self) -> Option<EmptyChunkIndex> {
+        match &self.array {
+            Some(ArrayMeasure::Empty(index)) => Some(*index),
+            _ => None,
+        }
+    }
+
+    /// Returns the combined payload and index length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the combined length exceeds [`u64::MAX`].
+    /// Propagates errors from [`EmptyChunkIndex::length`].
+    pub(super) fn length(&self) -> Result<u64, FormatError> {
+        let Self {
+            raw_length,
+            kind: _,
+            array,
+        } = self;
+        checked_end(
+            *raw_length,
+            array.as_ref().map_or(Ok(0), ArrayMeasure::length)?,
+        )
     }
 
     /// Reserves raw storage, returning [`None`] for an empty contiguous region.
@@ -110,21 +173,86 @@ impl DataMeasure {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`FileAllocation::reserve`].
+    /// Propagates errors from [`Self::length`] and [`FileAllocation::reserve`].
     pub(super) fn reserve(
-        self,
+        &self,
         allocation: &mut FileAllocation,
     ) -> Result<Option<Allocation>, FormatError> {
         if self.empty_contiguous() {
             Ok(None)
         } else {
-            Allocation::reserve(allocation, self.length, AllocationClass::Raw).map(Some)
+            Allocation::reserve(allocation, self.length()?, AllocationClass::Raw).map(Some)
         }
     }
 
-    fn empty_contiguous(self) -> bool {
-        let Self { length, kind } = self;
-        length == 0 && matches!(kind, DataKind::Contiguous)
+    fn empty_contiguous(&self) -> bool {
+        let Self {
+            raw_length,
+            kind,
+            array: _,
+        } = self;
+        *raw_length == 0 && matches!(kind, DataKind::Contiguous)
+    }
+}
+
+/// Address-independent block geometry for an allocated chunk array.
+///
+/// Empty arrays have scalar geometry. Format plans for occupied arrays include individual block
+/// lengths.
+pub(super) enum ArrayMeasure {
+    Empty(EmptyChunkIndex),
+    Extensible(ExtensibleArrayPlan),
+    Fixed(FixedArrayPlan),
+}
+
+impl ArrayMeasure {
+    /// Plans array blocks, retaining scalar geometry for an empty array.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`ExtensibleArrayPlan::new`] and [`FixedArrayPlan::new`].
+    fn new(geometry: ChunkArrayGeometry<'_>) -> Result<Self, FormatError> {
+        let ChunkArrayGeometry {
+            kind,
+            occupied,
+            slots,
+            chunk_bytes,
+            filtered,
+        } = geometry;
+        if occupied.is_empty() {
+            return Ok(Self::Empty(EmptyChunkIndex::new(
+                kind,
+                chunk_bytes,
+                slots,
+                filtered,
+            )));
+        }
+        Ok(match kind {
+            ChunkArrayKind::ExtensibleArray => Self::Extensible(ExtensibleArrayPlan::new(
+                ExtensibleArrayCreationParameters::canonical(),
+                SlotOccupancy::Slots(&occupied),
+                slots,
+                chunk_bytes,
+                WIDTHS,
+                filtered,
+            )?),
+            ChunkArrayKind::FixedArray => {
+                Self::Fixed(FixedArrayPlan::new(slots, chunk_bytes, WIDTHS, filtered)?)
+            }
+        })
+    }
+
+    /// Returns the combined length of the array blocks.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`EmptyChunkIndex::length`].
+    fn length(&self) -> Result<u64, FormatError> {
+        Ok(match self {
+            Self::Empty(index) => return index.length(),
+            Self::Extensible(plan) => plan.total_len(),
+            Self::Fixed(plan) => plan.total_len(),
+        })
     }
 }
 
@@ -298,12 +426,12 @@ impl<T> PagedLayout<T> {
     /// Measures the supplied section sizes before retrying tail placement. Retries use retained
     /// counts and size groups, without calling `bind` or serializing managers. Serializes each
     /// active manager after placement.
-    pub(super) fn new(
+    pub(super) fn new<'a>(
         page: FileSpacePageSize,
         persist: bool,
         metadata_end: StoredAddress,
         extension_length: u64,
-        measurements: impl ExactSizeIterator<Item = DataMeasure> + Clone,
+        measurements: impl ExactSizeIterator<Item = &'a DataMeasure> + Clone,
         sections: CollectionSections,
         mut bind: impl FnMut(usize, Option<Allocation>) -> Result<T, FormatError>,
     ) -> Result<Self, FormatError> {
@@ -320,17 +448,17 @@ impl<T> PagedLayout<T> {
             if measure.empty_contiguous() {
                 continue;
             }
-            if measure.length < page.get() {
+            let length = measure.length()?;
+            if length < page.get() {
                 small.push(index);
-                small_total = checked_end(small_total, measure.length)?;
+                small_total = checked_end(small_total, length)?;
             } else {
                 large.push(index);
-                let padding = (page.get() - measure.length % page.get()) % page.get();
-                measure
-                    .length
+                let padding = (page.get() - length % page.get()) % page.get();
+                length
                     .checked_add(padding)
                     .ok_or(FormatError::OffsetOverflow {
-                        offset: measure.length,
+                        offset: length,
                         length: padding,
                     })?;
                 if padding > 0 {
@@ -383,18 +511,16 @@ impl<T> PagedLayout<T> {
         }
         let mut data = Vec::with_capacity(measurements.len());
         for (index, measure) in measurements.enumerate() {
+            let length = measure.length()?;
             let placed = if measure.empty_contiguous() {
                 None
-            } else if measure.length < page.get() {
+            } else if length < page.get() {
                 let address = small_cursor;
-                small_cursor = small_cursor.checked_add(measure.length)?;
-                Some(Allocation {
-                    address,
-                    length: measure.length,
-                })
+                small_cursor = small_cursor.checked_add(length)?;
+                Some(Allocation { address, length })
             } else {
                 let start = align(cursor, page)?;
-                let end = start.checked_add(measure.length)?;
+                let end = start.checked_add(length)?;
                 cursor = align(end, page)?;
                 if cursor > end {
                     // The aligned cursor follows this large allocation.
@@ -405,7 +531,7 @@ impl<T> PagedLayout<T> {
                 }
                 Some(Allocation {
                     address: start,
-                    length: measure.length,
+                    length,
                 })
             };
             data.push(bind(index, placed)?);
@@ -804,12 +930,15 @@ fn align(offset: StoredAddress, page: FileSpacePageSize) -> Result<StoredAddress
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use hdf5_pure_format::__private as format;
     use hdf5_pure_format::__private::FreeSection;
     use hdf5_pure_format::__private::FreeSpaceManagerHeader;
     use rstest::rstest;
 
     use super::Allocation;
+    use super::ArrayMeasure;
     use super::CollectionSections;
     use super::DataKind;
     use super::DataMeasure;
@@ -819,10 +948,82 @@ mod tests {
     use crate::address::DecodedStoredAddress;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+    use crate::chunked_write::ChunkArrayGeometry;
+    use crate::chunked_write::ChunkArrayKind;
     use crate::error::FormatError;
     use crate::file_allocation::FileAllocation;
     use crate::file_space_info::FileSpacePageSize;
     use crate::file_writer::WIDTHS;
+
+    #[rstest]
+    #[case::fixed(ChunkArrayKind::FixedArray, &[0, 1024], 1025, &[28, 8227])]
+    #[case::extensible(ChunkArrayKind::ExtensibleArray, &[4], 5, &[72, 298, 150])]
+    fn chunked_measurements_retain_complete_array_blocks(
+        #[case] kind: ChunkArrayKind,
+        #[case] occupied: &[u64],
+        #[case] slots: u64,
+        #[case] expected: &[u64],
+    ) {
+        let measurement = DataMeasure::chunked(
+            16,
+            Some(ChunkArrayGeometry {
+                kind,
+                occupied: Cow::Borrowed(occupied),
+                slots,
+                chunk_bytes: 8,
+                filtered: false,
+            }),
+        )
+        .unwrap();
+        let lengths = match measurement.array.as_ref().unwrap() {
+            ArrayMeasure::Fixed(plan) => plan.block_lengths().collect::<Vec<_>>(),
+            ArrayMeasure::Extensible(plan) => plan.block_lengths().collect::<Vec<_>>(),
+            ArrayMeasure::Empty(_) => panic!("expected occupied array blocks"),
+        };
+        assert_eq!(lengths, expected);
+        assert_eq!(measurement.raw_length, 16);
+        assert_eq!(
+            measurement.length().unwrap(),
+            16 + expected.iter().sum::<u64>()
+        );
+        assert!(measurement.is_chunked());
+        assert!(measurement.empty_index().is_none());
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), false, None);
+        assert_eq!(
+            measurement.reserve(&mut allocation).unwrap(),
+            Some(span(48, 16 + expected.iter().sum::<u64>()))
+        );
+    }
+
+    #[rstest]
+    #[case::fixed(u64::MAX, ChunkArrayKind::FixedArray, 1, FormatError::OffsetOverflow { offset: u64::MAX, length: 54 })]
+    #[case::extensible(u64::MAX, ChunkArrayKind::ExtensibleArray, 1, FormatError::OffsetOverflow { offset: u64::MAX, length: 370 })]
+    #[case::fixed_slots(
+        0,
+        ChunkArrayKind::FixedArray,
+        u64::MAX,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    fn chunked_measurements_reject_unrepresentable_regions(
+        #[case] raw_length: u64,
+        #[case] kind: ChunkArrayKind,
+        #[case] slots: u64,
+        #[case] expected: FormatError,
+    ) {
+        let error = DataMeasure::chunked(
+            raw_length,
+            Some(ChunkArrayGeometry {
+                kind,
+                occupied: Cow::Borrowed(&[]),
+                slots,
+                chunk_bytes: 8,
+                filtered: false,
+            }),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, expected);
+    }
 
     #[rstest]
     #[case::direct(false)]
@@ -884,7 +1085,7 @@ mod tests {
             false,
             StoredAddress::new(offset + 200),
             20,
-            measurements.into_iter(),
+            measurements.iter(),
             CollectionSections::default(),
             |_, allocation| Ok(allocation),
         )
@@ -943,7 +1144,7 @@ mod tests {
                 DataMeasure::new(7, DataKind::Contiguous),
                 DataMeasure::new(700, DataKind::Chunked),
             ]
-            .into_iter(),
+            .iter(),
             CollectionSections::default(),
             |_, allocation| Ok(allocation),
         )
@@ -1200,14 +1401,16 @@ mod tests {
     ) {
         let page = FileSpacePageSize::try_from(page).unwrap();
         let (raw_start, end) = boundaries;
+        let measurements: Vec<_> = data_lengths
+            .iter()
+            .map(|&length| DataMeasure::new(length, DataKind::Contiguous))
+            .collect();
         let plan = PagedLayout::new(
             page,
             true,
             StoredAddress::new(start),
             length,
-            data_lengths
-                .iter()
-                .map(|&length| DataMeasure::new(length, DataKind::Contiguous)),
+            measurements.iter(),
             CollectionSections::default(),
             |_, placed| Ok(placed),
         )
@@ -1271,7 +1474,7 @@ mod tests {
             true,
             StoredAddress::new(start),
             extension,
-            core::iter::once(DataMeasure::new(7, DataKind::Contiguous)),
+            core::iter::once(&DataMeasure::new(7, DataKind::Contiguous)),
             CollectionSections::default(),
             |_, placed| Ok(placed),
         )
@@ -1291,14 +1494,16 @@ mod tests {
         #[case] offset: u64,
         #[case] length: u64,
     ) {
+        let measurements: Vec<_> = data_length
+            .into_iter()
+            .map(|length| DataMeasure::new(length, DataKind::Chunked))
+            .collect();
         let error = PagedLayout::new(
             FileSpacePageSize::try_from(512).unwrap(),
             false,
             StoredAddress::new(metadata_end),
             extension,
-            data_length
-                .into_iter()
-                .map(|length| DataMeasure::new(length, DataKind::Chunked)),
+            measurements.iter(),
             CollectionSections::default(),
             |_, allocation| Ok(allocation),
         )
@@ -1348,6 +1553,9 @@ mod tests {
         assert!(positive.blocks > 0, "{positive}");
         assert!(positive.peak_bytes >= 1024, "{positive}");
         drop(control);
+        let measurements: Vec<_> = (0..count)
+            .map(|_| DataMeasure::new(16, DataKind::Contiguous))
+            .collect();
         let mut calls = 0;
         let (plan, measured) = allocation::measure(region, || {
             PagedLayout::new(
@@ -1355,7 +1563,7 @@ mod tests {
                 persistent,
                 StoredAddress::new(200),
                 20,
-                (0..count).map(|_| DataMeasure::new(16, DataKind::Contiguous)),
+                measurements.iter(),
                 CollectionSections::default(),
                 |index, allocation| {
                     calls += 1;
