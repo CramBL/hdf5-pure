@@ -962,7 +962,14 @@ mod tests {
         0,
         ChunkArrayKind::FixedArray,
         u64::MAX,
-        FormatError::InvalidFixedArrayGeometry
+        if usize::BITS < u64::BITS {
+            FormatError::ValueTooLargeForPlatform {
+                value: u64::MAX,
+                target: "usize",
+            }
+        } else {
+            FormatError::InvalidFixedArrayGeometry
+        }
     )]
     fn chunked_measurements_reject_unrepresentable_regions(
         #[case] raw_length: u64,
