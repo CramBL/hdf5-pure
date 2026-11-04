@@ -6,15 +6,15 @@ use crate::address::StoredAddress;
 use crate::edit::object_header::OhRegion;
 use crate::error::Error;
 use crate::error::FormatError;
-use crate::file_writer::OFFSET_WIDTH;
 use crate::link_message::LinkMessage;
 use crate::message_type::MessageType;
 
 /// Hard-link address fields prepared for one borrowed working header.
 ///
 /// Requests are applied in input order, including repeated names. Mutation is limited to
-/// address fields and appended bytes, preserving the prepared field locations. Preparation
-/// failures are reported by [`Self::patch_next`].
+/// address fields and appended bytes, preserving the prepared field locations. Target addresses
+/// are encoded at the region's offset width. Preparation failures are reported by
+/// [`Self::patch_next`].
 pub(in crate::edit) struct LinkPatches<'a> {
     region: &'a mut OhRegion,
     fields: PatchFields,
@@ -100,7 +100,8 @@ impl<'a> LinkPatches<'a> {
             };
             visited += 1;
             if kind == MessageType::LINK
-                && let Ok(name) = LinkMessage::parsed_name_bytes(&region[body..end], OFFSET_WIDTH)
+                && let Ok(name) =
+                    LinkMessage::parsed_name_bytes(&region[body..end], region.widths().offsets)
             {
                 let name = LossyName(name);
                 let first = requests.partition_point(|request| request.0 < name);
@@ -108,7 +109,7 @@ impl<'a> LinkPatches<'a> {
                 if first != last && matches!(fields[requests[first].1], PatchField::Missing) {
                     let field = match LinkMessage::hard_link_address_range(
                         &region[body..end],
-                        OFFSET_WIDTH,
+                        region.widths().offsets,
                     ) {
                         Ok(Some(address)) if body + address.end == end => {
                             PatchField::Address(body + address.start..end)
@@ -140,7 +141,9 @@ impl<'a> LinkPatches<'a> {
     /// Returns [`Error::EditUnsupported`] if a named link is absent or symbolic, its
     /// address is followed by trailing body bytes, or record framing prevents finding it.
     /// Returns [`FormatError::Internal`] if no request remains or a prepared field is outside
-    /// the borrowed region. Propagates address-encoding errors.
+    /// the borrowed region. Returns [`FormatError::AddressTooLarge`] if `address` exceeds the
+    /// region's offset width, or [`FormatError::DefinedAddressIsUndefined`] if it equals the
+    /// undefined marker. Preserves the region's bytes on a width error.
     pub(in crate::edit) fn patch_next(&mut self, address: StoredAddress) -> Result<(), Error> {
         let Self {
             region,
@@ -149,9 +152,10 @@ impl<'a> LinkPatches<'a> {
             #[cfg(test)]
                 visited: _,
         } = self;
+        let offsets = region.widths().offsets;
         match fields.next() {
             Some(PatchField::Address(range)) => {
-                hdf5_pure_format::__private::write_stored_address_at(
+                hdf5_pure_format::__private::write_defined_stored_address_at(
                     region.bytes_mut().get_mut(range).ok_or_else(|| {
                         FormatError::Internal(
                             "a prepared link address is outside its region".into(),
@@ -159,7 +163,7 @@ impl<'a> LinkPatches<'a> {
                     })?,
                     0,
                     address,
-                    OFFSET_WIDTH,
+                    offsets,
                 )?;
                 Ok(())
             }

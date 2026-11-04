@@ -91,8 +91,13 @@ fn allocations(
         &ObjectPath::parse("g"),
     )
     .unwrap();
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), address, engine.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        address,
+        engine.addresses(),
+        crate::file_writer::WIDTHS,
+    )
+    .unwrap();
     let mut allocations = Vec::new();
     let opened = engine.opened_source();
     let source = PhysicalSource::new(&opened).stored();

@@ -802,10 +802,14 @@ impl WriteEngine {
             StoredAddress::ZERO,
         );
         let source = self.image();
-        let predecessor = object_header::ExtensionReconstruction::read(source, old_ext_addr, base)?;
-        let prepared =
-            object_header::PreparedHeader::new(&predecessor.rewrite(widths, &placeholder)?)?;
-        let geometry = prepared.geometry(widths)?;
+        let predecessor = object_header::ExtensionReconstruction::read(
+            source,
+            old_ext_addr,
+            base,
+            self.context.widths(),
+        )?;
+        let prepared = object_header::PreparedHeader::new(&predecessor.rewrite(&placeholder)?)?;
+        let geometry = prepared.geometry()?;
 
         let current_eoa = self.end_of_allocation()?;
         let Some(plan) = paged_persistence::PagedPersistencePlan::new(
@@ -850,9 +854,8 @@ impl WriteEngine {
                 final_eoa,
             )
         };
-        let final_header =
-            object_header::PreparedHeader::new(&predecessor.rewrite(widths, &info)?)?;
-        let final_geometry = final_header.geometry(widths)?;
+        let final_header = object_header::PreparedHeader::new(&predecessor.rewrite(&info)?)?;
+        let final_geometry = final_header.geometry()?;
         let ext_oh = final_geometry
             .into_placed_allocation(extension.iter().map(|allocation| allocation.range()))?;
         let physical_region = FileRange::new(base.resolve(region.start())?, region.len())?;

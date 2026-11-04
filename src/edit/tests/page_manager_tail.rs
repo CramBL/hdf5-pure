@@ -488,6 +488,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         &engine.image(),
         initial_extension.get(),
         engine.context.addresses(),
+        engine.context.widths(),
     )
     .unwrap();
     let minimum = edit_header::build_v2_object_header(&initial_region)
@@ -518,9 +519,13 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
                     .unwrap(),
             )
             .unwrap();
-        let chunks =
-            edit_header::read_oh_chunks(&engine.image(), address.get(), engine.context.addresses())
-                .unwrap();
+        let chunks = edit_header::read_oh_chunks(
+            &engine.image(),
+            address.get(),
+            engine.context.addresses(),
+            engine.context.widths(),
+        )
+        .unwrap();
         let extension = chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>();
         assert!(chunks.len() > 1);
         assert!(extension < 131_072);
@@ -533,6 +538,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             &engine.image(),
             address.get(),
             engine.context.addresses(),
+            engine.context.widths(),
         )
         .unwrap()
         .without_nil()
@@ -679,9 +685,13 @@ fn a_page_publication_reads_each_protected_extension_chunk_once(#[case] memory: 
                 .unwrap(),
         )
         .unwrap();
-    let chunks =
-        edit_header::read_oh_chunks(engine.image(), extension.get(), engine.context.addresses())
-            .unwrap();
+    let chunks = edit_header::read_oh_chunks(
+        engine.image(),
+        extension.get(),
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     assert!(chunks.len() > 1);
     let source_bytes = chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>()
         + u64::try_from(hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN).unwrap();
@@ -937,22 +947,26 @@ fn persistence_allocations(engine: &WriteEngine) -> (Vec<Extent>, Vec<Extent>) {
                 .unwrap(),
         )
         .unwrap();
-    let chunks =
-        edit_header::read_oh_chunks(engine.image(), address.get(), engine.context.addresses())
-            .unwrap()
-            .into_iter()
-            .map(|chunk| {
-                Extent::new(
-                    engine
-                        .context
-                        .addresses()
-                        .relative(chunk.span.start())
-                        .unwrap(),
-                    chunk.span.length(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
+    let chunks = edit_header::read_oh_chunks(
+        engine.image(),
+        address.get(),
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|chunk| {
+        Extent::new(
+            engine
+                .context
+                .addresses()
+                .relative(chunk.span.start())
+                .unwrap(),
+            chunk.span.length(),
+        )
+        .unwrap()
+    })
+    .collect::<Vec<_>>();
     let file = File::from_bytes(issued_bytes(engine)).unwrap();
     let info = file.file_space_info().unwrap().unwrap();
     let (_, managers) = crate::free_space_manager::read_persisted_sections_source(

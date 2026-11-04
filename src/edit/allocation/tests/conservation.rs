@@ -820,16 +820,21 @@ impl Observation {
             }
         }
         live.extend(
-            object_header::read_oh_chunks(&source, extension, addresses)
-                .unwrap()
-                .into_iter()
-                .map(|chunk| {
-                    Fact::new(
-                        AllocationKind::Manager,
-                        chunk.span.start().get(),
-                        chunk.span.length(),
-                    )
-                }),
+            object_header::read_oh_chunks(
+                &source,
+                extension,
+                addresses,
+                crate::file_writer::WIDTHS,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|chunk| {
+                Fact::new(
+                    AllocationKind::Manager,
+                    chunk.span.start().get(),
+                    chunk.span.length(),
+                )
+            }),
         );
         let root = addresses
             .resolve(context.superblock().root_group_address)
@@ -876,16 +881,21 @@ impl Observation {
         let mut element_size = None;
         for header in headers {
             live.extend(
-                object_header::read_oh_chunks(&source, header, addresses)
-                    .unwrap()
-                    .into_iter()
-                    .map(|chunk| {
-                        Fact::new(
-                            AllocationKind::Index,
-                            chunk.span.start().get(),
-                            chunk.span.length(),
-                        )
-                    }),
+                object_header::read_oh_chunks(
+                    &source,
+                    header,
+                    addresses,
+                    crate::file_writer::WIDTHS,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|chunk| {
+                    Fact::new(
+                        AllocationKind::Index,
+                        chunk.span.start().get(),
+                        chunk.span.length(),
+                    )
+                }),
             );
             let object = ObjectHeader::parse(
                 bytes,

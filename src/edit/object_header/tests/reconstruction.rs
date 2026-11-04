@@ -22,6 +22,78 @@ use crate::source::SourceMetadata;
 use crate::superblock;
 
 use super::*;
+use crate::width::{LengthWidth, OffsetWidth};
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn continuation_reconstruction_retains_both_widths(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER)] flags: HeaderFlags,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let wire = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+    let undefined = StoredAddress::undefined(offsets).get();
+    let info = Message::new(
+        WireType::FILE_SPACE_INFO,
+        &info_bytes::version_0(
+            wire,
+            info_bytes::ALL_PERSIST,
+            1,
+            &[undefined; info_bytes::VERSION_0_MANAGERS],
+        ),
+    );
+    let other = Message::new(WireType::UNKNOWN, &[17, 19, 23]).with_creation_order(7);
+    let continuation = v2::continuation_chunk(core::slice::from_ref(&other), flags);
+    let root = Header::new()
+        .flags(flags)
+        .message(info.clone())
+        .continuation(1_536, &continuation, wire)
+        .build();
+    let mut bytes = vec![0; 2_048 + continuation.len()];
+    bytes[1_024..1_024 + root.len()].copy_from_slice(&root);
+    bytes[2_048..].copy_from_slice(&continuation);
+    let source = CountedSource::new(&bytes);
+    let addresses = AddressContext::from_effective_base(BaseAddress::new(512));
+    let prepared = ExtensionReconstruction::read(&source, 1_024, addresses, widths).unwrap();
+    assert_eq!(prepared.region.widths(), widths);
+    assert_eq!(
+        &prepared.region[..],
+        v2::message_records(&[info, other], flags)
+    );
+    assert_eq!(source.calls.get(), 3);
+    let placeholder = file_space_info::persistent_placeholder(
+        FileSpaceStrategy::Page,
+        1,
+        FileSpacePageSize::DEFAULT,
+    );
+    let replacement = prepared.rewrite(&placeholder).unwrap();
+    assert_eq!(replacement.widths(), widths);
+    let record = replacement
+        .splice_first(MessageType::FILE_SPACE_INFO)
+        .unwrap()
+        .unwrap();
+    let decoded =
+        hdf5_pure_format::__private::parse_file_space_info(widths, record.record().body).unwrap();
+    assert_eq!(decoded, placeholder);
+    let header = PreparedHeader::new(&replacement).unwrap();
+    assert_eq!(header.geometry().unwrap().widths(), widths);
+    let chunks = read_oh_chunks(&source, 1_024, addresses, widths).unwrap();
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[1].span.start().get(), 2_048);
+    assert_eq!(
+        chunks[1].span.length(),
+        u64::try_from(continuation.len()).unwrap()
+    );
+}
 
 #[rstest]
 #[case::root(0)]
@@ -41,7 +113,12 @@ fn gathering_honors_checksum_verification_for_each_chunk(
     );
     fixture.bytes[checksum_at] ^= 1;
     let source = CountedSource::new(&fixture.bytes);
-    let result = WriteEngine::gather_oh_messages(&source, fixture.root, fixture.addresses);
+    let result = WriteEngine::gather_oh_messages(
+        &source,
+        fixture.root,
+        fixture.addresses,
+        crate::file_writer::WIDTHS,
+    );
     if cfg!(feature = "checksum") {
         let error = result.unwrap_err();
         assert!(
@@ -75,7 +152,13 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
 ) {
     let fixture = Predecessor::new(flags, times, phase_change, chunks);
     let source = CountedSource::new(&fixture.bytes);
-    let prepared = ExtensionReconstruction::read(&source, fixture.root, fixture.addresses).unwrap();
+    let prepared = ExtensionReconstruction::read(
+        &source,
+        fixture.root,
+        fixture.addresses,
+        crate::file_writer::WIDTHS,
+    )
+    .unwrap();
     assert_eq!(&prepared.region[..], &fixture.records);
     assert_eq!(prepared.region.props(), fixture.props);
     assert!(prepared.region.bytes.capacity() < fixture.records.len() * 2);
@@ -103,7 +186,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     );
     let body =
         hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &placeholder).unwrap();
-    let replacement = prepared.rewrite(WIDTHS, &placeholder).unwrap();
+    let replacement = prepared.rewrite(&placeholder).unwrap();
     assert_eq!(&replacement[..], &expected_records(&body));
     assert_eq!(replacement.props(), fixture.props);
     let final_info = file_space_info::persistent_managers(
@@ -120,17 +203,29 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     let final_body =
         hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &final_info).unwrap();
     assert_ne!(body, final_body);
-    let replacement = prepared.rewrite(WIDTHS, &final_info).unwrap();
+    let replacement = prepared.rewrite(&final_info).unwrap();
     assert_eq!(&replacement[..], &expected_records(&final_body));
     assert_eq!(replacement.props(), fixture.props);
     let allocation = Extent::new(StoredAddress::new(1_024), 262_144).unwrap();
-    let encoded = build_v2_object_header_allocation(&replacement, WIDTHS, allocation).unwrap();
+    let encoded = build_v2_object_header_allocation(&replacement, allocation).unwrap();
     assert_eq!(u64::try_from(encoded.len()).unwrap(), allocation.len());
     assert_eq!((source.calls.get(), source.bytes.get()), reads);
-    let raw = WriteEngine::gather_oh_messages(&source, fixture.root, fixture.addresses).unwrap();
+    let raw = WriteEngine::gather_oh_messages(
+        &source,
+        fixture.root,
+        fixture.addresses,
+        crate::file_writer::WIDTHS,
+    )
+    .unwrap();
     assert!(raw.len() >= chunks * 60_000);
     assert_eq!(&raw.without_nil().unwrap()[..], &fixture.records);
-    let collected = read_oh_chunks(&source, fixture.root, fixture.addresses).unwrap();
+    let collected = read_oh_chunks(
+        &source,
+        fixture.root,
+        fixture.addresses,
+        crate::file_writer::WIDTHS,
+    )
+    .unwrap();
     assert_eq!(collected.len(), chunks);
     if chunks == 1 {
         assert_eq!(collected.capacity(), 1);
@@ -148,9 +243,14 @@ fn compact_reconstruction_checks_records_after_nil_and_file_space_info(#[case] f
     let chunk = fixture.chunks.last().unwrap();
     checksum::restamp(&mut fixture.bytes, chunk.start, chunk.len());
     let source = BytesSource::new(&fixture.bytes);
-    let err = ExtensionReconstruction::read(&source, fixture.root, fixture.addresses)
-        .err()
-        .unwrap();
+    let err = ExtensionReconstruction::read(
+        &source,
+        fixture.root,
+        fixture.addresses,
+        crate::file_writer::WIDTHS,
+    )
+    .err()
+    .unwrap();
     let Error::EditUnsupported(reason) = err else {
         panic!("expected EditUnsupported, got {err:?}");
     };
@@ -166,12 +266,24 @@ fn compact_reconstruction_bounds_retained_and_peak_bytes(#[case] chunks: usize) 
     let source = CountedSource::new(&fixture.bytes);
     let name = format!("compact_extension_{chunks}");
     let (prepared, compact) = allocation::measure(&name, || {
-        ExtensionReconstruction::read(&source, fixture.root, fixture.addresses).unwrap()
+        ExtensionReconstruction::read(
+            &source,
+            fixture.root,
+            fixture.addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap()
     });
     assert_eq!(&prepared.region[..], &fixture.records);
     let name = format!("raw_extension_control_{chunks}");
     let (raw, control) = allocation::measure(&name, || {
-        WriteEngine::gather_oh_messages(&source, fixture.root, fixture.addresses).unwrap()
+        WriteEngine::gather_oh_messages(
+            &source,
+            fixture.root,
+            fixture.addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap()
     });
     assert!(control.bytes >= fixture.read_bytes, "{control}");
     assert!(
@@ -485,7 +597,7 @@ fn previous_opening_extension(source: &impl Source, context: &FileContext) -> Op
         });
     drop(header);
     let allocations = if info.as_ref().is_some_and(|info| info.persist) {
-        read_oh_chunks(source, address, context.addresses())
+        read_oh_chunks(source, address, context.addresses(), context.widths())
             .map(|chunks| chunks.into_iter().map(|chunk| chunk.span).collect())
     } else {
         Ok(Vec::new())

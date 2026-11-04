@@ -226,9 +226,13 @@ impl WriteEngine {
             .resolve(self.context.superblock().root_group_address)
             .unwrap()
             .get();
-        let mut region =
-            WriteEngine::gather_oh_messages(&self.image(), old_root, self.context.addresses())
-                .unwrap();
+        let mut region = WriteEngine::gather_oh_messages(
+            &self.image(),
+            old_root,
+            self.context.addresses(),
+            self.context.widths(),
+        )
+        .unwrap();
         region
             .push_link(
                 "added",

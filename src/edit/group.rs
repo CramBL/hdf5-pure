@@ -20,7 +20,6 @@ use crate::address::StoredAddress;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
-use crate::file_writer::OFFSET_WIDTH;
 use crate::filter_pipeline;
 use crate::group::v1 as group_v1;
 use crate::group::v2 as group_v2;
@@ -34,8 +33,8 @@ use crate::object_path::LinkNameBuf;
 use crate::source::PhysicalSource;
 use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
-use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+use crate::width::{FormatWidths, LengthWidth};
 
 use super::WriteEngine;
 use super::block::{BlockRequest, EncodingDependency};
@@ -120,7 +119,7 @@ impl WriteEngine {
                     self.context.widths().offsets,
                 )?)?
             }
-            None => link_message_region(&oh, self.context.widths().offsets)?,
+            None => link_message_region(&oh, self.context.widths())?,
         };
         for m in &oh.messages {
             if m.msg_type == MessageType::ATTRIBUTE {
@@ -169,7 +168,12 @@ impl WriteEngine {
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
             return self.reconstruct_v1_group(addr);
         }
-        let mut region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses())?;
+        let mut region = Self::gather_oh_messages(
+            &self.image(),
+            addr,
+            self.context.addresses(),
+            self.context.widths(),
+        )?;
         let links = group_links::inspect(&self.opened_source(), self.context.widths(), &region)?;
         ensure_group_info(&mut region)?;
         Ok(GroupInfo { region, links })
@@ -192,10 +196,10 @@ impl WriteEngine {
             None => group_v1::resolve_v1_group_links_from_source(physical, symbol_table, widths, k),
         }
         .map_err(group_links::storage_error)?;
-        let mut region = fresh_group_region()?;
+        let mut region = fresh_group_region(widths)?;
         for link in links {
             let body = link
-                .serialize(OFFSET_WIDTH)
+                .serialize(region.widths().offsets)
                 .map_err(group_links::storage_error)?;
             if body.len() > OBJECT_HEADER_MESSAGE_MAX {
                 return Err(Error::EditUnsupported(
@@ -248,7 +252,7 @@ impl GroupInfo {
                 region.push(
                     MessageType::LINK,
                     &link
-                        .serialize(OFFSET_WIDTH)
+                        .serialize(region.widths().offsets)
                         .map_err(group_links::storage_error)?,
                 );
             }
@@ -412,12 +416,12 @@ pub(super) const GROUP_INFO_BODY: [u8; 2] = [0, 0];
 ///
 /// Propagates errors from [`LinkInfoMessage::serialize`]. All addresses in the fixed
 /// [`COMPACT_LINK_INFO`](crate::file_writer::COMPACT_LINK_INFO) message are undefined and
-/// representable at [`OFFSET_WIDTH`].
-pub(super) fn fresh_group_region() -> Result<OhRegion, FormatError> {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+/// representable at `widths.offsets`.
+pub(super) fn fresh_group_region(widths: FormatWidths) -> Result<OhRegion, FormatError> {
+    let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::PLAIN);
     region.push(
         MessageType::LINK_INFO,
-        &crate::file_writer::COMPACT_LINK_INFO.serialize(OFFSET_WIDTH)?,
+        &crate::file_writer::COMPACT_LINK_INFO.serialize(widths.offsets)?,
     );
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     Ok(region)
@@ -437,9 +441,9 @@ pub(super) fn fresh_group_region() -> Result<OhRegion, FormatError> {
 /// [`unpadded_body`] and [`ensure_group_info`].
 pub(super) fn link_message_region(
     object_header: &ObjectHeader,
-    offset_width: OffsetWidth,
+    widths: FormatWidths,
 ) -> Result<OhRegion, Error> {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::PLAIN);
     for message in object_header
         .messages
         .iter()
@@ -457,7 +461,7 @@ pub(super) fn link_message_region(
                     .map_err(filter_pipeline::map_filter_pipeline_error)?,
             )
         } else {
-            Cow::Borrowed(unpadded_body(message, offset_width)?)
+            Cow::Borrowed(unpadded_body(message, widths.offsets)?)
         };
         // Filter serialization does not increase the parsed lengths. A version 1 header stores
         // each message size in two bytes, so every body fits `OBJECT_HEADER_MESSAGE_MAX`.
@@ -648,8 +652,10 @@ pub(super) fn find_link_info(
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::LINK_INFO
-            && let Ok(info) =
-                LinkInfoMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
+            && let Ok(info) = LinkInfoMessage::parse_with_offset_width(
+                &region[body..body_end],
+                region.widths().offsets,
+            )
         {
             return Ok(Some((p, body..body_end, info)));
         }
@@ -712,7 +718,12 @@ impl OhRegion {
     ) -> Result<(), Error> {
         let name =
             LinkNameBuf::new(name).ok_or_else(|| FormatError::InvalidLinkName(name.to_string()))?;
-        let mut record = PreparedHardLinkRecord::new(self.layout(), name, creation_order)?;
+        let mut record = PreparedHardLinkRecord::new(
+            self.widths().offsets,
+            self.layout(),
+            name,
+            creation_order,
+        )?;
         record.patch_target(addr)?;
         self.push_bytes(record.as_bytes());
         Ok(())
@@ -724,7 +735,7 @@ impl OhRegion {
             .ok_or(Error::EditUnsupported(
                 "a target group's object header has no link-info message",
             ))?;
-        *self = self.with_bytes(splice.replace_body(&info.serialize(OFFSET_WIDTH)?)?);
+        *self = self.with_bytes(splice.replace_body(&info.serialize(self.widths().offsets)?)?);
         Ok(())
     }
 }
@@ -760,9 +771,10 @@ mod tests {
         #[case] surviving: &[&str],
         #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER)] flags: HeaderFlags,
     ) {
-        let mut before = OhRegion::empty(ObjectHeaderPrefix::with_layout(
-            MessageRecordLayout::from_header_flags(flags.0),
-        ));
+        let mut before = OhRegion::empty(
+            crate::file_writer::WIDTHS,
+            ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
+        );
         before.push(MessageType::ATTRIBUTE, b"retained\0");
         let mut expected = before.clone();
         for name in ["a", "b", "c"] {
@@ -788,7 +800,7 @@ mod tests {
 
     #[test]
     fn bulk_link_deletion_rejects_an_absent_name() {
-        let region = super::fresh_group_region().unwrap();
+        let region = super::fresh_group_region(crate::file_writer::WIDTHS).unwrap();
         let error =
             super::remove_links_from_region(&region, &[LinkNameBuf::new("absent").unwrap()])
                 .unwrap_err();
@@ -815,7 +827,7 @@ mod tests {
         let path = directory.path().join("filters.h5");
         FileBuilder::new().write(&path).unwrap();
         let engine = edit_test_util::open_engine(&path);
-        let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+        let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
         region.push(
             MessageType::LINK_INFO,
             &file_writer::COMPACT_LINK_INFO

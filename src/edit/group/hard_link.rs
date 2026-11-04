@@ -13,13 +13,15 @@ use crate::file_writer;
 use crate::link_message::LinkMessage;
 use crate::message_type::MessageType;
 use crate::object_path::LinkNameBuf;
+use crate::width::OffsetWidth;
 
 /// An encoded hard Link record whose body fits the object-header message limit.
 ///
-/// The target address occupies a checked byte range within the record. Patching that range
+/// The target address occupies a checked byte range at the selected offset width. Patching it
 /// preserves the record length, name, and link creation index.
 #[derive(Debug)]
 pub(in crate::edit) struct PreparedHardLinkRecord {
+    offsets: OffsetWidth,
     record: Vec<u8>,
     target: Range<usize>,
     layout: MessageRecordLayout,
@@ -29,7 +31,7 @@ impl PreparedHardLinkRecord {
     /// Encodes a hard link with a zero target after checking its message-body size.
     ///
     /// `creation_order` is the link's creation index. The caller supplies the object-header
-    /// record layout separately.
+    /// record layout separately. The target field occupies `offsets` bytes.
     ///
     /// # Errors
     ///
@@ -37,24 +39,25 @@ impl PreparedHardLinkRecord {
     /// [`OBJECT_HEADER_MESSAGE_MAX`]. Returns [`Error::Format`] if the encoded target-address
     /// range cannot be read.
     pub(in crate::edit) fn new(
+        offsets: OffsetWidth,
         layout: MessageRecordLayout,
         name: LinkNameBuf,
         creation_order: Option<u64>,
     ) -> Result<Self, Error> {
         let mut link = file_writer::make_link(name.as_str(), StoredAddress::new(0));
         link.creation_order = creation_order;
-        let body = link.serialize(file_writer::OFFSET_WIDTH)?;
+        let body = link.serialize(offsets)?;
         if body.len() > OBJECT_HEADER_MESSAGE_MAX {
             return Err(Error::EditUnsupported(
                 "a new hard link message exceeds the object-header message size limit",
             ));
         }
-        let target = LinkMessage::hard_link_address_range(&body, file_writer::OFFSET_WIDTH)?
-            .ok_or_else(|| {
-                FormatError::Internal("a prepared hard link has no target address".into())
-            })?;
+        let target = LinkMessage::hard_link_address_range(&body, offsets)?.ok_or_else(|| {
+            FormatError::Internal("a prepared hard link has no target address".into())
+        })?;
         let target = layout.prefix_len() + target.start..layout.prefix_len() + target.end;
         Ok(Self {
+            offsets,
             record: layout.record(MessageType::LINK, &body),
             target,
             layout,
@@ -65,17 +68,19 @@ impl PreparedHardLinkRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if the target range is outside the record. Propagates
-    /// address-encoding errors.
+    /// Returns [`FormatError::AddressTooLarge`] if `address` exceeds the selected offset width,
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals the undefined marker, or
+    /// [`FormatError::Internal`] if the target range is outside the record. Preserves the record
+    /// on a width error.
     pub(in crate::edit) fn patch_target(&mut self, address: StoredAddress) -> Result<(), Error> {
         let target = self.record.get_mut(self.target.clone()).ok_or_else(|| {
             FormatError::Internal("a prepared hard link target is outside its record".into())
         })?;
-        hdf5_pure_format::__private::write_stored_address_at(
+        hdf5_pure_format::__private::write_defined_stored_address_at(
             target,
             0,
             address,
-            file_writer::OFFSET_WIDTH,
+            self.offsets,
         )?;
         Ok(())
     }
@@ -111,11 +116,68 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::PreparedHardLinkRecord;
+    use crate::FormatError;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::error::Error;
     use crate::message_type::MessageType;
     use crate::object_path::LinkNameBuf;
+    use crate::width::OffsetWidth;
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, 65_534)]
+    #[case::four(OffsetWidth::Four, 4_294_967_294)]
+    #[case::eight(OffsetWidth::Eight, u64::MAX - 1)]
+    fn prepared_hard_links_use_the_selected_target_width(
+        #[case] offsets: OffsetWidth,
+        #[case] address: u64,
+        #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER)] flags: HeaderFlags,
+    ) {
+        let mut record = PreparedHardLinkRecord::new(
+            offsets,
+            MessageRecordLayout::from_header_flags(flags.0),
+            LinkNameBuf::new("target").unwrap(),
+            Some(17),
+        )
+        .unwrap();
+        record.patch_target(StoredAddress::new(address)).unwrap();
+        let expected = HardLink::new("target", address)
+            .creation_order(17)
+            .build(Widths::new(usize::from(offsets.get()), 8));
+        assert_eq!(
+            record.as_bytes(),
+            v2::message_record(&Message::new(FixtureMessage::LINK, &expected), flags)
+        );
+    }
+
+    #[rstest]
+    #[case::two_undefined(OffsetWidth::Two, 65_535, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+    #[case::two_overflow(OffsetWidth::Two, 65_536, FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
+    #[case::four_undefined(OffsetWidth::Four, 4_294_967_295, FormatError::DefinedAddressIsUndefined { address: 4_294_967_295, offset_size: 4 })]
+    #[case::four_overflow(OffsetWidth::Four, 4_294_967_296, FormatError::AddressTooLarge { address: 4_294_967_296, offset_size: 4 })]
+    #[case::eight_undefined(OffsetWidth::Eight, u64::MAX, FormatError::DefinedAddressIsUndefined { address: u64::MAX, offset_size: 8 })]
+    fn prepared_hard_links_preserve_records_on_unrepresentable_targets(
+        #[case] offsets: OffsetWidth,
+        #[case] address: u64,
+        #[case] expected: FormatError,
+    ) {
+        let mut record = PreparedHardLinkRecord::new(
+            offsets,
+            MessageRecordLayout::PLAIN,
+            LinkNameBuf::new("target").unwrap(),
+            None,
+        )
+        .unwrap();
+        let before = record.as_bytes().to_vec();
+        let error = record
+            .patch_target(StoredAddress::new(address))
+            .unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected Format, got {error:?}");
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(record.as_bytes(), before);
+    }
 
     #[rstest]
     #[case::untracked(65_523, None)]
@@ -129,9 +191,13 @@ mod tests {
         let name = encoding.name(byte_len);
         assert_eq!(name.len(), byte_len);
         let layout = MessageRecordLayout::from_header_flags(flags.0);
-        let record =
-            PreparedHardLinkRecord::new(layout, LinkNameBuf::new(&name).unwrap(), creation_order)
-                .unwrap();
+        let record = PreparedHardLinkRecord::new(
+            OffsetWidth::Eight,
+            layout,
+            LinkNameBuf::new(&name).unwrap(),
+            creation_order,
+        )
+        .unwrap();
         let mut body = HardLink::new(&name, 0).name_size_width(2);
         if let Some(index) = creation_order {
             body = body.creation_order(index);
@@ -164,6 +230,7 @@ mod tests {
         let name = encoding.name(byte_len);
         assert_eq!(name.len(), byte_len);
         let error = PreparedHardLinkRecord::new(
+            OffsetWidth::Eight,
             MessageRecordLayout::from_header_flags(flags.0),
             LinkNameBuf::new(&name).unwrap(),
             creation_order,
@@ -191,11 +258,12 @@ mod tests {
         #[values(None, Some(0x0102_0304_0506_0708))] creation_order: Option<u64>,
         #[values(NameEncoding::Ascii, NameEncoding::Utf8)] encoding: NameEncoding,
         #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER)] flags: HeaderFlags,
-        #[values(0x0102_0304_0506_0708, u64::MAX)] address: u64,
+        #[values(0x0102_0304_0506_0708, u64::MAX - 1)] address: u64,
     ) {
         let name = encoding.name(byte_len);
         assert_eq!(name.len(), byte_len);
         let mut record = PreparedHardLinkRecord::new(
+            OffsetWidth::Eight,
             MessageRecordLayout::from_header_flags(flags.0),
             LinkNameBuf::new(&name).unwrap(),
             creation_order,

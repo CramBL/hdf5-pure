@@ -48,8 +48,13 @@ fn attribute_edits_capture_only_original_touched_references(
     assert_eq!(collections.len(), 1);
     let engine = edit_test_util::open_engine(&path);
     let root = engine.context.superblock().root_group_address.get();
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), root, engine.context.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        root,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     assert_eq!(
         super::super::region_uses_dense_attrs(&region).unwrap(),
         matches!(initial, Initial::Dense)
@@ -115,8 +120,13 @@ fn attribute_predecessors_retain_resolved_committed_datatypes(#[case] initial: I
     )
     .unwrap();
     let root = engine.context.superblock().root_group_address.get();
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), root, engine.context.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        root,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     assert_eq!(
         super::super::region_uses_dense_attrs(&region).unwrap(),
         matches!(initial, Initial::Dense)

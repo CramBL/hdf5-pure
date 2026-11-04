@@ -246,7 +246,7 @@ impl WriteEngine {
         let src = &self.image();
         let base = self.context.addresses();
         let widths = self.context.widths();
-        let region = Self::gather_oh_messages(src, addr, base)?;
+        let region = Self::gather_oh_messages(src, addr, base, widths)?;
 
         let mut datatype: Option<(usize, usize)> = None;
         let mut dataspace: Option<(usize, usize)> = None;
@@ -476,7 +476,7 @@ impl WriteEngine {
             ));
         }
 
-        let region = Self::gather_oh_messages(src, addr, base)?;
+        let region = Self::gather_oh_messages(src, addr, base, widths)?;
 
         let mut datatype: Option<(usize, usize)> = None;
         let mut dataspace: Option<(usize, usize)> = None;

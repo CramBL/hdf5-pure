@@ -605,9 +605,13 @@ impl Roles {
         let mut layout_field = None;
         let mut object_frame = None;
         let mut dataspace_body = None;
-        for chunk in
-            object_header::read_oh_chunks(&source, dataset.header_address().unwrap(), addresses)
-                .unwrap()
+        for chunk in object_header::read_oh_chunks(
+            &source,
+            dataset.header_address().unwrap(),
+            addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap()
         {
             let (region, mut position) = chunk.message_region();
             while let Some((kind, body, end)) =

@@ -39,13 +39,16 @@ fn attribute_edit_rejects_invalid_stored_thresholds(
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
     let before = engine.disk_bytes().unwrap();
-    let region = OhRegion::empty(ObjectHeaderPrefix {
-        attribute_phase_change: Some(AttributePhaseChange {
-            max_compact,
-            min_dense,
-        }),
-        ..ObjectHeaderPrefix::PLAIN
-    });
+    let region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix {
+            attribute_phase_change: Some(AttributePhaseChange {
+                max_compact,
+                min_dense,
+            }),
+            ..ObjectHeaderPrefix::PLAIN
+        },
+    );
     let operation = AttrOp::Set {
         name: "added".to_string(),
         value: AttrValue::I64(7),
@@ -71,13 +74,16 @@ fn compact_overwrite_preserves_storage_above_the_stored_maximum() {
     let path = directory.path().join("overwrite.h5");
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let mut region = OhRegion::empty(ObjectHeaderPrefix {
-        attribute_phase_change: Some(AttributePhaseChange {
-            max_compact: 1,
-            min_dense: 1,
-        }),
-        ..ObjectHeaderPrefix::PLAIN
-    });
+    let mut region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix {
+            attribute_phase_change: Some(AttributePhaseChange {
+                max_compact: 1,
+                min_dense: 1,
+            }),
+            ..ObjectHeaderPrefix::PLAIN
+        },
+    );
     region.push(
         MessageType::ATTRIBUTE,
         &super::encode_attr_body("kept", &AttrValue::I64(2)).unwrap(),
@@ -120,7 +126,7 @@ fn bulk_attribute_edits_preserve_metadata_parse_errors(
     let path = directory.path().join("invalid-info.h5");
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push(MessageType::ATTRIBUTE_INFO, &body);
     let operation = AttrOp::Remove {
         name: "absent".into(),
@@ -142,11 +148,12 @@ fn compact_rebuild_rejects_invalid_creation_metadata(
     #[case] next: u16,
     #[case] expected: FormatError,
 ) {
-    let region = OhRegion::empty(ObjectHeaderPrefix::with_layout(
-        MessageRecordLayout::from_header_flags(
+    let region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(
             (HeaderFlags::TRACKS_CREATION_ORDER | HeaderFlags::INDEXES_CREATION_ORDER).0,
-        ),
-    ));
+        )),
+    );
     let slots = indices
         .into_iter()
         .enumerate()
@@ -195,7 +202,7 @@ fn bulk_attribute_edits_reject_unknown_required_messages(#[case] flags: MessageF
     let path = directory.path().join("unknown-message.h5");
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let record =
         region
             .layout()

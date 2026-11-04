@@ -585,7 +585,8 @@ impl WriteEngine {
                         ));
                     }
                 }
-                let region = Self::gather_oh_messages(&self.image(), addr, base)?;
+                let region =
+                    Self::gather_oh_messages(&self.image(), addr, base, self.context.widths())?;
                 let attributes = attributes::plan_attr_ops(&self.opened_source(), &region, &ops)?;
                 edits.collections.extend(analysis.attribute_collections(
                     ObjectId::new(PhysicalAddress::new(addr)),
@@ -803,7 +804,7 @@ impl WriteEngine {
         let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
         for (key, node) in nodes.iter_mut() {
             if node.is_new {
-                node.prepared.region = group::fresh_group_region()?;
+                node.prepared.region = group::fresh_group_region(self.context.widths())?;
             } else {
                 let addr = crate::group::v2::resolve_path_any_from_source(
                     &self.opened_source(),
@@ -1067,8 +1068,12 @@ impl WriteEngine {
             };
             let mut records = Vec::with_capacity(adding.len());
             for name in adding {
-                let record =
-                    PreparedHardLinkRecord::new(result.layout(), name.clone(), order.take()?)?;
+                let record = PreparedHardLinkRecord::new(
+                    result.widths().offsets,
+                    result.layout(),
+                    name.clone(),
+                    order.take()?,
+                )?;
                 result.push_bytes(record.as_bytes());
                 records.push(record);
             }

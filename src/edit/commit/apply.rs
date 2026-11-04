@@ -302,7 +302,9 @@ impl WriteEngine {
             };
             let a = replaced.address();
             if let Ok(spans) = self.oh_chunk_spans(a) {
-                if let Ok(region) = Self::gather_oh_messages(&self.image(), a, base) {
+                if let Ok(region) =
+                    Self::gather_oh_messages(&self.image(), a, base, self.context.widths())
+                {
                     let attributes = self.dense_attribute_storage_spans(&region, &spans);
                     if let Some((_, _, info)) = group::find_link_info(&region)?
                         && let Some(storage) =
@@ -373,9 +375,12 @@ impl WriteEngine {
                             replaces_dense_storage: true,
                             ..
                         }
-                    ) && let Ok(region) =
-                        Self::gather_oh_messages(&self.image(), *old_oh, self.context.addresses())
-                        && let Some(storage) = self.dense_attribute_storage_spans(&region, &spans)
+                    ) && let Ok(region) = Self::gather_oh_messages(
+                        &self.image(),
+                        *old_oh,
+                        self.context.addresses(),
+                        self.context.widths(),
+                    ) && let Some(storage) = self.dense_attribute_storage_spans(&region, &spans)
                     {
                         to_free.extend(storage);
                     }

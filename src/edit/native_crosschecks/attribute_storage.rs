@@ -55,9 +55,13 @@ fn dense_reversion_preserves_encoded_records_and_prefix() {
         &ObjectPath::parse("g"),
     )
     .unwrap();
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), address, engine.context.addresses())
-            .unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        address,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     assert!(region.props().times.is_some());
     let (info_start, info_body, info) = attributes::find_attribute_info(&region).unwrap().unwrap();
     let mut bodies = BTreeMap::new();

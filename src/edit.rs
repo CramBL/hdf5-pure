@@ -1111,7 +1111,7 @@ impl OpeningExtension {
     /// Returns errors from [`WriteEngine::extension_summary`] and the first File Space Info
     /// decoding outcome. Allocation and Shared Message Table errors remain in the result.
     fn read(source: &(impl Source + ?Sized), context: &FileContext) -> Result<Self, FormatError> {
-        let mut allocations = self::object_header::ExtensionAllocations::new();
+        let mut allocations = self::object_header::ExtensionAllocations::new(context.widths());
         let summary = WriteEngine::extension_summary(
             source,
             context,

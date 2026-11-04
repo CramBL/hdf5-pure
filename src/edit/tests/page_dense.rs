@@ -109,7 +109,7 @@ fn empty_dense_attribute_sets_do_not_reserve_or_emit() {
     let (_directory, mut engine, _) = engine();
     let end = engine.image.len();
     let free = engine.space.reusable_sections().collect::<Vec<_>>();
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     engine
         .append_dense_attrs(&mut region, DenseAttrSet::default())
         .unwrap();

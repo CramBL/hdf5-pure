@@ -247,12 +247,15 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
     /// parsing and source-read errors from [`super::object_header::read_oh_chunks`].
     pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<FileRange>, Error> {
-        Ok(
-            super::object_header::read_oh_chunks(&self.image(), addr, self.context.addresses())?
-                .into_iter()
-                .map(|chunk| chunk.span)
-                .collect(),
-        )
+        Ok(super::object_header::read_oh_chunks(
+            &self.image(),
+            addr,
+            self.context.addresses(),
+            self.context.widths(),
+        )?
+        .into_iter()
+        .map(|chunk| chunk.span)
+        .collect())
     }
 
     /// Returns the storage of the dense attribute set that the Attribute Info message in `region`
@@ -488,7 +491,13 @@ impl WriteEngine {
         let file_len = self.image().len();
         // The header's own chunks. If they cannot be mapped, account for nothing.
         let spans = self.oh_chunk_spans(addr).ok()?;
-        let region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok();
+        let region = Self::gather_oh_messages(
+            &self.image(),
+            addr,
+            self.context.addresses(),
+            self.context.widths(),
+        )
+        .ok();
         let attribute_storage = region
             .as_ref()
             .and_then(|region| self.dense_attribute_storage_spans(region, &spans));
@@ -502,7 +511,12 @@ impl WriteEngine {
             out.extend(link_storage.into_iter().flatten());
             return Some(ObjectStorageKind::Group);
         }
-        match Self::read_object(&self.opened_source(), AccessMode::ReadWrite, addr) {
+        match Self::read_object(
+            &self.opened_source(),
+            AccessMode::ReadWrite,
+            addr,
+            self.context.widths(),
+        ) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
                 self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
                 Some(ObjectStorageKind::Dataset)
@@ -799,8 +813,13 @@ impl WriteEngine {
     /// Returns the raw chunk data and metadata index blocks of a chunked dataset separately.
     fn chunked_storage_parts(&self, addr: u64) -> Option<ChunkedStorageParts> {
         // Locate the data-layout and dataspace messages in the object header.
-        let region =
-            Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok()?;
+        let region = Self::gather_oh_messages(
+            &self.image(),
+            addr,
+            self.context.addresses(),
+            self.context.widths(),
+        )
+        .ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut dataspace_msg: Option<(usize, usize)> = None;
         let mut p = 0;
@@ -929,8 +948,13 @@ impl WriteEngine {
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
     /// violation.
     pub(super) fn chunked_index_spans(&self, addr: u64) -> Option<Vec<FileRange>> {
-        let region =
-            Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok()?;
+        let region = Self::gather_oh_messages(
+            &self.image(),
+            addr,
+            self.context.addresses(),
+            self.context.widths(),
+        )
+        .ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut p = 0;
         loop {

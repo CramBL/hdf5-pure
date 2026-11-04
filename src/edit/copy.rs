@@ -128,7 +128,8 @@ impl WriteEngine {
     ///
     /// Dense attributes are read into an owned set for replacement storage. Keeps every Link
     /// message in the retained header records, and records the byte offset of each hard link's
-    /// address field and of a contiguous dataset's data address within them.
+    /// address field and of a contiguous dataset's data address within them. Parses continuation
+    /// fields at `widths`.
     ///
     /// The layout version 3 and 4 fields are defined in "The Data Layout Message" of the
     /// [format specification, version 4.0][layout]. The Link Info version 0 fields are defined
@@ -147,9 +148,10 @@ impl WriteEngine {
         src: &(impl OriginalSource + ?Sized),
         access_mode: AccessMode,
         addr: u64,
+        widths: FormatWidths,
     ) -> Result<ObjModel, Error> {
         let base = src.addresses();
-        let region = Self::gather_oh_messages(src, addr, base)?;
+        let region = Self::gather_oh_messages(src, addr, base, widths)?;
 
         reject_external_storage(&region)?;
 
@@ -181,7 +183,7 @@ impl WriteEngine {
         let mut has_link_info = false;
         let mut has_links = false;
         let mut links = Vec::new();
-        let mut kept = OhRegion::empty(region.props());
+        let mut kept = OhRegion::empty(region.widths(), region.props());
 
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
@@ -841,6 +843,7 @@ impl CopyReader<'_> {
             &src,
             access_mode,
             id.header_address().get(),
+            self.widths,
         )?);
         if cross_file {
             let (region, dense_attrs) = source.header();
