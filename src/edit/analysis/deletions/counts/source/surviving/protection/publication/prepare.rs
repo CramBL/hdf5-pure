@@ -107,6 +107,16 @@ impl<'source> CurrentCountUpdates<'source> {
         })
     }
 
+    /// Releases the source loan and returns the encoded updates without acquired header buffers.
+    pub(super) fn into_updates(self) -> Vec<ObjectReferenceCountUpdate> {
+        let Self {
+            engine: _,
+            counts: _,
+            updates,
+        } = self;
+        updates
+    }
+
     /// Borrows each original field with its prepared writes, in allocation-address order.
     pub(in crate::edit) fn updates(
         &self,
