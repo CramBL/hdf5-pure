@@ -934,16 +934,13 @@ impl Chunk {
         bytes: &[u8],
         point: usize,
     ) -> Self {
-        let address = record.1.to_le_bytes();
         let fields = observation
             .element_blocks
             .iter()
             .flat_map(|parent| {
-                let start = usize::try_from(parent.start()).unwrap();
-                let end = usize::try_from(parent.end()).unwrap();
-                test_util::bytes::signature_offsets(&bytes[start..end], &address)
-                    .into_iter()
-                    .map(move |local| (*parent, start + local))
+                parent
+                    .reference_fields(bytes, record.1)
+                    .map(move |at| (parent.range, at))
             })
             .collect::<Vec<_>>();
         assert_eq!(fields.len(), 1, "stored pointer for {record:?}: {fields:?}");
@@ -1050,7 +1047,10 @@ impl Chunk {
 
     /// Returns whether the parent is reachable and the encoded entry and payload bytes match.
     fn referenced(&self, observation: &Observation, bytes: &[u8]) -> bool {
-        observation.element_blocks.contains(&self.parent)
+        observation
+            .element_blocks
+            .iter()
+            .any(|block| block.range == self.parent)
             && bytes.get(self.field..self.field + self.encoded.len())
                 == Some(self.encoded.as_slice())
             && self.payload_matches(bytes)

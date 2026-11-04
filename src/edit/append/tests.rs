@@ -14,6 +14,7 @@ use crate::image::WriteBuffering;
 use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
+mod growth;
 mod initialization;
 
 #[rstest]

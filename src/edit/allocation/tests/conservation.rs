@@ -5,10 +5,12 @@
 //! from parsed standard metadata and inspect stored EA pointers before final dataspace growth.
 //! Native crosschecks compare normalized free ranges and chunk records with libhdf5.
 
+use core::num::NonZeroU64;
 use std::cell::Cell;
 use std::fs;
 use std::path::Path;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
@@ -419,17 +421,19 @@ impl Workload {
             .chunks
             .iter()
             .map(|chunk| {
-                let encoded = chunk.1.to_le_bytes();
                 let fields = final_observation
-                    .live
+                    .element_blocks
                     .iter()
-                    .filter(|fact| final_observation.element_blocks.contains(&fact.range))
                     .flat_map(|parent| {
-                        let start = usize::try_from(parent.range.start()).unwrap();
-                        let end = usize::try_from(parent.range.end()).unwrap();
-                        test_util::bytes::signature_offsets(&final_bytes[start..end], &encoded)
-                            .into_iter()
-                            .map(move |local| (parent.range, start + local))
+                        assert!(
+                            final_observation
+                                .live
+                                .iter()
+                                .any(|fact| fact.range == parent.range)
+                        );
+                        parent
+                            .reference_fields(&final_bytes, chunk.1)
+                            .map(move |at| (parent.range, at))
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(
@@ -711,7 +715,7 @@ pub(super) struct Observation {
     pub(super) values: Vec<i32>,
     eof: u64,
     index_defined: bool,
-    element_blocks: Vec<Interval>,
+    element_blocks: Vec<ElementBlock>,
     element_size: Option<usize>,
     pub(super) chunks: Vec<(Vec<u64>, u64, u64, u32)>,
 }
@@ -1290,24 +1294,76 @@ fn replace_free_sections(original: &[u8], coverage: &Coverage) -> Vec<u8> {
     bytes
 }
 
+/// An element region and its complete owning index allocation.
+#[derive(Clone, Copy)]
+struct ElementBlock {
+    /// Complete block allocation, including every page for a paged data block.
+    range: Interval,
+    /// Contiguous element bytes from an index block, an unpaged data block, or an initialized page.
+    elements: FileRange,
+    /// Encoded element size in bytes.
+    stride: NonZeroU64,
+}
+
+impl ElementBlock {
+    fn new(range: FileRange, elements: FileRange, stride: NonZeroU64) -> Self {
+        assert!(range.contains(elements));
+        assert!(stride.get() >= u64::try_from(core::mem::size_of::<u64>()).unwrap());
+        assert_eq!(elements.length() % stride.get(), 0);
+        Self {
+            range: Interval::new(range.start().get(), range.length()).unwrap(),
+            elements,
+            stride,
+        }
+    }
+
+    /// Returns byte offsets of element address fields equal to `address`.
+    fn reference_fields(self, image: &[u8], address: u64) -> impl Iterator<Item = usize> + '_ {
+        let encoded = address.to_le_bytes();
+        self.fields().filter_map(move |at| {
+            let at = usize::try_from(at).unwrap();
+            (image[at..at + encoded.len()] == encoded).then_some(at)
+        })
+    }
+
+    fn fields(self) -> impl Iterator<Item = u64> {
+        let Self {
+            range: _,
+            elements,
+            stride,
+        } = self;
+        (0..elements.length() / stride.get())
+            .map(move |index| elements.start().get() + index * stride.get())
+    }
+}
+
 fn index_element_blocks(
     source: &impl Source,
     widths: crate::width::FormatWidths,
     address: StoredAddress,
-) -> Vec<Interval> {
+) -> Vec<ElementBlock> {
     let header =
         extensible_array::read_header(&source::zero_base_source(source), widths, address).unwrap();
+    let stride = NonZeroU64::new(u64::from(header.header().element_size)).unwrap();
     let reference = header.index_block().unwrap();
     let range = reference.parse_range();
     let bytes = source.read_range(range).unwrap();
     let index = reference
         .parse(FileRegion::new(range, &bytes).unwrap())
         .unwrap();
-    let mut blocks = vec![Interval::new(range.start().get(), range.length()).unwrap()];
+    let elements = FileRange::new(
+        range
+            .start()
+            .checked_add(INDEX_PREFIX_FIELDS + u64::from(widths.offsets.get()))
+            .unwrap(),
+        u64::from(header.header().idx_blk_elmts) * stride.get(),
+    )
+    .unwrap();
+    let mut blocks = vec![ElementBlock::new(range, elements, stride)];
     blocks.extend(
         index
             .data_blocks()
-            .map(|block| parse_data_block(source, block.unwrap())),
+            .flat_map(|block| parse_data_block(source, block.unwrap(), stride)),
     );
     for reference in index.super_blocks() {
         let reference = reference.unwrap();
@@ -1319,7 +1375,7 @@ fn index_element_blocks(
         blocks.extend(
             block
                 .data_blocks()
-                .map(|block| parse_data_block(source, block.unwrap())),
+                .flat_map(|block| parse_data_block(source, block.unwrap(), stride)),
         );
     }
     blocks
@@ -1328,23 +1384,53 @@ fn index_element_blocks(
 fn parse_data_block(
     source: &impl RangeReader,
     reference: format::ExtensibleArrayDataBlockRef<'_>,
-) -> Interval {
+    stride: NonZeroU64,
+) -> Vec<ElementBlock> {
     let range = reference.parse_range();
     let bytes = source.read_range(range).unwrap();
     let parsed = reference
         .parse(FileRegion::new(range, &bytes).unwrap())
         .unwrap();
-    if let format::ExtensibleArrayDataBlock::Pages(pages) = parsed {
-        for page in pages.pages() {
-            let page = page.unwrap();
-            let range = page.parse_range();
-            let bytes = source.read_range(range).unwrap();
-            page.parse(FileRegion::new(range, &bytes).unwrap()).unwrap();
+    match parsed {
+        format::ExtensibleArrayDataBlock::Pages(pages) => {
+            let mut blocks = pages
+                .pages()
+                .map(|page| {
+                    let page = page.unwrap();
+                    let range = page.parse_range();
+                    let bytes = source.read_range(range).unwrap();
+                    page.parse(FileRegion::new(range, &bytes).unwrap()).unwrap();
+                    ElementBlock::new(
+                        reference.range(),
+                        FileRange::new(range.start(), range.length() - CHECKSUM_SIZE).unwrap(),
+                        stride,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if blocks.is_empty() {
+                blocks.push(ElementBlock::new(
+                    reference.range(),
+                    FileRange::new(range.start(), 0).unwrap(),
+                    stride,
+                ));
+            }
+            blocks
+        }
+        format::ExtensibleArrayDataBlock::Elements(_) => {
+            let start = reference.framing().unwrap().prefix_range().unwrap().end();
+            let elements =
+                FileRange::new(start, range.end().get() - start.get() - CHECKSUM_SIZE).unwrap();
+            vec![ElementBlock::new(reference.range(), elements, stride)]
         }
     }
-    let range = reference.range();
-    Interval::new(range.start().get(), range.length()).unwrap()
 }
+
+// "The Extensible Array Index" of the format specification, version 4.0, defines the signature,
+// version, and client ID before the index block's header address and elements.
+const INDEX_PREFIX_FIELDS: u64 = 6;
+// "The Extensible Array Index" of the format specification, version 4.0, defines a four-byte
+// checksum at the end of each block or page.
+const CHECKSUM_SIZE: u64 = 4;
 
 fn assert_disjoint(intervals: &mut [Interval], label: &str) {
     intervals.sort_unstable();

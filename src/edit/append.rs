@@ -818,9 +818,9 @@ pub(crate) struct LocatedState {
 ///
 /// In persistent sessions, the editor publishes exact ownership through replacement free-space
 /// managers. Without persistence, the editor tries reusable space before classic aggregates, with
-/// raw aggregates for payloads and metadata aggregates for index blocks. PAGE initialization uses
-/// complete metadata-block reservations. In PAGE files, allocations through [`Store::allocate`]
-/// use raw pages.
+/// raw aggregates for payloads and metadata aggregates for index blocks. In PAGE files, the editor
+/// reserves complete metadata blocks for index initialization and growth, and raw pages for chunk
+/// payloads.
 pub(super) struct EditStore<'a> {
     engine: &'a mut WriteEngine,
 }
@@ -874,8 +874,6 @@ impl EditStore<'_> {
 
     /// Prepares bytes at their allocation address before padding and appending in raw PAGE space.
     ///
-    /// Index blocks allocated through [`Store::allocate`] use the same placement as chunk payloads.
-    ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if address conversion, PAGE geometry, or padding size is invalid.
@@ -910,6 +908,10 @@ impl EditStore<'_> {
 
     /// Prepares and places bytes in reusable space, a classic aggregate, or at end-of-file.
     ///
+    /// In PAGE files, reserves nonempty metadata as complete blocks in metadata pages and chunk
+    /// payloads in raw pages. Uses [`append_into_raw_page`](Self::append_into_raw_page) for an empty
+    /// allocation.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::AllocationPublicationUncertain`] if a nonempty allocation follows uncertain
@@ -923,7 +925,10 @@ impl EditStore<'_> {
         let Some(size) = NonZeroU64::new(length) else {
             return self.append_into_raw_page(length, prepare);
         };
-        let request = ReservationRequest::with_page_type(size, class, PageType::Raw);
+        let request = match class {
+            AllocationClass::Metadata => ReservationRequest::new(size, class).for_block(),
+            AllocationClass::Raw => ReservationRequest::new(size, class),
+        };
         let mut plan = self
             .engine
             .plan_immediate_reservation(request)

@@ -169,7 +169,8 @@ pub(crate) trait Store: Source {
     /// Writes `bytes` into provisional storage of `class`.
     ///
     /// Chunk payloads use [`AllocationClass::Raw`]. Extensible-array data and super blocks use
-    /// [`AllocationClass::Metadata`]. On PAGE files, the editor places both in raw pages.
+    /// [`AllocationClass::Metadata`]. In PAGE files, the editor places chunk payloads in raw pages
+    /// and reserves complete metadata blocks in metadata pages.
     /// During reclamation, the editor returns index storage to raw-page free space only where
     /// its PAGE placement is proven.
     ///

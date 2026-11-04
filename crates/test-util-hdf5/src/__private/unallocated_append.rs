@@ -187,6 +187,40 @@ pub fn paged_fixture(
     fixture_with_settings(path, filtered, Some(page), parameters)
 }
 
+/// Resizes dataset `d` and writes `values` through libhdf5.
+///
+/// Opens and closes the file for this write. Use a fixture from [`fixture`] or [`paged_fixture`].
+///
+/// # Panics
+///
+/// Panics if opening the file, accessing or resizing the dataset, writing values, or closing the
+/// file fails.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure::File;
+/// use test_util_hdf5::__private::unallocated_append;
+///
+/// # let _guard = test_util_hdf5::lock::libhdf5_guard();
+/// # let directory = tempfile::tempdir()?;
+/// let path = directory.path().join("initialized.h5");
+/// unallocated_append::fixture(&path, false, false, [32, 4, 4, 16, 10]);
+/// unallocated_append::write_values(&path, &[11, 12, 13, 14]);
+/// let file = File::open(&path)?;
+/// assert_eq!(file.dataset("d")?.read_i32()?, [11, 12, 13, 14]);
+/// file.close()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_values(path: &Path, values: &[i32]) {
+    let native = hdf5::File::open_rw(path).unwrap();
+    let target = native.dataset("d").unwrap();
+    target.resize([values.len()]).unwrap();
+    target.write_raw(values).unwrap();
+    drop(target);
+    native.close().unwrap();
+}
+
 fn fixture_with_settings(
     path: &Path,
     filtered: bool,
