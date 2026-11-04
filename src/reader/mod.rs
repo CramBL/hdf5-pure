@@ -6538,9 +6538,8 @@ impl Dataset {
 
     /// Stages an append to this dataset for publication by [`File::commit`].
     ///
-    /// Unlike [`append`](Self::append) (immediate, amortized `O(1)`,
-    /// Extensible-Array only), this rebuilds the chunk index on commit and so
-    /// also grows datasets whose Extensible-Array index is not yet allocated.
+    /// Rebuilds the chunk index on commit, including indexes whose storage is unallocated.
+    /// Supports single-chunk, Fixed Array, and Extensible Array indexes.
     /// An append that grows a partial tail stored under lossy filters (ZFP or float D-scale
     /// scale-offset) is rejected before any changes are staged. Use
     /// [`append_staged_with_options`](Self::append_staged_with_options) to permit it. Under
@@ -6548,10 +6547,10 @@ impl Dataset {
     /// unfiltered and can grow. With a lossy pipeline, the writer filters a tail when complete.
     /// Configure the appended elements through `build` on the
     /// [`AppendBuilder`]; repeated calls within the builder concatenate in
-    /// order. The dataset must be chunked, unlimited along axis 0,
-    /// Extensible-Array indexed, rank 1, use a re-encodable filter pipeline, and
-    /// have a single hard link, otherwise [`Error::AppendUnsupported`] is
-    /// returned on [`File::commit`].
+    /// order. A committed dataset must be rank 1, chunked, use a supported index and a
+    /// re-encodable filter pipeline, and have a single hard link. Growth must fit its maximum
+    /// first dimension, which may be finite or unlimited. [`File::commit`] returns
+    /// [`Error::AppendUnsupported`] if these requirements are not met.
     ///
     /// The file must have been opened with [`File::open_rw`], else
     /// [`Error::ReadOnly`].
@@ -6565,7 +6564,34 @@ impl Dataset {
     ///
     /// Returns [`Error::ReadOnly`] if the file is read-only, or [`Error::AppendUnsupported`]
     /// if growing the partial tail would re-encode lossy values. Propagates errors from
-    /// resolving the dataset or checking for conflicting staged edits.
+    /// resolving the dataset or checking for conflicting staged edits. [`File::commit`] reports
+    /// unsupported storage geometry or growth beyond the maximum first dimension.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, MaxExtent};
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("finite.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("values")
+    ///     .with_i32_data(&[1, 2])
+    ///     .with_chunks(&[2])
+    ///     .with_maxshape(&[MaxExtent::Fixed(6)]);
+    /// builder.write(&path)?;
+    ///
+    /// let file = File::open_rw(&path)?;
+    /// let mut values = file.dataset("values")?;
+    /// values.append_staged(|append| {
+    ///     append.append_i32(&[3, 4]);
+    /// })?;
+    /// file.commit()?;
+    /// assert_eq!(values.read::<i32>()?, [1, 2, 3, 4]);
+    /// assert_eq!(values.maxshape()?, Some(vec![MaxExtent::Fixed(6)]));
+    /// drop(values);
+    /// file.close()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn append_staged(&mut self, build: impl FnOnce(&mut AppendBuilder)) -> Result<(), Error> {
         self.append_staged_with_options(AppendOptions::new(), build)
     }

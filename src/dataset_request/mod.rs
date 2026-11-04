@@ -21,6 +21,8 @@ use crate::type_builders::{
     AttributeSpecs, DatasetBuilder, ObjectRefPatch, ProducedPayload, RawChunkPayload,
     VlStringStaging,
 };
+#[cfg(feature = "std")]
+use crate::width::FormatWidths;
 
 mod fill;
 
@@ -374,6 +376,22 @@ pub(crate) struct ValueOverwrite {
 
 #[cfg(feature = "std")]
 impl ValueOverwrite {
+    /// Converts canonical variable-length payloads to the destination's stored representation.
+    ///
+    /// Checks dataspace dimensions and deferred collection sizes before returning the replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns reference-width errors from [`crate::file_writer::require_reference_width`],
+    /// dimension errors from [`Dataspace::serialize`], or conversion errors from
+    /// [`PreparedBytes::prepare_widths`].
+    pub(crate) fn into_widths(mut self, widths: FormatWidths) -> Result<Self, FormatError> {
+        crate::file_writer::require_reference_width(widths, &self.dt)?;
+        self.ds.serialize(widths.lengths.get())?;
+        self.bytes.prepare_widths(widths, &self.dt)?;
+        Ok(self)
+    }
+
     /// Takes the replacement buffer and deferred heap staging, leaving an empty buffer and `None`.
     pub(crate) fn take_payload(&mut self) -> (Vec<u8>, Option<VlStringStaging>) {
         (
@@ -557,6 +575,27 @@ pub(crate) enum PreparedElements {
 }
 
 impl PreparedElements {
+    /// Converts buffered canonical elements to the destination's stored representation.
+    ///
+    /// Checks the datatype's reference-width requirements for unallocated storage too.
+    ///
+    /// # Errors
+    ///
+    /// Returns reference-width errors from [`crate::file_writer::require_reference_width`] or
+    /// conversion errors from [`PreparedBytes::prepare_widths`].
+    #[cfg(feature = "std")]
+    pub(crate) fn into_widths(
+        mut self,
+        widths: FormatWidths,
+        datatype: &Datatype,
+    ) -> Result<Self, FormatError> {
+        crate::file_writer::require_reference_width(widths, datatype)?;
+        if let Self::Bytes(bytes) = &mut self {
+            bytes.prepare_widths(widths, datatype)?;
+        }
+        Ok(self)
+    }
+
     /// Returns the element buffer for reference patching or appending.
     ///
     /// # Errors
@@ -641,6 +680,40 @@ impl PreparedBytes {
             reference_targets: None,
             vl_string_staging: None,
         }
+    }
+    /// Compacts canonical variable-length references and their deferred patch offsets in place.
+    ///
+    /// Checks deferred heap collection sizes against the destination length width. The caller
+    /// converts each canonical buffer once before sizing or emitting its stored elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns collection-size errors from [`crate::file_writer::validate_collections`] or
+    /// conversion errors from [`hdf5_pure_format::__private::narrow_variable_length_references`].
+    /// A conversion error can leave the buffer partially modified.
+    #[cfg(feature = "std")]
+    fn prepare_widths(
+        &mut self,
+        widths: FormatWidths,
+        datatype: &Datatype,
+    ) -> Result<(), FormatError> {
+        if let Some(staging) = &mut self.vl_string_staging {
+            crate::file_writer::validate_collections(widths, &staging.collections)?;
+            hdf5_pure_format::__private::narrow_variable_length_references(
+                widths.offsets,
+                datatype,
+                &mut self.raw,
+                Some(&mut staging.patch_offsets),
+            )?;
+        } else {
+            hdf5_pure_format::__private::narrow_variable_length_references(
+                widths.offsets,
+                datatype,
+                &mut self.raw,
+                None,
+            )?;
+        }
+        Ok(())
     }
 }
 

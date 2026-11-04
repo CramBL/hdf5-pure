@@ -1,7 +1,7 @@
-//! Pure-Rust tests for `Dataset::append_staged`: append new elements to an
-//! existing chunked, unlimited, Extensible-Array-indexed dataset in place —
-//! filtered and unfiltered, chunk-aligned and not — and read the result back
-//! with this crate. C-library interop lives in `crates/crosscheck/tests/main/append.rs`.
+//! Staged appends to rank-1 chunked datasets with finite or unlimited maximum extents.
+//!
+//! Covers filtered and unfiltered data, partial trailing chunks, maximum-extent errors,
+//! and retention of complete chunk storage.
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
@@ -399,9 +399,6 @@ fn introspection_on_contiguous_dataset() {
     assert!(ds.filters().unwrap().is_empty());
 }
 
-// --- Refusal matrix: every case leaves the file unchanged and returns
-// Error::AppendUnsupported. ---
-
 /// Stage an append on `dataset` via `build`, commit, and return the result —
 /// dropping the session (and its exclusive file lock) before returning so a
 /// subsequent readback can reopen the file. On Windows the write lock is
@@ -445,18 +442,34 @@ fn refuse_contiguous() {
 }
 
 #[test]
-fn refuse_fixed_chunked_not_unlimited() {
+fn staged_append_grows_a_finite_chunked_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
-    // Chunked but a finite maximum (not unlimited) => fixed-array index, refused.
+    dataset::AppendRefusalFixture::FixedChunked.write(&path);
+    commit_append(&path, "d", |append| {
+        append.append_i32(&[6, 7, 8]);
+    })
+    .unwrap();
+    assert_eq!(
+        dataset::read_pure::<i32>(&path, "d"),
+        (0..9).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn staged_append_rejects_growth_beyond_a_finite_maximum() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::FixedChunked;
     fixture.write(&path);
+    let before = std::fs::read(&path).unwrap();
     assert_append_unsupported(
-        commit_append(&path, "d", |a| {
-            a.append_i32(&[6, 7, 8]);
+        commit_append(&path, "d", |append| {
+            append.append_i32(&(6..101).collect::<Vec<_>>());
         }),
-        "append requires an Extensible-Array-indexed chunked dataset (a single unlimited dimension under the latest format)",
+        "append exceeds the dataset's maximum first dimension",
     );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
         fixture.expected_i32()

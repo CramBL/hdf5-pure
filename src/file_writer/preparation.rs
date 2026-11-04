@@ -1318,7 +1318,7 @@ pub(super) struct VlPatch {
 ///
 /// Returns [`FormatError::ReferenceWidthUnsupported`] if an address-bearing datatype is paired
 /// with two- or four-byte file offsets, including nested occurrences.
-pub(super) fn require_reference_width(
+pub(crate) fn require_reference_width(
     widths: FormatWidths,
     datatype: &Datatype,
 ) -> Result<(), FormatError> {

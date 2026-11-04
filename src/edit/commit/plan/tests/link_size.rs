@@ -169,6 +169,7 @@ impl Destination {
             }
             Destination::Dataset => {
                 let mut prepared = dataset::flatten_dataset(
+                    crate::file_writer::WIDTHS,
                     super::i32_dataset(&[31]),
                     LinkNameBuf::new("short").unwrap(),
                 )

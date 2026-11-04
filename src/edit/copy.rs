@@ -935,7 +935,8 @@ impl CopyReader<'_> {
                          copied in place yet",
                     ));
                 }
-                let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
+                let geometry =
+                    ChunkedGeometry::with_offset_width(widths.offsets, &dt, &ds, &layout)?;
 
                 let source = PhysicalSource::new(&src).stored();
                 let infos = chunked_read::enumerate_chunks_from_source(

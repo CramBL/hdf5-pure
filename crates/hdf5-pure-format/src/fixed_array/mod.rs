@@ -121,7 +121,11 @@ impl FixedArrayHeaderLocator {
             )?),
             DecodedStoredAddress::Undefined => None,
         };
-        Ok(FixedArrayHeader { range, data_block })
+        Ok(FixedArrayHeader {
+            range,
+            filtered: matches!(encoding.client(), ArrayClient::FilteredChunks { .. }),
+            data_block,
+        })
     }
 
     /// Returns the range a caller reads for [`parse`](Self::parse), the whole header.
@@ -144,10 +148,16 @@ impl FixedArrayHeaderLocator {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayHeader {
     range: FileRange,
+    filtered: bool,
     data_block: Option<FixedArrayDataBlockRef>,
 }
 
 impl FixedArrayHeader {
+    /// Returns whether the array's client format stores filtered chunk sizes and masks.
+    pub const fn is_filtered(&self) -> bool {
+        self.filtered
+    }
+
     /// Returns the physical range of the header.
     pub const fn range(&self) -> FileRange {
         self.range

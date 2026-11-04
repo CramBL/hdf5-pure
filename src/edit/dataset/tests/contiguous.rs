@@ -438,7 +438,8 @@ pub(super) fn prepared(creation: Creation, filtered: bool) -> CompressedChunkSet
         fill_time,
         #[cfg(feature = "provenance")]
             provenance: _,
-    } = super::super::flatten_dataset(builder, LinkNameBuf::new("d").unwrap()).unwrap();
+    } = super::super::flatten_dataset(file_writer::WIDTHS, builder, LinkNameBuf::new("d").unwrap())
+        .unwrap();
     let dimensions = chunk_options.resolve_chunk_dims(&ds.dimensions);
     let context = ChunkContext::from_datatype(&dimensions, &dt).unwrap();
     let element = NonZeroUsize::new(usize::try_from(context.element_size.get()).unwrap()).unwrap();

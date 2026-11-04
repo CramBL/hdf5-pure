@@ -13,6 +13,7 @@ use test_util::disk_log;
 use test_util::disk_log::IoEvent;
 use test_util::disk_log::IoOutcome;
 
+use crate::AttrValue;
 use crate::DeflateLevel;
 use crate::File;
 use crate::FileAccessProperties;
@@ -38,11 +39,12 @@ use crate::chunked_write;
 use crate::chunked_write::ChunkOptions;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::chunked_write::StorageAllocation;
+use crate::dataset_request::{PreparedDataset, StagedFill};
 use crate::dataspace::MaxExtent;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::edit::WriteEngine;
 use crate::edit::test_util as edit_test_util;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::fill_value::FillPattern;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -55,6 +57,8 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
+use crate::vl_data::VlElement;
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 use crate::writer::FileBuilder;
 
 mod contiguous;
@@ -115,7 +119,12 @@ fn empty_page_creation_reserves_only_defined_index_storage(
     if filtered {
         dataset.with_shuffle();
     }
-    let mut flat = super::flatten_dataset(dataset, LinkNameBuf::new("d").unwrap()).unwrap();
+    let mut flat = super::flatten_dataset(
+        engine.context.widths(),
+        dataset,
+        LinkNameBuf::new("d").unwrap(),
+    )
+    .unwrap();
     let bytes = engine.build_chunked_dataset(&mut flat).unwrap();
     let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
     assert_eq!(
@@ -502,4 +511,164 @@ impl CreationAccess {
             Self::Mirrored | Self::Userblock => MemoryStrategy::Mirrored,
         }
     }
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn staging_preserves_payload_allocation_with_stored_variable_length_sizes(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let mut builder = DatasetBuilder::new("values");
+    builder.with_vlen_strings(&["alpha", "", "gamma"]);
+    let pointer = builder.data.as_ref().unwrap().as_ref().unwrap().as_ptr();
+    let capacity = builder.data.as_ref().unwrap().as_ref().unwrap().capacity();
+    let datatype = builder.datatype.as_ref().unwrap().clone();
+    builder.fill = Some(StagedFill::source(datatype, vec![0; 16]));
+    builder.set_attr(
+        "labels",
+        AttrValue::VarLenStringArray(vec!["one".into(), "two".into()]),
+    );
+    let mut prepared =
+        super::flatten_dataset(widths, builder, LinkNameBuf::new("values").unwrap()).unwrap();
+    let stride = VlElement::serialized_size(offsets);
+    assert_eq!(prepared.extent, u64::try_from(3 * stride).unwrap());
+    assert_eq!(prepared.storage.raw().len(), 3 * stride);
+    assert_eq!(prepared.storage.raw().as_ptr(), pointer);
+    assert_eq!(prepared.storage.raw_mut().unwrap().capacity(), capacity);
+    assert_eq!(prepared.fill.as_ref().unwrap().as_bytes(), vec![0; stride]);
+    assert_eq!(prepared.attrs[0].raw_data.len(), 2 * stride);
+    let staging = prepared.storage.take_vl_string_staging().unwrap();
+    assert_eq!(staging.patch_offsets, [0, stride, 2 * stride]);
+    assert_eq!(staging.collections.len(), 1);
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 10)]
+#[case::four(OffsetWidth::Four, 12)]
+#[case::eight(OffsetWidth::Eight, 16)]
+fn overwrites_prepare_variable_length_bytes_once_before_application(
+    #[case] offsets: OffsetWidth,
+    #[case] stride: usize,
+) {
+    let mut builder = DatasetBuilder::new("values");
+    builder.with_vlen_strings(&["first", "second"]);
+    let pointer = builder.data.as_ref().unwrap().as_ref().unwrap().as_ptr();
+    let mut prepared = PreparedDataset::parse(builder)
+        .unwrap()
+        .into_overwrite()
+        .unwrap()
+        .into_widths(FormatWidths {
+            offsets,
+            lengths: LengthWidth::Two,
+        })
+        .unwrap();
+    assert_eq!(prepared.raw().len(), 2 * stride);
+    let (bytes, staging) = prepared.take_payload();
+    assert_eq!(bytes.as_ptr(), pointer);
+    assert_eq!(staging.unwrap().patch_offsets, [0, stride]);
+}
+
+#[rstest]
+#[case::dimension(65_536, None, 65_536)]
+#[case::maximum(1, Some(MaxExtent::Fixed(65_536)), 65_536)]
+#[case::unlimited(1, Some(MaxExtent::Unlimited), u64::MAX)]
+fn staged_declarations_reject_unrepresentable_length_fields(
+    #[case] dimension: u64,
+    #[case] maximum: Option<MaxExtent>,
+    #[case] length: u64,
+) {
+    let mut builder = DatasetBuilder::new("values");
+    builder.with_unallocated_storage(type_builders::make_u8_type(), &[dimension]);
+    if let Some(maximum) = maximum {
+        builder.with_maxshape(&[maximum]);
+    }
+    let result = super::flatten_dataset(
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Two,
+        },
+        builder,
+        LinkNameBuf::new("values").unwrap(),
+    );
+    let Err(error) = result else {
+        panic!("the unrepresentable declaration must fail");
+    };
+    assert!(
+        matches!(error, Error::Format(FormatError::LengthTooLarge { length: actual, length_size: 2 }) if actual == length),
+        "{error:?}"
+    );
+}
+
+#[rstest]
+#[case::creation(false)]
+#[case::overwrite(true)]
+fn dataset_preparation_rejects_unrepresentable_heap_collections(#[case] overwrite: bool) {
+    let mut builder = DatasetBuilder::new("values");
+    builder.with_vlen_strings(&[&"x".repeat(70_000)]);
+    let length =
+        u64::try_from(builder.vl_string_staging.as_ref().unwrap().collections[0].len()).unwrap();
+    assert!(length > u64::from(u16::MAX));
+    let error = preparation_error(
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Two,
+        },
+        builder,
+        overwrite,
+    );
+    assert!(
+        matches!(error, Error::Format(FormatError::LengthTooLarge { length: actual, length_size: 2 }) if actual == length),
+        "{error:?}"
+    );
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two)]
+#[case::four(OffsetWidth::Four)]
+fn dataset_preparation_rejects_narrow_legacy_references(
+    #[case] offsets: OffsetWidth,
+    #[values(false, true)] overwrite: bool,
+) {
+    let mut builder = DatasetBuilder::new("values");
+    builder.with_raw_data(type_builders::make_object_reference_type(), vec![0; 8], 1);
+    let error = preparation_error(
+        FormatWidths {
+            offsets,
+            lengths: LengthWidth::Eight,
+        },
+        builder,
+        overwrite,
+    );
+    assert!(
+        matches!(error, Error::Format(FormatError::ReferenceWidthUnsupported { offset_size }) if offset_size == offsets.get()),
+        "{error:?}"
+    );
+}
+
+fn preparation_error(widths: FormatWidths, builder: DatasetBuilder, overwrite: bool) -> Error {
+    let result = if overwrite {
+        PreparedDataset::parse(builder)
+            .unwrap()
+            .into_overwrite()
+            .unwrap()
+            .into_widths(widths)
+            .map(|_| ())
+            .map_err(Error::Format)
+    } else {
+        super::flatten_dataset(widths, builder, LinkNameBuf::new("values").unwrap()).map(|_| ())
+    };
+    let Err(error) = result else {
+        panic!("the unrepresentable preparation must fail");
+    };
+    error
 }

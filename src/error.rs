@@ -70,13 +70,13 @@ pub enum Error {
     /// [`Dataset::append_staged`](crate::Dataset::append_staged). The
     /// payload is a human-readable reason.
     AppendInPlaceUnsupported(&'static str),
-    /// The dataset is not a supported target for
-    /// [`Dataset::append_staged`](crate::Dataset::append_staged) - for
-    /// example a dataset that is not chunked, not extensible along its first
-    /// dimension, not indexed by an Extensible Array, higher than rank 1, uses a
-    /// filter this engine cannot re-encode, has a big-endian on-disk element
-    /// datatype (for a raw append), or has more than one hard link. The payload
-    /// is a human-readable reason.
+    /// The dataset or appended values are unsupported by
+    /// [`Dataset::append_staged`](crate::Dataset::append_staged).
+    ///
+    /// A committed dataset must be rank 1, chunked, and indexed by a single chunk, Fixed Array, or
+    /// Extensible Array. Appended values must fit the maximum first dimension. Unsupported
+    /// filters, incompatible element datatypes, sparse chunk grids, and shared hard links can
+    /// also cause this error. The payload is a human-readable reason.
     AppendUnsupported(&'static str),
     /// A [`commit`](crate::File::commit) failed, *and* could not put back a
     /// value it had already written over - so the file holds part of a batch

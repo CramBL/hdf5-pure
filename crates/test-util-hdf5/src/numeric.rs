@@ -136,6 +136,15 @@ impl ByteOrder {
         self.datatype::<i32>()
     }
 
+    /// Returns an unsigned 32-bit integer datatype with this byte order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reference library cannot create the datatype or set its byte order.
+    pub fn u32_datatype(self) -> Datatype {
+        self.datatype::<u32>()
+    }
+
     /// Returns an unsigned 8-bit integer datatype with this byte order.
     ///
     /// # Panics

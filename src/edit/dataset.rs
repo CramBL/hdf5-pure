@@ -4,14 +4,14 @@
 //! Application consumes the matching replacement buffers and resolves variable-length heap
 //! addresses before writing.
 
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::AddressRange;
-use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::{DenseAttrFixup, PreparedDenseAttrs};
 use hdf5_pure_space::__private::AllocationClass;
@@ -27,13 +27,14 @@ use crate::attribute_request::PreparedAttributes;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
 use crate::chunked_write::ChunkArrayGeometry;
-use crate::chunked_write::ChunkArrayKind;
 use crate::chunked_write::ChunkedHeader;
 use crate::chunked_write::CompressedChunkSet;
 #[cfg(doc)]
 use crate::chunked_write::PartialEdgeFiltering;
 use crate::chunked_write::VerbatimChunks;
-use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
+use crate::chunked_write::{
+    self, ChunkIndexKind, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation,
+};
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
@@ -45,7 +46,7 @@ use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_emission::EmissionError;
-use crate::file_writer::{self, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_WIDTH};
+use crate::file_writer;
 use crate::fill_value::FillPattern;
 use crate::fill_value::PaddingFill;
 use crate::filter_pipeline::FilterPipeline;
@@ -77,6 +78,11 @@ use crate::file_writer::DenseAttrCreationOrder;
 
 use super::{AppendBuilder, LOSSY_TAIL_REFUSAL, OhRegion, UNDEF, WriteEngine};
 
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
+
 impl WriteEngine {
     /// Stages a prepared dataset for creation at `path` on the next [`commit`](Self::commit).
     ///
@@ -101,7 +107,7 @@ impl WriteEngine {
             return Err(Error::EditUnsupported("dataset path has an empty name"));
         };
         self.refuse_creation_collision(path, StagedKind::Dataset)?;
-        let fd = flatten_dataset(builder, leaf)?;
+        let fd = flatten_dataset(self.context.widths(), builder, leaf)?;
         self.staged.push_dataset(parent, fd);
         Ok(())
     }
@@ -127,7 +133,9 @@ impl WriteEngine {
         if path.split_leaf().is_none() {
             return Err(Error::EditUnsupported("cannot overwrite the root group"));
         }
-        let values = PreparedDataset::parse(builder)?.into_overwrite()?;
+        let values = PreparedDataset::parse(builder)?
+            .into_overwrite()?
+            .into_widths(self.context.widths())?;
         self.staged
             .push(StagedOp::WriteDataset(path.clone(), values));
         Ok(())
@@ -171,7 +179,11 @@ impl WriteEngine {
     pub(super) fn resolve_dataset_attributes(&mut self, fd: &mut FlatDataset) -> Result<(), Error> {
         for (idx, collections) in std::mem::take(&mut fd.vl_attrs) {
             let addrs = self.place_vl_collections(&collections)?;
-            type_builders::patch_vl_refs(&mut fd.attrs[idx].raw_data, &addrs);
+            type_builders::patch_vl_refs_with_width(
+                self.context.widths().offsets,
+                &mut fd.attrs[idx].raw_data,
+                &addrs,
+            )?;
         }
         Ok(())
     }
@@ -194,11 +206,12 @@ impl WriteEngine {
             if let Some(staging) = fd.storage.take_vl_string_staging() {
                 if !staging.collections.is_empty() {
                     let addrs = self.place_vl_collections(&staging.collections)?;
-                    type_builders::patch_vl_refs_masked(
+                    type_builders::patch_vl_refs_masked_with_width(
+                        self.context.widths().offsets,
                         fd.storage.raw_mut()?,
                         &staging.patch_offsets,
                         &addrs,
-                    );
+                    )?;
                 }
             }
             let data_addr = if fd.storage.raw().is_empty() {
@@ -220,7 +233,7 @@ impl WriteEngine {
                 fd.fill_time,
                 fd.fill.as_ref().map(PreparedFill::as_bytes),
                 self.libver(),
-                file_writer::HeaderOptions::PLAIN,
+                file_writer::HeaderOptions::PLAIN.with_widths(self.context.widths()),
             )?
         };
         self.place_object_header(&oh)
@@ -322,24 +335,34 @@ impl WriteEngine {
                 bytes: source,
             })),
             1 => {
-                if le - lb < 18 {
-                    return Err(Error::EditUnsupported("malformed contiguous data layout"));
-                }
-                let addr_off = lb + 2;
-                let data_addr = StoredAddress::new(u64::from_le_bytes(
-                    region[addr_off..addr_off + 8].try_into().unwrap(),
-                ));
-                let data_size = u64::from_le_bytes(region[lb + 10..lb + 18].try_into().unwrap());
+                let layout = match DataLayout::parse_with_widths(&region[lb..le], widths) {
+                    Err(FormatError::UnexpectedEof { .. }) => {
+                        return Err(Error::EditUnsupported("malformed contiguous data layout"));
+                    }
+                    result => result?,
+                };
+                let DataLayout::Contiguous {
+                    address: data_addr,
+                    size: data_size,
+                } = layout
+                else {
+                    return Err(FormatError::Internal(
+                        "a contiguous layout has another class".into(),
+                    )
+                    .into());
+                };
 
                 // Deferred variable-length values must relocate. Publishing newly allocated heap
                 // references
                 // inside live data would make rollback release reachable storage.
                 if self.fresh_page_boundary.is_none()
                     && fd.vl_string_staging().is_none()
-                    && !data_addr.is_undefined(OFFSET_WIDTH)
+                    && data_addr.is_some()
                     && data_size == fd.raw().len() as u64
                 {
-                    if let Ok(start) = base.resolve(data_addr).map(PhysicalAddress::get) {
+                    if let Some(data_addr) = data_addr
+                        && let Ok(start) = base.resolve(data_addr).map(PhysicalAddress::get)
+                    {
                         if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
@@ -349,14 +372,13 @@ impl WriteEngine {
                     }
                 }
 
-                let old_extent = if !data_addr.is_undefined(OFFSET_WIDTH) && data_size > 0 {
-                    Some(FileRange::new(base.resolve(data_addr)?, data_size)?)
-                } else {
-                    None
-                };
+                let old_extent = data_addr
+                    .filter(|_| data_size > 0)
+                    .map(|address| FileRange::new(base.resolve(address)?, data_size))
+                    .transpose()?;
                 Ok(WritePlan::Moving(MovingWrite::Contiguous {
                     region,
-                    addr_off,
+                    version: LayoutVersion::try_from(version)?,
                     bytes: source,
                     old_extent,
                 }))
@@ -373,7 +395,8 @@ impl WriteEngine {
                     ));
                 }
 
-                let geometry = ChunkedGeometry::new(&fd.dt, &disk_ds, &dl)?;
+                let geometry =
+                    ChunkedGeometry::with_offset_width(widths.offsets, &fd.dt, &disk_ds, &dl)?;
 
                 let padding = fill_msg
                     .map_or(crate::fill_value::PaddingFill::Zero, |(mt, b, e)| {
@@ -418,6 +441,7 @@ impl WriteEngine {
 
                 if self.fresh_page_boundary.is_none()
                     && let Some(writes) = try_inplace_chunk_writes(
+                        widths,
                         &PhysicalSource::new(&self.opened_source()).stored(),
                         &dl,
                         &disk_ds,
@@ -452,14 +476,15 @@ impl WriteEngine {
     /// Prepares a relocating append while preserving complete chunks by their index records.
     ///
     /// A partial trailing chunk is decoded and combined with the appended elements. New chunks are
-    /// encoded for the grown extent, including its partial-edge filter exemption. This call reads
-    /// `src`
-    /// without writing it.
+    /// encoded for the grown extent, including its partial-edge filter exemption. Reads `src`
+    /// without writing it. Supports single-chunk, Fixed Array, and Extensible Array indexes,
+    /// subject to the dataspace's maximum first dimension.
     ///
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] for incompatible values, unsupported geometry or
-    /// filters, a sparse chunk grid, inconsistent filter metadata, or dimension overflow.
+    /// filters, a sparse chunk grid, inconsistent filter metadata, dimension overflow, or a grown
+    /// extent beyond the maximum first dimension.
     /// Returns the same error for a partial tail stored under lossy filters unless the append
     /// permits re-encoding it. Propagates metadata, chunk-decoding, and encoding errors.
     pub(super) fn prepare_append(
@@ -529,24 +554,20 @@ impl WriteEngine {
                 "append requires a chunked dataset",
             ));
         };
-        let ChunkIndexLayout::ExtensibleArray { address, .. } = index else {
+        if !matches!(
+            index,
+            ChunkIndexLayout::ExtensibleArray { .. }
+                | ChunkIndexLayout::FixedArray { .. }
+                | ChunkIndexLayout::SingleChunk { .. }
+        ) {
             return Err(Error::AppendUnsupported(
-                "append requires an Extensible-Array-indexed chunked dataset (a single \
-                 unlimited dimension under the latest format)",
+                "append requires a single-chunk, Fixed Array, or Extensible Array index",
             ));
-        };
+        }
 
         if disk_ds.space_type != DataspaceType::Simple || disk_ds.dimensions.len() != 1 {
             return Err(Error::AppendUnsupported(
                 "append requires a rank-1 dataset in this release",
-            ));
-        }
-        if !matches!(
-            disk_ds.max_dimensions.as_deref(),
-            Some([MaxExtent::Unlimited, ..])
-        ) {
-            return Err(Error::AppendUnsupported(
-                "append requires a dataset that is unlimited along its first dimension",
             ));
         }
 
@@ -555,7 +576,7 @@ impl WriteEngine {
             element_size,
             raw_size,
             ..
-        } = ChunkedGeometry::new(&disk_dt, &disk_ds, &dl)?;
+        } = ChunkedGeometry::with_offset_width(widths.offsets, &disk_dt, &disk_ds, &dl)?;
         let chunk_elems = spatial[0];
         if ab.raw().len() % element_size != 0 {
             return Err(Error::AppendUnsupported(
@@ -589,6 +610,18 @@ impl WriteEngine {
                 "append would overflow the dataset dimension",
             ))?;
 
+        let maximum = disk_ds
+            .max_dimensions
+            .as_deref()
+            .map_or(MaxExtent::Fixed(current_dim0), |maximum| maximum[0]);
+        if let MaxExtent::Fixed(limit) = maximum
+            && new_dim0 > limit
+        {
+            return Err(Error::AppendUnsupported(
+                "append exceeds the dataset's maximum first dimension",
+            ));
+        }
+
         let pipeline_message: Option<Vec<u8>> = filter.map(|(fb, fe)| region[fb..fe].to_vec());
         let has_filters = pipeline_message.is_some();
         let pipeline = match &pipeline_message {
@@ -611,26 +644,27 @@ impl WriteEngine {
         }
         let indexes = PhysicalSource::new(src).stored();
         // Retained records must use the same element format as the replacement index.
-        if let Some(idx_addr) = *address {
-            let array = crate::extensible_array::read_header(
-                &indexes,
-                crate::file_writer::WIDTHS,
-                idx_addr,
-            )?;
-            if array.is_filtered() != has_filters {
-                return Err(Error::AppendUnsupported(
-                    "dataset filter metadata is inconsistent (chunk-index client id \
-                     disagrees with the filter pipeline)",
-                ));
+        let filtered_index = match *index {
+            ChunkIndexLayout::ExtensibleArray {
+                address: Some(address),
+                ..
+            } => {
+                Some(crate::extensible_array::read_header(&indexes, widths, address)?.is_filtered())
             }
+            ChunkIndexLayout::FixedArray {
+                address: Some(address),
+            } => Some(crate::fixed_array::read_header(&indexes, widths, address)?.is_filtered()),
+            ChunkIndexLayout::SingleChunk { filtered, .. } => Some(filtered.is_some()),
+            _ => None,
+        };
+        if filtered_index.is_some_and(|filtered| filtered != has_filters) {
+            return Err(Error::AppendUnsupported(
+                "dataset filter metadata is inconsistent (chunk-index client id \
+                 disagrees with the filter pipeline)",
+            ));
         }
 
-        let infos = chunked_read::enumerate_chunks_from_source(
-            &indexes,
-            &dl,
-            &disk_ds,
-            crate::file_writer::WIDTHS,
-        )?;
+        let infos = chunked_read::enumerate_chunks_from_source(&indexes, &dl, &disk_ds, widths)?;
         let grid = chunked_read::plan_dense_grid(infos, &disk_ds.dimensions, spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
@@ -659,7 +693,11 @@ impl WriteEngine {
             });
         }
 
-        let ctx = ChunkContext::from_datatype(spatial, &disk_dt)?;
+        let ctx = ChunkContext::from_stored_datatype(
+            spatial,
+            &disk_dt,
+            hdf5_pure_format::__private::stored_element_size(&disk_dt, widths.offsets)?,
+        );
         let mut scratch = FilterScratch::new();
         let (mut tail_raw, old_tail_allocation) = if has_partial {
             let partial = &grid_order[n_full];
@@ -702,8 +740,22 @@ impl WriteEngine {
 
         let mut grown = disk_ds.clone();
         grown.dimensions[0] = new_dim0;
-        let new_dataspace_body = grown.serialize(LENGTH_SIZE)?;
+        let new_dataspace_body = grown.serialize(widths.lengths.get())?;
 
+        let (kind, slot_of_chunk, index_slots) = chunked_write::plan_index_slots(
+            widths,
+            &grown.dimensions,
+            spatial,
+            grown.max_dimensions.as_deref(),
+            raw_size,
+            has_filters,
+            StorageAllocation::Allocated,
+        )?;
+        let index = AppendIndex {
+            kind,
+            slot_of_chunk,
+            index_slots,
+        };
         let chunk_dims_u32: Vec<u32> = spatial
             .iter()
             .map(|&dim| dim.narrow::<u32>())
@@ -717,6 +769,7 @@ impl WriteEngine {
             element_size,
             raw_size,
             has_filters,
+            index,
             kept_chunks,
             new_chunks,
             old_addr: addr,
@@ -743,18 +796,23 @@ impl WriteEngine {
         match mw {
             MovingWrite::Contiguous {
                 region,
-                addr_off,
+                version,
                 bytes,
                 ..
             } => {
                 let raw = self.resolve_overwrite_bytes(overwrites.take(bytes))?;
                 let new_data_addr = self.alloc_or_append_typed(&raw, AllocationClass::Raw)?;
-                let mut region = region;
-                let relative = base.relative(PhysicalAddress::new(new_data_addr))?.get();
-                region.bytes_mut()[addr_off..addr_off + 8].copy_from_slice(&relative.to_le_bytes());
-                let size_off = addr_off + 8;
-                let raw_len = raw.len() as u64;
-                region.bytes_mut()[size_off..size_off + 8].copy_from_slice(&raw_len.to_le_bytes());
+                let body = DataLayout::encode_contiguous(
+                    version,
+                    base.relative(PhysicalAddress::new(new_data_addr))?,
+                    raw.len() as u64,
+                    region.widths().offsets,
+                    region.widths().lengths,
+                )?;
+                let splice = region.splice_first(MessageType::DATA_LAYOUT)?.ok_or(
+                    Error::EditUnsupported("contiguous dataset header has no data layout"),
+                )?;
+                let region = region.with_bytes(splice.replace_body(&body)?);
                 let oh = super::object_header::build_v2_object_header(&region)?;
                 self.place_object_header(&oh)
             }
@@ -803,6 +861,7 @@ impl WriteEngine {
                 element_size,
                 raw_size,
                 has_filters,
+                index,
                 kept_chunks,
                 new_chunks,
                 ..
@@ -814,6 +873,7 @@ impl WriteEngine {
                 element_size,
                 raw_size,
                 has_filters,
+                &index,
                 &kept_chunks,
                 &new_chunks,
             ),
@@ -851,47 +911,30 @@ impl WriteEngine {
         element_size: NonZeroUsize,
         chunk_bytes: u64,
         has_filters: bool,
+        index: &AppendIndex,
         kept_chunks: &[ChunkRecord],
         new_chunks: &[PreparedChunk],
     ) -> Result<u64, Error> {
+        let widths = self.context.widths();
         let base = self.context.addresses();
-        let ea_stored = if self.space.is_paged() {
-            self.write_paged_appended_chunks(chunk_bytes, has_filters, kept_chunks, new_chunks)?
-        } else {
-            let placed_chunks =
-                |blob_stored: StoredAddress| -> Result<Vec<ChunkRecord>, FormatError> {
-                    let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
-                    let mut next = blob_stored;
-                    for chunk in new_chunks {
-                        combined.push(ChunkRecord {
-                            address: next,
-                            stored_size: chunk.stored_size(),
-                            filter_mask: chunk.filter_mask(),
-                        });
-                        next = next.checked_add(chunk.stored_size())?;
-                    }
-                    Ok(combined)
-                };
-            let sizing = placed_chunks(StoredAddress::new(0))?;
-            let ea_len = hdf5_pure_format::__private::extensible_array_len(
-                &IndexSlots::dense(&sizing),
+        let (combined, index_stored) = if self.space.is_paged() && index.kind.array_kind().is_some()
+        {
+            self.write_paged_appended_chunks(
+                index,
                 chunk_bytes,
-                OFFSET_WIDTH,
-                LENGTH_WIDTH,
                 has_filters,
-            )?;
-            let ea = |slots: &IndexSlots<'_>, at: StoredAddress| -> Result<Vec<u8>, Error> {
-                hdf5_pure_format::__private::build_extensible_array_at(
-                    slots,
-                    chunk_bytes,
-                    OFFSET_WIDTH,
-                    LENGTH_WIDTH,
-                    has_filters,
-                    at,
-                )
-                .map_err(Error::Format)
-            };
-            let requests = new_chunks
+                kept_chunks,
+                new_chunks,
+            )?
+        } else {
+            let mut sizing = kept_chunks.to_vec();
+            sizing.extend(new_chunks.iter().map(|chunk| ChunkRecord {
+                address: StoredAddress::ZERO,
+                stored_size: chunk.stored_size(),
+                filter_mask: chunk.filter_mask(),
+            }));
+            let index_len = index.encoded_len(widths, &sizing, chunk_bytes, has_filters)?;
+            let mut requests = new_chunks
                 .iter()
                 .map(|chunk| {
                     NonZeroU64::new(chunk.stored_size())
@@ -905,27 +948,21 @@ impl WriteEngine {
                             "chunk allocation is empty",
                         ))
                 })
-                .chain(core::iter::once(
-                    NonZeroU64::new(ea_len)
-                        .map(|size| {
-                            BlockRequest::complete(
-                                ReservationRequest::with_page_type(
-                                    size,
-                                    AllocationClass::Metadata,
-                                    PageType::Raw,
-                                ),
-                                EncodingDependency::Reservations,
-                            )
-                        })
-                        .ok_or_else(|| {
-                            FormatError::Internal("extensible-array allocation is empty".into())
-                        }),
-                ))
                 .collect::<Result<Vec<_>, _>>()?;
+            if let Some(size) = NonZeroU64::new(index_len) {
+                requests.push(BlockRequest::complete(
+                    ReservationRequest::with_page_type(
+                        size,
+                        AllocationClass::Metadata,
+                        PageType::Raw,
+                    ),
+                    EncodingDependency::Reservations,
+                ));
+            }
             let mut plan = self
                 .plan_blocks(&requests)
                 .map_err(ReservationFailure::into_error)?;
-            let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
+            let mut combined = kept_chunks.to_vec();
             for (chunk, reservation) in new_chunks.iter().zip(plan.reservations()) {
                 combined.push(ChunkRecord {
                     address: base.relative(reservation.range().start())?,
@@ -936,37 +973,38 @@ impl WriteEngine {
             for chunk in new_chunks {
                 plan.write_next(chunk.bytes())?;
             }
-            let index = plan.reservations().last().ok_or_else(|| {
-                FormatError::Internal("extensible-array reservation is absent".into())
-            })?;
-            debug_assert_eq!(
-                index.encoding_dependency(),
-                EncodingDependency::Reservations
-            );
-            let index_address = index.range().start();
-            let bytes = ea(&IndexSlots::dense(&combined), base.relative(index_address)?)?;
-            #[cfg(test)]
-            {
-                super::observations::record_index_encoding();
-                super::observations::record_index(bytes.len(), bytes.capacity());
-            }
-            let ea_addr = plan.write_next(&bytes)?;
+            let index_stored = if index_len > 0 {
+                let reservation = plan.reservations().last().ok_or_else(|| {
+                    FormatError::Internal("append index reservation is absent".into())
+                })?;
+                debug_assert_eq!(
+                    reservation.encoding_dependency(),
+                    EncodingDependency::Reservations
+                );
+                let address = base.relative(reservation.range().start())?;
+                let bytes = index.build_at(widths, &combined, chunk_bytes, has_filters, address)?;
+                #[cfg(test)]
+                {
+                    super::observations::record_index_encoding();
+                    super::observations::record_index(bytes.len(), bytes.capacity());
+                }
+                plan.write_next(&bytes)?;
+                address
+            } else {
+                StoredAddress::ZERO
+            };
             plan.finish()?;
-            base.relative(ea_addr)?
+            (combined, index_stored)
         };
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "element size is a datatype byte width that fits u32"
-        )]
-        let layout_body = DataLayout::encode_chunked(
+        let layout_body = index.kind.layout_message(
+            widths,
             flags,
             chunk_dims_u32,
-            element_size.get() as u32,
-            ChunkIndexInfo::ExtensibleArray,
-            ea_stored,
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
+            element_size,
+            &combined,
+            index_stored,
+            has_filters,
         )?;
         let region = replace_dataspace_message(region, new_dataspace_body)?;
         let region = replace_layout_message(&region, &layout_body)?;
@@ -977,8 +1015,8 @@ impl WriteEngine {
     /// Writes a committed dataset's new PAGE chunks and returns its stored index address.
     ///
     /// Reserves a reusable raw allocation for the complete new payload when available, or one
-    /// raw allocation per prepared chunk. Plans the chosen payload and each complete Extensible
-    /// Array block before emission, reserving metadata through [`ArrayIndexPlan`]. With no new
+    /// raw allocation per prepared chunk. Plans the chosen payload and each complete array
+    /// block before emission, reserving metadata through [`ArrayIndexPlan`]. With no new
     /// chunks, reserves only index metadata.
     ///
     /// On a preferred allocation, writes the encoded chunk slices through one reserved producer.
@@ -993,26 +1031,22 @@ impl WriteEngine {
     /// uncertain.
     fn write_paged_appended_chunks(
         &mut self,
+        appended_index: &AppendIndex,
         chunk_bytes: u64,
         has_filters: bool,
         kept_chunks: &[ChunkRecord],
         new_chunks: &[PreparedChunk],
-    ) -> Result<StoredAddress, Error> {
+    ) -> Result<(Vec<ChunkRecord>, StoredAddress), Error> {
         let base = self.context.addresses();
-        let count = kept_chunks
-            .len()
-            .checked_add(new_chunks.len())
-            .ok_or_else(|| FormatError::Internal("an appended chunk count overflows".into()))?
-            .to_u64();
+        let kind = appended_index.kind.array_kind().ok_or_else(|| {
+            FormatError::Internal("a paged array append has no array index".into())
+        })?;
         let index = ArrayIndexPlan::new(
-            ChunkArrayKind::ExtensibleArray,
-            SlotOccupancy::Dense(count),
-            count,
+            kind,
+            SlotOccupancy::Slots(&appended_index.slot_of_chunk),
+            appended_index.index_slots,
             chunk_bytes,
-            FormatWidths {
-                offsets: OFFSET_WIDTH,
-                lengths: LENGTH_WIDTH,
-            },
+            self.context.widths(),
             has_filters,
         )?;
         let metadata = index.requests()?;
@@ -1086,9 +1120,9 @@ impl WriteEngine {
                 }
             }
         }
-        let address = index.write(&IndexSlots::dense(&combined), &mut reservations)?;
+        let address = index.write(&appended_index.slots(&combined)?, &mut reservations)?;
         reservations.finish()?;
-        Ok(address)
+        Ok((combined, address))
     }
 
     /// Writes a prepared dataset's chunk storage and returns its object-header bytes.
@@ -1106,13 +1140,18 @@ impl WriteEngine {
     /// Returns [`Error::Io`] if writing chunk storage, attributes, or allocation padding fails.
     /// Returns [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
     fn build_chunked_dataset(&mut self, fd: &mut FlatDataset) -> Result<Vec<u8>, Error> {
+        let widths = self.context.widths();
         let chunk_dims = fd.chunk_options.resolve_chunk_dims(&fd.ds.dimensions);
-        let ctx = ChunkContext::from_datatype(&chunk_dims, &fd.dt)?;
+        let ctx = ChunkContext::from_stored_datatype(
+            &chunk_dims,
+            &fd.dt,
+            hdf5_pure_format::__private::stored_element_size(&fd.dt, widths.offsets)?,
+        );
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         let fill_time = fd.fill_time;
         let fill = FillPattern::from_value(fd.fill.as_ref().map(PreparedFill::as_bytes), elem);
         let set = chunked_write::compress_chunks(
-            crate::file_writer::WIDTHS,
+            widths,
             fd.storage.raw(),
             &fd.ds.dimensions,
             ctx,
@@ -1158,7 +1197,7 @@ impl WriteEngine {
             attr_info.as_deref(),
             fill_time,
             fd.fill.as_ref().map(PreparedFill::as_bytes),
-            file_writer::HeaderOptions::PLAIN,
+            file_writer::HeaderOptions::PLAIN.with_widths(self.context.widths()),
         )?)
     }
 
@@ -1486,6 +1525,7 @@ impl WriteEngine {
         chunks: &dyn ChunkProvider,
         dense_attrs: DenseAttrSet,
     ) -> Result<u64, Error> {
+        let widths = self.context.widths();
         let ChunkGeometry {
             shape,
             spatial: chunk_dims,
@@ -1496,7 +1536,7 @@ impl WriteEngine {
         let element_size = *element_size;
         let maxshape = maxshape.as_deref();
         let prepared = VerbatimChunks::new(
-            crate::file_writer::WIDTHS,
+            widths,
             meta,
             shape,
             chunk_dims,
@@ -1516,7 +1556,7 @@ impl WriteEngine {
                 AllocationClass::Raw,
                 |stored_base| {
                     let layout = chunked_write::plan_chunked_data_verbatim(
-                        crate::file_writer::WIDTHS,
+                        widths,
                         meta,
                         shape,
                         chunk_dims,
@@ -1646,7 +1686,10 @@ impl WriteEngine {
             .staged
             .dataset_at_mut(path)
             .expect("caller checked a dataset is staged at this path");
-        if fd.storage.vl_string_staging().is_some() || fd.storage.reference_targets().is_some() {
+        if fd.storage.vl_string_staging().is_some()
+            || fd.storage.reference_targets().is_some()
+            || hdf5_pure_format::__private::datatype_holds_variable_length(&fd.dt)
+        {
             return Err(Error::AppendUnsupported(
                 "a staged variable-length-string or object-reference dataset cannot be appended \
                  to before it is committed: its per-element side table is built with the \
@@ -1665,7 +1708,13 @@ impl WriteEngine {
                 "a scalar dataset has no dimension to append along",
             ));
         };
-        let mut row_bytes = u64::from(fd.dt.type_size());
+        let mut row_bytes = u64::from(
+            hdf5_pure_format::__private::stored_element_size(
+                &fd.dt,
+                self.context.widths().offsets,
+            )?
+            .get(),
+        );
         for &d in inner {
             row_bytes = row_bytes.checked_mul(d).ok_or(Error::AppendUnsupported(
                 "staged dataset row size overflows",
@@ -1703,7 +1752,10 @@ impl WriteEngine {
                 "staged dataset byte size overflows",
             ))?;
         if fd.storage.allocation() == StorageAllocation::Unallocated && !bytes.is_empty() {
-            let elem_size = crate::datatype::element_size_usize(&fd.dt)?;
+            let elem_size = hdf5_pure_format::__private::stored_element_size_usize(
+                &fd.dt,
+                self.context.widths().offsets,
+            )?;
             fd.storage = PreparedElements::Bytes(PreparedBytes::new(
                 FillPattern::new(
                     fd.fill_time,
@@ -1759,7 +1811,12 @@ impl WriteEngine {
             .unwrap_or_default();
         let base = self.context.addresses();
         let addrs = self.place_vl_collections(&staging.collections)?;
-        type_builders::patch_vl_refs_masked(&mut raw, &staging.patch_offsets, &addrs);
+        type_builders::patch_vl_refs_masked_with_width(
+            self.context.widths().offsets,
+            &mut raw,
+            &staging.patch_offsets,
+            &addrs,
+        )?;
         let placed = addrs
             .iter()
             .zip(&staging.collections)
@@ -1846,6 +1903,7 @@ pub(super) enum MovingWrite {
         /// Whether the dataset has a filter pipeline, and so whether the rebuilt index stores the
         /// filtered chunk element format.
         has_filters: bool,
+        index: AppendIndex,
         /// Existing complete chunks with their stored addresses, sizes, and filter masks.
         kept_chunks: Vec<ChunkRecord>,
         /// Rewritten trailing and appended chunks, encoded for the grown extent.
@@ -1880,11 +1938,85 @@ pub(super) enum MovingWrite {
     /// Element bytes written to replacement contiguous storage.
     Contiguous {
         region: OhRegion,
-        addr_off: usize,
+        version: LayoutVersion,
         /// The replacement payload consumed during application.
         bytes: OverwriteId,
         old_extent: Option<FileRange>,
     },
+}
+
+/// A replacement chunk-index kind and slot mapping for a grown dataset.
+pub(super) struct AppendIndex {
+    kind: ChunkIndexKind,
+    /// The index slot assigned to each chunk in logical grid order.
+    slot_of_chunk: Vec<u64>,
+    /// The index's total capacity, including slots outside the current extent.
+    index_slots: u64,
+}
+
+impl AppendIndex {
+    /// Measures the replacement array index at `widths`, or returns zero for a single chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns slot-mapping errors from [`Self::slots`] or index-sizing errors from
+    /// [`chunked_write::chunk_index_len`].
+    fn encoded_len(
+        &self,
+        widths: FormatWidths,
+        chunks: &[ChunkRecord],
+        chunk_bytes: u64,
+        has_filters: bool,
+    ) -> Result<u64, FormatError> {
+        self.kind.array_kind().map_or(Ok(0), |kind| {
+            chunked_write::chunk_index_len(
+                kind,
+                &self.slots(chunks)?,
+                chunk_bytes,
+                widths.offsets,
+                widths.lengths,
+                has_filters,
+            )
+        })
+    }
+
+    /// Encodes the replacement array index at its stored address and file widths.
+    ///
+    /// Returns an empty buffer for a single-chunk layout, whose index is stored in the message.
+    ///
+    /// # Errors
+    ///
+    /// Returns slot-mapping errors from [`Self::slots`] or array-index serialization errors.
+    fn build_at(
+        &self,
+        widths: FormatWidths,
+        chunks: &[ChunkRecord],
+        chunk_bytes: u64,
+        has_filters: bool,
+        address: StoredAddress,
+    ) -> Result<Vec<u8>, FormatError> {
+        self.kind.array_kind().map_or_else(
+            || Ok(Vec::new()),
+            |kind| {
+                kind.build_at(
+                    widths,
+                    &self.slots(chunks)?,
+                    chunk_bytes,
+                    has_filters,
+                    address,
+                )
+            },
+        )
+    }
+
+    /// Borrows chunk records under the planned logical-slot mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns mapping and capacity errors from [`IndexSlots::new`].
+    fn slots<'a>(&'a self, chunks: &'a [ChunkRecord]) -> Result<IndexSlots<'a>, FormatError> {
+        IndexSlots::new(chunks, &self.slot_of_chunk, self.index_slots)
+    }
 }
 
 /// Distinguishes encoded chunks from element bytes awaiting heap-address resolution.
@@ -1955,7 +2087,9 @@ struct StagedProvenance {
 ///
 /// Variable-length collections and object-reference targets remain unresolved until commit
 /// application. Unallocated declarations retain the logical byte length derived from their shape
-/// and datatype. The `provenance` feature computes digest attributes over the prepared values.
+/// and stored element size at `widths`. Converts canonical variable-length values, fill values,
+/// and attribute storage before sizing. The `provenance` feature computes digest attributes over
+/// the prepared values.
 ///
 /// # Errors
 ///
@@ -1966,26 +2100,46 @@ struct StagedProvenance {
 /// Returns [`Error::Format`] for an invalid request, as described by [`PreparedDataset::parse`],
 /// or an incompatible filtering policy, as described by [`PreparedDataset::into_in_place`].
 ///
-/// Propagates chunk-size, filter-pipeline, and dense-attribute preparation errors.
-pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset, Error> {
+/// Propagates field-width, variable-length conversion, chunk-size, filter-pipeline, and
+/// dense-attribute preparation errors.
+pub(super) fn flatten_dataset(
+    widths: FormatWidths,
+    db: DatasetBuilder,
+    name: LinkNameBuf,
+) -> Result<FlatDataset, Error> {
     let InPlaceDataset { metadata, storage } = PreparedDataset::parse(db)?.into_in_place()?;
     let DatasetMetadata {
         dt,
-        element_size: elem_size,
+        element_size: canonical_element_size,
         ds,
-        extent,
+        extent: canonical_extent,
         attrs:
             PreparedAttributes {
-                messages: attrs,
+                messages: mut attrs,
                 collections: vl_attrs,
             },
         chunk_options,
-        fill,
+        mut fill,
         fill_time,
         committed_datatype_target: _,
         #[cfg(feature = "provenance")]
         provenance,
     } = metadata;
+    ds.serialize(widths.lengths.get())?;
+    let storage = storage.into_widths(widths, &dt)?;
+    let stored_element_size =
+        hdf5_pure_format::__private::stored_element_size(&dt, widths.offsets)?;
+    let elem_size = stored_element_size.narrow::<NonZeroUsize>()?;
+    let extent = (canonical_extent / canonical_element_size.get() as u64)
+        .checked_mul(u64::from(stored_element_size.get()))
+        .ok_or(FormatError::DatasetSizeOverflow {
+            size: canonical_extent,
+            dimension: u64::from(stored_element_size.get()),
+        })?;
+    if let Some(fill) = &mut fill {
+        fill.narrow_variable_length(&dt, widths.offsets)?;
+    }
+    file_writer::prepare_attribute_widths(widths, &mut attrs, &vl_attrs)?;
     let maxshape = ds.max_dimensions.clone();
     let fill_time = fill_time.unwrap_or_default();
     if chunk_options.is_chunked() || maxshape.is_some() {
@@ -1993,7 +2147,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
             .refuse_unavailable_filters()
             .map_err(Error::EditUnsupported)?;
         let chunk_dims = chunk_options.resolve_chunk_dims(&ds.dimensions);
-        let ctx = ChunkContext::from_datatype(&chunk_dims, &dt)?;
+        let ctx = ChunkContext::from_stored_datatype(&chunk_dims, &dt, stored_element_size);
         chunked_read::bounded_chunk_len(&chunk_dims, elem_size)?;
         chunk_options.build_pipeline(
             &ctx,
@@ -2001,16 +2155,23 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         )?;
     }
 
+    if !chunk_options.is_chunked() && maxshape.is_none() {
+        DataLayout::encode_contiguous(
+            LayoutVersion::Three,
+            StoredAddress::new(0),
+            extent,
+            widths.offsets,
+            widths.lengths,
+        )?;
+    }
     let mut sized = file_writer::make_link(name.as_str(), StoredAddress::new(0));
     sized.creation_order = Some(0);
-    if sized.serialize(crate::file_writer::OFFSET_WIDTH)?.len() > OBJECT_HEADER_MESSAGE_MAX {
+    if sized.serialize(widths.offsets)?.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "dataset name is too long to encode as a link message",
         ));
     }
 
-    #[cfg(feature = "provenance")]
-    let mut attrs = attrs;
     #[cfg(feature = "provenance")]
     let provenance = provenance.map(|inputs| {
         let attrs_start = attrs.len();
@@ -2020,7 +2181,8 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
             attrs_start,
         }
     });
-    let attrs_are_dense = crate::file_writer::needs_dense_attrs(&attrs).map_err(Error::Format)?;
+    let attrs_are_dense =
+        crate::file_writer::needs_dense_attrs_with_widths(widths, &attrs).map_err(Error::Format)?;
     let dense_attrs = if attrs_are_dense {
         let fixups = vl_attrs
             .iter()
@@ -2031,7 +2193,8 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         let fixups = fixups.chain(provenance.iter().map(|prov| DenseAttrFixup::Payload {
             attribute: prov.attrs_start,
         }));
-        Some(PreparedDenseAttrs::new(
+        Some(PreparedDenseAttrs::with_widths(
+            widths,
             &attrs,
             DenseAttrCreationOrder::Untracked,
             fixups,
@@ -2222,7 +2385,13 @@ impl ChunkedOverwrite {
         Ok(PreparedChunk::encode_dataset(
             &mut FilterScratch::new(),
             pipeline.as_ref(),
-            ChunkContext::from_datatype(chunk_dims, dt)?,
+            ChunkContext::from_stored_datatype(
+                chunk_dims,
+                dt,
+                NonZeroU32::new(element_size.get().narrow::<u32>()?).ok_or_else(|| {
+                    FormatError::Internal("chunk geometry has zero-sized elements".into())
+                })?,
+            ),
             *flags,
             shape,
             padding.pattern(*element_size),
@@ -2269,15 +2438,14 @@ impl ChunkGeometry {
 /// Returns `None` for incompatible storage, read errors, overlapping writes, or out-of-bounds
 /// spans.
 fn try_inplace_chunk_writes(
+    widths: FormatWidths,
     src: &(impl StoredRead + ?Sized),
     layout: &DataLayout,
     ds: &Dataspace,
     geometry: &ChunkGeometry,
     new_chunks: &[PreparedChunk],
 ) -> Option<Vec<(u64, Vec<u8>)>> {
-    let infos =
-        chunked_read::enumerate_chunks_from_source(src, layout, ds, crate::file_writer::WIDTHS)
-            .ok()?;
+    let infos = chunked_read::enumerate_chunks_from_source(src, layout, ds, widths).ok()?;
     let grid = chunked_read::plan_dense_grid(infos, &geometry.shape, &geometry.spatial)?;
     if grid.grid_order.len() != new_chunks.len() {
         return None;
@@ -2306,8 +2474,15 @@ fn try_inplace_chunk_writes(
     }
 
     if any_shrunk {
-        let (index_addr, index_bytes) =
-            try_rebuild_index_in_place(src, layout, ds, geometry, &grid.grid_order, new_chunks)?;
+        let (index_addr, index_bytes) = try_rebuild_index_in_place(
+            widths,
+            src,
+            layout,
+            ds,
+            geometry,
+            &grid.grid_order,
+            new_chunks,
+        )?;
         spans.push(AddressRange::new(index_addr, index_bytes.len() as u64).ok()?);
         writes.push((index_addr.get(), index_bytes));
     }
@@ -2331,6 +2506,7 @@ fn try_inplace_chunk_writes(
 ///
 /// An in-place index rewrite can tear on a failed write or crash.
 fn try_rebuild_index_in_place(
+    widths: FormatWidths,
     src: &(impl StoredRead + ?Sized),
     layout: &DataLayout,
     ds: &Dataspace,
@@ -2357,7 +2533,7 @@ fn try_rebuild_index_in_place(
         .collect();
     // Map the current dense grid onto the index slots of the maximum shape.
     let (_, slot_of_chunk, index_slots) = crate::chunked_write::plan_index_slots(
-        crate::file_writer::WIDTHS,
+        widths,
         &ds.dimensions,
         spatial,
         ds.max_dimensions.as_deref(),
@@ -2371,8 +2547,8 @@ fn try_rebuild_index_in_place(
         ChunkIndexLayout::FixedArray { .. } => hdf5_pure_format::__private::build_fixed_array_at(
             &slots,
             raw_size,
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
+            widths.offsets,
+            widths.lengths,
             true,
             index_addr,
         )
@@ -2381,8 +2557,8 @@ fn try_rebuild_index_in_place(
             hdf5_pure_format::__private::build_extensible_array_at(
                 &slots,
                 raw_size,
-                OFFSET_WIDTH,
-                LENGTH_WIDTH,
+                widths.offsets,
+                widths.lengths,
                 true,
                 index_addr,
             )
@@ -2395,9 +2571,7 @@ fn try_rebuild_index_in_place(
     };
 
     // Require the original index allocation to be contiguous and exactly the rebuilt length.
-    let mut spans =
-        crate::chunked_read::chunk_index_spans_from_source(src, layout, crate::file_writer::WIDTHS)
-            .ok()?;
+    let mut spans = crate::chunked_read::chunk_index_spans_from_source(src, layout, widths).ok()?;
     if spans.is_empty() {
         return None;
     }

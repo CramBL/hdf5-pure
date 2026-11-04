@@ -10,6 +10,7 @@ use core::num::NonZeroUsize;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, DataspaceType, Extent};
 use crate::datatype;
+use crate::width::OffsetWidth;
 use crate::{Datatype, FormatError, MaxExtent};
 
 /// The chunk dimensions and byte sizes derived from dataset metadata.
@@ -17,7 +18,7 @@ use crate::{Datatype, FormatError, MaxExtent};
 pub struct ChunkedGeometry<'a> {
     /// The chunk dimensions in elements, one per dataspace dimension.
     pub spatial: &'a [u64],
-    /// The nonzero element size in bytes, representable as a [`usize`].
+    /// The nonzero stored element size in bytes, representable as a [`usize`].
     pub element_size: NonZeroUsize,
     /// The uncompressed chunk size in bytes, including any edge overhang.
     pub raw_size: u64,
@@ -28,7 +29,8 @@ pub struct ChunkedGeometry<'a> {
 impl<'a> ChunkedGeometry<'a> {
     /// Borrows the spatial and maximum dimensions and checks the uncompressed chunk size.
     ///
-    /// The chunk byte count is a [`u64`], even when it exceeds the platform's [`usize`] range.
+    /// Assumes eight-byte file addresses when sizing variable-length elements. The chunk byte
+    /// count is a [`u64`], even when it exceeds the platform's [`usize`] range.
     ///
     /// # Errors
     ///
@@ -38,8 +40,58 @@ impl<'a> ChunkedGeometry<'a> {
     /// the maximum dimensions are invalid, or the chunk byte count exceeds [`u64::MAX`].
     /// Returns [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes per
     /// element, or [`FormatError::ValueTooLargeForPlatform`] if its element size exceeds
-    /// [`usize::MAX`].
+    /// [`usize::MAX`]. Propagates stored-element-size errors from
+    /// [`datatype::stored_element_size`].
     pub fn new(
+        datatype: &Datatype,
+        dataspace: &'a Dataspace,
+        layout: &'a DataLayout,
+    ) -> Result<Self, FormatError> {
+        Self::with_offset_width(OffsetWidth::Eight, datatype, dataspace, layout)
+    }
+
+    /// Borrows chunk dimensions and computes byte sizes from the stored element representation.
+    ///
+    /// Sizes variable-length references and arrays of them at `offsets`. The layout's final
+    /// chunk dimension must equal this stored size. Borrows the spatial dimensions and any
+    /// extensible maximum dimensions from the supplied metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns the geometry and element-size errors of [`Self::new`], using `offsets` for the
+    /// stored element size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, Datatype, FormatError, OffsetWidth,
+    ///     VariableLengthType};
+    ///
+    /// let datatype = Datatype::VariableLength(VariableLengthType::sequence(Datatype::Opaque {
+    ///     size: 1,
+    ///     tag: vec![],
+    /// }));
+    /// let dataspace = format::Dataspace {
+    ///     space_type: format::DataspaceType::Simple,
+    ///     rank: 1,
+    ///     dimensions: vec![8],
+    ///     max_dimensions: None,
+    /// };
+    /// let layout = format::DataLayout::Chunked {
+    ///     flags: format::ChunkedLayoutFlags::NONE,
+    ///     chunk_dimensions: vec![4, 10],
+    ///     index: format::ChunkIndexLayout::FixedArray { address: None },
+    /// };
+    /// let geometry = format::ChunkedGeometry::with_offset_width(
+    ///     OffsetWidth::Two, &datatype, &dataspace, &layout,
+    /// )?;
+    /// assert_eq!(datatype.type_size(), 16);
+    /// assert_eq!(geometry.element_size.get(), 10);
+    /// assert_eq!(geometry.raw_size, 40);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn with_offset_width(
+        offsets: OffsetWidth,
         datatype: &Datatype,
         dataspace: &'a Dataspace,
         layout: &'a DataLayout,
@@ -74,23 +126,22 @@ impl<'a> ChunkedGeometry<'a> {
                 "chunk dimensions must be nonzero",
             ));
         }
-        let element_size = datatype::element_size_usize(datatype)?;
-        if *stored_element_size != u64::from(datatype.type_size()) {
+        let element_size = datatype::stored_element_size_usize(datatype, offsets)?;
+        if *stored_element_size != element_size.get() as u64 {
             return Err(FormatError::InvalidChunkGeometry(
                 "chunk element size differs from the datatype size",
             ));
         }
         Extent::new(&dataspace.dimensions, dataspace.max_dimensions.as_deref())
             .map_err(FormatError::InvalidChunkGeometry)?;
-        let raw_size =
-            spatial
-                .iter()
-                .try_fold(u64::from(datatype.type_size()), |size, &dimension| {
-                    size.checked_mul(dimension)
-                        .ok_or(FormatError::InvalidChunkGeometry(
-                            "chunk logical byte size exceeds the addressable range",
-                        ))
-                })?;
+        let raw_size = spatial
+            .iter()
+            .try_fold(element_size.get() as u64, |size, &dimension| {
+                size.checked_mul(dimension)
+                    .ok_or(FormatError::InvalidChunkGeometry(
+                        "chunk logical byte size exceeds the addressable range",
+                    ))
+            })?;
         Ok(Self {
             spatial,
             element_size,
@@ -109,6 +160,7 @@ mod tests {
     use test_util::datatype::Class;
 
     use super::*;
+    use crate::VariableLengthType;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 
     #[rstest]
@@ -266,6 +318,44 @@ mod tests {
         let layout = layout(vec![u64::from(u32::MAX), 1, 8]);
         let geometry = ChunkedGeometry::new(&datatype(8), &dataspace, &layout).unwrap();
         assert_eq!(geometry.raw_size, u64::from(u32::MAX) * 8);
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, 10)]
+    #[case::four(OffsetWidth::Four, 12)]
+    #[case::eight(OffsetWidth::Eight, 16)]
+    fn variable_length_geometry_uses_stored_element_width(
+        #[case] offsets: OffsetWidth,
+        #[case] stored_size: u64,
+    ) {
+        let datatype = Datatype::VariableLength(VariableLengthType::sequence(datatype(1)));
+        let dataspace = dataspace();
+        let layout = layout(vec![2, 4, stored_size]);
+        let geometry =
+            ChunkedGeometry::with_offset_width(offsets, &datatype, &dataspace, &layout).unwrap();
+        assert_eq!(geometry.element_size.get() as u64, stored_size);
+        assert_eq!(geometry.raw_size, 8 * stored_size);
+        assert_eq!(datatype.type_size(), 16);
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    fn narrow_variable_length_geometry_rejects_canonical_element_width(
+        #[case] offsets: OffsetWidth,
+    ) {
+        let datatype = Datatype::VariableLength(VariableLengthType::sequence(datatype(1)));
+        let error = ChunkedGeometry::with_offset_width(
+            offsets,
+            &datatype,
+            &dataspace(),
+            &layout(vec![2, 4, 16]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::InvalidChunkGeometry("chunk element size differs from the datatype size")
+        );
     }
 
     fn datatype(size: u32) -> Datatype {
