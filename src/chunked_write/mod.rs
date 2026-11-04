@@ -49,8 +49,10 @@ use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+pub(crate) use self::array::ArrayMeasure;
 pub(crate) use self::gathering::ChunkTraversal;
 
+mod array;
 mod gathering;
 mod zfp;
 
