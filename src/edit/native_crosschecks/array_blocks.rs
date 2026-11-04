@@ -289,6 +289,98 @@ fn staged_first_writes_preserve_native_deferred_array_values(
 }
 
 #[rstest]
+#[case::single(Creation::Fixed(1))]
+#[case::fixed(Creation::Fixed(40))]
+#[case::sparse(Creation::FixedSparse)]
+#[case::paged(Creation::Fixed(1_025))]
+#[case::extensible(Creation::Extensible(40))]
+#[case::rotated(Creation::Rotated(20_000))]
+#[case::empty(Creation::Extensible(0))]
+#[case::undefined(Creation::Unallocated)]
+#[case::pending(Creation::Pending)]
+fn contiguous_creation_preserves_native_values_and_physical_records(
+    #[case] creation: Creation,
+    #[values(false, true)] filtered: bool,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("contiguous-created.h5");
+    let native = file::libhdf5_create_v110(&path);
+    let kept = native
+        .new_dataset::<i32>()
+        .shape([32])
+        .create("kept")
+        .unwrap();
+    kept.write_raw(&[31; 32]).unwrap();
+    drop(kept);
+    native.close().unwrap();
+    let pure = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(backing)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    let mut dataset = pure
+        .root()
+        .create_dataset("d", |builder| creation.configure(builder, filtered))
+        .unwrap();
+    if matches!(creation, Creation::Pending) {
+        dataset
+            .append_staged(|append| {
+                append.append_i32(&[5, 6, 7, 8]);
+            })
+            .unwrap();
+    }
+    pure.commit().unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), creation.expected());
+    let mut coordinates: Vec<_> = dataset
+        .chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| chunk.offset)
+        .collect();
+    coordinates.sort();
+    assert_eq!(coordinates, creation.coordinates());
+    drop(dataset);
+    pure.close().unwrap();
+    let native = file::libhdf5_open(&path);
+    let dataset = native.dataset("d").unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), creation.expected());
+    assert_eq!(dataset.num_chunks().unwrap(), coordinates.len());
+    drop(dataset);
+    assert_eq!(
+        native.dataset("kept").unwrap().read_raw::<i32>().unwrap(),
+        [31; 32]
+    );
+    native.close().unwrap();
+    let mut native_chunks: Vec<_> = array_index::libhdf5_chunks(&path, 0)
+        .into_iter()
+        .map(|chunk| (chunk.address(), chunk.size(), chunk.filter_mask()))
+        .collect();
+    let pure = File::open(&path).unwrap();
+    let mut chunks: Vec<_> = pure
+        .dataset("d")
+        .unwrap()
+        .chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| {
+            let mask = chunk.filter_mask().raw_bits();
+            (chunk.address, chunk.storage_size, mask)
+        })
+        .collect();
+    chunks.sort_unstable();
+    native_chunks.sort_unstable();
+    assert_eq!(chunks, native_chunks);
+    assert_eq!(
+        pure.dataset("d").unwrap().read_i32().unwrap(),
+        creation.expected()
+    );
+    pure.close().unwrap();
+}
+
+#[rstest]
 #[case::fixed(Creation::Fixed(40))]
 #[case::fixed_sparse(Creation::FixedSparse)]
 #[case::fixed_paged(Creation::Fixed(1_025))]

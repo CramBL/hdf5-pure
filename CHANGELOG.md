@@ -68,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- Chunked dataset creation through `File::commit` writes retained encoded chunks directly, removing a combined payload temporary. Buffering can increase retained capacity and cumulative allocations, and direct output can require more physical writes ([#1088](https://github.com/CramBL/hdf5-pure/pull/1088)).
 - `File::commit` patches relocated group links in batches, reducing repeated record scans and temporary allocations for sibling names and symbolic targets ([#1074](https://github.com/CramBL/hdf5-pure/pull/1074)).
 - `File::commit` reduces repeated header copying and attribute encoding in staged attribute batches, selecting compact or dense storage before rebuilding the header. Attribute operation errors are reported in staged order ([#1072](https://github.com/CramBL/hdf5-pure/pull/1072)).
 - `FileBuilder` encodes nested datatype metadata in one buffer, reducing temporary allocations and repeated copying. Array sizes are computed during encoding ([#1064](https://github.com/CramBL/hdf5-pure/pull/1064)).

@@ -1576,7 +1576,7 @@ fn direct_emission_uses_retained_chunks_and_matches_assembly(
     let plan = plan_chunked_at(&set, address).unwrap();
     let assembled = assemble_chunked_at(&set, address).unwrap();
     let mut sink = ChunkSlices::default();
-    emit_chunked_data(&mut sink, &set, &plan).unwrap();
+    emit_chunked_data(&mut sink, &plan).unwrap();
     assert_eq!(sink.bytes, assembled.data_bytes);
     assert_eq!(measured.data_len, plan.data_len);
     assert_eq!(plan.data_len, sink.position());
@@ -1689,7 +1689,7 @@ fn chunk_emission_stops_at_the_sink_error(
         .unwrap();
         emit_chunked_data_verbatim(&mut sink, &layout.plan, &EightByteChunks).unwrap_err()
     } else {
-        emit_chunked_data(&mut sink, &set, &plan).unwrap_err()
+        emit_chunked_data(&mut sink, &plan).unwrap_err()
     };
     assert_eq!(error, EmissionError::Sink(ChunkSinkFailure::Write(fail_at)));
     assert_eq!(sink.accepted, fail_at);

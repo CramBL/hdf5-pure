@@ -57,6 +57,7 @@ use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
 
+mod contiguous;
 mod providers;
 
 #[rstest]
