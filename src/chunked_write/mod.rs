@@ -3,10 +3,9 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
-#[cfg(feature = "std")]
-use std::borrow::Cow;
 
 /// The HDF5 "undefined address" sentinel (`HADDR_UNDEF`): all bits set, in
 /// whatever width the field is. A chunked layout message carrying it declares
@@ -965,7 +964,6 @@ impl CompressedChunkSet {
     ///
     /// Returns [`None`] for unallocated and single-chunk layouts. Ordered assignments are borrowed.
     /// Otherwise, the writer copies and sorts the assignments.
-    #[cfg(feature = "std")]
     pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
         let Self {
             chunks: _,
@@ -995,7 +993,6 @@ impl CompressedChunkSet {
     /// # Errors
     ///
     /// Returns the errors of [`ChunkIndexKind::layout_message`].
-    #[cfg(feature = "std")]
     pub(crate) fn header(
         &self,
         records: &[ChunkRecord],
@@ -1017,7 +1014,6 @@ impl CompressedChunkSet {
     /// Returns [`FormatError::OffsetOverflow`] if a chunk extends past [`u64::MAX`], or
     /// [`FormatError::Internal`] if the payload ends before `address`. Propagates errors from
     /// [`Self::header`].
-    #[cfg(feature = "std")]
     pub(crate) fn measure_payload_at(
         &self,
         address: StoredAddress,
@@ -1087,7 +1083,6 @@ impl CompressedChunkSet {
 ///
 /// The writer obtains this geometry from [`CompressedChunkSet::array_geometry`] or
 /// [`VerbatimChunks::array_geometry`] and assigns chunk addresses separately.
-#[cfg(feature = "std")]
 pub(crate) struct ChunkArrayGeometry<'a> {
     /// The array representation selected from the maximum chunk grid.
     pub(crate) kind: ChunkArrayKind,
@@ -1101,7 +1096,6 @@ pub(crate) struct ChunkArrayGeometry<'a> {
     pub(crate) filtered: bool,
 }
 
-#[cfg(feature = "std")]
 impl<'a> ChunkArrayGeometry<'a> {
     /// Borrows ordered slot assignments or sorts an owned copy.
     fn new(
@@ -1142,7 +1136,6 @@ pub(crate) struct EmptyChunkIndex {
 
 impl EmptyChunkIndex {
     /// Records scalar geometry for an array index with no stored chunks.
-    #[cfg(feature = "std")]
     pub(crate) fn new(
         kind: ChunkArrayKind,
         chunk_bytes: u64,
@@ -1163,7 +1156,6 @@ impl EmptyChunkIndex {
     ///
     /// Propagates slot, geometry, and length errors from [`IndexSlots::new`] and
     /// [`chunk_index_len`].
-    #[cfg(feature = "std")]
     pub(crate) fn length(self) -> Result<u64, FormatError> {
         chunk_index_len(
             self.kind,
@@ -1991,7 +1983,6 @@ impl<'a> VerbatimChunks<'a> {
     /// Returns array geometry for the records, or [`None`] for a single-chunk layout.
     ///
     /// Occupied-slot ordering follows [`ChunkArrayGeometry::new`].
-    #[cfg(feature = "std")]
     pub(crate) fn array_geometry(&self) -> Option<ChunkArrayGeometry<'_>> {
         Some(ChunkArrayGeometry::new(
             self.kind.array_kind()?,

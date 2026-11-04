@@ -930,7 +930,7 @@ fn align(offset: StoredAddress, page: FileSpacePageSize) -> Result<StoredAddress
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
+    use alloc::borrow::Cow;
 
     use hdf5_pure_format::__private as format;
     use hdf5_pure_format::__private::FreeSection;
