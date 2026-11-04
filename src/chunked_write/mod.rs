@@ -1169,24 +1169,30 @@ impl EmptyChunkIndex {
         )
     }
 
-    /// Serializes the empty array index at its assigned stored address.
-    ///
-    /// # Errors
-    ///
-    /// Propagates chunk-index slot and array serialization errors.
-    pub(crate) fn build_at(self, address: StoredAddress) -> Result<Vec<u8>, FormatError> {
+    /// Returns array geometry with no occupied slots.
+    pub(crate) fn geometry(self) -> ChunkArrayGeometry<'static> {
         let Self {
             kind,
             chunk_bytes,
             slots,
             has_filters,
         } = self;
-        kind.build_at(
-            &IndexSlots::new(&[], &[], slots)?,
+        ChunkArrayGeometry {
+            kind,
+            occupied: Cow::Borrowed(&[]),
+            slots,
             chunk_bytes,
-            has_filters,
-            address,
-        )
+            filtered: has_filters,
+        }
+    }
+
+    /// Serializes the empty array index at its assigned stored address.
+    ///
+    /// # Errors
+    ///
+    /// Propagates chunk-index slot and array serialization errors.
+    pub(crate) fn build_at(self, address: StoredAddress) -> Result<Vec<u8>, FormatError> {
+        ArrayMeasure::Empty(self).build_at(&IndexSlots::new(&[], &[], self.slots)?, address)
     }
 }
 
