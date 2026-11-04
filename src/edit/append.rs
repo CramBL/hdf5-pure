@@ -392,6 +392,20 @@ impl WriteEngine {
         if new_elems == 0 {
             return Ok(());
         }
+        let new_dimension = self.located[&oh_addr]
+            .index
+            .current_dim()
+            .checked_add(new_elems)
+            .ok_or(Error::AppendInPlaceUnsupported(
+                "append would overflow the dataset dimension",
+            ))?;
+        hdf5_pure_format::__private::write_length_at(
+            &mut [0; 8],
+            0,
+            new_dimension,
+            self.context.widths().lengths,
+        )?;
+        self.preflight_narrow_references()?;
 
         // SWMR appends leave visible chunks unchanged.
         if self.swmr_mode {
