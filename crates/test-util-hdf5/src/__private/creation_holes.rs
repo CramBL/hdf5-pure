@@ -9,6 +9,20 @@ use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use crate::file;
 use crate::file_space;
 
+/// Adds a hard link within an existing HDF5 file through the native library.
+///
+/// The caller releases all handles to `path` before calling. Opens `path` for writing,
+/// creates `link_name` for `source`, and closes the file before returning.
+///
+/// # Panics
+///
+/// Panics if opening the file, creating the link, or closing the file fails.
+pub fn add_hard_link(path: &Path, source: &str, link_name: &str) {
+    let file = NativeFile::open_rw(path).unwrap();
+    file.link_hard(source, link_name).unwrap();
+    file.close().unwrap();
+}
+
 /// Creates a file with retired scratch datasets and returns the native free-section ranges.
 ///
 /// Enables PAGE allocation when `paged` is `true`. Each surviving `spacer` dataset holds bytes
