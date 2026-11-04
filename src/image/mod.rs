@@ -315,6 +315,19 @@ pub(crate) trait FileImage: Source + Send + Sync {
     #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)>;
 
+    /// Reserves capacity for at least `_additional` more issued-write observations.
+    ///
+    /// Returns `true` if the image supports reserving its observation storage. The default
+    /// implementation returns `false`. Tests reserve outside measured allocation regions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if reserving supported observation storage would overflow its capacity.
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn reserve_write_observations(&mut self, _additional: usize) -> bool {
+        false
+    }
+
     /// How many writes this image has issued against the file since it was
     /// opened, for the tests that assert what an operation costs. Distinct from
     /// what the engine *called*: turning many of those into one is the point.
@@ -1119,6 +1132,12 @@ impl FileImage for MirrorImage {
         self.writes.issued_order().to_vec()
     }
 
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn reserve_write_observations(&mut self, additional: usize) -> bool {
+        self.writes.issued_order.reserve(additional);
+        true
+    }
+
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.writes.set_mode(mode)
     }
@@ -1535,6 +1554,12 @@ impl FileImage for HandleImage {
     #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.writes.issued_order().to_vec()
+    }
+
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn reserve_write_observations(&mut self, additional: usize) -> bool {
+        self.writes.issued_order.reserve(additional);
+        true
     }
 
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {

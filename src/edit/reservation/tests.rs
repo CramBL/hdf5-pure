@@ -35,6 +35,7 @@ use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy
 use super::{AppendCursor, ReservationFailure, ReservationPlan};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 
+mod emission;
 mod preferred;
 
 #[rstest]

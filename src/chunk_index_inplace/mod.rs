@@ -27,6 +27,7 @@
 //! flag and refuses filters; the general writer takes an exclusive lock, accepts
 //! filters, and relocates a partial trailing chunk.
 
+use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
@@ -225,6 +226,32 @@ pub(crate) trait Store: Source {
         )
         .map(|allocation| (allocation, None))
     }
+
+    /// Reserves provisional storage for ordered emission at the chosen physical address.
+    ///
+    /// After reserving storage, calls `emit` once with the address and a slice-writing callback.
+    /// The producer must supply exactly `length` bytes across its slices. Empty slices are
+    /// accepted. The sink rejects an oversized slice before writing it and rejects subsequent
+    /// writes after a failure, including failures the producer catches.
+    ///
+    /// The allocation and publication rules match [`Self::allocate`]. The complete allocation
+    /// lies within the image on successful return. A producer or sink failure may leave partial
+    /// unpublished bytes. The editor applies its allocator restoration policy on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SerializationError`] for a short emission or an oversized slice,
+    /// or [`FormatError::Internal`] if the producer reports success after a rejected sink write.
+    /// Propagates reservation, producer, placement, I/O, and allocator restoration errors.
+    fn allocate_emitted(
+        &mut self,
+        length: NonZeroU64,
+        class: AllocationClass,
+        emit: impl FnOnce(
+            PhysicalAddress,
+            &mut dyn FnMut(&[u8]) -> Result<(), Error>,
+        ) -> Result<(), Error>,
+    ) -> Result<ProvisionalAllocation, Error>;
 
     /// Marks allocation publication uncertain after an unconfirmed outcome.
     fn make_allocation_uncertain(&mut self);
@@ -4028,6 +4055,55 @@ mod tests {
                 .into());
             }
             self.allocate(bytes.as_ref(), class)
+        }
+
+        fn allocate_emitted(
+            &mut self,
+            length: NonZeroU64,
+            class: AllocationClass,
+            emit: impl FnOnce(
+                PhysicalAddress,
+                &mut dyn FnMut(&[u8]) -> Result<(), Error>,
+            ) -> Result<(), Error>,
+        ) -> Result<ProvisionalAllocation, Error> {
+            self.allocate_encoded(length.get(), class, |address| {
+                let mut output = Vec::new();
+                let mut rejected = false;
+                emit(address, &mut |bytes| {
+                    if rejected {
+                        return Err(FormatError::Internal(
+                            "reservation emission has an earlier failed write".into(),
+                        )
+                        .into());
+                    }
+                    let remaining = length.get() - output.len().to_u64();
+                    if bytes.len().to_u64() > remaining {
+                        rejected = true;
+                        return Err(FormatError::SerializationError(format!(
+                            "a placement reserved {} bytes but emitted more than its remaining {remaining}",
+                            length.get(),
+                        ))
+                        .into());
+                    }
+                    output.extend_from_slice(bytes);
+                    Ok(())
+                })?;
+                if rejected {
+                    return Err(FormatError::Internal(
+                        "reservation emission has an earlier failed write".into(),
+                    )
+                    .into());
+                }
+                if output.len().to_u64() != length.get() {
+                    return Err(FormatError::SerializationError(format!(
+                        "a placement reserved {} bytes but emitted {}",
+                        length.get(),
+                        output.len(),
+                    ))
+                    .into());
+                }
+                Ok(output)
+            })
         }
 
         fn make_allocation_uncertain(&mut self) {
