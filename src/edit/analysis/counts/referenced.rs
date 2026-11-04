@@ -19,6 +19,8 @@ use super::{
     ROOT_REFERENCE_COUNT,
 };
 
+mod batch;
+
 impl<'source> AnalysisPhase<'source> {
     /// Returns an original count for a target of the supplied prospective copy emissions.
     ///
