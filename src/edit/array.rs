@@ -68,6 +68,50 @@ impl ArrayIndexPlan {
 
     /// Returns complete metadata requests in format block order.
     ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ArrayIndexPlanRef::requests`].
+    pub(super) fn requests(&self) -> Result<Vec<BlockRequest>, FormatError> {
+        self.as_ref().requests()
+    }
+
+    /// Writes array blocks to matching reservations and returns the stored header address.
+    ///
+    /// Uses the reservation and encoding contracts of [`ArrayIndexPlanRef::write`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ArrayIndexPlanRef::write`].
+    pub(super) fn write(
+        &self,
+        slots: &IndexSlots<'_>,
+        reservations: &mut ReservationPlan<'_>,
+    ) -> Result<StoredAddress, Error> {
+        self.as_ref().write(slots, reservations)
+    }
+
+    fn as_ref(&self) -> ArrayIndexPlanRef<'_> {
+        match self {
+            Self::Extensible(plan) => ArrayIndexPlanRef::Extensible(plan),
+            Self::Fixed(plan) => ArrayIndexPlanRef::Fixed(plan),
+        }
+    }
+}
+
+/// Borrowed format geometry for reservation-backed array emission.
+///
+/// The caller retains the format plan while the writer derives requests and encodes blocks at
+/// the reserved addresses.
+pub(super) enum ArrayIndexPlanRef<'a> {
+    /// An extensible array with its planned creation parameters.
+    Extensible(&'a ExtensibleArrayPlan),
+    /// A fixed array covering its planned logical slots.
+    Fixed(&'a FixedArrayPlan),
+}
+
+impl ArrayIndexPlanRef<'_> {
+    /// Returns complete metadata requests in format block order.
+    ///
     /// The encoded length equals the complete allocation length. Encoding depends on the
     /// reservation addresses.
     ///

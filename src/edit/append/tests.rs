@@ -14,6 +14,8 @@ use crate::image::WriteBuffering;
 use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
+mod initialization;
+
 #[rstest]
 fn raw_fallback_prepares_the_chosen_address_before_bounded_padding(
     #[values(0, 262_144)] base: u64,

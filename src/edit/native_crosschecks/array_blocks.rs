@@ -2,6 +2,7 @@ use core::num::NonZeroUsize;
 use std::fs;
 use std::path::Path;
 
+use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use rstest::rstest;
 use test_util_hdf5::__private::array_index;
 use test_util_hdf5::__private::ownership_append;
@@ -58,6 +59,75 @@ fn staged_appends_keep_native_array_blocks_in_metadata_pages(
         drop(engine);
         fixture.assert_contents(&path, cycle);
     }
+}
+
+#[rstest]
+#[case::canonical([32, 4, 4, 16, 10])]
+#[case::alternate([24, 8, 2, 8, 8])]
+#[case::large_index([32, 255, 4, 16, 10])]
+fn immediate_first_writes_keep_native_array_blocks_in_metadata_pages(
+    #[case] parameters: [u8; 5],
+    #[values(false, true)] filtered: bool,
+    #[values(512, 4_096)] page: u64,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("immediate-deferred-array.h5");
+    let header = unallocated_append::paged_fixture(
+        &path,
+        filtered,
+        FileSpacePageSize::try_from(page).unwrap(),
+        ExtensibleArrayCreationParameters::parse(&parameters).unwrap(),
+    );
+    let before = fs::read(&path).unwrap();
+    unallocated_append::assert_unallocated_layout(&before, header, parameters);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(backing)
+            .with_sync_policy(sync),
+    )
+    .unwrap();
+    let mut target = file.dataset("d").unwrap();
+    target.append(&[0_i32, 1, 2]).unwrap();
+    assert_eq!(target.read_i32().unwrap(), [0, 1, 2]);
+    drop(target);
+    file.close().unwrap();
+    let engine = test_util::open_engine(&path);
+    assert_eq!(
+        engine
+            .chunked_index_spans(u64::try_from(header).unwrap())
+            .unwrap()
+            .len(),
+        2
+    );
+    engine.assert_array_metadata_pages(u64::try_from(header).unwrap());
+    drop(engine);
+    unallocated_append::inspect_initialized_index(&path, header, parameters);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [0, 1, 2]);
+    dataset::pure_append(&path, "d", &(3..12).collect::<Vec<i32>>());
+    let expected: Vec<i32> = (0..12).collect();
+    let ordinary = file::libhdf5_open(&path);
+    assert_eq!(
+        ordinary.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        expected
+    );
+    let free = ordinary.free_space();
+    assert!(free > 0);
+    ordinary.close().unwrap();
+    let buffered = file::libhdf5_open_with_page_buffer(
+        &path,
+        NonZeroUsize::new(usize::try_from(2 * page).unwrap()).unwrap(),
+    );
+    assert_eq!(
+        buffered.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        expected
+    );
+    assert_eq!(buffered.free_space(), free);
+    buffered.close().unwrap();
+    file_space_oracle::assert_persisted_sections(&path);
+    file_space_oracle::assert_manager_metadata_bytes(&path);
 }
 
 #[rstest]

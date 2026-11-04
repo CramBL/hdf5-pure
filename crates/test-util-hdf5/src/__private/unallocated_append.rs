@@ -8,6 +8,9 @@ use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5_pure::{File, MessageType};
 use hdf5_pure_core::__private::{BaseAddressExt, FileRegion};
 use hdf5_pure_core::BaseAddress;
+use hdf5_pure_core::FileSpacePageSize;
+use hdf5_pure_core::FileSpaceStrategy as PureFileSpaceStrategy;
+use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::{AccessMode, ChunkIndexLayout, DataLayout, ObjectHeader};
 use hdf5_pure_format::__private::{ExtensibleArrayHeaderLocator, FormatWidths};
 use test_util::object_header::MessageType as FixtureMessage;
@@ -17,15 +20,18 @@ use crate::numeric::ByteOrder;
 
 use super::c_object;
 
-/// Asserts the allocated index geometry, contiguous header and index block, and free-space exclusion.
+/// Asserts complete allocated index geometry and exclusion from persisted free space.
 ///
-/// Pass the object header address returned by [`fixture`] and the same creation parameters.
+/// Pass the object header address returned by [`fixture`] or [`paged_fixture`] and the same
+/// creation parameters. The header and index block must be disjoint. For non-PAGE files, the index
+/// block must immediately follow its header.
 ///
 /// # Panics
 ///
 /// Panics if the file cannot be read or parsed, the index geometry differs from `parameters`,
-/// the index block does not immediately follow its header, or either extends beyond the file
-/// boundary or overlaps persisted free space.
+/// the blocks overlap, or the index block does not immediately follow its header in a non-PAGE
+/// file. Panics if either allocation extends beyond the published EOF or overlaps persisted free
+/// space.
 pub fn inspect_initialized_index(path: &Path, header: usize, parameters: [u8; 5]) {
     let bytes = fs::read(path).unwrap();
     let messages = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, header, 8, 8).unwrap();
@@ -71,7 +77,7 @@ pub fn inspect_initialized_index(path: &Path, header: usize, parameters: [u8; 5]
         creation.min_data_blocks().get()
     );
     let index = array.index_block().unwrap();
-    assert_eq!(index.range().start(), array.range().end());
+    assert!(!index.range().overlaps(array.range()));
     let range = index.range();
     index
         .parse(
@@ -84,18 +90,23 @@ pub fn inspect_initialized_index(path: &Path, header: usize, parameters: [u8; 5]
         )
         .unwrap();
     let pure = File::open(path).unwrap();
-    assert!(range.end().get() <= pure.superblock().eof_address);
+    if pure.file_space_settings().unwrap().unwrap().strategy() != PureFileSpaceStrategy::Page {
+        assert_eq!(index.range().start(), array.range().end());
+    }
     let free = pure.persisted_free_sections().unwrap().unwrap();
-    for section in free.free_sections().sections() {
-        assert!(
-            section.end_address().get() <= address.get()
-                || section.address().get() >= range.end().get(),
-            "allocated pair {}..{} overlaps free {}..{}",
-            address.get(),
-            range.end().get(),
-            section.address().get(),
-            section.end_address().get()
-        );
+    for allocation in [array.range(), range] {
+        assert!(allocation.end().get() <= pure.superblock().eof_address);
+        for section in free.free_sections().sections() {
+            assert!(
+                section.end_address().get() <= allocation.start().get()
+                    || section.address().get() >= allocation.end().get(),
+                "allocated block {}..{} overlaps free {}..{}",
+                allocation.start().get(),
+                allocation.end().get(),
+                section.address().get(),
+                section.end_address().get()
+            );
+        }
     }
     pure.close().unwrap();
     assert_eq!(fs::read(path).unwrap(), bytes);
@@ -132,14 +143,69 @@ pub fn inspect_initialized_index(path: &Path, header: usize, parameters: [u8; 5]
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn fixture(path: &Path, filtered: bool, paged: bool, parameters: [u8; 5]) -> usize {
+    fixture_with_settings(
+        path,
+        filtered,
+        paged.then_some(FileSpacePageSize::DEFAULT),
+        ExtensibleArrayCreationParameters::parse(&parameters).unwrap(),
+    )
+}
+
+/// Writes the empty dataset of [`fixture`] with the supplied PAGE size.
+///
+/// Uses persistent free-space management with threshold 1. The Extensible Array creation
+/// parameters are replaced with `parameters` after file closure.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be written or its layout differs from the expected unallocated index.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::FileSpacePageSize;
+/// use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
+/// use test_util_hdf5::__private::unallocated_append;
+///
+/// # let _guard = test_util_hdf5::lock::libhdf5_guard();
+/// # let directory = tempfile::tempdir()?;
+/// let path = directory.path().join("empty-paged.h5");
+/// let parameters = ExtensibleArrayCreationParameters::canonical();
+/// let header = unallocated_append::paged_fixture(
+///     &path, false, FileSpacePageSize::MIN, parameters,
+/// );
+/// let bytes = std::fs::read(&path)?;
+/// unallocated_append::assert_unallocated_layout(&bytes, header, parameters.encode());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn paged_fixture(
+    path: &Path,
+    filtered: bool,
+    page: FileSpacePageSize,
+    parameters: ExtensibleArrayCreationParameters,
+) -> usize {
+    fixture_with_settings(path, filtered, Some(page), parameters)
+}
+
+fn fixture_with_settings(
+    path: &Path,
+    filtered: bool,
+    page: Option<FileSpacePageSize>,
+    parameters: ExtensibleArrayCreationParameters,
+) -> usize {
+    let parameters = parameters.encode();
     let native = hdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties.file_space_strategy(FileSpaceStrategy::FreeSpaceManager {
-                paged,
+                paged: page.is_some(),
                 persist: true,
                 threshold: 1,
-            })
+            });
+            if let Some(page) = page {
+                properties.file_space_page_size(page.get());
+            }
+            properties
         })
         .create(path)
         .unwrap();
