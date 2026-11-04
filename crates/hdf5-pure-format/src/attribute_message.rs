@@ -89,6 +89,32 @@ impl AttributeMessage {
         }
     }
 
+    /// Borrows the datatype field when the attribute marks it as a shared reference.
+    ///
+    /// Checks field boundaries and flags for versions 2 and 3. Returns `None` for an inline
+    /// datatype or a version 1 message with a complete fixed prefix. The version 1 result
+    /// requires only that prefix.
+    ///
+    /// The returned bytes can refer to a committed datatype or the shared-message heap. Reference
+    /// decoding, datatype and dataspace decoding, and value validation remain with the caller.
+    /// Name and value bytes remain uninterpreted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidAttributeVersion`] if the version is not 1, 2, or 3,
+    /// [`FormatError::InvalidAttributeFlags`] if a version 2 or 3 flags byte sets an undefined bit,
+    /// and [`FormatError::UnexpectedEof`] if `data` ends within the required prefix or a version
+    /// 2 or 3 name, datatype, or dataspace field.
+    pub fn shared_datatype_reference(data: &[u8]) -> Result<Option<&[u8]>, FormatError> {
+        bytes::ensure_len(data, 0, 2)?;
+        if data[0] == VERSION_ONE {
+            bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
+            return Ok(None);
+        }
+        let fields = AttributeFields::parse(data)?;
+        Ok((fields.flags & FLAG_SHARED_DATATYPE != 0).then_some(fields.datatype))
+    }
+
     /// Parses an attribute message without access to the file it came from.
     ///
     /// A message whose datatype or dataspace is shared cannot be parsed this way. Use
@@ -208,8 +234,7 @@ impl AttributeMessage {
 
         match version {
             VERSION_ONE => Self::parse_v1(data, length_width),
-            VERSION_TWO => Self::parse_v2(data, length_width, resolver),
-            VERSION_THREE => Self::parse_v3(data, length_width, resolver),
+            VERSION_TWO | VERSION_THREE => Self::parse_fields(data, length_width, resolver),
             _ => Err(FormatError::InvalidAttributeVersion(version)),
         }
     }
@@ -258,94 +283,39 @@ impl AttributeMessage {
         ))
     }
 
-    fn parse_v2(
+    /// Decodes a version 2 or 3 message into owned fields and returns its value offset.
+    ///
+    /// The offset is measured from the start of `data`. Resolves shared datatype and dataspace
+    /// fields through `resolver`.
+    ///
+    /// # Errors
+    ///
+    /// Returns framing errors from [`AttributeFields::parse`], and resolver, datatype, dataspace,
+    /// and value-size errors documented by [`Self::parse_resolving_with_length_width`].
+    fn parse_fields(
         data: &[u8],
         length_width: LengthWidth,
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
-        // version(1) + flags(1) + name_size(2) + datatype_size(2) + dataspace_size(2) = 8
-        bytes::ensure_len(data, 0, V1_V2_PREFIX_SIZE)?;
-        let flags = data[1];
-        let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let datatype_size = u16::from_le_bytes([data[4], data[5]]) as usize;
-        let dataspace_size = u16::from_le_bytes([data[6], data[7]]) as usize;
-
-        let mut pos = V1_V2_PREFIX_SIZE;
-
-        // Name (NO padding)
-        bytes::ensure_len(data, pos, name_size)?;
-        let name = extract_name(&data[pos..pos + name_size]);
-        pos += name_size;
-
-        // Datatype (NO padding)
-        bytes::ensure_len(data, pos, datatype_size)?;
-        let dt_field = &data[pos..pos + datatype_size];
-        pos += datatype_size;
-
-        // Dataspace (NO padding)
-        bytes::ensure_len(data, pos, dataspace_size)?;
-        let ds_field = &data[pos..pos + dataspace_size];
-        pos += dataspace_size;
-
+        let AttributeFields {
+            flags,
+            name,
+            datatype,
+            dataspace,
+            data_offset,
+        } = AttributeFields::parse(data)?;
         let (datatype, dataspace, datatype_location) =
-            decode_type_and_space(dt_field, ds_field, flags, length_width, resolver)?;
-        let raw_data = compute_raw_data(data, pos, &dataspace, &datatype)?;
-
+            decode_type_and_space(datatype, dataspace, flags, length_width, resolver)?;
+        let raw_data = compute_raw_data(data, data_offset, &dataspace, &datatype)?;
         Ok((
             AttributeMessage {
-                name,
+                name: extract_name(name),
                 datatype,
                 dataspace,
                 raw_data,
                 datatype_location,
             },
-            pos,
-        ))
-    }
-
-    fn parse_v3(
-        data: &[u8],
-        length_width: LengthWidth,
-        resolver: &dyn SharedResolver,
-    ) -> Result<(AttributeMessage, usize), FormatError> {
-        // version(1) + flags(1) + name_size(2) + datatype_size(2) + dataspace_size(2) + encoding(1) = 9
-        bytes::ensure_len(data, 0, V3_PREFIX_SIZE)?;
-        let flags = data[1];
-        let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let datatype_size = u16::from_le_bytes([data[4], data[5]]) as usize;
-        let dataspace_size = u16::from_le_bytes([data[6], data[7]]) as usize;
-        let _encoding = data[8]; // 0=ASCII, 1=UTF-8
-
-        let mut pos = V3_PREFIX_SIZE;
-
-        // Name (NO padding)
-        bytes::ensure_len(data, pos, name_size)?;
-        let name = extract_name(&data[pos..pos + name_size]);
-        pos += name_size;
-
-        // Datatype (NO padding)
-        bytes::ensure_len(data, pos, datatype_size)?;
-        let dt_field = &data[pos..pos + datatype_size];
-        pos += datatype_size;
-
-        // Dataspace (NO padding)
-        bytes::ensure_len(data, pos, dataspace_size)?;
-        let ds_field = &data[pos..pos + dataspace_size];
-        pos += dataspace_size;
-
-        let (datatype, dataspace, datatype_location) =
-            decode_type_and_space(dt_field, ds_field, flags, length_width, resolver)?;
-        let raw_data = compute_raw_data(data, pos, &dataspace, &datatype)?;
-
-        Ok((
-            AttributeMessage {
-                name,
-                datatype,
-                dataspace,
-                raw_data,
-                datatype_location,
-            },
-            pos,
+            data_offset,
         ))
     }
 
@@ -476,6 +446,62 @@ impl AttributeMessage {
     }
 }
 
+/// Borrowed fields and the value offset of a version 2 or 3 attribute message.
+///
+/// Field bounds and flags are checked independently of field decoding and value validation.
+struct AttributeFields<'a> {
+    flags: u8,
+    name: &'a [u8],
+    datatype: &'a [u8],
+    dataspace: &'a [u8],
+    /// The offset of the value bytes within the input slice.
+    data_offset: usize,
+}
+
+impl<'a> AttributeFields<'a> {
+    /// Borrows fields after checking their bounds and the shared-message flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidAttributeVersion`] if the version is not 2 or 3,
+    /// [`FormatError::InvalidAttributeFlags`] if the flags byte sets an undefined bit, and
+    /// [`FormatError::UnexpectedEof`] if `data` ends within the prefix, name, datatype, or dataspace.
+    fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
+        bytes::ensure_len(data, 0, 2)?;
+        let prefix_size = match data[0] {
+            VERSION_TWO => V1_V2_PREFIX_SIZE,
+            VERSION_THREE => V3_PREFIX_SIZE,
+            version => return Err(FormatError::InvalidAttributeVersion(version)),
+        };
+        bytes::ensure_len(data, 0, prefix_size)?;
+        let flags = data[1];
+        let name_size = usize::from(u16::from_le_bytes([data[2], data[3]]));
+        let datatype_size = usize::from(u16::from_le_bytes([data[4], data[5]]));
+        let dataspace_size = usize::from(u16::from_le_bytes([data[6], data[7]]));
+        let mut pos = prefix_size;
+        bytes::ensure_len(data, pos, name_size)?;
+        let name = &data[pos..pos + name_size];
+        pos += name_size;
+        bytes::ensure_len(data, pos, datatype_size)?;
+        let datatype = &data[pos..pos + datatype_size];
+        pos += datatype_size;
+        bytes::ensure_len(data, pos, dataspace_size)?;
+        let dataspace = &data[pos..pos + dataspace_size];
+        pos += dataspace_size;
+        // libhdf5 rejects a flags byte that sets any other bit (`H5Oattr.c`, HDF5 2.1.0).
+        if flags & !FLAG_ALL != 0 {
+            return Err(FormatError::InvalidAttributeFlags(flags));
+        }
+        Ok(Self {
+            flags,
+            name,
+            datatype,
+            dataspace,
+            data_offset: pos,
+        })
+    }
+}
+
 /// An [`AttributeMessage`] paired with its encoded body for eight-byte addresses and lengths.
 ///
 /// The message and body are immutable until consumed. Compact writers use the body directly.
@@ -545,11 +571,6 @@ fn decode_type_and_space(
     length_width: LengthWidth,
     resolver: &dyn SharedResolver,
 ) -> Result<(Datatype, Dataspace, DatatypeLocation), FormatError> {
-    // libhdf5 rejects a flags byte that sets any other bit (`H5Oattr.c`, HDF5 2.1.0).
-    if flags & !FLAG_ALL != 0 {
-        return Err(FormatError::InvalidAttributeFlags(flags));
-    }
-
     let (datatype, location) = if flags & FLAG_SHARED_DATATYPE != 0 {
         // A shared datatype is either a committed object every user names, or
         // one anonymous copy in the file's shared-message heap. Only the first
@@ -686,6 +707,153 @@ mod tests {
     use crate::shared_message;
 
     #[rstest]
+    #[case::version_one(AttributeVersion::One, attribute::Flags::NONE, false)]
+    #[case::inline_v2(AttributeVersion::Two, attribute::Flags::NONE, false)]
+    #[case::inline_v3(AttributeVersion::Three, attribute::Flags::NONE, false)]
+    #[case::datatype_v2(AttributeVersion::Two, attribute::Flags::SHARED_DATATYPE, true)]
+    #[case::datatype_v3(AttributeVersion::Three, attribute::Flags::SHARED_DATATYPE, true)]
+    #[case::dataspace_only(AttributeVersion::Two, attribute::Flags::SHARED_DATASPACE, false)]
+    #[case::both_fields(
+        AttributeVersion::Three,
+        attribute::Flags::SHARED_DATATYPE | attribute::Flags::SHARED_DATASPACE,
+        true
+    )]
+    fn shared_datatype_reference_borrows_the_flagged_field(
+        #[case] version: AttributeVersion,
+        #[case] flags: attribute::Flags,
+        #[case] shared: bool,
+    ) {
+        let reference = datatype::committed_reference(0x320);
+        let dataspace = dataspace::scalar();
+        let fixture = attribute::Attribute::new("type", &reference, &dataspace, &[]);
+        let fixture = match version {
+            AttributeVersion::One => fixture,
+            AttributeVersion::Two => fixture.flags(flags),
+            AttributeVersion::Three => fixture.flags(flags).character_set(ASCII_NAME_CHARACTER_SET),
+        };
+        let bytes = fixture.build();
+        let found = AttributeMessage::shared_datatype_reference(&bytes).unwrap();
+        assert_eq!(found, shared.then_some(reference.as_slice()));
+        if let Some(found) = found {
+            let start = if version == AttributeVersion::Three {
+                V3_PREFIX_SIZE
+            } else {
+                V1_V2_PREFIX_SIZE
+            } + "type".len()
+                + 1;
+            assert_eq!(found.as_ptr(), bytes[start..].as_ptr());
+        }
+    }
+
+    #[rstest]
+    #[case::v2_prefix(VERSION_TWO, 7, 8)]
+    #[case::v3_prefix(VERSION_THREE, 8, 9)]
+    #[case::v2_name(VERSION_TWO, 9, 10)]
+    #[case::v3_name(VERSION_THREE, 10, 11)]
+    #[case::v2_datatype(VERSION_TWO, 12, 13)]
+    #[case::v3_datatype(VERSION_THREE, 13, 14)]
+    #[case::v2_dataspace(VERSION_TWO, 14, 15)]
+    #[case::v3_dataspace(VERSION_THREE, 15, 16)]
+    fn borrowed_and_owned_attribute_fields_report_the_same_truncation(
+        #[case] version: u8,
+        #[case] available: usize,
+        #[case] expected: usize,
+    ) {
+        let fixture = attribute::Attribute::new("a", &[0xa5; 3], &[0xc3; 2], &[])
+            .flags(attribute::Flags::SHARED_DATATYPE);
+        let mut bytes = if version == VERSION_THREE {
+            fixture.character_set(ASCII_NAME_CHARACTER_SET).build()
+        } else {
+            fixture.build()
+        };
+        bytes.truncate(available);
+        let error = FormatError::UnexpectedEof {
+            expected,
+            available,
+        };
+        assert_eq!(
+            AttributeMessage::shared_datatype_reference(&bytes).unwrap_err(),
+            error
+        );
+        assert_eq!(AttributeMessage::parse(&bytes, 8).unwrap_err(), error);
+    }
+
+    #[rstest]
+    #[case::empty(Vec::new(), FormatError::UnexpectedEof { expected: 2, available: 0 })]
+    #[case::version_only(vec![VERSION_ONE], FormatError::UnexpectedEof { expected: 2, available: 1 })]
+    #[case::short_v1(vec![VERSION_ONE, 0], FormatError::UnexpectedEof { expected: 8, available: 2 })]
+    #[case::unknown_version(vec![5, 0], FormatError::InvalidAttributeVersion(5))]
+    #[case::unknown_flags(
+        attribute::Attribute::new("a", &[], &[], &[]).flags(attribute::Flags(0x80)).build(),
+        FormatError::InvalidAttributeFlags(0x80)
+    )]
+    fn borrowed_and_owned_attributes_report_the_same_prefix_error(
+        #[case] bytes: Vec<u8>,
+        #[case] error: FormatError,
+    ) {
+        assert_eq!(
+            AttributeMessage::shared_datatype_reference(&bytes).unwrap_err(),
+            error
+        );
+        assert_eq!(AttributeMessage::parse(&bytes, 8).unwrap_err(), error);
+    }
+
+    #[test]
+    fn shared_datatype_reference_ignores_v1_reserved_flags() {
+        let mut bytes = attribute::Attribute::new("a", &[], &[], &[]).build();
+        bytes[1] = u8::MAX;
+        assert_eq!(
+            AttributeMessage::shared_datatype_reference(&bytes).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn shared_datatype_reference_preserves_heap_reference_bytes() {
+        let reference = shared_message::encode_sohm_ref(&[0xa5; shared_message::FHEAP_ID_LEN]);
+        let bytes = attribute::Attribute::new("a", &reference, &[], &[])
+            .flags(attribute::Flags::SHARED_DATATYPE)
+            .build();
+        assert_eq!(
+            AttributeMessage::shared_datatype_reference(&bytes).unwrap(),
+            Some(reference.as_slice())
+        );
+    }
+
+    #[test]
+    fn shared_datatype_reference_borrows_fields_with_absent_and_large_values() {
+        let mut bytes = attr_with_committed_reference(FLAG_SHARED_DATATYPE);
+        bytes.truncate(bytes.len() - 8);
+        let reference = AttributeMessage::shared_datatype_reference(&bytes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference, datatype::committed_reference(0x320));
+        let resolver = StubResolver(crate::datatype::serialize_datatype(&i32_datatype()).unwrap());
+        assert_eq!(
+            AttributeMessage::parse_resolving_at_with_length_width(
+                &bytes,
+                LengthWidth::Eight,
+                &resolver
+            )
+            .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: bytes.len() + 4,
+                available: bytes.len()
+            }
+        );
+        let prefix = bytes.len();
+        bytes.resize(prefix + 4_000_000, 0xa5);
+        let reference = AttributeMessage::shared_datatype_reference(&bytes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference, datatype::committed_reference(0x320));
+        assert_eq!(
+            reference.as_ptr(),
+            bytes[V1_V2_PREFIX_SIZE + "shared_attr".len() + 1..].as_ptr()
+        );
+    }
+
+    #[rstest]
     #[case::ascii_v2("scale", false, VERSION_TWO, ASCII_NAME_CHARACTER_SET)]
     #[case::ascii_forced_v3("scale", true, VERSION_THREE, ASCII_NAME_CHARACTER_SET)]
     #[case::utf8_auto_v3("échelle", false, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
@@ -812,6 +980,13 @@ mod tests {
         let data = [5u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidAttributeVersion(5));
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum AttributeVersion {
+        One,
+        Two,
+        Three,
     }
 
     /// Returns a version 2 attribute message with the flags byte `flags`, whose datatype field is
