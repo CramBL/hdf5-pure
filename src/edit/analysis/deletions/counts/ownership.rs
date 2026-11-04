@@ -196,7 +196,7 @@ impl SurvivingCount {
         self.field
     }
 
-    /// Returns the positive declared remainder after the planned removals.
+    /// Returns the positive planned declared net count.
     pub(in crate::edit) fn count(&self) -> NonZeroU32 {
         self.count
     }
@@ -430,7 +430,7 @@ impl ProtectedCount {
         self.field
     }
 
-    /// Returns the positive declared remainder after the planned removals.
+    /// Returns the positive planned declared net count.
     pub(in crate::edit) fn count(&self) -> NonZeroU32 {
         self.count
     }
