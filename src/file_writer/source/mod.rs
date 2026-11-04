@@ -2,7 +2,8 @@
 //!
 //! The writer reconstructs individual objects during planning and emission. Per-object records
 //! retain allocations, object-use counts, and occupied chunk records with logical slots. The plan
-//! also retains serialized file-space managers. Source and provider storage have separate costs.
+//! also retains serialized file-space managers and PAGE array block addresses. The writer
+//! serializes PAGE arrays from retained metadata. Source and provider storage have separate costs.
 
 use core::num::NonZeroU64;
 
@@ -26,6 +27,7 @@ use hdf5_pure_space::__private::AllocationClass;
 
 use super::layout;
 use super::layout::Allocation;
+use super::layout::ArrayAllocation;
 use super::layout::ObjectAllocation;
 use super::layout::ObjectMeasure;
 use super::preparation::PreparedAttributes;
@@ -40,6 +42,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::ByteSink;
+use crate::chunked_write::ChunkedMeasure;
 use crate::chunked_write::CompressedChunkSet;
 use crate::chunked_write::EmptyChunkIndex;
 use crate::chunked_write::VerbatimPayload;
@@ -50,6 +53,7 @@ use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
 use crate::file_allocation::FileManager;
 use crate::file_emission::EmissionError;
+use crate::file_emission::Reservation;
 use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceStrategy;
@@ -410,6 +414,7 @@ impl Object {
             data,
             data_measure,
             array_payload: array_payload.map(Box::new),
+            array: None,
             dense_links,
             heaps,
             references: 1,
@@ -773,12 +778,13 @@ impl<S: ObjectSource> Plan<S> {
         })
     }
 
-    /// Writes allocations in address order while reconstructing one source object at a time.
+    /// Writes planned regions in address order.
     ///
-    /// The working object is retained across adjacent allocations of that object. Chunk providers
-    /// supply verbatim payloads during data emission. With a retained descriptor, the writer
-    /// serializes the array from its chunk records. For reconstructed encoded storage, the writer
-    /// prepares chunks when emitting a header or data region.
+    /// Retains one working object until another object is needed. The writer serializes PAGE
+    /// arrays from retained chunk records or scalar geometry, separately from object
+    /// reconstruction. Chunk providers supply verbatim payloads during data emission. For
+    /// reconstructed encoded storage, the writer prepares chunks when emitting a header or data
+    /// region.
     ///
     /// # Errors
     ///
@@ -823,55 +829,66 @@ impl<S: ObjectSource> Plan<S> {
         )?)?;
         let mut spans = Vec::new();
         for (index, record) in records.iter().enumerate() {
-            spans.push((record.metadata.header, Part::Header(index)));
+            spans.push(
+                record
+                    .metadata
+                    .header
+                    .reservation(BaseAddress::ZERO, Part::Header(index))?,
+            );
             if let Some(span) = record.metadata.attributes {
-                spans.push((span, Part::Attributes(index)));
+                spans.push(span.reservation(BaseAddress::ZERO, Part::Attributes(index))?);
             }
             if let Some(span) = record.metadata.links {
-                spans.push((span, Part::Links(index)));
+                spans.push(span.reservation(BaseAddress::ZERO, Part::Links(index))?);
             }
             for (collection, &span) in record.heaps.iter().enumerate() {
-                spans.push((span, Part::Heap(index, collection)));
+                spans.push(span.reservation(BaseAddress::ZERO, Part::Heap(index, collection))?);
             }
             if let Some(span) = record.data.filter(|span| span.length != 0) {
-                spans.push((
-                    span,
-                    record
-                        .data_measure
-                        .empty_index()
-                        .map_or(Part::Data(index), Part::EmptyIndex),
-                ));
+                spans.push(
+                    span.reservation(
+                        BaseAddress::ZERO,
+                        record
+                            .data_measure
+                            .empty_index()
+                            .map_or(Part::Data(index), Part::EmptyIndex),
+                    )?,
+                );
+            }
+        }
+        for (index, record) in records.iter().enumerate() {
+            if let Some(array) = &record.array {
+                spans.push(array.reservation(BaseAddress::ZERO, Part::Array(index))?);
             }
         }
         if let Some((span, _)) = extension.as_ref() {
-            spans.push((*span, Part::Extension));
+            spans.push(Reservation::new(
+                BaseAddress::ZERO,
+                span.address,
+                span.length,
+                Part::Extension,
+            )?);
         }
         for (index, manager) in managers.iter().enumerate() {
-            spans.push((
-                Allocation {
-                    address: manager.header_address,
-                    length: manager.header.len() as u64,
-                },
+            spans.push(Reservation::new(
+                BaseAddress::ZERO,
+                manager.header_address,
+                manager.header.len() as u64,
                 Part::ManagerHeader(index),
-            ));
-            spans.push((
-                Allocation {
-                    address: manager.section_list_address,
-                    length: manager.section_list.len() as u64,
-                },
+            )?);
+            spans.push(Reservation::new(
+                BaseAddress::ZERO,
+                manager.section_list_address,
+                manager.section_list.len() as u64,
                 Part::ManagerSections(index),
-            ));
+            )?);
         }
-        spans.sort_unstable_by_key(|(span, _)| span.address);
+        spans.sort_unstable_by_key(Reservation::start);
         let mut working = None;
-        for (span, part) in spans {
-            let start = BaseAddress::ZERO.resolve(span.address)?.get();
-            let end = start
-                .checked_add(span.length)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: start,
-                    length: span.length,
-                })?;
+        for span in spans {
+            let (range, part) = span.into_parts();
+            let start = range.start().get();
+            let end = range.end().get();
             pad(&mut sink, start)?;
             if let Some(index) = part.object() {
                 if !working
@@ -884,14 +901,21 @@ impl<S: ObjectSource> Plan<S> {
                 }
             }
             match part {
+                Part::Array(index) => self.records[index].emit_array(&mut sink)?,
                 Part::EmptyIndex(index) => super::preparation::emit_empty_index(
                     &mut sink,
                     BaseAddress::ZERO,
                     index,
-                    span.address,
+                    StoredAddress::new(start),
                 )
                 .map_err(emission_error)?,
-                Part::Links(index) => sink.put(&self.links(index, span)?)?,
+                Part::Links(index) => sink.put(&self.links(
+                    index,
+                    Allocation {
+                        address: StoredAddress::new(start),
+                        length: range.length(),
+                    },
+                )?)?,
                 Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
                 Part::ManagerHeader(index) => sink.put(&managers[index].header)?,
                 Part::ManagerSections(index) => sink.put(&managers[index].section_list)?,
@@ -904,7 +928,13 @@ impl<S: ObjectSource> Plan<S> {
                         Part::Header(_) => {
                             sink.put(&self.header(*index, object, chunks.as_ref())?)?
                         }
-                        Part::Attributes(_) => sink.put(&self.attributes(object, span)?)?,
+                        Part::Attributes(_) => sink.put(&self.attributes(
+                            object,
+                            Allocation {
+                                address: StoredAddress::new(start),
+                                length: range.length(),
+                            },
+                        )?)?,
                         Part::Heap(_, collection) => {
                             sink.put(object.collection(collection).ok_or_else(inconsistent)?)?
                         }
@@ -955,14 +985,19 @@ impl<S: ObjectSource> Plan<S> {
                             span.address,
                             chunks.as_ref(),
                             &record.data_measure,
-                            record.data_measure.array_address(span.address)?,
+                            record.array_address()?,
                         )?
                         .data
                         .len()
                 } else {
                     dataset.contiguous_len()
                 };
-                if length != span.length {
+                let expected = if record.array.is_some() {
+                    record.data_measure.payload_length()
+                } else {
+                    length
+                };
+                if expected != span.length {
                     return Err(inconsistent().into());
                 }
             }
@@ -1083,7 +1118,23 @@ impl<S: ObjectSource> Plan<S> {
                     .map_or(super::UNDEF_ADDRESS, |span| span.address);
                 let measured = dataset
                     .is_chunked()
-                    .then(|| dataset.measure_chunked(address, chunks))
+                    .then(|| {
+                        if record.array.is_some() {
+                            let built = dataset.build_chunked(
+                                address,
+                                chunks,
+                                &record.data_measure,
+                                record.array_address()?,
+                            )?;
+                            Ok(ChunkedMeasure {
+                                data_len: built.data.len(),
+                                layout_message: built.layout_message,
+                                pipeline_message: built.pipeline_message,
+                            })
+                        } else {
+                            dataset.measure_chunked(address, chunks)
+                        }
+                    })
                     .transpose()?;
                 if let Some(measured) = &measured {
                     if measured.data_len != record.data_measure.length()? {
@@ -1266,11 +1317,14 @@ impl DenseLinks {
 /// Allocations, storage kind, and relocation state for one source object.
 struct Record {
     metadata: ObjectAllocation,
+    /// The PAGE payload allocation, or the combined classic payload and index region.
     data: Option<Allocation>,
     /// Payload length, storage kind, and retained array block geometry.
     data_measure: layout::DataMeasure,
     /// Chunk records and logical slots for an occupied array, excluding encoded bytes.
     array_payload: Option<Box<VerbatimPayload>>,
+    /// Separate PAGE array block placements, including for an allocated empty array.
+    array: Option<Box<ArrayAllocation>>,
     /// Relative name-index geometry for the dense links in `metadata`.
     dense_links: Option<DenseLinks>,
     heaps: Vec<Allocation>,
@@ -1300,10 +1354,11 @@ impl Record {
 
     /// Writes a data allocation using retained array records when available.
     ///
-    /// The caller positions `sink` at the data allocation's start. With a retained descriptor,
-    /// provider-backed output uses its records for payload checks and array serialization.
-    /// Encoded payloads are borrowed from `chunks`. Source reconstruction and encoding are separate
-    /// operations. A failure can leave partial output.
+    /// The caller positions `sink` at the data allocation's start. Provider-backed output uses
+    /// retained records for payload checks. Classic output includes consecutive array blocks.
+    /// PAGE array blocks are written through [`Self::emit_array`]. Encoded payloads are borrowed
+    /// from `chunks`. Source reconstruction and encoding are separate operations. A failure can
+    /// leave partial output.
     ///
     /// # Errors
     ///
@@ -1331,6 +1386,9 @@ impl Record {
             } else {
                 chunks.ok_or_else(inconsistent)?.emit_payload(sink)?;
             }
+            if self.array.is_some() {
+                return Ok(());
+            }
             super::preparation::emit_array(
                 sink,
                 BaseAddress::ZERO,
@@ -1342,16 +1400,70 @@ impl Record {
             )
             .map_err(emission_error)
         } else {
-            dataset
-                .build_chunked(
-                    address,
-                    chunks,
-                    &self.data_measure,
-                    self.data_measure.array_address(address)?,
-                )?
+            let built = dataset.build_chunked(
+                address,
+                chunks,
+                &self.data_measure,
+                self.array_address()?,
+            )?;
+            if self.array.is_some() {
+                built
+                    .data
+                    .emit_payload(sink, &dataset.storage)
+                    .map_err(emission_error)
+            } else {
+                built
+                    .data
+                    .emit(sink, BaseAddress::ZERO, &dataset.storage)
+                    .map_err(emission_error)
+            }
+        }
+    }
+
+    /// Writes PAGE array blocks from retained chunk metadata or scalar empty-array geometry.
+    ///
+    /// Pads gaps between blocks using the assigned addresses. Source objects and provider
+    /// payloads are read separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if the array placement or
+    /// geometry is absent. Propagates slot, placement, encoding, physical-range, and output errors.
+    fn emit_array(&self, sink: &mut impl ByteSink<Error = std::io::Error>) -> Result<(), Error> {
+        let array = self.array.as_ref().ok_or_else(inconsistent)?;
+        match &self.array_payload {
+            Some(payload) => super::preparation::emit_array_at(
+                sink,
+                BaseAddress::ZERO,
+                self.data_measure.array.as_ref().ok_or_else(inconsistent)?,
+                &payload.index_slots()?,
+                &array.addresses,
+            )
+            .map_err(emission_error),
+            None => super::preparation::emit_empty_index_at(
+                sink,
+                BaseAddress::ZERO,
+                self.data_measure.empty_index().ok_or_else(inconsistent)?,
+                &array.addresses,
+            )
+            .map_err(emission_error),
+        }
+    }
+
+    /// Returns the PAGE array root or the consecutive array address after the classic payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if separate array placement has no blocks. Propagates
+    /// consecutive address errors from [`layout::DataMeasure::array_address`].
+    fn array_address(&self) -> Result<Option<StoredAddress>, FormatError> {
+        match &self.array {
+            Some(array) => array.address().map(Some),
+            None => self
                 .data
-                .emit(sink, BaseAddress::ZERO, &dataset.storage)
-                .map_err(emission_error)
+                .map(|span| self.data_measure.array_address(span.address))
+                .transpose()
+                .map(Option::flatten),
         }
     }
 
@@ -1370,8 +1482,10 @@ impl Record {
     }
 }
 
-/// The source of bytes for one allocation in the ordered output.
+/// The source of bytes for one region in the ordered output.
 enum Part {
+    /// Complete array blocks and the padding between them.
+    Array(usize),
     Attributes(usize),
     Data(usize),
     /// An array index emitted from scalar geometry.
@@ -1391,7 +1505,8 @@ impl Part {
             | Self::Data(index)
             | Self::Header(index)
             | Self::Heap(index, _) => Some(index),
-            Self::EmptyIndex(_)
+            Self::Array(_)
+            | Self::EmptyIndex(_)
             | Self::Links(_)
             | Self::Extension
             | Self::ManagerHeader(_)
@@ -1485,6 +1600,7 @@ impl FileLayout {
             let layout::PagedLayout {
                 extension,
                 data,
+                arrays,
                 small: _,
                 large: _,
                 slots,
@@ -1500,8 +1616,11 @@ impl FileLayout {
                 extension.as_ref().map_or(0, |bytes| bytes.len() as u64),
                 records.iter().map(|record| &record.data_measure),
                 collections.ok_or_else(inconsistent)?.sections,
-                |_, placed| Ok(placed),
+                |_, placed, _| Ok(placed),
             )?;
+            for (index, array) in arrays {
+                records[index].array = Some(Box::new(array));
+            }
             for (record, placed) in records.iter_mut().zip(data) {
                 record.assign_data(placed)?;
             }
@@ -1744,6 +1863,8 @@ mod tests {
     use crate::datatype::CharacterSet;
     use crate::error::Error;
     use crate::error::FormatError;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use crate::file_allocation::FileManager;
     use crate::file_writer;
     use crate::object_path::ObjectPathBuf;
     use crate::type_builders::DatasetBuilder;
@@ -1991,8 +2112,9 @@ mod tests {
                     None
                 } else {
                     let allocation = record.data.unwrap();
-                    assert!(allocation.length > 0);
-                    Some(allocation.address)
+                    assert!(record.data_measure.length().unwrap() > 0);
+                    assert_eq!(allocation.length == 0, record.array.is_some());
+                    record.array_address().unwrap()
                 }
             })
             .collect();
@@ -2056,6 +2178,7 @@ mod tests {
         #[case] count: usize,
         #[case] region: &'static str,
         #[case] control_region: &'static str,
+        #[values(false, true)] paged: bool,
     ) {
         let loads = Arc::new((0..=count).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
         let (control, positive) =
@@ -2071,20 +2194,23 @@ mod tests {
                     unallocated: false,
                     loads: Arc::clone(&loads),
                 },
-                None,
+                paged.then_some(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+                ),
                 None,
                 LibVer::V110,
             )
             .unwrap()
         });
-        let retained = (plan.records.capacity() * mem::size_of::<Record>()) as u64;
+        let retained = (plan.records.capacity() * mem::size_of::<Record>()
+            + page_metadata_capacity(&plan)) as u64;
         assert_eq!(measured.live_bytes, retained, "{measured}");
         assert!(measured.peak_bytes >= retained, "{measured}");
         assert!(measured.peak_bytes <= retained + 262_144, "{measured}");
         for record in &plan.records[..count] {
             assert!(record.data_measure.empty_index().is_some());
             assert_eq!(record.data_measure.length().unwrap(), 370);
-            assert_eq!(record.data.unwrap().length, 370);
+            assert_eq!(record.data.unwrap().length, if paged { 0 } else { 370 });
         }
         assert_eq!(
             loads
@@ -2275,7 +2401,9 @@ mod tests {
             },
         ];
         let slots = IndexSlots::new(&records, &[0, 1], 2).unwrap();
-        let array = payload.checked_add(width * 2).unwrap();
+        let array = record.array_address().unwrap().unwrap();
+        let placed = record.array.as_ref().map(|array| array.addresses.clone());
+        let measure = &record.data_measure;
         let expected = if unlimited {
             format::build_extensible_array_at(
                 &slots,
@@ -2296,9 +2424,26 @@ mod tests {
             )
         }
         .unwrap();
+        let mut expected_blocks = Vec::new();
+        if let Some(addresses) = &placed {
+            assert!(array < payload);
+            measure
+                .array
+                .as_ref()
+                .unwrap()
+                .write_at(&slots, addresses, |address, bytes| {
+                    expected_blocks.push((address, bytes.to_vec()));
+                    Ok::<(), core::convert::Infallible>(())
+                })
+                .unwrap();
+        } else {
+            expected_blocks.push((array, expected));
+        }
         let image = plan.finish().unwrap();
-        let at = usize::try_from(array.get()).unwrap();
-        assert_eq!(&image[at..at + expected.len()], expected);
+        for (address, bytes) in expected_blocks {
+            let at = usize::try_from(address.get()).unwrap();
+            assert_eq!(&image[at..at + bytes.len()], bytes);
+        }
         let file = File::from_bytes(image).unwrap();
         assert_eq!(
             *reads.lock().unwrap(),
@@ -2323,6 +2468,7 @@ mod tests {
         #[case] encoded: bool,
         #[case] chunks: usize,
         #[case] region: &str,
+        #[values(false, true)] paged: bool,
     ) {
         let reads = Arc::new(Mutex::new(Vec::new()));
         let loads = Arc::new(AtomicUsize::new(0));
@@ -2340,12 +2486,21 @@ mod tests {
         assert_eq!(positive.peak_bytes, 1_024, "{positive}");
         drop(control);
         let (plan, measured) = allocation::measure(region, || {
-            Plan::new(source, None, None, LibVer::V110).unwrap()
+            Plan::new(
+                source,
+                paged.then_some(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+                ),
+                None,
+                LibVer::V110,
+            )
+            .unwrap()
         });
         let descriptors = chunks * (mem::size_of::<ChunkRecord>() + mem::size_of::<u64>());
         let retained = plan.records.capacity() * mem::size_of::<Record>()
             + descriptors
-            + mem::size_of::<VerbatimPayload>();
+            + mem::size_of::<VerbatimPayload>()
+            + page_metadata_capacity(&plan);
         let payload_bytes = chunks * 128 * 4;
         assert_eq!(measured.live_bytes, retained as u64, "{measured}");
         assert!(measured.live_bytes >= descriptors as u64, "{measured}");
@@ -2375,6 +2530,28 @@ mod tests {
                 .map(|value| i32::try_from(value).unwrap())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn page_metadata_capacity(plan: &Plan<impl ObjectSource>) -> usize {
+        plan.records
+            .iter()
+            .filter_map(|record| record.array.as_deref())
+            .map(|array| {
+                mem::size_of_val(array)
+                    + array.addresses.capacity() * mem::size_of::<StoredAddress>()
+            })
+            .sum::<usize>()
+            + plan
+                .extension
+                .as_ref()
+                .map_or(0, |(_, bytes)| bytes.capacity())
+            + plan.managers.capacity() * mem::size_of::<FileManager>()
+            + plan
+                .managers
+                .iter()
+                .map(|manager| manager.header.capacity() + manager.section_list.capacity())
+                .sum::<usize>()
     }
 
     struct ChunkSource {

@@ -2153,6 +2153,7 @@ impl FileWriter {
                         length: ext_len,
                     },
                 data: ds_layouts,
+                arrays,
                 small: small_indices,
                 large: large_indices,
                 slots,
@@ -2168,7 +2169,7 @@ impl FileWriter {
                 ext_oh.as_ref().map_or(0, |bytes| bytes.len() as u64),
                 ds_data_measures.iter(),
                 collection_sections,
-                |i, placed: Option<layout::Allocation>| {
+                |i, placed: Option<layout::Allocation>, array: Option<&layout::ArrayAllocation>| {
                     let dataset = &mut all_ds[i];
                     let address = placed.map_or(
                         UNDEF_ADDRESS,
@@ -2179,7 +2180,7 @@ impl FileWriter {
                             address,
                             chunk_sets[i].as_ref(),
                             &ds_data_measures[i],
-                            ds_data_measures[i].array_address(address)?,
+                            array.map(layout::ArrayAllocation::address).transpose()?,
                         )?;
                         if built.data.len() != ds_data_measures[i].length()? {
                             return Err(FormatError::Internal(
@@ -2359,6 +2360,11 @@ impl FileWriter {
                     sink.put(&dense.blob).map_err(EmissionError::Sink)?;
                 }
             }
+            for (index, array) in &arrays {
+                ds_layouts[*index]
+                    .data
+                    .emit_array_at(sink, base, &array.addresses)?;
+            }
             let mut tail = core::iter::once((ext_addr, real_ext_oh.as_slice()))
                 .chain(managers.iter().flatten().flat_map(|manager| {
                     [
@@ -2393,7 +2399,7 @@ impl FileWriter {
             for &i in &small_indices {
                 let at = base.resolve(ds_layouts[i].data_addr)?.get();
                 debug_assert_eq!(sink.position(), at);
-                ds_layouts[i].data.emit(sink, base, &all_ds[i].storage)?;
+                ds_layouts[i].data.emit_payload(sink, &all_ds[i].storage)?;
             }
             if small_raw_total > 0 {
                 sink.put_zeros(
@@ -2406,7 +2412,7 @@ impl FileWriter {
                 let gap = base.resolve(ds_layouts[i].data_addr)?.get() - sink.position();
                 sink.put_zeros(gap.to_usize()?)
                     .map_err(EmissionError::Sink)?;
-                ds_layouts[i].data.emit(sink, base, &all_ds[i].storage)?;
+                ds_layouts[i].data.emit_payload(sink, &all_ds[i].storage)?;
                 let end_rel = base.relative(PhysicalAddress::new(sink.position()))?.get();
                 sink.put_zeros(
                     ((page_size.get() - end_rel % page_size.get()) % page_size.get()).to_usize()?,

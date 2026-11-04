@@ -334,7 +334,8 @@ fn measure_persistent_appends(
     builder.with_file_space_settings(
         FileSpaceSettings::new(strategy)
             .with_persistence(true)
-            .with_threshold(4096),
+            .with_threshold(4096)
+            .with_page_size(FileSpacePageSize::try_from(8192).unwrap()),
     );
     let target = builder.create_dataset("d");
     if initial == 0 {
