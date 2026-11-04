@@ -21,7 +21,7 @@ use crate::edit::WriteEngine;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
 use crate::link_info::LinkInfoMessage;
-use crate::width::OffsetWidth;
+use crate::width::{LengthWidth, OffsetWidth};
 
 #[rstest]
 #[case::strings(global_heap_fixture::vlen_string(), &[0])]
@@ -159,6 +159,68 @@ fn parsed_attributes_skip_null_references(#[case] address: u64) {
     });
 }
 
+#[rstest]
+#[case::strings(global_heap_fixture::vlen_string(), 1, 0, None)]
+#[case::sequences(global_heap_fixture::vlen_sequence(), 1, 0, None)]
+#[case::array(
+    global_heap_fixture::array_of(global_heap_fixture::vlen_string()),
+    2,
+    0,
+    None
+)]
+#[case::compound(
+    global_heap_fixture::with_integer(global_heap_fixture::vlen_string()),
+    1,
+    4,
+    Some(20)
+)]
+fn parsed_attributes_use_stored_reference_strides(
+    #[case] datatype: Datatype,
+    #[case] slots: usize,
+    #[case] first: usize,
+    #[case] declared_stride: Option<usize>,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    #[values(UserblockSize::NONE, UserblockSize::MIN)] base: UserblockSize,
+    #[values(false, true)] truncated: bool,
+) {
+    let widths = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+    let reference_size = 4 + widths.offset + 4;
+    let stride = declared_stride.unwrap_or(slots * reference_size);
+    let mut raw = vec![0; stride * 2];
+    let mut expected = BTreeSet::from([7]);
+    for element in 0..2 {
+        for slot in 0..slots {
+            let collection = 4096 + u64::try_from(element * 1024 + slot * 256).unwrap();
+            let descriptor = global_heap::reference(5, collection, 1, widths);
+            let at = element * stride + first + slot * reference_size;
+            raw[at..at + reference_size].copy_from_slice(&descriptor);
+            expected.insert(base.get() + collection);
+        }
+    }
+    if truncated {
+        raw.pop().unwrap();
+    }
+    let attribute = parsed_attribute(datatype, 2, raw);
+    with_width_engine(base, widths, |engine| {
+        let mut referenced = BTreeSet::from([7]);
+        let result = engine.collect_parsed_attribute_collections(&attribute, &mut referenced);
+        if truncated {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::UnexpectedEof {
+                    expected: stride * 2,
+                    available: stride * 2 - 1,
+                }
+            );
+            assert_eq!(referenced, BTreeSet::from([7]));
+        } else {
+            assert!(result.unwrap());
+            assert_eq!(referenced, expected);
+        }
+    });
+}
+
 fn parsed_attribute(datatype: Datatype, count: u64, raw_data: Vec<u8>) -> AttributeMessage {
     AttributeMessage {
         name: "labels".into(),
@@ -175,6 +237,10 @@ fn parsed_attribute(datatype: Datatype, count: u64, raw_data: Vec<u8>) -> Attrib
 }
 
 fn with_engine(base: UserblockSize, inspect: impl FnOnce(&WriteEngine)) {
+    with_width_engine(base, Widths::EIGHT, inspect);
+}
+
+fn with_width_engine(base: UserblockSize, widths: Widths, inspect: impl FnOnce(&WriteEngine)) {
     let link_info = LinkInfoMessage {
         max_creation_order: None,
         fractal_heap_address: None,
@@ -184,7 +250,9 @@ fn with_engine(base: UserblockSize, inspect: impl FnOnce(&WriteEngine)) {
     let root = Header::new()
         .message(Message::new(
             MessageType::LINK_INFO,
-            &link_info.serialize(OffsetWidth::Eight).unwrap(),
+            &link_info
+                .serialize(OffsetWidth::try_from(u8::try_from(widths.offset).unwrap()).unwrap())
+                .unwrap(),
         ))
         .build();
     let mut image = Image::new();
@@ -192,7 +260,7 @@ fn with_engine(base: UserblockSize, inspect: impl FnOnce(&WriteEngine)) {
     image.place(base_at + ROOT_HEADER, &root);
     image.place(
         base_at,
-        &Superblock::new(Widths::EIGHT)
+        &Superblock::new(widths)
             .base_address(base.get())
             .eof_address(u64::try_from(image.as_bytes().len()).unwrap())
             .root_header_address(u64::try_from(ROOT_HEADER).unwrap())

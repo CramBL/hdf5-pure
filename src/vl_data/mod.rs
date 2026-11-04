@@ -228,11 +228,11 @@ pub(crate) fn is_vlen_string_datatype(datatype: &Datatype) -> bool {
 
 /// A variable-length reference within a compound member or array entry.
 ///
-/// Repacking uses its position and element size to copy the heap payload and
-/// rewrite the reference in place.
+/// Readers use its position and element size to inspect heap references. The repack writer uses
+/// them to copy heap payloads and rewrite references in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EmbeddedVlSlot {
-    /// Byte offset of the 16-byte reference within one element of the dataset.
+    /// Byte offset of the reference within one stored element.
     pub byte_offset: usize,
     /// The byte multiplier for the reference's stored `length`. This is 1 for strings
     /// and the base-type element size for sequences.
@@ -249,35 +249,52 @@ pub(crate) struct EmbeddedVlData {
     pub objects: Vec<VlByteObject>,
 }
 
-/// Returns variable-length reference slots in compound and array declaration order.
+/// Returns reference slots at eight-byte address width in compound and array declaration order.
 ///
-/// A top-level variable-length datatype has one slot at offset 0. Returns `None`
-/// if reference-slot traversal exceeds address or storage bounds.
+/// Returns `None` if a stored size exceeds its field or platform capacity, or if slot traversal
+/// exceeds address or storage bounds. A top-level variable-length datatype has one slot at
+/// offset 0.
 pub(crate) fn embedded_vlen_slots(datatype: &Datatype) -> Option<Vec<EmbeddedVlSlot>> {
-    // A reference is 16 bytes, so an element can hold no more than this many.
-    // Bounding the walk keeps a datatype declaring absurd array dimensions from
-    // driving an unbounded allocation here.
-    let element_size = datatype.type_size() as usize;
-    let capacity = element_size / VL_REF_BYTES;
+    embedded_vlen_slots_with_offset_width(datatype, OffsetWidth::Eight)
+        .ok()
+        .flatten()
+}
+
+/// Returns bounded reference slots using stored sizes at `offset_width`.
+///
+/// Walks compound members and array entries in declaration order. A top-level variable-length
+/// value has one slot at offset 0. Returns `Ok(None)` if address arithmetic, slot capacity, or
+/// bounds for complete references cannot be established.
+///
+/// # Errors
+///
+/// Returns the field-size errors of [`crate::datatype::stored_type_size`], or
+/// [`FormatError::ValueTooLargeForPlatform`] if stored geometry exceeds [`usize::MAX`].
+pub(crate) fn embedded_vlen_slots_with_offset_width(
+    datatype: &Datatype,
+    offset_width: OffsetWidth,
+) -> Result<Option<Vec<EmbeddedVlSlot>>, FormatError> {
+    let element_size = crate::datatype::stored_type_size(datatype, offset_width)?.to_usize()?;
+    let reference_size = SEQUENCE_LENGTH_BYTES + usize::from(offset_width.get()) + HEAP_INDEX_BYTES;
+    let capacity = element_size / reference_size;
     let mut slots = Vec::new();
-    if !collect_vlen_slots(datatype, 0, capacity, &mut slots) {
-        return None;
+    if !collect_vlen_slots(datatype, offset_width, 0, capacity, &mut slots)? {
+        return Ok(None);
     }
-    // Check the complete reference extent before indexing an element.
     if slots.len() > capacity
         || slots.iter().any(|s| {
             s.byte_offset
-                .checked_add(VL_REF_BYTES)
+                .checked_add(reference_size)
                 .is_none_or(|end| end > element_size)
         })
     {
-        return None;
+        return Ok(None);
     }
-    Some(slots)
+    Ok(Some(slots))
 }
 
-/// On-disk width of a variable-length reference with 8-byte offsets, which is
-/// the only offset size the write path emits and the only one repack re-stages.
+/// Reference stride for test fixtures with eight-byte heap addresses.
+#[cfg(test)]
 const VL_REF_BYTES: usize = 16;
 
 // H5T__vlen_disk_write writes the sequence length as a u32 in H5Tvlen.c, HDF5 2.2.0.
@@ -288,20 +305,26 @@ const HEAP_INDEX_BYTES: usize = 4;
 
 /// Appends reference slots while checking address arithmetic and output capacity.
 ///
-/// Returns `false` if address arithmetic fails or an array with reference slots
-/// has more entries than `capacity`. An extra slot signals capacity overflow
-/// to the caller.
+/// Returns `Ok(false)` if address arithmetic fails or an array with reference slots has more
+/// entries than `capacity`. Appends at most one excess slot for the caller's capacity check.
+/// Previously appended slots remain in `out` on error.
+///
+/// # Errors
+///
+/// Returns the field-size errors of [`crate::datatype::stored_type_size`], or
+/// [`FormatError::ValueTooLargeForPlatform`] if a stored size exceeds [`usize::MAX`].
 fn collect_vlen_slots(
     datatype: &Datatype,
+    offset_width: OffsetWidth,
     base: usize,
     capacity: usize,
     out: &mut Vec<EmbeddedVlSlot>,
-) -> bool {
+) -> Result<bool, FormatError> {
     // Stop after one excess slot so the caller detects capacity overflow.
     if out.len() > capacity {
-        return true;
+        return Ok(true);
     }
-    match datatype {
+    Ok(match datatype {
         Datatype::VariableLength(kind) => {
             let base_type = kind.base_type();
             // A VL string's reference counts bytes. A sequence's reference counts
@@ -309,7 +332,9 @@ fn collect_vlen_slots(
             let element_size = if is_vlen_string_datatype(datatype) {
                 1
             } else {
-                (base_type.type_size() as usize).max(1)
+                crate::datatype::stored_type_size(base_type, offset_width)?
+                    .to_usize()?
+                    .max(1)
             };
             out.push(EmbeddedVlSlot {
                 byte_offset: base,
@@ -323,10 +348,10 @@ fn collect_vlen_slots(
                     .ok()
                     .and_then(|off| base.checked_add(off))
                 else {
-                    return false;
+                    return Ok(false);
                 };
-                if !collect_vlen_slots(&m.datatype, at, capacity, out) {
-                    return false;
+                if !collect_vlen_slots(&m.datatype, offset_width, at, capacity, out)? {
+                    return Ok(false);
                 }
             }
             true
@@ -338,12 +363,12 @@ fn collect_vlen_slots(
             // Walk the base type once and translate its slots to each array entry.
             // Each repeated entry contributes a slot, so the output bound also limits the work.
             let mut probe = Vec::new();
-            if !collect_vlen_slots(base_type, 0, capacity, &mut probe) {
-                return false;
+            if !collect_vlen_slots(base_type, offset_width, 0, capacity, &mut probe)? {
+                return Ok(false);
             }
             // No reference in one entry means none in any repetition of it.
             if probe.is_empty() {
-                return true;
+                return Ok(true);
             }
             let count = dimensions
                 .iter()
@@ -351,17 +376,17 @@ fn collect_vlen_slots(
                 .fold(1u64, |a, b| a.saturating_mul(u64::from(b)));
             // Reject an entry count larger than the slot capacity before allocation.
             if count > capacity as u64 {
-                return false;
+                return Ok(false);
             }
             let entries = usize::try_from(count).unwrap_or(usize::MAX);
-            let stride = base_type.type_size() as usize;
+            let stride = crate::datatype::stored_type_size(base_type, offset_width)?.to_usize()?;
             for i in 0..entries {
                 let Some(at) = i.checked_mul(stride).and_then(|off| base.checked_add(off)) else {
-                    return false;
+                    return Ok(false);
                 };
                 for slot in &probe {
                     let Some(byte_offset) = at.checked_add(slot.byte_offset) else {
-                        return false;
+                        return Ok(false);
                     };
                     out.push(EmbeddedVlSlot {
                         byte_offset,
@@ -369,7 +394,7 @@ fn collect_vlen_slots(
                     });
                     // Stop after one excess slot so the caller detects capacity overflow.
                     if out.len() > capacity {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
@@ -378,7 +403,7 @@ fn collect_vlen_slots(
         // An enumeration's base is an integer, and no other class can reach a
         // variable-length reference.
         _ => true,
-    }
+    })
 }
 
 fn check_element_limit(

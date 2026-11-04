@@ -12,6 +12,8 @@ use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::FileSpacePageSize;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::UserblockSize;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::{FileSpaceSettings, FileSpaceStrategy};
 use hdf5_pure::{LengthWidth, OffsetWidth};
 
 /// Opens an existing file for read-only native observations.
@@ -146,6 +148,68 @@ pub fn libhdf5_create_v110_with_widths(
     )
 }
 
+/// Creates a native fixture with independent widths and the supplied file-space settings.
+///
+/// Sets both format bounds to HDF5 1.10 and reserves `userblock` bytes before the superblock.
+///
+/// # Panics
+///
+/// Panics if libhdf5 rejects the creation properties or cannot create `path`.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5::plist::file_create::Sizeof;
+/// use hdf5_pure::{FileSpaceSettings, FileSpaceStrategy, LengthWidth, OffsetWidth};
+/// use test_util_hdf5::file::libhdf5_create_with_widths_and_space;
+///
+/// # let directory = tempfile::tempdir()?;
+/// let path = directory.path().join("native.h5");
+/// let file = libhdf5_create_with_widths_and_space(
+///     &path,
+///     OffsetWidth::Four,
+///     LengthWidth::Two,
+///     0,
+///     FileSpaceSettings::new(FileSpaceStrategy::None),
+/// );
+/// let sizes = file.create_plist()?.get_sizes()?;
+/// assert_eq!(sizes.sizeof_addr, Sizeof::Bytes4);
+/// assert_eq!(sizes.sizeof_size, Sizeof::Bytes2);
+/// file.close()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "__hdf5-1.10")]
+pub fn libhdf5_create_with_widths_and_space(
+    path: &Path,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    userblock: u64,
+    settings: FileSpaceSettings,
+) -> hdf5::File {
+    let strategy = match settings.strategy() {
+        FileSpaceStrategy::None => NativeStrategy::None,
+        FileSpaceStrategy::Aggr => NativeStrategy::PageAggregation,
+        FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => NativeStrategy::FreeSpaceManager {
+            paged: settings.strategy() == FileSpaceStrategy::Page,
+            persist: settings.persist(),
+            threshold: settings.threshold(),
+        },
+    };
+    hdf5::File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V110, LibraryVersion::V110)
+        })
+        .with_fcpl(|properties| {
+            properties
+                .sizes(sizes(offsets, lengths))
+                .userblock(userblock)
+                .file_space_strategy(strategy)
+                .file_space_page_size(settings.page_size().get())
+        })
+        .create(path)
+        .unwrap()
+}
+
 fn create_with_widths(
     path: &Path,
     offsets: OffsetWidth,
@@ -154,6 +218,18 @@ fn create_with_widths(
     lower: LibraryVersion,
     upper: LibraryVersion,
 ) -> hdf5::File {
+    hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_bounds(lower, upper))
+        .with_fcpl(|properties| {
+            properties
+                .sizes(sizes(offsets, lengths))
+                .userblock(userblock)
+        })
+        .create(path)
+        .unwrap()
+}
+
+fn sizes(offsets: OffsetWidth, lengths: LengthWidth) -> SizeofInfo {
     let sizeof_addr = match offsets {
         OffsetWidth::Two => Sizeof::Bytes2,
         OffsetWidth::Four => Sizeof::Bytes4,
@@ -164,18 +240,10 @@ fn create_with_widths(
         LengthWidth::Four => Sizeof::Bytes4,
         LengthWidth::Eight => Sizeof::Bytes8,
     };
-    hdf5::File::with_options()
-        .with_fapl(|properties| properties.libver_bounds(lower, upper))
-        .with_fcpl(|properties| {
-            properties
-                .sizes(SizeofInfo {
-                    sizeof_addr,
-                    sizeof_size,
-                })
-                .userblock(userblock)
-        })
-        .create(path)
-        .unwrap()
+    SizeofInfo {
+        sizeof_addr,
+        sizeof_size,
+    }
 }
 
 #[track_caller]

@@ -446,7 +446,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
 #[rstest]
 #[case::two(Sizeof::Bytes2)]
 #[case::four(Sizeof::Bytes4)]
-fn narrow_native_tail_editing_is_rejected_without_changing_ownership(#[case] width: Sizeof) {
+fn narrow_native_tail_appends_preserve_values_and_ownership(#[case] width: Sizeof) {
     let path = test_util::temp::temp_path("narrow-tail.h5");
     let native = hdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
@@ -459,7 +459,8 @@ fn narrow_native_tail_editing_is_rejected_without_changing_ownership(#[case] wid
         .create(&path)
         .unwrap();
     let dataset = native
-        .new_dataset::<i32>()
+        .new_dataset_builder()
+        .empty_as(ByteOrder::LittleEndian.i32_datatype())
         .chunk((4,))
         .shape((Extent::resizable(3),))
         .deflate(6)
@@ -468,20 +469,27 @@ fn narrow_native_tail_editing_is_rejected_without_changing_ownership(#[case] wid
     dataset.write(&[1, 2, 3]).unwrap();
     drop(dataset);
     native.close().unwrap();
-    let bytes = std::fs::read(&path).unwrap();
-    let file = File::open(&path).unwrap();
-    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3]);
-    drop(file);
-    let error = File::open_rw(&path).unwrap_err();
-    let Error::EditUnsupported(reason) = error else {
-        panic!("expected unsupported editing width, got {error:?}")
-    };
-    assert_eq!(
-        reason,
-        "only 8-byte offsets and lengths are supported for in-place editing"
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3]);
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    dataset.append(&[4_i32, 5]).unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4, 5]);
+    let chunks = dataset.chunks().unwrap();
+    for section in file.reusable_free_sections().unwrap().sections() {
+        for chunk in &chunks {
+            let start = section.address().get();
+            assert!(
+                start + section.length().get() <= chunk.address
+                    || chunk.address + chunk.storage_size <= start
+            );
+        }
+    }
+    drop(dataset);
+    file.close().unwrap();
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3, 4, 5]);
+    let native = hdf5::File::open(&path).unwrap();
+    let sizes = native.create_plist().unwrap().get_sizes().unwrap();
+    assert_eq!(sizes.sizeof_addr, width);
+    assert_eq!(sizes.sizeof_size, Sizeof::Bytes8);
 }
 
 #[test]

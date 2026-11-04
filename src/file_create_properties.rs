@@ -117,8 +117,8 @@ use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 /// on the owned-handle path, mirroring `H5Fcreate(name, flags, fcpl_id, fapl_id)`. It returns an
 /// open read-write handle. The constructor rejects
 /// [`MemoryStrategy::Bounded`](crate::MemoryStrategy::Bounded) combined with nonpersistent paged
-/// settings or a userblock before writing. Read-write creation currently requires eight-byte
-/// address and length widths.
+/// settings or a userblock before writing. The editor preserves the selected address and length
+/// widths.
 ///
 /// [`FileSpaceSettings`] configures the file-space rows below. Apply the value with
 /// [`with_file_space_settings`](Self::with_file_space_settings). The writer uses separate metadata

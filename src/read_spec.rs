@@ -41,7 +41,7 @@ pub(crate) struct RawReadSpec<'a> {
 }
 
 impl<'a> RawReadSpec<'a> {
-    /// Parses dataset properties with eight-byte heap addresses.
+    /// Parses dataset properties with eight-byte heap addresses for test fixtures.
     ///
     /// For allocated compact and contiguous storage, construction compares the
     /// storage extent with the byte length implied by the dataspace and datatype.
@@ -55,6 +55,7 @@ impl<'a> RawReadSpec<'a> {
     /// a nonempty dataset's compact or allocated contiguous storage differs from
     /// its logical byte length. Returns the errors of [`Self::parse_with_offset_width`] for an
     /// array size that exceeds its encoded field.
+    #[cfg(test)]
     pub(crate) fn parse(
         layout: &'a DataLayout,
         dataspace: &'a Dataspace,
@@ -217,7 +218,7 @@ impl<'a> RawReadSpec<'a> {
     }
 }
 
-/// Storage facts that remain after [`RawReadSpec::parse`] establishes the
+/// Storage facts that remain after [`RawReadSpec::parse_with_offset_width`] establishes the
 /// dataset-level extent invariant.
 ///
 /// The raw contiguous `size` is deliberately absent. Construction returns an

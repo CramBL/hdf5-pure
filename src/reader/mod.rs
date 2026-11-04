@@ -2862,10 +2862,9 @@ impl File {
     /// file — immediate [`Dataset::append`]s, plus [`Dataset::write`]/`set_attr`,
     /// [`Group::create_dataset`]/`create_group`/`delete`/`set_attr`, and
     /// [`copy`](Self::copy)/[`copy_from`](Self::copy_from) staged until
-    /// [`commit`](Self::commit). The file must use 8-byte offsets and lengths and
-    /// keep its superblock at its base address (a canonical userblock, as in a
-    /// MATLAB `.mat` file, is supported); anything else is refused with
-    /// [`Error::EditUnsupported`].
+    /// [`commit`](Self::commit). The editor preserves the file's independent address and length
+    /// widths of 2, 4, or 8 bytes. The superblock must be at its base address. A canonical
+    /// userblock, as in a MATLAB `.mat` file, is supported.
     ///
     /// The fast immediate [`Dataset::append`] additionally requires a
     /// latest-format (version-2/3) file with no userblock and an
@@ -2890,31 +2889,57 @@ impl File {
     ///
     /// # Memory
     ///
-    /// This picks its backing from the file rather than making the caller pick a
-    /// function (issue #198): a latest-format file with no userblock, except a
-    /// non-persistent [`FileSpaceStrategy::Page`] file, is edited
-    /// **bounded**, holding only the metadata being parsed plus the configured
-    /// caches plus what an edit is building, so resident memory does not scale
-    /// with the file; anything else falls back to a whole-file in-memory mirror,
-    /// which supports pre-v2 superblocks, userblocks, and non-persistent PAGE editing. The two
-    /// backings are the same engine over different storage and offer the same
-    /// edit surface, differing in one trade: the bounded one applies a large
-    /// immediate append in whole-chunk batches, each crash-atomic on its own, so
-    /// a crash mid-call leaves a valid shorter dataset rather than none of the
-    /// append. Ask a file which it got with
-    /// [`edit_backing`](Self::edit_backing), and demand one with
-    /// [`FileAccessProperties::with_memory_strategy`] —
-    /// [`MemoryStrategy::Mirrored`] restores the unconditional mirror this
-    /// entry point used before it learned to dispatch.
+    /// A file with a version 2 or 3 superblock and no userblock uses bounded memory, except under
+    /// nonpersistent [`FileSpaceStrategy::Page`] allocation. The editor retains metadata, caches,
+    /// and the content an edit builds. Other supported files use a whole-file mirror, including
+    /// pre-v2 superblocks, userblocks, and nonpersistent PAGE allocation.
+    ///
+    /// The editor exposes the same operations with either backing. With bounded memory, it
+    /// publishes a large immediate append in whole-chunk batches. An interruption between batches
+    /// can leave a published prefix. Durability depends on the synchronization policy and
+    /// publication ordering.
+    ///
+    /// [`Self::edit_backing`] reports the selected backing. Configure selection through
+    /// [`FileAccessProperties::with_memory_strategy`]. [`MemoryStrategy::Mirrored`] always selects
+    /// a whole-file mirror.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] for unsupported address widths or file layouts.
+    /// Returns [`Error::EditUnsupported`] for unsupported file layouts.
     /// Returns [`Error::Format`] for malformed File Space Info or invalid address arithmetic,
     /// and [`Error::InvalidSpaceOwnershipExtent`] for invalid allocation extents.
     /// Returns [`Error::FileLocked`] if the file is locked by another process,
     /// [`Error::FileMarkedInUse`] if its status flags indicate a writer, and [`Error::Io`]
     /// if opening or reading fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, LengthWidth, MaxExtent, OffsetWidth};
+    ///
+    /// # let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("append.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_offset_width(OffsetWidth::Two).with_length_width(LengthWidth::Eight);
+    /// builder.create_dataset("samples")
+    ///     .with_i32_data(&[1, 2, 3])
+    ///     .with_chunks(&[4])
+    ///     .with_maxshape(&[MaxExtent::Unlimited]);
+    /// builder.write(&path)?;
+    ///
+    /// let file = File::open_rw(&path)?;
+    /// let mut samples = file.dataset("samples")?;
+    /// samples.append(&[4_i32, 5])?;
+    /// drop(samples);
+    /// file.close()?;
+    ///
+    /// let reopened = File::open(&path)?;
+    /// assert_eq!(reopened.dataset("samples")?.read_i32()?, [1, 2, 3, 4, 5]);
+    /// assert_eq!(reopened.superblock().offset_size, OffsetWidth::Two);
+    /// assert_eq!(reopened.superblock().length_size, LengthWidth::Eight);
+    /// reopened.close()?;
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
     #[doc(alias = "H5Fopen")]
     pub fn open_rw<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Self::open_rw_with_options(path, FileAccessProperties::new())
@@ -3134,27 +3159,64 @@ impl File {
         )
     }
 
-    /// Create a new, empty HDF5 file with explicit creation and access properties,
-    /// then open it for reading and writing — see [`create`](Self::create).
+    /// Creates an empty HDF5 file and opens it for reading and editing.
     ///
     /// Mirrors `H5Fcreate(name, flags, fcpl_id, fapl_id)`: `create` carries the
     /// creation properties recorded in the new file (userblock, file-space
-    /// strategy, library-version bounds, root link policy), and `access` the properties governing
+    /// strategy, address and length widths, library-version bounds, root link policy), and
+    /// `access` the properties governing
     /// the handle returned (locking policy, `fsync` cadence, chunk cache). Both are values, so a
     /// layout defined once can be reused across every file an application writes.
     ///
-    /// A creation property is validated as the file is written, so an invalid
-    /// userblock or page size surfaces here rather than when the properties were
-    /// built. A file created with [`FileSpaceStrategy::Page`] and persistence enabled supports
+    /// The writer checks content and allocation against the widths in `create`. The editor
+    /// preserves those widths throughout subsequent appends and commits. A file created with
+    /// [`FileSpaceStrategy::Page`] and persistence enabled supports
     /// immediate [`Dataset::append`] and staged commits. With persistence disabled, staged
     /// edits require the mirror and the restrictions documented by [`File::open_rw`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the creation and access properties cannot be used
-    /// together, including widths other than eight-byte addresses and lengths. Such combinations
-    /// are rejected before writing. Returns the build, write, or [`File::open_rw_with_options`]
-    /// error if file creation or read-write opening fails.
+    /// together, such as bounded editing with a userblock or nonpersistent PAGE allocation.
+    /// These combinations are rejected before writing. Returns [`Error::Format`] if content or
+    /// allocation exceeds the selected widths. Other failures are the build, write, or
+    /// [`File::open_rw_with_options`] errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{
+    ///     File, FileAccessProperties, FileCreateProperties, LengthWidth, MaxExtent,
+    ///     MemoryStrategy, OffsetWidth,
+    /// };
+    ///
+    /// # let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("created.h5");
+    /// let file = File::create_with_options(
+    ///     &path,
+    ///     FileCreateProperties::new()
+    ///         .with_offset_width(OffsetWidth::Eight)
+    ///         .with_length_width(LengthWidth::Two),
+    ///     FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
+    /// )?;
+    /// let mut samples = file.root().create_dataset("samples", |dataset| {
+    ///     dataset.with_i32_data(&[1, 2]).with_chunks(&[4])
+    ///         .with_maxshape(&[MaxExtent::Fixed(12)]);
+    /// })?;
+    /// file.commit()?;
+    /// samples.append_staged(|append| { append.append_i32(&[3, 4]); })?;
+    /// file.commit()?;
+    /// samples.append(&[5_i32, 6])?;
+    /// drop(samples);
+    /// file.close()?;
+    ///
+    /// let reopened = File::open(&path)?;
+    /// assert_eq!(reopened.dataset("samples")?.read_i32()?, [1, 2, 3, 4, 5, 6]);
+    /// assert_eq!(reopened.superblock().offset_size, OffsetWidth::Eight);
+    /// assert_eq!(reopened.superblock().length_size, LengthWidth::Two);
+    /// reopened.close()?;
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
     pub fn create_with_options<P: AsRef<std::path::Path>>(
         path: P,
         create: FileCreateProperties,

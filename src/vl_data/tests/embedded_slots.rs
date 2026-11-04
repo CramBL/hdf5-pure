@@ -1,3 +1,5 @@
+use rstest::rstest;
+
 use super::super::*;
 use crate::{
     DatatypeByteOrder,
@@ -161,4 +163,51 @@ fn a_member_offset_beyond_the_address_space_is_rejected() {
         members: vec![member("s", u64::MAX - 8, vlen_string())],
     };
     assert_eq!(embedded_vlen_slots(&dt), None);
+}
+
+#[rstest]
+#[case::strings(vlen_string(), 1)]
+#[case::sequences(vlen_i32_sequence(), 4)]
+fn stored_array_slots_use_the_file_reference_width(
+    #[case] datatype: Datatype,
+    #[case] element_size: usize,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+) {
+    let datatype = Datatype::Array {
+        base_type: Box::new(datatype),
+        dimensions: vec![3],
+    };
+    let stride = 4 + usize::from(offsets.get()) + 4;
+    assert_eq!(
+        embedded_vlen_slots_with_offset_width(&datatype, offsets).unwrap(),
+        Some(
+            (0..3)
+                .map(|index| EmbeddedVlSlot {
+                    byte_offset: index * stride,
+                    element_size
+                })
+                .collect()
+        )
+    );
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 42_949_672_950)]
+#[case::four(OffsetWidth::Four, 51_539_607_540)]
+#[case::eight(OffsetWidth::Eight, 68_719_476_720)]
+fn unrepresentable_array_slots_return_the_field_error(
+    #[case] offsets: OffsetWidth,
+    #[case] length: u64,
+) {
+    let datatype = Datatype::Array {
+        base_type: Box::new(vlen_string()),
+        dimensions: vec![u32::MAX],
+    };
+    assert_eq!(
+        embedded_vlen_slots_with_offset_width(&datatype, offsets).unwrap_err(),
+        FormatError::LengthTooLarge {
+            length,
+            length_size: 4
+        }
+    );
 }

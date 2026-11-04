@@ -7,7 +7,6 @@ use hdf5_pure_core::PhysicalAddress;
 
 use crate::address::{AddressContext, StoredAddress};
 use crate::error::{Error, FormatError};
-use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::superblock::{self, LocatedSuperblock, Superblock};
 use crate::width::{FormatWidths, OffsetWidth};
 
@@ -15,8 +14,9 @@ use super::allocation::AllocationPublication;
 
 /// The superblock, address domain, and allocation publication state of an editable file.
 ///
-/// The editor supports 8-byte offsets and lengths and a superblock located at its base address.
-/// Widths, the address mapping, and the signature position are derived from the superblock.
+/// Address and length widths are independently 2, 4, or 8 bytes. The superblock must be located at
+/// its base address. The editor derives both widths, the address mapping, and the signature
+/// position from the superblock and preserves that format throughout the session.
 pub(super) struct FileContext {
     superblock: Superblock,
     widths: FormatWidths,
@@ -24,23 +24,18 @@ pub(super) struct FileContext {
 }
 
 impl FileContext {
-    /// Requires the editor's supported widths and canonical superblock position.
+    /// Requires the superblock to be located at its encoded base address.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if either width differs from eight bytes, or if the
-    /// superblock's physical position differs from its encoded base address.
+    /// Returns [`Error::EditUnsupported`] if the superblock's physical position differs from its
+    /// encoded base address.
     pub(super) fn new(located: LocatedSuperblock) -> Result<Self, Error> {
         let LocatedSuperblock {
             address,
             superblock,
             widths,
         } = located;
-        if superblock.offset_size != OFFSET_WIDTH || superblock.length_size != LENGTH_WIDTH {
-            return Err(Error::EditUnsupported(
-                "only 8-byte offsets and lengths are supported for in-place editing",
-            ));
-        }
         if superblock.base_address.get() != address.get() {
             return Err(Error::EditUnsupported(
                 "a file whose superblock is not located at its base address is not editable in place",
@@ -281,30 +276,27 @@ mod tests {
     }
 
     #[rstest]
-    #[case::plain(0)]
-    #[case::userblock(512)]
-    fn context_derives_the_opened_address_domain(#[case] base: u64) {
-        let context = FileContext::new(located(base, Widths::new(8, 8))).unwrap();
+    #[case::two_two(Widths::new(2, 2))]
+    #[case::two_four(Widths::new(2, 4))]
+    #[case::two_eight(Widths::new(2, 8))]
+    #[case::four_two(Widths::new(4, 2))]
+    #[case::four_four(Widths::new(4, 4))]
+    #[case::four_eight(Widths::new(4, 8))]
+    #[case::eight_two(Widths::new(8, 2))]
+    #[case::eight_four(Widths::new(8, 4))]
+    #[case::eight_eight(Widths::new(8, 8))]
+    fn context_derives_the_opened_address_domain(
+        #[case] widths: Widths,
+        #[values(0, 512)] base: u64,
+    ) {
+        let context = FileContext::new(located(base, widths)).unwrap();
         assert_eq!(context.signature().get(), base);
-        assert_eq!(context.widths().offsets, OffsetWidth::Eight);
-        assert_eq!(context.widths().lengths, LengthWidth::Eight);
+        assert_eq!(usize::from(context.widths().offsets.get()), widths.offset);
+        assert_eq!(usize::from(context.widths().lengths.get()), widths.length);
         assert_eq!(context.superblock().base_address.get(), base);
         let physical = context.addresses().resolve(StoredAddress::new(96)).unwrap();
         assert_eq!(physical.get(), base + 96);
         assert_eq!(context.addresses().relative(physical).unwrap().get(), 96);
-    }
-
-    #[rstest]
-    #[case::offset_width(Widths::new(4, 8))]
-    #[case::length_width(Widths::new(8, 4))]
-    fn context_rejects_unsupported_edit_widths(#[case] widths: Widths) {
-        let Err(Error::EditUnsupported(reason)) = FileContext::new(located(0, widths)) else {
-            panic!("expected unsupported edit widths");
-        };
-        assert_eq!(
-            reason,
-            "only 8-byte offsets and lengths are supported for in-place editing"
-        );
     }
 
     #[test]
