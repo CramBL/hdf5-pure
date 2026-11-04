@@ -12,13 +12,6 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "journal scopes are exercised by private owner tests"
-    )
-)]
 pub(super) mod scoped;
 
 /// A saved allocator state for rollback or retention after uncertain publication.

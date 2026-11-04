@@ -563,7 +563,7 @@ fn with_unchecked_carrier<T>(
     apply(engine, retirement, request)
 }
 
-fn bounds<'engine>(
+pub(super) fn bounds<'engine>(
     engine: &'engine mut WriteEngine,
     retired: Vec<(FileRange, FreeClass)>,
     names: &[&str],
