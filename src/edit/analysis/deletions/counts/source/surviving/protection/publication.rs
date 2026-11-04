@@ -13,6 +13,7 @@ use super::ProtectedCount;
 use super::ProtectedCounts;
 
 mod current;
+mod prepare;
 
 impl ProtectedCounts {
     /// Checks pending retirements against complete original count allocations.
