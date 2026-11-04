@@ -642,9 +642,10 @@ impl PartialEdgeFiltering {
 /// and filter masks.
 const MAX_UNUSED_INDEX_BYTES: u64 = 32 << 20;
 
-/// Result of building a chunked dataset.
+/// A buffered chunk region and its object-header messages for test fixtures.
+#[cfg(test)]
 pub struct ChunkedDataResult {
-    /// Raw bytes containing all chunk data + index structures.
+    /// Encoded chunk payloads followed by their index bytes.
     pub data_bytes: Vec<u8>,
     /// The DataLayout v4 message bytes.
     pub layout_message: Vec<u8>,
@@ -904,8 +905,8 @@ pub(crate) fn chunk_index_len(
 /// A chunked dataset's encoded chunks and address-independent index properties.
 ///
 /// The writer retains encoded chunks across measurement, placement, and emission. Payload emission,
-/// object-header preparation, and array encoding use separate operations. For contiguous assembly,
-/// [`plan_chunked_at`] constructs the index for [`emit_chunked_data`].
+/// object-header preparation, and array encoding use separate operations. For consecutive placement,
+/// [`plan_chunked_at`] constructs the index for [`ChunkedPlan::emit`].
 pub(crate) struct CompressedChunkSet {
     /// The chunks as the writer stores them, in dense row-major grid order.
     chunks: Vec<PreparedChunk>,
@@ -1334,7 +1335,7 @@ impl EmptyChunkIndex {
 /// filter pipeline.
 ///
 /// A partial edge chunk is stored as its data where [`ChunkOptions::partial_edge_filtering`] holds
-/// [`PartialEdgeFiltering::Skip`]. [`assemble_chunked_at`] lays the set out at an address without
+/// [`PartialEdgeFiltering::Skip`]. [`plan_chunked_at`] assigns consecutive addresses without
 /// encoding the chunks again. An unallocated dataset has no chunks.
 ///
 /// `fill` is the configured fill value used in filter parameters. The writer initializes partial
@@ -1701,8 +1702,14 @@ pub(crate) fn chunked_data_len(set: &CompressedChunkSet) -> Result<u64, FormatEr
     chunked_region_len(set, &written_chunks, data_address, index_address)
 }
 
-/// A chunked data region's finalized index and object-header messages.
-pub(crate) struct ChunkedPlan {
+/// A borrowed chunk set with finalized index bytes and object-header messages.
+///
+/// Chunk payloads are borrowed from the matching [`CompressedChunkSet`]. The index and
+/// object-header buffers are owned. The caller writes the emitted slices consecutively at the
+/// stored address passed to [`plan_chunked_at`].
+pub(crate) struct ChunkedPlan<'a> {
+    /// The retained chunk set whose records match the encoded index.
+    set: &'a CompressedChunkSet,
     /// The index bytes emitted after the encoded chunks.
     index: Vec<u8>,
     /// The total length of the encoded chunks and index.
@@ -1713,7 +1720,42 @@ pub(crate) struct ChunkedPlan {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
+impl ChunkedPlan<'_> {
+    /// Returns the object-header messages after releasing the encoded index buffer.
+    pub(crate) fn into_header(self) -> ChunkedHeader {
+        let Self {
+            set: _,
+            index: _,
+            data_len: _,
+            layout_message,
+            pipeline_message,
+        } = self;
+        ChunkedHeader {
+            layout_message,
+            pipeline_message,
+        }
+    }
+
+    /// Passes each retained chunk slice and the final index to `emit` in storage order.
+    ///
+    /// The final index slice is passed even when empty. Stops at the first callback error, which
+    /// can leave partial output. Payload encoding and index construction precede this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error from `emit`.
+    pub(crate) fn emit<E>(&self, mut emit: impl FnMut(&[u8]) -> Result<(), E>) -> Result<(), E> {
+        for chunk in &self.set.chunks {
+            emit(chunk.bytes())?;
+        }
+        emit(&self.index)
+    }
+}
+
 /// Finalizes chunk addresses, index bytes, and object-header messages at `data_address`.
+///
+/// Borrows encoded payloads from `set` and constructs the index and header buffers. Chunk records
+/// and slot lookup storage are temporary planning allocations.
 ///
 /// # Errors
 ///
@@ -1722,11 +1764,12 @@ pub(crate) struct ChunkedPlan {
 pub(crate) fn plan_chunked_at(
     set: &CompressedChunkSet,
     data_address: StoredAddress,
-) -> Result<ChunkedPlan, FormatError> {
+) -> Result<ChunkedPlan<'_>, FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, data_address)?;
     let data_len = chunked_region_len(set, &written_chunks, data_address, index_address)?;
     let (index, layout_message) = chunk_index_bytes(set, &written_chunks, index_address)?;
     Ok(ChunkedPlan {
+        set,
         index,
         data_len,
         layout_message,
@@ -1736,19 +1779,18 @@ pub(crate) fn plan_chunked_at(
 
 /// Writes retained encoded chunks followed by the finalized chunk index.
 ///
-/// The caller pairs `plan` with the [`CompressedChunkSet`] used to create it and positions `sink`
-/// at the region's start.
+/// The caller positions `sink` at the region's start.
 ///
 /// # Errors
 ///
 /// Returns [`EmissionError::Sink`] with the error from [`ByteSink::put`] if a write fails.
+#[cfg(test)]
 pub(crate) fn emit_chunked_data<S: ByteSink>(
     sink: &mut S,
-    set: &CompressedChunkSet,
-    plan: &ChunkedPlan,
+    plan: &ChunkedPlan<'_>,
 ) -> Result<(), EmissionError<S::Error>> {
-    set.emit_payload(sink).map_err(EmissionError::Sink)?;
-    sink.put(&plan.index).map_err(EmissionError::Sink)
+    plan.emit(|bytes| sink.put(bytes))
+        .map_err(EmissionError::Sink)
 }
 
 /// Returns the length from `data_address` through the end of the chunk index.
@@ -1806,8 +1848,7 @@ pub(crate) fn measure_chunked_at(
     })
 }
 
-/// Everything [`ChunkedDataResult`] carries except the data region: what a caller
-/// sizing an object header needs, and no more.
+/// A chunked region's measured length and object-header messages.
 pub(crate) struct ChunkedMeasure {
     /// Bytes the data region will occupy.
     pub data_len: u64,
@@ -1825,7 +1866,7 @@ pub(crate) struct ChunkedHeader {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
-/// Materializes encoded chunks and their index in a contiguous data-region buffer.
+/// Materializes a test fixture's encoded chunks and index in one contiguous buffer.
 ///
 /// Uses [`plan_chunked_at`] and [`emit_chunked_data`] at `data_address`.
 ///
@@ -1833,17 +1874,22 @@ pub(crate) struct ChunkedHeader {
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the region length exceeds [`usize::MAX`].
 /// Propagates the errors of [`plan_chunked_at`].
+#[cfg(test)]
 pub(crate) fn assemble_chunked_at(
     set: &CompressedChunkSet,
     data_address: StoredAddress,
 ) -> Result<ChunkedDataResult, FormatError> {
     let plan = plan_chunked_at(set, data_address)?;
     let mut data_buf = Vec::with_capacity(plan.data_len.to_usize()?);
-    emit_chunked_data(&mut data_buf, set, &plan).map_err(EmissionError::into_format)?;
+    emit_chunked_data(&mut data_buf, &plan).map_err(EmissionError::into_format)?;
+    let ChunkedHeader {
+        layout_message,
+        pipeline_message,
+    } = plan.into_header();
     Ok(ChunkedDataResult {
         data_bytes: data_buf,
-        layout_message: plan.layout_message,
-        pipeline_message: plan.pipeline_message,
+        layout_message,
+        pipeline_message,
     })
 }
 
@@ -1851,11 +1897,8 @@ pub(crate) fn assemble_chunked_at(
 /// maximum shape.
 ///
 /// Convenience composition of [`compress_chunks`] + [`assemble_chunked_at`] for
-/// tests that build a single chunked dataset at a known address in one shot.
-/// Production callers keep the [`CompressedChunkSet`] between passes instead, so
-/// they compress each dataset only once: the file writer sizes an object header
-/// before it emits the data, and the in-place editor sizes the dataset
-/// ([`chunked_data_len`]) before it chooses the address to assemble it at.
+/// tests that build a single chunked dataset at a known address. Encodes the chunks once and
+/// buffers their bytes together with the index.
 ///
 /// `ctx` carries chunk_dims, element_size, and (for type-aware filters like
 /// ZFP) the scalar element type. Build it via [`ChunkContext::from_datatype`]

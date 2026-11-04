@@ -1076,8 +1076,8 @@ impl WriteEngine {
     /// Chunks are encoded once before their storage is sized and allocated. For PAGE layouts with
     /// an undefined index address, the writer constructs the layout and filter-pipeline messages
     /// directly. For allocated PAGE array layouts, the writer calls
-    /// [`Self::write_paged_chunk_set`]. For other layouts and non-PAGE files, the writer selects the
-    /// contiguous chunk serializer.
+    /// [`Self::write_paged_chunk_set`]. For other layouts and non-PAGE files, the writer calls
+    /// [`Self::write_contiguous_chunk_set`].
     ///
     /// # Errors
     ///
@@ -1115,21 +1115,7 @@ impl WriteEngine {
         } else if let Some(geometry) = geometry {
             self.write_paged_chunk_set(&set, geometry)?
         } else {
-            let (_, header) = self.place_relocatable(
-                chunked_write::chunked_data_len(&set)?,
-                AllocationClass::Raw,
-                |stored_base| {
-                    let result = chunked_write::assemble_chunked_at(&set, stored_base)?;
-                    Ok((
-                        result.data_bytes,
-                        ChunkedHeader {
-                            layout_message: result.layout_message,
-                            pipeline_message: result.pipeline_message,
-                        },
-                    ))
-                },
-            )?;
-            header
+            self.write_contiguous_chunk_set(&set)?
         };
         let attr_info = self.place_dense_attrs_if_needed(fd)?;
         Ok(file_writer::build_chunked_dataset_oh(
@@ -1144,6 +1130,66 @@ impl WriteEngine {
             fd.fill.as_ref().map(PreparedFill::as_bytes),
             file_writer::HeaderOptions::PLAIN,
         )?)
+    }
+
+    /// Writes retained chunks and their index through one complete raw reservation.
+    ///
+    /// Constructs the final index and header messages at the reserved address before writing
+    /// content. Submits one borrowed slice per chunk and the final index slice through the
+    /// reservation plan. A zero-length region uses a scalar zero-length reservation.
+    ///
+    /// Complete capacity remains reserved after partial emission. The caller handles allocation
+    /// rollback and reference publication within the enclosing commit.
+    ///
+    /// # Working memory
+    ///
+    /// Index preparation allocates chunk records, slot lookup storage, and encoding buffers.
+    /// The final index remains allocated until header extraction. The caller retains raw input
+    /// and encoded chunks, with compression scratch allocated during their preparation.
+    /// Operation buffering can copy submitted slices and retain spare capacity after emission.
+    /// Backend mirroring has separate storage. Physical write grouping depends on operation
+    /// buffering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] for chunk or index geometry, address conversion, encoding, or
+    /// reservation length errors. Returns [`Error::Io`] if content or padding writes fail, or
+    /// [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
+    fn write_contiguous_chunk_set(
+        &mut self,
+        set: &CompressedChunkSet,
+    ) -> Result<ChunkedHeader, Error> {
+        let length = chunked_write::chunked_data_len(set)?;
+        let Some(size) = NonZeroU64::new(length) else {
+            let placement = self.reserve(0, AllocationClass::Raw)?;
+            let address = self
+                .context
+                .addresses()
+                .relative(PhysicalAddress::new(placement.address()))?;
+            let header = set.header_at(address, address)?;
+            self.place(placement, &[])?;
+            return Ok(header);
+        };
+        let request = BlockRequest::complete(
+            ReservationRequest::new(size, AllocationClass::Raw),
+            EncodingDependency::Allocation,
+        );
+        let mut reservations = self
+            .plan_blocks(core::slice::from_ref(&request))
+            .map_err(ReservationFailure::into_error)?;
+        let address = reservations
+            .addresses()
+            .relative(reservations.reservations()[0].range().start())?;
+        let plan = chunked_write::plan_chunked_at(set, address)?;
+        if plan.data_len != length {
+            return Err(FormatError::Internal(
+                "chunked creation length differs from its reservation".into(),
+            )
+            .into());
+        }
+        reservations.write_next_with(|writer| plan.emit(|bytes| writer.write(bytes)))?;
+        reservations.finish()?;
+        Ok(plan.into_header())
     }
 
     /// Writes a prepared PAGE chunk set with independent metadata array blocks.
