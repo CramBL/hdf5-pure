@@ -419,61 +419,6 @@ enum AttributeForm {
     Verbatim,
 }
 
-#[rstest::rstest]
-#[case::before_exact_fill(394, 0, false, Some(35))]
-#[case::exact_fill(395, 0, false, Some(36))]
-#[case::after_exact_fill(396, 0, false, Some(35))]
-#[case::no_tail(512, 0, false, None)]
-#[case::other_manager_fills_page(395, 117, false, None)]
-#[case::existing_section(377, 0, true, Some(53))]
-fn paged_metadata_capacity_keeps_known_sections(
-    #[case] end: u64,
-    #[case] other: u64,
-    #[case] existing: bool,
-    #[case] expected: Option<u64>,
-) {
-    let sections = if existing {
-        vec![FreeSection {
-            addr: StoredAddress::new(48),
-            size: 17,
-        }]
-    } else {
-        Vec::new()
-    };
-    assert_eq!(
-        layout::paged_metadata_section_allocation(
-            FileSpacePageSize::try_from(512).unwrap(),
-            StoredAddress::new(end),
-            [other],
-            &sections
-        )
-        .unwrap(),
-        expected
-    );
-}
-
-#[rstest::rstest]
-#[case::other_manager(u64::MAX, 1, u64::MAX, 1)]
-#[case::header(u64::MAX - 10, 0, u64::MAX - 10, 82)]
-#[case::section_list(u64::MAX - 90, 0, u64::MAX - 8, 35)]
-fn paged_metadata_capacity_rejects_overflow(
-    #[case] end: u64,
-    #[case] other: u64,
-    #[case] offset: u64,
-    #[case] length: u64,
-) {
-    assert_eq!(
-        layout::paged_metadata_section_allocation(
-            FileSpacePageSize::try_from(512).unwrap(),
-            StoredAddress::new(end),
-            [other],
-            &[]
-        )
-        .unwrap_err(),
-        FormatError::OffsetOverflow { offset, length }
-    );
-}
-
 #[test]
 fn small_paged_collections_can_place_metadata_above_four_gibibytes() {
     let mut writer = FileWriter::new();

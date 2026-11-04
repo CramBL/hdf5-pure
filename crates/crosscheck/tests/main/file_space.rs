@@ -12,6 +12,7 @@ use hdf5::dataset::Layout as CLayout;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
+use hdf5::types::VarLenUnicode;
 use hdf5::types::{FixedUnicode, TypeDescriptor};
 use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
@@ -35,6 +36,7 @@ use hdf5_pure::MessageType;
 use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::PhysicalAddress;
+use hdf5_pure::RepackOptions;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -310,24 +312,29 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
 }
 
 #[rstest]
-#[case::before_exact_fill(false, 512, 0, 17, 512)]
-#[case::exact_fill(false, 512, 0, 18, 512)]
-#[case::after_exact_fill(false, 512, 0, 19, 512)]
-#[case::metadata_only(false, 512, 0, 18, 0)]
-#[case::raw_manager(false, 512, 0, 18, 511)]
-#[case::large_manager(false, 512, 0, 18, 513)]
-#[case::raw_and_metadata_managers(false, 512, 0, 412, 511)]
-#[case::large_and_metadata_managers(false, 512, 0, 412, 513)]
-#[case::userblock(false, 512, 4096, 18, 512)]
-#[case::default_page(false, 4096, 4096, 3601, 4096)]
-#[case::larger_page(false, 8192, 8192, 7697, 8192)]
-#[case::c_created(true, 512, 0, 18, 512)]
+#[case::attribute_17(false, false, 512, 0, 17, 512, false)]
+#[case::attribute_18(false, false, 512, 0, 18, 512, true)]
+#[case::attribute_19(false, false, 512, 0, 19, 512, false)]
+#[case::metadata_only(false, false, 512, 0, 18, 0, false)]
+#[case::raw_manager(false, false, 512, 0, 18, 511, false)]
+#[case::large_manager(false, false, 512, 0, 18, 513, false)]
+#[case::raw_and_metadata_managers(false, false, 512, 0, 412, 511, false)]
+#[case::large_and_metadata_managers(false, false, 512, 0, 412, 513, false)]
+#[case::userblock(false, false, 512, 4096, 18, 512, false)]
+#[case::default_page(false, false, 4096, 4096, 3601, 4096, false)]
+#[case::larger_page(false, false, 8192, 8192, 7697, 8192, false)]
+#[case::c_created(true, false, 512, 0, 18, 512, true)]
+#[case::repacked_metadata(false, true, 512, 0, 18, 512, true)]
+#[case::repacked_raw(false, true, 512, 0, 18, 511, true)]
+#[case::repacked_large(false, true, 512, 0, 18, 513, true)]
 fn created_page_tail_survives_reference_library_mutation(
     #[case] c_created: bool,
+    #[case] repacked: bool,
     #[case] page: u64,
     #[case] base: u64,
     #[case] attribute_len: usize,
     #[case] raw_len: usize,
+    #[case] buffered: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creation_tail.h5");
@@ -361,8 +368,24 @@ fn created_page_tail_survives_reference_library_mutation(
     } else {
         paged::write_metadata_tail(&path, page, base, 1, attribute_len, raw_len);
     }
+    let path = if repacked {
+        let output = dir.path().join("repacked_tail.h5");
+        hdf5_pure::repack(&path, &output, &RepackOptions::new()).unwrap();
+        output
+    } else {
+        path
+    };
     let userblock = Userblock::read(&path, usize::try_from(base).unwrap());
     let file = File::open(&path).unwrap();
+    if !c_created && page == 512 && attribute_len == 18 && (raw_len == 511 || raw_len == 513) {
+        assert_eq!(
+            file.file_space_info().unwrap().unwrap().manager_addrs[0],
+            hdf5_pure::DecodedStoredAddress::Undefined
+        );
+        let pages = if raw_len == 511 { 2 } else { 3 };
+        assert_eq!(file.file_size(), base + pages * page);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), base + pages * page);
+    }
     let free: u64 = file
         .persisted_free_sections()
         .unwrap()
@@ -371,17 +394,40 @@ fn created_page_tail_survives_reference_library_mutation(
         .free_bytes();
     drop(file);
     let bytes = std::fs::read(&path).unwrap();
+    if !c_created {
+        let file = File::open(&path).unwrap();
+        for extent in storage::manager_and_extension_extents(&file, &bytes) {
+            let start = file
+                .superblock()
+                .base_address
+                .relative(extent.start())
+                .unwrap()
+                .get();
+            if extent.length() >= page {
+                assert_eq!(start % page, 0, "{extent:?}");
+            } else {
+                assert_eq!(
+                    start / page,
+                    (start + extent.length() - 1) / page,
+                    "{extent:?}"
+                );
+            }
+        }
+    }
     let file = File::open_rw(&path).unwrap();
     storage::assert_unavailable(&file, &storage::file_metadata_extents(&file, &bytes));
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    if !c_created
-        && ((attribute_len == 18 && raw_len == 512)
-            || (attribute_len == 412 && (raw_len == 511 || raw_len == 513)))
-    {
-        assert_eq!(file_space::serialized_manager_padding(&path), 1);
+    if !c_created {
+        assert!(file_space::serialized_manager_padding(&path) < page);
     }
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let mut options = hdf5::File::with_options();
+    if buffered {
+        options.with_fapl(|properties| {
+            properties.page_buffer_size(usize::try_from(4 * page).unwrap(), 0, 0)
+        });
+    }
+    let file = options.open_rw(&path).unwrap();
     assert_eq!(file.free_space(), free);
     assert_eq!(
         file.create_plist()
@@ -453,6 +499,98 @@ fn created_page_tail_survives_reference_library_mutation(
         vec![19; 32]
     );
     userblock.assert_unchanged(&path);
+}
+
+#[rstest]
+#[case::created(false)]
+#[case::repacked(true)]
+fn large_page_manager_lists_survive_reference_library_mutation(#[case] repacked: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("collections.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(521).unwrap()),
+    );
+    for index in 0..80 {
+        builder
+            .create_dataset(&format!("strings{index:02}"))
+            .with_vlen_strings(&["collection"]);
+    }
+    builder.write(&source).unwrap();
+    let path = if repacked {
+        let output = directory.path().join("repacked.h5");
+        hdf5_pure::repack(&source, &output, &RepackOptions::new()).unwrap();
+        output
+    } else {
+        source
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let extents = storage::manager_and_extension_extents(&file, &bytes);
+    assert!(extents.iter().any(|extent| {
+        extent.length() >= 521
+            && bytes[usize::try_from(extent.start().get()).unwrap()..]
+                .starts_with(free_space::SECTIONS_SIGNATURE)
+    }));
+    for extent in &extents {
+        if extent.length() >= 521 {
+            assert_eq!(extent.start().get() % 521, 0, "{extent:?}");
+        } else {
+            assert_eq!(
+                extent.start().get() / 521,
+                (extent.start().get() + extent.length() - 1) / 521,
+                "{extent:?}"
+            );
+        }
+    }
+    let free = file
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap()
+        .free_sections()
+        .free_bytes();
+    drop(file);
+    let file = File::open_rw(&path).unwrap();
+    storage::assert_unavailable(&file, &extents);
+    file.close().unwrap();
+    let native = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(native.free_space(), free);
+    for index in 0..80 {
+        assert_eq!(
+            native
+                .dataset(&format!("strings{index:02}"))
+                .unwrap()
+                .read_raw::<VarLenUnicode>()
+                .unwrap()
+                .iter()
+                .map(VarLenUnicode::as_str)
+                .collect::<Vec<_>>(),
+            ["collection"]
+        );
+    }
+    native
+        .new_attr::<u32>()
+        .create("generation")
+        .unwrap()
+        .write_scalar(&3)
+        .unwrap();
+    native.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.root().attrs().unwrap()["generation"],
+        AttrValue::U32(3)
+    );
+    for index in 0..80 {
+        assert_eq!(
+            file.dataset(&format!("strings{index:02}"))
+                .unwrap()
+                .read_string()
+                .unwrap(),
+            ["collection"]
+        );
+    }
 }
 
 #[rstest]

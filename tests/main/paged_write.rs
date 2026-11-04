@@ -4,6 +4,7 @@
 //! `crates/crosscheck/tests/main/file_space.rs`.
 
 use hdf5_pure::AttrValue;
+use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
@@ -22,14 +23,14 @@ use test_util_hdf5::paged;
 use test_util_hdf5::storage;
 
 #[rstest]
-#[case::before_exact_fill(512, 0, 1, 17, 512)]
-#[case::exact_fill(512, 0, 1, 18, 512)]
-#[case::after_exact_fill(512, 0, 1, 19, 512)]
+#[case::attribute_17(512, 0, 1, 17, 512)]
+#[case::attribute_18(512, 0, 1, 18, 512)]
+#[case::attribute_19(512, 0, 1, 19, 512)]
 #[case::metadata_only(512, 0, 1, 18, 0)]
-#[case::raw_manager_fills_metadata(512, 0, 1, 18, 511)]
-#[case::large_manager_fills_metadata(512, 0, 1, 18, 513)]
-#[case::raw_and_metadata_managers_fill_page(512, 0, 1, 412, 511)]
-#[case::large_and_metadata_managers_fill_page(512, 0, 1, 412, 513)]
+#[case::raw_manager(512, 0, 1, 18, 511)]
+#[case::large_manager(512, 0, 1, 18, 513)]
+#[case::raw_and_metadata_managers(512, 0, 1, 412, 511)]
+#[case::large_and_metadata_managers(512, 0, 1, 412, 513)]
 #[case::userblock(512, 4096, 1, 18, 512)]
 #[case::threshold(512, 0, 4097, 18, 512)]
 #[case::default_page(4096, 4096, 1, 3601, 4096)]
@@ -49,29 +50,27 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
     if raw_len != 0 {
         paged::assert_pages_homogeneous(&path, page, &["d"]);
     }
-    let exact_fill = [(512, 18), (4096, 3601), (8192, 7697)].contains(&(page, attribute_len))
+    let list_alignment = [(512, 18), (4096, 3601), (8192, 7697)].contains(&(page, attribute_len))
         && u64::try_from(raw_len).unwrap() == page;
-    if exact_fill || (page == 512 && attribute_len == 412 && (raw_len == 511 || raw_len == 513)) {
-        assert_eq!(file_space::serialized_manager_padding(&path), 1);
+    if list_alignment || (page == 512 && attribute_len == 412 && (raw_len == 511 || raw_len == 513))
+    {
+        assert_eq!(file_space::serialized_manager_padding(&path), 0);
     }
     if attribute_len == 18 && (raw_len == 511 || raw_len == 513) {
+        let file = File::open(&path).unwrap();
         assert_eq!(
-            File::open(&path)
-                .unwrap()
-                .file_space_info()
-                .unwrap()
-                .unwrap()
-                .manager_addrs
-                .first(),
-            Some(&hdf5_pure::DecodedStoredAddress::Undefined),
+            file.file_space_info().unwrap().unwrap().manager_addrs[0],
+            DecodedStoredAddress::Undefined
         );
+        let pages = if raw_len == 511 { 2 } else { 3 };
+        assert_eq!(file.file_size(), base + pages * page);
     }
     let file = File::open_rw(&path).unwrap();
     let initial = file.reusable_free_sections().unwrap();
-    if exact_fill {
+    if list_alignment {
         test_util_hdf5::assert_free_sections!(
             &initial,
-            &[(base + page + 1, page - 1)],
+            &[(base + page - 35, 35), (base + page + 53, page - 53)],
             PhysicalAddress
         );
     }
@@ -106,7 +105,7 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
     let reopened = File::open_rw(&path).unwrap();
     let metadata = storage::file_metadata_extents(&reopened, &bytes);
     storage::assert_unavailable(&reopened, &metadata);
-    if exact_fill && threshold == 1 {
+    if list_alignment && threshold == 1 {
         assert!(metadata.iter().any(|range| {
             initial
                 .sections()
