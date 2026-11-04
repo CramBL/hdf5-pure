@@ -1,28 +1,64 @@
 //! Dataspace message bodies: section
 //! `subsubsec_fmt4_dataobject_hdr_msg_simple`, version 4.0.
 
-/// The body of a version 1 dataspace message, which has no type byte and so
-/// describes only a simple dataspace.
+use crate::bytes;
+use crate::widths::Widths;
+
+/// Encodes a version 1 dataspace body with eight-byte dimension fields.
 pub fn v1(rank: u8, flags: Flags, dims: &[u64], max_dims: Option<&[u64]>) -> Vec<u8> {
+    v1_with_widths(rank, flags, dims, max_dims, Widths::EIGHT)
+}
+
+/// Encodes a version 1 dataspace body at `widths.length`.
+///
+/// Writes rank, flags, and dimension lists as supplied, allowing malformed combinations.
+///
+/// # Panics
+///
+/// Panics if the length width is unsupported or a dimension does not fit it.
+pub fn v1_with_widths(
+    rank: u8,
+    flags: Flags,
+    dims: &[u64],
+    max_dims: Option<&[u64]>,
+    widths: Widths,
+) -> Vec<u8> {
     let mut message = Vec::new();
     message.push(V1_VERSION);
     message.push(rank);
     message.push(flags.0);
     message.push(0);
     message.extend_from_slice(&[0; 4]);
-    push_dims(&mut message, dims, max_dims);
+    push_dims(&mut message, dims, max_dims, widths);
     message
 }
 
-/// The body of a version 2 dataspace message, whose type byte separates a
-/// scalar and a null dataspace from a simple one.
+/// Encodes a version 2 dataspace body with eight-byte dimension fields.
 pub fn v2(rank: u8, flags: Flags, kind: Kind, dims: &[u64], max_dims: Option<&[u64]>) -> Vec<u8> {
+    v2_with_widths(rank, flags, kind, dims, max_dims, Widths::EIGHT)
+}
+
+/// Encodes a version 2 dataspace body at `widths.length`.
+///
+/// Writes rank, flags, type, and dimension lists as supplied, allowing malformed combinations.
+///
+/// # Panics
+///
+/// Panics if the length width is unsupported or a dimension does not fit it.
+pub fn v2_with_widths(
+    rank: u8,
+    flags: Flags,
+    kind: Kind,
+    dims: &[u64],
+    max_dims: Option<&[u64]>,
+    widths: Widths,
+) -> Vec<u8> {
     let mut message = Vec::new();
     message.push(V2_VERSION);
     message.push(rank);
     message.push(flags.0);
     message.push(kind.0);
-    push_dims(&mut message, dims, max_dims);
+    push_dims(&mut message, dims, max_dims, widths);
     message
 }
 
@@ -31,14 +67,10 @@ pub fn scalar() -> Vec<u8> {
     v2(0, Flags::NONE, Kind::SCALAR, &[], None)
 }
 
-fn push_dims(message: &mut Vec<u8>, dims: &[u64], max_dims: Option<&[u64]>) {
-    message.extend(dims.iter().flat_map(|dim| dim.to_le_bytes()));
-    message.extend(
-        max_dims
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|dim| dim.to_le_bytes()),
-    );
+fn push_dims(message: &mut Vec<u8>, dims: &[u64], max_dims: Option<&[u64]>, widths: Widths) {
+    for &dimension in dims.iter().chain(max_dims.unwrap_or_default()) {
+        bytes::push_uint(message, dimension, widths.length);
+    }
 }
 
 /// Which optional dimension lists follow the fixed fields.
@@ -70,3 +102,16 @@ impl Kind {
 const V1_VERSION: u8 = 1;
 
 const V2_VERSION: u8 = 2;
+
+/// The length in bytes of a version 1 dataspace prefix before its current dimensions.
+///
+/// Defined in "The Dataspace Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_simple
+pub const V1_HEADER_LEN: usize = 8;
+/// The length in bytes of a version 2 dataspace prefix before its current dimensions.
+///
+/// Defined in "The Dataspace Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_simple
+pub const V2_HEADER_LEN: usize = 4;

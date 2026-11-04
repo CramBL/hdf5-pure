@@ -375,6 +375,38 @@ pub(crate) fn require_length(val: u64, width: LengthWidth) -> Result<(), FormatE
     Ok(())
 }
 
+/// Writes a little-endian length into `buf` at `pos`, preserving surrounding bytes.
+///
+/// Checks that `value` fits `width` and the output range fits `buf` before writing.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if `value` exceeds `width`, or
+/// [`FormatError::UnexpectedEof`] if the output range exceeds `buf`. Preserves `buf` on error.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::{__private as format, FormatError, LengthWidth};
+///
+/// let mut bytes = [0xcc; 4];
+/// format::write_length_at(&mut bytes, 1, 0x1234, LengthWidth::Two)?;
+/// assert_eq!(bytes, [0xcc, 0x34, 0x12, 0xcc]);
+/// # Ok::<(), FormatError>(())
+/// ```
+pub fn write_length_at(
+    buf: &mut [u8],
+    pos: usize,
+    value: u64,
+    width: LengthWidth,
+) -> Result<(), FormatError> {
+    require_length(value, width)?;
+    let length = usize::from(width.get());
+    ensure_len(buf, pos, length)?;
+    buf[pos..pos + length].copy_from_slice(&value.to_le_bytes()[..length]);
+    Ok(())
+}
+
 /// Appends `val` to `buf` as a little-endian integer of `width` bytes.
 ///
 /// Writes `u64::MAX` as the undefined address at `width`, all ones.
@@ -530,6 +562,41 @@ impl<'a> Fields<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case::two(LengthWidth::Two, u64::from(u16::MAX), &[0xff, 0xff])]
+    #[case::four(LengthWidth::Four, u64::from(u32::MAX), &[0xff, 0xff, 0xff, 0xff])]
+    #[case::eight(LengthWidth::Eight, u64::MAX, &[0xff; 8])]
+    fn length_field_writes_preserve_surrounding_bytes(
+        #[case] width: LengthWidth,
+        #[case] value: u64,
+        #[case] field: &[u8],
+    ) {
+        let mut output = [0xcc; 10];
+        write_length_at(&mut output, 1, value, width).unwrap();
+        assert_eq!(&output[1..1 + field.len()], field);
+        assert_eq!(output[0], 0xcc);
+        assert_eq!(&output[1 + field.len()..], &vec![0xcc; 9 - field.len()]);
+    }
+
+    #[rstest::rstest]
+    #[case::two_overflow(LengthWidth::Two, 65_536, 1, FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
+    #[case::four_overflow(LengthWidth::Four, 4_294_967_296, 1, FormatError::LengthTooLarge { length: 4_294_967_296, length_size: 4 })]
+    #[case::short(LengthWidth::Eight, 1, 3, FormatError::UnexpectedEof { expected: 11, available: 10 })]
+    #[case::offset_overflow(LengthWidth::Two, 1, usize::MAX, FormatError::UnexpectedEof { expected: usize::MAX, available: 10 })]
+    fn length_field_failures_preserve_the_buffer(
+        #[case] width: LengthWidth,
+        #[case] value: u64,
+        #[case] offset: usize,
+        #[case] error: FormatError,
+    ) {
+        let mut output = [0xcc; 10];
+        assert_eq!(
+            write_length_at(&mut output, offset, value, width).unwrap_err(),
+            error
+        );
+        assert_eq!(output, [0xcc; 10]);
+    }
 
     #[test]
     fn ensure_len_accepts_an_exact_fit_and_rejects_one_byte_more() {
