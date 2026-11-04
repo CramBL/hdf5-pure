@@ -30,6 +30,8 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
+mod added_users;
+
 impl<'source> AnalysisPhase<'source> {
     /// Returns a positive declared count consistent with this topology's reference minimum.
     ///
