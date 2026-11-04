@@ -112,6 +112,13 @@ pub(super) struct ProvenRetirementBatch {
 }
 
 impl ProvenRetirementBatch {
+    /// Borrows complete physical allocation ranges with their original free-space classes.
+    ///
+    /// Preserves each allocation boundary without conversion or coalescing.
+    pub(super) fn entries(&self) -> &[(FileRange, FreeClass)] {
+        &self.spans
+    }
+
     /// Converts physical allocations to stored extents, preserving boundaries and classes.
     ///
     /// # Errors
