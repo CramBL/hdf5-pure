@@ -4,21 +4,26 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
+use hdf5_pure_format::__private::IndexSlots;
+
 use crate::FillTime;
+use crate::address::BaseAddress;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::attribute_request::PreparedAttributes as AttributeRequest;
 use crate::chunked_write;
+use crate::chunked_write::ArrayMeasure;
 use crate::chunked_write::ByteSink;
+use crate::chunked_write::ChunkArrayKind;
 use crate::chunked_write::ChunkOptions;
 use crate::chunked_write::ChunkProvider;
 use crate::chunked_write::ChunkedHeader;
 use crate::chunked_write::ChunkedMeasure;
-use crate::chunked_write::ChunkedPlan;
 use crate::chunked_write::CompressedChunkSet;
+use crate::chunked_write::EmptyChunkIndex;
 use crate::chunked_write::VerbatimChunks;
 use crate::chunked_write::VerbatimLayout;
-use crate::chunked_write::VerbatimPlan;
+use crate::chunked_write::VerbatimPayload;
 use crate::convert::Narrow;
 use crate::dataset_request::{
     DatasetMetadata, PreparedDataset as DatasetRequest, PreparedFill, PreparedStorage,
@@ -28,6 +33,7 @@ use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::error::FormatError;
 use crate::file_emission::EmissionError;
+use crate::file_emission::Reservation;
 use crate::fill_value::FillPattern;
 use crate::libver::LibVer;
 use crate::object_path::LinkNameBuf;
@@ -327,30 +333,31 @@ impl PreparedDataset {
         )
     }
 
-    /// Plans emission of a chunked dataset at `data_address`.
+    /// Prepares payload and array emission with their object-header messages.
     ///
-    /// Encoded chunks are borrowed from `chunk_set`. The writer reads verbatim chunks from their
-    /// provider during emission.
+    /// Checks the payload length and array kind against `measure`. The caller supplies
+    /// `array_address` exactly when the dataset has an allocated array. The returned plan borrows
+    /// `measure` and any encoded `chunk_set`. The writer reads provider payloads during emission.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if encoded chunks are required and `chunk_set` is
-    /// absent. Propagates errors from planning encoded or verbatim chunks.
+    /// Returns [`FormatError::Internal`] if required encoded chunks are absent, the payload length
+    /// or array kind differs from `measure`, or array geometry and address presence disagree.
+    /// Returns [`FormatError::OffsetOverflow`] if a payload or array end exceeds [`u64::MAX`].
+    /// Propagates chunk preparation and layout serialization errors.
     pub(super) fn build_chunked<'a>(
         &self,
         data_address: StoredAddress,
         chunk_set: Option<&'a CompressedChunkSet>,
+        measure: &'a DataMeasure,
+        array_address: Option<StoredAddress>,
     ) -> Result<ChunkedBuilt<'a>, FormatError> {
         if let Some(rc) = self.storage.chunks() {
             // Verbatim chunks are always streamed: the layout is planned from
             // chunk sizes alone, and the bytes are pulled from the provider in
             // the assembly loop (buffered `finish` and streaming `finish_to`
             // share that one emitter, so their output is byte-identical).
-            let VerbatimLayout {
-                plan,
-                layout_message,
-                pipeline_message,
-            } = chunked_write::plan_chunked_data_verbatim(
+            let prepared = VerbatimChunks::new(
                 &rc.meta,
                 &self.ds.dimensions,
                 &rc.chunk_dims,
@@ -360,21 +367,45 @@ impl PreparedDataset {
                 data_address,
                 self.maxshape.as_deref(),
             )?;
+            let array = ArrayEmission::new(measure, prepared.array_kind(), array_address)?;
+            let layout_message = prepared.layout_message(
+                array_address.unwrap_or(data_address.checked_add(prepared.payload_len())?),
+            )?;
+            let payload = prepared.into_payload();
+            if payload.len() != measure.payload_length() {
+                return Err(inconsistent_chunk_measurement());
+            }
+            Ok(ChunkedBuilt {
+                layout_message,
+                pipeline_message: rc.pipeline_message.clone(),
+                data: DsData::Streamed {
+                    payload,
+                    array,
+                    len: measure.length()?,
+                },
+            })
+        } else {
+            let chunks = chunk_set.ok_or_else(|| {
+                FormatError::Internal("an encoded dataset has no prepared chunk set".into())
+            })?;
+            let array = ArrayEmission::new(measure, chunks.array_kind(), array_address)?;
+            let payload_end = chunks.payload_end_at(data_address)?;
+            if payload_end.checked_distance_from(data_address) != Some(measure.payload_length()) {
+                return Err(inconsistent_chunk_measurement());
+            }
+            let ChunkedHeader {
+                layout_message,
+                pipeline_message,
+            } = chunks.header_at(data_address, array_address.unwrap_or(payload_end))?;
             Ok(ChunkedBuilt {
                 layout_message,
                 pipeline_message,
-                data: DsData::Streamed(plan),
-            })
-        } else {
-            // Each cached chunk set contains the encoded final element bytes.
-            let set = chunk_set.ok_or_else(|| {
-                FormatError::Internal("an encoded dataset has no prepared chunk set".into())
-            })?;
-            let plan = chunked_write::plan_chunked_at(set, data_address)?;
-            Ok(ChunkedBuilt {
-                layout_message: plan.layout_message.clone(),
-                pipeline_message: plan.pipeline_message.clone(),
-                data: DsData::Encoded { chunks: set, plan },
+                data: DsData::Encoded {
+                    chunks,
+                    data_address,
+                    array,
+                    len: measure.length()?,
+                },
             })
         }
     }
@@ -520,14 +551,17 @@ impl PendingHash {
     }
 }
 
-/// A dataset's planned data region.
+/// Plans for a dataset's payload and optional array emission.
 ///
-/// Contiguous element buffers and providers remain in prepared storage.
+/// Contiguous element buffers and providers remain in prepared storage. Array geometry is
+/// borrowed from the dataset's retained measurement.
 pub(super) enum DsData<'a> {
-    /// Encoded chunks borrowed from the writer's retained set, with finalized metadata.
+    /// Borrowed encoded chunks with their payload start and optional array placement.
     Encoded {
         chunks: &'a CompressedChunkSet,
-        plan: ChunkedPlan,
+        data_address: StoredAddress,
+        array: Option<ArrayEmission<'a>>,
+        len: u64,
     },
     /// A contiguous region emitted from the element buffer in prepared storage.
     InMemory { len: u64 },
@@ -539,29 +573,57 @@ pub(super) enum DsData<'a> {
         /// Bytes per block, the last one excepted.
         block_bytes: u64,
     },
-    /// A verbatim chunk plan whose provider is held in the dataset's prepared storage.
-    Streamed(VerbatimPlan),
+    /// Provider-backed payload records with optional array placement.
+    Streamed {
+        payload: VerbatimPayload,
+        array: Option<ArrayEmission<'a>>,
+        len: u64,
+    },
 }
 impl DsData<'_> {
-    /// Writes the data region, including a chunk index for chunked storage.
+    /// Writes payload bytes followed by array blocks at their stored addresses.
+    ///
+    /// The caller positions `sink` at the payload start and assigns consecutive array addresses
+    /// after the payload. Resolves array addresses through `base`.
     ///
     /// # Errors
     ///
-    /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if a streamed
-    /// or produced region is paired with prepared storage of another kind. Propagates
-    /// provider and serialization errors as [`EmissionError::Format`] and sink errors as
-    /// [`EmissionError::Sink`].
+    /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if array addresses differ
+    /// from the sink position, or a streamed or produced region is paired with prepared storage
+    /// of another kind. Propagates address, provider, and serialization errors as
+    /// [`EmissionError::Format`] and output errors as [`EmissionError::Sink`].
     pub(super) fn emit<S: ByteSink>(
+        &self,
+        sink: &mut S,
+        base: BaseAddress,
+        storage: &PreparedStorage,
+    ) -> Result<(), EmissionError<S::Error>> {
+        self.emit_payload(sink, storage)?;
+        self.emit_array(|address, bytes| put_array_block(sink, base, address, bytes))
+            .map_err(flatten_emission_error)
+    }
+
+    /// Writes stored element bytes from retained chunks, an element buffer, or a provider.
+    ///
+    /// The caller positions `sink` at the payload start. Provider-backed emission reuses one
+    /// chunk or block buffer. Array metadata is emitted through [`Self::emit_array`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if a streamed or produced
+    /// region is paired with prepared storage of another kind. Propagates provider and length
+    /// errors as [`EmissionError::Format`] and sink errors as [`EmissionError::Sink`].
+    pub(super) fn emit_payload<S: ByteSink>(
         &self,
         sink: &mut S,
         storage: &PreparedStorage,
     ) -> Result<(), EmissionError<S::Error>> {
         match self {
-            DsData::Encoded { chunks, plan } => {
-                chunked_write::emit_chunked_data(sink, chunks, plan)
+            DsData::Encoded { chunks, .. } => {
+                chunks.emit_payload(sink).map_err(EmissionError::Sink)
             }
             DsData::InMemory { .. } => sink.put(storage.raw()).map_err(EmissionError::Sink),
-            DsData::Streamed(plan) => {
+            DsData::Streamed { payload, .. } => {
                 let provider = storage
                     .chunks()
                     .ok_or_else(|| {
@@ -572,7 +634,7 @@ impl DsData<'_> {
                     .provider
                     .0
                     .as_ref();
-                chunked_write::emit_chunked_data_verbatim(sink, plan, provider)
+                payload.emit_payload(sink, provider)
             }
             DsData::Produced {
                 total_bytes,
@@ -591,15 +653,155 @@ impl DsData<'_> {
         }
     }
 
-    /// Returns the allocated data length, including any chunk index.
+    /// Serializes complete array blocks at their assigned stored addresses.
+    ///
+    /// Calls `emit` in serialization order, stopping at its first error. A failure can leave
+    /// partial output. Constructs temporary chunk records for encoded storage and uses retained
+    /// records for provider-backed storage. Payload providers are read by [`Self::emit_payload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns callback errors as [`EmissionError::Sink`]. Propagates address, slot, and encoding
+    /// errors as [`EmissionError::Format`].
+    pub(super) fn emit_array<E>(
+        &self,
+        emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        match self {
+            Self::Encoded {
+                chunks,
+                data_address,
+                array: Some(array),
+                len: _,
+            } => {
+                let (records, _) = chunks.records_at(*data_address)?;
+                array.emit(&chunks.index_slots(&records)?, emit)
+            }
+            Self::Streamed {
+                payload,
+                array: Some(array),
+                len: _,
+            } => array.emit(&payload.index_slots()?, emit),
+            Self::Encoded { array: None, .. }
+            | Self::Streamed { array: None, .. }
+            | Self::InMemory { .. }
+            | Self::Produced { .. } => Ok(()),
+        }
+    }
+
+    /// Returns the combined payload and array byte length.
     pub(super) fn len(&self) -> u64 {
         match self {
-            DsData::Encoded { plan, .. } => plan.data_len,
+            DsData::Encoded { len, .. } | DsData::Streamed { len, .. } => *len,
             DsData::InMemory { len } => *len,
-            DsData::Streamed(plan) => plan.total_len,
             DsData::Produced { total_bytes, .. } => *total_bytes,
         }
     }
+}
+
+/// A borrowed array measurement and checked stored root.
+///
+/// The constructor checks the array kind and exclusive end for the supplied dataset measurement.
+pub(super) struct ArrayEmission<'a> {
+    measure: &'a ArrayMeasure,
+    address: StoredAddress,
+}
+
+impl<'a> ArrayEmission<'a> {
+    /// Associates matching allocated-array geometry with its checked stored root.
+    ///
+    /// Returns [`None`] when geometry, kind, and address are all absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if only some of geometry, kind, and address are present,
+    /// or if the measured and supplied array kinds differ. Returns [`FormatError::OffsetOverflow`]
+    /// if the complete array end exceeds [`u64::MAX`].
+    /// Propagates errors from [`ArrayMeasure::length`].
+    fn new(
+        data: &'a DataMeasure,
+        kind: Option<ChunkArrayKind>,
+        address: Option<StoredAddress>,
+    ) -> Result<Option<Self>, FormatError> {
+        match (&data.array, kind, address) {
+            (None, None, None) => Ok(None),
+            (Some(measure), Some(kind), Some(address)) if measure.kind() == kind => {
+                address.checked_add(measure.length()?)?;
+                Ok(Some(Self { measure, address }))
+            }
+            _ => Err(inconsistent_chunk_measurement()),
+        }
+    }
+
+    /// Serializes the measured array through complete-block callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ArrayMeasure::write_consecutive`].
+    fn emit<E>(
+        &self,
+        slots: &IndexSlots<'_>,
+        emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        let Self { measure, address } = self;
+        measure.write_consecutive(slots, *address, emit)
+    }
+}
+
+/// Writes an empty array through the checked sink adapter.
+///
+/// Builds block geometry for this emission from scalar index metadata.
+///
+/// # Errors
+///
+/// Returns sink errors as [`EmissionError::Sink`]. Propagates array planning, encoding, and
+/// physical-range errors as [`EmissionError::Format`].
+pub(super) fn emit_empty_index<S: ByteSink>(
+    sink: &mut S,
+    base: BaseAddress,
+    index: EmptyChunkIndex,
+    address: StoredAddress,
+) -> Result<(), EmissionError<S::Error>> {
+    index
+        .write_at(address, |address, bytes| {
+            put_array_block(sink, base, address, bytes)
+        })
+        .map_err(flatten_emission_error)
+}
+
+/// Writes one block after checking its complete physical range and sink position.
+///
+/// # Errors
+///
+/// Returns [`EmissionError::Format`] with [`FormatError::OffsetOverflow`] if resolving the range
+/// overflows, or [`FormatError::Internal`] if the sink position differs from the resolved start.
+/// Returns output errors as [`EmissionError::Sink`].
+fn put_array_block<S: ByteSink>(
+    sink: &mut S,
+    base: BaseAddress,
+    address: StoredAddress,
+    bytes: &[u8],
+) -> Result<(), EmissionError<S::Error>> {
+    let reservation = Reservation::new(base, address, bytes.len().to_u64(), ())?;
+    if sink.position() != reservation.start().get() {
+        return Err(
+            FormatError::Internal("array output differs from its stored address".into()).into(),
+        );
+    }
+    sink.put(bytes).map_err(EmissionError::Sink)
+}
+
+/// Removes one callback-error layer, preserving format and sink errors.
+fn flatten_emission_error<E>(error: EmissionError<EmissionError<E>>) -> EmissionError<E> {
+    match error {
+        EmissionError::Format(error) => EmissionError::Format(error),
+        EmissionError::Sink(error) => error,
+    }
+}
+
+/// Returns the format error for incompatible chunk measurements.
+fn inconsistent_chunk_measurement() -> FormatError {
+    FormatError::Internal("chunk payload or array differs from its prepared measurement".into())
 }
 
 /// Returns the error for a variable-length dataset whose element bytes
@@ -724,18 +926,28 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec;
     use alloc::vec::Vec;
+
     use core::num::NonZeroUsize;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use hdf5_pure_format::__private as format;
+    use hdf5_pure_format::__private::ChunkIndexLayout;
+    use hdf5_pure_format::__private::ChunkRecord;
+    use hdf5_pure_format::__private::DataLayout;
+    use hdf5_pure_format::__private::IndexSlots;
     use rstest::rstest;
 
     use super::PreparedDataset;
     use crate::AttrValue;
+    use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+    use crate::chunked_write;
+    use crate::chunked_write::ByteSink;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::error::FormatError;
+    use crate::file_emission::EmissionError;
     use crate::libver::LibVer;
     use crate::type_builders::DatasetBuilder;
 
@@ -803,14 +1015,20 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         let data = if chunked {
             dataset
-                .build_chunked(StoredAddress::new(0), None)
+                .build_chunked(
+                    StoredAddress::ZERO,
+                    None,
+                    &measured.data,
+                    measured.data.array_address(StoredAddress::ZERO).unwrap(),
+                )
                 .unwrap()
                 .data
         } else {
             dataset.contiguous_data()
         };
         let mut bytes = Vec::new();
-        data.emit(&mut bytes, &dataset.storage).unwrap();
+        data.emit(&mut bytes, crate::BaseAddress::ZERO, &dataset.storage)
+            .unwrap();
         assert_eq!(bytes.len() as u64, measured.data.length().unwrap());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         let expected: Vec<_> = [1_i32, 2, 3, 4]
@@ -858,7 +1076,12 @@ mod tests {
             values.len() as u64 * 4 + expected.iter().sum::<u64>()
         );
         let built = dataset
-            .build_chunked(StoredAddress::new(4096), Some(&chunks))
+            .build_chunked(
+                StoredAddress::new(4096),
+                Some(&chunks),
+                &data,
+                data.array_address(StoredAddress::new(4096)).unwrap(),
+            )
             .unwrap();
         assert_eq!(built.data.len(), data.length().unwrap());
     }
@@ -902,9 +1125,11 @@ mod tests {
         let mut builder = DatasetBuilder::new("values");
         builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
         let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let empty =
+            super::super::layout::DataMeasure::new(0, super::super::layout::DataKind::Chunked);
         let result = if build {
             dataset
-                .build_chunked(StoredAddress::new(0), None)
+                .build_chunked(StoredAddress::ZERO, None, &empty, None)
                 .map(|_| ())
         } else {
             dataset
@@ -922,6 +1147,419 @@ mod tests {
             panic!("expected Internal, got {error:?}");
         };
         assert_eq!(reason, "an encoded dataset has no prepared chunk set");
+    }
+
+    #[rstest]
+    #[case::encoded_fixed(false, false, false)]
+    #[case::encoded_fixed_filtered(false, false, true)]
+    #[case::encoded_extensible(false, true, false)]
+    #[case::encoded_extensible_filtered(false, true, true)]
+    #[case::verbatim_fixed(true, false, false)]
+    #[case::verbatim_fixed_filtered(true, false, true)]
+    #[case::verbatim_extensible(true, true, false)]
+    #[case::verbatim_extensible_filtered(true, true, true)]
+    fn array_emission_precedes_payload_reads_and_preserves_consecutive_bytes(
+        #[case] verbatim: bool,
+        #[case] unlimited: bool,
+        #[case] filtered: bool,
+    ) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
+        if unlimited {
+            builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
+        }
+        if filtered {
+            builder.with_fletcher32();
+        }
+        let (seed, _) = PreparedDataset::prepare(builder).unwrap();
+        let chunks = seed.compress_chunks().unwrap();
+        let mut payload = Vec::new();
+        chunks.emit_payload(&mut payload).unwrap();
+        let width = if filtered { 12 } else { 8 };
+        assert_eq!(payload.len(), 2 * width);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let address = StoredAddress::new((1 << 32) + 8_192);
+        let array_address = StoredAddress::new((1 << 32) + 128);
+        let records = [
+            ChunkRecord {
+                address,
+                stored_size: width as u64,
+                filter_mask: 0,
+            },
+            ChunkRecord {
+                address: address.checked_add(width as u64).unwrap(),
+                stored_size: width as u64,
+                filter_mask: 0,
+            },
+        ];
+        let header = chunks.header(&records, array_address).unwrap();
+        let dataset = if verbatim {
+            let mut builder = DatasetBuilder::new("values");
+            builder.with_raw_chunks_lazy(
+                crate::make_i32_type(),
+                &[4],
+                unlimited.then_some(&[crate::MaxExtent::Unlimited][..]),
+                &[2],
+                NonZeroUsize::new(4).unwrap(),
+                ChunkedLayoutFlags::NONE,
+                header.pipeline_message.clone(),
+                records
+                    .iter()
+                    .map(|record| ChunkMeta {
+                        compressed_size: record.stored_size,
+                        filter_mask: record.filter_mask,
+                    })
+                    .collect(),
+                Box::new(StoredChunks {
+                    chunks: payload.chunks_exact(width).map(<[u8]>::to_vec).collect(),
+                    reads: Arc::clone(&reads),
+                }),
+            );
+            PreparedDataset::prepare(builder).unwrap().0
+        } else {
+            seed
+        };
+        let encoded = (!verbatim).then_some(&chunks);
+        let (_, measured) = dataset.measure_chunked_storage(address, encoded).unwrap();
+        let built = dataset
+            .build_chunked(address, encoded, &measured, Some(array_address))
+            .unwrap();
+        let parsed = DataLayout::parse(&built.layout_message, 8, 8).unwrap();
+        let DataLayout::Chunked { index, .. } = parsed else {
+            panic!("expected chunked storage, got {parsed:?}");
+        };
+        match (index, unlimited) {
+            (ChunkIndexLayout::FixedArray { address, .. }, false)
+            | (ChunkIndexLayout::ExtensibleArray { address, .. }, true) => {
+                assert_eq!(address, Some(array_address));
+            }
+            other => panic!("unexpected chunk index {other:?}"),
+        }
+        assert_eq!(built.pipeline_message, header.pipeline_message);
+        let mut callbacks = 0;
+        let error = built
+            .data
+            .emit_array(|_, _| {
+                callbacks += 1;
+                Err(17_u8)
+            })
+            .unwrap_err();
+        assert!(matches!(error, EmissionError::Sink(17)), "{error:?}");
+        assert_eq!(callbacks, 1);
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let mut array = Vec::new();
+        let mut cursor = array_address;
+        built
+            .data
+            .emit_array(|address, bytes| {
+                assert_eq!(address, cursor);
+                cursor = cursor.checked_add(bytes.len() as u64).unwrap();
+                array.extend_from_slice(bytes);
+                Ok::<(), core::convert::Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let slots = IndexSlots::new(&records, &[0, 1], 2).unwrap();
+        let widths = super::super::WIDTHS;
+        let expected = if unlimited {
+            format::build_extensible_array_at(
+                &slots,
+                8,
+                widths.offsets,
+                widths.lengths,
+                filtered,
+                array_address,
+            )
+        } else {
+            format::build_fixed_array_at(
+                &slots,
+                8,
+                widths.offsets,
+                widths.lengths,
+                filtered,
+                array_address,
+            )
+        }
+        .unwrap();
+        assert_eq!(array, expected);
+        let mut emitted = Vec::new();
+        built
+            .data
+            .emit_payload(&mut emitted, &dataset.storage)
+            .unwrap();
+        assert_eq!(emitted, payload);
+        assert_eq!(reads.load(Ordering::Relaxed), if verbatim { 2 } else { 0 });
+        let consecutive = dataset
+            .build_chunked(
+                address,
+                encoded,
+                &measured,
+                measured.array_address(address).unwrap(),
+            )
+            .unwrap();
+        consecutive
+            .data
+            .emit_array(|_, bytes| {
+                emitted.extend_from_slice(bytes);
+                Ok::<(), core::convert::Infallible>(())
+            })
+            .unwrap();
+        let legacy = chunked_write::assemble_chunked_at(&chunks, address).unwrap();
+        assert_eq!(emitted, legacy.data_bytes);
+        assert_eq!(consecutive.layout_message, legacy.layout_message);
+        assert_eq!(consecutive.pipeline_message, legacy.pipeline_message);
+        assert_eq!(reads.load(Ordering::Relaxed), if verbatim { 2 } else { 0 });
+    }
+
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::fixed(1_025, false, "prepared_fixed_parts", "prepared_fixed_control")]
+    #[case::extensible(
+        4_097,
+        true,
+        "prepared_extensible_parts",
+        "prepared_extensible_control"
+    )]
+    fn array_plans_retain_headers_and_bound_emission_buffers(
+        #[case] count: usize,
+        #[case] unlimited: bool,
+        #[case] region: &str,
+        #[case] control: &str,
+    ) {
+        use core::mem;
+
+        use test_util::allocation;
+
+        let values: Vec<_> = (0..i32::try_from(count * 2).unwrap()).collect();
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&values).with_chunks(&[2]);
+        if unlimited {
+            builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
+        }
+        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let chunks = dataset.compress_chunks().unwrap();
+        let (_, measured) = dataset
+            .measure_chunked_storage(StoredAddress::ZERO, Some(&chunks))
+            .unwrap();
+        let (control, positive) = allocation::measure(control, || vec![0_u8; 1_024]);
+        assert!(positive.blocks > 0, "{positive}");
+        assert_eq!(positive.peak_bytes, 1_024, "{positive}");
+        drop(control);
+        let index_address = measured.array_address(StoredAddress::ZERO).unwrap();
+        let (built, planned) = allocation::measure(region, || {
+            dataset
+                .build_chunked(StoredAddress::ZERO, Some(&chunks), &measured, index_address)
+                .unwrap()
+        });
+        let retained = built.layout_message.capacity()
+            + built.pipeline_message.as_ref().map_or(0, Vec::capacity);
+        let records = count * mem::size_of::<ChunkRecord>();
+        assert!(planned.peak_bytes >= retained as u64, "{planned}");
+        assert!(planned.peak_bytes <= retained as u64 + 1_024, "{planned}");
+        assert_eq!(planned.live_bytes, retained as u64, "{planned}");
+        let array = measured.array.as_ref().unwrap();
+        let mut largest = 0;
+        let mut blocks = 0;
+        array
+            .visit_blocks(|length| {
+                largest = largest.max(length);
+                blocks += 1;
+                Ok(())
+            })
+            .unwrap();
+        let ((), emitted) = allocation::measure(&format!("{region}_emission"), || {
+            let mut cursor = index_address.unwrap();
+            built
+                .data
+                .emit_array(|address, bytes| {
+                    assert_eq!(address, cursor);
+                    cursor = cursor.checked_add(bytes.len() as u64).unwrap();
+                    Ok::<(), core::convert::Infallible>(())
+                })
+                .unwrap();
+            assert_eq!(
+                cursor.checked_distance_from(index_address.unwrap()),
+                Some(array.length().unwrap())
+            );
+        });
+        assert_eq!(emitted.live_bytes, 0, "{emitted}");
+        assert!(emitted.peak_bytes >= records as u64 + largest, "{emitted}");
+        assert!(
+            emitted.peak_bytes <= records as u64 + 2 * largest + blocks * 128 + 16_384,
+            "{emitted}"
+        );
+    }
+
+    #[rstest]
+    #[case::fixed_missing(false, None, FormatError::Internal("chunk payload or array differs from its prepared measurement".into()))]
+    #[case::extensible_missing(true, None, FormatError::Internal("chunk payload or array differs from its prepared measurement".into()))]
+    #[case::fixed_overflow(false, Some(u64::MAX), FormatError::OffsetOverflow { offset: u64::MAX, length: 62 })]
+    #[case::extensible_overflow(true, Some(u64::MAX), FormatError::OffsetOverflow { offset: u64::MAX, length: 370 })]
+    fn array_preparation_rejects_missing_or_overflowing_addresses(
+        #[case] unlimited: bool,
+        #[case] array_address: Option<u64>,
+        #[case] expected: FormatError,
+    ) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
+        if unlimited {
+            builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
+        }
+        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let chunks = dataset.compress_chunks().unwrap();
+        let (_, measured) = dataset
+            .measure_chunked_storage(StoredAddress::ZERO, Some(&chunks))
+            .unwrap();
+        let error = dataset
+            .build_chunked(
+                StoredAddress::ZERO,
+                Some(&chunks),
+                &measured,
+                array_address.map(StoredAddress::new),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error, expected);
+    }
+
+    #[rstest]
+    #[case::encoded_kind(false, true)]
+    #[case::encoded_payload(false, false)]
+    #[case::verbatim_kind(true, true)]
+    #[case::verbatim_payload(true, false)]
+    fn array_preparation_requires_matching_payload_length_and_array_kind(
+        #[case] verbatim: bool,
+        #[case] change_kind: bool,
+    ) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
+        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let chunks = dataset.compress_chunks().unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let dataset = if verbatim {
+            let mut builder = DatasetBuilder::new("values");
+            builder.with_raw_chunks_lazy(
+                crate::make_i32_type(),
+                &[4],
+                None,
+                &[2],
+                NonZeroUsize::new(4).unwrap(),
+                ChunkedLayoutFlags::NONE,
+                None,
+                vec![
+                    ChunkMeta {
+                        compressed_size: 8,
+                        filter_mask: 0
+                    };
+                    2
+                ],
+                Box::new(CountingProvider(Arc::clone(&reads))),
+            );
+            PreparedDataset::prepare(builder).unwrap().0
+        } else {
+            dataset
+        };
+        let mut other = DatasetBuilder::new("other");
+        other.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
+        if change_kind {
+            other.with_maxshape(&[crate::MaxExtent::Unlimited]);
+        } else {
+            other.with_i32_data(&[1, 2, 3, 4, 5, 6]).with_shape(&[6]);
+        }
+        let (other, _) = PreparedDataset::prepare(other).unwrap();
+        let other_chunks = other.compress_chunks().unwrap();
+        let (_, measured) = other
+            .measure_chunked_storage(StoredAddress::ZERO, Some(&other_chunks))
+            .unwrap();
+        let error = dataset
+            .build_chunked(
+                StoredAddress::ZERO,
+                (!verbatim).then_some(&chunks),
+                &measured,
+                measured.array_address(StoredAddress::ZERO).unwrap(),
+            )
+            .err()
+            .unwrap();
+        let FormatError::Internal(reason) = error else {
+            panic!("expected Internal, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "chunk payload or array differs from its prepared measurement"
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[rstest]
+    #[case::userblock(4_096, 7, 4_103, None)]
+    #[case::physical_start(u64::MAX, 1, 0, Some(FormatError::OffsetOverflow { offset: 1, length: u64::MAX }))]
+    #[case::physical_end(u64::MAX - 10, 8, u64::MAX - 2, Some(FormatError::OffsetOverflow { offset: u64::MAX - 2, length: 3 }))]
+    #[case::position(0, 7, 8, Some(FormatError::Internal("array output differs from its stored address".into())))]
+    fn array_output_checks_complete_physical_ranges_before_writing(
+        #[case] base: u64,
+        #[case] address: u64,
+        #[case] position: u64,
+        #[case] expected: Option<FormatError>,
+    ) {
+        let mut sink = PositionedBytes {
+            position,
+            bytes: Vec::new(),
+        };
+        let result = super::put_array_block(
+            &mut sink,
+            crate::BaseAddress::new(base),
+            StoredAddress::new(address),
+            b"abc",
+        );
+        if let Some(expected) = expected {
+            assert_eq!(result.unwrap_err().into_format(), expected);
+            assert!(sink.bytes.is_empty());
+        } else {
+            result.unwrap();
+            assert_eq!(sink.bytes, b"abc");
+            assert_eq!(sink.position, base + address + 3);
+        }
+    }
+
+    struct PositionedBytes {
+        position: u64,
+        bytes: Vec<u8>,
+    }
+
+    impl ByteSink for PositionedBytes {
+        type Error = core::convert::Infallible;
+
+        fn put(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+            let Self {
+                position,
+                bytes: output,
+            } = self;
+            *position += bytes.len() as u64;
+            output.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn put_zeros(&mut self, length: usize) -> Result<(), Self::Error> {
+            self.put(&vec![0; length])
+        }
+
+        fn position(&self) -> u64 {
+            self.position
+        }
+    }
+
+    struct StoredChunks {
+        chunks: Vec<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl ChunkProvider for StoredChunks {
+        fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
+            let Self { chunks, reads } = self;
+            reads.fetch_add(1, Ordering::Relaxed);
+            out.extend_from_slice(&chunks[index]);
+            Ok(())
+        }
     }
 
     struct CountingProvider(Arc<AtomicUsize>);

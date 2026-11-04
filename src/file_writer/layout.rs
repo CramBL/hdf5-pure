@@ -163,6 +163,31 @@ impl DataMeasure {
         )
     }
 
+    /// Returns the array address after the payload, or [`None`] for storage without an array.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the payload end exceeds [`u64::MAX`].
+    pub(super) fn array_address(
+        &self,
+        payload: StoredAddress,
+    ) -> Result<Option<StoredAddress>, FormatError> {
+        let Self {
+            raw_length,
+            kind: _,
+            array,
+        } = self;
+        array
+            .as_ref()
+            .map(|_| payload.checked_add(*raw_length))
+            .transpose()
+    }
+
+    /// Returns the recorded payload length, excluding separately measured array metadata.
+    pub(super) fn payload_length(&self) -> u64 {
+        self.raw_length
+    }
+
     /// Reserves raw storage, returning [`None`] for an empty contiguous region.
     ///
     /// A zero-length chunked region has a reservation at the current end of allocation.

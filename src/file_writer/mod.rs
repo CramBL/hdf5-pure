@@ -2175,7 +2175,12 @@ impl FileWriter {
                         |layout::Allocation { address, length: _ }| address,
                     );
                     if is_chunked[i] {
-                        let built = dataset.build_chunked(address, chunk_sets[i].as_ref())?;
+                        let built = dataset.build_chunked(
+                            address,
+                            chunk_sets[i].as_ref(),
+                            &ds_data_measures[i],
+                            ds_data_measures[i].array_address(address)?,
+                        )?;
                         if built.data.len() != ds_data_measures[i].length()? {
                             return Err(FormatError::Internal(
                                 "chunk data differs from its allocation".into(),
@@ -2388,7 +2393,7 @@ impl FileWriter {
             for &i in &small_indices {
                 let at = base.resolve(ds_layouts[i].data_addr)?.get();
                 debug_assert_eq!(sink.position(), at);
-                ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
+                ds_layouts[i].data.emit(sink, base, &all_ds[i].storage)?;
             }
             if small_raw_total > 0 {
                 sink.put_zeros(
@@ -2401,7 +2406,7 @@ impl FileWriter {
                 let gap = base.resolve(ds_layouts[i].data_addr)?.get() - sink.position();
                 sink.put_zeros(gap.to_usize()?)
                     .map_err(EmissionError::Sink)?;
-                ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
+                ds_layouts[i].data.emit(sink, base, &all_ds[i].storage)?;
                 let end_rel = base.relative(PhysicalAddress::new(sink.position()))?.get();
                 sink.put_zeros(
                     ((page_size.get() - end_rel % page_size.get()) % page_size.get()).to_usize()?,
@@ -2424,7 +2429,12 @@ impl FileWriter {
                         FormatError::Internal("chunk data allocation is absent".into())
                     })?;
                 let data_address = span.address;
-                let built = d.build_chunked(data_address, chunk_sets[i].as_ref())?;
+                let built = d.build_chunked(
+                    data_address,
+                    chunk_sets[i].as_ref(),
+                    &ds_data_measures[i],
+                    ds_data_measures[i].array_address(data_address)?,
+                )?;
                 if built.data.len() != ds_data_measures[i].length()? {
                     return Err(FormatError::Internal(
                         "chunk data differs from its allocation".into(),
@@ -2895,7 +2905,7 @@ impl FileWriter {
                 }
                 sink.put(&oh).map_err(EmissionError::Sink)
             }
-            FileData::Dataset(i) => ds_layouts[i].data.emit(sink, &all_ds[i].storage),
+            FileData::Dataset(i) => ds_layouts[i].data.emit(sink, base, &all_ds[i].storage),
         };
         if aggregated {
             let count = aggregate_collection_addresses.len()

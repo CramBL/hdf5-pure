@@ -876,7 +876,13 @@ impl<S: ObjectSource> Plan<S> {
                 }
             }
             match part {
-                Part::EmptyIndex(index) => sink.put(&index.build_at(span.address)?)?,
+                Part::EmptyIndex(index) => super::preparation::emit_empty_index(
+                    &mut sink,
+                    BaseAddress::ZERO,
+                    index,
+                    span.address,
+                )
+                .map_err(emission_error)?,
                 Part::Links(index) => sink.put(&self.links(index, span)?)?,
                 Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
                 Part::ManagerHeader(index) => sink.put(&managers[index].header)?,
@@ -900,14 +906,21 @@ impl<S: ObjectSource> Plan<S> {
                             };
                             if dataset.is_chunked() {
                                 dataset
-                                    .build_chunked(span.address, chunks.as_ref())?
+                                    .build_chunked(
+                                        span.address,
+                                        chunks.as_ref(),
+                                        &self.records[*index].data_measure,
+                                        self.records[*index]
+                                            .data_measure
+                                            .array_address(span.address)?,
+                                    )?
                                     .data
-                                    .emit(&mut sink, &dataset.storage)
+                                    .emit(&mut sink, BaseAddress::ZERO, &dataset.storage)
                                     .map_err(emission_error)?;
                             } else {
                                 dataset
                                     .contiguous_data()
-                                    .emit(&mut sink, &dataset.storage)
+                                    .emit(&mut sink, BaseAddress::ZERO, &dataset.storage)
                                     .map_err(emission_error)?;
                             }
                         }
@@ -948,7 +961,12 @@ impl<S: ObjectSource> Plan<S> {
             if let (Kind::Dataset(dataset), Some(span)) = (&object.kind, record.data) {
                 let length = if record.data_measure.is_chunked() {
                     dataset
-                        .build_chunked(span.address, chunks.as_ref())?
+                        .build_chunked(
+                            span.address,
+                            chunks.as_ref(),
+                            &record.data_measure,
+                            record.data_measure.array_address(span.address)?,
+                        )?
                         .data
                         .len()
                 } else {
