@@ -13,11 +13,13 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
 
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 use core::ops::Range;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
+use crate::chunk_record::ChunkRecord;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
@@ -100,6 +102,96 @@ impl DataLayout {
         data: &[u8],
         widths: FormatWidths,
     ) -> Result<(DataLayout, Option<Range<usize>>), FormatError> {
+        Self::parse_with_index_fields(data, widths).map(|(layout, fields)| {
+            let address = match fields {
+                Some(ChunkIndexFields::ExtensibleArray(field)) => Some(field.range()),
+                _ => None,
+            };
+            (layout, address)
+        })
+    }
+
+    /// Parses a layout and locates its writable chunk-index reference fields.
+    ///
+    /// Returns fields for Single Chunk, Fixed Array, and Extensible Array indexes in version 4
+    /// messages, including undefined references. Ranges are relative to `data`. Returns `None`
+    /// for other indexes and storage classes, and for version 3 messages.
+    ///
+    /// The fields are defined in "The Data Layout Message" of the
+    /// [format specification, version 4.0][spec]. Encoding a field does not establish allocation
+    /// ownership or update the containing object header's checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the layout errors of [`Self::parse_with_widths`].
+    ///
+    /// # Examples
+    ///
+    /// Replacing a filtered Single Chunk reference at independent address and length widths:
+    ///
+    /// ```
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, OffsetWidth};
+    ///
+    /// let widths = format::FormatWidths::from_sizes(2, 4)?;
+    /// let info = format::ChunkIndexInfo::SingleChunk {
+    ///     filtered: Some(format::FilteredSingleChunk { filtered_size: 0, filter_mask: 0 }),
+    /// };
+    /// let mut body = format::DataLayout::encode_chunked(
+    ///     format::ChunkedLayoutFlags::NONE, &[4], 4, info,
+    ///     StoredAddress::undefined(OffsetWidth::Two), OffsetWidth::Two, LengthWidth::Four,
+    /// )?;
+    /// let (_, fields) = format::DataLayout::parse_with_index_fields(&body, widths)?;
+    /// let Some(format::ChunkIndexFields::SingleChunk(field)) = fields else {
+    ///     panic!("expected a Single Chunk reference");
+    /// };
+    /// let encoded = field.encode(Some(format::ChunkRecord {
+    ///     address: StoredAddress::new(0x1234), stored_size: 70_000, filter_mask: 3,
+    /// }))?;
+    /// assert_eq!(encoded.as_bytes(), &[0x70, 0x11, 1, 0, 3, 0, 0, 0, 0x34, 0x12]);
+    /// body[field.range()].copy_from_slice(encoded.as_bytes());
+    /// let parsed = format::DataLayout::parse_with_widths(&body, widths)?;
+    /// assert!(matches!(parsed, format::DataLayout::Chunked {
+    ///     index: format::ChunkIndexLayout::SingleChunk { address: Some(_), .. }, ..
+    /// }));
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    ///
+    /// Replacing an array's header address, preserving its creation parameters:
+    ///
+    /// ```
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, OffsetWidth};
+    ///
+    /// let widths = format::FormatWidths::from_sizes(4, 2)?;
+    /// let mut body = format::DataLayout::encode_chunked(
+    ///     format::ChunkedLayoutFlags::NONE, &[4], 4, format::ChunkIndexInfo::FixedArray,
+    ///     StoredAddress::undefined(OffsetWidth::Four), OffsetWidth::Four, LengthWidth::Two,
+    /// )?;
+    /// let (_, fields) = format::DataLayout::parse_with_index_fields(&body, widths)?;
+    /// let Some(format::ChunkIndexFields::FixedArray { page_bits, address }) = fields else {
+    ///     panic!("expected a Fixed Array reference");
+    /// };
+    /// assert_eq!(page_bits, 10);
+    /// let encoded = address.encode(Some(StoredAddress::new(512)))?;
+    /// body[address.range()].copy_from_slice(encoded.as_bytes());
+    /// assert_eq!(format::DataLayout::parse_with_widths(&body, widths)?,
+    ///     format::DataLayout::Chunked {
+    ///         flags: format::ChunkedLayoutFlags::NONE, chunk_dimensions: vec![4, 4],
+    ///         index: format::ChunkIndexLayout::FixedArray {
+    ///             address: Some(StoredAddress::new(512)),
+    ///         },
+    ///     });
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+    pub fn parse_with_index_fields(
+        data: &[u8],
+        widths: FormatWidths,
+    ) -> Result<(DataLayout, Option<ChunkIndexFields>), FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let layout_class = data[1];
         match LayoutVersion::try_from(data[0])? {
@@ -278,7 +370,7 @@ impl DataLayout {
         data: &[u8],
         layout_class: u8,
         widths: FormatWidths,
-    ) -> Result<(DataLayout, Option<Range<usize>>), FormatError> {
+    ) -> Result<(DataLayout, Option<ChunkIndexFields>), FormatError> {
         let pos = LAYOUT_PROPERTIES_OFFSET;
         match layout_class {
             LAYOUT_CLASS_COMPACT => Self::parse_compact(data).map(|layout| (layout, None)),
@@ -312,18 +404,44 @@ impl DataLayout {
                 }
 
                 let index = parse_chunk_index(data, p, flags, widths)?;
-                let address =
-                    matches!(index, ChunkIndexLayout::ExtensibleArray { .. }).then(|| {
-                        let start = p + 1 + EXTENSIBLE_ARRAY_INFO_LEN;
-                        start..start + usize::from(widths.offsets.get())
-                    });
+                let info = p + 1;
+                let address = |start| IndexAddressField {
+                    range: start..start + usize::from(widths.offsets.get()),
+                    offsets: widths.offsets,
+                };
+                let fields = match &index {
+                    ChunkIndexLayout::SingleChunk { filtered, .. } => {
+                        Some(ChunkIndexFields::SingleChunk(SingleChunkField {
+                            range: info..info
+                                + filtered.map_or(0, |_| {
+                                    usize::from(widths.lengths.get()) + FILTER_MASK_LEN
+                                })
+                                + usize::from(widths.offsets.get()),
+                            widths,
+                            filtered: filtered.is_some(),
+                        }))
+                    }
+                    ChunkIndexLayout::FixedArray { .. } => Some(ChunkIndexFields::FixedArray {
+                        address: address(info + FIXED_ARRAY_INFO_LEN),
+                        page_bits: *data.get(info).ok_or(FormatError::UnexpectedEof {
+                            expected: info + 1,
+                            available: data.len(),
+                        })?,
+                    }),
+                    ChunkIndexLayout::ExtensibleArray { .. } => {
+                        Some(ChunkIndexFields::ExtensibleArray(address(
+                            info + EXTENSIBLE_ARRAY_INFO_LEN,
+                        )))
+                    }
+                    _ => None,
+                };
                 Ok((
                     DataLayout::Chunked {
                         flags,
                         chunk_dimensions,
                         index,
                     },
-                    address,
+                    fields,
                 ))
             }
             LAYOUT_CLASS_VIRTUAL => Ok((DataLayout::Virtual, None)),
@@ -352,6 +470,164 @@ impl DataLayout {
         })
     }
 }
+
+/// The reference fields of a version 4 chunked layout message.
+///
+/// [`DataLayout::parse_with_index_fields`] returns these fields with the parsed layout. Each
+/// field holds its encoded widths, including when the reference is undefined.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChunkIndexFields {
+    /// The chunk address and, for a filtered chunk, its stored size and filter mask.
+    SingleChunk(SingleChunkField),
+    /// The Fixed Array header address and its page-size parameter.
+    FixedArray {
+        /// The base 2 logarithm of the maximum number of entries per page.
+        page_bits: u8,
+        /// The field that stores the header's base-relative address.
+        address: IndexAddressField,
+    },
+    /// The Extensible Array header address, excluding its creation parameters.
+    ExtensibleArray(IndexAddressField),
+}
+
+/// The checked range and encoding widths of a Single Chunk reference.
+///
+/// The range includes the address and any filtered-size and filter-mask fields. See
+/// [`DataLayout::parse_with_index_fields`] for an example of replacing a reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SingleChunkField {
+    range: Range<usize>,
+    widths: FormatWidths,
+    filtered: bool,
+}
+
+impl SingleChunkField {
+    /// Returns the field range relative to the layout message body's start.
+    pub fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
+    /// Encodes a chunk reference at the widths read from its layout message.
+    ///
+    /// Encodes `None` as the undefined address with zero size and mask fields, where present.
+    /// Omits the size and mask for an unfiltered reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if the address exceeds the offset width,
+    /// [`FormatError::DefinedAddressIsUndefined`] if a defined address equals the undefined
+    /// marker, or [`FormatError::LengthTooLarge`] if a filtered size exceeds the length width.
+    pub fn encode(&self, record: Option<ChunkRecord>) -> Result<EncodedIndexField, FormatError> {
+        let Self {
+            range,
+            widths,
+            filtered,
+        } = self;
+        let mut field = EncodedIndexField::new(range.len())?;
+        let address_offset = if *filtered {
+            bytes::write_length_at(
+                &mut field.bytes,
+                0,
+                record.map_or(0, |record| record.stored_size),
+                widths.lengths,
+            )?;
+            let offset = usize::from(widths.lengths.get());
+            field.bytes[offset..offset + FILTER_MASK_LEN]
+                .copy_from_slice(&record.map_or(0, |record| record.filter_mask).to_le_bytes());
+            offset + FILTER_MASK_LEN
+        } else {
+            0
+        };
+        field.write_address(
+            address_offset,
+            record.map(|record| record.address),
+            widths.offsets,
+        )?;
+        Ok(field)
+    }
+}
+
+/// The checked range and offset width of an array header address in a layout message.
+///
+/// See [`DataLayout::parse_with_index_fields`] for an example of replacing the address.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexAddressField {
+    range: Range<usize>,
+    offsets: OffsetWidth,
+}
+
+impl IndexAddressField {
+    /// Returns the address field's range relative to the layout message body's start.
+    pub fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
+    /// Encodes a base-relative address, or the undefined marker for `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if the address exceeds the offset width, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if a defined address equals its undefined marker.
+    pub fn encode(&self, address: Option<StoredAddress>) -> Result<EncodedIndexField, FormatError> {
+        let Self { range, offsets } = self;
+        let mut field = EncodedIndexField::new(range.len())?;
+        field.write_address(0, address, *offsets)?;
+        Ok(field)
+    }
+}
+
+/// Encoded layout reference bytes, stored in a fixed-size buffer.
+///
+/// [`SingleChunkField::encode`] and [`IndexAddressField::encode`] check the values before
+/// returning these bytes. The caller updates the containing object header and its checksum.
+pub struct EncodedIndexField {
+    bytes: [u8; MAX_INDEX_REFERENCE_LEN],
+    length: NonZeroUsize,
+}
+
+impl EncodedIndexField {
+    fn new(length: usize) -> Result<Self, FormatError> {
+        let length = NonZeroUsize::new(length)
+            .filter(|length| length.get() <= MAX_INDEX_REFERENCE_LEN)
+            .ok_or_else(|| {
+                FormatError::Internal("an index field has an invalid encoded length".into())
+            })?;
+        Ok(Self {
+            bytes: [0; MAX_INDEX_REFERENCE_LEN],
+            length,
+        })
+    }
+
+    /// Returns only the encoded field bytes, excluding unused buffer capacity.
+    pub fn as_bytes(&self) -> &[u8] {
+        let Self { bytes, length } = self;
+        &bytes[..length.get()]
+    }
+
+    fn write_address(
+        &mut self,
+        position: usize,
+        address: Option<StoredAddress>,
+        offsets: OffsetWidth,
+    ) -> Result<(), FormatError> {
+        match address {
+            Some(address) => {
+                bytes::write_defined_stored_address_at(&mut self.bytes, position, address, offsets)
+            }
+            None => bytes::write_stored_address_at(
+                &mut self.bytes,
+                position,
+                StoredAddress::undefined(offsets),
+                offsets,
+            ),
+        }
+    }
+}
+
+// "The Data Layout Message", format specification version 4.0, defines a version 4 filtered
+// Single Chunk reference's length, mask, and address fields.
+const MAX_INDEX_REFERENCE_LEN: usize =
+    LengthWidth::Eight.get() as usize + FILTER_MASK_LEN + OffsetWidth::Eight.get() as usize;
 
 /// The chunked layout feature flags, the Flags byte of a version 4 message's
 /// chunked property description.
@@ -824,6 +1100,198 @@ mod tests {
                 size: 512,
             }
         );
+    }
+
+    #[rstest]
+    #[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+    #[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+    #[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+    #[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+    #[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+    #[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+    #[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+    #[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+    #[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+    fn single_chunk_fields_preserve_independent_widths(
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[values(false, true)] filtered: bool,
+        #[values(false, true)] allocated: bool,
+    ) {
+        let widths = FormatWidths { offsets, lengths };
+        let fixture_widths =
+            test_util::widths::Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+        let original = test_util::data_layout::single_chunk(
+            fixture_widths,
+            filtered.then_some(test_util::data_layout::FilteredChunk {
+                size: 0x1234,
+                mask: 0x5566_7788,
+            }),
+            Some(0x3456),
+        );
+        let (_, Some(ChunkIndexFields::SingleChunk(field))) =
+            DataLayout::parse_with_index_fields(&original, widths).unwrap()
+        else {
+            panic!("expected Single Chunk fields");
+        };
+        let start = test_util::data_layout::ONE_DIMENSION_INDEX_INFO_OFFSET;
+        assert_eq!(
+            field.range(),
+            start
+                ..start
+                    + usize::from(offsets.get())
+                    + if filtered {
+                        usize::from(lengths.get()) + FILTER_MASK_LEN
+                    } else {
+                        0
+                    }
+        );
+        let record = allocated.then_some(ChunkRecord {
+            address: StoredAddress::new(0x4567),
+            stored_size: 0x2345,
+            filter_mask: 0x3344_aabb,
+        });
+        let encoded = field.encode(record).unwrap();
+        let expected = test_util::data_layout::single_chunk(
+            fixture_widths,
+            filtered.then_some(test_util::data_layout::FilteredChunk {
+                size: if allocated { 0x2345 } else { 0 },
+                mask: if allocated { 0x3344_aabb } else { 0 },
+            }),
+            allocated.then_some(0x4567),
+        );
+        assert_eq!(encoded.as_bytes(), &expected[start..]);
+        let mut output = original.clone();
+        output[field.range()].copy_from_slice(encoded.as_bytes());
+        assert_eq!(output, expected);
+        assert_eq!(&output[..start], &original[..start]);
+        assert!(
+            DataLayout::parse_with_ea_address(&original, widths)
+                .unwrap()
+                .1
+                .is_none()
+        );
+    }
+
+    #[rstest]
+    #[case::fixed(test_util::data_layout::ArrayIndex::Fixed { page_bits: 9 }, FIXED_ARRAY_INFO_LEN)]
+    #[case::extensible(test_util::data_layout::ArrayIndex::Extensible { parameters: [32, 4, 4, 16, 10] }, EXTENSIBLE_ARRAY_INFO_LEN)]
+    fn array_address_fields_preserve_selected_offset_width(
+        #[case] index: test_util::data_layout::ArrayIndex,
+        #[case] info_length: usize,
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+        #[values(false, true)] allocated: bool,
+    ) {
+        let widths = FormatWidths {
+            offsets,
+            lengths: LengthWidth::Two,
+        };
+        let fixture_widths = test_util::widths::Widths::new(usize::from(offsets.get()), 2);
+        let original = test_util::data_layout::array_chunk(fixture_widths, index, None);
+        let (_, fields) = DataLayout::parse_with_index_fields(&original, widths).unwrap();
+        let field = match fields.unwrap() {
+            ChunkIndexFields::FixedArray { page_bits, address } => {
+                assert_eq!(page_bits, 9);
+                address
+            }
+            ChunkIndexFields::ExtensibleArray(address) => {
+                assert_eq!(
+                    DataLayout::parse_with_ea_address(&original, widths)
+                        .unwrap()
+                        .1,
+                    Some(address.range())
+                );
+                address
+            }
+            fields => panic!("expected array fields, got {fields:?}"),
+        };
+        let start = test_util::data_layout::ONE_DIMENSION_INDEX_INFO_OFFSET + info_length;
+        assert_eq!(field.range(), start..start + usize::from(offsets.get()));
+        let encoded = field
+            .encode(allocated.then_some(StoredAddress::new(0x3456)))
+            .unwrap();
+        let expected =
+            test_util::data_layout::array_chunk(fixture_widths, index, allocated.then_some(0x3456));
+        let mut output = original;
+        output[field.range()].copy_from_slice(encoded.as_bytes());
+        assert_eq!(output, expected);
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, LengthWidth::Two, u64::from(u16::MAX) - 1, u64::from(u16::MAX))]
+    #[case::four(OffsetWidth::Four, LengthWidth::Four, u64::from(u32::MAX) - 1, u64::from(u32::MAX))]
+    #[case::eight(OffsetWidth::Eight, LengthWidth::Eight, u64::MAX - 1, u64::MAX)]
+    fn single_chunk_fields_encode_exact_width_limits(
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[case] address: u64,
+        #[case] size: u64,
+    ) {
+        let fixture_widths =
+            test_util::widths::Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+        let fixture = test_util::data_layout::single_chunk(
+            fixture_widths,
+            Some(test_util::data_layout::FilteredChunk { size: 0, mask: 0 }),
+            None,
+        );
+        let (_, Some(ChunkIndexFields::SingleChunk(field))) =
+            DataLayout::parse_with_index_fields(&fixture, FormatWidths { offsets, lengths })
+                .unwrap()
+        else {
+            panic!("expected Single Chunk fields");
+        };
+        let encoded = field
+            .encode(Some(ChunkRecord {
+                address: StoredAddress::new(address),
+                stored_size: size,
+                filter_mask: u32::MAX,
+            }))
+            .unwrap();
+        let expected = test_util::data_layout::single_chunk(
+            fixture_widths,
+            Some(test_util::data_layout::FilteredChunk {
+                size,
+                mask: u32::MAX,
+            }),
+            Some(address),
+        );
+        assert_eq!(
+            encoded.as_bytes(),
+            &expected[test_util::data_layout::ONE_DIMENSION_INDEX_INFO_OFFSET..]
+        );
+    }
+
+    #[rstest]
+    #[case::address_sentinel(OffsetWidth::Two, LengthWidth::Eight, 65_535, 1, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+    #[case::address_overflow(OffsetWidth::Two, LengthWidth::Eight, 65_536, 1, FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
+    #[case::length_overflow(OffsetWidth::Eight, LengthWidth::Two, 32, 65_536, FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
+    #[case::four_length_overflow(OffsetWidth::Two, LengthWidth::Four, 32, 4_294_967_296, FormatError::LengthTooLarge { length: 4_294_967_296, length_size: 4 })]
+    fn single_chunk_fields_reject_unrepresentable_records(
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[case] address: u64,
+        #[case] stored_size: u64,
+        #[case] expected: FormatError,
+    ) {
+        let fixture = test_util::data_layout::single_chunk(
+            test_util::widths::Widths::new(usize::from(offsets.get()), usize::from(lengths.get())),
+            Some(test_util::data_layout::FilteredChunk { size: 1, mask: 0 }),
+            None,
+        );
+        let (_, Some(ChunkIndexFields::SingleChunk(field))) =
+            DataLayout::parse_with_index_fields(&fixture, FormatWidths { offsets, lengths })
+                .unwrap()
+        else {
+            panic!("expected Single Chunk fields");
+        };
+        let Err(error) = field.encode(Some(ChunkRecord {
+            address: StoredAddress::new(address),
+            stored_size,
+            filter_mask: 0,
+        })) else {
+            panic!("expected an unrepresentable record");
+        };
+        assert_eq!(error, expected);
     }
 
     fn v4_chunked(flags: u8, index_type: u8, info: &[u8]) -> Vec<u8> {
