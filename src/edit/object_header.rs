@@ -481,7 +481,7 @@ pub(super) fn oh_region_at(
 ) -> Result<(u64, u64, ObjectHeaderPrefix), Error> {
     let parsed = ObjectHeaderPrefix::parse(prefix).map_err(|err| match err {
         FormatError::InvalidObjectHeaderSignature | FormatError::InvalidObjectHeaderVersion(_) => {
-            Error::EditUnsupported("an object does not use a version 2 object header")
+            Error::EditUnsupported(VERSION_TWO_REQUIRED)
         }
         FormatError::UnexpectedEof { .. } => Error::EditUnsupported("truncated object header"),
         err => Error::Format(err),
@@ -1045,6 +1045,9 @@ const OBJECT_HEADER_CHECKSUM_SIZE: usize = 4;
 
 /// The traversal limit for header chunks, including cyclic continuation chains.
 const MAX_OH_CHUNKS: usize = 256;
+
+/// The unsupported-header error used to select parsed-header traversal for other versions.
+pub(crate) const VERSION_TWO_REQUIRED: &str = "an object does not use a version 2 object header";
 
 #[cfg(test)]
 mod tests {

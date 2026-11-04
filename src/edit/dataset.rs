@@ -1525,60 +1525,54 @@ impl WriteEngine {
         chunks: &dyn ChunkProvider,
         dense_attrs: DenseAttrSet,
     ) -> Result<u64, Error> {
-        let widths = self.context.widths();
-        let ChunkGeometry {
-            shape,
-            spatial: chunk_dims,
-            element_size,
-            maxshape,
-            ..
-        } = geometry;
-        let element_size = *element_size;
-        let maxshape = maxshape.as_deref();
-        let prepared = VerbatimChunks::new(
-            widths,
-            meta,
-            shape,
-            chunk_dims,
-            element_size,
-            flags,
-            pipeline_message,
-            StoredAddress::ZERO,
-            maxshape,
-        )?;
-        let layout_message = if self.space.page_size().is_some() && prepared.array_kind().is_some()
-        {
-            self.write_paged_verbatim_chunks(prepared, chunks)?
-        } else {
-            let sizing = prepared.into_layout()?;
-            let (_addr, layout_message) = self.place_relocatable(
-                sizing.plan.total_len,
-                AllocationClass::Raw,
-                |stored_base| {
-                    let layout = chunked_write::plan_chunked_data_verbatim(
-                        widths,
-                        meta,
-                        shape,
-                        chunk_dims,
-                        element_size,
-                        flags,
-                        pipeline_message,
-                        stored_base,
-                        maxshape,
-                    )?;
-                    let mut buf =
-                        Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
-                    chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)
-                        .map_err(EmissionError::into_format)?;
-                    Ok((buf, layout.layout_message))
-                },
-            )?;
-            layout_message
-        };
+        let layout_message =
+            self.place_verbatim_chunks(geometry, flags, pipeline_message, meta, chunks)?;
         let mut new_region = replace_layout_message(region, &layout_message)?;
         self.append_dense_attrs(&mut new_region, dense_attrs)?;
         let oh = super::object_header::build_v2_object_header(&new_region)?;
         self.place_object_header(&oh)
+    }
+
+    /// Places stored chunk bytes and their rebuilt index and returns the replacement layout body.
+    ///
+    /// Uses the retained geometry for sizing and emission at the session's widths. Preserves
+    /// encoded chunk payloads, sizes, and filter masks.
+    ///
+    /// # Errors
+    ///
+    /// Returns planning errors from [`ChunkGeometry::plan_verbatim`], reservation and placement
+    /// errors from [`Self::place_relocatable`], or chunk-provider and emission errors.
+    pub(super) fn place_verbatim_chunks(
+        &mut self,
+        geometry: &ChunkGeometry,
+        flags: ChunkedLayoutFlags,
+        pipeline_message: Option<&[u8]>,
+        meta: &[ChunkMeta],
+        chunks: &dyn ChunkProvider,
+    ) -> Result<Vec<u8>, Error> {
+        let widths = self.context.widths();
+        let prepared = geometry.prepare_verbatim(
+            widths,
+            flags,
+            pipeline_message,
+            meta,
+            StoredAddress::ZERO,
+        )?;
+        if self.space.page_size().is_some() && prepared.array_kind().is_some() {
+            return self.write_paged_verbatim_chunks(prepared, chunks);
+        }
+        let sizing = prepared.into_layout()?;
+        let (_, layout_message) =
+            self.place_relocatable(sizing.plan.total_len, AllocationClass::Raw, |stored_base| {
+                let layout =
+                    geometry.plan_verbatim(widths, flags, pipeline_message, meta, stored_base)?;
+                let mut buf =
+                    Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
+                chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)
+                    .map_err(EmissionError::into_format)?;
+                Ok((buf, layout.layout_message))
+            })?;
+        Ok(layout_message)
     }
 
     /// Writes a PAGE provider payload and complete metadata index, returning its layout message.
@@ -2428,6 +2422,54 @@ impl ChunkGeometry {
             raw_size,
             maxshape: maxshape.map(<[MaxExtent]>::to_vec),
         }
+    }
+
+    /// Plans stored chunk placement and its layout at `address` without decoding payloads.
+    ///
+    /// Uses this geometry's current and maximum shapes, spatial dimensions, and stored element
+    /// size with the supplied file widths and filter metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns layout-planning errors from [`chunked_write::plan_chunked_data_verbatim`].
+    pub(super) fn plan_verbatim(
+        &self,
+        widths: FormatWidths,
+        flags: ChunkedLayoutFlags,
+        pipeline_message: Option<&[u8]>,
+        meta: &[ChunkMeta],
+        address: StoredAddress,
+    ) -> Result<chunked_write::VerbatimLayout, FormatError> {
+        self.prepare_verbatim(widths, flags, pipeline_message, meta, address)?
+            .into_layout()
+    }
+
+    fn prepare_verbatim<'a>(
+        &self,
+        widths: FormatWidths,
+        flags: ChunkedLayoutFlags,
+        pipeline_message: Option<&'a [u8]>,
+        meta: &[ChunkMeta],
+        address: StoredAddress,
+    ) -> Result<VerbatimChunks<'a>, FormatError> {
+        let Self {
+            shape,
+            spatial,
+            element_size,
+            raw_size: _,
+            maxshape,
+        } = self;
+        VerbatimChunks::new(
+            widths,
+            meta,
+            shape,
+            spatial,
+            *element_size,
+            flags,
+            pipeline_message,
+            address,
+            maxshape.as_deref(),
+        )
     }
 }
 

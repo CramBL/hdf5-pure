@@ -230,7 +230,9 @@ file.commit()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-Unlike [`copy`](crate::File::copy), the source subtree is read and validated **eagerly** (the [`File`](crate::File) borrow need not outlive the call), so [`copy_from`](crate::File::copy_from) returns a `Result`, and the destination still changes only on [`commit()`](crate::File::commit). Because the copy is byte-for-byte verbatim, anything whose stored bytes embed a *source-file* absolute address, which would dangle in another file, is rejected up front: variable-length and reference datasets and attributes (whether compact or dense), and any shared header message (a committed datatype, or an SOHM-shared dataspace, fill value, or filter pipeline). The same-file [`copy`](crate::File::copy) keeps these forms valid instead, by sharing the source file's global heaps and objects. The `source` must be a buffered file ([`File::open`](crate::File::open) or [`File::from_bytes`](crate::File::from_bytes), and not [`File::open_streaming`](crate::File::open_streaming)) using 8-byte offsets and no userblock.
+[`copy_from`](crate::File::copy_from) reads and checks the source subtree before returning, so the source handle need not outlive the call. The destination is published by [`File::commit`](crate::File::commit). The source must be buffered, have no userblock, and use the same address and length widths as the destination.
+
+Cross-file copies reject variable-length and reference datasets and attributes, including dense attributes, and shared header messages. Their encoded references would otherwise retain addresses in the source file. Same-file [`copy`](crate::File::copy) can share the file's existing global heaps and referenced objects.
 
 ### Replacing an object
 

@@ -17,6 +17,7 @@ use crate::attribute_policy::AttributePolicy;
 use crate::attribute_policy::AttributeStorage;
 use crate::attribute_request::AttributeName;
 use crate::convert::Narrow;
+use crate::datatype::Datatype;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_writer::DenseAttrCreationOrder;
 use crate::message_flags::MessageFlags;
@@ -146,16 +147,10 @@ impl WriteEngine {
         region: &mut OhRegion,
         set: DenseAttrSet,
     ) -> Result<(), Error> {
-        if set.is_empty() {
+        let Some(plan) = set.into_plan()? else {
             return Ok(());
-        }
-        let attr_info_message =
-            self.place_dense_attrs(crate::file_writer::finalize_dense_attrs(
-                set.prepared.ok_or_else(|| {
-                    FormatError::Internal("a dense set has no prepared geometry".into())
-                })?,
-                &set.attrs,
-            )?)?;
+        };
+        let attr_info_message = self.place_dense_attrs(plan)?;
         region.push(MessageType::ATTRIBUTE_INFO, &attr_info_message);
         Ok(())
     }
@@ -443,6 +438,28 @@ impl DenseAttrSet {
             )?),
             attrs,
         })
+    }
+
+    /// Resolves deferred body updates into a dense-storage plan.
+    ///
+    /// Returns `None` for an empty set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a nonempty set lacks prepared geometry. Propagates
+    /// finalization errors from [`crate::file_writer::finalize_dense_attrs`].
+    pub(super) fn into_plan(self) -> Result<Option<DenseAttrPlan>, FormatError> {
+        let Self { attrs, prepared } = self;
+        if attrs.is_empty() {
+            return Ok(None);
+        }
+        crate::file_writer::finalize_dense_attrs(
+            prepared.ok_or_else(|| {
+                FormatError::Internal("a dense set has no prepared geometry".into())
+            })?,
+            &attrs,
+        )
+        .map(Some)
     }
 
     /// Returns the messages used to resolve the prepared updates during placement.
@@ -1455,17 +1472,19 @@ fn strip_attr_messages(region: &OhRegion) -> Result<OhRegion, Error> {
 /// Reads an object's compact or dense attributes into owned messages.
 ///
 /// Resolves heap addresses using the opened source's effective address context. The caller
-/// checks whether the resulting set can be rebuilt after applying any edits.
+/// checks whether the resulting set can be rebuilt after applying any edits. Calls `inspect`
+/// after resolving each datatype and before parsing its dataspace or copying its values.
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if the effective base exceeds the source length.
-/// Propagates header parsing, attribute parsing, and source-read errors.
+/// Propagates header parsing, attribute parsing, source-read, and inspection errors.
 pub(super) fn read_object_attrs(
     src: &(impl OriginalSource + ?Sized),
     access_mode: AccessMode,
     addr: u64,
     widths: FormatWidths,
+    inspect: impl FnMut(&Datatype) -> Result<(), FormatError>,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
     let base = src.addresses();
     let header = ObjectHeader::parse_from_source_with_widths(
@@ -1480,13 +1499,14 @@ pub(super) fn read_object_attrs(
             "this file's userblock is larger than the file itself",
         ));
     }
-    crate::attribute::extract_stored_attributes_from_source(
+    crate::attribute::extract_stored_attributes_with(
         src,
         access_mode,
         &header,
         widths,
         // Read attributes without a shared-message table.
         None,
+        inspect,
     )
     .map_err(Error::Format)
 }

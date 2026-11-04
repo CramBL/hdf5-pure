@@ -72,6 +72,12 @@ impl Header {
         }
     }
 
+    /// Sets the encoded heap-ID length in bytes.
+    pub fn heap_id_length(mut self, length: u16) -> Self {
+        self.heap_id_len = length;
+        self
+    }
+
     pub fn managed_object_count(mut self, count: u64) -> Self {
         self.managed_object_count = count;
         self
@@ -156,6 +162,29 @@ impl Header {
         bytes::push_uint(&mut block, 0, offset_width);
         block.extend_from_slice(objects);
         block
+    }
+
+    /// Encodes a managed heap ID with a two-byte offset and one-byte length.
+    ///
+    /// Pads the ID to this header's configured heap-ID length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `length` exceeds the maximum managed-object size or the heap-ID length is less
+    /// than four bytes.
+    pub fn managed_id(&self, offset: u16, length: u8) -> Vec<u8> {
+        assert!(u32::from(length) <= self.max_managed_object_size);
+        let mut id = vec![MANAGED_ID];
+        id.extend_from_slice(&offset.to_le_bytes());
+        id.push(length);
+        assert!(id.len() <= usize::from(self.heap_id_len));
+        id.resize(usize::from(self.heap_id_len), 0);
+        id
+    }
+
+    /// Returns the starting direct-block size encoded in the doubling-table parameters.
+    pub fn direct_block_size(&self) -> u64 {
+        self.starting_block_size
     }
 }
 
@@ -439,3 +468,10 @@ pub const FILTER_INFO_LEN_AT: usize = SIGNATURE.len() + 1 + 2;
 const TABLE_WIDTH_AT: usize = FILTER_INFO_LEN_AT + 2 + 1 + 4 + 12 * LENGTH;
 const ROOT_ROWS_AT: usize = TABLE_WIDTH_AT + 2 + 2 * LENGTH + 2 + 2 + LENGTH;
 const FILTER_MASK_LEN: usize = 4;
+
+/// The version 0 managed heap-ID prefix, with type and reserved bits set to zero.
+///
+/// Defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const MANAGED_ID: u8 = 0;

@@ -1,15 +1,14 @@
 //! Object-tree copies, source reads, and reference screening for staged edits.
 
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
-use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
+use hdf5_pure_format::__private::{ChunkedGeometry, DenseAttrPlan};
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::chunked_read;
 use crate::chunked_write::{ChunkMeta, ChunkProvider};
 use crate::convert::Narrow;
@@ -17,7 +16,8 @@ use crate::data_layout::{ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError};
-use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
+use crate::file_writer;
+use crate::link_info::LinkInfoMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::Expansion;
@@ -31,7 +31,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::reader::OpenedSource;
 use crate::shared_message::SharedResolver;
 use crate::source::{OriginalSource, PhysicalSource, Source};
-use crate::width::FormatWidths;
+use crate::width::{FormatWidths, OffsetWidth};
 
 use super::attributes::{self, DenseAttrSet};
 use super::dataset::{self, ChunkGeometry};
@@ -40,6 +40,11 @@ use super::group_links;
 use super::object_header::OhRegion;
 use super::staging::StagedOp;
 use super::{InvalidatedAddresses, WriteEngine};
+
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
 
 impl WriteEngine {
     /// Stages a deep copy of a committed object for the next [`commit`](Self::commit).
@@ -67,8 +72,8 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the source is streamed, uses a userblock or
-    /// widths other than eight bytes, either path is the root, or a live buffered appender
-    /// overlaps `dst`. Returns the read or preparation error if the source subtree cannot
+    /// widths that differ from the destination's, either path is the root, or a live buffered
+    /// appender overlaps `dst`. Returns the read or preparation error if the source subtree cannot
     /// be resolved or reproduced without references to storage in the source file.
     pub fn copy_from(
         &mut self,
@@ -80,11 +85,7 @@ impl WriteEngine {
             "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
         ))?;
         let src_sb = source.superblock();
-        if src_sb.offset_size != OFFSET_WIDTH || src_sb.length_size != LENGTH_WIDTH {
-            return Err(Error::EditUnsupported(
-                "cross-file copy requires the source file to use 8-byte offsets and lengths",
-            ));
-        }
+        require_copy_widths(self.context.widths(), source.widths())?;
         if !source.base_address().is_zero() {
             return Err(Error::EditUnsupported(
                 "cross-file copy requires the source file to have no userblock (base address 0)",
@@ -129,7 +130,8 @@ impl WriteEngine {
     /// Dense attributes are read into an owned set for replacement storage. Keeps every Link
     /// message in the retained header records, and records the byte offset of each hard link's
     /// address field and of a contiguous dataset's data address within them. Parses continuation
-    /// fields at `widths`.
+    /// fields at `widths`. Screens reference datatypes before copying attribute values when
+    /// offsets are narrower than eight bytes.
     ///
     /// The layout version 3 and 4 fields are defined in "The Data Layout Message" of the
     /// [format specification, version 4.0][layout]. The Link Info version 0 fields are defined
@@ -140,7 +142,9 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] if the source uses external storage, an unsupported
     /// layout, dense link storage, or a Link message the editor cannot reproduce, if a dataset
     /// header contains Link messages, or if the object is neither a dataset nor a group.
-    /// Propagates metadata, attribute, and Link message read, parse, and storage-planning errors.
+    /// Returns [`FormatError::ReferenceWidthUnsupported`] for reference-bearing datatypes at
+    /// two- or four-byte offset widths. Propagates metadata, attribute, and Link message read,
+    /// parse, and storage-planning errors.
     ///
     /// [layout]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     /// [links]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
@@ -154,6 +158,7 @@ impl WriteEngine {
         let region = Self::gather_oh_messages(src, addr, base, widths)?;
 
         reject_external_storage(&region)?;
+        require_copy_reference_widths(src, &region)?;
 
         let mut dense = false;
         let mut p = 0;
@@ -161,7 +166,7 @@ impl WriteEngine {
             if msg_type == MessageType::ATTRIBUTE_INFO {
                 let ai = crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
                     &region[body..body_end],
-                    crate::file_writer::OFFSET_WIDTH,
+                    widths.offsets,
                 )?;
                 if ai.fractal_heap_address.is_some() {
                     dense = true;
@@ -172,7 +177,10 @@ impl WriteEngine {
 
         // Read dense attributes into owned messages and check that they can be serialized.
         let dense_attrs = if dense {
-            let stored = attributes::read_object_attrs(src, access_mode, addr, widths)?;
+            let stored =
+                attributes::read_object_attrs(src, access_mode, addr, widths, |datatype| {
+                    file_writer::require_reference_width(widths, datatype)
+                })?;
             let set = attributes::dense_attr_set(&region, stored)?;
             DenseAttrSet::new(widths, set.attrs, set.creation, [])?
         } else {
@@ -202,29 +210,26 @@ impl WriteEngine {
                 }
                 MessageType::LINK_INFO => {
                     has_link_info = true;
-                    let mut q = body + 2;
-                    if body_end - body >= 2 && region[body + 1] & 0x01 != 0 {
-                        q += 8;
-                    }
-                    if q + 8 <= body_end {
-                        let heap_addr = u64::from_le_bytes(region[q..q + 8].try_into().unwrap());
-                        if heap_addr != u64::MAX {
-                            return Err(Error::EditUnsupported(
-                                "a group uses dense (fractal-heap) link storage (not supported in place yet)",
-                            ));
-                        }
+                    let info = LinkInfoMessage::parse_with_offset_width(
+                        &region[body..body_end],
+                        widths.offsets,
+                    )?;
+                    if info.fractal_heap_address.is_some() {
+                        return Err(Error::EditUnsupported(
+                            "a group uses dense (fractal-heap) link storage (not supported in place yet)",
+                        ));
                     }
                 }
                 MessageType::LINK => {
                     has_links = true;
-                    let link = OwnedLink::parse(&region[body..body_end], OFFSET_WIDTH)
+                    let link = OwnedLink::parse(&region[body..body_end], widths.offsets)
                         .map_err(group_links::storage_error)?;
                     if let OwnedLinkTarget::Hard {
                         object_header_address,
                     } = *link.target()
                     {
                         // `OwnedLink::parse` rejects trailing bytes, so the address ends the body.
-                        let address = body_end - usize::from(OFFSET_WIDTH.get());
+                        let address = body_end - usize::from(widths.offsets.get());
                         links.push(CopyLink {
                             addr_off: kept.len() + (address - p),
                             target: object_header_address,
@@ -249,8 +254,11 @@ impl WriteEngine {
                     "a dataset header holds link messages",
                 ));
             }
+            if lsize < 2 {
+                return Err(Error::EditUnsupported("malformed data layout"));
+            }
             let version = kept[lbody];
-            if !(version == 3 || version == 4) || lsize < 2 {
+            if !(version == 3 || version == 4) {
                 return Err(Error::EditUnsupported(
                     "an unsupported data-layout version cannot be copied in place yet",
                 ));
@@ -262,14 +270,20 @@ impl WriteEngine {
                     dense_attrs,
                 }),
                 1 => {
-                    if lbody + 18 > kept.len() {
-                        return Err(Error::EditUnsupported("malformed contiguous data layout"));
-                    }
-                    let data_addr = StoredAddress::new(u64::from_le_bytes(
-                        kept[lbody + 2..lbody + 10].try_into().unwrap(),
-                    ));
-                    let data_size =
-                        u64::from_le_bytes(kept[lbody + 10..lbody + 18].try_into().unwrap());
+                    let layout =
+                        DataLayout::parse_with_widths(&kept[lbody..lbody + lsize], widths)?;
+                    let DataLayout::Contiguous {
+                        address,
+                        size: data_size,
+                    } = layout
+                    else {
+                        return Err(FormatError::Internal(
+                            "a contiguous layout has another class".into(),
+                        )
+                        .into());
+                    };
+                    let data_addr =
+                        address.unwrap_or_else(|| StoredAddress::undefined(widths.offsets));
                     Ok(ObjModel::DatasetContiguous {
                         region: kept,
                         addr_off: lbody + 2,
@@ -343,99 +357,85 @@ impl WriteEngine {
     /// if writing the copy fails. Propagates errors from [`Self::write_chunked_relocatable`] for
     /// chunked copies.
     pub(super) fn write_copy_subtree(&mut self, tree: &CopyTree) -> Result<u64, Error> {
-        let mut written = Vec::with_capacity(tree.descendants.len());
-        for node in &tree.descendants {
-            let addr = self.write_copy_node(&written, node)?;
-            written.push(addr);
-        }
-        self.write_copy_node(&written, &tree.root)
+        let root = tree.emit(self)?;
+        Ok(self.context.addresses().resolve(root)?.get())
     }
+}
 
-    /// Writes one node of a copy and returns its object-header address.
-    ///
-    /// The caller passes in `written` the address of each descendant written before `node`, at the
-    /// index of its [`CopyNodeId`].
+/// Placement operations for the shared copy emitter.
+///
+/// The emitter supplies retained chunk geometry and finalized dense-attribute plans.
+/// Implementations place their bytes and return stored addresses or replacement message bodies.
+trait CopyOutput {
+    /// Returns the destination widths used to check each retained header.
+    fn output_widths(&self) -> FormatWidths;
+    /// Places contiguous values and returns their stored starting address.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if a link of `node` targets a descendant that is not in
-    /// `written`. Returns the other errors [`Self::write_copy_subtree`] documents.
-    fn write_copy_node(&mut self, written: &[u64], node: &CopyNode) -> Result<u64, Error> {
-        let base = self.context.addresses();
-        match node {
-            CopyNode::DatasetVerbatim {
-                region,
-                dense_attrs,
-            } => {
-                let mut region = region.clone();
-                self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::object_header::build_v2_object_header(&region)?;
-                self.place_object_header(&oh)
-            }
-            CopyNode::DatasetContiguous {
-                region,
-                addr_off,
-                data,
-                dense_attrs,
-            } => {
-                let mut region = region.clone();
-                // Preserve an undefined data address without allocating a data block.
-                if let Some(data) = data {
-                    let new_data_addr = self.alloc_or_append_typed(data, AllocationClass::Raw)?;
-                    hdf5_pure_format::__private::write_stored_address_at(
-                        region.bytes_mut(),
-                        *addr_off,
-                        base.relative(PhysicalAddress::new(new_data_addr))?,
-                        OFFSET_WIDTH,
-                    )?;
-                }
-                self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::object_header::build_v2_object_header(&region)?;
-                self.place_object_header(&oh)
-            }
-            CopyNode::DatasetChunked {
-                region,
-                geometry,
-                flags,
-                pipeline_message,
-                meta,
-                chunk_bytes,
-                dense_attrs,
-            } => self.write_chunked_relocatable(
-                region,
-                geometry,
-                *flags,
-                pipeline_message.as_deref(),
-                meta,
-                &SliceChunkProvider {
-                    chunks: chunk_bytes,
-                },
-                dense_attrs.clone(),
-            ),
-            CopyNode::Group {
-                region,
-                links,
-                dense_attrs,
-            } => {
-                let mut region = region.clone();
-                for CopyLink { addr_off, target } in links {
-                    let child = written.get(target.index()).copied().ok_or_else(|| {
-                        FormatError::Internal(
-                            "a copied group links an object that is not yet written".into(),
-                        )
-                    })?;
-                    hdf5_pure_format::__private::write_stored_address_at(
-                        region.bytes_mut(),
-                        *addr_off,
-                        base.relative(PhysicalAddress::new(child))?,
-                        OFFSET_WIDTH,
-                    )?;
-                }
-                self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::object_header::build_v2_object_header(&region)?;
-                self.place_object_header(&oh)
-            }
-        }
+    /// Returns implementation-specific reservation, address-conversion, or write errors.
+    fn place_data(&mut self, data: &[u8]) -> Result<StoredAddress, Error>;
+    /// Places stored chunks and their index and returns the replacement Data Layout body.
+    ///
+    /// # Errors
+    ///
+    /// Returns implementation-specific planning, provider, reservation, or write errors.
+    fn place_chunks(
+        &mut self,
+        geometry: &ChunkGeometry,
+        flags: ChunkedLayoutFlags,
+        pipeline: Option<&[u8]>,
+        meta: &[ChunkMeta],
+        chunks: &dyn ChunkProvider,
+    ) -> Result<Vec<u8>, Error>;
+    /// Places finalized dense attributes and returns their Attribute Info body.
+    ///
+    /// # Errors
+    ///
+    /// Returns implementation-specific allocation, encoding, or write errors.
+    fn place_attributes(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error>;
+    /// Places a complete encoded header and returns its stored starting address.
+    ///
+    /// # Errors
+    ///
+    /// Returns implementation-specific reservation, address-conversion, or write errors.
+    fn place_header(&mut self, header: &[u8]) -> Result<StoredAddress, Error>;
+}
+
+impl CopyOutput for WriteEngine {
+    fn output_widths(&self) -> FormatWidths {
+        self.context.widths()
+    }
+
+    fn place_data(&mut self, data: &[u8]) -> Result<StoredAddress, Error> {
+        let address = self.alloc_or_append_typed(data, AllocationClass::Raw)?;
+        Ok(self
+            .context
+            .addresses()
+            .relative(PhysicalAddress::new(address))?)
+    }
+
+    fn place_chunks(
+        &mut self,
+        geometry: &ChunkGeometry,
+        flags: ChunkedLayoutFlags,
+        pipeline: Option<&[u8]>,
+        meta: &[ChunkMeta],
+        chunks: &dyn ChunkProvider,
+    ) -> Result<Vec<u8>, Error> {
+        self.place_verbatim_chunks(geometry, flags, pipeline, meta, chunks)
+    }
+
+    fn place_attributes(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error> {
+        self.place_dense_attrs(plan)
+    }
+
+    fn place_header(&mut self, header: &[u8]) -> Result<StoredAddress, Error> {
+        let address = self.place_object_header(header)?;
+        Ok(self
+            .context
+            .addresses()
+            .relative(PhysicalAddress::new(address))?)
     }
 }
 
@@ -493,6 +493,21 @@ impl CopyTree {
         core::iter::once(&self.root)
             .chain(&self.descendants)
             .any(|node| !node.dense_attrs().is_empty())
+    }
+
+    /// Places descendants before their parents and returns the copied root's stored address.
+    ///
+    /// The caller publishes the returned root after successful placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`CopyNode::emit`]. Earlier nodes may have been placed before an error.
+    fn emit(&self, output: &mut impl CopyOutput) -> Result<StoredAddress, Error> {
+        let mut written = Vec::with_capacity(self.descendants.len());
+        for node in &self.descendants {
+            written.push(node.emit(output, &written)?);
+        }
+        self.root.emit(output, &written)
     }
 
     /// Returns the nodes depth first, each group before its targets and the targets in link
@@ -602,6 +617,84 @@ pub(super) enum CopyNode {
 }
 
 impl CopyNode {
+    /// Places one copied object with references to the previously written descendants.
+    ///
+    /// Checks the retained region's widths against the destination before placement. Rebuilds a
+    /// chunked layout from borrowed records using the retained geometry and finalizes dense
+    /// attribute storage separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the source and destination widths differ,
+    /// [`FormatError::Internal`] if a child address is missing, or address-patch, header-encoding,
+    /// dense-plan, and placement errors.
+    fn emit(
+        &self,
+        output: &mut impl CopyOutput,
+        written: &[StoredAddress],
+    ) -> Result<StoredAddress, Error> {
+        let widths = output.output_widths();
+        require_copy_widths(widths, self.region().widths())?;
+        let mut region = match self {
+            Self::DatasetContiguous {
+                addr_off,
+                data: Some(data),
+                ..
+            } => {
+                let mut region = self.region().clone();
+                let address = output.place_data(data)?;
+                hdf5_pure_format::__private::write_stored_address_at(
+                    region.bytes_mut(),
+                    *addr_off,
+                    address,
+                    widths.offsets,
+                )?;
+                region
+            }
+            Self::DatasetChunked {
+                geometry,
+                flags,
+                pipeline_message,
+                meta,
+                chunk_bytes,
+                ..
+            } => {
+                let layout = output.place_chunks(
+                    geometry,
+                    *flags,
+                    pipeline_message.as_deref(),
+                    meta,
+                    &SliceChunkProvider {
+                        chunks: chunk_bytes,
+                    },
+                )?;
+                dataset::replace_layout_message(self.region(), &layout)?
+            }
+            Self::Group { links, .. } => {
+                let mut region = self.region().clone();
+                for CopyLink { addr_off, target } in links {
+                    let child = written.get(target.index()).copied().ok_or_else(|| {
+                        FormatError::Internal(
+                            "a copied group links an object that is not yet written".into(),
+                        )
+                    })?;
+                    hdf5_pure_format::__private::write_stored_address_at(
+                        region.bytes_mut(),
+                        *addr_off,
+                        child,
+                        widths.offsets,
+                    )?;
+                }
+                region
+            }
+            _ => self.region().clone(),
+        };
+        if let Some(plan) = self.dense_attrs().clone().into_plan()? {
+            region.push(MessageType::ATTRIBUTE_INFO, &output.place_attributes(plan)?);
+        }
+        output.place_header(&super::object_header::build_v2_object_header(&region)?)
+    }
+
     /// Returns the header records the copy keeps, without the Attribute Info and Attribute
     /// messages of dense attribute storage.
     fn region(&self) -> &OhRegion {
@@ -613,6 +706,7 @@ impl CopyNode {
         }
     }
 
+    /// Returns the retained dense-attribute messages and their prepared geometry.
     fn dense_attrs(&self) -> &DenseAttrSet {
         match self {
             Self::DatasetChunked { dense_attrs, .. }
@@ -898,7 +992,7 @@ impl CopyReader<'_> {
                 dense_attrs,
             } => {
                 // Preserve an undefined data address without allocating a data block.
-                let data = if data_addr.is_undefined(OFFSET_WIDTH) {
+                let data = if data_addr.is_undefined(widths.offsets) {
                     None
                 } else {
                     let start = src.addresses().resolve(data_addr)?.get();
@@ -939,12 +1033,8 @@ impl CopyReader<'_> {
                     ChunkedGeometry::with_offset_width(widths.offsets, &dt, &ds, &layout)?;
 
                 let source = PhysicalSource::new(&src).stored();
-                let infos = chunked_read::enumerate_chunks_from_source(
-                    &source,
-                    &layout,
-                    &ds,
-                    crate::file_writer::WIDTHS,
-                )?;
+                let infos =
+                    chunked_read::enumerate_chunks_from_source(&source, &layout, &ds, widths)?;
                 let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial)
                     .ok_or(Error::EditUnsupported(
                         "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
@@ -1171,6 +1261,74 @@ fn parse_chunked_header(
     })
 }
 
+/// Requires identical address and length widths for retained copy records.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if either width differs.
+fn require_copy_widths(destination: FormatWidths, source: FormatWidths) -> Result<(), Error> {
+    if destination != source {
+        return Err(Error::EditUnsupported(
+            "cross-file copy requires matching address and length widths",
+        ));
+    }
+    Ok(())
+}
+
+/// Screens dataset and compact-attribute datatypes before reading values at narrow offsets.
+///
+/// Skips this inspection for eight-byte offsets. Dense attributes are screened during their read.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ReferenceWidthUnsupported`] for reference-bearing datatypes with
+/// two- or four-byte offsets, or [`FormatError::UnsupportedSohmReference`] for a shared attribute
+/// record. Propagates record, datatype, and resolver errors.
+fn require_copy_reference_widths(
+    source: &(impl OriginalSource + ?Sized),
+    region: &OhRegion,
+) -> Result<(), Error> {
+    let widths = region.widths();
+    if widths.offsets == OffsetWidth::Eight {
+        return Ok(());
+    }
+    let resolver =
+        crate::shared_message::SourceResolver::new(source, AccessMode::ReadWrite, widths, None);
+    let mut position = 0;
+    while let Some(record) = region
+        .layout()
+        .next_message(region, position)
+        .map_err(super::object_header::record_error)?
+    {
+        match record.msg_type {
+            MessageType::DATATYPE => {
+                let resolved;
+                let encoded = if record.flags.is_shared() {
+                    resolved = resolver.resolve(record.body, MessageType::DATATYPE)?;
+                    resolved.as_slice()
+                } else {
+                    record.body
+                };
+                let (datatype, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
+                file_writer::require_reference_width(widths, &datatype)?;
+            }
+            MessageType::ATTRIBUTE => {
+                if record.flags.is_shared() {
+                    return Err(FormatError::UnsupportedSohmReference.into());
+                }
+                let datatype = crate::attribute::AttributeMessage::parse_datatype_resolving(
+                    record.body,
+                    &resolver,
+                )?;
+                file_writer::require_reference_width(widths, &datatype)?;
+            }
+            _ => {}
+        }
+        position = record.body_range.end;
+    }
+    Ok(())
+}
+
 /// Rejects a header with an External Data Files message.
 ///
 /// Both copy paths use this check because the editor reads dataset elements from the source
@@ -1235,9 +1393,9 @@ pub(super) fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
                         "an attribute with a committed (shared) datatype cannot be copied to another file yet",
                     ));
                 }
-                let attr = crate::attribute::AttributeMessage::parse_with_length_width(
+                let attr = crate::attribute::AttributeMessage::parse_with_widths(
                     &region[body..body_end],
-                    crate::file_writer::LENGTH_WIDTH,
+                    region.widths(),
                 )?;
                 if datatype::datatype_holds_file_address(&attr.datatype) {
                     return Err(Error::EditUnsupported(
@@ -1327,3 +1485,6 @@ const COPY_BUDGET: TraversalBudget = TraversalBudget::new(1 << 24, 1 << 24);
 /// The reason [`Error::EditUnsupported`] gives for a copy source whose objects do not form a tree.
 pub(super) const COPY_REPEATED_OBJECT: &str = "a copy source reaches one object through more than one hard link (an alias or a \
      cycle), which a copy cannot reproduce yet";
+
+#[cfg(test)]
+mod tests;

@@ -3,6 +3,14 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+#[cfg(feature = "hdf5")]
+use hdf5::File as NativeFile;
+#[cfg(feature = "hdf5")]
+use hdf5::ObjectReference;
+#[cfg(feature = "hdf5")]
+use hdf5::ObjectReference1;
+#[cfg(feature = "hdf5")]
+use hdf5::ReferencedObject;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
@@ -74,4 +82,85 @@ impl Origin {
         file.commit().unwrap();
         file.close().unwrap();
     }
+}
+
+/// The storage location of a native legacy object-reference fixture.
+#[cfg(feature = "hdf5")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceSite {
+    /// A root-group attribute named `reference`.
+    Attribute,
+    /// A dataset named `references`.
+    Dataset,
+    /// A root-group attribute with additional attributes for dense-storage fixtures.
+    DenseAttribute,
+}
+
+/// Writes one native legacy object reference to the object named `target`.
+///
+/// For [`ReferenceSite::DenseAttribute`], also creates eight scalar numeric attributes on the
+/// root group. The caller checks that its creation settings select dense storage.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create the reference, its dataset or attribute, or the extra
+/// attributes.
+#[cfg(feature = "hdf5")]
+pub fn write_legacy_reference(file: &NativeFile, site: ReferenceSite) {
+    let reference = ObjectReference1::create(file, "target").unwrap();
+    match site {
+        ReferenceSite::Dataset => {
+            file.new_dataset::<ObjectReference1>()
+                .shape(1)
+                .create("references")
+                .unwrap()
+                .write_raw(&[reference])
+                .unwrap();
+        }
+        ReferenceSite::Attribute | ReferenceSite::DenseAttribute => {
+            file.new_attr::<ObjectReference1>()
+                .shape(1)
+                .create("reference")
+                .unwrap()
+                .write_raw(&[reference])
+                .unwrap();
+            if site == ReferenceSite::DenseAttribute {
+                for index in 0..8_u32 {
+                    file.new_attr::<u32>()
+                        .create(format!("number_{index}").as_str())
+                        .unwrap()
+                        .write_scalar(&index)
+                        .unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// Checks that a native legacy reference resolves to a dataset containing the one value `expected`.
+///
+/// # Panics
+///
+/// Panics if a native read or reference resolution fails, the fixture holds a different number
+/// of references, the target is not a dataset, or its complete values differ from `[expected]`.
+#[cfg(feature = "hdf5")]
+pub fn assert_legacy_reference(path: &Path, site: ReferenceSite, expected: u32) {
+    let file = crate::file::libhdf5_open(path);
+    let references = match site {
+        ReferenceSite::Dataset => file
+            .dataset("references")
+            .unwrap()
+            .read_raw::<ObjectReference1>()
+            .unwrap(),
+        ReferenceSite::Attribute | ReferenceSite::DenseAttribute => file
+            .attr("reference")
+            .unwrap()
+            .read_raw::<ObjectReference1>()
+            .unwrap(),
+    };
+    assert_eq!(references.len(), 1);
+    let ReferencedObject::Dataset(target) = references[0].dereference(&file).unwrap() else {
+        panic!("the reference must address a dataset");
+    };
+    assert_eq!(target.read_raw::<u32>().unwrap(), [expected]);
 }

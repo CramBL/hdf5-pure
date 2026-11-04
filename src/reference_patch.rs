@@ -1,73 +1,13 @@
-//! Repointing the object references a file already stores, across the
-//! object-header relocations one commit makes (issue #324).
+//! Object-reference patch plans and reference screening for staged edits.
 //!
-//! A [`File::open_rw`](crate::File::open_rw) commit rebuilds a dirty object's
-//! header at a fresh address and repoints the one *link* that names it. That is
-//! enough for the link graph and not enough for the file: an **object
-//! reference** is an object-header address stored as data, in a dataset's
-//! elements or an attribute's value, and nothing about rewriting a header
-//! updates one. Left alone it keeps naming the pre-commit header, which the same
-//! commit frees — so a reference dataset the commit never touched reads a stale
-//! copy of the object, and reads garbage once something reuses the span.
+//! For eight-byte offsets, plans patches in inline version 2 attributes and compact or contiguous
+//! dataset values whose reference slots [`datatype::embedded_reference_slots`] can locate.
+//! Unsupported storage can leave the reference-free proof incomplete. Version 1 headers are
+//! traversed through the parsed-header path, which can patch contiguous values.
 //!
-//! This module finds those stored addresses and rewrites them. It runs *after*
-//! the superblock repoint, over the committed tree, for two reasons. The commit
-//! is atomic at the repoint, and a fixup derived from it must not precede it: a
-//! crash before the repoint has to leave the pre-commit file, references
-//! included. And the committed tree is the one whose bytes need fixing — a
-//! rebuilt group's header is a fresh copy of the pre-commit one, carrying the
-//! old address of anything it referenced, so patching the header the commit
-//! superseded would correct bytes that are already dead.
-//!
-//! # What it reaches
-//!
-//! Two questions decide it, and both have to answer yes: **where** the bytes are
-//! stored, and **what** [`datatype::embedded_reference_slots`] can locate inside an
-//! element.
-//!
-//! Storage: an **inline attribute's value**, and a **contiguous** or **compact**
-//! dataset's elements. A **committed** (`H5Tcommit`) datatype is followed rather
-//! than skipped, so a dataset of references through a named type is reached like
-//! any other.
-//!
-//! Datatype: an 8-byte object reference, an **array** of them, a **compound**
-//! holding one, and any nesting of those two. That is the whole of it — see
-//! `datatype::embedded_reference_slots`, whose reach this inherits exactly.
-//!
-//! # What it does not
-//!
-//! Everything else, and none of it is refused. Each is left as it was, which is
-//! the pre-#324 behaviour rather than a new failure. By storage:
-//!
-//! - **Chunked** dataset elements. Unfiltered chunks would only need the index
-//!   walked; filtered ones hold their addresses compressed, the same obstacle
-//!   that makes [`crate::repack()`] reject a chunked object-reference dataset.
-//! - **Dense (fractal-heap) attributes**, whose values are not in the header,
-//!   and an attribute held as a **shared (SOHM) record**, which is not stored in
-//!   the header either.
-//! - An **attribute's value** in a **version 1 object header**.
-//!   [`edit::object_header::read_oh_chunks`] supports version 2 headers.
-//!   [`scan_parsed_header`] reads contiguous element data from parsed headers of both versions,
-//!   whose message bodies have no file offsets for attribute patches. The walk descends through
-//!   either version to find child objects.
-//!
-//! And by datatype, every form `embedded_reference_slots` answers `None` for: an
-//! object reference **wider than 8 bytes**, a **dataset-region** reference, a
-//! **variable length** of references (the encoding the dimension-scale attribute
-//! `DIMENSION_LIST` uses, whose addresses sit in a global heap collection), an
-//! **enumeration** over one, and any compound or array reaching one of those.
-//!
-//! A file whose objects all carry version 1 headers - libhdf5's
-//! default, and h5py's — can never be *proved* free of references, since an
-//! attribute in one of those headers is never read. Such a file is therefore
-//! walked on every commit rather than on the first.
-//!
-//! Deliberately, none of these is a *refusal*. Every commit rebuilds at least
-//! its root group, so there is always a relocation in hand, and refusing on an
-//! unreachable shape would therefore refuse *every* commit on any file holding
-//! one — a ban rather than a check, imposed on files whose references were no
-//! better served before this module existed. The crate's
-//! [limitations](crate#limitations) record the set as a whole.
+//! For two- or four-byte offsets, screens reachable dataset and attribute datatypes before
+//! publication. Rejects reference-bearing datatypes and propagates inspection failures. Skips the
+//! source walk on subsequent preflight calls when a successful proof is cached.
 
 use std::collections::BTreeMap;
 
@@ -82,22 +22,26 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 use crate::attribute::AttributeMessage;
+use crate::attribute_info::AttributeInfoMessage;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout};
 use crate::datatype::{self, Datatype};
 use crate::edit;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
+use crate::file_writer;
 use crate::group::v1 as group_v1;
 use crate::group::v2 as group_v2;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::{ObjectId, ObjectTraversal, TraversalBudget};
 use crate::object_header::ObjectHeader;
+use crate::shared_message::SharedResolver;
 use crate::source::OriginalSource;
+use crate::source::PhysicalSource;
 use crate::source::SourceMetadata;
 use crate::superblock::Superblock;
-use crate::width::FormatWidths;
+use crate::width::{FormatWidths, OffsetWidth};
 
 /// The byte edits that repoint a commit's relocated object headers.
 ///
@@ -274,15 +218,18 @@ pub(crate) fn plan<S: OriginalSource + ?Sized>(
     walk(src, superblock, widths, relocations, budget)
 }
 
-/// Returns whether every reachable object was inspected and has no object references.
+/// Returns whether inspection proved the reachable metadata free of object-reference datatypes.
 ///
-/// Returns `false` if traversal exceeds `budget`, encounters unsupported storage, or cannot
-/// inspect every object.
+/// With eight-byte offsets, returns `false` if traversal exceeds `budget` or storage cannot be
+/// fully inspected. With narrower offsets, requires complete datatype inspection and propagates
+/// inspection failures. This proof concerns reference datatypes, not allocation ownership.
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] for a truncated object-header record and [`Error::Format`]
-/// for other record errors or a root-address overflow.
+/// Returns [`FormatError::ReferenceWidthUnsupported`] for reference-bearing datatypes at narrow
+/// offsets, or [`FormatError::ResourceLimit`] if narrow traversal exceeds `budget`. Propagates
+/// root-address, record, metadata-read, resolver, and parse errors. Eight-byte inspection can skip
+/// unsupported or unreadable storage and return an incomplete proof.
 pub(crate) fn prove_free_of_references(
     src: &(impl OriginalSource + ?Sized),
     superblock: &Superblock,
@@ -292,6 +239,43 @@ pub(crate) fn prove_free_of_references(
     Ok(walk(src, superblock, widths, &BTreeMap::new(), budget)?.proved_free_of_references())
 }
 
+/// Requires a complete reference-free proof before publication with two- or four-byte offsets.
+///
+/// Returns `proved_free` without reading for eight-byte offsets or an existing successful proof.
+/// Returns `true` after a successful narrow inspection.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if the inspection cannot establish a complete proof, or
+/// errors from [`prove_free_of_references`].
+pub(crate) fn preflight_narrow_references(
+    source: &(impl OriginalSource + ?Sized),
+    superblock: &Superblock,
+    widths: FormatWidths,
+    budget: u32,
+    proved_free: bool,
+) -> Result<bool, Error> {
+    if widths.offsets == OffsetWidth::Eight || proved_free {
+        return Ok(proved_free);
+    }
+    if !prove_free_of_references(source, superblock, widths, budget)? {
+        return Err(Error::EditUnsupported(
+            "narrow-address editing requires a complete object-reference inspection",
+        ));
+    }
+    Ok(true)
+}
+
+/// Collects reference patches and a reference-free proof in one bounded object traversal.
+///
+/// Skips relocated headers. Narrow inspection propagates failures from headers, links, datatypes,
+/// and attributes. Eight-byte inspection retains supported patches when other storage is
+/// unreadable.
+///
+/// # Errors
+///
+/// Returns the address, parsing, source, reference-width, and narrow traversal-budget errors
+/// documented by [`prove_free_of_references`].
 fn walk(
     src: &(impl OriginalSource + ?Sized),
     superblock: &Superblock,
@@ -328,21 +312,25 @@ fn walk(
         // them as a record of one measurement rather than as a bound.
         let outcome = scan_object(src, addr, widths, relocations, &mut plan)?;
         saw_reference |= outcome.holds_a_reference;
-        complete &= outcome.fully_read;
         if !outcome.descend {
+            complete &= outcome.fully_read;
             continue;
         }
         // A group whose header or links cannot be read hides its subtree from
         // the walk; that leaves references below it unpatched, never mispatched.
-        let Ok(header) = ObjectHeader::parse_from_source_with_widths(
+        let header = match ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(src),
             AccessMode::ReadWrite,
             addr,
             widths,
             base.effective_base(),
-        ) else {
-            complete = false;
-            continue;
+        ) {
+            Ok(header) => header,
+            Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error.into()),
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
         // A header the chunk reader declined is reached through this parse
         // instead, which reads version 1 and creation-order headers alike. It
@@ -350,26 +338,47 @@ fn walk(
         // element data — which lives outside the header — and not an attribute's
         // value, which does not.
         if !outcome.header_located {
-            saw_reference |= scan_parsed_header(src, &header, widths, relocations, &mut plan);
+            saw_reference |= scan_parsed_header(src, &header, widths, relocations, &mut plan)?;
         }
-        let Ok(entries) = group_v2::resolve_group_entries_from_source(
+        complete &= outcome.fully_read || widths.offsets != OffsetWidth::Eight;
+        if widths.offsets != OffsetWidth::Eight
+            && !header.messages.iter().any(|message| {
+                matches!(
+                    message.msg_type,
+                    MessageType::SYMBOL_TABLE | MessageType::LINK | MessageType::LINK_INFO
+                )
+            })
+        {
+            continue;
+        }
+        let entries = match group_v2::resolve_group_entries_from_source(
             src,
             AccessMode::ReadWrite,
             &header,
             widths,
             group_v1::group_leaf_node_k(superblock),
-        ) else {
-            complete = false;
-            continue;
+        ) {
+            Ok(entries) => entries,
+            Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error.into()),
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
-        for e in entries {
-            if let Ok(child) = base
-                .resolve(e.object_header_address)
-                .map(PhysicalAddress::get)
-            {
-                traversal.push_child(ObjectId::new(PhysicalAddress::new(child)), depth);
+        for entry in entries {
+            match base.resolve(entry.object_header_address) {
+                Ok(child) => traversal.push_child(ObjectId::new(child), depth),
+                Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error.into()),
+                Err(_) => complete = false,
             }
         }
+    }
+    if widths.offsets != OffsetWidth::Eight && !traversal.complete() {
+        return Err(FormatError::ResourceLimit {
+            limit: u64::from(budget),
+            required: u64::from(budget) + 1,
+        }
+        .into());
     }
     plan.proved_free_of_references = complete && traversal.complete() && !saw_reference;
     Ok(plan)
@@ -378,16 +387,22 @@ fn walk(
 /// Collects reference patches in contiguous data using a parsed object header.
 ///
 /// The parsed messages have no file offsets for inline attribute or compact data patches.
-/// Returns whether the element datatype can contain an object reference.
+/// Returns whether the element datatype can contain an object reference. At narrow offsets,
+/// screens dataset and attribute datatypes and dense-attribute metadata before reading values.
+///
+/// # Errors
+///
+/// Returns reference-width, attribute, datatype, and resolver errors during narrow inspection.
 fn scan_parsed_header<S: OriginalSource + ?Sized>(
     src: &S,
     header: &ObjectHeader,
     widths: FormatWidths,
     relocations: &BTreeMap<u64, u64>,
     plan: &mut Plan,
-) -> bool {
-    use crate::shared_message::SharedResolver as _;
+) -> Result<bool, Error> {
     let base = src.addresses();
+    let resolver =
+        crate::shared_message::SourceResolver::new(src, AccessMode::ReadWrite, widths, None);
     let mut element_dt = None;
     let mut layout = None;
     for message in &header.messages {
@@ -415,19 +430,44 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
                             resolved = bytes;
                             &resolved[..]
                         }
+                        Err(error) if widths.offsets != OffsetWidth::Eight => {
+                            return Err(error.into());
+                        }
                         Err(_) => continue,
                     }
                 } else {
                     &message.data[..]
                 };
-                if encoded
-                    .first()
-                    .is_some_and(|&b| crate::datatype::class_may_hold_object_address(b))
+                if widths.offsets != OffsetWidth::Eight
+                    || encoded
+                        .first()
+                        .is_some_and(|&b| crate::datatype::class_may_hold_object_address(b))
                 {
-                    if let Ok((dt, _)) = hdf5_pure_format::__private::parse_datatype(encoded) {
-                        element_dt = Some(dt);
+                    match hdf5_pure_format::__private::parse_datatype(encoded) {
+                        Ok((dt, _)) => {
+                            file_writer::require_reference_width(widths, &dt)?;
+                            element_dt = Some(dt);
+                        }
+                        Err(error) if widths.offsets != OffsetWidth::Eight => {
+                            return Err(error.into());
+                        }
+                        Err(_) => {}
                     }
                 }
+            }
+            MessageType::ATTRIBUTE if widths.offsets != OffsetWidth::Eight => {
+                let resolved;
+                let body = if message.flags.is_shared() {
+                    resolved = resolver.resolve(&message.data, MessageType::ATTRIBUTE)?;
+                    resolved.as_slice()
+                } else {
+                    message.data.as_slice()
+                };
+                let datatype = AttributeMessage::parse_datatype_resolving(body, &resolver)?;
+                file_writer::require_reference_width(widths, &datatype)?;
+            }
+            MessageType::ATTRIBUTE_INFO if widths.offsets != OffsetWidth::Eight => {
+                require_dense_reference_widths(src, &message.data, widths, &resolver)?;
             }
             MessageType::DATA_LAYOUT => {
                 layout = DataLayout::parse_with_widths(&message.data, widths).ok();
@@ -436,7 +476,7 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
         }
     }
     let Some(dt) = element_dt else {
-        return false;
+        return Ok(false);
     };
     let holds = datatype::datatype_holds_object_address(&dt);
     let (
@@ -447,16 +487,16 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
         }),
     ) = (element_slots(&dt), layout)
     else {
-        return holds;
+        return Ok(holds);
     };
     let (Ok(at), Ok(want)) = (
         base.resolve(a).map(PhysicalAddress::get),
         usize::try_from(size),
     ) else {
-        return holds;
+        return Ok(holds);
     };
     let Ok(raw) = src.read_exact_at(at, want) else {
-        return holds;
+        return Ok(holds);
     };
     collect_slots(
         &dt,
@@ -467,7 +507,7 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
         relocations,
         &mut plan.data_writes,
     );
-    holds
+    Ok(holds)
 }
 
 /// What one object contributed to the walk beyond its byte edits.
@@ -491,13 +531,15 @@ struct Scanned {
     header_located: bool,
 }
 
-/// Collect the byte edits owed by the single object whose header is at `addr`:
-/// its inline attributes' values, and its own elements when they are stored
-/// where this can address them.
+/// Collects reference patches and inspection status for the object at `addr`.
 ///
-/// Reports whether the caller should descend through this object looking for
-/// children, which this walk establishes on the way past — see
-/// [`Scanned::descend`], which is not quite "this object is a group".
+/// Reports whether the caller should attempt child traversal through [`Scanned::descend`].
+/// Screens dataset and compact or dense attribute datatypes at narrow offsets. Other header
+/// versions are inspected by [`scan_parsed_header`].
+///
+/// # Errors
+///
+/// Propagates record errors and narrow header, datatype, attribute, resolver, and source errors.
 fn scan_object<S: OriginalSource + ?Sized>(
     src: &S,
     addr: u64,
@@ -510,15 +552,26 @@ fn scan_object<S: OriginalSource + ?Sized>(
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
     let base = src.addresses();
-    let Ok(chunks) = edit::object_header::read_oh_chunks(src, addr, base, widths) else {
-        return Ok(Scanned {
-            descend: true,
-            holds_a_reference: false,
-            fully_read: false,
-            header_located: false,
-        });
+    let chunks = match edit::object_header::read_oh_chunks(src, addr, base, widths) {
+        Ok(chunks) => chunks,
+        Err(Error::EditUnsupported(edit::object_header::VERSION_TWO_REQUIRED)) => {
+            return Ok(Scanned {
+                descend: true,
+                holds_a_reference: false,
+                fully_read: false,
+                header_located: false,
+            });
+        }
+        Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error),
+        Err(_) => {
+            return Ok(Scanned {
+                descend: true,
+                holds_a_reference: false,
+                fully_read: false,
+                header_located: false,
+            });
+        }
     };
-    use crate::shared_message::SharedResolver as _;
     // Resolve committed datatype addresses through the opened source's effective base.
     let resolver = crate::shared_message::SourceResolver::new(
         src,
@@ -569,6 +622,9 @@ fn scan_object<S: OriginalSource + ?Sized>(
                     let encoded = if shared {
                         match resolver.resolve(&region[body..body_end], MessageType::DATATYPE) {
                             Ok(bytes) => committed.insert(bytes),
+                            Err(error) if widths.offsets != OffsetWidth::Eight => {
+                                return Err(error.into());
+                            }
                             Err(_) => {
                                 out.fully_read = false;
                                 p = body_end;
@@ -582,18 +638,25 @@ fn scan_object<S: OriginalSource + ?Sized>(
                     // dataset in the file on every commit, so the encoded class
                     // decides first: it is a necessary condition for holding an
                     // address and costs one byte to read.
-                    if encoded.is_empty() || !datatype::class_may_hold_object_address(encoded[0]) {
+                    if widths.offsets == OffsetWidth::Eight
+                        && (encoded.is_empty()
+                            || !datatype::class_may_hold_object_address(encoded[0]))
+                    {
                         p = body_end;
                         continue;
                     }
                     match hdf5_pure_format::__private::parse_datatype(encoded) {
                         Ok((dt, _)) => {
+                            file_writer::require_reference_width(widths, &dt)?;
                             out.holds_a_reference |= datatype::datatype_holds_object_address(&dt);
                             element_dt = Some(dt);
                         }
                         // A datatype of a qualifying class that will not parse
                         // might have been a reference; the file is not proven
                         // free of them.
+                        Err(error) if widths.offsets != OffsetWidth::Eight => {
+                            return Err(error.into());
+                        }
                         Err(_) => out.fully_read = false,
                     }
                 }
@@ -607,20 +670,41 @@ fn scan_object<S: OriginalSource + ?Sized>(
                 // defined heap address rather than the message's presence: the
                 // reference C library and h5py emit an Attribute Info message
                 // for compact attributes too, to carry creation-order metadata.
-                MessageType::ATTRIBUTE_INFO
-                    if crate::edit::attributes::attribute_info_is_dense(
+                MessageType::ATTRIBUTE_INFO => {
+                    if widths.offsets != OffsetWidth::Eight {
+                        require_dense_reference_widths(
+                            src,
+                            &region[body..body_end],
+                            widths,
+                            &resolver,
+                        )?;
+                    } else if crate::edit::attributes::attribute_info_is_dense(
                         widths.offsets,
                         &region[body..body_end],
-                    ) =>
-                {
-                    out.fully_read = false;
+                    ) {
+                        out.fully_read = false;
+                    }
                 }
                 // A *shared record* attribute — the whole message held in the
                 // file's shared-message table — is not stored here, so its
                 // elements are not addressable from this header, and it leaves
                 // the object unproven rather than proven reference-free.
-                MessageType::ATTRIBUTE if shared => out.fully_read = false,
+                MessageType::ATTRIBUTE if shared => {
+                    if widths.offsets != OffsetWidth::Eight {
+                        return Err(FormatError::UnsupportedSohmReference.into());
+                    }
+                    out.fully_read = false;
+                }
                 MessageType::ATTRIBUTE => {
+                    if widths.offsets != OffsetWidth::Eight {
+                        let datatype = AttributeMessage::parse_datatype_resolving(
+                            &region[body..body_end],
+                            &resolver,
+                        )?;
+                        file_writer::require_reference_width(widths, &datatype)?;
+                        p = body_end;
+                        continue;
+                    }
                     let Ok((attr, data_off)) = AttributeMessage::parse_resolving_at_with_widths(
                         &region[body..body_end],
                         widths,
@@ -717,6 +801,39 @@ fn scan_object<S: OriginalSource + ?Sized>(
         _ => {}
     }
     Ok(out)
+}
+
+/// Screens dense-attribute datatypes without copying their values.
+///
+/// Reads each heap message once and parses its datatype through `resolver`.
+///
+/// # Errors
+///
+/// Returns reference-width errors from [`file_writer::require_reference_width`], or errors from
+/// reading the Attribute Info message, heap storage, or attribute datatype.
+fn require_dense_reference_widths(
+    source: &(impl OriginalSource + ?Sized),
+    body: &[u8],
+    widths: FormatWidths,
+    resolver: &impl SharedResolver,
+) -> Result<(), FormatError> {
+    let info = AttributeInfoMessage::parse_with_offset_width(body, widths.offsets)?;
+    let Some(heap) = info.fractal_heap_address else {
+        return Ok(());
+    };
+    crate::attribute::visit_dense_attribute_messages_from_source(
+        &PhysicalSource::new(source).stored(),
+        AccessMode::ReadWrite,
+        &info,
+        heap,
+        widths,
+        None,
+        |_| true,
+        |body, _| {
+            let datatype = AttributeMessage::parse_datatype_resolving(body, resolver)?;
+            file_writer::require_reference_width(widths, &datatype)
+        },
+    )
 }
 
 /// Records physical edit positions as byte offsets within their header chunk.
@@ -1003,6 +1120,67 @@ mod tests {
         assert_eq!(plan.len(), 0);
         assert!(plan.data_writes.is_empty());
         assert!(plan.header_writes.is_empty());
+    }
+
+    #[rstest]
+    #[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+    #[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+    #[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+    #[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+    #[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+    #[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+    fn version_one_metadata_is_inspected_before_reference_values(
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[values(false, true)] attribute: bool,
+        #[values(false, true)] reference: bool,
+    ) {
+        let widths = FormatWidths { offsets, lengths };
+        let datatype = if reference {
+            hdf5_pure_format::__private::serialize_datatype(
+                &type_builders::make_object_reference_type(),
+            )
+            .unwrap()
+        } else {
+            datatype_bytes::f64_le()
+        };
+        let mut message = if attribute {
+            Message::new(
+                RecordType::ATTRIBUTE,
+                &attribute::Attribute::new("value", &datatype, &dataspace_bytes::scalar(), &[])
+                    .build(),
+            )
+        } else {
+            Message::new(RecordType::DATATYPE, &datatype)
+        };
+        let alignment = test_util::object_header::v1::MESSAGE_ALIGNMENT;
+        message
+            .data
+            .resize(message.data.len().div_ceil(alignment) * alignment, 0);
+        let header = test_util::object_header::v1::Header::new()
+            .message(message)
+            .build();
+        let source = BytesSource::new(header.as_slice());
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        let opened = OpenedSource::for_test(&source, addresses);
+        let mut plan = Plan::default();
+        let fallback = scan_object(&opened, 0, widths, &BTreeMap::new(), &mut plan).unwrap();
+        assert!(fallback.descend);
+        assert!(!fallback.header_located);
+        let parsed =
+            ObjectHeader::parse_with_widths(&header, AccessMode::ReadWrite, 0, widths).unwrap();
+        assert_eq!(parsed.version, header[0]);
+        let scanned = scan_parsed_header(&opened, &parsed, widths, &BTreeMap::new(), &mut plan);
+        if reference {
+            let error = scanned.unwrap_err();
+            assert!(
+                matches!(error, Error::Format(FormatError::ReferenceWidthUnsupported { offset_size }) if offset_size == offsets.get()),
+                "{error:?}"
+            );
+        } else {
+            assert!(!scanned.unwrap());
+        }
+        assert!(plan.is_empty());
     }
 
     #[test]
