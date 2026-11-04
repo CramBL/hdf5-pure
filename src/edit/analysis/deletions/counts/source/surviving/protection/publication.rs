@@ -12,6 +12,8 @@ use super::CountProtectionError;
 use super::ProtectedCount;
 use super::ProtectedCounts;
 
+mod current;
+
 impl ProtectedCounts {
     /// Checks pending retirements against complete original count allocations.
     ///
