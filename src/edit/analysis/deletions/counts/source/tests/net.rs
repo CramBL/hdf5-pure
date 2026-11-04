@@ -17,7 +17,9 @@ use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::added_users::AddedCopyUsers;
 use crate::edit::analysis::counts::added_users::CopyUsersError;
 use crate::edit::analysis::counts::balance::CountArithmeticError;
+use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::analysis::counts::test_support as count_test_support;
+use crate::edit::analysis::counts::{CountEvidence, OrdinaryCountSubject};
 use crate::edit::analysis::deletions::counts::source::net::NetCountError;
 use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK, PlannedDeletion};
 use crate::edit::copy::CopyTree;
@@ -38,6 +40,7 @@ use crate::{Datatype, DatatypeByteOrder, FileLocking, FloatingPointType, Physica
 #[case::maximum(Some(u32::MAX), Links::Aliases, &["type", "type"], true, false, u32::MAX)]
 #[case::removal_only(Some(2), Links::Named, &["type"], false, false, 1)]
 #[case::implicit(None, Links::Anonymous, &[], true, false, 2)]
+#[case::unproven_zero(Some(0), Links::Anonymous, &[], true, false, 1)]
 #[case::partial_allocation(Some(2), Links::Named, &[], true, true, 3)]
 fn net_counts_project_each_target_once_with_original_fields(
     #[case] original: Option<u32>,
@@ -100,6 +103,49 @@ fn net_counts_project_each_target_once_with_original_fields(
         .iter()
         .find(|change| change.object() == target)
         .unwrap();
+    let evidence = plan
+        .evidence_changes()
+        .find(|change| match change.original() {
+            OriginalCount::Topology(evidence) => evidence.bound().object() == target,
+            OriginalCount::Referenced(observed) => observed.object() == target,
+        })
+        .unwrap();
+    assert_eq!(evidence.remaining(), expected);
+    match evidence.original() {
+        OriginalCount::Topology(topology) => {
+            assert!(paths.contains(&"type"));
+            assert!(matches!(topology, CountEvidence::Retained(_)));
+            let bound = topology.bound();
+            assert_eq!(bound.original(), original.unwrap_or(1));
+            assert_eq!(bound.field(), changed.field());
+            assert_eq!(bound.header_allocation(), changed.header_allocation());
+            let stored = plan
+                .removals()
+                .unwrap()
+                .plan
+                .remaining
+                .values()
+                .find_map(|state| {
+                    state
+                        .evidence
+                        .as_ref()
+                        .filter(|other| other.bound().object() == target)
+                })
+                .unwrap();
+            assert!(std::ptr::eq(topology, stored));
+        }
+        OriginalCount::Referenced(observed) => {
+            assert!(!paths.contains(&"type"));
+            assert_eq!(observed.original(), original.unwrap_or(1));
+            assert_eq!(observed.field(), changed.field());
+            assert_eq!(observed.header_allocation(), changed.header_allocation());
+            assert_eq!(observed.incoming(), (!paths.is_empty()).then_some(1));
+            assert_eq!(
+                observed.minimum().map(|count| count.get()),
+                (!paths.is_empty()).then_some(1)
+            );
+        }
+    }
     assert_eq!(changed.original(), original.unwrap_or(1));
     assert_eq!(changed.remaining(), expected);
     assert_eq!(changed.field().map(|field| field.value()), original);
@@ -273,6 +319,58 @@ fn removal_only_plans_preserve_eligible_ordinary_transitions() {
             .collect::<Vec<_>>(),
         [(super::id(owner), 1, 0), (super::id(child), 1, 0)]
     );
+    let evidence = plan
+        .evidence_changes()
+        .map(|change| {
+            let OriginalCount::Topology(CountEvidence::Ordinary(ordinary)) = change.original()
+            else {
+                panic!("expected the original ordinary count evidence")
+            };
+            (ordinary.subject(), change.remaining())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        evidence,
+        [
+            (OrdinaryCountSubject::Group, 0),
+            (OrdinaryCountSubject::Dataset, 0)
+        ]
+    );
+}
+
+#[test]
+fn retained_zero_counts_keep_their_original_evidence() {
+    let path = test_util::temp::temp_path("retained-zero-count-view.h5");
+    let mut fixture = Fixture::new();
+    let address = fixture.append_header(vec![
+        Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+        Message::reference_count(1),
+    ]);
+    fixture.link("type", address);
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let added = phase.added_copy_users([]).unwrap().unwrap();
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse("type"))
+        .unwrap();
+    let plan = phase.net_count_plan([&deletion], &added).unwrap().unwrap();
+    let evidence = plan.evidence_changes().collect::<Vec<_>>();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].remaining(), 0);
+    let OriginalCount::Topology(CountEvidence::Retained(bound)) = evidence[0].original() else {
+        panic!("expected retained topology count evidence")
+    };
+    assert_eq!(bound.object(), super::id(address));
+    assert_eq!(bound.original(), 1);
+    assert_eq!(bound.field().unwrap().value(), 1);
+    assert_eq!(
+        bound.header_allocation().unwrap().range(),
+        bound.field().unwrap().chunk()
+    );
+    assert_eq!(plan.removals().unwrap().counted_zero_objects().count(), 0);
 }
 
 #[rstest]
@@ -327,6 +425,10 @@ fn an_empty_net_plan_skips_source_and_heap_work() {
     let plan = plan.unwrap().unwrap();
     assert!(plan.same_engine(&engine));
     assert!(plan.source().is_none() && plan.removals().is_none());
+    let (entries, empty_views) = allocation::measure("empty_net_original_views", || {
+        plan.evidence_changes().count()
+    });
+    assert_eq!(entries, 0);
     assert_eq!(plan.changes().count(), 0);
     drop(plan);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -337,6 +439,12 @@ fn an_empty_net_plan_skips_source_and_heap_work() {
         phase.net_count_plan([], &added)
     });
     let plan = plan.unwrap().unwrap();
+    let (sum, original_views) = allocation::measure("nonempty_net_original_views", || {
+        plan.evidence_changes()
+            .map(|change| u64::from(change.remaining()))
+            .sum::<u64>()
+    });
+    assert_eq!(sum, 3);
     assert_eq!(
         plan.changes()
             .map(|change| (change.object(), change.remaining()))
@@ -347,6 +455,16 @@ fn an_empty_net_plan_skips_source_and_heap_work() {
     assert!(calls.load(Ordering::Relaxed) > 0);
     assert_eq!(measured.blocks, 0, "{measured}");
     assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(
+        (empty_views.blocks, empty_views.bytes),
+        (0, 0),
+        "{empty_views}"
+    );
+    assert_eq!(
+        (original_views.blocks, original_views.bytes),
+        (0, 0),
+        "{original_views}"
+    );
 }
 
 fn additions<'source>(

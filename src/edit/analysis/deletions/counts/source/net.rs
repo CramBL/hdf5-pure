@@ -5,11 +5,13 @@ use std::collections::BTreeMap;
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 
 use super::super::super::PlannedDeletion;
+use super::SourceCountState;
 use super::SourceRemovalPlan;
 use super::added::AddedCountError;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::added_users::{AddedCopyUsers, CopyUsersError};
 use crate::edit::analysis::counts::balance::{CountArithmeticError, CountBalance};
+use crate::edit::analysis::counts::changes::{CountChange, OriginalCount};
 use crate::edit::analysis::counts::referenced::{ReferencedCountError, ReferencedTarget};
 use crate::edit::analysis::counts::{CountEvidenceError, HeaderCountAllocation};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
@@ -171,6 +173,39 @@ impl<'phase, 'source> NetCountPlan<'phase, 'source> {
     /// the plan and yields fixed-size numeric projections. Original typed evidence and phase
     /// association remain with the plan.
     pub(in crate::edit) fn changes(&self) -> impl Iterator<Item = NetCountChange> + '_ {
+        self.evidence_changes().map(|change| {
+            let remaining = change.remaining();
+            match change.original() {
+                OriginalCount::Topology(evidence) => {
+                    let bound = evidence.bound();
+                    NetCountChange {
+                        object: bound.object(),
+                        original: bound.original(),
+                        remaining,
+                        field: bound.field(),
+                        allocation: bound.header_allocation(),
+                    }
+                }
+                OriginalCount::Referenced(original) => NetCountChange {
+                    object: original.object(),
+                    original: original.original(),
+                    remaining,
+                    field: original.field(),
+                    allocation: original.header_allocation(),
+                },
+            }
+        })
+    }
+
+    /// Borrows each represented target's original facts and final declared count once.
+    ///
+    /// Uses the ordering and target set of [`Self::changes`], including unchanged counts. Original
+    /// facts are borrowed unchanged with their [`OriginalCount`] class. Iteration requires no source
+    /// reads, topology discovery, count-arithmetic recalculation, or heap allocation. Source
+    /// freshness, ownership, retirement, and publication permissions remain separate requirements.
+    pub(in crate::edit) fn evidence_changes(
+        &self,
+    ) -> impl Iterator<Item = CountChange<'_, 'source>> {
         let Self {
             engine: _,
             source: _,
@@ -179,27 +214,23 @@ impl<'phase, 'source> NetCountPlan<'phase, 'source> {
         } = self;
         removals
             .iter()
-            .flat_map(SourceRemovalPlan::changes)
-            .map(|change| {
-                let bound = change.bound();
-                NetCountChange {
-                    object: bound.object(),
-                    original: bound.original(),
-                    remaining: change.remaining(),
-                    field: bound.field(),
-                    allocation: bound.header_allocation(),
-                }
+            .flat_map(|plan| plan.plan.remaining.values())
+            .filter_map(|state| {
+                let SourceCountState {
+                    evidence,
+                    graph: _,
+                    declared,
+                } = state;
+                evidence
+                    .as_ref()
+                    .zip(*declared)
+                    .map(|(evidence, remaining)| {
+                        CountChange::new(OriginalCount::Topology(evidence), remaining)
+                    })
             })
-            .chain(referenced.iter().map(|(&object, change)| {
+            .chain(referenced.values().map(|change| {
                 let ReferencedChange { target, count } = change;
-                let original = target.count();
-                NetCountChange {
-                    object,
-                    original: original.original(),
-                    remaining: *count,
-                    field: original.field(),
-                    allocation: original.header_allocation(),
-                }
+                CountChange::new(OriginalCount::Referenced(target.count()), *count)
             }))
     }
 }

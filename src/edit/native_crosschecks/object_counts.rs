@@ -17,6 +17,7 @@ use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::OrdinaryCountSubject;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
+use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::group::GroupInfo;
 use crate::edit::object_header;
 use crate::edit::object_header::PreparedHeader;
@@ -204,6 +205,28 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
         projected[0].header_allocation().unwrap().range(),
         field.chunk()
     );
+    let evidence = plan.evidence_changes().collect::<Vec<_>>();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].remaining(), projected[0].remaining());
+    match evidence[0].original() {
+        OriginalCount::Topology(CountEvidence::Retained(bound)) => {
+            assert!(named);
+            assert_eq!(bound.object(), target);
+            assert_eq!(bound.original(), field.value());
+            assert_eq!(bound.field(), Some(field));
+        }
+        OriginalCount::Referenced(observed) => {
+            assert!(!named);
+            assert_eq!(observed.object(), target);
+            assert_eq!(observed.original(), field.value());
+            assert_eq!(observed.minimum(), None);
+            assert_eq!(observed.field(), Some(field));
+        }
+        OriginalCount::Topology(CountEvidence::Ordinary(_)) => {
+            panic!("expected retained committed-type evidence")
+        }
+    }
+    drop(evidence);
     if let Some(removals) = plan.removals() {
         assert_eq!(removals.graph_remaining(target), Some(0));
         assert_eq!(removals.counted_zero_objects().count(), 0);

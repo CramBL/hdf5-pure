@@ -33,6 +33,7 @@ use super::deletions::TopologyIdentity;
 
 pub(super) mod added_users;
 pub(super) mod balance;
+pub(in crate::edit) mod changes;
 pub(super) mod referenced;
 
 #[cfg(test)]
