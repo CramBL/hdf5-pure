@@ -51,6 +51,8 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+mod mutation;
+
 /// The address of a Fixed Array header, from the chunk index address of a data layout message.
 ///
 /// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
@@ -74,7 +76,8 @@ impl FixedArrayHeaderLocator {
 
     /// Parses the header in `region`.
     ///
-    /// An unfiltered element is the chunk address alone, whatever the header's entry size.
+    /// An unfiltered entry size must equal the file's offset width. A filtered entry includes
+    /// the address, a size field of up to eight bytes, and a four-byte filter mask.
     ///
     /// # Errors
     ///
@@ -111,6 +114,9 @@ impl FixedArrayHeaderLocator {
         checksum::verify_trailing(bytes)?;
 
         let encoding = element_encoding(widths.offsets, client_id, entry_size)?;
+        if entry_size != encoding.stride().get() {
+            return Err(FormatError::InvalidFixedArrayGeometry);
+        }
         let geometry = Geometry::new(encoding, entries, page_bits)?;
         let data_block = match data_block {
             DecodedStoredAddress::Defined(address) => Some(FixedArrayDataBlockRef::new(
@@ -123,8 +129,12 @@ impl FixedArrayHeaderLocator {
         };
         Ok(FixedArrayHeader {
             range,
-            filtered: matches!(encoding.client(), ArrayClient::FilteredChunks { .. }),
-            data_block,
+            widths,
+            base,
+            entry_size,
+            page_bits,
+            geometry,
+            data_block: data_block.map(|block| block.range),
         })
     }
 
@@ -144,18 +154,29 @@ impl FixedArrayHeaderLocator {
     }
 }
 
-/// A Fixed Array header, from [`FixedArrayHeaderLocator::parse`].
+/// A version 0 Fixed Array header, from [`FixedArrayHeaderLocator::parse`].
+///
+/// Retains the recorded widths, base, entry encoding, and page geometry, including when the
+/// data-block address is undefined. A writer can prepare empty storage with
+/// [`initialization_at`](Self::initialization_at).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayHeader {
     range: FileRange,
-    filtered: bool,
-    data_block: Option<FixedArrayDataBlockRef>,
+    widths: FormatWidths,
+    base: BaseAddress,
+    entry_size: u8,
+    page_bits: u8,
+    geometry: Geometry,
+    data_block: Option<FileRange>,
 }
 
 impl FixedArrayHeader {
     /// Returns whether the array's client format stores filtered chunk sizes and masks.
     pub const fn is_filtered(&self) -> bool {
-        self.filtered
+        matches!(
+            self.geometry.encoding.client(),
+            ArrayClient::FilteredChunks { .. }
+        )
     }
 
     /// Returns the physical range of the header.
@@ -166,7 +187,15 @@ impl FixedArrayHeader {
     /// Returns the reference to the data block, or `None` if the header stores the undefined
     /// address, in an array without chunks.
     pub const fn data_block(&self) -> Option<FixedArrayDataBlockRef> {
-        self.data_block
+        match self.data_block {
+            Some(range) => Some(FixedArrayDataBlockRef {
+                base: self.base,
+                header: self.range.start(),
+                range,
+                geometry: self.geometry,
+            }),
+            None => None,
+        }
     }
 }
 
@@ -440,7 +469,7 @@ impl FixedArrayUnpaged {
     }
 }
 
-/// The physical range and logical slots of entries within an unpaged Fixed Array data block.
+/// The physical range and logical slots of entries within a Fixed Array data block or page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayEntryWindow {
     range: FileRange,
@@ -452,8 +481,8 @@ pub struct FixedArrayEntryWindow {
 impl FixedArrayEntryWindow {
     /// Borrows the window's entry bytes from `region`.
     ///
-    /// The caller verifies the whole block's checksum separately before reading records with
-    /// [`FixedArrayElements::records`].
+    /// The caller verifies the containing block's or page's checksum separately before reading
+    /// records with [`FixedArrayElements::records`].
     ///
     /// # Errors
     ///
@@ -513,7 +542,10 @@ impl<'a> FixedArrayPageBitmap<'a> {
 }
 
 /// The position of one page of a paged Fixed Array data block, from
-/// [`FixedArrayPageBitmap::pages`].
+/// [`FixedArrayPageBitmap::pages`] or [`FixedArrayDataBlockRef::page_for_slot`].
+///
+/// A reference describes the reserved range, including for an uninitialized page. The caller
+/// checks the page-init bitmap before reading existing elements.
 ///
 /// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
 /// [`parse`](Self::parse).
@@ -748,6 +780,8 @@ pub struct FixedArrayPlan {
     widths: FormatWidths,
     geometry: Geometry,
     encoding: ChunkElementEncoding,
+    entry_size: u8,
+    page_bits: u8,
     data_block_length: u64,
     total_length: u64,
 }
@@ -788,6 +822,8 @@ impl FixedArrayPlan {
             widths,
             geometry,
             encoding,
+            entry_size,
+            page_bits: FIXED_ARRAY_PAGE_BITS,
             data_block_length,
             total_length,
         })
@@ -917,6 +953,8 @@ impl FixedArrayPlacement {
             widths: _,
             geometry,
             encoding: _,
+            entry_size: _,
+            page_bits: _,
             data_block_length: _,
             total_length: _,
         } = plan;
@@ -933,7 +971,17 @@ impl FixedArrayPlacement {
         ])
     }
 
-    fn serialize_header(&self) -> Result<Vec<u8>, FormatError> {
+    /// Serializes the version 0 header with the placed data-block address and its checksum.
+    ///
+    /// The caller obtains both blocks from [`Self::serialize_blocks`] or emits an empty data
+    /// block with [`Self::emit_empty_data_block`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the header length exceeds
+    /// [`usize::MAX`], or [`FormatError::AllocationFailed`] if its buffer reservation fails.
+    /// Placement and planning check the encoded address and entry count.
+    pub fn serialize_header(&self) -> Result<Vec<u8>, FormatError> {
         let Self {
             plan,
             header,
@@ -943,11 +991,13 @@ impl FixedArrayPlacement {
             widths,
             geometry,
             encoding,
+            entry_size,
+            page_bits,
             data_block_length: _,
             total_length: _,
         } = plan;
         let Geometry {
-            encoding: elements,
+            encoding: _,
             entries,
             paging: _,
         } = geometry;
@@ -955,8 +1005,8 @@ impl FixedArrayPlacement {
         bytes.extend_from_slice(&HEADER_SIGNATURE);
         bytes.push(VERSION);
         bytes.push(encoding.client_id);
-        bytes.push(elements.stride().get());
-        bytes.push(FIXED_ARRAY_PAGE_BITS);
+        bytes.push(entry_size);
+        bytes.push(page_bits);
         bytes::try_write_length(&mut bytes, entries, widths.lengths)?;
         bytes::try_write_decoded_address(
             &mut bytes,
@@ -979,6 +1029,8 @@ impl FixedArrayPlacement {
             widths,
             geometry,
             encoding,
+            entry_size: _,
+            page_bits: _,
             data_block_length: _,
             total_length: _,
         } = plan;
@@ -1042,6 +1094,8 @@ impl FixedArrayPlacement {
             widths,
             geometry,
             encoding,
+            entry_size: _,
+            page_bits: _,
             data_block_length: _,
             total_length: _,
         } = plan;
@@ -1174,9 +1228,11 @@ const CHECKSUM_LEN: u64 = 4;
 mod tests {
     use rstest::rstest;
     use test_util::checksum;
+    use test_util::fixed_array as fixture;
 
     use super::*;
 
+    mod mutation;
     mod placement;
 
     const WIDTHS: FormatWidths = FormatWidths {
@@ -1536,18 +1592,95 @@ mod tests {
     }
 
     #[rstest]
-    #[case::signature(0, b'X', FormatError::InvalidFixedArraySignature)]
-    #[case::version(4, 1, FormatError::InvalidFixedArrayVersion(1))]
-    #[case::client(5, 2, FormatError::InvalidFixedArrayClient(2))]
-    #[case::page_bits(7, 64, FormatError::InvalidFixedArrayGeometry)]
-    #[case::filtered_entry_too_small(6, 8 + 4 - 1, FormatError::InvalidFixedArrayGeometry)]
-    #[case::filtered_entry_too_large(6, 8 + 4 + 9, FormatError::InvalidFixedArrayGeometry)]
+    #[case::signature(
+        OffsetWidth::Eight,
+        true,
+        0,
+        b'X',
+        FormatError::InvalidFixedArraySignature
+    )]
+    #[case::version(
+        OffsetWidth::Eight,
+        true,
+        4,
+        1,
+        FormatError::InvalidFixedArrayVersion(1)
+    )]
+    #[case::client(
+        OffsetWidth::Eight,
+        true,
+        5,
+        2,
+        FormatError::InvalidFixedArrayClient(2)
+    )]
+    #[case::page_bits(
+        OffsetWidth::Eight,
+        true,
+        7,
+        64,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    #[case::filtered_entry_too_small(OffsetWidth::Eight, true, fixture::HEADER_ENTRY_SIZE_OFFSET, 8 + 4 - 1, FormatError::InvalidFixedArrayGeometry)]
+    #[case::filtered_entry_too_large(OffsetWidth::Eight, true, fixture::HEADER_ENTRY_SIZE_OFFSET, 8 + 4 + 9, FormatError::InvalidFixedArrayGeometry)]
+    #[case::two_byte_entry_too_small(
+        OffsetWidth::Two,
+        false,
+        fixture::HEADER_ENTRY_SIZE_OFFSET,
+        1,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    #[case::two_byte_entry_too_large(
+        OffsetWidth::Two,
+        false,
+        fixture::HEADER_ENTRY_SIZE_OFFSET,
+        3,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    #[case::four_byte_entry_too_small(
+        OffsetWidth::Four,
+        false,
+        fixture::HEADER_ENTRY_SIZE_OFFSET,
+        3,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    #[case::four_byte_entry_too_large(
+        OffsetWidth::Four,
+        false,
+        fixture::HEADER_ENTRY_SIZE_OFFSET,
+        5,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    #[case::eight_byte_entry_too_small(
+        OffsetWidth::Eight,
+        false,
+        fixture::HEADER_ENTRY_SIZE_OFFSET,
+        7,
+        FormatError::InvalidFixedArrayGeometry
+    )]
+    #[case::eight_byte_entry_too_large(
+        OffsetWidth::Eight,
+        false,
+        fixture::HEADER_ENTRY_SIZE_OFFSET,
+        9,
+        FormatError::InvalidFixedArrayGeometry
+    )]
     fn a_malformed_header_is_rejected(
+        #[case] offsets: OffsetWidth,
+        #[case] filtered: bool,
         #[case] field: usize,
         #[case] value: u8,
         #[case] expected: FormatError,
     ) {
-        let mut fixture = Fixture::new(5, true);
+        let mut fixture = Fixture::at(
+            0,
+            FormatWidths {
+                offsets,
+                lengths: LengthWidth::Eight,
+            },
+            8,
+            5,
+            filtered,
+        );
         let at = fixture.header_at() + field;
         fixture.bytes[at] = value;
         fixture.restamp_header();

@@ -21,6 +21,7 @@ pub mod extensible_array;
 pub mod file_space_info;
 pub mod filter_pipeline;
 pub mod filtered_chunks;
+pub mod fixed_array;
 pub mod fractal_heap;
 pub mod free_space;
 pub mod free_space_damage;
