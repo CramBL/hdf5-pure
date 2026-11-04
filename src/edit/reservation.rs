@@ -9,6 +9,7 @@ use hdf5_pure_space::__private::{
 
 use crate::address::{AddressContext, StoredAddress};
 use crate::error::{Error, FormatError};
+use crate::width::OffsetWidth;
 
 use super::aggregation::AggregateSpace;
 use super::block::{BlockRequest, EncodingDependency, PlannedBlock};
@@ -18,7 +19,8 @@ use super::{Placement, WriteEngine};
 /// Allocations reserved before emission, with a private end-of-allocation cursor.
 ///
 /// The engine remains borrowed while the plan is used. Complete ranges, PAGE transitions, and
-/// aggregate capacity are retained for writes in request order through [`Self::write_next`].
+/// aggregate capacity are checked against the session's address width and retained for writes
+/// in request order through [`Self::write_next`].
 /// Dropping the plan keeps reused allocations unavailable. Publication and rollback remain the
 /// caller's responsibility.
 pub(super) struct ReservationPlan<'a> {
@@ -77,6 +79,7 @@ impl<'a> ReservationPlan<'a> {
                 if let Some(reservation) = reservation {
                     plan.reservations.push(Self::reused(
                         addresses,
+                        plan.engine.context.widths().offsets,
                         reservation,
                         preferred,
                         &mut plan.unresolved,
@@ -331,6 +334,7 @@ impl<'a> ReservationPlan<'a> {
             *end = addresses.resolve(cursor)?;
         }
         let mut page = AppendCursor {
+            offsets: engine.context.widths().offsets,
             addresses,
             cursor,
             page_size: engine.space.page_size(),
@@ -378,10 +382,17 @@ impl<'a> ReservationPlan<'a> {
     ) -> Result<PlannedReservation, Error> {
         let request = block_request.reservation();
         if reuse && let Some(reservation) = batch.reserve(request) {
-            return Self::reused(page.addresses, reservation, block_request, unresolved);
+            return Self::reused(
+                page.addresses,
+                page.offsets,
+                reservation,
+                block_request,
+                unresolved,
+            );
         }
         if let Some(aggregation) = aggregation {
             let placement = aggregation.reserve_with(
+                page.offsets,
                 page.addresses,
                 request.size(),
                 request.class(),
@@ -412,18 +423,27 @@ impl<'a> ReservationPlan<'a> {
 
     /// Associates a reusable allocation with a checked physical block.
     ///
-    /// Moves the reservation into `unresolved` if block construction fails.
+    /// Checks the complete allocation, including its exclusive end, in stored and physical
+    /// coordinates at `offsets`. Moves the reservation into `unresolved` if construction or
+    /// address checks fail.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] with the error from [`PlannedBlock::placed`].
+    /// Returns [`Error::Format`] with placement errors from [`PlannedBlock::placed`] or address
+    /// errors from [`super::context::require_range`].
     fn reused(
         addresses: AddressContext,
+        offsets: OffsetWidth,
         reservation: ReusableReservation,
         request: BlockRequest,
         unresolved: &mut Option<ReusableReservation>,
     ) -> Result<PlannedReservation, Error> {
-        let block = match PlannedBlock::placed(addresses, reservation.placement(), request) {
+        let block =
+            PlannedBlock::placed(addresses, reservation.placement(), request).and_then(|block| {
+                super::context::require_range(offsets, addresses, block.allocation())?;
+                Ok(block)
+            });
+        let block = match block {
             Ok(block) => block,
             Err(error) => {
                 *unresolved = Some(reservation);
@@ -641,6 +661,7 @@ impl Reservations {
 
 /// A provisional stored EOA with PAGE alignment and tail-type state.
 struct AppendCursor {
+    offsets: OffsetWidth,
     addresses: AddressContext,
     cursor: StoredAddress,
     page_size: Option<FileSpacePageSize>,
@@ -652,17 +673,21 @@ impl AppendCursor {
     /// Advances EOA past a complete allocation and any PAGE alignment gap.
     ///
     /// Applies [`ReservationRequest::for_block`] geometry to block requests before resolving the
-    /// physical range. Preserves the cursor and tail page type on error.
+    /// physical range. Checks the full reserved capacity, including any bytes beyond the encoded
+    /// content, against the address width. Preserves the cursor and tail page type on error.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if stored or physical range arithmetic overflows, or
-    /// [`FormatError::Internal`] if placement precedes the fresh-page boundary.
+    /// [`FormatError::Internal`] if placement precedes the fresh-page boundary. Returns the width
+    /// errors from [`super::context::require_range`] if either range endpoint cannot be
+    /// represented.
     fn reserve(
         &mut self,
         request: ReservationRequest,
     ) -> Result<(FileRange, ReservationPlacement, Option<PageTransition>), FormatError> {
         let Self {
+            offsets,
             addresses,
             cursor,
             page_size,
@@ -693,7 +718,11 @@ impl AppendCursor {
         }
         let end = placement.extent().end();
         let range = FileRange::new(addresses.resolve(start)?, request.size().get())?;
-        addresses.resolve(end)?;
+        super::context::require_range(
+            *offsets,
+            *addresses,
+            FileRange::new(addresses.resolve(start)?, placement.extent().len())?,
+        )?;
         *cursor = end;
         if page_size.is_some() {
             *tail_type = Some(request.page_type());

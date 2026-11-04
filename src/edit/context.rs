@@ -2,13 +2,14 @@
 
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 
-use crate::address::AddressContext;
-use crate::error::Error;
+use crate::address::{AddressContext, StoredAddress};
+use crate::error::{Error, FormatError};
 use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::superblock::{self, LocatedSuperblock, Superblock};
-use crate::width::FormatWidths;
+use crate::width::{FormatWidths, OffsetWidth};
 
 use super::allocation::AllocationPublication;
 
@@ -18,6 +19,7 @@ use super::allocation::AllocationPublication;
 /// Widths, the address mapping, and the signature position are derived from the superblock.
 pub(super) struct FileContext {
     superblock: Superblock,
+    widths: FormatWidths,
     pub(super) allocations: AllocationPublication,
 }
 
@@ -32,7 +34,7 @@ impl FileContext {
         let LocatedSuperblock {
             address,
             superblock,
-            widths: _,
+            widths,
         } = located;
         if superblock.offset_size != OFFSET_WIDTH || superblock.length_size != LENGTH_WIDTH {
             return Err(Error::EditUnsupported(
@@ -46,6 +48,7 @@ impl FileContext {
         }
         Ok(Self {
             superblock,
+            widths,
             allocations: AllocationPublication::new(),
         })
     }
@@ -106,10 +109,7 @@ impl FileContext {
 
     /// Returns the offset and length widths stored in the superblock.
     pub(super) const fn widths(&self) -> FormatWidths {
-        FormatWidths {
-            offsets: self.superblock.offset_size,
-            lengths: self.superblock.length_size,
-        }
+        self.widths
     }
 
     /// Returns the mapping between stored addresses and physical file positions.
@@ -120,6 +120,18 @@ impl FileContext {
     /// Returns the physical position of the superblock signature.
     pub(super) const fn signature(&self) -> PhysicalAddress {
         PhysicalAddress::new(self.superblock.base_address.get())
+    }
+
+    /// Checks a physical range against the session's address width and base.
+    ///
+    /// Checks both endpoints, including the exclusive end, as defined stored and physical
+    /// addresses. Checks the single position of a zero-length range.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address errors from [`require_range`].
+    pub(super) fn require_range(&self, range: FileRange) -> Result<(), FormatError> {
+        require_range(self.widths.offsets, self.addresses(), range)
     }
 
     fn require_format(&self, superblock: &Superblock) -> Result<(), Error> {
@@ -134,6 +146,50 @@ impl FileContext {
         }
         Ok(())
     }
+}
+
+/// Checks both endpoints of a physical range in stored and physical coordinates.
+///
+/// The exclusive end must fit as a defined address, including for an empty range.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressBelowBase`] if an endpoint precedes the effective base,
+/// [`FormatError::AddressTooLarge`] if either coordinate exceeds `offsets`, or
+/// [`FormatError::DefinedAddressIsUndefined`] if either coordinate equals its undefined marker.
+pub(super) fn require_range(
+    offsets: OffsetWidth,
+    addresses: AddressContext,
+    range: FileRange,
+) -> Result<(), FormatError> {
+    for physical in [range.start(), range.end()] {
+        require_address(offsets, addresses.relative(physical)?.get())?;
+        require_address(offsets, physical.get())?;
+    }
+    Ok(())
+}
+
+/// Checks that `address` fits below the undefined marker at `offsets`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if `address` exceeds the width, or
+/// [`FormatError::DefinedAddressIsUndefined`] if it equals the undefined marker.
+fn require_address(offsets: OffsetWidth, address: u64) -> Result<(), FormatError> {
+    let undefined = StoredAddress::undefined(offsets).get();
+    if address > undefined {
+        return Err(FormatError::AddressTooLarge {
+            address,
+            offset_size: offsets.get(),
+        });
+    }
+    if address == undefined {
+        return Err(FormatError::DefinedAddressIsUndefined {
+            address,
+            offset_size: offsets.get(),
+        });
+    }
+    Ok(())
 }
 
 /// A superblock with its base address, widths, and version checked against a file context.
@@ -179,17 +235,50 @@ impl SuperblockPublication {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::FileRange;
     use rstest::rstest;
     use test_util::superblock::v2;
     use test_util::widths::Widths;
 
-    use crate::address::{BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt};
+    use crate::address::{
+        AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
+    };
     use crate::error::FormatError;
     use crate::superblock;
     use crate::width::{LengthWidth, OffsetWidth};
     use crate::{SuperblockStatusFlags, SuperblockVersion};
 
     use super::{Error, FileContext, LocatedSuperblock, PhysicalAddress};
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, 65_535)]
+    #[case::four(OffsetWidth::Four, 4_294_967_295)]
+    #[case::eight(OffsetWidth::Eight, u64::MAX)]
+    fn reserved_ranges_reject_undefined_and_overflowing_ends(
+        #[case] offsets: OffsetWidth,
+        #[case] undefined: u64,
+        #[values(0, 512)] base: u64,
+    ) {
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+        let range = |start, length| FileRange::new(PhysicalAddress::new(start), length).unwrap();
+        super::require_range(offsets, addresses, range(undefined - 2, 1)).unwrap();
+        assert_eq!(
+            super::require_range(offsets, addresses, range(undefined - 2, 2)),
+            Err(FormatError::DefinedAddressIsUndefined {
+                address: undefined,
+                offset_size: offsets.get(),
+            })
+        );
+        if let Some(end) = undefined.checked_add(1) {
+            assert_eq!(
+                super::require_range(offsets, addresses, range(undefined - 2, 3)),
+                Err(FormatError::AddressTooLarge {
+                    address: end,
+                    offset_size: offsets.get(),
+                })
+            );
+        }
+    }
 
     #[rstest]
     #[case::plain(0)]

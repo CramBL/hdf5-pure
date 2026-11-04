@@ -981,6 +981,7 @@ impl EditStore<'_> {
             .allocate_bytes(length, class, prepare)
             .and_then(|address| {
                 let range = FileRange::new(PhysicalAddress::new(address), length)?;
+                self.engine.context.require_range(range)?;
                 let allocation = self.engine.context.allocations.provision(range)?;
                 if allocation.range().end().get() > self.engine.image.len() {
                     return Err(FormatError::TruncatedFile {

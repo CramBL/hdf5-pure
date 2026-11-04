@@ -2959,7 +2959,14 @@ impl WriteEngine {
         self.write_planned_block(&block, bytes)
     }
 
+    /// Writes a block after checking its complete allocation against the session's address width.
+    ///
+    /// # Errors
+    ///
+    /// Returns range errors from [`FileContext::require_range`], encoding-length errors from
+    /// [`PlannedBlock::region`], or image-write errors.
     fn write_planned_block(&mut self, block: &PlannedBlock, bytes: &[u8]) -> Result<(), Error> {
+        self.context.require_range(block.allocation())?;
         let region = block.region(bytes)?;
         let at = region.range().start();
         if at == PhysicalAddress::new(self.image.len()) {
@@ -3003,9 +3010,12 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if writing fails, or [`Error::Format`] if the image cannot
-    /// represent `target` or reading or representing a clean gap fails.
+    /// represent `target` as a defined address at the session's width, or reading or representing
+    /// a clean gap fails.
     fn pad_zeros_to(&mut self, target: u64) -> Result<(), Error> {
         let len = self.image.len();
+        self.context
+            .require_range(FileRange::new(PhysicalAddress::new(target), 0)?)?;
         if target > len {
             let range = FileRange::new(PhysicalAddress::new(len), target - len)?;
             self.fill_zeros(range)?;
@@ -3020,9 +3030,20 @@ impl WriteEngine {
         self.image.fill_zeros(range)
     }
 
-    /// Append `bytes` at end-of-file, returning the absolute address they were
-    /// written at.
+    /// Appends `bytes` and returns their physical starting address.
+    ///
+    /// Checks the complete range and resulting EOA against the session's address width before
+    /// writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns range errors from [`FileRange::new`] or [`FileContext::require_range`], or
+    /// image-append errors.
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
+        self.context.require_range(FileRange::new(
+            PhysicalAddress::new(self.image.len()),
+            bytes.len() as u64,
+        )?)?;
         self.image.append(bytes)
     }
 
@@ -3125,6 +3146,8 @@ impl WriteEngine {
             return self
                 .reserve_request(ReservationRequest::with_page_type(size, class, page_type));
         }
+        self.context
+            .require_range(FileRange::new(PhysicalAddress::new(self.image.len()), 0)?)?;
         self.begin_page(page_type)?;
         Ok(Placement::Appended {
             addr: self.image.len(),

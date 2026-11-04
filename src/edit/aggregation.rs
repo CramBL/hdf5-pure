@@ -2,6 +2,7 @@
 
 use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::AggregationError;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
@@ -16,6 +17,7 @@ use crate::edit::commit::PublicationState;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
+use crate::width::OffsetWidth;
 
 use super::FreeClass;
 use super::Placement;
@@ -72,14 +74,17 @@ impl AggregateSpace {
     ///
     /// Calls `release` with the stored EOA and complete abandoned spare, marking manager state dirty
     /// if the callback returns `true`. The caller applies threshold admission in that callback and
-    /// writes the reservation through [`place`](Self::place). On error, aggregate state is unchanged
-    /// and the callback has not been called.
+    /// writes the reservation through [`place`](Self::place). Checks the complete aggregate
+    /// capacity through its EOA against `offsets` before calling `release`. On error, aggregate
+    /// state is unchanged and the callback has not been called.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if aggregate planning or physical address resolution fails.
+    /// Returns [`Error::Format`] if aggregate planning, address resolution, or the range check
+    /// in [`super::context::require_range`] fails.
     pub(super) fn reserve_with(
         &mut self,
+        offsets: OffsetWidth,
         addresses: AddressContext,
         size: NonZeroU64,
         class: AllocationClass,
@@ -99,7 +104,13 @@ impl AggregateSpace {
                     }
                 })?;
         next.eoa = allocation.end_of_allocation();
+        let start = addresses.resolve(allocation.extent().start())?;
         let physical_end = addresses.resolve(next.eoa)?.get();
+        super::context::require_range(
+            offsets,
+            addresses,
+            FileRange::new(start, physical_end - start.get())?,
+        )?;
         let placement = Placement::Aggregated {
             addr: addresses.resolve(allocation.extent().start())?.get(),
             len,

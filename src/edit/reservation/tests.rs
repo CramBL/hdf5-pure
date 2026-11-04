@@ -29,12 +29,88 @@ use crate::image::WriteBuffering;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::source::MetadataCacheConfig;
 use crate::source::Source;
+use crate::width::OffsetWidth;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
 use super::{AppendCursor, ReservationFailure, ReservationPlan};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 
 mod preferred;
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 65_535)]
+#[case::four(OffsetWidth::Four, 4_294_967_295)]
+fn narrow_block_reservations_check_page_capacity_beyond_encoded_bytes(
+    #[case] offsets: OffsetWidth,
+    #[case] undefined: u64,
+    #[values(0, 512)] base: u64,
+) {
+    let page_size = FileSpacePageSize::DEFAULT;
+    let start = undefined - (2 * page_size.get() - 1);
+    let mut cursor = AppendCursor {
+        offsets,
+        addresses: AddressContext::from_effective_base(BaseAddress::new(base)),
+        cursor: StoredAddress::new(start),
+        page_size: Some(page_size),
+        tail_type: Some(PageType::Meta),
+        fresh_boundary: None,
+    };
+    let block = BlockRequest::new(
+        request(2 * page_size.get(), PageType::Meta).for_block(),
+        page_size.get() + 1,
+        EncodingDependency::Allocation,
+    )
+    .unwrap();
+    assert!(base + start + block.encoded_length() < undefined);
+    let error = cursor.reserve(block.reservation()).unwrap_err();
+    assert_eq!(
+        error,
+        FormatError::AddressTooLarge {
+            address: undefined + 1,
+            offset_size: offsets.get()
+        }
+    );
+    assert_eq!(cursor.cursor.get(), start);
+    assert_eq!(cursor.tail_type, Some(PageType::Meta));
+}
+
+#[rstest]
+#[case::plain(0, None, 65_530, 4, 65_534)]
+#[case::userblock(512, None, 65_018, 4, 65_022)]
+#[case::page(0, Some(FileSpacePageSize::DEFAULT), 61_440, 1, 61_441)]
+fn narrow_append_cursor_checks_complete_capacity_before_advancing(
+    #[case] base: u64,
+    #[case] page_size: Option<FileSpacePageSize>,
+    #[case] start: u64,
+    #[case] size: u64,
+    #[case] end: u64,
+) {
+    let mut cursor = AppendCursor {
+        offsets: OffsetWidth::Two,
+        addresses: AddressContext::from_effective_base(BaseAddress::new(base)),
+        cursor: StoredAddress::new(start),
+        page_size,
+        tail_type: Some(PageType::Raw),
+        fresh_boundary: None,
+    };
+    let (range, _, _) = cursor.reserve(request(size, PageType::Raw)).unwrap();
+    assert_eq!(range.start().get(), base + start);
+    assert_eq!(cursor.cursor.get(), end);
+    let before = cursor.cursor;
+    let tail = cursor.tail_type;
+    let error = cursor.reserve(request(4096, PageType::Meta)).unwrap_err();
+    let FormatError::AddressTooLarge {
+        address,
+        offset_size,
+    } = error
+    else {
+        panic!("expected AddressTooLarge, got {error:?}");
+    };
+    assert!(address > u64::from(u16::MAX));
+    assert_eq!(offset_size, 2);
+    assert_eq!(cursor.cursor, before);
+    assert_eq!(cursor.tail_type, tail);
+}
 
 #[rstest]
 #[case::append(FileSpaceStrategy::None, &[0, 16, 48], 72)]
@@ -343,6 +419,7 @@ fn failed_emission_keeps_reserved_space_until_explicit_rollback() {
 fn provisional_geometry_above_32bit_addresses_uses_only_local_lengths(#[values(0, 512)] base: u64) {
     let start = (1u64 << 40) + 16;
     let mut cursor = AppendCursor {
+        offsets: OffsetWidth::Eight,
         addresses: AddressContext::from_effective_base(BaseAddress::new(base)),
         cursor: StoredAddress::new(start),
         page_size: Some(FileSpacePageSize::DEFAULT),
@@ -1117,6 +1194,7 @@ fn failed_block_geometry_preserves_the_append_cursor(
     #[case] length: u64,
 ) {
     let mut cursor = AppendCursor {
+        offsets: OffsetWidth::Eight,
         addresses: AddressContext::from_effective_base(BaseAddress::new(base)),
         cursor: StoredAddress::new(start),
         page_size: Some(FileSpacePageSize::DEFAULT),
