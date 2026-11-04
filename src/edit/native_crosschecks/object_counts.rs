@@ -16,6 +16,7 @@ use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::OrdinaryCountSubject;
+use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::group::GroupInfo;
 use crate::edit::object_header;
 use crate::edit::object_header::PreparedHeader;
@@ -23,6 +24,71 @@ use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
+
+#[rstest]
+#[case::version_1(false)]
+#[case::version_2(true)]
+fn native_root_counts_include_the_superblock_reference(
+    #[case] modern: bool,
+    #[values(0, 1, 2)] links: u32,
+) {
+    let path = test_util::temp::temp_path("native-root-counts.h5");
+    let native = if modern {
+        file::libhdf5_create_v18(&path)
+    } else {
+        file::libhdf5_create_earliest(&path)
+    };
+    assert_eq!(
+        native.loc_info_by_name("/").unwrap().num_links,
+        usize::try_from(ROOT_REFERENCE_COUNT).unwrap()
+    );
+    for index in 0..links {
+        native.link_hard("/", &format!("self{index}")).unwrap();
+    }
+    assert_eq!(
+        native.loc_info_by_name("/").unwrap().num_links,
+        usize::try_from(links + ROOT_REFERENCE_COUNT).unwrap()
+    );
+    if links > 0 {
+        native.unlink("self0").unwrap();
+    }
+    let expected = links.saturating_sub(1) + ROOT_REFERENCE_COUNT;
+    assert_eq!(
+        native.loc_info_by_name("/").unwrap().num_links,
+        usize::try_from(expected).unwrap()
+    );
+    native.close().unwrap();
+    let engine = edit_test_util::open_engine(&path);
+    let root =
+        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
+    let mut phase = AnalysisPhase::new(&engine);
+    assert_eq!(
+        phase.topology().unwrap().incoming(root),
+        if links > 1 { Some(links - 1) } else { None }
+    );
+    match phase.object_reference_count(root).unwrap() {
+        ObjectReferenceCount::Version1(field) if !modern => assert_eq!(field.value(), expected),
+        ObjectReferenceCount::Version2(field) if modern => assert_eq!(field.value(), expected),
+        ObjectReferenceCount::ImplicitOne if modern && expected == ROOT_REFERENCE_COUNT => {}
+        other => panic!("unexpected root count: {other:?}"),
+    }
+    let Some(CountEvidence::Retained(bound)) = phase.count_evidence(root).unwrap() else {
+        panic!("expected retained native root evidence")
+    };
+    assert_eq!(bound.original(), expected);
+    assert_eq!(bound.incoming(), links.saturating_sub(1));
+    if links > 1 {
+        let deletion = phase
+            .topology()
+            .unwrap()
+            .deletion(&ObjectPathBuf::parse("self1"))
+            .unwrap();
+        let plan = phase.source_count_plan([&deletion]).unwrap().unwrap();
+        assert_eq!(plan.graph_remaining(root), Some(0));
+        assert_eq!(plan.declared_remaining(root), Some(ROOT_REFERENCE_COUNT));
+        assert_eq!(plan.counted_zero_objects().count(), 0);
+    }
+}
 
 #[rstest]
 #[case::hard_links(Usage::HardLinks)]
