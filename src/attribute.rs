@@ -27,6 +27,7 @@ use crate::btree::v2 as btree_v2;
 use crate::btree::v2::BTreeV2Header;
 use crate::btree::v2::BTreeV2Source;
 use crate::convert::Narrow;
+use crate::datatype::Datatype;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::FormatError;
 use crate::fractal_heap;
@@ -199,7 +200,8 @@ pub struct StoredAttribute {
 ///
 /// Resolves heap and shared-message addresses using the source's effective address context.
 /// Object-header records store creation indexes for compact attributes, and B-tree records
-/// for dense attributes.
+/// for dense attributes. Checks complete datatype and dataspace fields before decoding the
+/// datatype. [`extract_stored_attributes_with`] supports earlier datatype inspection.
 ///
 /// # Errors
 ///
@@ -212,6 +214,62 @@ pub fn extract_stored_attributes_from_source(
     widths: FormatWidths,
     sohm: Option<&SohmTable>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
+    extract_stored_attributes_parsing(
+        source,
+        access_mode,
+        header,
+        widths,
+        sohm,
+        |data, resolver| AttributeMessage::parse_resolving_with_widths(data, widths, resolver),
+    )
+}
+
+/// Reads stored attributes after inspecting each resolved datatype.
+///
+/// Calls `inspect` before parsing each attribute's dataspace or copying its values. Resolves shared
+/// fields once during that parse. Retains creation indexes from compact or dense storage.
+///
+/// # Errors
+///
+/// Returns the error from `inspect`, or the source and parsing errors of
+/// [`extract_stored_attributes_from_source`].
+pub(crate) fn extract_stored_attributes_with(
+    source: &(impl OriginalSource + ?Sized),
+    access_mode: AccessMode,
+    header: &ObjectHeader,
+    widths: FormatWidths,
+    sohm: Option<&SohmTable>,
+    mut inspect: impl FnMut(&Datatype) -> Result<(), FormatError>,
+) -> Result<Vec<StoredAttribute>, FormatError> {
+    extract_stored_attributes_parsing(
+        source,
+        access_mode,
+        header,
+        widths,
+        sohm,
+        |data, resolver| {
+            AttributeMessage::parse_inspecting_datatype(data, widths, resolver, &mut inspect)
+        },
+    )
+}
+
+/// Reads compact and dense storage through one attribute parser.
+///
+/// Calls `parse` once per attribute with resolved message bytes and a resolver for shared fields.
+/// The caller selects complete-field parsing or early datatype inspection. Retains creation
+/// indexes from the object-header or name-index record.
+///
+/// # Errors
+///
+/// Returns source-read or metadata errors, or the error from `parse`.
+fn extract_stored_attributes_parsing(
+    source: &(impl OriginalSource + ?Sized),
+    access_mode: AccessMode,
+    header: &ObjectHeader,
+    widths: FormatWidths,
+    sohm: Option<&SohmTable>,
+    mut parse: impl FnMut(&[u8], &dyn SharedResolver) -> Result<AttributeMessage, FormatError>,
+) -> Result<Vec<StoredAttribute>, FormatError> {
     let resolver = SourceResolver::new(source, access_mode, widths, sohm);
     let mut attrs = Vec::new();
 
@@ -219,9 +277,9 @@ pub fn extract_stored_attributes_from_source(
         if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = if msg.flags.is_shared() {
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving_with_widths(&resolved, widths, &resolver)?
+                parse(&resolved, &resolver)?
             } else {
-                AttributeMessage::parse_resolving_with_widths(&msg.data, widths, &resolver)?
+                parse(&msg.data, &resolver)?
             };
             attrs.push(StoredAttribute {
                 message: attr,
@@ -241,6 +299,7 @@ pub fn extract_stored_attributes_from_source(
             fh_addr,
             widths,
             sohm,
+            &mut parse,
         )?;
         attrs.extend(dense_attrs);
     }
@@ -331,11 +390,12 @@ fn extract_dense_attributes(
 
 /// Reads dense attributes and creation indexes through the opened source.
 ///
-/// Resolves embedded datatype and dataspace references through the original [`Source`].
+/// Calls `parse` with each message's bytes and a resolver for embedded datatype and dataspace
+/// references through the original [`Source`]. Retains creation indexes from the name-index record.
 ///
 /// # Errors
 ///
-/// Returns errors from [`visit_dense_attribute_messages_from_source`] or attribute parsing.
+/// Returns errors from [`visit_dense_attribute_messages_from_source`] or `parse`.
 fn extract_dense_attributes_from_source(
     source: &(impl OriginalSource + ?Sized),
     access_mode: AccessMode,
@@ -343,6 +403,7 @@ fn extract_dense_attributes_from_source(
     fh_addr: StoredAddress,
     widths: FormatWidths,
     sohm: Option<&SohmTable>,
+    parse: &mut impl FnMut(&[u8], &dyn SharedResolver) -> Result<AttributeMessage, FormatError>,
 ) -> Result<Vec<StoredAttribute>, FormatError> {
     let resolver = SourceResolver::new(source, access_mode, widths, sohm);
     let mut attrs = Vec::new();
@@ -357,7 +418,7 @@ fn extract_dense_attributes_from_source(
         |_flags| true,
         |data, creation_index| {
             attrs.push(StoredAttribute {
-                message: AttributeMessage::parse_resolving_with_widths(data, widths, &resolver)?,
+                message: parse(data, &resolver)?,
                 creation_index,
             });
             Ok(())
@@ -537,6 +598,9 @@ mod tests {
                 StoredAddress::ZERO,
                 widths,
                 None,
+                &mut |data, resolver| {
+                    AttributeMessage::parse_resolving_with_widths(data, widths, resolver)
+                },
             )
             .unwrap_err()
         } else {
@@ -582,6 +646,9 @@ mod tests {
                 StoredAddress::new(0),
                 widths,
                 table.as_ref(),
+                &mut |data, resolver| {
+                    AttributeMessage::parse_resolving_with_widths(data, widths, resolver)
+                },
             )
             .unwrap_err()
         } else {
@@ -972,6 +1039,9 @@ mod tests {
             fh_addr,
             widths,
             None,
+            &mut |data, resolver| {
+                AttributeMessage::parse_resolving_with_widths(data, widths, resolver)
+            },
         )
         .unwrap();
 
@@ -1045,6 +1115,9 @@ mod tests {
             fh_addr,
             widths,
             None,
+            &mut |data, resolver| {
+                AttributeMessage::parse_resolving_with_widths(data, widths, resolver)
+            },
         )
         .unwrap();
 

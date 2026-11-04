@@ -346,6 +346,24 @@ pub(super) enum ReferenceTarget {
 }
 
 impl WriteEngine {
+    /// Screens narrow-offset files for reference datatypes and caches a successful proof.
+    ///
+    /// Skips the source walk for eight-byte offsets or an existing successful proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns inspection errors from [`crate::reference_patch::preflight_narrow_references`].
+    pub(in crate::edit) fn preflight_narrow_references(&mut self) -> Result<(), Error> {
+        self.proved_free_of_references = crate::reference_patch::preflight_narrow_references(
+            &self.opened_source(),
+            self.context.superblock(),
+            self.context.widths(),
+            MAX_LINK_GRAPH_NODES,
+            self.proved_free_of_references,
+        )?;
+        Ok(())
+    }
+
     /// Prepares edits while retaining the staged inputs for retry on rejection.
     ///
     /// # Errors
@@ -354,6 +372,7 @@ impl WriteEngine {
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
     fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
+        self.preflight_narrow_references()?;
         let mut analysis = AnalysisPhase::new(self);
         let mut edits = DatasetEdits {
             inplace_writes: Vec::new(),

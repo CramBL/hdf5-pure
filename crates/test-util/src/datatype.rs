@@ -33,6 +33,13 @@ pub fn fixed_string(size: u32) -> Vec<u8> {
     header(Class::STRING, DATATYPE_VERSION, [0x01, 0, 0], size)
 }
 
+/// Encodes a legacy object-reference datatype with the caller-supplied element size.
+///
+/// Accepts arbitrary sizes for malformed fixtures.
+pub fn object_reference(size: u32) -> Vec<u8> {
+    header(Class::REFERENCE, DATATYPE_VERSION, OBJECT_REFERENCE, size)
+}
+
 /// A reference to a committed datatype, which stands where an encoding
 /// usually is when the message's shared flag is set.
 pub fn committed_reference(address: u64) -> Vec<u8> {
@@ -76,3 +83,11 @@ const DATATYPE_VERSION: u8 = 1;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const IEEE754_BINARY64_CLASS_FIELDS: [u8; 3] = [0x20, 0x3F, 0];
+
+/// The version 1 datatype class fields for a legacy object reference.
+///
+/// The reference type is zero and the remaining bits are reserved, as defined in "The Datatype
+/// Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const OBJECT_REFERENCE: [u8; 3] = [0; 3];

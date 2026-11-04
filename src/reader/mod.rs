@@ -3277,19 +3277,13 @@ impl File {
         })
     }
 
-    /// Copy the object at `src` in `source` — a separate, buffered read-only
-    /// file — into this file at `dst`: the cross-file `H5Ocopy`, staged until
-    /// [`commit`](Self::commit).
+    /// Stages a copy of `src` from a separate buffered file at `dst`.
     ///
-    /// `source` must be a buffered file ([`File::open`] or [`File::from_bytes`],
-    /// not [`File::open_streaming`]) that uses 8-byte offsets and has no
-    /// userblock; anything else is refused with
-    /// [`Error::EditUnsupported`]. The source
-    /// subtree is read and validated eagerly, so `source` need not outlive this
-    /// call — and so a source this cannot reproduce, external storage included,
-    /// is refused by this call. Refusals that concern the *destination* — `dst`
-    /// already exists, or its parent group does not — still come from `commit`.
-    /// Requires a read-write destination ([`File::open_rw`]).
+    /// The source must have the same address and length widths as the destination and no
+    /// userblock. Reads the source subtree before returning, so `source` need not outlive this
+    /// call. Unsupported source storage is rejected here. [`File::commit`] checks destination
+    /// collisions and parent groups before publication. Requires a read-write destination
+    /// opened with [`File::open_rw`].
     ///
     /// Soft and external links are copied with their stored targets, so an absolute soft link in
     /// the copy is resolved from the root group of this file.
@@ -3299,7 +3293,9 @@ impl File {
     /// Returns [`Error::EditUnsupported`] if the source reaches one object through more than one
     /// hard link, as an alias or a cycle does, [`Error::TraversalLimitExceeded`] if it reaches
     /// more objects or hard links than a copy reads, and [`Error::ReadOnly`] if this file is
-    /// read-only.
+    /// read-only. Returns [`Error::EditUnsupported`] if the source is streamed, has a userblock,
+    /// has different file widths, or uses source storage that cannot be reproduced. Propagates
+    /// source-read and preparation errors.
     pub fn copy_from(&self, source: &File, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
             session.copy_from(

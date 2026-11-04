@@ -1,8 +1,8 @@
 //! Independent file images with dense attributes on a dataset or the root group.
 //!
-//! Each image has a version 2 superblock, version 2 object headers, eight-byte
-//! addresses and lengths, and little-endian numeric values. Attributes are stored
-//! in a fractal heap with a version 2 B-tree name index.
+//! [`Fixture`] uses eight-byte addresses and lengths and little-endian numeric values.
+//! [`one_message`] embeds a caller-supplied body at selected file widths. Both use version 2
+//! superblocks and object headers, with a fractal heap and version 2 B-tree name index.
 
 use crate::attribute;
 use crate::attribute::Attribute;
@@ -136,6 +136,74 @@ pub fn dense_attrs() -> Vec<u8> {
 /// by 2.0 as scalar [`f64`] values.
 pub fn dense_attrs_root() -> Vec<u8> {
     Fixture::Root.build()
+}
+
+/// Encodes a root group with one dense attribute body and independently selected file widths.
+///
+/// Stores `message` unchanged in a managed heap object, allowing malformed attribute bodies.
+/// The name index uses `value` as the attribute name.
+///
+/// # Panics
+///
+/// Panics if `message` exceeds 64 bytes or a file-width field cannot represent the fixture.
+pub fn one_message(message: &[u8], widths: Widths) -> Vec<u8> {
+    let mut image = Image::starting_with(&Superblock::new(widths).build());
+    let heap = fractal_heap::Header::new(0)
+        .heap_id_length(HEAP_ID_LENGTH)
+        .managed_object_count(1);
+    let heap_at = image.append(&heap.build(widths));
+    let prefix = heap.direct_block(heap_at as u64, &[], widths).len();
+    let id = heap.managed_id(
+        u16::try_from(prefix).unwrap(),
+        u8::try_from(message.len()).unwrap(),
+    );
+    let mut block = heap.direct_block(heap_at as u64, message, widths);
+    block.resize(usize::try_from(heap.direct_block_size()).unwrap(), 0);
+    let block_at = image.append(&block);
+    image.place(
+        heap_at,
+        &fractal_heap::Header::new(block_at as u64)
+            .heap_id_length(HEAP_ID_LENGTH)
+            .managed_object_count(1)
+            .build(widths),
+    );
+    let record = btree_v2::attribute_name_record(&id, NO_FLAGS, 0, checksum::lookup3(b"value"));
+    let mut leaf = btree_v2::leaf(ATTRIBUTE_NAME_INDEX, core::slice::from_ref(&record));
+    leaf.resize(BTREE_NODE_SIZE, 0);
+    let leaf_at = image.append(&leaf);
+    let index = image.append(
+        &btree_v2::Header::new(
+            ATTRIBUTE_NAME_INDEX,
+            u16::try_from(record.len()).unwrap(),
+            leaf_at as u64,
+            1,
+        )
+        .node_size(BTREE_NODE_SIZE as u32)
+        .build(widths),
+    );
+    let mut link_info = vec![LINK_INFO_VERSION, NO_FLAGS];
+    bytes::push_undefined_address(&mut link_info, widths.offset);
+    bytes::push_undefined_address(&mut link_info, widths.offset);
+    let root = image.append(
+        &v2::Header::new()
+            .messages([
+                Message::new(MessageType::LINK_INFO, &link_info),
+                Message::new(MessageType::GROUP_INFO, &[GROUP_INFO_VERSION, NO_FLAGS]),
+                Message::new(
+                    MessageType::ATTRIBUTE_INFO,
+                    &attribute::info(Some(heap_at as u64), Some(index as u64), widths),
+                ),
+            ])
+            .build(),
+    );
+    image.place(
+        0,
+        &Superblock::new(widths)
+            .root_header_address(root as u64)
+            .eof_address(image.as_bytes().len() as u64)
+            .build(),
+    );
+    image.build()
 }
 
 /// A selected corruption of the dataset fixture's dense-attribute leaf.

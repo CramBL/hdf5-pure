@@ -167,6 +167,57 @@ impl AttributeMessage {
     /// [`FormatError::UnexpectedEof`] if the prefix, name, or datatype is truncated. Propagates
     /// datatype-decoding and resolver errors.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, Datatype, FormatError, LengthWidth,
+    ///     MessageType, OffsetWidth, ReferenceType};
+    /// use hdf5_pure_core::StoredAddress;
+    ///
+    /// struct InlineOnly;
+    /// impl format::SharedResolver for InlineOnly {
+    ///     fn resolve(&self, _: &[u8], target: MessageType)
+    ///         -> Result<Vec<u8>, FormatError>
+    ///     {
+    ///         Err(FormatError::UnresolvedSharedMessage(target.to_u16()))
+    ///     }
+    ///     fn committed_address(&self, _: &[u8]) -> Result<Option<StoredAddress>, FormatError> {
+    ///         Err(FormatError::UnresolvedSharedMessage(MessageType::DATATYPE.to_u16()))
+    ///     }
+    /// }
+    ///
+    /// let datatype = Datatype::Reference { size: 8, ref_type: ReferenceType::Object };
+    /// let attribute = format::AttributeMessage {
+    ///     name: "target".into(),
+    ///     datatype: datatype.clone(),
+    ///     dataspace: format::Dataspace {
+    ///         space_type: format::DataspaceType::Scalar,
+    ///         rank: 0,
+    ///         dimensions: vec![],
+    ///         max_dimensions: None,
+    ///     },
+    ///     raw_data: vec![],
+    ///     datatype_location: format::DatatypeLocation::Inline,
+    /// };
+    /// let body = attribute.serialize(OffsetWidth::Two, 4)?;
+    /// assert_eq!(
+    ///     format::AttributeMessage::parse_datatype_resolving(&body, &InlineOnly)?,
+    ///     datatype,
+    /// );
+    /// let error = format::AttributeMessage::parse_inspecting_datatype(
+    ///     &body,
+    ///     format::FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Four },
+    ///     &InlineOnly,
+    ///     |datatype| match datatype {
+    ///         Datatype::Reference { .. } => Err(FormatError::ReferenceWidthUnsupported {
+    ///             offset_size: 2,
+    ///         }),
+    ///         _ => Ok(()),
+    ///     },
+    /// ).unwrap_err();
+    /// assert_eq!(error, FormatError::ReferenceWidthUnsupported { offset_size: 2 });
+    /// # Ok::<(), FormatError>(())
+    /// ```
     pub fn parse_datatype_resolving(
         data: &[u8],
         resolver: &dyn SharedResolver,
@@ -303,6 +354,8 @@ impl AttributeMessage {
     /// Resolves shared datatype and dataspace fields through `resolver`. Reads dimensions at
     /// `widths.lengths` and sizes variable-length element storage at `widths.offsets`. The returned
     /// offset is relative to the start of `data`, including any version 1 field padding.
+    /// Checks complete datatype and dataspace field ranges before decoding or resolving them.
+    /// [`Self::parse_inspecting_datatype`] supports earlier datatype screening.
     ///
     /// # Errors
     ///
@@ -318,14 +371,67 @@ impl AttributeMessage {
         resolver: &dyn SharedResolver,
     ) -> Result<(AttributeMessage, usize), FormatError> {
         let prefix = AttributePrefix::parse(data)?;
-        let (ds_field, raw_at) = prefix.dataspace(data)?;
-        let (datatype, dataspace, datatype_location) = decode_type_and_space(
-            prefix.datatype,
-            ds_field,
-            prefix.flags,
-            widths.lengths,
+        prefix.dataspace(data)?;
+        Self::parse_after_prefix(data, widths, resolver, prefix, |_| Ok(()))
+    }
+
+    /// Parses an attribute after inspecting its resolved datatype.
+    ///
+    /// Calls `inspect` once after decoding the datatype, before reading the dataspace body or
+    /// copying values. Resolves shared fields once each. If `inspect` returns an error, returns
+    /// that error immediately. Reads accepted values at `widths` as in
+    /// [`Self::parse_resolving_with_widths`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from `inspect` or the parsing and resolution errors of
+    /// [`Self::parse_resolving_at_with_widths`].
+    ///
+    /// # Examples
+    ///
+    /// See [`Self::parse_datatype_resolving`] for datatype inspection before reading values.
+    pub fn parse_inspecting_datatype(
+        data: &[u8],
+        widths: FormatWidths,
+        resolver: &dyn SharedResolver,
+        inspect: impl FnOnce(&Datatype) -> Result<(), FormatError>,
+    ) -> Result<AttributeMessage, FormatError> {
+        Self::parse_inspecting_datatype_at(data, widths, resolver, inspect)
+            .map(|(attribute, _)| attribute)
+    }
+
+    /// Inspects the datatype before parsing the remaining fields and returns the value offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns the inspection and parsing errors of [`Self::parse_inspecting_datatype`].
+    fn parse_inspecting_datatype_at(
+        data: &[u8],
+        widths: FormatWidths,
+        resolver: &dyn SharedResolver,
+        inspect: impl FnOnce(&Datatype) -> Result<(), FormatError>,
+    ) -> Result<(AttributeMessage, usize), FormatError> {
+        Self::parse_after_prefix(
+            data,
+            widths,
             resolver,
-        )?;
+            AttributePrefix::parse(data)?,
+            inspect,
+        )
+    }
+
+    fn parse_after_prefix(
+        data: &[u8],
+        widths: FormatWidths,
+        resolver: &dyn SharedResolver,
+        prefix: AttributePrefix<'_>,
+        inspect: impl FnOnce(&Datatype) -> Result<(), FormatError>,
+    ) -> Result<(AttributeMessage, usize), FormatError> {
+        let (datatype, datatype_location) =
+            decode_datatype(prefix.datatype, prefix.flags, resolver)?;
+        inspect(&datatype)?;
+        let (ds_field, raw_at) = prefix.dataspace(data)?;
+        let dataspace = decode_dataspace(ds_field, prefix.flags, widths.lengths, resolver)?;
         let raw_data = compute_raw_data(data, raw_at, &dataspace, &datatype, widths.offsets)?;
         Ok((
             AttributeMessage {
@@ -667,34 +773,23 @@ impl<'a> AttributePrefix<'a> {
     }
 }
 
-/// Decodes an attribute's datatype and dataspace fields, and resolves a field through `resolver`
-/// where the flags byte marks it as shared.
+/// Parses an inline dataspace or resolves its shared encoding at `length_width`.
 ///
-/// Only the flags byte distinguishes a reference from an encoding: the datatype parser reads a
-/// version 2 reference to address `0x320` as a time datatype, and rejects it only for its size of
-/// zero.
+/// # Errors
 ///
-/// Only the datatype's location is returned. A shared *dataspace* is resolved
-/// and then indistinguishable from an inline one: a dataspace has no name, and no
-/// HDF5 call reports one as shared, so writing it back inline loses nothing. A
-/// committed datatype does have a name, which is why that one is tracked.
-fn decode_type_and_space(
-    dt_field: &[u8],
-    ds_field: &[u8],
+/// Returns dataspace-parsing or resolver errors.
+fn decode_dataspace(
+    field: &[u8],
     flags: u8,
     length_width: LengthWidth,
     resolver: &dyn SharedResolver,
-) -> Result<(Datatype, Dataspace, DatatypeLocation), FormatError> {
-    let (datatype, location) = decode_datatype(dt_field, flags, resolver)?;
-
-    let dataspace = if flags & FLAG_SHARED_DATASPACE != 0 {
-        let body = resolver.resolve(ds_field, MessageType::DATASPACE)?;
-        Dataspace::parse_with_length_width(&body, length_width)?
+) -> Result<Dataspace, FormatError> {
+    if flags & FLAG_SHARED_DATASPACE != 0 {
+        let body = resolver.resolve(field, MessageType::DATASPACE)?;
+        Dataspace::parse_with_length_width(&body, length_width)
     } else {
-        Dataspace::parse_with_length_width(ds_field, length_width)?
-    };
-
-    Ok((datatype, dataspace, location))
+        Dataspace::parse_with_length_width(field, length_width)
+    }
 }
 
 /// Parses an inline or shared datatype and retains its committed-object location.
@@ -829,6 +924,8 @@ const V1_FIELD_ALIGNMENT: usize = 8;
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
     use hdf5_pure_core::FixedPointType;
     use rstest::rstest;
     use test_util::attribute;
@@ -1433,6 +1530,101 @@ mod tests {
             AttributeMessage::parse(&bytes, 8).unwrap_err(),
             FormatError::UnresolvedSharedMessage(MessageType::DATASPACE.to_u16())
         );
+    }
+
+    #[rstest]
+    #[case::accepted(false)]
+    #[case::rejected(true)]
+    fn datatype_inspection_resolves_shared_fields_once(#[case] reject: bool) {
+        let bytes = attribute::Attribute::new(
+            "label",
+            &datatype::committed_reference(0x320),
+            &datatype::committed_reference(0x640),
+            b"abcd",
+        )
+        .flags(attribute::Flags(
+            FLAG_SHARED_DATATYPE | FLAG_SHARED_DATASPACE,
+        ))
+        .build();
+        let resolver = InspectionResolver {
+            datatypes: Cell::new(0),
+            dataspaces: Cell::new(0),
+        };
+        let inspected = Cell::new(0);
+        let result = AttributeMessage::parse_inspecting_datatype(
+            &bytes,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+            &resolver,
+            |datatype| {
+                inspected.set(inspected.get() + 1);
+                assert_eq!(datatype.type_size(), 4);
+                if reject {
+                    Err(FormatError::ResourceLimit {
+                        limit: 0,
+                        required: 1,
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(inspected.get(), 1);
+        assert_eq!(resolver.datatypes.get(), 1);
+        assert_eq!(resolver.dataspaces.get(), usize::from(!reject));
+        if reject {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::ResourceLimit {
+                    limit: 0,
+                    required: 1
+                }
+            );
+        } else {
+            let parsed = result.unwrap();
+            assert_eq!(parsed.name, "label");
+            assert_eq!(parsed.raw_data, b"abcd");
+            assert_eq!(
+                parsed.datatype_location,
+                DatatypeLocation::Committed(StoredAddress::new(0x320))
+            );
+            assert_eq!(
+                parsed.dataspace,
+                Dataspace {
+                    space_type: DataspaceType::Scalar,
+                    rank: 0,
+                    dimensions: Vec::new(),
+                    max_dimensions: None,
+                }
+            );
+        }
+    }
+
+    struct InspectionResolver {
+        datatypes: Cell<usize>,
+        dataspaces: Cell<usize>,
+    }
+
+    impl SharedResolver for InspectionResolver {
+        fn resolve(&self, _reference: &[u8], target: MessageType) -> Result<Vec<u8>, FormatError> {
+            match target {
+                MessageType::DATATYPE => {
+                    self.datatypes.set(self.datatypes.get() + 1);
+                    Ok(datatype::fixed_string(4))
+                }
+                MessageType::DATASPACE => {
+                    self.dataspaces.set(self.dataspaces.get() + 1);
+                    Ok(dataspace::scalar())
+                }
+                _ => Err(FormatError::UnresolvedSharedMessage(target.to_u16())),
+            }
+        }
+
+        fn committed_address(
+            &self,
+            reference: &[u8],
+        ) -> Result<Option<StoredAddress>, FormatError> {
+            shared_message::committed_address_in(reference, 8, 8)
+        }
     }
 
     #[test]

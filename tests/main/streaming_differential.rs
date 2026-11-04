@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, SuperblockStatusFlags};
 use rstest::rstest;
 use test_util::attribute;
+use test_util::dataspace;
+use test_util::datatype;
 use test_util::dense_attributes::ChecksumUpdate;
 use test_util::dense_attributes::NodeCorruption;
 use test_util::image::Image as FileImage;
@@ -33,6 +35,112 @@ fn matching_files_execute_bounded_metadata_operations(
         oracle::compare(&image.build()),
         Comparison::Opened { groups, datasets }
     );
+}
+
+#[rstest]
+#[case::version_one_truncated(AttributeVersion::One, 32, 68, true)]
+#[case::version_one_invalid_type(AttributeVersion::One, 32, 68, false)]
+#[case::version_one_valid(AttributeVersion::One, 32, 64, false)]
+#[case::version_two_truncated(AttributeVersion::Two, 26, 68, true)]
+#[case::version_two_invalid_type(AttributeVersion::Two, 26, 68, false)]
+#[case::version_two_valid(AttributeVersion::Two, 26, 64, false)]
+#[case::version_three_truncated(AttributeVersion::Three, 27, 68, true)]
+#[case::version_three_invalid_type(AttributeVersion::Three, 27, 68, false)]
+#[case::version_three_valid(AttributeVersion::Three, 27, 64, false)]
+fn attribute_field_truncation_precedes_datatype_decoding(
+    #[case] version: AttributeVersion,
+    #[case] dataspace_at: usize,
+    #[case] precision: u16,
+    #[case] truncated: bool,
+    #[values(false, true)] dense: bool,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let mut datatype = datatype::header(datatype::Class::FIXED_POINT, 1, [0; 3], 8);
+    datatype.extend_from_slice(&0_u16.to_le_bytes());
+    datatype.extend_from_slice(&precision.to_le_bytes());
+    let scalar = dataspace::scalar();
+    let value = 42_u64.to_le_bytes();
+    let body = attribute::Attribute::new("value", &datatype, &scalar, &value);
+    let body = match version {
+        AttributeVersion::One => body,
+        AttributeVersion::Two => body.flags(attribute::Flags::NONE),
+        AttributeVersion::Three => body.character_set(0),
+    };
+    let mut body = body.build();
+    assert_eq!(&body[dataspace_at..dataspace_at + scalar.len()], scalar);
+    if truncated {
+        body[6..8].copy_from_slice(&4096_u16.to_le_bytes());
+    }
+    let image = if dense {
+        test_util::dense_attributes::one_message(&body, Widths::EIGHT)
+    } else {
+        let header = Superblock::new(Widths::EIGHT);
+        let root_at = header.build().len();
+        let mut image = FileImage::starting_with(&header.build());
+        image.place(
+            root_at,
+            &v2::Header::new()
+                .message(Message::new(MessageType::ATTRIBUTE, &body))
+                .build(),
+        );
+        image.place(
+            0,
+            &header
+                .root_header_address(root_at as u64)
+                .eof_address(image.as_bytes().len() as u64)
+                .build(),
+        );
+        image.build()
+    };
+    let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    std::fs::write(&path, &image).unwrap();
+    let file = backend.open(&path).unwrap();
+    let result = file.root().attrs();
+    if truncated || precision > 64 {
+        let expected = if truncated {
+            FormatError::UnexpectedEof {
+                expected: dataspace_at + 4096,
+                available: body.len(),
+            }
+        } else {
+            FormatError::InvalidFixedPointRange {
+                size: 8,
+                bit_offset: 0,
+                bit_precision: precision,
+            }
+        };
+        let error = result.unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected an attribute format error, got {error:?}");
+        };
+        assert_eq!(actual, expected);
+    } else {
+        assert_eq!(
+            result.unwrap(),
+            HashMap::from([("value".into(), AttrValue::U64(42))])
+        );
+    }
+    file.close().unwrap();
+    assert_eq!(
+        oracle::compare(&image),
+        Comparison::Opened {
+            groups: 1,
+            datasets: 0
+        },
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AttributeVersion {
+    One,
+    Two,
+    Three,
 }
 
 #[test]
