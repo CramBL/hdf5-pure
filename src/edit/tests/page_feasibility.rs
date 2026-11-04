@@ -195,8 +195,12 @@ impl WriteEngine {
     fn place_dataset_and_root(&mut self) -> (u64, u64, u64) {
         let mut builder = DatasetBuilder::new("added");
         builder.with_u8_data(&[9; 64]);
-        let dataset =
-            edit::dataset::flatten_dataset(builder, LinkNameBuf::new("added").unwrap()).unwrap();
+        let dataset = edit::dataset::flatten_dataset(
+            crate::file_writer::WIDTHS,
+            builder,
+            LinkNameBuf::new("added").unwrap(),
+        )
+        .unwrap();
         let raw = self
             .alloc_or_append_typed(dataset.storage.raw(), AllocationClass::Raw)
             .unwrap();

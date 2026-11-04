@@ -200,8 +200,8 @@ use hdf5_pure::{File, MaxExtent};
 let file = File::open(&path)?;
 let ds = file.dataset("samples")?;
 
-// Broadly appendable: chunked and unlimited along axis 0. The full rules
-// (rank 1, Extensible-Array index, single hard link) are in the editing guide.
+// Check chunked storage and an unlimited first dimension here. The editing
+// guide lists the complete requirements for each append path.
 let appendable = ds.is_chunked()
     && matches!(ds.maxshape()?.as_deref(), Some([MaxExtent::Unlimited, ..]));
 # assert!(appendable);

@@ -58,6 +58,7 @@ impl PublicationCost {
             &source,
             header,
             AddressContext::from_effective_base(located.superblock.base_address),
+            located.widths,
         )
         .unwrap();
         assert_eq!(chunks.len(), 1);

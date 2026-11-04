@@ -751,7 +751,12 @@ impl WriteEngine {
         if disk_ds.dimensions.len() != 1 {
             return false;
         }
-        let Ok(geometry) = ChunkedGeometry::new(&disk_dt, &disk_ds, &dl) else {
+        let Ok(geometry) = ChunkedGeometry::with_offset_width(
+            self.context.widths().offsets,
+            &disk_dt,
+            &disk_ds,
+            &dl,
+        ) else {
             return false;
         };
         match (geometry.spatial.first(), disk_ds.dimensions.first()) {

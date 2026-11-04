@@ -101,6 +101,49 @@ pub fn libhdf5_create_with_widths(
     lengths: LengthWidth,
     userblock: u64,
 ) -> hdf5::File {
+    create_with_widths(
+        path,
+        offsets,
+        lengths,
+        userblock,
+        LibraryVersion::V18,
+        LibraryVersion::latest(),
+    )
+}
+
+/// Creates a native file with both format bounds set to HDF5 1.10.
+///
+/// Sets the address and length widths independently and reserves `userblock` bytes before the
+/// superblock.
+///
+/// # Panics
+///
+/// Panics if libhdf5 rejects the creation properties or cannot create `path`.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn libhdf5_create_v110_with_widths(
+    path: &Path,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    userblock: u64,
+) -> hdf5::File {
+    create_with_widths(
+        path,
+        offsets,
+        lengths,
+        userblock,
+        LibraryVersion::V110,
+        LibraryVersion::V110,
+    )
+}
+
+fn create_with_widths(
+    path: &Path,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    userblock: u64,
+    lower: LibraryVersion,
+    upper: LibraryVersion,
+) -> hdf5::File {
     let sizeof_addr = match offsets {
         OffsetWidth::Two => Sizeof::Bytes2,
         OffsetWidth::Four => Sizeof::Bytes4,
@@ -112,9 +155,7 @@ pub fn libhdf5_create_with_widths(
         LengthWidth::Eight => Sizeof::Bytes8,
     };
     hdf5::File::with_options()
-        .with_fapl(|properties| {
-            properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
-        })
+        .with_fapl(|properties| properties.libver_bounds(lower, upper))
         .with_fcpl(|properties| {
             properties
                 .sizes(SizeofInfo {

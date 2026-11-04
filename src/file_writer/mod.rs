@@ -38,7 +38,9 @@ use hdf5_pure_space::__private::AllocationClass;
 
 use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
 #[cfg(feature = "std")]
-pub(crate) use self::preparation::{prepare_attribute_widths, validate_collections};
+pub(crate) use self::preparation::{
+    prepare_attribute_widths, require_reference_width, validate_collections,
+};
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
@@ -121,6 +123,7 @@ pub(crate) const WIDTHS: FormatWidths = FormatWidths {
 #[cfg(any(test, doc))]
 pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
+#[cfg(test)]
 pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
 const SUPERBLOCK_SIZE: usize =
     hdf5_pure_format::__private::superblock_serialized_size(OFFSET_WIDTH);
@@ -649,7 +652,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// # Errors
 ///
 /// Propagates attribute serialization errors from [`AttributeMessage::serialize`].
-fn needs_dense_attrs_with_widths(
+pub(crate) fn needs_dense_attrs_with_widths(
     widths: FormatWidths,
     attrs: &[AttributeMessage],
 ) -> Result<bool, FormatError> {

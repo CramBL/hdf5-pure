@@ -744,7 +744,7 @@ impl ChunkArrayKind {
     /// # Errors
     ///
     /// Propagates array-index serialization errors.
-    fn build_at(
+    pub(crate) fn build_at(
         self,
         widths: FormatWidths,
         slots: &IndexSlots<'_>,
@@ -795,7 +795,7 @@ impl ChunkIndexKind {
     /// exceeds [`u32::MAX`]. Propagates layout serialization errors.
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
-    fn layout_message(
+    pub(crate) fn layout_message(
         self,
         widths: FormatWidths,
         flags: ChunkedLayoutFlags,

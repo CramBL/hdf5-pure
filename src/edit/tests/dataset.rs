@@ -87,7 +87,11 @@ fn creation_backends_preserve_common_request_causes(
     let mut builder = DatasetBuilder::new("values");
     builder.with_i32_data(&[1]);
     configure(&mut builder);
-    let result = edit::dataset::flatten_dataset(builder, LinkName::new("values").unwrap().into());
+    let result = edit::dataset::flatten_dataset(
+        crate::file_writer::WIDTHS,
+        builder,
+        LinkName::new("values").unwrap().into(),
+    );
     let Err(Error::Format(error)) = result else {
         panic!("expected the same format error from in-place creation");
     };
@@ -805,7 +809,11 @@ fn in_place_creation_rejects_provider_sources(
             Box::new(UnreadDatasetProvider),
         );
     }
-    let result = edit::dataset::flatten_dataset(builder, LinkName::new("provider").unwrap().into());
+    let result = edit::dataset::flatten_dataset(
+        crate::file_writer::WIDTHS,
+        builder,
+        LinkName::new("provider").unwrap().into(),
+    );
     let error = match result {
         Err(error) => error,
         Ok(_) => panic!("expected an unsupported provider source"),
@@ -832,7 +840,11 @@ fn in_place_creation_preserves_the_missing_data_cause() {
     builder
         .with_dtype(type_builders::make_i32_type())
         .with_shape(&[1]);
-    let result = edit::dataset::flatten_dataset(builder, LinkName::new("missing").unwrap().into());
+    let result = edit::dataset::flatten_dataset(
+        crate::file_writer::WIDTHS,
+        builder,
+        LinkName::new("missing").unwrap().into(),
+    );
     let error = match result {
         Err(error) => error,
         Ok(_) => panic!("expected a missing data error"),

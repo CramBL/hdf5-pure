@@ -145,7 +145,7 @@ Three cases return an error:
 | [`Group::create_group(name)`](crate::Group::create_group) | Stage a new empty group, returning a [`Group`](crate::Group) handle onto it | `H5Gcreate` |
 | [`Group::create_group_with(name, build)`](crate::Group::create_group_with) | Stage a new group, configured through `build` (attributes, nested objects), returning a [`Group`](crate::Group) handle onto it | `H5Gcreate` |
 | [`Group::create_dataset(name, build)`](crate::Group::create_dataset) | Stage a new dataset, configured through a [`DatasetBuilder`](crate::DatasetBuilder), returning a [`Dataset`](crate::Dataset) handle onto it | `H5Dcreate` |
-| [`Dataset::append_staged(build)`](crate::Dataset::append_staged) | Stage appending elements along axis 0 of an existing chunked, unlimited dataset, via an [`AppendBuilder`](crate::AppendBuilder) | `H5Dset_extent` + write |
+| [`Dataset::append_staged(build)`](crate::Dataset::append_staged) | Stage appending elements within the maximum extent of a rank-1 chunked dataset, via an [`AppendBuilder`](crate::AppendBuilder) | `H5Dset_extent` + write |
 | [`Dataset::append(data)`](crate::Dataset::append) | Append immediately and durably, no [`commit`](crate::File::commit) needed | `H5Dset_extent` + write |
 | [`Dataset::buffered_appender()`](crate::Dataset::buffered_appender) | Buffer appended elements and write them a whole chunk at a time | `H5Pset_chunk_cache` (write side) |
 | [`Dataset::write(data)`](crate::Dataset::write) / [`write_staged(build)`](crate::Dataset::write_staged) | Stage a value overwrite of the same datatype and shape | `H5Dwrite` |
@@ -312,7 +312,7 @@ Such a handle *addresses* the object: it cannot read bytes the file has yet to h
 | [`Dataset::append`](crate::Dataset::append) / [`append_raw`](crate::Dataset::append_raw) / [`buffered_appender`](crate::Dataset::buffered_appender) | [`Error::NotCommitted`](crate::Error::NotCommitted): no bytes to grow in place |
 | [`Dataset::write`](crate::Dataset::write) / [`write_staged`](crate::Dataset::write_staged) / [`set_attr`](crate::Dataset::set_attr) / [`remove_attr`](crate::Dataset::remove_attr) | [`Error::NotCommitted`](crate::Error::NotCommitted) |
 
-[`append_staged`](crate::Dataset::append_staged) on a staged dataset is the same edit as having handed the elements to its builder, so it needs neither an unlimited dimension nor a chunked layout, the two an append onto a *committed* dataset does need. A variable-length-string or object-reference dataset is the exception: its per-element side table is built with the dataset, so supply every element through the builder.
+[`append_staged`](crate::Dataset::append_staged) on a pending dataset extends its staged element buffer. This supports contiguous datasets and finite maximum extents. Supply variable-length or object-reference elements through the creation builder.
 
 After [`commit`](crate::File::commit) the same handles read and write the objects in the file. A rejected commit leaves them staged and still returning [`NotCommitted`](crate::Error::NotCommitted), and the same batch can be committed again.
 
@@ -330,7 +330,7 @@ A deletion carries a group's whole subtree away, but only a commit that builds t
 
 ## Appending to an unlimited dataset
 
-[`Dataset::append_staged`](crate::Dataset::append_staged) grows an existing **chunked, unlimited** dataset in place along its first (axis-0) dimension, **including filtered** datasets (deflate, shuffle, fletcher32, scale-offset, LZF, and ZFP with the `zfp` feature). It is the general, non-SWMR counterpart to the SWMR writer, which appends only to *unfiltered*, chunk-aligned datasets. It returns an [`AppendBuilder`](crate::AppendBuilder) whose typed and generic methods mirror the writer's, and repeated calls concatenate in call order.
+[`Dataset::append_staged`](crate::Dataset::append_staged) grows an existing rank-1 chunked dataset within its finite or unlimited maximum extent, including filtered datasets. The closure configures an [`AppendBuilder`](crate::AppendBuilder), whose append methods concatenate input in call order.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -355,13 +355,13 @@ file.commit()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-Existing chunks stay exactly where they are. Only the newly appended chunks are compressed and written, plus the single trailing partial chunk, when the dataset's current length is not a whole multiple of the chunk length. Every other chunk is carried into the rebuilt index by metadata alone, so an append does not rewrite existing data and the file does not grow by the whole dataset each time. Appends of any length are allowed, and the datatype, fill value, filter pipeline, and attributes are preserved.
+Complete chunks retain their addresses. The writer encodes appended chunks and a partial trailing chunk when present, then rebuilds the index from their records. Growth is limited by the maximum first dimension, and the datatype, fill value, filter pipeline, and attributes are preserved.
 
-Like every staged edit, an append commits by writing the new chunks and a rebuilt index at end-of-file and repointing the superblock last (under the file's exclusive lock), so a crash leaves either the original dataset or the fully grown one, never a torn state. It sets no SWMR flag.
+The commit writes replacement storage before publishing the grown dataset through the root. Publication uses the file's exclusive lock.
 
 ### Eligibility
 
-The engine supports the Extensible-Array chunk index, which libhdf5 and h5py select for a single unlimited dimension under the latest format and this crate writes for every unlimited dataset, on rank-1 datasets that have a single hard link. A dataset that is not chunked, not unlimited along axis 0, not Extensible-Array indexed, higher than rank 1, uses a filter this engine cannot re-encode, or has a sparse chunk grid is rejected with [`Error::AppendUnsupported`](crate::Error::AppendUnsupported) before any file bytes change. Check eligibility up front with the read-side accessors [`is_chunked`](crate::Dataset::is_chunked), [`maxshape`](crate::Dataset::maxshape), [`chunk_shape`](crate::Dataset::chunk_shape), and [`filters`](crate::Dataset::filters), which report it without an attempted append (the [reading guide](crate::_guide::reading#chunking-filters-and-append-eligibility) has the four in one table).
+The engine supports single-chunk, Fixed Array, and Extensible Array indexes on rank-1 datasets with a single hard link. Growth must fit the maximum first dimension. Unsupported indexes, incompatible filters, sparse chunk grids, and growth beyond that maximum return [`Error::AppendUnsupported`](crate::Error::AppendUnsupported) before publication. Inspect storage with [`is_chunked`](crate::Dataset::is_chunked), [`maxshape`](crate::Dataset::maxshape), [`chunk_shape`](crate::Dataset::chunk_shape), and [`filters`](crate::Dataset::filters) before staging an append. The [reading guide](crate::_guide::reading#chunking-filters-and-append-eligibility) lists these accessors.
 
 Typed appends require compatible datatypes and preserve the stored datatype. Fixed byte arrays
 require matching dimensions and base types, with byte order ignored for one-byte fixed-point
@@ -440,9 +440,9 @@ The appended **length** is unconstrained too. An unaligned length only makes the
 
 The SWMR writer is the exception: it keeps the chunk-aligned, unfiltered subset, because its readers are concurrent by contract and follow the chunk-index counts and not the dataspace dimension.
 
-The remaining eligibility rules match [`Dataset::append_staged`](crate::Dataset::append_staged)
-(chunked, unlimited axis 0, Extensible-Array index, rank 1, a re-encodable filter pipeline), plus the
-file-level gates in [the tables above](#choosing-a-write-path). Eligible empty datasets can initialize
+Immediate appends require a rank-1 chunked dataset with an unlimited first dimension, an
+Extensible Array index, a re-encodable filter pipeline, and a single hard link. The
+file-level gates are listed in [the tables above](#choosing-a-write-path). Eligible empty datasets can initialize
 an unallocated Extensible Array index on the first nonempty write. Empty operations leave storage
 deferred.
 

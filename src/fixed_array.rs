@@ -170,7 +170,7 @@ const ENTRY_WINDOW_ENTRIES: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 #[cfg(feature = "checksum")]
 const CHECKSUM_WINDOW_BYTES: u64 = 4_096;
 
-fn read_header(
+pub(crate) fn read_header(
     file: &(impl StoredRead + ?Sized),
     widths: FormatWidths,
     address: StoredAddress,
