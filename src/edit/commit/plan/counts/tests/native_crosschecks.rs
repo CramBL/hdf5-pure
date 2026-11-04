@@ -1,3 +1,5 @@
+use core::num::NonZeroU32;
+
 use hdf5_pure_format::__private::MessageRecordLayout;
 use rstest::rstest;
 use test_util::object_header::Message;
@@ -10,8 +12,12 @@ use crate::MessageType;
 use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::counts::OrdinaryCountSubject;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::OriginalCount;
+use crate::edit::analysis::counts::changes::owned::{
+    CountDisposition as OwnedCountDisposition, OwnedOriginalCount, UnresolvedCount,
+};
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
 use crate::edit::group;
@@ -108,6 +114,24 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
         panic!("expected topology-bound count evidence")
     };
     assert_eq!(evidence.bound().original(), 2);
+    let (inventory, surviving) = plan.owned_counts(&engine).unwrap().partition().into_parts();
+    assert_eq!(inventory.changes().len(), 1);
+    assert_eq!(
+        inventory.changes()[0].original(),
+        OwnedOriginalCount::Ordinary {
+            original: NonZeroU32::new(2).unwrap(),
+            incoming: 2,
+            subject: OrdinaryCountSubject::Group,
+        }
+    );
+    assert_eq!(
+        surviving
+            .updates()
+            .iter()
+            .map(|update| update.count().get())
+            .collect::<Vec<_>>(),
+        [1]
+    );
     assert_eq!(rebuilt[0].remaining(), 1);
     let mut position = 0;
     let at = loop {
@@ -261,6 +285,30 @@ fn native_copy_users_project_combined_counts_without_source_writes(#[case] named
     }
     assert_eq!(&prepared.region[..], expected);
     assert_eq!(engine.disk_bytes().unwrap(), disk);
+    let (inventory, surviving) = plan.owned_counts(&engine).unwrap().partition().into_parts();
+    assert_eq!(inventory.changes().len(), 1);
+    let owned = &inventory.changes()[0];
+    assert_eq!(
+        (owned.object(), owned.original().value(), owned.remaining()),
+        (target, original, 3)
+    );
+    assert_eq!(
+        surviving.updates().len(),
+        usize::from(owned.field().is_some())
+    );
+    if let Some(field) = owned.field() {
+        assert_eq!(surviving.updates()[0].field(), field);
+        assert_eq!(
+            surviving.updates()[0].header_allocation(),
+            owned.header_allocation()
+        );
+    } else {
+        let OwnedCountDisposition::Unresolved { change, reason } = owned.disposition() else {
+            panic!("expected a missing source field");
+        };
+        assert!(std::ptr::eq(change, owned));
+        assert_eq!(reason, UnresolvedCount::MissingField);
+    }
     drop((rebuilt, source, opaque, unchanged));
     drop(plan);
     drop(added);
@@ -268,6 +316,9 @@ fn native_copy_users_project_combined_counts_without_source_writes(#[case] named
     drop(tree);
     drop(phase);
     drop(engine);
+    let reopened = edit_test_util::open_engine(&path);
+    assert!(!inventory.same_session(&reopened));
+    drop(reopened);
     let native = file::libhdf5_open(&path);
     assert_eq!(
         native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
@@ -365,6 +416,24 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
         panic!("expected topology-bound count evidence")
     };
     assert_eq!(evidence.bound().object(), root);
+    let (inventory, surviving) = plan.owned_counts(&engine).unwrap().partition().into_parts();
+    assert_eq!(inventory.root(), Some(root));
+    assert_eq!(inventory.changes().len(), 1);
+    assert_eq!(
+        inventory.changes()[0].original(),
+        OwnedOriginalCount::Retained {
+            original: NonZeroU32::new(2).unwrap(),
+            incoming: 1,
+        }
+    );
+    assert_eq!(
+        surviving
+            .updates()
+            .iter()
+            .map(|update| update.count().get())
+            .collect::<Vec<_>>(),
+        [1]
+    );
     assert_eq!(rebuilt[0].remaining(), ROOT_REFERENCE_COUNT);
     assert_eq!(&prepared.region[..], expected);
     assert_eq!(engine.disk_bytes().unwrap(), disk);

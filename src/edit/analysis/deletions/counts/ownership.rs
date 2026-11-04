@@ -21,6 +21,7 @@ use crate::object_graph::ObjectIndex;
 
 use super::SourceRemovalPlan;
 
+mod inventory;
 mod publication;
 
 impl SourceRemovalPlan<'_, '_> {
