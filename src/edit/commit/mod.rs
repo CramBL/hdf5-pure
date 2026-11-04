@@ -7,13 +7,13 @@
 
 use hdf5_pure_space::__private::ReturnedExtents;
 
+use self::plan::{CommitPreparation, PreparedCommit};
+pub(super) use self::publish::PublishedTree;
+use super::WriteEngine;
+use super::staging::StagedEdits;
 #[cfg(doc)]
 use crate::edit::SyncPolicy;
 use crate::error::Error;
-
-use self::plan::{CommitPreparation, PreparedCommit};
-use super::WriteEngine;
-use super::staging::StagedEdits;
 
 mod apply;
 pub(super) mod plan;
