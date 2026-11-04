@@ -665,6 +665,18 @@ impl WriteEngine {
         ReservationPlan::new(self, requests.iter().copied(), ReservationMode::Staged)
     }
 
+    /// Reserves complete blocks under the session's immediate-write reuse policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reservation failure described by [`Self::plan_reservations`].
+    pub(super) fn plan_immediate_blocks(
+        &mut self,
+        requests: &[BlockRequest],
+    ) -> Result<ReservationPlan<'_>, Box<ReservationFailure<'_>>> {
+        ReservationPlan::new(self, requests.iter().copied(), ReservationMode::Immediate)
+    }
+
     /// Reserves one allocation under the session's immediate-write reuse policy.
     ///
     /// # Errors

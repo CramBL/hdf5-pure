@@ -9,6 +9,7 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
+use hdf5_pure_format::__private::IndexSlots;
 
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReservationRequest;
@@ -38,6 +39,7 @@ use crate::width::FormatWidths;
 
 use super::LOSSY_TAIL_REFUSAL;
 use super::allocation::{AllocationPublication, ConfirmedPublication, ProvisionalAllocation};
+use super::array::ArrayIndexPlanRef;
 use super::dataset;
 use super::staging::StagedOp;
 
@@ -521,16 +523,23 @@ impl WriteEngine {
     ) -> Result<Located, Error> {
         let addresses = self.context.addresses();
         let mut store = EditStore { engine: self };
-        let allocation = store.allocate_prepared(
-            initialization.allocation_len(),
-            AllocationClass::Metadata,
-            |address| {
-                initialization
-                    .encode_at(addresses.relative(address)?)
-                    .map_err(Error::Format)
-            },
-        )?;
-        let allocation = store.publish_allocations()?.confirm(allocation)?;
+        let allocation = if store.engine.space.is_paged() {
+            let [header, index] = store.allocate_paged_initialization(initialization)?;
+            let publication = store.publish_allocations()?;
+            publication.confirm(index)?;
+            publication.confirm(header)?
+        } else {
+            let allocation = store.allocate_prepared(
+                initialization.allocation_len(),
+                AllocationClass::Metadata,
+                |address| {
+                    initialization
+                        .encode_at(addresses.relative(address)?)
+                        .map_err(Error::Format)
+                },
+            )?;
+            store.publish_allocations()?.confirm(allocation)?
+        };
         index.reference.publish(&mut store, &allocation)?;
         store.sync()?;
         let result = Located::locate_at(&store, oh_addr, Error::AppendInPlaceUnsupported).and_then(
@@ -809,16 +818,63 @@ pub(crate) struct LocatedState {
 ///
 /// In persistent sessions, the editor publishes exact ownership through replacement free-space
 /// managers. Without persistence, the editor tries reusable space before classic aggregates, with
-/// raw aggregates for payloads and metadata aggregates for index blocks. The PAGE allocator uses
-/// raw pages for both.
+/// raw aggregates for payloads and metadata aggregates for index blocks. PAGE initialization uses
+/// complete metadata-block reservations. In PAGE files, allocations through [`Store::allocate`]
+/// use raw pages.
 pub(super) struct EditStore<'a> {
     engine: &'a mut WriteEngine,
 }
 
 impl EditStore<'_> {
+    /// Reserves and writes the complete PAGE header and index block of an empty array.
+    ///
+    /// Uses the retained creation geometry and records both physical ranges as provisional
+    /// allocations after complete emission. The caller publishes ownership before writing a
+    /// reference to the header. On a reservation, emission, or provisioning error, restores the
+    /// pending persistent allocator batch through [`WriteEngine::restore_append_allocation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if publication is uncertain. Returns
+    /// preparation, reservation, encoding, address-conversion, I/O, and allocator-restoration
+    /// errors. Returns [`FormatError::Internal`] if the plan has an unexpected block count or
+    /// incomplete emission.
+    fn allocate_paged_initialization(
+        &mut self,
+        initialization: &ExtensibleArrayInitialization,
+    ) -> Result<[ProvisionalAllocation; 2], Error> {
+        self.engine.context.allocations.available()?;
+        self.engine.prepare_append_allocation()?;
+        let result = (|| {
+            let array = ArrayIndexPlanRef::Extensible(initialization.plan());
+            let requests = array.requests()?;
+            let mut reservations = self
+                .engine
+                .plan_immediate_blocks(&requests)
+                .map_err(ReservationFailure::into_error)?;
+            let [header, index] = reservations.reservations() else {
+                return Err(FormatError::Internal(
+                    "empty extensible array requires two complete blocks".into(),
+                )
+                .into());
+            };
+            let ranges = [header.range(), index.range()];
+            array.write(&IndexSlots::dense(&[]), &mut reservations)?;
+            reservations.finish()?;
+            Ok([
+                self.engine.context.allocations.provision(ranges[0])?,
+                self.engine.context.allocations.provision(ranges[1])?,
+            ])
+        })();
+        if result.is_err() {
+            self.engine.restore_append_allocation()?;
+        }
+        result
+    }
+
     /// Prepares bytes at their allocation address before padding and appending in raw PAGE space.
     ///
-    /// Extensible-array index blocks use the same raw-page placement as chunk payloads.
+    /// Index blocks allocated through [`Store::allocate`] use the same placement as chunk payloads.
     ///
     /// # Errors
     ///
