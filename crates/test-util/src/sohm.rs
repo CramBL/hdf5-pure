@@ -5,6 +5,18 @@ use crate::bytes;
 use crate::checksum;
 use crate::widths::Widths;
 
+/// Encodes a version 3 reference to a message in the shared-message fractal heap.
+///
+/// The reference fields are defined in "Data Object Header Messages" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_dataobject_hdr_msg
+pub fn heap_reference(heap_id: [u8; HEAP_ID_LEN]) -> Vec<u8> {
+    let mut reference = vec![SHARED_MESSAGE_VERSION, SHARED_HEAP_TYPE];
+    reference.extend_from_slice(&heap_id);
+    reference
+}
+
 /// Encodes a version 0 Shared Message Table body with a stored table address.
 ///
 /// The fields are defined in "The Shared Message Table Message" of the [format specification,
@@ -107,3 +119,10 @@ const HEAP_LOCATION_LEN: usize = 4 + 8;
 const RECORD_PREFIX: usize = 1 + 4;
 
 const VERSION: u8 = 0;
+
+// "Data Object Header Messages" of the format specification, version 4.0, defines shared-message
+// version 3 with heap-location type 1 and an eight-byte heap identifier.
+const SHARED_MESSAGE_VERSION: u8 = 3;
+const SHARED_HEAP_TYPE: u8 = 1;
+/// The length in bytes of a version 3 shared-message heap identifier.
+pub const HEAP_ID_LEN: usize = 8;
