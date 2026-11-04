@@ -2011,6 +2011,22 @@ pub(crate) fn collect_chunked_storage_spans(
 
     let mut data: Vec<AddressRange<StoredAddress>> = Vec::new();
 
+    if let ChunkIndexLayout::FixedArray {
+        address: Some(address),
+    } = chunk_index
+    {
+        let chunk_bytes = chunk_grid::chunk_byte_size(&chunk_dimensions[..rank], elem_size)?;
+        fixed_array::read_chunks(source, widths, *address, chunk_bytes, |_, record| {
+            if record.stored_size != 0 {
+                data.push(AddressRange::new(record.address, record.stored_size)?);
+            }
+            Ok(())
+        })?;
+        let index =
+            collect_chunk_index_spans(source, *chunk_index, chunk_dimensions.len(), widths)?;
+        return Ok(ChunkedStorageSpans { data, index });
+    }
+
     // Chunk data blocks (the walkers omit unallocated chunks). Build checked extents before the
     // caller can admit any of them to returned-space state.
     for ci in collect_chunks_for_layout_from_source(

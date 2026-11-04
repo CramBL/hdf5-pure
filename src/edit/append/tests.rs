@@ -4,6 +4,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, PageTransition, PageType, SessionSpace};
 use rstest::rstest;
 use test_util::disk_log;
+use test_util_hdf5::dataset::FiniteChunkIndex;
 
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::WriteEngine;
@@ -21,14 +22,17 @@ use crate::{
 #[rstest]
 #[case::small(4)]
 #[case::large(64)]
-fn single_chunk_ownership_analysis_is_reused_until_a_commit(#[case] groups: usize) {
+fn finite_chunk_ownership_analysis_is_reused_until_a_commit(
+    #[case] groups: usize,
+    #[values(FiniteChunkIndex::Fixed, FiniteChunkIndex::Single)] index: FiniteChunkIndex,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owned.h5");
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("d")
         .with_i32_data(&[0])
-        .with_maxshape(&[MaxExtent::Fixed(16)])
+        .with_maxshape(&[MaxExtent::Fixed(index.maximum() * 4)])
         .with_chunks(&[16]);
     for index in 0..groups {
         let group = builder.create_group(&format!("g{index}")).finish();
@@ -36,24 +40,24 @@ fn single_chunk_ownership_analysis_is_reused_until_a_commit(#[case] groups: usiz
     }
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
-    observations::reset_single_ownership_analyses();
+    observations::reset_chunk_ownership_analyses();
     engine.append_inplace_i32_phased("d", &[1], 4).unwrap();
-    assert_eq!(observations::single_ownership_analyses(), 1);
-    assert_eq!(engine.single_ownership.get().unwrap().len(), groups + 2);
+    assert_eq!(observations::chunk_ownership_analyses(), 1);
+    assert_eq!(engine.chunk_ownership.get().unwrap().len(), groups + 2);
     engine.located.clear();
     engine.append_inplace_i32_phased("d", &[2], 4).unwrap();
-    assert_eq!(observations::single_ownership_analyses(), 1);
-    engine.single_ownership.take();
+    assert_eq!(observations::chunk_ownership_analyses(), 1);
+    engine.chunk_ownership.take();
     engine.located.clear();
     engine.append_inplace_i32_phased("d", &[3], 4).unwrap();
-    assert_eq!(observations::single_ownership_analyses(), 2);
+    assert_eq!(observations::chunk_ownership_analyses(), 2);
     engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
     engine.commit().unwrap();
-    assert!(engine.single_ownership.get().is_none());
+    assert!(engine.chunk_ownership.get().is_none());
     assert!(engine.located.is_empty());
     engine.append_inplace_i32_phased("d", &[4], 4).unwrap();
-    assert_eq!(observations::single_ownership_analyses(), 3);
-    assert_eq!(engine.single_ownership.get().unwrap().len(), groups + 3);
+    assert_eq!(observations::chunk_ownership_analyses(), 3);
+    assert_eq!(engine.chunk_ownership.get().unwrap().len(), groups + 3);
     drop(engine);
     let file = File::open(&path).unwrap();
     assert_eq!(

@@ -443,22 +443,24 @@ published after the new extent.
 
 An immediate append with that permission can publish the replacement tail's index record before its new length. If interrupted there, a reader at the old length can observe re-quantized values. The file remains readable, but preserving old tail values and publishing the length is not one atomic operation. Complete chunks preceding the tail retain their storage.
 
-The appended length may be unaligned under a lossless pipeline. For a finite Single Chunk
-index, growth must remain within the maximum first dimension and one chunk. The writer checks
-the complete request before writing a batch.
+The appended length may be unaligned under a lossless pipeline. Finite-index growth must remain
+within the maximum first dimension. A Single Chunk maximum must also fit within one chunk. The
+writer checks the complete request before writing a batch.
 
 The SWMR writer requires an unfiltered Extensible Array and chunk-aligned lengths and appends.
 It leaves published chunks unchanged while concurrent readers may access them.
 
-Immediate appends require a rank-1 chunked dataset with an unlimited Extensible Array or finite
-Single Chunk index and a re-encodable filter pipeline. Single Chunk datasets may have several hard
-links to the same object. The editor checks complete, disjoint storage ownership before replacing
-Single Chunk storage and caches reachable object-header identities until a commit. The file-level
-gates are listed in [the tables above](#choosing-a-write-path).
+Immediate appends require a rank-1 chunked dataset with an unlimited Extensible Array or a finite
+Single Chunk or Fixed Array index and a re-encodable filter pipeline. Finite datasets may have
+several hard links to the same object. The editor checks complete, disjoint storage ownership
+before replacing finite chunk storage and caches reachable object-header identities until a
+commit. The file-level gates are listed in [the tables above](#choosing-a-write-path).
 
 For an eligible empty Extensible Array, the writer initializes an unallocated index on the first
-nonempty write. For an unallocated Single Chunk reference, it fills the existing prefix from the
-dataset's fill value before appending. Empty operations leave unallocated storage unchanged.
+nonempty write. For absent chunks in a finite index, it fills the existing prefix from the
+dataset's fill value before appending. Missing Fixed Array headers, data blocks, and pages are
+initialized from the recorded geometry before publishing their references. Empty operations leave
+unallocated storage unchanged.
 
 Eligible retired tails are reusable during the session. Admission and persistence follow the
 [space-reuse rules](#space-reuse-and-truncation), including strategy, threshold, and PAGE class
@@ -538,7 +540,11 @@ preparation, independently of the complete input length.
 For Single Chunk appends, the writer prepares the whole logical chunk. Before the first append,
 the editor analyzes reachable storage, with temporary allocation facts and cached object-header
 identities. This metadata memory can grow with the number of identified objects and allocations.
-The editor retains the header identities until a commit.
+The editor retains the header identities until a commit. The editor uses the same
+ownership analysis for Fixed Arrays. The writer prepares the affected chunks and entry windows,
+then emits missing pages with bounded scratch. Checksum updates read each affected checksummed body
+in bounded
+windows, including a whole unpaged data block when necessary.
 
 ```rust
 # let dir = tempfile::tempdir()?;

@@ -4,14 +4,18 @@ use std::path::Path;
 use hdf5_pure_format::__private::ChunkIndexFields;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayDataBlock;
+use hdf5_pure_format::__private::FixedArrayHeader;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use hdf5_pure_format::__private::FixedArrayPlan;
 use rstest::rstest;
 use test_util_hdf5::dataset;
+use test_util_hdf5::dataset::FiniteChunkIndex;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
+use super::fixed::FixedSource;
 use super::*;
+use crate::File as PureFile;
 use crate::address::BaseAddressExt;
 
 #[rstest]
@@ -60,7 +64,9 @@ fn ea_publication_preserves_native_values_and_recorded_widths(
                 state.fill.pattern(state.element_size),
             )
             .unwrap(),
-            AppendIndex::Single(_) => panic!("expected an Extensible Array index"),
+            AppendIndex::Fixed(_) | AppendIndex::Single(_) => {
+                panic!("expected an Extensible Array index")
+            }
             AppendIndex::Unallocated(index) => {
                 let (plan, initialization) = plan_initial_ea_append(
                     index,
@@ -395,6 +401,273 @@ fn native_writes_consume_streamed_empty_fixed_arrays(
 #[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
 #[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
 #[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn fixed_array_appends_preserve_native_values_pages_and_widths(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(Producer::Native, Producer::Rust)] producer: Producer,
+    #[values(FixedInitial::Empty, FixedInitial::Fill, FixedInitial::Partial)] initial: FixedInitial,
+    #[values(false, true)] paged: bool,
+    #[values(false, true)] filtered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fixed.h5");
+    let widths = FormatWidths { offsets, lengths };
+    let maximum = if paged { 4_100 } else { 12 };
+    let length = match initial {
+        FixedInitial::Empty | FixedInitial::Fill => 0,
+        FixedInitial::Partial => {
+            if paged {
+                4_091
+            } else {
+                3
+            }
+        }
+    };
+    let mut expected = (0..length).collect::<Vec<i32>>();
+    producer.write_finite(&path, widths, maximum, filtered, &expected);
+    let native = file::libhdf5_open_rw(&path);
+    native.link_hard("d", "alias").unwrap();
+    if matches!(initial, FixedInitial::Fill) {
+        let dataset = native.dataset("d").unwrap();
+        dataset.resize((3,)).unwrap();
+        expected = vec![0; 3];
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
+    }
+    native.close().unwrap();
+    let mut store = WindowProbeStore::open(fs::read(&path).unwrap());
+    let header = fixed_header(&store);
+    assert_eq!(header.is_some(), matches!(initial, FixedInitial::Partial));
+    if let Some(header) = header {
+        assert_eq!(header.entries(), maximum.to_u64().div_ceil(4));
+        assert_eq!(header.is_filtered(), filtered);
+        let block = header.data_block().unwrap();
+        let range = block.parse_range().unwrap();
+        let bytes = store
+            .read_exact_at(range.start().get(), range.length().to_usize().unwrap())
+            .unwrap();
+        match block
+            .parse(FileRegion::new(range, &bytes).unwrap())
+            .unwrap()
+        {
+            FixedArrayDataBlock::Elements(_) => assert!(!paged),
+            FixedArrayDataBlock::PageBitmap(bitmap) => {
+                assert!(paged);
+                let (_, initialized) = bitmap.page_for_slot(1_024).unwrap().unwrap();
+                assert_eq!(initialized, matches!(producer, Producer::Rust));
+            }
+        }
+    }
+    append_fixed_until(&mut store, &mut expected, if paged { 4_096 } else { 8 });
+    assert_fixed_native(
+        &directory.path().join("first.h5"),
+        &store,
+        &expected,
+        widths,
+        maximum,
+    );
+    let mut store = WindowProbeStore::open(store.data);
+    append_fixed_until(&mut store, &mut expected, maximum);
+    assert_fixed_native(
+        &directory.path().join("second.h5"),
+        &store,
+        &expected,
+        widths,
+        maximum,
+    );
+    let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+    let AppendIndex::Fixed(index) = &mut state.index else {
+        panic!("expected a Fixed Array index")
+    };
+    let before = store.data.clone();
+    let error = match index.plan(
+        &store,
+        &state.datatype,
+        &state.spatial,
+        state.pipeline.as_ref(),
+        LossyTailReencoding::Reject,
+        &i32_bytes(&[i32::try_from(maximum).unwrap()]),
+        NonZeroU64::new(1).unwrap(),
+        state.fill.pattern(state.element_size),
+    ) {
+        Ok(_) => panic!("a Fixed Array grows beyond its maximum"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            Error::AppendUnsupported("append exceeds the dataset's maximum first dimension")
+        ),
+        "{error:?}"
+    );
+    assert_eq!(store.data, before);
+    directory.close().unwrap();
+}
+
+fn append_fixed_until(store: &mut WindowProbeStore, expected: &mut Vec<i32>, end: usize) {
+    let mut state = edit::locate_dataset_state(store, dataset_address(store)).unwrap();
+    let AppendIndex::Fixed(index) = &mut state.index else {
+        panic!("expected a Fixed Array index")
+    };
+    let values =
+        (i32::try_from(expected.len()).unwrap()..i32::try_from(end).unwrap()).collect::<Vec<_>>();
+    let plan = index
+        .plan(
+            store,
+            &state.datatype,
+            &state.spatial,
+            state.pipeline.as_ref(),
+            LossyTailReencoding::Reject,
+            &i32_bytes(&values),
+            NonZeroU64::new(values.len().to_u64()).unwrap(),
+            state.fill.pattern(state.element_size),
+        )
+        .unwrap();
+    index.apply(store, plan, 4).unwrap();
+    expected.extend_from_slice(&values);
+}
+
+fn fixed_header(store: &WindowProbeStore) -> Option<FixedArrayHeader> {
+    let walk = walk_v2_object_header(store, dataset_address(store), store.widths()).unwrap();
+    let message = walk
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let bytes = store.read_exact_at(message.data_off, message.size).unwrap();
+    let DataLayout::Chunked {
+        index: ChunkIndexLayout::FixedArray { address },
+        ..
+    } = DataLayout::parse_with_widths(&bytes, store.widths()).unwrap()
+    else {
+        panic!("expected a Fixed Array layout")
+    };
+    address.map(|address| {
+        let locator = FixedArrayHeaderLocator::new(
+            store.widths(),
+            store.addresses().effective_base(),
+            address,
+        );
+        let range = locator.parse_range().unwrap();
+        let bytes = store
+            .read_exact_at(range.start().get(), range.length().to_usize().unwrap())
+            .unwrap();
+        locator
+            .parse(FileRegion::new(range, &bytes).unwrap())
+            .unwrap()
+    })
+}
+
+fn assert_fixed_native(
+    path: &Path,
+    store: &WindowProbeStore,
+    expected: &[i32],
+    widths: FormatWidths,
+    maximum: usize,
+) {
+    let header = fixed_header(store).unwrap();
+    assert_eq!(header.entries(), maximum.to_u64().div_ceil(4));
+    assert!(header.data_block().is_some());
+    fs::write(path, &store.data).unwrap();
+    let native = file::libhdf5_open(path);
+    let target = native.dataset("d").unwrap();
+    assert_eq!(target.read_raw::<i32>().unwrap(), expected);
+    assert_eq!(target.shape(), [expected.len()]);
+    drop(target);
+    assert_eq!(
+        native.dataset("alias").unwrap().read_raw::<i32>().unwrap(),
+        expected
+    );
+    let sizes = native.create_plist().unwrap().get_sizes().unwrap();
+    assert_eq!(
+        (
+            usize::from(sizes.sizeof_addr),
+            usize::from(sizes.sizeof_size)
+        ),
+        (
+            usize::from(widths.offsets.get()),
+            usize::from(widths.lengths.get())
+        )
+    );
+    native.close().unwrap();
+    let pure = PureFile::open(path).unwrap();
+    assert_eq!(pure.dataset("d").unwrap().read_i32().unwrap(), expected);
+    assert_eq!(pure.dataset("alias").unwrap().read_i32().unwrap(), expected);
+    pure.close().unwrap();
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn fixed_array_appends_preserve_source_page_parameters(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(FixedSource::HeaderOnly, FixedSource::SparsePages)] source: FixedSource,
+    #[values(false, true)] filtered: bool,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source-pages.h5");
+    let store = super::fixed::fixture(widths, filtered, source);
+    let header = fixed_header(&store).unwrap();
+    assert_eq!(header.page_bits(), 2);
+    assert_eq!(header.entries(), 17);
+    assert_eq!(
+        header.data_block().is_some(),
+        matches!(source, FixedSource::SparsePages)
+    );
+    fs::write(&path, &store.data).unwrap();
+    let native = file::libhdf5_open_rw(&path);
+    native.link_hard("d", "alias").unwrap();
+    let mut expected = if matches!(source, FixedSource::SparsePages) {
+        vec![0; 3]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        expected
+    );
+    native.close().unwrap();
+    let mut store = WindowProbeStore::open(fs::read(&path).unwrap());
+    append_fixed_until(&mut store, &mut expected, 21);
+    assert_eq!(fixed_header(&store).unwrap().page_bits(), 2);
+    assert_fixed_native(
+        &directory.path().join("first.h5"),
+        &store,
+        &expected,
+        widths,
+        68,
+    );
+    let mut store = WindowProbeStore::open(store.data);
+    append_fixed_until(&mut store, &mut expected, 68);
+    assert_eq!(fixed_header(&store).unwrap().page_bits(), 2);
+    assert_fixed_native(
+        &directory.path().join("second.h5"),
+        &store,
+        &expected,
+        widths,
+        68,
+    );
+    directory.close().unwrap();
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
 fn single_chunk_appends_preserve_native_values_and_widths(
     #[case] offsets: OffsetWidth,
     #[case] lengths: LengthWidth,
@@ -534,12 +807,15 @@ fn single_chunk_appends_preserve_native_values_and_widths(
 #[rstest]
 #[case::before_extent(2)]
 #[case::after_extent(4)]
-fn single_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(#[case] phase: u8) {
+fn finite_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(
+    #[case] phase: u8,
+    #[values(FiniteChunkIndex::Fixed, FiniteChunkIndex::Single)] kind: FiniteChunkIndex,
+) {
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("d")
         .with_f32_data(&[1.234])
-        .with_maxshape(&[MaxExtent::Fixed(4)])
+        .with_maxshape(&[MaxExtent::Fixed(kind.maximum())])
         .with_create_properties(
             crate::DatasetCreateProperties::new()
                 .with_chunks(&[4])
@@ -548,26 +824,43 @@ fn single_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(#
         );
     let mut store = WindowProbeStore::open(builder.finish().unwrap());
     let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-    let AppendIndex::Single(index) = &mut state.index else {
-        panic!("expected a Single Chunk index")
-    };
     let raw = [2.345_f32, 3.456, 4.567]
         .into_iter()
         .flat_map(f32::to_le_bytes)
         .collect::<Vec<_>>();
-    let plan = index
-        .plan(
-            &store,
-            &state.datatype,
-            &state.spatial,
-            state.pipeline.as_ref(),
-            LossyTailReencoding::Reject,
-            &raw,
-            NonZeroU64::new(3).unwrap(),
-            state.fill.pattern(state.element_size),
-        )
-        .unwrap();
-    index.apply(&mut store, plan, phase).unwrap();
+    match &mut state.index {
+        AppendIndex::Single(index) => {
+            let plan = index
+                .plan(
+                    &store,
+                    &state.datatype,
+                    &state.spatial,
+                    state.pipeline.as_ref(),
+                    LossyTailReencoding::Reject,
+                    &raw,
+                    NonZeroU64::new(3).unwrap(),
+                    state.fill.pattern(state.element_size),
+                )
+                .unwrap();
+            index.apply(&mut store, plan, phase).unwrap();
+        }
+        AppendIndex::Fixed(index) => {
+            let plan = index
+                .plan(
+                    &store,
+                    &state.datatype,
+                    &state.spatial,
+                    state.pipeline.as_ref(),
+                    LossyTailReencoding::Reject,
+                    &raw,
+                    NonZeroU64::new(3).unwrap(),
+                    state.fill.pattern(state.element_size),
+                )
+                .unwrap();
+            index.apply(&mut store, plan, phase).unwrap();
+        }
+        _ => panic!("expected a finite chunk index"),
+    }
     assert_eq!(store.retired.len(), if phase == 4 { 2 } else { 1 });
     assert_eq!(
         *store.allocations.borrow(),
@@ -604,6 +897,13 @@ fn single_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(#
     }
     file.close().unwrap();
     directory.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum FixedInitial {
+    Empty,
+    Fill,
+    Partial,
 }
 
 #[derive(Clone, Copy)]

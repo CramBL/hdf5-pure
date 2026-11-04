@@ -36,12 +36,47 @@ pub use append::{AppendFilters, AppendMode};
 ///
 /// Panics if fixture creation or writing `path` fails.
 pub fn write_single_chunk_i32(path: &Path, settings: FileSpaceSettings, filtered: bool) {
+    write_finite_chunked_i32(path, settings, filtered, FiniteChunkIndex::Single);
+}
+
+/// The finite index selected by the shared four-element chunk fixtures.
+#[derive(Clone, Copy, Debug)]
+pub enum FiniteChunkIndex {
+    /// A Fixed Array with maximum extent 16.
+    Fixed,
+    /// A Single Chunk with maximum extent 4.
+    Single,
+}
+
+impl FiniteChunkIndex {
+    /// Returns the maximum extent that selects this index for four-element chunks.
+    pub const fn maximum(self) -> u64 {
+        match self {
+            Self::Fixed => 16,
+            Self::Single => 4,
+        }
+    }
+}
+
+/// Writes dataset `d` with value 0, chunk length 4, and the selected finite maximum.
+///
+/// Applies the supplied file-space policy and optional deflate level 1.
+///
+/// # Panics
+///
+/// Panics if fixture creation or writing `path` fails.
+pub fn write_finite_chunked_i32(
+    path: &Path,
+    settings: FileSpaceSettings,
+    filtered: bool,
+    index: FiniteChunkIndex,
+) {
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(settings);
     let dataset = builder
         .create_dataset("d")
         .with_i32_data(&[0])
-        .with_maxshape(&[MaxExtent::Fixed(4)])
+        .with_maxshape(&[MaxExtent::Fixed(index.maximum())])
         .with_chunks(&[4]);
     if filtered {
         dataset.with_deflate(DeflateLevel::One);
@@ -59,12 +94,30 @@ pub fn write_single_chunk_i32(path: &Path, settings: FileSpaceSettings, filtered
 /// Panics if libhdf5 rejects creation, resizing, or closure.
 #[cfg(feature = "__hdf5-1.10")]
 pub fn write_native_empty_single_chunk_i32(path: &Path, widths: FormatWidths, filtered: bool) {
+    write_native_empty_finite_chunked_i32(path, widths, filtered, FiniteChunkIndex::Single);
+}
+
+/// Writes an empty native dataset `d` with the selected unallocated finite index.
+///
+/// Uses four-element chunks, the supplied widths, and optional deflate level 1. Releases every
+/// native handle before returning.
+///
+/// # Panics
+///
+/// Panics if libhdf5 rejects creation, resizing, or closure.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_native_empty_finite_chunked_i32(
+    path: &Path,
+    widths: FormatWidths,
+    filtered: bool,
+    index: FiniteChunkIndex,
+) {
     let native =
         crate::file::libhdf5_create_v110_with_widths(path, widths.offsets, widths.lengths, 0);
     let mut builder = native
         .new_dataset_builder()
         .empty_as(crate::numeric::ByteOrder::LittleEndian.i32_datatype())
-        .shape((4..=4,))
+        .shape((4..=usize::try_from(index.maximum()).unwrap(),))
         .chunk((4,));
     if filtered {
         builder = builder.deflate(1);

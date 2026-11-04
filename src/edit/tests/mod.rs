@@ -2,6 +2,8 @@ mod attribute_collections;
 mod common;
 mod crash_replay;
 mod dataset;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod fixed_array_append;
 mod global_heap_liveness;
 mod group_links;
 mod object;

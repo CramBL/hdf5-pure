@@ -1703,6 +1703,11 @@ impl FileImage for CountingImage {
         self.inner.issued_write_order()
     }
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn reserve_write_observations(&mut self, additional: usize) -> bool {
+        self.inner.reserve_write_observations(additional)
+    }
+
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.inner.set_write_buffering(mode)
     }

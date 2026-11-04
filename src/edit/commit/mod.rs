@@ -244,7 +244,7 @@ impl WriteEngine {
         self.invalidate_heap_provenance(staged);
 
         self.located.clear();
-        self.single_ownership.take();
+        self.chunk_ownership.take();
         self.resolved.clear();
         self.committed = true;
     }

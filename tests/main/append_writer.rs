@@ -1,9 +1,5 @@
-//! Pure-Rust tests for in-place appends through an owned handle: general appends
-//! to an existing
-//! chunked, unlimited, Extensible-Array-indexed dataset — filtered and
-//! unfiltered, chunk-aligned and not, across one or many calls and sessions —
-//! read back with this crate. C-library interop lives in
-//! `crates/crosscheck/tests/main/append_writer.rs`.
+//! Immediate append tests for unlimited Extensible Array and finite array-indexed datasets.
+
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, ScaleOffset, SyncPolicy};
 
@@ -350,20 +346,25 @@ fn refuse_contiguous() {
 }
 
 #[test]
-fn refuse_fixed_not_unlimited() {
+fn fixed_array_appends_respect_the_finite_maximum() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::FixedChunked;
     fixture.write(&path);
-    with_writer(&path, |w| {
+    with_writer(&path, |writer| {
+        writer
+            .dataset("d")
+            .unwrap()
+            .append(&(6..100).collect::<Vec<i32>>())
+            .unwrap();
         assert_unsupported(
-            w.dataset("d").unwrap().append(&[6, 7]),
-            "dataset has no unlimited (maxshape) dimension",
-        )
+            writer.dataset("d").unwrap().append(&[100_i32]),
+            "append exceeds the dataset's maximum first dimension",
+        );
     });
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
-        fixture.expected_i32()
+        (0..100).collect::<Vec<_>>()
     );
 }
 

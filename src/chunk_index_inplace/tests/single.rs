@@ -1,8 +1,10 @@
 use hdf5_pure_format::__private::ChunkIndexFields;
 use hdf5_pure_format::__private::ChunkRecord;
 use rstest::rstest;
+use test_util::data_layout::ArrayIndex;
 use test_util::filtered_chunks::PipelinePattern;
 use test_util::superblock::v2 as superblock_bytes;
+use test_util_hdf5::dataset::FiniteChunkIndex;
 
 use super::*;
 use crate::File;
@@ -24,18 +26,28 @@ use crate::object_path::ObjectPathBuf;
     target_pointer_width = "64",
     case::host_capacity(u32::MAX, u32::MAX, false)
 )]
-fn unallocated_single_chunks_are_bounded_before_materialization(
+fn unallocated_finite_chunks_are_bounded_before_materialization(
     #[case] elements: u32,
     #[case] element_size: u32,
     #[case] supported: bool,
+    #[values(FiniteChunkIndex::Fixed, FiniteChunkIndex::Single)] index: FiniteChunkIndex,
 ) {
-    let layout = test_util::data_layout::single_chunk_with_geometry(
-        Widths::EIGHT,
-        None,
-        None,
-        elements,
-        element_size,
-    );
+    let layout = match index {
+        FiniteChunkIndex::Single => test_util::data_layout::single_chunk_with_geometry(
+            Widths::EIGHT,
+            None,
+            None,
+            elements,
+            element_size,
+        ),
+        FiniteChunkIndex::Fixed => test_util::data_layout::array_chunk_with_geometry(
+            Widths::EIGHT,
+            ArrayIndex::Fixed { page_bits: 4 },
+            None,
+            elements,
+            element_size,
+        ),
+    };
     let datatype = test_util::datatype::fixed_string(element_size);
     let dataspace = test_util::dataspace::v2(
         1,
@@ -67,7 +79,7 @@ fn unallocated_single_chunks_are_bounded_before_materialization(
         assert_eq!(state.index.current_dim(), 0);
     } else {
         let error = match result {
-            Ok(_) => panic!("an oversized Single Chunk is accepted"),
+            Ok(_) => panic!("an oversized finite chunk is accepted"),
             Err(error) => error,
         };
         let expected = if supported {
@@ -546,8 +558,8 @@ fn single_chunk_storage_requires_complete_reachable_ownership(#[case] ownership:
         Err(error) => error,
     };
     let reason = match ownership {
-        Ownership::Detached => "single-chunk storage has no reachable ownership proof",
-        Ownership::Incomplete => "single-chunk storage ownership analysis is incomplete",
+        Ownership::Detached => "chunk storage has no reachable ownership proof",
+        Ownership::Incomplete => "chunk storage ownership analysis is incomplete",
     };
     assert!(
         matches!(error, Error::AppendUnsupported(actual) if actual == reason),

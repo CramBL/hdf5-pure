@@ -2869,7 +2869,7 @@ impl File {
     ///
     /// The fast immediate [`Dataset::append`] additionally requires a
     /// latest-format (version-2/3) file with no userblock and an
-    /// eligible Extensible Array or finite Single Chunk dataset. See [`Dataset::append`] for
+    /// eligible Extensible Array, Fixed Array, or Single Chunk dataset. See [`Dataset::append`] for
     /// dataset requirements. [`Dataset::append_staged`] supports other eligible chunk indexes.
     ///
     /// A [`FileSpaceStrategy::Page`] file with persistence disabled supports staged edits
@@ -6019,8 +6019,8 @@ impl Dataset {
     /// The file must have been opened for writing with [`File::open_rw`];
     /// a read-only file returns
     /// [`Error::ReadOnly`]. The target must be chunked and rank one, with either an unlimited
-    /// Extensible Array index or a finite Single Chunk index. A Single Chunk maximum must fit
-    /// within one chunk, and the editor requires complete, disjoint storage ownership.
+    /// Extensible Array index or a finite Single Chunk or Fixed Array index. A Single Chunk maximum
+    /// must fit within one chunk. Both finite paths require complete, disjoint storage ownership.
     /// An unsupported target returns [`Error::AppendInPlaceUnsupported`]. A missing path returns
     /// [`Error::Format`] with [`FormatError::PathNotFound`], and a header message
     /// that does not read or parse returns [`Error::Format`] with the failure the
@@ -6052,8 +6052,8 @@ impl Dataset {
     /// completed chunk unfiltered.
     ///
     /// An absent trailing chunk in an Extensible Array requires a chunk-aligned starting length
-    /// or [`append_staged`](Self::append_staged). For an unallocated Single Chunk reference, the
-    /// writer fills the existing prefix from the dataset's fill value. An append beyond a finite
+    /// or [`append_staged`](Self::append_staged). For absent finite-index chunks, the writer fills
+    /// the existing prefix from the dataset's fill value. An append beyond a finite
     /// maximum is rejected before writing any part of that call.
     ///
     /// With ordinary write buffering, the writer preserves publication order under either
@@ -6109,9 +6109,10 @@ impl Dataset {
     /// chunk encoding and storage. Bounded sessions limit the full-chunk portion of each
     /// batch, allowing at least one chunk and space to complete an existing partial tail.
     /// ASCII and numeric inputs are encoded into a temporary buffer per batch.
-    /// For Single Chunk appends, the editor analyzes reachable storage on first use and caches
-    /// reachable object-header identities until a commit. Payload preparation retains one logical
-    /// chunk, with a second encoded version when completing a raw edge under lossy filters.
+    /// For finite-index appends, the editor analyzes reachable storage on first use and caches
+    /// reachable object-header identities until a commit. The writer retains one logical chunk
+    /// for Single Chunk appends and the prepared batch chunks for Fixed Arrays. When completing a
+    /// raw edge under lossy filters, it retains an additional encoded version.
     ///
     /// # Examples
     ///
@@ -6162,6 +6163,30 @@ impl Dataset {
     ///     ))
     /// ));
     /// assert_eq!(dataset.shape()?, [4]);
+    /// drop(dataset);
+    /// file.close()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Growing across chunk boundaries within a finite Fixed Array maximum:
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, MaxExtent};
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("fixed-array.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("d")
+    ///     .with_i32_data(&[1])
+    ///     .with_maxshape(&[MaxExtent::Fixed(12)])
+    ///     .with_chunks(&[4]);
+    /// builder.write(&path)?;
+    /// let file = File::open_rw(&path)?;
+    /// let mut dataset = file.dataset("d")?;
+    /// dataset.append(&[2_i32, 3, 4, 5, 6, 7, 8])?;
+    /// let mut appender = dataset.buffered_appender()?;
+    /// appender.append(&[9_i32, 10, 11, 12])?;
+    /// appender.finish()?;
+    /// assert_eq!(dataset.read_i32()?, (1..=12).collect::<Vec<i32>>());
     /// drop(dataset);
     /// file.close()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())

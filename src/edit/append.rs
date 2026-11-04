@@ -9,6 +9,8 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
+use hdf5_pure_format::__private::FixedArrayHeader;
+use hdf5_pure_format::__private::FixedArrayPlan;
 use hdf5_pure_format::__private::IndexSlots;
 
 use hdf5_pure_space::__private::AllocationClass;
@@ -23,6 +25,7 @@ use crate::DatatypeByteOrder;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, BaseAddressExt};
+use crate::chunk_index_inplace::FixedInitialization;
 use crate::chunk_index_inplace::{self, AppendIndex, Located, RetiredChunk, Store};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
@@ -415,7 +418,12 @@ impl WriteEngine {
                 "append exceeds the dataset's maximum first dimension",
             ));
         }
-        if self.swmr_mode && matches!(self.located[&oh_addr].index, AppendIndex::Single(_)) {
+        if self.swmr_mode
+            && matches!(
+                self.located[&oh_addr].index,
+                AppendIndex::Fixed(_) | AppendIndex::Single(_)
+            )
+        {
             return Err(Error::SwmrAppendUnsupported(
                 "SWMR append requires an Extensible Array index",
             ));
@@ -493,6 +501,20 @@ impl WriteEngine {
                             initialization,
                         },
                     ),
+                    AppendIndex::Fixed(index) => index
+                        .plan(
+                            &store,
+                            &st.datatype,
+                            &st.spatial,
+                            st.pipeline.as_ref(),
+                            options.lossy_tail_reencoding(),
+                            batch,
+                            NonZeroU64::new(take).ok_or_else(|| {
+                                FormatError::Internal("append batch is empty".into())
+                            })?,
+                            st.fill.pattern(st.element_size),
+                        )
+                        .map(|plan| ImmediatePreparation::Publish(ImmediatePlan::Fixed(plan))),
                     AppendIndex::Single(index) => index
                         .plan(
                             &store,
@@ -537,6 +559,15 @@ impl WriteEngine {
                 };
                 let mut store = EditStore { engine: self };
                 match plan {
+                    ImmediatePlan::Fixed(plan) => {
+                        let AppendIndex::Fixed(index) = &mut state.index else {
+                            return Err(FormatError::Internal(
+                                "fixed-array plan has a different index kind".into(),
+                            )
+                            .into());
+                        };
+                        index.apply(&mut store, plan, max_phase)
+                    }
                     ImmediatePlan::Single(plan) => {
                         let AppendIndex::Single(index) = &mut state.index else {
                             return Err(FormatError::Internal(
@@ -845,7 +876,7 @@ pub(crate) struct AppendGeometry {
 
 /// Caches dataset metadata maintained across immediate appends.
 pub(crate) struct LocatedState {
-    /// Checked geometry for an Extensible Array or Single Chunk index.
+    /// Checked geometry for an Extensible Array, Fixed Array, or Single Chunk index.
     pub(crate) index: AppendIndex,
     /// The datatype used for append compatibility and filter context.
     pub(crate) datatype: Datatype,
@@ -871,6 +902,7 @@ enum ImmediatePreparation {
 /// Index-specific content ready for ordered publication.
 enum ImmediatePlan {
     Extensible(chunk_index_inplace::AppendPlan),
+    Fixed(chunk_index_inplace::FixedAppend),
     Single(chunk_index_inplace::SingleAppend),
 }
 
@@ -932,12 +964,82 @@ impl EditStore<'_> {
         result
     }
 
+    /// Reserves PAGE metadata blocks separately and streams an empty data block into its range.
+    ///
+    /// Retains a source header when present. Provisions each complete emitted block only after
+    /// the reservation plan finishes, restoring the persistent batch on failure.
+    ///
+    /// # Errors
+    ///
+    /// Propagates preparation, placement, emission, provisioning, and allocator-restoration errors.
+    fn allocate_paged_fixed_initialization(
+        &mut self,
+        plan: &FixedArrayPlan,
+        header: Option<FixedArrayHeader>,
+    ) -> Result<FixedInitialization, Error> {
+        self.engine.context.allocations.available()?;
+        self.engine.prepare_append_allocation()?;
+        let result = (|| {
+            let requests = ArrayIndexPlanRef::Fixed(plan).requests()?;
+            let requests = requests
+                .get(usize::from(header.is_some())..)
+                .ok_or(FormatError::InvalidFixedArrayGeometry)?;
+            let mut reservations = self
+                .engine
+                .plan_immediate_blocks(requests)
+                .map_err(ReservationFailure::into_error)?;
+            let addresses = reservations.addresses();
+            let (header_range, block_range) = match reservations.reservations() {
+                [block] if header.is_some() => (None, block.range()),
+                [planned_header, block] if header.is_none() => {
+                    (Some(planned_header.range()), block.range())
+                }
+                _ => {
+                    return Err(FormatError::Internal(
+                        "fixed-array initialization reservations differ from its blocks".into(),
+                    )
+                    .into());
+                }
+            };
+            let placement = match header {
+                Some(header) => {
+                    header.initialization_at(addresses.relative(block_range.start())?)?
+                }
+                None => plan.place(
+                    addresses.relative(
+                        header_range
+                            .ok_or(FormatError::InvalidFixedArrayGeometry)?
+                            .start(),
+                    )?,
+                    addresses.relative(block_range.start())?,
+                )?,
+            };
+            if header_range.is_some() {
+                reservations.write_next(&placement.serialize_header()?)?;
+            }
+            reservations.write_next_with(|writer| {
+                placement.emit_empty_data_block(|bytes| writer.write(bytes))
+            })?;
+            reservations.finish()?;
+            let header = header_range
+                .map(|range| self.engine.context.allocations.provision(range))
+                .transpose()?;
+            let block = self.engine.context.allocations.provision(block_range)?;
+            FixedInitialization::from_blocks(addresses, placement, header, block)
+        })();
+        if result.is_err() {
+            self.engine.restore_append_allocation()?;
+        }
+        result
+    }
+
     /// Prepares bytes at their allocation address before padding and appending in raw PAGE space.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if address conversion, PAGE geometry, or padding size is invalid.
-    /// Returns [`Error::Io`] if appending the padding or bytes fails. Propagates preparation errors.
+    /// Returns [`Error::Io`] if appending the padding or bytes fails. Propagates preparation
+    /// errors.
     fn append_into_raw_page<B: AsRef<[u8]>>(
         &mut self,
         length: u64,
@@ -969,7 +1071,8 @@ impl EditStore<'_> {
     /// Prepares and places bytes in reusable space, a classic aggregate, or at end-of-file.
     ///
     /// In PAGE files, reserves nonempty metadata as complete blocks in metadata pages and chunk
-    /// payloads in raw pages. Uses [`append_into_raw_page`](Self::append_into_raw_page) for an empty
+    /// payloads in raw pages. Uses [`append_into_raw_page`](Self::append_into_raw_page) for an
+    /// empty
     /// allocation.
     ///
     /// # Errors
@@ -1107,13 +1210,11 @@ impl Store for EditStore<'_> {
     }
 
     fn require_exclusive_chunk_storage(&self, header: u64) -> Result<(), Error> {
-        let owners = match self.engine.single_ownership.get() {
+        let owners = match self.engine.chunk_ownership.get() {
             Some(owners) => owners,
             None => {
                 let owners = self.engine.exclusive_chunk_owners()?;
-                self.engine
-                    .single_ownership
-                    .get_or_init(|| Box::new(owners))
+                self.engine.chunk_ownership.get_or_init(|| Box::new(owners))
             }
         };
         owners.require(header)
@@ -1136,6 +1237,18 @@ impl Store for EditStore<'_> {
 
     fn allocation_publication(&self) -> &AllocationPublication {
         &self.engine.context.allocations
+    }
+
+    fn allocate_fixed_initialization(
+        &mut self,
+        plan: &FixedArrayPlan,
+        header: Option<FixedArrayHeader>,
+    ) -> Result<FixedInitialization, Error> {
+        if self.engine.space.is_paged() {
+            self.allocate_paged_fixed_initialization(plan, header)
+        } else {
+            FixedInitialization::allocate(self, plan, header)
+        }
     }
 
     fn allocate_ea_initialization(
@@ -1310,9 +1423,10 @@ pub(super) fn datatypes_match(stored: &Datatype, input: &Datatype) -> bool {
 
 /// Reads checked geometry, the datatype, and encoding metadata for an immediate append.
 ///
-/// The dataset must be rank one with an unlimited Extensible Array or finite Single Chunk
-/// index. An empty array may have an undefined index-header address. The filter pipeline must be
-/// re-encodable. Single Chunk lookup also requires complete storage ownership.
+/// The dataset must be rank one with an unlimited Extensible Array or a finite Single Chunk
+/// or Fixed Array index. An empty array may have an undefined index-header address. The filter
+/// pipeline must be
+/// re-encodable. Finite-index lookup also requires complete storage ownership.
 /// Unreadable fill metadata is rejected only when padding is needed. File storage remains
 /// unchanged during lookup.
 ///

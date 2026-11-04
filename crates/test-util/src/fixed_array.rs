@@ -118,13 +118,65 @@ pub fn empty_data_block(
     output
 }
 
+/// Builds a checksummed data block with every page initialized.
+///
+/// Writes optional records at the supplied encoding, retaining undefined entries for `None`.
+///
+/// # Panics
+///
+/// Panics for invalid integer widths, values that exceed their fields, a page shift beyond the
+/// platform's width, or output beyond the platform's capacity.
+pub fn data_block(
+    widths: Widths,
+    client: Client,
+    page_bits: u8,
+    records: &[Option<Entry>],
+    owner: u64,
+) -> Vec<u8> {
+    let mut output = DATA_BLOCK_SIGNATURE.to_vec();
+    output.extend_from_slice(&[VERSION, client.id()]);
+    bytes::push_uint(&mut output, owner, widths.offset);
+    let page_entries = 1_usize.checked_shl(u32::from(page_bits)).unwrap();
+    if records.len() <= page_entries {
+        let entries = page(widths, client, records);
+        output.extend_from_slice(&entries[..entries.len() - mem::size_of::<u32>()]);
+        checksum::append(&mut output);
+    } else {
+        let pages = records.len().div_ceil(page_entries);
+        let bitmap = output.len();
+        output.resize(
+            bitmap + pages.div_ceil(usize::try_from(u8::BITS).unwrap()),
+            0,
+        );
+        for page in 0..pages {
+            output[bitmap + page / usize::try_from(u8::BITS).unwrap()] |=
+                FIRST_PAGE_MASK >> (page % usize::try_from(u8::BITS).unwrap());
+        }
+        checksum::append(&mut output);
+        for records in records.chunks(page_entries) {
+            output.extend_from_slice(&page(widths, client, records));
+        }
+    }
+    output
+}
+
+/// The raw address, size, and mask fields of one independent entry fixture.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry {
+    /// The base-relative chunk address.
     pub address: u64,
+    /// The filtered stored size, omitted by an unfiltered client.
     pub stored_size: u64,
+    /// The skipped filters, omitted by an unfiltered client.
     pub filter_mask: u32,
 }
 
+/// Builds a complete page of the supplied entries with a trailing checksum.
+///
+/// # Panics
+///
+/// Panics for invalid integer widths, values that exceed their fields, or output beyond the
+/// platform's capacity.
 pub fn page(widths: Widths, client: Client, records: &[Option<Entry>]) -> Vec<u8> {
     let mut output = Vec::new();
     for record in records {
@@ -161,3 +213,7 @@ pub const THIRD_PAGE_MASK: u8 = 0x20;
 const VERSION: u8 = 0;
 const PLAIN_CLIENT: u8 = 0;
 const FILTERED_CLIENT: u8 = 1;
+
+// H5VM_bit_set uses H5VM_bit_set_g in H5VMprivate.h, HDF5 2.2.0, to store page zero in the high
+// bit.
+const FIRST_PAGE_MASK: u8 = 0x80;
