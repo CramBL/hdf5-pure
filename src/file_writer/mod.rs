@@ -37,6 +37,8 @@ use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_space::__private::AllocationClass;
 
 use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
+#[cfg(feature = "std")]
+pub(crate) use self::preparation::{prepare_attribute_widths, validate_collections};
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
@@ -101,6 +103,7 @@ pub use crate::type_builders::AttrValue;
 use crate::datatype::{CharacterSet, Datatype};
 
 mod layout;
+
 mod preparation;
 #[cfg(feature = "std")]
 pub(crate) mod source;

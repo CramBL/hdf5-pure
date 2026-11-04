@@ -60,6 +60,17 @@ pub enum FormatError {
         /// The attribute message's serialized size in bytes.
         size: usize,
     },
+    /// Attributes prepared for one dense set have different address or length widths.
+    AttributeWidthsMismatch {
+        /// The first prepared attribute's address width in bytes.
+        expected_offset_size: u8,
+        /// The first prepared attribute's length width in bytes.
+        expected_length_size: u8,
+        /// The conflicting attribute's address width in bytes.
+        actual_offset_size: u8,
+        /// The conflicting attribute's length width in bytes.
+        actual_length_size: u8,
+    },
     /// The number of supplied node addresses differs from the version 2 B-tree plan.
     BTreeV2NodeCount {
         /// The number of nodes in the plan.
@@ -2636,6 +2647,15 @@ impl fmt::Display for FormatError {
                      element size of {expected} bytes"
                 )
             }
+            Self::AttributeWidthsMismatch {
+                expected_offset_size,
+                expected_length_size,
+                actual_offset_size,
+                actual_length_size,
+            } => write!(
+                f,
+                "attribute offset/length widths {actual_offset_size}/{actual_length_size} do not match {expected_offset_size}/{expected_length_size}"
+            ),
             Self::AttributeMessageTooLarge { name, size } => {
                 write!(
                     f,

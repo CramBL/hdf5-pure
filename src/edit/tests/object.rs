@@ -459,7 +459,13 @@ fn a_copied_reference_attribute_is_screened_in_both_storages(
     let tree = if dense {
         verbatim_copy(
             OhRegion::default(),
-            DenseAttrSet::new(vec![attr], DenseAttrCreationOrder::Untracked, []).unwrap(),
+            DenseAttrSet::new(
+                crate::file_writer::WIDTHS,
+                vec![attr],
+                DenseAttrCreationOrder::Untracked,
+                [],
+            )
+            .unwrap(),
         )
     } else {
         verbatim_copy(inline_attr_region(&attr), DenseAttrSet::default())
@@ -1944,8 +1950,13 @@ fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     let leaf = CopyNode::Group {
         region: edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap(),
         links: Vec::new(),
-        dense_attrs: DenseAttrSet::new(vec![leaf_attr], DenseAttrCreationOrder::Untracked, [])
-            .unwrap(),
+        dense_attrs: DenseAttrSet::new(
+            crate::file_writer::WIDTHS,
+            vec![leaf_attr],
+            DenseAttrCreationOrder::Untracked,
+            [],
+        )
+        .unwrap(),
     };
     let root = (0..depth).fold(leaf, |child, _| {
         let mut region = edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap();

@@ -1337,7 +1337,10 @@ pub(super) fn require_reference_width(
 /// # Errors
 ///
 /// Returns [`FormatError::LengthTooLarge`] if a collection exceeds `widths.lengths`.
-fn validate_collections(widths: FormatWidths, collections: &[Vec<u8>]) -> Result<(), FormatError> {
+pub(crate) fn validate_collections(
+    widths: FormatWidths,
+    collections: &[Vec<u8>],
+) -> Result<(), FormatError> {
     let maximum = u64::MAX >> (64 - 8 * widths.lengths.get());
     for collection in collections {
         if collection.len() as u64 > maximum {
@@ -1356,7 +1359,7 @@ fn validate_collections(widths: FormatWidths, collections: &[Vec<u8>]) -> Result
 ///
 /// Returns the errors of [`validate_collections`] and [`require_reference_width`]. Propagates
 /// variable-length conversion errors for invalid layouts, buffer ranges, or addresses.
-fn prepare_attribute_widths(
+pub(crate) fn prepare_attribute_widths(
     widths: FormatWidths,
     messages: &mut [AttributeMessage],
     collections: &[(usize, Vec<Vec<u8>>)],

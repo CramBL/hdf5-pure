@@ -7,11 +7,11 @@ use std::path::Path;
 use hdf5::file::LibraryVersion;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
+use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::FileSpacePageSize;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::UserblockSize;
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::{LengthWidth, OffsetWidth};
 
 /// Opens an existing file for read-only native observations.

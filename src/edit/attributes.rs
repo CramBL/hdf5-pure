@@ -28,6 +28,7 @@ use crate::source::OriginalSource;
 use crate::source::PhysicalSource;
 use crate::source::SourceMetadata;
 use crate::type_builders::{self, AttrValue};
+use crate::width::{FormatWidths, OffsetWidth};
 
 use super::WriteEngine;
 use super::block::{BlockRequest, EncodingDependency};
@@ -35,6 +36,11 @@ use super::object_header;
 use super::object_header::OhRegion;
 use super::reservation::ReservationFailure;
 use super::staging::StagedOp;
+
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
 
 impl WriteEngine {
     /// Stages an attribute addition or replacement for the next [`commit`](Self::commit).
@@ -218,7 +224,7 @@ impl WriteEngine {
         reservations.finish()?;
         Ok(placement
             .attribute_info()
-            .serialize(crate::file_writer::OFFSET_WIDTH)?)
+            .serialize(self.context.widths().offsets)?)
     }
 
     /// Places prepared attribute storage and appends its header records.
@@ -245,7 +251,7 @@ impl WriteEngine {
                             "a compact attribute fixup extends past its records".into(),
                         )
                     })?;
-                    type_builders::patch_vl_refs(data, &addrs);
+                    type_builders::patch_vl_refs_with_width(region.widths().offsets, data, &addrs)?;
                 }
                 region.push_bytes(&compact.records);
                 Ok(())
@@ -253,7 +259,11 @@ impl WriteEngine {
             EditedAttrs::Dense(mut dense) => {
                 for (idx, collections) in std::mem::take(&mut dense.vl) {
                     let addrs = self.place_vl_collections(&collections)?;
-                    type_builders::patch_vl_refs(&mut dense.set.attrs[idx].raw_data, &addrs);
+                    type_builders::patch_vl_refs_with_width(
+                        region.widths().offsets,
+                        &mut dense.set.attrs[idx].raw_data,
+                        &addrs,
+                    )?;
                 }
                 self.append_dense_attrs(region, dense.set)
             }
@@ -321,8 +331,7 @@ impl AttributePredecessors {
     /// Skips shared records and attributes that cannot be parsed. Retains the parsed prefix
     /// if record traversal fails.
     fn compact(src: &(impl OriginalSource + ?Sized), region: &OhRegion, ops: &[&AttrOp]) -> Self {
-        let resolver =
-            SourceResolver::new(src, AccessMode::ReadWrite, crate::file_writer::WIDTHS, None);
+        let resolver = SourceResolver::new(src, AccessMode::ReadWrite, region.widths(), None);
         let names: BTreeSet<&str> = ops
             .iter()
             .map(|op| match op {
@@ -336,9 +345,9 @@ impl AttributePredecessors {
                 && !record.flags.is_shared()
                 && let Ok(name) = AttributeMessage::parse_name(record.body)
                 && names.contains(name.as_str())
-                && let Ok(attribute) = AttributeMessage::parse_resolving_with_length_width(
+                && let Ok(attribute) = AttributeMessage::parse_resolving_with_widths(
                     record.body,
-                    crate::file_writer::LENGTH_WIDTH,
+                    region.widths(),
                     &resolver,
                 )
             {
@@ -421,14 +430,17 @@ impl DenseAttrSet {
     ///
     /// # Errors
     ///
-    /// Returns the encoding, metadata, and update errors of [`PreparedDenseAttrs::new`].
+    /// Returns the encoding, metadata, and update errors of [`PreparedDenseAttrs::with_widths`].
     pub(super) fn new(
+        widths: FormatWidths,
         attrs: Vec<AttributeMessage>,
         creation: DenseAttrCreationOrder,
         fixups: impl IntoIterator<Item = DenseAttrFixup>,
     ) -> Result<Self, FormatError> {
         Ok(Self {
-            prepared: Some(PreparedDenseAttrs::new(&attrs, creation, fixups)?),
+            prepared: Some(PreparedDenseAttrs::with_widths(
+                widths, &attrs, creation, fixups,
+            )?),
             attrs,
         })
     }
@@ -513,13 +525,11 @@ pub(super) fn plan_attr_ops(
         let first_edit = touched.insert(name.as_str());
         match op {
             AttrOp::Set { name, value } => {
-                let attribute = SlotAttribute::Prepared(PreparedAttributeMessage::new(
-                    AttributeName::try_from(name.as_str())?.build_value(value)?,
-                )?);
-                let collections = value
-                    .var_len_strings()
-                    .map(type_builders::build_global_heap_collections)
-                    .transpose()?;
+                let PreparedAttributeValue {
+                    attribute,
+                    collections,
+                } = prepare_attribute_value(region.widths(), name, value)?;
+                let attribute = SlotAttribute::Prepared(attribute);
                 match set.get_mut(name) {
                     // Preserve the existing creation index on replacement.
                     Some(slot) => {
@@ -575,6 +585,42 @@ pub(super) fn plan_attr_ops(
     prepare_dense_attrs(region, set, next_index, dense_now, predecessors)
 }
 
+/// An attribute body encoded at the destination widths with unresolved heap collections.
+struct PreparedAttributeValue {
+    attribute: PreparedAttributeMessage,
+    collections: Option<Vec<Vec<u8>>>,
+}
+
+/// Encodes an attribute value and prepares its variable-length storage at `widths`.
+///
+/// Retains heap collections separately for address resolution during commit application.
+///
+/// # Errors
+///
+/// Returns attribute-name and value-encoding errors, collection-size errors from
+/// [`crate::file_writer::validate_collections`], width-conversion errors from
+/// [`crate::file_writer::prepare_attribute_widths`], or errors from
+/// [`PreparedAttributeMessage::with_widths`].
+fn prepare_attribute_value(
+    widths: FormatWidths,
+    name: &str,
+    value: &AttrValue,
+) -> Result<PreparedAttributeValue, Error> {
+    let mut message = AttributeName::try_from(name)?.build_value(value)?;
+    let collections = value
+        .var_len_strings()
+        .map(type_builders::build_global_heap_collections)
+        .transpose()?;
+    if let Some(collections) = &collections {
+        crate::file_writer::validate_collections(widths, collections)?;
+    }
+    crate::file_writer::prepare_attribute_widths(widths, core::slice::from_mut(&mut message), &[])?;
+    Ok(PreparedAttributeValue {
+        attribute: PreparedAttributeMessage::with_widths(widths, message)?,
+        collections,
+    })
+}
+
 /// Prepares the complete dense set from stored or encoded attribute values.
 ///
 /// # Errors
@@ -604,7 +650,7 @@ fn prepare_dense_attrs(
             "a tracked object's attribute must carry a creation index"
         );
         indices.push(slot.creation_index.unwrap_or_default());
-        attrs.push(slot.attribute.into_prepared()?);
+        attrs.push(slot.attribute.into_prepared(original.widths())?);
     }
     let creation = if tracked {
         DenseAttrCreationOrder::Tracked {
@@ -779,15 +825,11 @@ impl<'a> CompactBatch<'a> {
             AttrOp::Set { name, .. } | AttrOp::Remove { name } => name,
         };
         let prepared = match operation {
-            AttrOp::Set { name, value } => Some((
-                PreparedAttributeMessage::new(
-                    AttributeName::try_from(name.as_str())?.build_value(value)?,
-                )?,
-                value
-                    .var_len_strings()
-                    .map(type_builders::build_global_heap_collections)
-                    .transpose()?,
-            )),
+            AttrOp::Set { name, value } => Some(prepare_attribute_value(
+                self.original.widths(),
+                name,
+                value,
+            )?),
             AttrOp::Remove { .. } => None,
         };
         let index = match self.names.get(name).copied() {
@@ -810,7 +852,10 @@ impl<'a> CompactBatch<'a> {
         };
         let slot = &mut self.slots[index];
         match prepared {
-            Some((attribute, collections)) => {
+            Some(PreparedAttributeValue {
+                attribute,
+                collections,
+            }) => {
                 self.oversized |= attribute.body().len() > OBJECT_HEADER_MESSAGE_MAX;
                 if slot.count == 0 && self.original.layout().tracks_creation_order() {
                     let derived = self
@@ -898,7 +943,7 @@ impl<'a> CompactBatch<'a> {
                 && assigned
                 && let Ok(mut info) = AttributeInfoMessage::parse_with_offset_width(
                     &original[body..range.end],
-                    crate::file_writer::OFFSET_WIDTH,
+                    original.widths().offsets,
                 )
             {
                 info.max_creation_index = counter;
@@ -911,10 +956,8 @@ impl<'a> CompactBatch<'a> {
                                     .into(),
                             )
                         })?;
-                splice.replace_body_into(
-                    &mut bytes,
-                    &info.serialize(crate::file_writer::OFFSET_WIDTH)?,
-                )?;
+                splice
+                    .replace_body_into(&mut bytes, &info.serialize(original.widths().offsets)?)?;
                 has_info = true;
             } else {
                 bytes.extend_from_slice(&original[range]);
@@ -966,7 +1009,7 @@ impl<'a> CompactBatch<'a> {
             };
             region.push(
                 MessageType::ATTRIBUTE_INFO,
-                &info.serialize(crate::file_writer::OFFSET_WIDTH)?,
+                &info.serialize(original.widths().offsets)?,
             );
         }
         Ok(AttrEdits {
@@ -1142,11 +1185,11 @@ impl SlotAttribute {
     ///
     /// # Errors
     ///
-    /// Returns the encoding errors documented by [`PreparedAttributeMessage::new`].
-    fn into_prepared(self) -> Result<PreparedAttributeMessage, FormatError> {
+    /// Returns the encoding errors documented by [`PreparedAttributeMessage::with_widths`].
+    fn into_prepared(self, widths: FormatWidths) -> Result<PreparedAttributeMessage, FormatError> {
         match self {
             Self::Prepared(attribute) => Ok(attribute),
-            Self::Stored { message, .. } => PreparedAttributeMessage::new(message),
+            Self::Stored { message, .. } => PreparedAttributeMessage::with_widths(widths, message),
         }
     }
 }
@@ -1165,15 +1208,14 @@ fn read_attr_slots(
     src: &(impl OriginalSource + ?Sized),
     region: &OhRegion,
 ) -> Result<(BTreeMap<String, AttributeSlot>, u16), Error> {
-    let resolver =
-        SourceResolver::new(src, AccessMode::ReadWrite, crate::file_writer::WIDTHS, None);
+    let resolver = SourceResolver::new(src, AccessMode::ReadWrite, region.widths(), None);
     let mut stored = Vec::new();
     let mut bodies = Vec::new();
     let mut visit = |body: &[u8], creation_index| {
         stored.push(StoredAttribute {
-            message: AttributeMessage::parse_resolving_with_length_width(
+            message: AttributeMessage::parse_resolving_with_widths(
                 body,
-                crate::file_writer::LENGTH_WIDTH,
+                region.widths(),
                 &resolver,
             )?,
             creation_index,
@@ -1198,7 +1240,7 @@ fn read_attr_slots(
             MessageType::ATTRIBUTE_INFO if info.is_none() => {
                 info = Some(AttributeInfoMessage::parse_with_offset_width(
                     record.body,
-                    crate::file_writer::OFFSET_WIDTH,
+                    region.widths().offsets,
                 )?);
             }
             _ => {}
@@ -1213,7 +1255,7 @@ fn read_attr_slots(
             AccessMode::ReadWrite,
             &info,
             heap,
-            crate::file_writer::WIDTHS,
+            region.widths(),
             None,
             |_| true,
             &mut visit,
@@ -1319,7 +1361,7 @@ fn prepare_compact_attrs(
         btree_name_index_address: None,
         btree_creation_order_address: None,
     }
-    .serialize(crate::file_writer::OFFSET_WIDTH)?;
+    .serialize(original.widths().offsets)?;
     let mut region = strip_attr_messages(original)?;
     if let Some((start, body, _)) = find_attribute_info(original)? {
         let splice = RecordSplice::first(
@@ -1357,7 +1399,7 @@ fn region_uses_dense_attrs(region: &OhRegion) -> Result<bool, Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::ATTRIBUTE_INFO
-            && attribute_info_is_dense(&region[body..body_end])
+            && attribute_info_is_dense(region.widths().offsets, &region[body..body_end])
         {
             return Ok(true);
         }
@@ -1423,13 +1465,14 @@ pub(super) fn read_object_attrs(
     src: &(impl OriginalSource + ?Sized),
     access_mode: AccessMode,
     addr: u64,
+    widths: FormatWidths,
 ) -> Result<Vec<crate::attribute::StoredAttribute>, Error> {
     let base = src.addresses();
     let header = ObjectHeader::parse_from_source_with_widths(
         &SourceMetadata(src),
         access_mode,
         addr,
-        crate::file_writer::WIDTHS,
+        widths,
         base.effective_base(),
     )?;
     if base.effective_base().get() > src.len() {
@@ -1441,7 +1484,7 @@ pub(super) fn read_object_attrs(
         src,
         access_mode,
         &header,
-        crate::file_writer::WIDTHS,
+        widths,
         // Read attributes without a shared-message table.
         None,
     )
@@ -1522,11 +1565,8 @@ fn bump_creation_index(index: u16) -> Result<u16, Error> {
 /// version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
-pub(crate) fn attribute_info_is_dense(body: &[u8]) -> bool {
-    match crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
-        body,
-        crate::file_writer::OFFSET_WIDTH,
-    ) {
+pub(crate) fn attribute_info_is_dense(offsets: OffsetWidth, body: &[u8]) -> bool {
+    match crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(body, offsets) {
         Ok(ai) => ai.fractal_heap_address.is_some(),
         Err(_) => true,
     }
@@ -1608,7 +1648,7 @@ pub(super) fn find_attribute_info(
         if msg_type == MessageType::ATTRIBUTE_INFO
             && let Ok(info) = AttributeInfoMessage::parse_with_offset_width(
                 &region[body..body_end],
-                crate::file_writer::OFFSET_WIDTH,
+                region.widths().offsets,
             )
         {
             return Ok(Some((p, body..body_end, info)));

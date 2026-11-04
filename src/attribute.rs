@@ -141,17 +141,9 @@ pub fn extract_attributes_full(
                 // The whole attribute message is shared: resolve the reference to
                 // get the message, which may itself name a committed datatype.
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving_with_length_width(
-                    &resolved,
-                    widths.lengths,
-                    &resolver,
-                )?
+                AttributeMessage::parse_resolving_with_widths(&resolved, widths, &resolver)?
             } else {
-                AttributeMessage::parse_resolving_with_length_width(
-                    &msg.data,
-                    widths.lengths,
-                    &resolver,
-                )?
+                AttributeMessage::parse_resolving_with_widths(&msg.data, widths, &resolver)?
             };
             attrs.push(attr);
         }
@@ -227,17 +219,9 @@ pub fn extract_stored_attributes_from_source(
         if msg.msg_type == MessageType::ATTRIBUTE {
             let attr = if msg.flags.is_shared() {
                 let resolved = resolver.resolve(&msg.data, MessageType::ATTRIBUTE)?;
-                AttributeMessage::parse_resolving_with_length_width(
-                    &resolved,
-                    widths.lengths,
-                    &resolver,
-                )?
+                AttributeMessage::parse_resolving_with_widths(&resolved, widths, &resolver)?
             } else {
-                AttributeMessage::parse_resolving_with_length_width(
-                    &msg.data,
-                    widths.lengths,
-                    &resolver,
-                )?
+                AttributeMessage::parse_resolving_with_widths(&msg.data, widths, &resolver)?
             };
             attrs.push(StoredAttribute {
                 message: attr,
@@ -338,11 +322,7 @@ fn extract_dense_attributes(
 
         // The data in the heap is a complete attribute message, and it names a
         // committed datatype the same way a compact one does.
-        let attr = AttributeMessage::parse_resolving_with_length_width(
-            &attr_data,
-            widths.lengths,
-            &resolver,
-        )?;
+        let attr = AttributeMessage::parse_resolving_with_widths(&attr_data, widths, &resolver)?;
         attrs.push(attr);
     }
 
@@ -377,11 +357,7 @@ fn extract_dense_attributes_from_source(
         |_flags| true,
         |data, creation_index| {
             attrs.push(StoredAttribute {
-                message: AttributeMessage::parse_resolving_with_length_width(
-                    data,
-                    widths.lengths,
-                    &resolver,
-                )?,
+                message: AttributeMessage::parse_resolving_with_widths(data, widths, &resolver)?,
                 creation_index,
             });
             Ok(())
