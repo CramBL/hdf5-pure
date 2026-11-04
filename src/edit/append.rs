@@ -1092,7 +1092,46 @@ impl Store for EditStore<'_> {
         class: AllocationClass,
         prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
     ) -> Result<ProvisionalAllocation, Error> {
-        EditStore::allocate_prepared(self, length, class, prepare)
+        let Some(length) = NonZeroU64::new(length) else {
+            return EditStore::allocate_prepared(self, 0, class, prepare);
+        };
+        self.allocate_emitted(length, class, |address, emit| {
+            let bytes = Self::prepare_allocation_bytes(length.get(), address, prepare)?;
+            emit(bytes.as_ref())
+        })
+    }
+
+    fn allocate_emitted(
+        &mut self,
+        length: NonZeroU64,
+        class: AllocationClass,
+        emit: impl FnOnce(
+            PhysicalAddress,
+            &mut dyn FnMut(&[u8]) -> Result<(), Error>,
+        ) -> Result<(), Error>,
+    ) -> Result<ProvisionalAllocation, Error> {
+        self.engine.context.allocations.available()?;
+        self.engine.prepare_append_allocation()?;
+        let result = (|| {
+            let request = match class {
+                AllocationClass::Metadata => ReservationRequest::new(length, class).for_block(),
+                AllocationClass::Raw => ReservationRequest::new(length, class),
+            };
+            let mut plan = self
+                .engine
+                .plan_immediate_reservation(request)
+                .map_err(ReservationFailure::into_error)?;
+            let address = plan.reservations()[0].range().start();
+            let address =
+                plan.write_next_with(|writer| emit(address, &mut |bytes| writer.write(bytes)))?;
+            plan.finish()?;
+            let range = FileRange::new(address, length.get())?;
+            self.engine.context.allocations.provision(range)
+        })();
+        if result.is_err() {
+            self.engine.restore_append_allocation()?;
+        }
+        result
     }
 
     fn make_allocation_uncertain(&mut self) {
