@@ -2,6 +2,7 @@ use core::num::NonZeroUsize;
 use std::fs;
 use std::path::Path;
 
+use ::test_util::extensible_array;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use rstest::rstest;
 use test_util_hdf5::__private::array_index;
@@ -128,6 +129,128 @@ fn immediate_first_writes_keep_native_array_blocks_in_metadata_pages(
     buffered.close().unwrap();
     file_space_oracle::assert_persisted_sections(&path);
     file_space_oracle::assert_manager_metadata_bytes(&path);
+}
+
+#[rstest]
+#[case::direct(Growth::Direct)]
+#[case::super_block(Growth::SuperBlock)]
+#[case::paged_parent(Growth::PagedParent)]
+fn immediate_growth_keeps_complete_native_index_blocks_in_metadata_pages(
+    #[case] growth: Growth,
+    #[values(false, true)] filtered: bool,
+    #[values(512, 4_096)] page: u64,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("immediate-array-growth.h5");
+    let parameters = ExtensibleArrayCreationParameters::parse(&[16, 4, 2, 16, 6]).unwrap();
+    let header = unallocated_append::paged_fixture(
+        &path,
+        filtered,
+        FileSpacePageSize::try_from(page).unwrap(),
+        parameters,
+    );
+    let expected: Vec<i32> = (0..growth.chunks() * 4)
+        .map(|index| index * 7_919 + 17)
+        .collect();
+    unallocated_append::write_values(&path, &expected[..4]);
+    unallocated_append::inspect_initialized_index(&path, header, parameters.encode());
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected[..4]);
+    let pure = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(backing)
+            .with_sync_policy(sync),
+    )
+    .unwrap();
+    let mut target = pure.dataset("d").unwrap();
+    target.append(&expected[4..]).unwrap();
+    assert_eq!(target.read_i32().unwrap(), expected);
+    drop(target);
+    pure.close().unwrap();
+    let engine = test_util::open_engine(&path);
+    let header = u64::try_from(header).unwrap();
+    engine.assert_array_metadata_pages(header);
+    let mut data_blocks = 0;
+    let mut super_blocks = 0;
+    let mut largest = 0;
+    for range in engine.chunked_index_spans(header).unwrap() {
+        match engine
+            .image()
+            .read_exact_at(range.start().get(), extensible_array::SIGNATURE.len())
+            .unwrap()
+            .as_slice()
+        {
+            bytes if bytes == DATA_BLOCK_SIGNATURE => {
+                data_blocks += 1;
+                largest = largest.max(range.length());
+            }
+            bytes if bytes == SUPER_BLOCK_SIGNATURE => super_blocks += 1,
+            bytes
+                if bytes == extensible_array::SIGNATURE
+                    || bytes == extensible_array::INDEX_SIGNATURE => {}
+            bytes => panic!("unexpected array signature {bytes:?}"),
+        }
+    }
+    assert_eq!((data_blocks, super_blocks), growth.blocks());
+    if matches!(growth, Growth::PagedParent) {
+        let element_size = if filtered { 14 } else { 8 };
+        let checksum = u64::try_from(extensible_array::CHECKSUM_BYTES).unwrap();
+        assert_eq!(largest, 20 + 2 * (64 * element_size + checksum));
+    }
+    drop(engine);
+    unallocated_append::inspect_initialized_index(
+        &path,
+        usize::try_from(header).unwrap(),
+        parameters.encode(),
+    );
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
+    let ordinary = file::libhdf5_open(&path);
+    let free = ordinary.free_space();
+    assert!(free > 0);
+    ordinary.close().unwrap();
+    let buffered = file::libhdf5_open_with_page_buffer(
+        &path,
+        NonZeroUsize::new(usize::try_from(2 * page).unwrap()).unwrap(),
+    );
+    assert_eq!(
+        buffered.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        expected
+    );
+    assert_eq!(buffered.free_space(), free);
+    buffered.close().unwrap();
+    dataset::pure_append(&path, "d", &[31_i32, 37, 41]);
+    let mut expected = expected;
+    expected.extend([31, 37, 41]);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
+    file_space_oracle::assert_persisted_sections(&path);
+    file_space_oracle::assert_manager_metadata_bytes(&path);
+}
+
+#[derive(Clone, Copy)]
+enum Growth {
+    Direct,
+    PagedParent,
+    SuperBlock,
+}
+
+impl Growth {
+    fn chunks(self) -> i32 {
+        match self {
+            Self::Direct => 24,
+            Self::PagedParent => 580,
+            Self::SuperBlock => 80,
+        }
+    }
+
+    fn blocks(self) -> (usize, usize) {
+        match self {
+            Self::Direct => (2, 0),
+            Self::PagedParent => (11, 4),
+            Self::SuperBlock => (3, 1),
+        }
+    }
 }
 
 #[rstest]
@@ -630,3 +753,10 @@ impl WriteEngine {
         }
     }
 }
+
+// "The Extensible Array Index" of the format specification, version 4.0, defines this data-block
+// signature.
+const DATA_BLOCK_SIGNATURE: &[u8; 4] = b"EADB";
+// "The Extensible Array Index" of the format specification, version 4.0, defines this secondary-block
+// signature.
+const SUPER_BLOCK_SIGNATURE: &[u8; 4] = b"EASB";

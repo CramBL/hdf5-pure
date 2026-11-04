@@ -189,8 +189,10 @@ fn reported_sync_errors_stop_dependent_references_and_reuse(
 #[case::incomplete_write(Control::IncompleteWrite, SyncPolicy::Always)]
 #[case::ordered_write_failure(Control::WriteFailure, SyncPolicy::OnClose)]
 #[case::late_payload(Control::LatePayload, SyncPolicy::Always)]
+#[case::late_header(Control::LateHeader, SyncPolicy::Always)]
 #[case::late_index(Control::LateIndex, SyncPolicy::Always)]
 #[case::ordered_late_payload(Control::LatePayload, SyncPolicy::OnClose)]
+#[case::ordered_late_header(Control::LateHeader, SyncPolicy::OnClose)]
 #[case::ordered_late_index(Control::LateIndex, SyncPolicy::OnClose)]
 fn reference_controls_reject_readable_completed_files(
     #[case] control: Control,
@@ -198,21 +200,23 @@ fn reference_controls_reject_readable_completed_files(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("control.h5");
-    let (mut workload, _) = record(&path, true, true, policy, true);
+    let buffered = !matches!(control, Control::LateHeader | Control::LateIndex);
+    let (mut workload, _) = record(&path, true, true, policy, buffered);
     let roles = Roles::read(&workload);
     roles.require(&workload, policy).unwrap();
     let dependency = match control {
-        Control::LatePayload | Control::LateIndex => {
+        Control::LatePayload | Control::LateHeader | Control::LateIndex => {
             let (range, content, reference) = roles
                 .pointers
                 .iter()
-                .find(|(_, content, reference)| {
+                .filter(|(_, content, reference)| {
                     if matches!(control, Control::LatePayload) {
                         content.contains(&roles.payload)
                     } else {
                         *reference == roles.layout
                     }
                 })
+                .nth(usize::from(matches!(control, Control::LateIndex)))
                 .unwrap();
             let preparation = if matches!(control, Control::LatePayload) {
                 roles.payload
@@ -245,7 +249,7 @@ fn reference_controls_reject_readable_completed_files(
         _ => None,
     };
     match control {
-        Control::LatePayload | Control::LateIndex => {
+        Control::LatePayload | Control::LateHeader | Control::LateIndex => {
             let (preparation, publication, _) = dependency.unwrap();
             assert!(roles.positions[preparation] < roles.positions[publication]);
             let event = workload.events.remove(roles.positions[preparation]);
@@ -277,6 +281,7 @@ fn reference_controls_reject_readable_completed_files(
                 | Control::WriteFailure
                 | Control::SyncFailure
                 | Control::IncompleteWrite
+                | Control::LateHeader
                 | Control::LateIndex
                 | Control::LatePayload => {
                     panic!("the case selects a different operation")
@@ -337,7 +342,11 @@ fn reference_controls_reject_readable_completed_files(
                 OrderError::Barrier
             }
             Control::Count | Control::Dataspace => OrderError::Reference,
-            Control::Indirect | Control::Secondary | Control::LatePayload | Control::LateIndex => {
+            Control::Indirect
+            | Control::Secondary
+            | Control::LatePayload
+            | Control::LateHeader
+            | Control::LateIndex => {
                 let (content, publication, reference) = dependency.unwrap();
                 OrderError::Io(PublicationError::ReferenceOrder {
                     content: altered.positions[content],
@@ -659,25 +668,25 @@ impl Roles {
         let mut direct = None;
         let mut secondary = None;
         let mut indirect = None;
-        assert_eq!(header.range.end(), ea_index.range().start().get());
-        let initial = Interval::new(
-            header.range.start(),
-            ea_index.range().end().get() - header.range.start(),
-        )
-        .unwrap();
-        let mut pointers = vec![(
-            initial,
-            vec![
-                workload.prepared_index(ea.range(), |region| {
+        assert_eq!(header.range, interval(ea.range()));
+        assert!(!ea.range().overlaps(ea_index.range()));
+        let mut pointers = vec![
+            (
+                header.range,
+                vec![workload.prepared_index(ea.range(), |region| {
                     ExtensibleArrayHeader::parse_with_widths(region.bytes(), 0, located.widths)
                         .map(|_| ())
-                }),
-                workload.prepared_index(ea_index.parse_range(), |region| {
+                })],
+                layout,
+            ),
+            (
+                interval(ea_index.range()),
+                vec![workload.prepared_index(ea_index.parse_range(), |region| {
                     ea_index.parse(region).map(|_| ())
-                }),
-            ],
-            layout,
-        )];
+                })],
+                layout,
+            ),
+        ];
         let parsed_index = ea_index
             .parse(region(&workload.final_bytes, ea_index.parse_range()))
             .unwrap();
@@ -770,16 +779,10 @@ impl Roles {
             let fields = final_observation
                 .element_blocks
                 .iter()
-                .filter_map(|parent| {
-                    let offsets = test_util::bytes::signature_offsets(
-                        bytes(&workload.final_bytes, *parent),
-                        &chunk.1.to_le_bytes(),
-                    );
-                    if offsets.is_empty() {
-                        None
-                    } else {
-                        Some(pointer_field(&workload.final_bytes, *parent, chunk.1))
-                    }
+                .flat_map(|parent| {
+                    parent
+                        .reference_fields(&workload.final_bytes, chunk.1)
+                        .map(|at| Interval::new(u64::try_from(at).unwrap(), 8).unwrap())
                 })
                 .collect::<Vec<_>>();
             assert_eq!(fields.len(), 1);
@@ -861,10 +864,17 @@ impl Roles {
             let image = workload.prefix(operation + 1);
             let observation = &workload.snapshots[operation + 1];
             let mut prepared_managers = Vec::new();
-            for fact in observation.live.iter().filter(|fact| {
-                fact.kind == AllocationKind::Manager && !workload.snapshots[0].live.contains(fact)
-            }) {
-                let preparation = workload.prepared(fact.parsed, &image, start);
+            for fact in observation
+                .live
+                .iter()
+                .filter(|fact| fact.kind == AllocationKind::Manager)
+            {
+                let Some(preparation) = workload
+                    .preparation(fact.parsed, &image, start)
+                    .filter(|preparation| *preparation < operation)
+                else {
+                    continue;
+                };
                 let stored = bytes(&image, fact.parsed);
                 if stored.starts_with(test_util::free_space::SIGNATURE) {
                     manager_header.get_or_insert(preparation);
@@ -1264,6 +1274,12 @@ impl Workload {
 
     /// Finds the first complete write matching `image` within `range`, starting at `start`.
     fn prepared(&self, range: Interval, image: &[u8], start: usize) -> usize {
+        self.preparation(range, image, start)
+            .unwrap_or_else(|| panic!("no complete preparation for {range:?} after {start}"))
+    }
+
+    /// Returns the first complete write matching `image` within `range`, starting at `start`.
+    fn preparation(&self, range: Interval, image: &[u8], start: usize) -> Option<usize> {
         self.operations
             .iter()
             .enumerate()
@@ -1281,7 +1297,6 @@ impl Workload {
                     == Some(bytes(image, range)))
                 .then_some(operation)
             })
-            .unwrap_or_else(|| panic!("no complete preparation for {range:?} after {start}"))
     }
 
     /// Finds the first complete block write with a valid checksum and a successful `parse` result.
@@ -1764,6 +1779,7 @@ enum Control {
     Dataspace,
     IncompleteWrite,
     Indirect,
+    LateHeader,
     LateIndex,
     LatePayload,
     LayoutBarrier,
