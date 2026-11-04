@@ -1,5 +1,6 @@
-//! Native observations of link and attribute metadata before and after repacking.
+//! Native observations of link metadata, attributes, and PAGE chunk arrays.
 
+use core::num::NonZeroUsize;
 use std::path::Path;
 
 use hdf5_pure_core::PhysicalAddress;
@@ -14,10 +15,15 @@ use test_util_hdf5::dense_links::GroupOrder;
 use test_util_hdf5::exotic_attributes;
 use test_util_hdf5::file;
 
+use crate::ChunkIndex;
 use crate::Error;
 use crate::File;
+use crate::FileBuilder;
+use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
+use crate::MaxExtent;
+use crate::UserblockSize;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::object_header::ObjectHeader;
@@ -25,6 +31,109 @@ use crate::width::OffsetWidth;
 
 use super::test_util::ExoticAttributes;
 use crate::RepackOptions;
+
+#[rstest]
+#[case::fixed(false, 128)]
+#[case::fixed_paged(false, 2_048)]
+#[case::extensible(true, 128)]
+#[case::extensible_paged(true, 20_480)]
+fn whole_file_page_arrays_match_native_page_buffered_values(
+    #[case] unlimited: bool,
+    #[case] count: usize,
+    #[values(512, 4_096)] page: u64,
+    #[values(false, true)] filtered: bool,
+    #[values(false, true)] source_backed: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let native_path = directory.path().join("native.h5");
+    let destination = directory.path().join("written.h5");
+    let page_size = FileSpacePageSize::try_from(page).unwrap();
+    let userblock = UserblockSize::try_from(page).unwrap();
+    let expected: Vec<_> = (0..count)
+        .map(|value| i32::try_from(value).unwrap())
+        .collect();
+    let native = file::libhdf5_create_page(&native_path, page_size, userblock, true);
+    let builder = native.new_dataset::<i32>().chunk([1]);
+    let builder = if filtered {
+        builder.fletcher32()
+    } else {
+        builder
+    };
+    let dataset = if unlimited {
+        builder.shape((count..,)).create("values")
+    } else {
+        builder.shape([count]).create("values")
+    }
+    .unwrap();
+    dataset.write_raw(&expected).unwrap();
+    drop(dataset);
+    native.close().unwrap();
+    let native = file::libhdf5_open_with_page_buffer(
+        &native_path,
+        NonZeroUsize::new(usize::try_from(2 * page).unwrap()).unwrap(),
+    );
+    let dataset = native.dataset("values").unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
+    drop(dataset);
+    native.close().unwrap();
+    let source = File::open(&native_path).unwrap();
+    let input = source.dataset("values").unwrap();
+    assert_eq!(input.read_i32().unwrap(), expected);
+    assert_eq!(
+        input.chunk_index().unwrap(),
+        Some(if unlimited {
+            ChunkIndex::ExtensibleArray
+        } else {
+            ChunkIndex::FixedArray
+        })
+    );
+    drop(input);
+    if source_backed {
+        super::repack_to_path(&source, &destination, &RepackOptions::new()).unwrap();
+    } else {
+        let mut builder = FileBuilder::new();
+        builder.with_userblock(userblock).with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_threshold(1)
+                .with_page_size(page_size),
+        );
+        let dataset = builder.create_dataset("values");
+        dataset.with_i32_data(&expected).with_chunks(&[1]);
+        if unlimited {
+            dataset.with_maxshape(&[MaxExtent::Unlimited]);
+        }
+        if filtered {
+            dataset.with_fletcher32();
+        }
+        builder.write(&destination).unwrap();
+    }
+    source.close().unwrap();
+    let native = file::libhdf5_open_with_page_buffer(
+        &destination,
+        NonZeroUsize::new(usize::try_from(2 * page).unwrap()).unwrap(),
+    );
+    let dataset = native.dataset("values").unwrap();
+    assert_eq!(dataset.shape(), [count]);
+    assert_eq!(dataset.chunk().unwrap(), [1]);
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
+    assert_eq!(dataset.num_chunks().unwrap(), count);
+    drop(dataset);
+    native.close().unwrap();
+    let file = File::open(&destination).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+    assert_eq!(
+        dataset.chunk_index().unwrap(),
+        Some(if unlimited {
+            ChunkIndex::ExtensibleArray
+        } else {
+            ChunkIndex::FixedArray
+        })
+    );
+    drop(dataset);
+    file.close().unwrap();
+}
 
 #[rstest]
 #[case::compact_empty(0, false, "a compact group's link filters cannot be reproduced")]
