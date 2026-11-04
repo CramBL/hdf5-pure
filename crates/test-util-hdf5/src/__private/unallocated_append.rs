@@ -1,9 +1,13 @@
 //! Native empty-dataset fixtures with an unallocated Extensible Array index.
 
+use core::num::NonZeroUsize;
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
 
 use hdf5::Extent;
+use hdf5::MajorErrorCode;
+use hdf5::MinorErrorCode;
 use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5_pure::{File, MessageType};
 use hdf5_pure_core::__private::{BaseAddressExt, FileRegion};
@@ -219,6 +223,110 @@ pub fn write_values(path: &Path, values: &[i32]) {
     target.write_raw(values).unwrap();
     drop(target);
     native.close().unwrap();
+}
+
+/// Returns the major, minor, and patch version of the linked libhdf5.
+pub fn library_version() -> (u8, u8, u8) {
+    hdf5::library_version()
+}
+
+/// The values or metadata checksum failure observed by [`read_values`].
+#[derive(Debug, Eq, PartialEq)]
+pub enum ReadOutcome {
+    /// Exhausted metadata checksum read attempts in the native cache
+    MetadataChecksum,
+    /// Values read from the selected dataset elements
+    Values(Vec<i32>),
+}
+
+/// Reads dataset `d` through libhdf5 and distinguishes metadata checksum failures.
+///
+/// Pass `Some(capacity)` to enable a page buffer of `capacity` bytes, or `None` for an ordinary
+/// open. Pass `Some(range)` to read a one-dimensional selection, or `None` for the whole dataset.
+/// The dataset and file are closed before returning [`ReadOutcome`].
+///
+/// # Panics
+///
+/// Panics if opening or closing the file, or accessing the dataset fails. Panics on a read error
+/// unless the innermost native error frame reports cache read failure after exhausting metadata
+/// checksum attempts, with the expected function name and diagnostic.
+///
+/// # Examples
+///
+/// ```
+/// use core::num::NonZeroUsize;
+/// use hdf5_pure_core::FileSpacePageSize;
+/// use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
+/// use test_util_hdf5::__private::unallocated_append::{self, ReadOutcome};
+///
+/// # let _guard = test_util_hdf5::lock::libhdf5_guard();
+/// # let directory = tempfile::tempdir()?;
+/// let path = directory.path().join("read.h5");
+/// unallocated_append::paged_fixture(
+///     &path, false, FileSpacePageSize::MIN,
+///     ExtensibleArrayCreationParameters::canonical(),
+/// );
+/// unallocated_append::write_values(&path, &[11, 12, 13, 14]);
+/// assert_eq!(
+///     unallocated_append::read_values(&path, None, None),
+///     ReadOutcome::Values(vec![11, 12, 13, 14]),
+/// );
+/// let capacity = NonZeroUsize::new(1_024).unwrap();
+/// assert_eq!(
+///     unallocated_append::read_values(&path, Some(capacity), Some(1..3)),
+///     ReadOutcome::Values(vec![12, 13]),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+// `H5C_load_entry` in `H5C.c`, HDF5 1.10.11, and `H5C__load_entry` in `H5C.c`, HDF5 1.12.3,
+// report this checksum diagnostic. `H5C__load_entry` in `H5Centry.c`, HDF5 1.14.6 and 2.2.0,
+// reports the same error.
+pub fn read_values(
+    path: &Path,
+    capacity: Option<NonZeroUsize>,
+    range: Option<Range<usize>>,
+) -> ReadOutcome {
+    let native = match capacity {
+        Some(capacity) => crate::file::libhdf5_open_with_page_buffer(path, capacity),
+        None => crate::file::libhdf5_open(path),
+    };
+    let target = native.dataset("d").unwrap();
+    let values = match range {
+        Some(range) => target
+            .read_slice_1d::<i32, _>(range)
+            .map(|values| values.to_vec()),
+        None => target.read_raw::<i32>(),
+    };
+    drop(target);
+    native.close().unwrap();
+    match values {
+        Ok(values) => ReadOutcome::Values(values),
+        Err(error) => {
+            let stack = error
+                .stack()
+                .unwrap_or_else(|| panic!("expected native error stack, got {error:?}"));
+            let frame = stack
+                .last()
+                .unwrap_or_else(|| panic!("expected native error frame, got {error:?}"));
+            assert_eq!(frame.major_code(), MajorErrorCode::Cache, "{error:?}");
+            assert_eq!(frame.minor_code(), MinorErrorCode::ReadError, "{error:?}");
+            assert_eq!(
+                frame.func(),
+                if cfg!(feature = "__hdf5-1.12") {
+                    "H5C__load_entry"
+                } else {
+                    "H5C_load_entry"
+                },
+                "{error:?}"
+            );
+            assert_eq!(
+                frame.desc(),
+                "incorrect metadata checksum after all read attempts",
+                "{error:?}"
+            );
+            ReadOutcome::MetadataChecksum
+        }
+    }
 }
 
 fn fixture_with_settings(

@@ -26,6 +26,8 @@ use crate::edit::dataset::tests::Creation;
 use crate::edit::dataset::tests::CreationAccess;
 use crate::edit::test_util;
 
+mod short_pages;
+
 #[rstest]
 #[case::plain(false, false)]
 #[case::filtered(true, false)]
