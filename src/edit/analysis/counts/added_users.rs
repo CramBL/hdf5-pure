@@ -175,6 +175,40 @@ pub(in crate::edit) struct AddedCopyUsers<'source> {
 }
 
 impl AddedCopyUsers<'_> {
+    /// Returns the root and phase association for a listed target.
+    ///
+    /// Checks the association of a nonempty union before looking up `object`. Returns `None` for
+    /// an empty union or an unlisted target. The root and phase describe destination interpretation.
+    /// Copy-source applicability and source freshness remain the caller's responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CopyUsersError::Engine`], [`CopyUsersError::Root`], or [`CopyUsersError::Phase`]
+    /// for a mismatched association, or [`CopyUsersError::Address`] for failed root resolution.
+    pub(super) fn source_for(
+        &self,
+        phase: &AnalysisPhase<'_>,
+        object: ObjectId,
+    ) -> Result<Option<ReconstructionSource>, CopyUsersError> {
+        let Self { source, users } = self;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        source.require_phase(phase)?;
+        if !users.contains_key(&object) {
+            return Ok(None);
+        }
+        let CopyUsersSource {
+            engine: _,
+            identity,
+            root,
+        } = source;
+        Ok(Some(ReconstructionSource {
+            identity: Arc::clone(identity),
+            object: *root,
+        }))
+    }
+
     /// Returns the associated physical root, or `None` for empty counts.
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.source.as_ref().map(|source| source.root)
