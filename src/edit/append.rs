@@ -27,6 +27,7 @@ use crate::chunk_index_inplace::{self, AppendIndex, Located, RetiredChunk, Store
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::Dataspace;
+use crate::dataspace::MaxExtent;
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError};
 use crate::filter_pipeline::FilterPipeline;
@@ -316,6 +317,7 @@ impl WriteEngine {
             chunk_elems,
             element_size: st.element_size,
             current_dim: st.index.current_dim(),
+            maximum: st.index.maximum(),
             lossy_filters: st
                 .pipeline
                 .as_ref()
@@ -325,16 +327,17 @@ impl WriteEngine {
         })
     }
 
-    /// Applies an immediate append through the shared extensible-array writer.
+    /// Applies an immediate append through the matching chunk-index writer.
     ///
     /// Bounded sessions limit the full-chunk portion of each batch with
     /// [`batch_elems`](Self::batch_elems).
     /// The first batch may also fill a partial trailing chunk. Intermediate batch boundaries are
     /// chunk-aligned, and the final batch may end within a chunk. Each batch publishes its extent
     /// after its data and index updates, with barriers governed by [`SyncPolicy`]. Predictable
-    /// rejections are checked before writing. SWMR appends require unfiltered, chunk-aligned input.
+    /// rejections, including growth beyond a finite maximum, are checked before writing.
+    /// SWMR appends require an unfiltered Extensible Array and chunk-aligned input.
     ///
-    /// For an empty dataset with an undefined index-header address, prepares the first batch
+    /// For an empty Extensible Array with an undefined header address, prepares the first batch
     /// before initializing its index. Publishes ownership and EOF for the complete header and
     /// index block before linking the header from the layout message. Empty appends leave that
     /// storage unallocated.
@@ -405,6 +408,18 @@ impl WriteEngine {
             new_dimension,
             self.context.widths().lengths,
         )?;
+        if let MaxExtent::Fixed(maximum) = self.located[&oh_addr].index.maximum()
+            && new_dimension > maximum
+        {
+            return Err(Error::AppendInPlaceUnsupported(
+                "append exceeds the dataset's maximum first dimension",
+            ));
+        }
+        if self.swmr_mode && matches!(self.located[&oh_addr].index, AppendIndex::Single(_)) {
+            return Err(Error::SwmrAppendUnsupported(
+                "SWMR append requires an Extensible Array index",
+            ));
+        }
         self.preflight_narrow_references()?;
 
         // SWMR appends leave visible chunks unchanged.
@@ -460,7 +475,7 @@ impl WriteEngine {
                         take,
                         st.fill.pattern(st.element_size),
                     )
-                    .map(|plan| (plan, None)),
+                    .map(|plan| ImmediatePreparation::Publish(ImmediatePlan::Extensible(plan))),
                     AppendIndex::Unallocated(index) => chunk_index_inplace::plan_initial_ea_append(
                         index,
                         store.widths(),
@@ -472,35 +487,72 @@ impl WriteEngine {
                         take,
                         st.fill.pattern(st.element_size),
                     )
-                    .map(|(plan, initialization)| (plan, Some(initialization))),
+                    .map(
+                        |(plan, initialization)| ImmediatePreparation::InitializeExtensible {
+                            plan,
+                            initialization,
+                        },
+                    ),
+                    AppendIndex::Single(index) => index
+                        .plan(
+                            &store,
+                            &st.datatype,
+                            &st.spatial,
+                            st.pipeline.as_ref(),
+                            options.lossy_tail_reencoding(),
+                            batch,
+                            NonZeroU64::new(take).ok_or_else(|| {
+                                FormatError::Internal("append batch is empty".into())
+                            })?,
+                            st.fill.pattern(st.element_size),
+                        )
+                        .map(|plan| ImmediatePreparation::Publish(ImmediatePlan::Single(plan))),
                 }
             };
-            let (plan, initialization) = plan_result.map_err(as_inplace_error)?;
+            let preparation = plan_result.map_err(as_inplace_error)?;
             self.synchronize_aggregates()?;
             let mut state = self.located.remove(&oh_addr).ok_or_else(|| {
                 FormatError::Internal("prepared append dataset is absent from the session".into())
             })?;
             let result = (|| {
-                if let Some(initialization) = initialization {
-                    let AppendIndex::Unallocated(index) = &state.index else {
-                        return Err(FormatError::Internal(
-                            "initialization requires an unallocated index".into(),
-                        )
-                        .into());
-                    };
-                    state.index = AppendIndex::Allocated(self.initialize_append_index(
-                        oh_addr,
-                        index,
-                        &initialization,
-                    )?);
-                }
+                let plan = match preparation {
+                    ImmediatePreparation::Publish(plan) => plan,
+                    ImmediatePreparation::InitializeExtensible {
+                        plan,
+                        initialization,
+                    } => {
+                        let AppendIndex::Unallocated(index) = &state.index else {
+                            return Err(FormatError::Internal(
+                                "initialization requires an unallocated index".into(),
+                            )
+                            .into());
+                        };
+                        state.index = AppendIndex::Allocated(self.initialize_append_index(
+                            oh_addr,
+                            index,
+                            &initialization,
+                        )?);
+                        ImmediatePlan::Extensible(plan)
+                    }
+                };
                 let mut store = EditStore { engine: self };
-                chunk_index_inplace::apply_ea_append(
-                    &mut store,
-                    state.index.allocated_mut().map_err(as_inplace_error)?,
-                    plan,
-                    max_phase,
-                )
+                match plan {
+                    ImmediatePlan::Single(plan) => {
+                        let AppendIndex::Single(index) = &mut state.index else {
+                            return Err(FormatError::Internal(
+                                "single-chunk append has a different index".into(),
+                            )
+                            .into());
+                        };
+                        index.apply(&mut store, plan, max_phase)
+                    }
+                    ImmediatePlan::Extensible(plan) => chunk_index_inplace::apply_ea_append(
+                        &mut store,
+                        state.index.allocated_mut().map_err(as_inplace_error)?,
+                        plan,
+                        max_phase,
+                    ),
+                }
             })();
             if result.is_ok() {
                 self.located.insert(oh_addr, state);
@@ -781,8 +833,10 @@ pub(crate) struct AppendGeometry {
     pub(crate) chunk_elems: u64,
     /// Bytes per on-disk element.
     pub(crate) element_size: NonZeroUsize,
-    /// Current length along the unlimited dimension.
+    /// Current length along the first dimension.
     pub(crate) current_dim: u64,
+    /// Finite or unlimited first-dimension bound for whole-call preflight.
+    pub(crate) maximum: MaxExtent,
     /// Whether growing a partial trailing chunk would re-encode lossy data.
     pub(crate) lossy_filters: bool,
     /// Whole-chunk element limit, or [`u64::MAX`] when batching is disabled.
@@ -791,7 +845,7 @@ pub(crate) struct AppendGeometry {
 
 /// Caches dataset metadata maintained across immediate appends.
 pub(crate) struct LocatedState {
-    /// Checked geometry for an allocated or empty unallocated index.
+    /// Checked geometry for an Extensible Array or Single Chunk index.
     pub(crate) index: AppendIndex,
     /// The datatype used for append compatibility and filter context.
     pub(crate) datatype: Datatype,
@@ -805,7 +859,22 @@ pub(crate) struct LocatedState {
     pub(crate) fill: crate::fill_value::PaddingFill,
 }
 
-/// Adapts session allocation and I/O to the shared extensible-array writer.
+/// Prepared append content, with deferred empty-array initialization where required.
+enum ImmediatePreparation {
+    InitializeExtensible {
+        plan: chunk_index_inplace::AppendPlan,
+        initialization: ExtensibleArrayInitialization,
+    },
+    Publish(ImmediatePlan),
+}
+
+/// Index-specific content ready for ordered publication.
+enum ImmediatePlan {
+    Extensible(chunk_index_inplace::AppendPlan),
+    Single(chunk_index_inplace::SingleAppend),
+}
+
+/// Adapts session allocation and I/O to the shared immediate-append writers.
 ///
 /// In persistent sessions, the editor publishes exact ownership through replacement free-space
 /// managers. Without persistence, the editor tries reusable space before classic aggregates, with
@@ -1037,6 +1106,19 @@ impl Store for EditStore<'_> {
         self.engine.context.superblock().eof_address
     }
 
+    fn require_exclusive_chunk_storage(&self, header: u64) -> Result<(), Error> {
+        let owners = match self.engine.single_ownership.get() {
+            Some(owners) => owners,
+            None => {
+                let owners = self.engine.exclusive_chunk_owners()?;
+                self.engine
+                    .single_ownership
+                    .get_or_init(|| Box::new(owners))
+            }
+        };
+        owners.require(header)
+    }
+
     fn retire(&mut self, retirement: RetiredChunk) {
         let (extent, class) = retirement.into_extent();
         // Opening checks the base against the image length, and editor truncation preserves it.
@@ -1228,8 +1310,9 @@ pub(super) fn datatypes_match(stored: &Datatype, input: &Datatype) -> bool {
 
 /// Reads checked geometry, the datatype, and encoding metadata for an immediate append.
 ///
-/// The dataset must be rank one, unlimited, and indexed by an Extensible Array. An empty dataset
-/// may have an undefined index-header address. The filter pipeline must be re-encodable.
+/// The dataset must be rank one with an unlimited Extensible Array or finite Single Chunk
+/// index. An empty array may have an undefined index-header address. The filter pipeline must be
+/// re-encodable. Single Chunk lookup also requires complete storage ownership.
 /// Unreadable fill metadata is rejected only when padding is needed. File storage remains
 /// unchanged during lookup.
 ///

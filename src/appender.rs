@@ -7,6 +7,7 @@
 use core::num::{NonZeroU64, NonZeroUsize};
 
 use crate::convert::Narrow;
+use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendGeometry, AppendOptions, LossyTailReencoding};
 use crate::element::H5Element;
 use crate::error::{Error, FormatError};
@@ -15,8 +16,8 @@ use crate::reader::Dataset;
 /// Buffers appended elements and writes complete chunks automatically.
 ///
 /// Created by [`Dataset::buffered_appender`] or
-/// [`Dataset::buffered_appender_with_options`]. The dataset must be chunked, rank one,
-/// unlimited along axis 0, and Extensible-Array indexed. Construction rejects SWMR sessions.
+/// [`Dataset::buffered_appender_with_options`]. The dataset must meet the requirements of
+/// [`Dataset::append`]. Construction rejects SWMR sessions.
 ///
 /// The appender borrows the [`Dataset`] for its lifetime. A second handle from the same
 /// [`File`](crate::File) can read the written prefix. Before each write, the appender reads
@@ -33,6 +34,10 @@ use crate::reader::Dataset;
 /// [`flush`](Self::flush) writes a partial trailing chunk and retains the appender.
 /// [`finish`](Self::finish) flushes and consumes it, including on error.
 /// [`discard`](Self::discard) consumes it and returns the pending bytes without writing them.
+///
+/// For a finite maximum, the writer checks the published length plus all pending input before
+/// automatic writes. It rejects excessive new input and preserves the prior buffer. The writer
+/// accounts for appends made through another dataset handle.
 ///
 /// If appending fails before the write path, only the bytes submitted by that call are rejected.
 /// If a write fails, the appender is poisoned, including when no elements were written.
@@ -117,6 +122,34 @@ use crate::reader::Dataset;
 /// drop(file);
 /// # Ok(())
 /// # }
+/// ```
+///
+/// Rejected input preserves the finite dataset's pending prefix:
+///
+/// ```
+/// use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
+/// # let directory = tempfile::tempdir()?;
+/// # let path = directory.path().join("finite-buffer.h5");
+/// let mut builder = FileBuilder::new();
+/// builder.create_dataset("d")
+///     .with_i32_data(&[0])
+///     .with_maxshape(&[MaxExtent::Fixed(4)])
+///     .with_chunks(&[4]);
+/// builder.write(&path)?;
+/// let file = File::open_rw(&path)?;
+/// let mut dataset = file.dataset("d")?;
+/// let mut appender = dataset.buffered_appender()?;
+/// appender.append(&[1_i32])?;
+/// assert!(matches!(appender.append(&[2_i32, 3, 4]),
+///     Err(Error::AppendInPlaceUnsupported("append exceeds the dataset's maximum first dimension"))
+/// ));
+/// assert_eq!(appender.unwritten(), 1_i32.to_le_bytes());
+/// appender.append(&[2_i32, 3])?;
+/// appender.finish()?;
+/// assert_eq!(dataset.read_i32()?, [0, 1, 2, 3]);
+/// drop(dataset);
+/// file.close()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct BufferedAppender<'a> {
     dataset: &'a mut Dataset,
@@ -264,8 +297,8 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// Owns a dataset and buffers appended elements until complete chunks can be written.
 ///
 /// Created by [`Dataset::into_buffered_appender`] or
-/// [`Dataset::into_buffered_appender_with_options`]. The dataset must be chunked, rank one,
-/// unlimited along axis 0, and Extensible-Array indexed. Construction rejects SWMR sessions.
+/// [`Dataset::into_buffered_appender_with_options`]. The dataset must meet the requirements of
+/// [`Dataset::append`]. Construction rejects SWMR sessions.
 ///
 /// The owned dataset retains the editing session after the original [`File`](crate::File)
 /// is dropped. The appender can be stored in a struct without a lifetime parameter. For an
@@ -284,6 +317,10 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// [`finish`](Self::finish) flushes and consumes the appender, including on error.
 /// [`discard`](Self::discard) consumes it and returns the pending bytes without writing them.
 /// Both terminal methods release the session claim and drop the owned dataset.
+///
+/// For a finite maximum, the writer checks the published length plus all pending input before
+/// automatic writes. It rejects excessive new input and preserves the prior buffer. The writer
+/// accounts for appends made through another dataset handle.
 ///
 /// If appending fails before the write path, only the bytes submitted by that call are rejected.
 /// If a write fails, the appender is poisoned, including when no elements were written.
@@ -516,6 +553,7 @@ struct BufferState {
     chunk_elems: NonZeroU64,
     element_size: NonZeroUsize,
     lossy_filters: bool,
+    maximum: MaxExtent,
     pending: AppendBuilder,
     lifecycle: Lifecycle,
     claim: u64,
@@ -529,6 +567,7 @@ impl BufferState {
             chunk_elems,
             element_size,
             current_dim,
+            maximum,
             lossy_filters,
             full_batch_elems: _,
         } = dataset.append_geometry()?;
@@ -558,6 +597,7 @@ impl BufferState {
             chunk_elems,
             element_size,
             lossy_filters,
+            maximum,
             pending,
             lifecycle: Lifecycle::Active,
             claim,
@@ -641,10 +681,30 @@ impl BufferState {
     ///
     /// # Errors
     ///
-    /// Propagates errors from reading the current append geometry, converting the write prefix
-    /// length, and the immediate append.
+    /// Returns [`Error::AppendInPlaceUnsupported`] if pending input exceeds the finite maximum.
+    /// Propagates errors from reading the current geometry, converting the write prefix length,
+    /// and the immediate append.
     fn settle(&mut self, dataset: &mut Dataset, mark: usize) -> Result<(), Error> {
-        let result = self.write_complete_chunks(dataset);
+        let result = (|| {
+            if let MaxExtent::Fixed(maximum) = self.maximum {
+                let current = dataset.append_geometry()?.current_dim;
+                let remaining =
+                    maximum
+                        .checked_sub(current)
+                        .ok_or(Error::AppendInPlaceUnsupported(
+                            "append exceeds the dataset's maximum first dimension",
+                        ))?;
+                let available = self.buffered_elements();
+                if available > remaining
+                    || (available == remaining && self.pending.raw().len() % self.element_size != 0)
+                {
+                    return Err(Error::AppendInPlaceUnsupported(
+                        "append exceeds the dataset's maximum first dimension",
+                    ));
+                }
+            }
+            self.write_complete_chunks(dataset)
+        })();
         if result.is_err() && self.lifecycle == Lifecycle::Active {
             self.pending.truncate(mark);
         }

@@ -8,6 +8,7 @@ mod edit_dense_links;
 mod edit_tracked_dense_links;
 mod extension_records;
 mod file_widths;
+mod finite_append;
 mod group_link_inspection;
 mod large_page;
 mod link_patches;
