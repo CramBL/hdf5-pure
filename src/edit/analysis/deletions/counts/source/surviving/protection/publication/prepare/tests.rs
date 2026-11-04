@@ -24,6 +24,12 @@ use test_util::object_header::v2;
 use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture::Fixture;
 
+use super::super::super::tests as protection_tests;
+use super::super::CountPublicationBounds;
+use super::CountPreparationError;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use super::CurrentCountUpdates;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::UserblockSize;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -40,10 +46,6 @@ use crate::source::BytesSource;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::FormatWidths;
-
-use super::super::super::tests as protection_tests;
-use super::super::CountPublicationBounds;
-use super::CountPreparationError;
 
 #[rstest]
 #[case::v1(Form::Version1)]
@@ -89,12 +91,11 @@ fn preparation_uses_current_values_and_preserves_complete_predecessor_ownership(
         update.writes().count(),
         if matches!(form, Form::Version1) { 1 } else { 2 }
     );
-    assert_eq!(prepared.bounds.original_root(), root);
-    assert_eq!(
-        prepared.bounds.phase.retirement.batch.entries(),
-        fixture.retired
-    );
-    assert_eq!(prepared.bounds.phase.engine.disk_bytes().unwrap(), before);
+    assert_eq!(prepared.counts.root(), root);
+    assert_eq!(prepared.engine.disk_bytes().unwrap(), before);
+    drop(prepared);
+    assert_eq!(bounds.original_root(), root);
+    assert_eq!(bounds.phase.retirement.batch.entries(), fixture.retired);
 }
 
 #[rstest]
@@ -412,7 +413,8 @@ fn preparation_skips_empty_work_and_retains_only_compact_updates(
     assert_eq!(prepared.updates().len(), 0);
     assert_eq!(measured.blocks, 0, "{measured}");
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(prepared.bounds.phase.retirement.batch.entries(), retired);
+    drop(prepared);
+    assert_eq!(empty.phase.retirement.batch.entries(), retired);
 }
 
 #[test]
@@ -513,6 +515,101 @@ fn current_observations_keep_encoded_widths_and_physical_fields(
 
 test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
+}
+
+#[rstest]
+#[case::original(Association::Original)]
+#[case::replacement_root(Association::ReplacementRoot)]
+#[case::other_session(Association::OtherSession)]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association: Association) {
+    let path = test_util::temp::temp_path("count-preparation-loan.h5");
+    let other_path = test_util::temp::temp_path("count-preparation-other-loan.h5");
+    let fixture = fixture(
+        &path,
+        Form::Version2,
+        0,
+        NonZeroU32::new(2).unwrap(),
+        c"old",
+    );
+    std::fs::copy(&path, &other_path).unwrap();
+    let (mut engine, calls) = protection_tests::engine_with_read_call_counter(&path);
+    let (mut other, other_calls) = protection_tests::engine_with_read_call_counter(&other_path);
+    let (counts, _) = protection_tests::counts(&engine, &["a"]);
+    let counts = counts.protect(&engine, []).unwrap();
+    let original_root = counts.root().unwrap();
+    assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    if matches!(association, Association::ReplacementRoot) {
+        let spans = engine
+            .oh_chunk_spans(original_root.header_address().get())
+            .unwrap();
+        let [range] = spans.as_slice() else {
+            panic!("expected one original root allocation")
+        };
+        let bytes = engine
+            .image()
+            .read_exact_at(
+                range.start().get(),
+                usize::try_from(range.length()).unwrap(),
+            )
+            .unwrap();
+        let root = PhysicalAddress::new(engine.place_object_header(&bytes).unwrap());
+        assert_ne!(root, original_root.header_address());
+        engine.publish_nonpersisting(root, None).unwrap();
+    }
+    let (receiver, calls) = if matches!(association, Association::OtherSession) {
+        (&mut other, &other_calls)
+    } else {
+        (&mut engine, &calls)
+    };
+    let before = receiver.disk_bytes().unwrap();
+    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    DISCOVERY_WORK.with(|work| work.set((0, 0)));
+    let (result, measured) =
+        allocation::measure(&format!("prepare-count-loan-{association:?}"), || {
+            CurrentCountUpdates::new(receiver, &counts)
+        });
+    if matches!(association, Association::OtherSession) {
+        let Err(error) = result else {
+            panic!("expected another allocation session")
+        };
+        assert!(matches!(error, CountPreparationError::Session), "{error:?}");
+        assert_eq!(measured.blocks, 0, "{measured}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    } else {
+        let prepared = result.unwrap();
+        assert!(std::ptr::eq(prepared.counts, &counts));
+        assert_eq!(prepared.counts.root(), Some(original_root));
+        let (original, update) = prepared.updates().next().unwrap();
+        assert_eq!(original.object(), fixture.object);
+        assert_eq!(original.allocation().range(), fixture.allocation);
+        assert_eq!(original.field().value(), 2);
+        assert_eq!(original.count().get(), 1);
+        let mut patched = Form::Version2.chunk(2, c"old");
+        for (range, bytes) in update.writes() {
+            patched[convert::slice_range(
+                range.start().get() - fixture.allocation.start().get(),
+                range.length(),
+            )
+            .unwrap()]
+            .copy_from_slice(bytes);
+        }
+        assert_eq!(patched, Form::Version2.chunk(1, c"old"));
+        let reads = calls.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(reads > 0);
+        assert_eq!(prepared.updates().len(), 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), reads);
+        assert!(measured.blocks > 0 && measured.live_bytes > 0, "{measured}");
+        assert!(
+            measured.live_bytes
+                <= u64::try_from(core::mem::size_of::<ObjectReferenceCountUpdate>()).unwrap(),
+            "{measured}"
+        );
+        assert_eq!(prepared.engine.disk_bytes().unwrap(), before);
+    }
+    assert_eq!(receiver.disk_bytes().unwrap(), before);
+    assert_eq!(counts.root(), Some(original_root));
+    DISCOVERY_WORK.with(|work| assert_eq!(work.get(), (0, 0)));
 }
 
 fn publication_bounds<'a>(
@@ -663,4 +760,12 @@ impl Source for MislocatedSource<'_> {
             &self.0[convert::slice_range(offset, length)?],
         )
     }
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[derive(Clone, Copy, Debug)]
+enum Association {
+    Original,
+    OtherSession,
+    ReplacementRoot,
 }
