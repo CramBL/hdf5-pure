@@ -1,9 +1,126 @@
-//! Data layout message bodies, with 8-byte addresses and lengths.
+//! Data layout message bodies for independent byte fixtures.
+//!
+//! Version 3 builders and [`implicit`] use eight-byte address and length fields.
+//! [`single_chunk`] and [`array_chunk`] use the caller's [`Widths`].
 //!
 //! The message is defined in "The Data Layout Message" of the [format specification, version
 //! 4.0][spec].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+
+use crate::bytes;
+use crate::widths::Widths;
+
+/// The array's index-specific bytes in a version 4 layout message.
+///
+/// These values are written verbatim, including parameters for malformed-input fixtures.
+#[expect(
+    variant_size_differences,
+    reason = "the variants retain the one-byte Fixed Array or five-byte Extensible Array information"
+)]
+#[derive(Clone, Copy, Debug)]
+pub enum ArrayIndex {
+    /// A Fixed Array with the supplied Page Bits byte.
+    Fixed {
+        /// The base 2 logarithm of the maximum page entry count.
+        page_bits: u8,
+    },
+    /// An Extensible Array with the five creation parameter bytes in wire order.
+    Extensible {
+        /// Max Bits, Index Elements, Min Pointers, Min Elements, and Page Bits.
+        parameters: [u8; 5],
+    },
+}
+
+/// The size and filter mask written before a Single Chunk address.
+#[derive(Clone, Copy, Debug)]
+pub struct FilteredChunk {
+    /// The filtered size, encoded at the file's length width.
+    pub size: u64,
+    /// The skipped filters, encoded as a four-byte mask.
+    pub mask: u32,
+}
+
+/// Builds a version 4 Single Chunk layout for four elements of four bytes each.
+///
+/// Writes filtered information only for `Some(filtered)`. An absent address is the undefined
+/// marker at `widths.offset` bytes. Parameters are written without semantic checks.
+///
+/// # Panics
+///
+/// Panics if an encoded width is outside 1 through 8 bytes or a value exceeds its field width.
+pub fn single_chunk(
+    widths: Widths,
+    filtered: Option<FilteredChunk>,
+    address: Option<u64>,
+) -> Vec<u8> {
+    let mut layout = chunked_prefix(
+        if filtered.is_some() {
+            SINGLE_INDEX_WITH_FILTER
+        } else {
+            NO_CHUNKED_FLAGS
+        },
+        SINGLE_CHUNK_INDEX,
+    );
+    if let Some(FilteredChunk { size, mask }) = filtered {
+        bytes::push_uint(&mut layout, size, widths.length);
+        layout.extend_from_slice(&mask.to_le_bytes());
+    }
+    bytes::push_address(&mut layout, address, widths.offset);
+    layout
+}
+
+/// Builds a version 4 array-index layout for four elements of four bytes each.
+///
+/// Writes `index` parameters verbatim and `None` as the undefined header address.
+///
+/// # Panics
+///
+/// Panics if `widths.offset` is outside 1 through 8 bytes or `address` exceeds its field width.
+pub fn array_chunk(widths: Widths, index: ArrayIndex, address: Option<u64>) -> Vec<u8> {
+    let mut layout = match index {
+        ArrayIndex::Fixed { page_bits } => {
+            let mut layout = chunked_prefix(NO_CHUNKED_FLAGS, FIXED_ARRAY_INDEX);
+            layout.push(page_bits);
+            layout
+        }
+        ArrayIndex::Extensible { parameters } => {
+            let mut layout = chunked_prefix(NO_CHUNKED_FLAGS, EXTENSIBLE_ARRAY_INDEX);
+            layout.extend_from_slice(&parameters);
+            layout
+        }
+    };
+    bytes::push_address(&mut layout, address, widths.offset);
+    layout
+}
+
+fn chunked_prefix(flags: u8, index: u8) -> Vec<u8> {
+    let mut layout = vec![
+        VERSION_FOUR,
+        CHUNKED_CLASS,
+        flags,
+        ONE_DIMENSION_FIELD_COUNT,
+        DIMENSION_SIZE_LEN,
+    ];
+    layout.extend_from_slice(&4_u32.to_le_bytes());
+    layout.extend_from_slice(&4_u32.to_le_bytes());
+    layout.push(index);
+    layout
+}
+
+/// The index-specific field offset in the one-dimensional version 4 fixtures.
+///
+/// The prefix, dimension array, and index byte are defined in "The Data Layout Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+pub const ONE_DIMENSION_INDEX_INFO_OFFSET: usize = 14;
+const ONE_DIMENSION_FIELD_COUNT: u8 = 2;
+// "The Data Layout Message", format specification version 4.0, defines the version 4 Single
+// Chunk filter flag and array index type bytes.
+const SINGLE_INDEX_WITH_FILTER: u8 = 0x02;
+const FIXED_ARRAY_INDEX: u8 = 3;
+const EXTENSIBLE_ARRAY_INDEX: u8 = 4;
 
 /// Returns a version 3 compact layout message that holds `data`.
 pub fn compact(data: &[u8]) -> Vec<u8> {
