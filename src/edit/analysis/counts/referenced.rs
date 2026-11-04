@@ -19,6 +19,8 @@ use super::{
     ROOT_REFERENCE_COUNT,
 };
 
+pub(in crate::edit::analysis) use batch::ReferencedTarget;
+
 mod batch;
 
 impl<'source> AnalysisPhase<'source> {

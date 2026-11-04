@@ -37,6 +37,7 @@ use super::super::SourceCountState;
 use super::super::SourceRemovalPlan;
 
 mod added;
+mod net;
 
 #[rstest]
 #[case::one(&["first"], 1)]

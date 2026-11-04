@@ -31,9 +31,12 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
-mod added_users;
+pub(super) mod added_users;
 pub(super) mod balance;
-mod referenced;
+pub(super) mod referenced;
+
+#[cfg(test)]
+pub(super) mod test_util;
 
 impl<'source> AnalysisPhase<'source> {
     /// Returns a positive declared count consistent with this topology's reference minimum.
