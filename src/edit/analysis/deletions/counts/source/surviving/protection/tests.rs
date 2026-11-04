@@ -511,22 +511,7 @@ fn reusable_exclusion_visits_each_needed_extent_once_and_preserves_errors(#[case
 fn protection_keeps_empty_work_allocation_and_read_free() {
     let path = test_util::temp::temp_path("protected-count-cost.h5");
     fixture(&path);
-    let calls = Arc::new(AtomicU64::new(0));
-    let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, len| {
-        Ok(Box::new(
-            CountingImage::new(
-                Box::new(HandleImage::new(
-                    handle,
-                    len,
-                    MetadataCacheConfig::disabled(),
-                )),
-                Arc::default(),
-                Arc::default(),
-            )
-            .with_read_calls(calls.clone()),
-        ))
-    })
-    .unwrap();
+    let (mut engine, calls) = engine_with_read_call_counter(&path);
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
         1,
@@ -570,10 +555,60 @@ fn fixture(path: &Path) -> (u64, u64) {
     fixture_with_base(path, UserblockSize::NONE)
 }
 
-fn fixture_with_base(path: &Path, userblock: UserblockSize) -> (u64, u64) {
+pub(super) fn fixture_with_base(path: &Path, userblock: UserblockSize) -> (u64, u64) {
+    fixture_with_storage(path, userblock, CountStorage::Header)
+}
+
+/// Writes counted objects and returns their stored header offsets.
+pub(super) fn fixture_with_storage(
+    path: &Path,
+    userblock: UserblockSize,
+    storage: CountStorage,
+) -> (u64, u64) {
+    write_count_fixture(Fixture::new(), path, userblock, storage)
+}
+
+/// Writes adjacent retirement allocations before the counted object storage.
+pub(super) fn fixture_with_retirements(
+    path: &Path,
+    userblock: UserblockSize,
+    storage: CountStorage,
+) -> RetirementFixture {
     let mut fixture = Fixture::new();
-    let c = fixture.append_header(vec![Message::reference_count(2)]);
-    let a = fixture.append_header(vec![Message::reference_count(2)]);
+    let first = u64::try_from(fixture.image.append(&[7; 16])).unwrap();
+    let second = u64::try_from(fixture.image.append(&[11; 24])).unwrap();
+    let retired = [
+        (
+            FileRange::new(PhysicalAddress::new(first + userblock.get()), 16).unwrap(),
+            FreeClass::Page(PageType::Meta),
+        ),
+        (
+            FileRange::new(PhysicalAddress::new(second + userblock.get()), 24).unwrap(),
+            FreeClass::Page(PageType::Raw),
+        ),
+    ];
+    RetirementFixture {
+        objects: write_count_fixture(fixture, path, userblock, storage),
+        retired,
+    }
+}
+
+/// Counted objects and adjacent original retirements in one byte fixture.
+pub(super) struct RetirementFixture {
+    /// The stored header offsets of the objects named `a` and `c`.
+    pub(super) objects: (u64, u64),
+    /// The original physical allocation ranges and their free-space classes.
+    pub(super) retired: [(FileRange, FreeClass); 2],
+}
+
+fn write_count_fixture(
+    mut fixture: Fixture,
+    path: &Path,
+    userblock: UserblockSize,
+    storage: CountStorage,
+) -> (u64, u64) {
+    let c = append_count_header(&mut fixture, storage);
+    let a = append_count_header(&mut fixture, storage);
     fixture.link("a", a);
     fixture.link("b", a);
     fixture.link("c", c);
@@ -595,7 +630,10 @@ fn fixture_with_base(path: &Path, userblock: UserblockSize) -> (u64, u64) {
     (a, c)
 }
 
-fn counts(engine: &WriteEngine, names: &[&str]) -> (SurvivingCounts, Vec<ReconstructionSource>) {
+pub(super) fn counts(
+    engine: &WriteEngine,
+    names: &[&str],
+) -> (SurvivingCounts, Vec<ReconstructionSource>) {
     let mut phase = AnalysisPhase::new(engine);
     let mut origins = Vec::new();
     let mut deletions = Vec::new();
@@ -607,6 +645,49 @@ fn counts(engine: &WriteEngine, names: &[&str]) -> (SurvivingCounts, Vec<Reconst
     }
     let plan = phase.source_count_plan(&deletions).unwrap().unwrap();
     (plan.surviving_counts(engine).unwrap(), origins)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(super) fn engine_with_read_call_counter(path: &Path) -> (WriteEngine, Arc<AtomicU64>) {
+    let calls = Arc::new(AtomicU64::new(0));
+    let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
+        Ok(Box::new(
+            CountingImage::new(
+                Box::new(HandleImage::new(
+                    handle,
+                    len,
+                    MetadataCacheConfig::disabled(),
+                )),
+                Arc::default(),
+                Arc::default(),
+            )
+            .with_read_calls(calls.clone()),
+        ))
+    })
+    .unwrap();
+    (engine, calls)
+}
+
+fn append_count_header(fixture: &mut Fixture, storage: CountStorage) -> u64 {
+    match storage {
+        CountStorage::Header => fixture.append_header(vec![Message::reference_count(2)]),
+        CountStorage::Continuation => {
+            let child =
+                v2::continuation_chunk(&[Message::reference_count(2)], v2::HeaderFlags::default());
+            let at = fixture.image.append(&child);
+            let header = v2::Header::new()
+                .continuation(at, &child, Widths::EIGHT)
+                .build();
+            u64::try_from(fixture.image.append(&header)).unwrap()
+        }
+    }
+}
+
+/// The object-header chunk containing a fixture count message.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum CountStorage {
+    Continuation,
+    Header,
 }
 
 #[derive(Clone, Copy)]

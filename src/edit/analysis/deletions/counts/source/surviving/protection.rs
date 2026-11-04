@@ -20,6 +20,8 @@ use super::CountSource;
 use super::SurvivingCount;
 use super::SurvivingCounts;
 
+mod publication;
+
 impl SurvivingCounts {
     /// Checks original count allocations against the engine's recorded allocator claims.
     ///
