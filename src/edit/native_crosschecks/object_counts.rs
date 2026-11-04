@@ -140,6 +140,12 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
         vec![(target, count.checked_add(count.get()).unwrap())]
     );
     assert_eq!(phase.object_reference_count(target).unwrap(), observed);
+    let fact = phase.referenced_count(&added, target).unwrap().unwrap();
+    assert_eq!(fact.original(), field.value());
+    assert_eq!(fact.incoming(), Some(u32::from(named)));
+    assert_eq!(fact.minimum().map(|count| count.get()), named.then_some(1));
+    assert_eq!(fact.field(), Some(field));
+    assert_eq!(fact.header_allocation().unwrap().range(), field.chunk());
 }
 
 #[rstest]
