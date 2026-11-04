@@ -59,6 +59,7 @@ use crate::writer::FileBuilder;
 
 mod contiguous;
 mod fragmented;
+pub(in crate::edit) mod lifecycle;
 mod providers;
 
 #[rstest]
