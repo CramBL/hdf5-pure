@@ -115,6 +115,7 @@ pub(crate) const WIDTHS: FormatWidths = FormatWidths {
     lengths: LENGTH_WIDTH,
 };
 /// [`OFFSET_WIDTH`] as the `u8` width the writers take.
+#[cfg(any(test, doc))]
 pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
 pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();

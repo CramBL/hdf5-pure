@@ -83,8 +83,13 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
             max_bytes: 16_384,
         })
         .unwrap();
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), owner, engine.context.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        owner,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     let descriptor_bytes = region.len();
     let operations: Vec<_> = (0..ATTRIBUTES)
         .map(|index| AttrOp::Remove {

@@ -1618,7 +1618,7 @@ pub(super) fn find_attribute_info(
     Ok(None)
 }
 
-/// Serializes compact Attribute Info metadata using the region's record layout.
+/// Serializes compact Attribute Info metadata at the region's offset width.
 ///
 /// Uses [`next_attr_creation_index`] for tracked headers and undefined addresses for dense
 /// storage fields.
@@ -1639,7 +1639,7 @@ fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
         btree_name_index_address: None,
         btree_creation_order_address: None,
     };
-    Ok(info.serialize(crate::file_writer::OFFSET_WIDTH)?)
+    Ok(info.serialize(region.widths().offsets)?)
 }
 
 /// Counts inline Attribute records in a compact region.

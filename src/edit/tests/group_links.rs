@@ -98,6 +98,7 @@ fn inspection_preserves_encoded_names_and_targets(
     ];
     let storage = GroupLinkStorage::new(&info, links.clone(), offset_width).unwrap();
     let (bytes, region) = fixture(storage, dense);
+    assert_eq!(region.widths(), widths);
     let mut source = vec![0xAC; usize::try_from(effective_base).unwrap()];
     source.extend_from_slice(&bytes[512..]);
     let inspected = group_links::inspect(
@@ -654,7 +655,13 @@ fn update_checksum(bytes: &mut [u8], at: usize, record_size: usize) {
 
 fn fixture(storage: GroupLinkStorage, dense: bool) -> (Vec<u8>, OhRegion) {
     let offset_width = storage.offset_width();
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(
+        FormatWidths {
+            offsets: offset_width,
+            lengths: LengthWidth::Eight,
+        },
+        ObjectHeaderPrefix::PLAIN,
+    );
     let mut source = vec![0xAC; 512];
     if dense {
         let image = DenseLinkPlan::new(storage, LengthWidth::Eight)

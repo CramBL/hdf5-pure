@@ -11,6 +11,8 @@ use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5_pure::FileSpacePageSize;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::UserblockSize;
+use hdf5::plist::file_create::{Sizeof, SizeofInfo};
+use hdf5_pure::{LengthWidth, OffsetWidth};
 
 /// Opens an existing file for read-only native observations.
 ///
@@ -83,6 +85,46 @@ pub fn libhdf5_create_v110(path: &Path) -> hdf5::File {
 /// superblock and version 1 object headers, which no checksum covers.
 pub fn libhdf5_create_earliest(path: &Path) -> hdf5::File {
     create_bounded(path, LibraryVersion::Earliest)
+}
+
+/// Creates a native file under HDF5 1.8 or newer format bounds.
+///
+/// Sets the address and length widths independently and reserves `userblock` bytes before the
+/// superblock.
+///
+/// # Panics
+///
+/// Panics if libhdf5 rejects the creation properties or cannot create `path`.
+pub fn libhdf5_create_with_widths(
+    path: &Path,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    userblock: u64,
+) -> hdf5::File {
+    let sizeof_addr = match offsets {
+        OffsetWidth::Two => Sizeof::Bytes2,
+        OffsetWidth::Four => Sizeof::Bytes4,
+        OffsetWidth::Eight => Sizeof::Bytes8,
+    };
+    let sizeof_size = match lengths {
+        LengthWidth::Two => Sizeof::Bytes2,
+        LengthWidth::Four => Sizeof::Bytes4,
+        LengthWidth::Eight => Sizeof::Bytes8,
+    };
+    hdf5::File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| {
+            properties
+                .sizes(SizeofInfo {
+                    sizeof_addr,
+                    sizeof_size,
+                })
+                .userblock(userblock)
+        })
+        .create(path)
+        .unwrap()
 }
 
 #[track_caller]

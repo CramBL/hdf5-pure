@@ -125,7 +125,7 @@ fn prepared_link_names_distinguish_survivors_and_deleted_destinations(
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
     let mut node = Node::default();
-    node.prepared.region = group::fresh_group_region().unwrap();
+    node.prepared.region = group::fresh_group_region(crate::file_writer::WIDTHS).unwrap();
     node.prepared
         .region
         .push_link("existing", StoredAddress::new(100), None)

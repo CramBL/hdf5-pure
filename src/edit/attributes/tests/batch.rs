@@ -20,7 +20,10 @@ fn compact_batches_assign_creation_indices_in_operation_order(#[case] variable: 
     let layout = MessageRecordLayout::from_header_flags(
         (HeaderFlags::TRACKS_CREATION_ORDER | HeaderFlags::INDEXES_CREATION_ORDER).0,
     );
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::with_layout(layout));
+    let mut region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix::with_layout(layout),
+    );
     let info = AttributeInfoMessage {
         max_creation_index: Some(4),
         indexes_creation_order: true,
@@ -102,7 +105,7 @@ fn compact_batches_assign_creation_indices_in_operation_order(#[case] variable: 
 #[case::invalid_before_remove(ErrorSequence::InvalidBeforeRemove)]
 #[case::remove_before_set(ErrorSequence::RemoveBeforeSet)]
 fn compact_batch_reports_operation_errors_in_source_order(#[case] sequence: ErrorSequence) {
-    let region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let invalid = AttrOp::Set {
         name: String::new(),
         value: AttrValue::I64(1),
@@ -147,7 +150,10 @@ fn compact_batch_reports_operation_errors_in_source_order(#[case] sequence: Erro
 #[case::new_attribute(true)]
 fn compact_batch_checks_creation_exhaustion_only_for_new_names(#[case] new_name: bool) {
     let layout = MessageRecordLayout::from_header_flags(HeaderFlags::TRACKS_CREATION_ORDER.0);
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::with_layout(layout));
+    let mut region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix::with_layout(layout),
+    );
     region.push_bytes(&layout.record_with_creation_index(
         MessageType::ATTRIBUTE,
         MessageFlags::NONE,
@@ -197,7 +203,7 @@ fn superseded_oversized_values_preserve_the_full_attribute_parsing_boundary(
     crate::FileBuilder::new().write(&path).unwrap();
     let engine = crate::edit::test_util::open_engine(&path);
     let before = engine.disk_bytes().unwrap();
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let datatype = test_util::datatype::f64_le();
     let dataspace = test_util::dataspace::scalar();
     let mut body =

@@ -510,7 +510,7 @@ fn scan_object<S: OriginalSource + ?Sized>(
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
     let base = src.addresses();
-    let Ok(chunks) = edit::object_header::read_oh_chunks(src, addr, base) else {
+    let Ok(chunks) = edit::object_header::read_oh_chunks(src, addr, base, widths) else {
         return Ok(Scanned {
             descend: true,
             holds_a_reference: false,
@@ -824,6 +824,15 @@ fn collect_slots(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+    use test_util::attribute;
+    use test_util::data_layout as layout_bytes;
+    use test_util::dataspace as dataspace_bytes;
+    use test_util::datatype as datatype_bytes;
+    use test_util::object_header::v2 as v2_bytes;
+    use test_util::object_header::{Message, MessageType as RecordType};
+    use test_util::widths::Widths;
+
     use super::*;
     use crate::attribute::AttributeMessage;
     use crate::datatype::ReferenceType;
@@ -831,10 +840,7 @@ mod tests {
     use crate::reader::OpenedSource;
     use crate::source::BytesSource;
     use crate::type_builders::{self, AttrValue};
-    use test_util::attribute;
-    use test_util::object_header::v2 as v2_bytes;
-    use test_util::object_header::{Message, MessageType as RecordType};
-    use test_util::widths::Widths;
+    use crate::width::{LengthWidth, OffsetWidth};
 
     /// Where a hand-built header is placed in the test image. Non-zero so an
     /// offset accidentally taken relative to the *chunk* rather than the file —
@@ -850,10 +856,10 @@ mod tests {
         )
     }
 
-    /// A region of plain (4-byte-record) messages, the layout every writer in
-    /// this crate emits.
+    /// Creates a region with eight-byte file widths and four-byte message prefixes.
     fn plain_region(bytes: Vec<u8>) -> crate::edit::OhRegion {
         crate::edit::OhRegion::new(
+            crate::file_writer::WIDTHS,
             bytes,
             hdf5_pure_format::__private::ObjectHeaderPrefix::PLAIN,
         )
@@ -933,6 +939,71 @@ mod tests {
         )
         .unwrap();
         (plan, scanned)
+    }
+
+    #[rstest]
+    #[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+    #[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+    #[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+    #[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+    #[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+    #[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+    #[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+    #[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+    #[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+    fn reference_scan_follows_continuations_at_the_recorded_widths(
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[values(0, 512)] base: u64,
+    ) {
+        let widths = FormatWidths { offsets, lengths };
+        let wire = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+        let flags = v2_bytes::HeaderFlags::default();
+        let continuation_at = 8_192;
+        let continuation = v2_bytes::continuation_chunk(
+            &[Message::new(
+                RecordType::DATA_LAYOUT,
+                &layout_bytes::compact(&HEADER_AT.to_le_bytes()),
+            )],
+            flags,
+        );
+        let header = v2_bytes::Header::new()
+            .message(Message::new(
+                RecordType::DATATYPE,
+                &datatype_bytes::f64_le(),
+            ))
+            .message(Message::new(
+                RecordType::DATASPACE,
+                &dataspace_bytes::scalar(),
+            ))
+            .continuation(
+                usize::try_from(continuation_at - base).unwrap(),
+                &continuation,
+                wire,
+            )
+            .build();
+        let mut bytes = vec![0; usize::try_from(HEADER_AT).unwrap()];
+        bytes.extend_from_slice(&header);
+        bytes.resize(usize::try_from(continuation_at).unwrap(), 0);
+        bytes.extend_from_slice(&continuation);
+        let source = BytesSource::new(bytes);
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+        let mut plan = Plan::default();
+        let scanned = scan_object(
+            &OpenedSource::for_test(&source, addresses),
+            HEADER_AT,
+            widths,
+            &BTreeMap::from([(HEADER_AT, 16_384)]),
+            &mut plan,
+        )
+        .unwrap();
+        assert!(scanned.fully_read);
+        assert!(scanned.header_located);
+        assert!(!scanned.holds_a_reference);
+        assert!(!scanned.descend);
+        assert_eq!(plan.len(), 0);
+        assert!(plan.data_writes.is_empty());
+        assert!(plan.header_writes.is_empty());
     }
 
     #[test]

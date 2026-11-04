@@ -184,9 +184,13 @@ impl DatasetGeometry {
         let source = BytesSource::new(bytes);
         let addresses = AddressContext::from_effective_base(located.superblock.base_address);
         let mut parsed = None;
-        for chunk in
-            object_header::read_oh_chunks(&source, u64::try_from(header).unwrap(), addresses)
-                .unwrap()
+        for chunk in object_header::read_oh_chunks(
+            &source,
+            u64::try_from(header).unwrap(),
+            addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap()
         {
             let (region, mut position) = chunk.message_region();
             while let Some((kind, body, end)) =
@@ -430,10 +434,15 @@ impl Ownership {
             .unwrap()
         }));
         ownership.initialized.extend(
-            object_header::read_oh_chunks(&source, extension, addresses)
-                .unwrap()
-                .into_iter()
-                .map(|chunk| chunk.span),
+            object_header::read_oh_chunks(
+                &source,
+                extension,
+                addresses,
+                crate::file_writer::WIDTHS,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|chunk| chunk.span),
         );
         for address in &info.manager_addrs {
             let DecodedStoredAddress::Defined(address) = address else {

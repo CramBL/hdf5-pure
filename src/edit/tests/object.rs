@@ -83,7 +83,6 @@ use crate::source::BytesSource;
 use crate::superblock::LocatedSuperblock;
 use crate::type_builders::AttrValue;
 use crate::type_builders::ObjectRefTarget;
-use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 
 #[test]
@@ -96,6 +95,7 @@ fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
         &BytesSource::new(header.as_slice()),
         0,
         AddressContext::from_effective_base(BaseAddress::ZERO),
+        crate::file_writer::WIDTHS,
     ) else {
         panic!("expected the chunk walk to fail");
     };
@@ -512,9 +512,13 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
 
             let base = engine.addresses();
             for _ in 0..DEEP_NESTING {
-                let object =
-                    WriteEngine::read_object(&engine.opened_source(), AccessMode::ReadWrite, addr)
-                        .unwrap();
+                let object = WriteEngine::read_object(
+                    &engine.opened_source(),
+                    AccessMode::ReadWrite,
+                    addr,
+                    engine.context.widths(),
+                )
+                .unwrap();
                 let ObjModel::Group {
                     region,
                     links,
@@ -533,9 +537,13 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                 );
                 addr = base.resolve(link.target).unwrap().get();
             }
-            let leaf =
-                WriteEngine::read_object(&engine.opened_source(), AccessMode::ReadWrite, addr)
-                    .unwrap();
+            let leaf = WriteEngine::read_object(
+                &engine.opened_source(),
+                AccessMode::ReadWrite,
+                addr,
+                engine.context.widths(),
+            )
+            .unwrap();
             let ObjModel::Group {
                 region,
                 links,
@@ -584,9 +592,13 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
     FileBuilder::new().write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let addr = engine.write_copy_subtree(&tree).unwrap();
-    let ObjModel::Group { region, links, .. } =
-        WriteEngine::read_object(&engine.opened_source(), AccessMode::ReadWrite, addr).unwrap()
-    else {
+    let ObjModel::Group { region, links, .. } = WriteEngine::read_object(
+        &engine.opened_source(),
+        AccessMode::ReadWrite,
+        addr,
+        engine.context.widths(),
+    )
+    .unwrap() else {
         panic!("expected a group at {addr}");
     };
     assert_eq!(
@@ -669,12 +681,13 @@ fn read_object_with_messages(
         ),
         AccessMode::ReadWrite,
         0,
+        crate::file_writer::WIDTHS,
     )
 }
 
 #[test]
 fn fresh_group_region_pairs_link_info_with_group_info() {
-    let types = region_types(&edit::group::fresh_group_region().unwrap());
+    let types = region_types(&edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap());
     assert_eq!(types, vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]);
 }
 
@@ -688,7 +701,7 @@ fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
         (MessageType::GROUP_INFO, MessageFlags::CONSTANT, group_info),
         (MessageType::LINK, MessageFlags::NONE, link),
     ]);
-    let region = edit::group::link_message_region(&header, OffsetWidth::Eight).unwrap();
+    let region = edit::group::link_message_region(&header, crate::file_writer::WIDTHS).unwrap();
     let mut records = Vec::new();
     let mut pos = 0;
     while let Some(record) = region.layout().next_message(&region, pos).unwrap() {
@@ -733,7 +746,7 @@ fn converting_version_1_link_messages_rejects_link_storage_it_cannot_reproduce(
     #[case] reason: &str,
 ) {
     let header = version_1_header(vec![(msg_type, flags, body)]);
-    let Err(error) = edit::group::link_message_region(&header, OffsetWidth::Eight) else {
+    let Err(error) = edit::group::link_message_region(&header, crate::file_writer::WIDTHS) else {
         panic!("expected the region to be rejected");
     };
     assert!(
@@ -751,7 +764,7 @@ fn converting_version_1_link_messages_rejects_a_truncated_body(
     #[case] expected: FormatError,
 ) {
     let header = version_1_header(vec![(msg_type, MessageFlags::NONE, body)]);
-    let Err(error) = edit::group::link_message_region(&header, OffsetWidth::Eight) else {
+    let Err(error) = edit::group::link_message_region(&header, crate::file_writer::WIDTHS) else {
         panic!("expected the region to be rejected");
     };
     let Error::Format(error) = error else {
@@ -885,7 +898,7 @@ fn link_creation_indexing_preserves_index_addresses_while_updating_the_counter()
 
 #[test]
 fn an_untracked_group_numbers_none_of_its_links() {
-    let mut region = edit::group::fresh_group_region().unwrap();
+    let mut region = edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap();
     let before = region.clone();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
     assert_eq!(order.take().unwrap(), None);
@@ -913,7 +926,7 @@ fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
 
 #[test]
 fn ensure_group_info_is_idempotent() {
-    let mut region = edit::group::fresh_group_region().unwrap();
+    let mut region = edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap();
     let before = region.clone();
     edit::group::ensure_group_info(&mut region).unwrap();
     assert_eq!(*region, *before);
@@ -996,7 +1009,7 @@ fn a_heap_reference_is_rewrapped_as_a_heap_reference() {
 
 #[test]
 fn a_rewrapped_shared_message_keeps_its_flag() {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push_shared(MessageType::ATTRIBUTE, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(region[3], MessageFlags::SHARED.get());
     assert!(edit::attributes::region_has_shared_attr(&region).unwrap());
@@ -1036,7 +1049,11 @@ fn a_record_walk_steps_by_the_width_the_header_declares() {
         );
     }
     let tracked = attr_region(TRACKED, &[("alpha", 0), ("beta", 7)], 8);
-    let misread = OhRegion::new(tracked.to_vec(), ObjectHeaderPrefix::PLAIN);
+    let misread = OhRegion::new(
+        crate::file_writer::WIDTHS,
+        tracked.to_vec(),
+        ObjectHeaderPrefix::PLAIN,
+    );
     let mut p = 0;
     let mut agreed = true;
     while let Ok(Some((_, _, body_end))) = misread.next_message(p) {
@@ -1062,7 +1079,11 @@ fn a_rebuilt_header_declares_the_record_layout_it_used() {
             ObjectHeaderPrefix::with_layout(layout),
             "the flags lost the layout"
         );
-        let round_tripped = OhRegion::new(header[start as usize..end as usize].to_vec(), read_back);
+        let round_tripped = OhRegion::new(
+            crate::file_writer::WIDTHS,
+            header[start as usize..end as usize].to_vec(),
+            read_back,
+        );
         assert_eq!(
             walk_attrs(&round_tripped),
             walk_attrs(&region),
@@ -1088,8 +1109,11 @@ fn a_headers_optional_prefix_blocks_survive_a_rebuild() {
                     edit::object_header::oh_region_at(&header, 0, header.len() as u64)
                         .expect("the hand-built header parses");
                 assert_eq!(read_back, props, "the prefix lost a block");
-                let parsed =
-                    OhRegion::new(header[start as usize..end as usize].to_vec(), read_back);
+                let parsed = OhRegion::new(
+                    crate::file_writer::WIDTHS,
+                    header[start as usize..end as usize].to_vec(),
+                    read_back,
+                );
                 assert_eq!(
                     walk_attrs(&parsed),
                     walk_attrs(&region),
@@ -1278,7 +1302,11 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
         ]
         .concat()
     };
-    let source = OhRegion::new([records(1, false), vec![0xCD; 2]].concat(), props);
+    let source = OhRegion::new(
+        crate::file_writer::WIDTHS,
+        [records(1, false), vec![0xCD; 2]].concat(),
+        props,
+    );
 
     let out = edit::attributes::edit_compact_region(
         &source,
@@ -1377,7 +1405,10 @@ fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
 
 #[test]
 fn a_tracked_header_without_an_info_message_gains_one() {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::with_layout(TRACKED));
+    let mut region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix::with_layout(TRACKED),
+    );
     for (name, index) in [("alpha", 0u16), ("beta", 4)] {
         let record = TRACKED.record_with_creation_index(
             MessageType::ATTRIBUTE,
@@ -1439,7 +1470,7 @@ fn rebuild_compact_layout_replaces_only_the_first_layout(
     };
 
     let out = edit::object_header::rebuild_compact_layout_region(
-        &OhRegion::new(region(&[1, 2, 3, 4]), props),
+        &OhRegion::new(crate::file_writer::WIDTHS, region(&[1, 2, 3, 4]), props),
         &[9, 8, 7, 6, 5],
     )
     .unwrap();
@@ -1649,6 +1680,7 @@ fn malformed_message_region_returns_a_header_build_error() {
     region.extend_from_slice(&[0u8; 4]); // a body far shorter than declared
 
     let err = edit::object_header::build_v2_object_header(&OhRegion::new(
+        crate::file_writer::WIDTHS,
         region,
         ObjectHeaderPrefix::PLAIN,
     ))
@@ -1665,6 +1697,7 @@ fn rebuilt_inline_attributes_include_attribute_info() {
     region.extend_from_slice(&body);
 
     let oh = edit::object_header::build_v2_object_header(&OhRegion::new(
+        crate::file_writer::WIDTHS,
         region.clone(),
         ObjectHeaderPrefix::PLAIN,
     ))
@@ -1909,16 +1942,17 @@ fn verbatim_copy(region: OhRegion, dense_attrs: DenseAttrSet) -> CopyTree {
 fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     let mut nodes = CopyTreeBuilder::default();
     let leaf = CopyNode::Group {
-        region: edit::group::fresh_group_region().unwrap(),
+        region: edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap(),
         links: Vec::new(),
         dense_attrs: DenseAttrSet::new(vec![leaf_attr], DenseAttrCreationOrder::Untracked, [])
             .unwrap(),
     };
     let root = (0..depth).fold(leaf, |child, _| {
-        let mut region = edit::group::fresh_group_region().unwrap();
-        region
-            .push_link("g", StoredAddress::new(UNDEF), None)
-            .unwrap();
+        let mut region = edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap();
+        region.push(
+            MessageType::LINK,
+            &HardLink::new("g", UNDEF).build(Widths::EIGHT),
+        );
         CopyNode::Group {
             links: vec![CopyLink {
                 addr_off: region.len() - usize::from(OFFSET_WIDTH.get()),
@@ -1955,7 +1989,7 @@ fn message_record(msg_type: MessageType, body: &[u8]) -> Vec<u8> {
 }
 
 fn plain_region(bytes: Vec<u8>) -> OhRegion {
-    OhRegion::new(bytes, ObjectHeaderPrefix::PLAIN)
+    OhRegion::new(crate::file_writer::WIDTHS, bytes, ObjectHeaderPrefix::PLAIN)
 }
 
 fn hard_link_region(trailing: &[u8]) -> OhRegion {
@@ -2020,7 +2054,7 @@ fn link_tracked_region(max: u64, indexed: bool, links: &[&str]) -> OhRegion {
     if indexed {
         li.extend_from_slice(&u64::MAX.to_le_bytes()); // b-tree creation order
     }
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push(MessageType::LINK_INFO, &li);
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     for (i, name) in links.iter().enumerate() {
@@ -2072,7 +2106,7 @@ fn attr_region(layout: MessageRecordLayout, attrs: &[(&str, u16)], max: u16) -> 
 /// Constructs inline attributes, recording creation indexes and `max` when tracking is enabled.
 fn attr_region_in(props: ObjectHeaderPrefix, attrs: &[(&str, u16)], max: u16) -> OhRegion {
     let layout = props.layout;
-    let mut region = OhRegion::empty(props);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, props);
     let info = AttributeInfoMessage {
         max_creation_index: layout.tracks_creation_order().then_some(max),
         indexes_creation_order: layout.indexes_creation_order(),
@@ -2165,6 +2199,7 @@ fn v2_header_bytes(props: ObjectHeaderPrefix, region: &OhRegion) -> Vec<u8> {
 
 fn rewrite_fixture(record_layout: MessageRecordLayout, bytes: Vec<u8>) -> OhRegion {
     OhRegion::new(
+        crate::file_writer::WIDTHS,
         bytes,
         ObjectHeaderPrefix {
             layout: record_layout,

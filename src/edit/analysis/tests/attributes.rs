@@ -61,8 +61,13 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
     )]);
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), owner, engine.context.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        owner,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     let operations = [
         AttrOp::Remove { name: "one".into() },
         AttrOp::Remove { name: "two".into() },
@@ -126,8 +131,13 @@ fn allocator_restoration_does_not_restore_attribute_reference_facts() {
     fixture.write(&path);
     let mut engine = edit_test_util::open_engine(&path);
     let root = engine.context.superblock().root_group_address;
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), owner, engine.context.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        owner,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     let edited = attributes::plan_attr_ops(
         &engine.opened_source(),
         &region,
@@ -198,8 +208,13 @@ fn unknown_attribute_evidence_does_not_reject_preparation(#[case] evidence: Unkn
     fixture.link("owner", owner);
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), owner, engine.context.addresses()).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        owner,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     let edited = attributes::plan_attr_ops(
         &engine.opened_source(),
         &region,

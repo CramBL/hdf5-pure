@@ -698,8 +698,12 @@ impl WriteEngine {
         ) else {
             return false;
         };
-        let Ok(region) = Self::gather_oh_messages(&self.image(), addr, self.context.addresses())
-        else {
+        let Ok(region) = Self::gather_oh_messages(
+            &self.image(),
+            addr,
+            self.context.addresses(),
+            self.context.widths(),
+        ) else {
             return false;
         };
         let mut datatype: Option<(usize, usize)> = None;

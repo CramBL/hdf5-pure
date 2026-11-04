@@ -88,6 +88,7 @@ pub(super) fn inspect(engine: &WriteEngine, page: u64) -> (u64, Vec<(u64, u64)>)
         engine.image(),
         engine.context.addresses().resolve(stored).unwrap().get(),
         engine.context.addresses(),
+        engine.context.widths(),
     )
     .unwrap();
     let (sections, mut allocations) = free_space_manager::read_persisted_sections_source(

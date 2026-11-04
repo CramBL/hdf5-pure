@@ -21,7 +21,7 @@ fn compact_batches_copy_unrelated_records_a_bounded_number_of_times(
     let path = test_util::temp::temp_path("compact-attribute-batch-allocation.h5");
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     for _ in 0..16 {
         region.push(MessageType::from_u16(0xff), &vec![0x5a; 48_000]);
     }
@@ -86,7 +86,7 @@ fn compact_to_dense_batches_allocate_in_proportion_to_final_attributes(
     let path = test_util::temp::temp_path("attribute-batch-dense-allocation.h5");
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let ops: Vec<_> = (0..count)
         .map(|index| AttrOp::Set {
             name: format!("a{index:04}"),

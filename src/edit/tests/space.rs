@@ -114,6 +114,7 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
         &BytesSource::new(&bytes),
         extension,
         AddressContext::from_effective_base(BaseAddress::ZERO),
+        crate::file_writer::WIDTHS,
     )
     .unwrap()
     .into_iter()
@@ -2348,7 +2349,13 @@ fn dense_attribute_owner(session: &WriteEngine, object: &ObjectPathBuf) -> Dense
 }
 
 fn header_region(session: &WriteEngine, addr: u64) -> OhRegion {
-    WriteEngine::gather_oh_messages(&session.image(), addr, session.addresses()).unwrap()
+    WriteEngine::gather_oh_messages(
+        &session.image(),
+        addr,
+        session.addresses(),
+        crate::file_writer::WIDTHS,
+    )
+    .unwrap()
 }
 
 fn attribute_heap_address(session: &WriteEngine, addr: u64) -> u64 {

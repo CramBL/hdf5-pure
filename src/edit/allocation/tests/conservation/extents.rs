@@ -773,6 +773,7 @@ pub(super) fn replace_space_info(
         &BytesSource::new(&*bytes),
         extension,
         context.addresses(),
+        context.widths(),
     )
     .unwrap();
     for chunk in chunks {

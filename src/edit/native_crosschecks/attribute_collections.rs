@@ -40,9 +40,13 @@ fn native_attribute_edits_retire_complete_original_collections(
         &owner_path.as_path(),
     )
     .unwrap();
-    let region =
-        WriteEngine::gather_oh_messages(engine.image(), address, engine.context.addresses())
-            .unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        address,
+        engine.context.addresses(),
+        engine.context.widths(),
+    )
+    .unwrap();
     assert_eq!(
         attributes::find_attribute_info(&region)
             .unwrap()

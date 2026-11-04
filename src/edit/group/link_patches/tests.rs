@@ -14,9 +14,52 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::edit::group;
 use crate::edit::object_header::OhRegion;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::message_type::MessageType;
 use crate::object_path::LinkNameBuf;
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn link_batches_keep_region_widths_and_reject_undefined_targets(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(HeaderFlags::default(), HeaderFlags::TRACKS_CREATION_ORDER)] flags: HeaderFlags,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let wire = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+    let mut region = OhRegion::empty(
+        widths,
+        ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
+    );
+    region.push(MessageType::LINK, &HardLink::new("changed", 7).build(wire));
+    let mut expected = region.with_bytes(Vec::new());
+    expected.push(MessageType::LINK, &HardLink::new("changed", 29).build(wire));
+    let mut patches = LinkPatches::new(&mut region, ["changed", "changed"]);
+    patches.patch_next(StoredAddress::new(29)).unwrap();
+    let address = StoredAddress::undefined(offsets);
+    let error = patches.patch_next(address).unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::DefinedAddressIsUndefined { address: actual, offset_size }) if actual == address.get() && offset_size == offsets.get()),
+        "{error:?}"
+    );
+    drop(patches);
+    assert_eq!(&region[..], &expected[..]);
+    assert_eq!(region.widths(), widths);
+    let fresh = group::fresh_group_region(widths).unwrap();
+    let (_, _, info) = group::find_link_info(&fresh).unwrap().unwrap();
+    assert_eq!(info.fractal_heap_address, None);
+    assert_eq!(info.btree_name_index_address, None);
+    assert_eq!(fresh.widths(), widths);
+}
 
 #[rstest]
 fn link_batches_preserve_other_fields_and_repeated_request_order(
@@ -46,7 +89,7 @@ fn link_batches_report_existing_target_errors_at_the_requested_operation(
     #[case] reason: &str,
     #[values(false, true)] batch: bool,
 ) {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push(MessageType::LINK, &body);
     region.push(
         MessageType::LINK,
@@ -70,7 +113,7 @@ fn link_batches_report_existing_target_errors_at_the_requested_operation(
 
 #[test]
 fn link_batches_defer_later_framing_errors_until_the_requested_operation() {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push(
         MessageType::LINK,
         &HardLink::new("good", 1).build(Widths::EIGHT),
@@ -112,7 +155,7 @@ fn link_batches_resolve_after_deletion_and_preserve_fields_across_appends() {
 
 #[test]
 fn link_batches_match_lossy_names_and_preserve_symbolic_targets() {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push(
         MessageType::LINK,
         &SymbolicLink::external("skipped", "file.h5", "/target").build(),
@@ -139,7 +182,7 @@ fn link_batches_match_lossy_names_and_preserve_symbolic_targets() {
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     assert_eq!(measured.blocks, 0, "{measured}");
-    let mut expected = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut expected = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     expected.push(
         MessageType::LINK,
         &SymbolicLink::external("skipped", "file.h5", "/target").build(),
@@ -190,7 +233,7 @@ fn empty_and_single_link_patch_plans_preserve_records_and_bound_visits(
 
 #[test]
 fn an_empty_link_patch_plan_does_not_parse_malformed_records() {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push_bytes(&[6, 0xff, 0xff, 0]);
     let patches = LinkPatches::new(&mut region, []);
     assert_eq!(patches.visited, 0);
@@ -200,8 +243,8 @@ fn an_empty_link_patch_plan_does_not_parse_malformed_records() {
 #[case::medium("link_patch_256", 256)]
 #[case::large("link_patch_512", 512)]
 fn link_patch_batches_visit_each_record_once(#[case] region_name: &str, #[case] count: usize) {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
-    let mut expected = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
+    let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
+    let mut expected = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let names: Vec<_> = (0..count)
         .map(|index| format!("{index:04}_{}", "x".repeat(128)))
         .collect();
@@ -250,9 +293,10 @@ fn link_patch_batches_visit_each_record_once(#[case] region_name: &str, #[case] 
 }
 
 fn mixed_region(flags: HeaderFlags, address: u64) -> OhRegion {
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::with_layout(
-        MessageRecordLayout::from_header_flags(flags.0),
-    ));
+    let mut region = OhRegion::empty(
+        crate::file_writer::WIDTHS,
+        ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
+    );
     region.push(
         MessageType::LINK,
         &HardLink::new("untouched", 5).build(Widths::EIGHT),

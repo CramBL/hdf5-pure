@@ -820,6 +820,7 @@ fn a_link_target_that_overflows_the_base_address_is_refused() {
         &crate::source::BytesSource::new(&bytes[..]),
         root_oh as u64,
         AddressContext::from_effective_base(BaseAddress::new(0)),
+        crate::file_writer::WIDTHS,
     )
     .expect("the root header is readable")[0]
         .span;

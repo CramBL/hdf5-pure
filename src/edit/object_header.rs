@@ -25,7 +25,6 @@ use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout, LAYOUT_CLASS_COMPACT};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_space_info::FileSpaceInfo;
-use crate::file_writer::{LENGTH_SIZE, OFFSET_SIZE};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
@@ -68,14 +67,16 @@ impl WriteEngine {
         info: &FileSpaceInfo,
     ) -> Result<OhRegion, Error> {
         let widths = self.context.widths();
-        let region = Self::gather_oh_messages(&self.image(), ext_addr, self.context.addresses())?;
-        rewrite_extension_region_bytes(&region, widths, info)
+        let region =
+            Self::gather_oh_messages(&self.image(), ext_addr, self.context.addresses(), widths)?;
+        rewrite_extension_region_bytes(&region, info)
     }
 
     /// Collects a version 2 header's records into one region for reconstruction.
     ///
     /// Reads each chunk into a bounded buffer and omits continuation records and trailing gaps.
-    /// Preserves the chunk 0 prefix properties for [`build_v2_object_header`].
+    /// Preserves `widths` and the chunk 0 prefix properties for [`build_v2_object_header`].
+    /// Parses continuation addresses and lengths at `widths`.
     ///
     /// # Errors
     ///
@@ -85,8 +86,9 @@ impl WriteEngine {
         src: &S,
         addr: u64,
         base: AddressContext,
+        widths: FormatWidths,
     ) -> Result<OhRegion, Error> {
-        gather_records(src, addr, base, HeaderRecords::All)
+        gather_records(src, addr, base, widths, HeaderRecords::All)
     }
 }
 
@@ -94,7 +96,7 @@ impl WriteEngine {
 ///
 /// NIL and continuation records are omitted. Record flags, creation indexes, and chunk 0 prefix
 /// properties are preserved. The caller borrows the source immutably while sizing and encoding
-/// replacement File Space Info bodies.
+/// replacement File Space Info bodies at the widths supplied to [`Self::read`].
 pub(crate) struct ExtensionReconstruction<'a, S: Source + ?Sized> {
     _source: &'a S,
     region: OhRegion,
@@ -104,39 +106,49 @@ impl<'a, S: Source + ?Sized> ExtensionReconstruction<'a, S> {
     /// Reads occupied version 2 extension records from the physical address `addr`.
     ///
     /// Reads each chunk into a temporary buffer and retains its occupied records in traversal
-    /// order. Continuation addresses are resolved through `base`.
+    /// order. Parses continuation fields at `widths` and resolves their addresses through `base`.
     ///
     /// # Errors
     ///
     /// Returns the traversal errors from [`visit_oh_chunks`].
-    pub(crate) fn read(src: &'a S, addr: u64, base: AddressContext) -> Result<Self, Error> {
+    pub(crate) fn read(
+        src: &'a S,
+        addr: u64,
+        base: AddressContext,
+        widths: FormatWidths,
+    ) -> Result<Self, Error> {
         Ok(Self {
             _source: src,
-            region: gather_records(src, addr, base, HeaderRecords::Occupied)?,
+            region: gather_records(src, addr, base, widths, HeaderRecords::Occupied)?,
         })
     }
 
     /// Replaces every retained File Space Info body without reading the source.
     ///
+    /// Encodes the replacements at the widths supplied to [`Self::read`].
+    ///
     /// # Errors
     ///
     /// Returns the encoding and missing-message errors from [`rewrite_extension_region_bytes`].
-    pub(crate) fn rewrite(
-        &self,
-        widths: FormatWidths,
-        info: &FileSpaceInfo,
-    ) -> Result<OhRegion, Error> {
-        rewrite_extension_region_bytes(&self.region, widths, info)
+    pub(crate) fn rewrite(&self, info: &FileSpaceInfo) -> Result<OhRegion, Error> {
+        rewrite_extension_region_bytes(&self.region, info)
     }
 }
 
-/// Owned normalized records and a stamped prefix for repeated allocation planning.
+/// Owned normalized records, their file widths, and a stamped prefix for allocation planning.
 pub(super) struct PreparedHeader {
     prefix: ObjectHeaderPrefix,
     records: OhRegion,
 }
 
 impl PreparedHeader {
+    /// Normalizes attribute information and stamps existing modification and change times.
+    ///
+    /// Preserves the region's file widths for allocation sizing and serialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns normalization errors from [`normalized_header`].
     pub(super) fn new(region: &OhRegion) -> Result<Self, Error> {
         let records = normalized_header(region)?;
         Ok(Self {
@@ -145,11 +157,13 @@ impl PreparedHeader {
         })
     }
 
-    pub(super) fn geometry(
-        &self,
-        widths: FormatWidths,
-    ) -> Result<ObjectHeaderAllocationGeometry<'_>, FormatError> {
-        ObjectHeaderAllocationGeometry::new(self.prefix, widths, &self.records)
+    /// Measures allocation geometry at the retained region's file widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns planning errors from [`ObjectHeaderAllocationGeometry::new`].
+    pub(super) fn geometry(&self) -> Result<ObjectHeaderAllocationGeometry<'_>, FormatError> {
+        ObjectHeaderAllocationGeometry::new(self.prefix, self.records.widths(), &self.records)
     }
 }
 
@@ -157,11 +171,12 @@ fn gather_records<S: Source + ?Sized>(
     src: &S,
     addr: u64,
     base: AddressContext,
+    widths: FormatWidths,
     records: HeaderRecords,
 ) -> Result<OhRegion, Error> {
     let mut out = None;
-    visit_oh_chunks(src, addr, base, |chunk| {
-        let out = out.get_or_insert_with(|| OhRegion::empty(chunk.props()));
+    visit_oh_chunks(src, addr, base, widths, |chunk| {
+        let out = out.get_or_insert_with(|| OhRegion::empty(widths, chunk.props()));
         let layout = chunk.layout();
         let (region, mut p) = chunk.message_region();
         while let Some((msg_type, _body, body_end)) = next_record(layout, region, p)? {
@@ -230,7 +245,7 @@ pub(super) fn rebuild_compact_layout_region(
 /// Replaces every File Space Info body with a persistent version 1 encoding of `info`.
 ///
 /// Preserves the original record flags, creation indexes, prefix properties, and unrelated
-/// bytes. Both commit paths use this operation to prepare the extension region.
+/// bytes. Encodes the replacement bodies at the region's file widths.
 ///
 /// # Errors
 ///
@@ -238,10 +253,10 @@ pub(super) fn rebuild_compact_layout_region(
 /// message is present. Returns [`Error::Format`] if `info` cannot be encoded.
 pub(crate) fn rewrite_extension_region_bytes(
     region: &OhRegion,
-    widths: FormatWidths,
     info: &FileSpaceInfo,
 ) -> Result<OhRegion, Error> {
-    let new_body = hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info)?;
+    let new_body =
+        hdf5_pure_format::__private::serialize_file_space_info_v1(region.widths(), info)?;
     HeaderRewrite::parse(region)?
         .replace_bodies(MessageType::FILE_SPACE_INFO, &new_body)?
         .ok_or(Error::EditUnsupported(
@@ -254,6 +269,7 @@ pub(crate) fn rewrite_extension_region_bytes(
 /// Retains the first error while the source parser completes the header. The caller must finish
 /// that parse before calling [`finish`](Self::finish). Recorded ranges use physical coordinates.
 pub(super) struct ExtensionAllocations {
+    widths: FormatWidths,
     ranges: ExtensionRanges,
     count: usize,
     error: Option<Error>,
@@ -261,8 +277,11 @@ pub(super) struct ExtensionAllocations {
 
 impl ExtensionAllocations {
     /// Creates an empty collector with the root counted toward the traversal budget.
-    pub(super) fn new() -> Self {
+    ///
+    /// Parses continuation fields at `widths` when checking observed records.
+    pub(super) fn new(widths: FormatWidths) -> Self {
         Self {
+            widths,
             ranges: ExtensionRanges::Empty,
             count: 1,
             error: None,
@@ -316,7 +335,7 @@ impl ExtensionAllocations {
         let mut start = 0;
         while let Some((kind, body, end)) = next_record(layout, region, start)? {
             if kind == MessageType::OBJECT_HEADER_CONTINUATION {
-                ContinuationChunk::parse_span(&region[body..end], base, file_len)?;
+                ContinuationChunk::parse_span(&region[body..end], base, self.widths, file_len)?;
                 self.count += 1;
                 if self.count > MAX_OH_CHUNKS {
                     return Err(Error::EditUnsupported(
@@ -552,7 +571,8 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
 /// Reads every chunk of a version 2 header, following continuation records.
 ///
 /// Returns chunk 0 first, followed by continuation chunks in breadth-first order. Retains every
-/// chunk buffer and its complete physical range.
+/// chunk buffer and its complete physical range. Parses continuation fields at `widths` and
+/// resolves their stored addresses through `base`.
 ///
 /// # Errors
 ///
@@ -563,9 +583,10 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     src: &S,
     addr: u64,
     base: AddressContext,
+    widths: FormatWidths,
 ) -> Result<Vec<OhChunk>, Error> {
     let mut chunks = Vec::with_capacity(1);
-    visit_oh_chunks(src, addr, base, |chunk| {
+    visit_oh_chunks(src, addr, base, widths, |chunk| {
         chunks.push(chunk);
         Ok(())
     })?;
@@ -575,7 +596,8 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
 /// Visits version 2 header chunks in breadth-first continuation order.
 ///
 /// Reads the next chunk after the visitor consumes the current chunk. Pending continuations
-/// contain complete physical ranges and inherited prefix properties.
+/// contain complete physical ranges and inherited prefix properties. Parses continuation
+/// fields at `widths` before resolving their addresses through `base`.
 ///
 /// # Errors
 ///
@@ -586,6 +608,7 @@ fn visit_oh_chunks<S: Source + ?Sized>(
     src: &S,
     addr: u64,
     base: AddressContext,
+    widths: FormatWidths,
     mut visit: impl FnMut(OhChunk) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let mut chunk = read_oh_chunk0(src, addr)?;
@@ -600,6 +623,7 @@ fn visit_oh_chunks<S: Source + ?Sized>(
                 pending.push_back(ContinuationChunk::parse(
                     &region[body..body_end],
                     base,
+                    widths,
                     props,
                     src.len(),
                 )?);
@@ -642,11 +666,12 @@ impl ContinuationChunk {
     fn parse(
         body: &[u8],
         base: AddressContext,
+        widths: FormatWidths,
         props: ObjectHeaderPrefix,
         file_len: u64,
     ) -> Result<Self, Error> {
         Ok(Self {
-            span: Self::parse_span(body, base, file_len)?,
+            span: Self::parse_span(body, base, widths, file_len)?,
             props,
         })
     }
@@ -657,14 +682,21 @@ impl ContinuationChunk {
     ///
     /// Returns [`Error::EditUnsupported`] if `body` is truncated or the block is out of bounds.
     /// Returns [`Error::Format`] for an undefined address or address-conversion overflow.
-    fn parse_span(body: &[u8], base: AddressContext, file_len: u64) -> Result<FileRange, Error> {
-        let continuation = match ObjectHeaderContinuation::parse(body, OFFSET_SIZE, LENGTH_SIZE) {
-            Ok(continuation) => continuation,
-            Err(FormatError::UnexpectedEof { .. }) => {
-                return Err(Error::EditUnsupported("malformed continuation message"));
-            }
-            Err(err) => return Err(Error::Format(err)),
-        };
+    fn parse_span(
+        body: &[u8],
+        base: AddressContext,
+        widths: FormatWidths,
+        file_len: u64,
+    ) -> Result<FileRange, Error> {
+        let continuation =
+            match ObjectHeaderContinuation::parse(body, widths.offsets.get(), widths.lengths.get())
+            {
+                Ok(continuation) => continuation,
+                Err(FormatError::UnexpectedEof { .. }) => {
+                    return Err(Error::EditUnsupported("malformed continuation message"));
+                }
+                Err(err) => return Err(Error::Format(err)),
+            };
         let len = continuation.length();
         let off = base.resolve(continuation.address())?;
         off.get()
@@ -740,31 +772,43 @@ pub(super) fn record_error(err: FormatError) -> Error {
     }
 }
 
-/// A version 2 message region and its header-prefix properties.
+/// A version 2 message region, its file widths, and its header-prefix properties.
 ///
 /// [`WriteEngine::gather_oh_messages`] collects records into this region, and
 /// [`build_v2_object_header`] serializes it. The record layout and optional prefix fields are
-/// retained when the bytes are replaced.
-#[derive(Clone, Debug, Default)]
+/// retained with the file widths when the bytes are replaced. The caller supplies records
+/// whose file-width fields are encoded at these widths. The default region is empty, with
+/// eight-byte offsets and lengths and default prefix properties.
+#[derive(Clone, Debug)]
 pub(crate) struct OhRegion {
+    widths: FormatWidths,
     bytes: Vec<u8>,
     props: ObjectHeaderPrefix,
 }
 
 impl OhRegion {
-    /// Creates a region with the supplied record bytes and prefix properties.
-    pub(crate) fn new(bytes: Vec<u8>, props: ObjectHeaderPrefix) -> Self {
-        Self { bytes, props }
+    /// Creates a region from records encoded at `widths` and the supplied prefix properties.
+    pub(crate) fn new(widths: FormatWidths, bytes: Vec<u8>, props: ObjectHeaderPrefix) -> Self {
+        Self {
+            widths,
+            bytes,
+            props,
+        }
     }
 
-    /// Creates an empty region with the supplied prefix properties.
-    pub(super) fn empty(props: ObjectHeaderPrefix) -> Self {
-        Self::new(Vec::new(), props)
+    /// Creates an empty region for records encoded at `widths`.
+    pub(super) fn empty(widths: FormatWidths, props: ObjectHeaderPrefix) -> Self {
+        Self::new(widths, Vec::new(), props)
     }
 
-    /// Creates a region with replacement bytes and the same prefix properties.
+    /// Creates a region with replacement bytes and the same file widths and prefix properties.
     pub(super) fn with_bytes(&self, bytes: Vec<u8>) -> Self {
-        Self::new(bytes, self.props)
+        Self::new(self.widths, bytes, self.props)
+    }
+
+    /// Returns the file widths used to encode this region's message bodies.
+    pub(crate) fn widths(&self) -> FormatWidths {
+        self.widths
     }
 
     /// Returns a copy containing complete non-NIL records and the same prefix properties.
@@ -827,7 +871,7 @@ impl OhRegion {
         self.props.layout.creation_index(&self.bytes, msg_start)
     }
 
-    /// Appends records already encoded in this region's layout.
+    /// Appends records already encoded at this region's file widths and record layout.
     pub(super) fn push_bytes(&mut self, record: &[u8]) {
         self.bytes.extend_from_slice(record);
     }
@@ -862,6 +906,12 @@ impl OhRegion {
             reference,
         );
         self.push_bytes(&record);
+    }
+}
+
+impl Default for OhRegion {
+    fn default() -> Self {
+        Self::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::default())
     }
 }
 
@@ -912,9 +962,9 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 /// Builds a normalized version 2 header that fills `allocation`.
 ///
 /// The allocation uses stored, base-relative coordinates and includes all chunk framing and
-/// padding. Uses [`ObjectHeaderAllocation`] to encode its checksummed chunks. Preserves optional
-/// prefix fields and updates existing modification and change times when the system clock is
-/// available.
+/// padding. Uses [`ObjectHeaderAllocation`] to encode its checksummed chunks at the region's
+/// file widths. Preserves optional prefix fields and updates existing modification and change
+/// times when the system clock is available.
 ///
 /// # Errors
 ///
@@ -923,13 +973,12 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
 #[cfg(test)]
 pub(crate) fn build_v2_object_header_allocation(
     region: &OhRegion,
-    widths: FormatWidths,
     allocation: Extent,
 ) -> Result<Vec<u8>, Error> {
     let owned = normalized_header(region)?;
     Ok(ObjectHeaderAllocation::new(
         stamped_prefix(&owned),
-        widths,
+        owned.widths(),
         allocation.start(),
         allocation.len(),
         &owned,
@@ -1082,30 +1131,40 @@ mod tests {
             ]
             .concat()
         };
-        let source = OhRegion::new(region_bytes(&source_body), props);
+        let source = OhRegion::new(
+            crate::file_writer::WIDTHS,
+            region_bytes(&source_body),
+            props,
+        );
 
-        let rewritten = rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap();
+        let rewritten = rewrite_extension_region_bytes(&source, &info).unwrap();
 
         assert_eq!(rewritten.props(), props);
         assert_eq!(&rewritten[..], &region_bytes(&body));
 
         let allocation = Extent::new(StoredAddress::new(1_024), 131_123).unwrap();
-        let encoded = build_v2_object_header_allocation(&rewritten, WIDTHS, allocation).unwrap();
+        let encoded = build_v2_object_header_allocation(&rewritten, allocation).unwrap();
         let addresses = AddressContext::from_effective_base(BaseAddress::new(4_096));
         let physical = addresses.resolve(allocation.start()).unwrap();
         let mut image = vec![0; usize::try_from(physical.get()).unwrap()];
         image.extend(encoded);
         let src = BytesSource::new(&image);
-        let chunks = read_oh_chunks(&src, physical.get(), addresses).unwrap();
+        let chunks =
+            read_oh_chunks(&src, physical.get(), addresses, crate::file_writer::WIDTHS).unwrap();
         assert!(chunks.len() > 1);
         assert_eq!(
             chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>(),
             allocation.len()
         );
-        let actual = WriteEngine::gather_oh_messages(&src, physical.get(), addresses)
-            .unwrap()
-            .without_nil()
-            .unwrap();
+        let actual = WriteEngine::gather_oh_messages(
+            &src,
+            physical.get(),
+            addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap()
+        .without_nil()
+        .unwrap();
         assert_eq!(&actual[..], &rewritten.without_nil().unwrap()[..]);
         assert_eq!(actual.props().layout, props.layout);
         assert_eq!(
@@ -1129,6 +1188,7 @@ mod tests {
             .serialize(WIDTHS.offsets, WIDTHS.lengths.get())
             .unwrap();
         let region = OhRegion::new(
+            crate::file_writer::WIDTHS,
             layout.record_with_creation_index(
                 MessageType::ATTRIBUTE,
                 MessageFlags::NONE,
@@ -1145,18 +1205,27 @@ mod tests {
         );
         let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
         let expected = build_v2_object_header(&region).unwrap();
-        let expected =
-            WriteEngine::gather_oh_messages(&BytesSource::new(expected), 0, addresses).unwrap();
+        let expected = WriteEngine::gather_oh_messages(
+            &BytesSource::new(expected),
+            0,
+            addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap();
         let bytes = build_v2_object_header_allocation(
             &region,
-            WIDTHS,
             Extent::new(StoredAddress::ZERO, 8_192).unwrap(),
         )
         .unwrap();
-        let actual = WriteEngine::gather_oh_messages(&BytesSource::new(bytes), 0, addresses)
-            .unwrap()
-            .without_nil()
-            .unwrap();
+        let actual = WriteEngine::gather_oh_messages(
+            &BytesSource::new(bytes),
+            0,
+            addresses,
+            crate::file_writer::WIDTHS,
+        )
+        .unwrap()
+        .without_nil()
+        .unwrap();
         assert_eq!(&actual[..], &expected[..]);
         assert!(
             actual
@@ -1181,6 +1250,7 @@ mod tests {
             &[u64::MAX; info_bytes::VERSION_0_MANAGERS],
         );
         let source = OhRegion::new(
+            crate::file_writer::WIDTHS,
             [
                 layout.record(MessageType::FILE_SPACE_INFO, &old_body),
                 layout.record(MessageType::NIL, &[0; 2]),
@@ -1195,7 +1265,7 @@ mod tests {
         );
 
         let (rewritten, measured) = allocation::measure(measurement, || {
-            rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap()
+            rewrite_extension_region_bytes(&source, &info).unwrap()
         });
 
         assert_eq!(measured.blocks, 3, "{measured}");
@@ -1231,9 +1301,13 @@ mod tests {
         let mut malformed = layout.record(MessageType::GROUP_INFO, &[0; 2]);
         malformed.pop();
         bytes.extend_from_slice(&malformed);
-        let source = OhRegion::new(bytes, ObjectHeaderPrefix::with_layout(layout));
+        let source = OhRegion::new(
+            crate::file_writer::WIDTHS,
+            bytes,
+            ObjectHeaderPrefix::with_layout(layout),
+        );
 
-        let err = rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap_err();
+        let err = rewrite_extension_region_bytes(&source, &info).unwrap_err();
 
         let Error::EditUnsupported(reason) = err else {
             panic!("expected EditUnsupported, got {err:?}");
@@ -1251,11 +1325,12 @@ mod tests {
             FileSpacePageSize::DEFAULT,
         );
         let source = OhRegion::new(
+            crate::file_writer::WIDTHS,
             layout.record(MessageType::GROUP_INFO, &[0; 2]),
             ObjectHeaderPrefix::with_layout(layout),
         );
 
-        let err = rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap_err();
+        let err = rewrite_extension_region_bytes(&source, &info).unwrap_err();
 
         let Error::EditUnsupported(reason) = err else {
             panic!("expected EditUnsupported, got {err:?}");

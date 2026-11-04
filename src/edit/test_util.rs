@@ -591,7 +591,8 @@ pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
         .resolve(located.superblock.superblock_extension_address.unwrap())
         .unwrap()
         .get();
-    let region = WriteEngine::gather_oh_messages(source, extension, addresses).unwrap();
+    let region =
+        WriteEngine::gather_oh_messages(source, extension, addresses, located.widths).unwrap();
     let splice = region
         .splice_first(MessageType::FILE_SPACE_INFO)
         .unwrap()
@@ -600,8 +601,7 @@ pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
         hdf5_pure_format::__private::parse_file_space_info(located.widths, splice.record().body)
             .unwrap();
 
-    let rewritten =
-        object_header::rewrite_extension_region_bytes(&region, located.widths, &info).unwrap();
+    let rewritten = object_header::rewrite_extension_region_bytes(&region, &info).unwrap();
 
     assert_eq!(rewritten.props(), region.props());
     assert_eq!(&rewritten[..], &region[..]);

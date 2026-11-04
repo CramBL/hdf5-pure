@@ -54,7 +54,9 @@ fn native_extension_opening_facts_retain_complete_allocations(#[case] fixture: F
             _ => panic!("fixture has no recorded page size: {fixture:?}"),
         }
     );
-    let expected = object_header::read_oh_chunks(&source, address, context.addresses()).unwrap();
+    let expected =
+        object_header::read_oh_chunks(&source, address, context.addresses(), context.widths())
+            .unwrap();
     let allocations = facts.allocations.unwrap();
     assert_eq!(
         allocations,
