@@ -139,6 +139,14 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
         detached.updates()[0].count().get(),
         u32::try_from(reported).unwrap() - 1
     );
+    let protected = detached.protect(&engine, []).unwrap();
+    assert_eq!(protected.updates().len(), 1);
+    assert_eq!(protected.updates()[0].field(), field);
+    assert_eq!(
+        protected.updates()[0].count().get(),
+        u32::try_from(reported).unwrap() - 1
+    );
+    assert_eq!(protected.updates()[0].allocation().range(), field.chunk());
     drop(source);
     if matches!(usage, Usage::HardLinks) {
         let alias = phase

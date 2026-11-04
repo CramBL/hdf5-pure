@@ -16,6 +16,8 @@ use crate::object_graph::ObjectIndex;
 
 use super::SourceRemovalPlan;
 
+mod protection;
+
 impl SourceRemovalPlan<'_, '_> {
     /// Copies known positive declared remainders into an owned batch.
     ///
