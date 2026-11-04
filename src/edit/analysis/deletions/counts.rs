@@ -24,6 +24,7 @@ use super::PlannedDeletion;
 use super::RemovedLinks;
 
 mod added;
+mod net;
 mod ownership;
 
 impl<'topology, 'source> RemovedLinks<'topology, 'source> {

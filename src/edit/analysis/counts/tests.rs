@@ -1,4 +1,6 @@
 use core::cell::Cell;
+use core::num::NonZeroU32;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -20,19 +22,29 @@ use test_util_hdf5::global_heap_fixture::Form;
 use crate::Datatype;
 use crate::FileLocking;
 use crate::FixedPointType;
+use crate::edit::WriteEngine;
+use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::DISCOVERY_WORK;
 use crate::edit::analysis::PlannedDeletion;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
 use crate::image::CountingImage;
 use crate::image::HandleImage;
+use crate::object_graph::ObjectId;
+use crate::object_graph::ObjectIndex;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 
+use super::CountContradiction;
+use super::CountEvidence;
+use super::CountEvidenceError;
+use super::CountQueries;
 use super::HeaderCountAllocation;
-use super::*;
+use super::IncomingLinks;
+use super::OrdinaryCountSubject;
+use super::ROOT_REFERENCE_COUNT;
 
 #[rstest]
 #[case::implicit_dataset(Subject::Dataset, None, 1, Some(OrdinaryCountSubject::Dataset))]
