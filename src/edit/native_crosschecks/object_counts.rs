@@ -130,6 +130,16 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
         panic!("expected a version 2 committed-type count, got {observed:?}")
     };
     assert_eq!(u64::from(field.value()), count.get() + u64::from(named));
+    let copy = phase.copy_users(&tree).unwrap().unwrap();
+    let added = phase
+        .added_copy_users([Some(&copy), Some(&copy)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        added.users().collect::<Vec<_>>(),
+        vec![(target, count.checked_add(count.get()).unwrap())]
+    );
+    assert_eq!(phase.object_reference_count(target).unwrap(), observed);
 }
 
 #[rstest]
