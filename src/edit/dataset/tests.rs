@@ -58,6 +58,7 @@ use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
 
 mod contiguous;
+mod fragmented;
 mod providers;
 
 #[rstest]
@@ -371,7 +372,7 @@ fn page_creation_emits_retained_chunks_without_an_aggregate_payload_buffer(#[cas
     let writes = engine.image.issued_write_order().len();
     let (header, measured) =
         allocation::measure(&format!("page_creation_encoding_{count}"), || {
-            engine.write_paged_chunk_set(&set, geometry).unwrap()
+            engine.write_array_chunk_set(&set, geometry).unwrap()
         });
     assert!(
         measured.peak_bytes < u64::try_from(raw.len() / 2).unwrap(),
