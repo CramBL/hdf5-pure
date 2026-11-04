@@ -262,6 +262,8 @@ pub fn write_stored_address_at(
     let len = usize::from(width.get());
     ensure_len(buf, pos, len)?;
     buf[pos..pos + len].copy_from_slice(&addr.get().to_le_bytes()[..len]);
+    #[cfg(test)]
+    crate::field_observations::offset(width);
     Ok(())
 }
 
@@ -404,6 +406,8 @@ pub fn write_length_at(
     let length = usize::from(width.get());
     ensure_len(buf, pos, length)?;
     buf[pos..pos + length].copy_from_slice(&value.to_le_bytes()[..length]);
+    #[cfg(test)]
+    crate::field_observations::length(width);
     Ok(())
 }
 
@@ -430,6 +434,8 @@ pub(crate) fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
         OffsetWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
         OffsetWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
     }
+    #[cfg(test)]
+    crate::field_observations::offset(width);
 }
 
 /// Appends the length `val` to `buf` as a little-endian field of `width` bytes.
@@ -452,6 +458,8 @@ pub(crate) fn write_length(buf: &mut Vec<u8>, val: u64, width: LengthWidth) {
         LengthWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
         LengthWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
     }
+    #[cfg(test)]
+    crate::field_observations::length(width);
 }
 
 /// A cursor over the little-endian fields of a block.
