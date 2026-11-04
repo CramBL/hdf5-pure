@@ -84,11 +84,11 @@ pub fn write_small_large_i32(path: &Path, page_size: u64) {
 /// let file = File::open(&path)?;
 /// assert_eq!(file.dataset("d")?.read_u8()?, vec![7; 512]);
 /// let report = file.persisted_free_sections()?.expect("persistence is configured");
-/// let sections = report.free_sections().sections();
-/// assert_eq!(sections.len(), 1);
-/// let start: StoredAddress = sections[0].address();
-/// assert_eq!(start.get(), 513);
-/// assert_eq!(sections[0].length().get(), 511);
+/// test_util_hdf5::assert_free_sections!(
+///     report.free_sections(),
+///     &[(477, 35), (565, 459)],
+///     StoredAddress,
+/// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///

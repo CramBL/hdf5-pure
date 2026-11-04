@@ -23,7 +23,7 @@
 /// let sections = file.reusable_free_sections()?;
 /// test_util_hdf5::assert_free_sections!(
 ///     &sections,
-///     &[(513, 511)],
+///     &[(477, 35), (565, 459)],
 ///     PhysicalAddress,
 /// );
 /// # Ok::<(), hdf5_pure::Error>(())
@@ -127,7 +127,7 @@ macro_rules! assert_free_sections_consistent {
 ///     &(500..600),
 ///     PhysicalAddress,
 /// );
-/// assert_eq!(covered, 87);
+/// assert_eq!(covered, 47);
 /// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 #[macro_export]

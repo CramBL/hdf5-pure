@@ -25,8 +25,6 @@ use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
 #[cfg(test)]
 use hdf5_pure_format::__private::FractalHeapHeader;
-#[cfg(test)]
-use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
@@ -2365,14 +2363,24 @@ impl FileWriter {
                     sink.put(&dense.blob).map_err(EmissionError::Sink)?;
                 }
             }
-            debug_assert_eq!(sink.position(), base.resolve(ext_addr)?.get());
-            sink.put(&real_ext_oh).map_err(EmissionError::Sink)?;
-            // Free-space-manager blocks (SUPER, DRAW, generic-large), ascending.
-            for manager in managers.iter().flatten() {
-                sink.put(&manager.header).map_err(EmissionError::Sink)?;
-                sink.put(&manager.section_list)
-                    .map_err(EmissionError::Sink)?;
-            }
+            let mut tail = core::iter::once((ext_addr, real_ext_oh.as_slice()))
+                .chain(managers.iter().flatten().flat_map(|manager| {
+                    [
+                        (manager.header_address, manager.header.as_slice()),
+                        (
+                            manager.section_list_address,
+                            manager.section_list.as_slice(),
+                        ),
+                    ]
+                }))
+                .map(|(address, bytes)| {
+                    Reservation::new(base, address, bytes.len().to_u64(), bytes)
+                });
+            Emission::new([&mut tail]).emit(
+                sink,
+                base.resolve(meta_end)?.get(),
+                |sink, bytes| sink.put(bytes).map_err(EmissionError::Sink),
+            )?;
             debug_assert_eq!(sink.position(), base.resolve(meta_end)?.get());
 
             // Raw data region: metadata page tail, then small data, DRAW tail,

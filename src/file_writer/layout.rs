@@ -1,13 +1,16 @@
 //! Stored-address layout planning for file creation.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::SectionInfoCounts;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ManagerKind;
 
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
+use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
 use crate::file_allocation::FileManager;
@@ -275,7 +278,9 @@ impl<T> PagedLayout<T> {
     /// Plans the extension, managers, and dataset regions after the object metadata.
     ///
     /// `metadata_end` is the stored address before the extension. `sections` contains free
-    /// page tails from collection placement. With `persist`, serializes the active managers.
+    /// page tails from collection placement. Small extension and manager blocks stay within
+    /// one page, and blocks at least one page long start at page boundaries. With `persist`,
+    /// serializes the active managers with capacity for their placement gaps.
     ///
     /// Calls `bind` once per dataset in measurement order with its index and allocation,
     /// passing [`None`] for an empty contiguous region. Small regions share a page run, and
@@ -284,8 +289,15 @@ impl<T> PagedLayout<T> {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if a region or its padding exceeds [`u64::MAX`],
-    /// or [`FormatError::Internal`] if serialized manager lengths differ from their reservations.
-    /// Propagates errors from `bind` and manager serialization.
+    /// or [`FormatError::Internal`] if manager capacity exceeds its section bound or serialized
+    /// lengths differ from their reservations. Propagates errors from `bind` and manager
+    /// serialization.
+    ///
+    /// # Performance
+    ///
+    /// Measures the supplied section sizes before retrying tail placement. Retries use retained
+    /// counts and size groups, without calling `bind` or serializing managers. Serializes each
+    /// active manager after placement.
     pub(super) fn new(
         page: FileSpacePageSize,
         persist: bool,
@@ -300,11 +312,6 @@ impl<T> PagedLayout<T> {
             raw: mut raw_sections,
             large: mut large_sections,
         } = sections;
-        let extension = Allocation {
-            address: metadata_end,
-            length: extension_length,
-        };
-        let mut cursor = metadata_end.checked_add(extension_length)?;
         let mut small = Vec::new();
         let mut large = Vec::new();
         let mut small_total = 0;
@@ -332,85 +339,41 @@ impl<T> PagedLayout<T> {
             }
         }
         large_sizes.extend(large_sections.iter().map(|section| section.size));
-        let draw_active = !raw_sections.is_empty() || small_total % page.get() != 0;
-        let large_active = !large_sizes.is_empty();
         let mut raw_sizes: Vec<_> = raw_sections.iter().map(|section| section.size).collect();
-        raw_sizes.push(0);
-        let draw_length = if draw_active {
-            checked_end(
-                hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
-                hdf5_pure_format::__private::section_info_len(WIDTHS, &raw_sizes),
-            )?
-        } else {
-            0
-        };
-        let large_length = if large_active {
-            checked_end(
-                hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
-                hdf5_pure_format::__private::section_info_len(WIDTHS, &large_sizes),
-            )?
-        } else {
-            0
-        };
-        let super_allocation = if persist {
-            paged_metadata_section_allocation(
-                page,
-                cursor,
-                [draw_length, large_length],
-                &meta_sections,
-            )?
-        } else {
-            None
-        };
-        let mut slots = [DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS];
-        let mut locations = [None, None, None];
-        if persist {
-            for (target, kind, length) in [
-                (0, ManagerKind::PagedSmallMetadata, super_allocation),
-                (
-                    1,
-                    ManagerKind::PagedSmallRaw,
-                    draw_active
-                        .then(|| hdf5_pure_format::__private::section_info_len(WIDTHS, &raw_sizes)),
-                ),
-                (
-                    2,
-                    ManagerKind::PagedLargeGeneric,
-                    large_active.then(|| {
-                        hdf5_pure_format::__private::section_info_len(WIDTHS, &large_sizes)
-                    }),
-                ),
-            ] {
-                if let Some(length) = length {
-                    let header = cursor;
-                    cursor = cursor.checked_add(
-                        hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
-                    )?;
-                    let section_list = cursor;
-                    cursor = cursor.checked_add(length)?;
-                    let (slot, _) = free_space_manager::manager_wire(kind);
-                    slots[slot] = DecodedStoredAddress::Defined(header);
-                    locations[target] = Some(ManagerLocation {
-                        header,
-                        section_list,
-                        length,
-                        kind,
-                    });
-                }
-            }
+        let raw_tail = (page.get() - small_total % page.get()) % page.get();
+        if raw_tail > 0 {
+            raw_sizes.push(raw_tail);
         }
-        let metadata_end = cursor;
-        let raw_start = align(cursor, page)?;
-        if raw_start > cursor {
-            // The aligned start follows the metadata cursor.
-            meta_sections.push(FreeSection {
-                addr: cursor,
-                size: raw_start.checked_distance_from(cursor).unwrap(),
-            });
+        let TailLayout {
+            extension,
+            locations,
+            arena,
+        } = TailLayout::new(
+            page,
+            persist,
+            metadata_end,
+            extension_length,
+            &meta_sections,
+            &raw_sizes,
+            &large_sizes,
+        )?;
+        let MetadataArena {
+            page: _,
+            cursor: raw_start,
+            occupied_end: metadata_end,
+            metadata,
+            large: padding,
+        } = arena;
+        meta_sections.extend(metadata);
+        large_sections.extend(padding);
+        let mut slots = [DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS];
+        for location in locations.iter().flatten() {
+            let (slot, _) = free_space_manager::manager_wire(location.kind);
+            slots[slot] = DecodedStoredAddress::Defined(location.header);
         }
         let small_end = raw_start.checked_add(small_total)?;
         let mut small_cursor = raw_start;
-        cursor = align(small_end, page)?;
+        let mut cursor = align(small_end, page)?;
         if small_total > 0 && cursor > small_end {
             // Alignment advances the nonempty raw region past its end.
             raw_sections.push(FreeSection {
@@ -473,6 +436,313 @@ impl<T> PagedLayout<T> {
     }
 }
 
+/// Complete extension and manager reservations with their classified placement gaps.
+struct TailLayout {
+    extension: Allocation,
+    locations: [Option<ManagerLocation>; 3],
+    arena: MetadataArena,
+}
+
+impl TailLayout {
+    /// Places complete blocks and reserves sufficient manager capacity for their free gaps.
+    ///
+    /// With `persist`, activates a metadata manager immediately for supplied metadata sections
+    /// or gaps before the extension. Resolves required generic-manager capacity before activation
+    /// for gaps introduced by manager placement. Capacity grows within bounds on counts and
+    /// distinct sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if an address, length, or count overflows.
+    /// Returns [`FormatError::Internal`] if a manager exceeds its section bound or a generic
+    /// section has no active manager. Propagates section measurement errors.
+    fn new(
+        page: FileSpacePageSize,
+        persist: bool,
+        start: StoredAddress,
+        extension_length: u64,
+        metadata: &[FreeSection],
+        raw_sizes: &[u64],
+        large_sizes: &[u64],
+    ) -> Result<Self, FormatError> {
+        let mut arena = MetadataArena::new(page, start);
+        let extension = arena.reserve(extension_length)?;
+        if !persist {
+            arena.finish()?;
+            return Ok(Self {
+                extension,
+                locations: [None, None, None],
+                arena,
+            });
+        }
+        let metadata_measure = SectionMeasure::new(metadata.iter().map(|section| section.size))?;
+        let large_measure = SectionMeasure::new(large_sizes.iter().copied())?;
+        let mut metadata_active = !metadata.is_empty() || !arena.metadata.is_empty();
+        let raw_length = (!raw_sizes.is_empty())
+            .then(|| hdf5_pure_format::__private::section_info_len(WIDTHS, raw_sizes));
+        let mut metadata_capacity = metadata_measure.encoded_len(core::iter::once(0))?;
+        let mut large_capacity = large_measure.encoded_len(core::iter::empty())?;
+        let metadata_limit = checked_end(metadata_measure.capacity(TAIL_GAP_LIMIT)?, 1)?;
+        let large_limit = large_measure.capacity(TAIL_BLOCK_LIMIT)?;
+        let header_length = hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
+        let after_extension = arena;
+        loop {
+            let large_active = !large_sizes.is_empty()
+                || !after_extension.large.is_empty()
+                || [metadata_active.then_some(metadata_capacity), raw_length]
+                    .into_iter()
+                    .flatten()
+                    .chain(metadata_active.then_some(header_length))
+                    .any(|length| length >= page.get() && length % page.get() != 0);
+            let mut arena = after_extension.clone();
+            let locations = arena.managers([
+                metadata_active.then_some(metadata_capacity),
+                raw_length,
+                large_active.then_some(large_capacity),
+            ])?;
+            arena.finish()?;
+            let large_length =
+                large_measure.encoded_len(arena.large.iter().map(|section| section.size))?;
+            if large_length > large_limit {
+                return Err(FormatError::Internal(
+                    "PAGE large manager length exceeds its section bound".into(),
+                ));
+            }
+            if !large_active && !arena.large.is_empty() {
+                return Err(FormatError::Internal(
+                    "PAGE placement introduces an unplanned large section".into(),
+                ));
+            }
+            if large_active && large_length > large_capacity {
+                large_capacity = large_length;
+                continue;
+            }
+            if !metadata_active && !arena.metadata.is_empty() {
+                metadata_active = true;
+                continue;
+            }
+            if metadata_active && metadata.is_empty() && arena.metadata.is_empty() {
+                metadata_capacity = checked_end(metadata_capacity, 1)?;
+                if metadata_capacity > metadata_limit {
+                    return Err(FormatError::Internal(
+                        "PAGE metadata capacity exceeds its section bound".into(),
+                    ));
+                }
+                continue;
+            }
+            let metadata_length =
+                metadata_measure.encoded_len(arena.metadata.iter().map(|section| section.size))?;
+            if metadata_length > metadata_limit {
+                return Err(FormatError::Internal(
+                    "PAGE metadata manager length exceeds its section bound".into(),
+                ));
+            }
+            if metadata_active && metadata_length > metadata_capacity {
+                metadata_capacity = metadata_length;
+                continue;
+            }
+            return Ok(Self {
+                extension,
+                locations,
+                arena,
+            });
+        }
+    }
+}
+
+/// A stored-address cursor with free gaps classified by complete allocation length.
+///
+/// The occupied end excludes page padding after the last reserved block.
+#[derive(Clone)]
+struct MetadataArena {
+    page: FileSpacePageSize,
+    cursor: StoredAddress,
+    occupied_end: StoredAddress,
+    metadata: Vec<FreeSection>,
+    large: Vec<FreeSection>,
+}
+
+impl MetadataArena {
+    /// Starts placement at `start` with no allocations or gaps.
+    fn new(page: FileSpacePageSize, start: StoredAddress) -> Self {
+        Self {
+            page,
+            cursor: start,
+            occupied_end: start,
+            metadata: Vec::new(),
+            large: Vec::new(),
+        }
+    }
+
+    /// Places a small block within one page or a large block on a page boundary.
+    ///
+    /// Records skipped small-page space as metadata and the final page suffix of a large
+    /// allocation as generic large space. The returned length excludes both kinds of gap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the allocation or its page padding overflows.
+    /// Returns [`FormatError::Internal`] if a padding endpoint precedes its cursor.
+    fn reserve(&mut self, length: u64) -> Result<Allocation, FormatError> {
+        let remaining = self.page.get() - self.cursor.get() % self.page.get();
+        if length >= self.page.get() || length > remaining {
+            self.gap_to(align(self.cursor, self.page)?)?;
+        }
+        let address = self.cursor;
+        let end = address.checked_add(length)?;
+        self.occupied_end = end;
+        self.cursor = end;
+        if length >= self.page.get() {
+            self.cursor = align(end, self.page)?;
+            if self.cursor > end {
+                self.large.push(FreeSection {
+                    addr: end,
+                    size: self.cursor.checked_distance_from(end).ok_or_else(|| {
+                        FormatError::Internal("PAGE padding ends before its allocation".into())
+                    })?,
+                });
+            }
+        }
+        Ok(Allocation { address, length })
+    }
+
+    /// Reserves each active manager's header and allocated section list separately.
+    ///
+    /// Uses metadata, small raw, and generic large order. Each optional length is the complete
+    /// section-list allocation length.
+    ///
+    /// # Errors
+    ///
+    /// Propagates placement errors from [`Self::reserve`].
+    fn managers(
+        &mut self,
+        lengths: [Option<u64>; 3],
+    ) -> Result<[Option<ManagerLocation>; 3], FormatError> {
+        let mut locations = [None, None, None];
+        for ((target, length), kind) in lengths.into_iter().enumerate().zip([
+            ManagerKind::PagedSmallMetadata,
+            ManagerKind::PagedSmallRaw,
+            ManagerKind::PagedLargeGeneric,
+        ]) {
+            if let Some(length) = length {
+                let header = self.reserve(
+                    hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
+                )?;
+                let list = self.reserve(length)?;
+                locations[target] = Some(ManagerLocation {
+                    header: header.address,
+                    section_list: list.address,
+                    length,
+                    kind,
+                });
+            }
+        }
+        Ok(locations)
+    }
+
+    /// Records the remaining small metadata tail and advances to a page boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if page alignment overflows.
+    /// Propagates padding errors from [`Self::gap_to`].
+    fn finish(&mut self) -> Result<(), FormatError> {
+        self.gap_to(align(self.cursor, self.page)?)
+    }
+
+    /// Records a nonempty metadata gap from the cursor to `end` and advances the cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `end` precedes the cursor.
+    fn gap_to(&mut self, end: StoredAddress) -> Result<(), FormatError> {
+        let length = end.checked_distance_from(self.cursor).ok_or_else(|| {
+            FormatError::Internal("PAGE metadata padding ends before its cursor".into())
+        })?;
+        if length == 0 {
+            return Ok(());
+        }
+        let section = FreeSection {
+            addr: self.cursor,
+            size: length,
+        };
+        self.metadata.push(section);
+        self.cursor = end;
+        Ok(())
+    }
+}
+
+/// A retained section count and the distinct sizes needed to measure a section list.
+struct SectionMeasure {
+    count: u64,
+    sizes: BTreeSet<u64>,
+}
+
+impl SectionMeasure {
+    /// Counts the supplied sections and retains their distinct sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the section count overflows.
+    fn new(sizes: impl Iterator<Item = u64>) -> Result<Self, FormatError> {
+        let mut result = Self {
+            count: 0,
+            sizes: BTreeSet::new(),
+        };
+        for size in sizes {
+            result.count = checked_end(result.count, 1)?;
+            result.sizes.insert(size);
+        }
+        Ok(result)
+    }
+
+    /// Measures the section list with the supplied additional sizes.
+    ///
+    /// Includes every additional section in the record count, grouping equal sizes together.
+    /// Keeps the original measurement unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a count or encoded length overflows.
+    /// Propagates inconsistent-count errors from [`SectionInfoCounts::new`].
+    fn encoded_len(&self, additional: impl Iterator<Item = u64>) -> Result<u64, FormatError> {
+        let Self { count, sizes } = self;
+        let mut count = *count;
+        let mut extra = BTreeSet::new();
+        for size in additional {
+            count = checked_end(count, 1)?;
+            if !sizes.contains(&size) {
+                extra.insert(size);
+            }
+        }
+        SectionInfoCounts::new(
+            count,
+            checked_end(sizes.len().to_u64(), extra.len().to_u64())?,
+        )?
+        .encoded_len(WIDTHS)
+    }
+
+    /// Bounds encoded capacity when every additional section has a distinct size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a count or encoded length overflows.
+    /// Propagates inconsistent-count errors from [`SectionInfoCounts::new`].
+    fn capacity(&self, additional: u64) -> Result<u64, FormatError> {
+        let Self { count, sizes } = self;
+        SectionInfoCounts::new(
+            checked_end(*count, additional)?,
+            checked_end(sizes.len().to_u64(), additional)?,
+        )?
+        .encoded_len(WIDTHS)
+    }
+}
+
+/// The extension and the header and section list of each of the three managers.
+const TAIL_BLOCK_LIMIT: u64 = 7;
+/// The maximum number of small metadata gaps, including the final page tail.
+const TAIL_GAP_LIMIT: u64 = TAIL_BLOCK_LIMIT + 1;
+
 /// Stored reservations for a manager's header and section list.
 struct ManagerLocation {
     header: StoredAddress,
@@ -496,15 +766,7 @@ impl ManagerLocation {
             kind,
         } = self;
         let (_, class) = free_space_manager::manager_wire(kind);
-        let (header_bytes, section_bytes) = if kind == ManagerKind::PagedLargeGeneric {
-            hdf5_pure_format::__private::serialize_free_space_manager(
-                WIDTHS,
-                sections,
-                header,
-                section_list,
-                class,
-            )?
-        } else {
+        let (header_bytes, section_bytes) =
             hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
                 WIDTHS,
                 sections,
@@ -512,8 +774,7 @@ impl ManagerLocation {
                 section_list,
                 class,
                 Some(length),
-            )?
-        };
+            )?;
         if header_bytes.len() as u64
             != hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
             || section_bytes.len() as u64 != length
@@ -539,55 +800,6 @@ fn checked_end(offset: u64, length: u64) -> Result<u64, FormatError> {
 
 fn align(offset: StoredAddress, page: FileSpacePageSize) -> Result<StoredAddress, FormatError> {
     offset.checked_add((page.get() - offset.get() % page.get()) % page.get())
-}
-
-/// Reserves section-list capacity for the final metadata page tail.
-///
-/// `metadata_end` is a stored address before manager placement. Includes the lengths in
-/// `other_managers` when testing page alignment. Returns `None` when the metadata ends on a
-/// page boundary without this manager and `sections` is empty. When adding the manager would
-/// fill a page exactly with no other metadata sections, reserves one extra padding byte so
-/// the manager has a page tail to record.
-///
-/// # Errors
-///
-/// Returns [`FormatError::OffsetOverflow`] if a manager extent or its padding exceeds [`u64::MAX`].
-pub(super) fn paged_metadata_section_allocation(
-    page: FileSpacePageSize,
-    metadata_end: StoredAddress,
-    other_managers: impl IntoIterator<Item = u64>,
-    sections: &[FreeSection],
-) -> Result<Option<u64>, FormatError> {
-    let end = other_managers
-        .into_iter()
-        .try_fold(metadata_end, |offset, length| offset.checked_add(length))?;
-    if sections.is_empty() && end.get() % page.get() == 0 {
-        return Ok(None);
-    }
-    let sizes: Vec<_> = sections
-        .iter()
-        .map(|section| section.size)
-        .chain(core::iter::once(0))
-        .collect();
-    let allocation = hdf5_pure_format::__private::section_info_len(WIDTHS, &sizes);
-    let end = [
-        hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
-        allocation,
-    ]
-    .into_iter()
-    .try_fold(end, |offset, length| offset.checked_add(length))?;
-    Ok(Some(
-        if sections.is_empty() && end.get() % page.get() == 0 {
-            allocation
-                .checked_add(1)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: allocation,
-                    length: 1,
-                })?
-        } else {
-            allocation
-        },
-    ))
 }
 
 #[cfg(test)]
@@ -775,7 +987,20 @@ mod tests {
                 size: 324,
             },
         };
-        assert_eq!(sections, [expected]);
+        if matches!(kind, PageTail::Metadata) {
+            assert_eq!(
+                sections,
+                [
+                    FreeSection {
+                        addr: StoredAddress::new(472),
+                        size: 40
+                    },
+                    expected
+                ]
+            );
+        } else {
+            assert_eq!(sections, [expected]);
+        }
         assert_eq!(end.get() % page.get(), 0);
     }
 
@@ -824,6 +1049,238 @@ mod tests {
     }
 
     #[rstest]
+    #[case::extension_crossing(500, 20, 0, 0)]
+    #[case::extension_one_page(500, 512, 0, 0)]
+    #[case::extension_large(500, 600, 0, 0)]
+    #[case::metadata_large(1_048_576, 20, 64, 0)]
+    #[case::count_width_before(1_048_576, 20, 246, 0)]
+    #[case::count_width_after(1_048_576, 20, 247, 0)]
+    #[case::raw_list_one_page(1_048_576, 20, 0, 54)]
+    #[case::raw_list_large(1_048_576, 20, 0, 100)]
+    fn tail_blocks_and_free_sections_partition_page_storage(
+        #[case] start: u64,
+        #[case] extension: u64,
+        #[case] metadata_count: usize,
+        #[case] raw_count: usize,
+    ) {
+        let metadata: Vec<_> = (0..metadata_count)
+            .map(|index| FreeSection {
+                addr: StoredAddress::new(u64::try_from(index).unwrap() * 512 + 48),
+                size: u64::try_from(index % 127 + 1).unwrap(),
+            })
+            .collect();
+        let raw: Vec<_> = (0..raw_count)
+            .map(|index| FreeSection {
+                addr: StoredAddress::new(u64::try_from(index).unwrap() * 512 + 256),
+                size: 1,
+            })
+            .collect();
+        let plan = PagedLayout::new(
+            FileSpacePageSize::try_from(512).unwrap(),
+            true,
+            StoredAddress::new(start),
+            extension,
+            core::iter::empty(),
+            CollectionSections {
+                metadata: metadata.clone(),
+                raw: raw.clone(),
+                large: Vec::new(),
+            },
+            |_, placed| Ok(placed),
+        )
+        .unwrap();
+        let mut occupied = vec![plan.extension];
+        let mut actual = [Vec::new(), Vec::new(), Vec::new()];
+        for (target, manager) in plan.managers.iter().enumerate() {
+            let Some(manager) = manager else {
+                continue;
+            };
+            let header = FreeSpaceManagerHeader::parse(WIDTHS, &manager.header).unwrap();
+            assert_eq!(
+                header.section_list_used(),
+                u64::try_from(manager.section_list.len()).unwrap()
+            );
+            assert_eq!(header.section_list_allocated(), header.section_list_used());
+            assert_eq!(header.section_list_addr(), manager.section_list_address);
+            occupied.extend([
+                span(
+                    manager.header_address.get(),
+                    u64::try_from(manager.header.len()).unwrap(),
+                ),
+                span(
+                    manager.section_list_address.get(),
+                    header.section_list_allocated(),
+                ),
+            ]);
+            actual[target] = format::parse_section_info(
+                WIDTHS,
+                &manager.section_list,
+                manager.header_address,
+                &header,
+            )
+            .unwrap();
+        }
+        occupied.sort_by_key(|block| block.address);
+        let mut expected = [metadata, raw, Vec::new()];
+        let mut cursor = StoredAddress::new(start);
+        let mut previous_large = false;
+        for block in occupied
+            .iter()
+            .chain(core::iter::once(&span(plan.raw_start.get(), 0)))
+        {
+            let boundary = if previous_large {
+                super::align(cursor, FileSpacePageSize::try_from(512).unwrap())
+                    .unwrap()
+                    .min(block.address)
+            } else {
+                cursor
+            };
+            if boundary > cursor {
+                expected[2].push(FreeSection {
+                    addr: cursor,
+                    size: boundary.checked_distance_from(cursor).unwrap(),
+                });
+                cursor = boundary;
+            }
+            if block.address > cursor {
+                expected[0].push(FreeSection {
+                    addr: cursor,
+                    size: block.address.checked_distance_from(cursor).unwrap(),
+                });
+            }
+            if block.length >= 512 {
+                assert_eq!(block.address.get() % 512, 0);
+            } else if block.length > 0 {
+                assert_eq!(
+                    block.address.get() / 512,
+                    (block.address.get() + block.length - 1) / 512
+                );
+            }
+            cursor = block.address.checked_add(block.length).unwrap();
+            previous_large = block.length >= 512;
+        }
+        for (actual, expected) in actual.iter_mut().zip(&mut expected) {
+            actual.sort_by_key(|section| section.addr);
+            expected.sort_by_key(|section| section.addr);
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(plan.end, plan.raw_start);
+        if metadata_count > 0 || raw_count > 54 || extension > 512 {
+            assert!(plan.managers[2].is_some());
+        }
+        if raw_count == 54 {
+            assert_eq!(plan.managers[1].as_ref().unwrap().section_list.len(), 512);
+            assert!(plan.managers[2].is_none());
+        }
+    }
+
+    #[rstest]
+    #[case::empty(512, 492, 20, &[], false, (512, 512), None)]
+    #[case::alignment_feedback(512, 375, 20, &[], true, (1_024, 1_024), None)]
+    #[case::raw_manager(512, 375, 20, &[511], false, (512, 1_024), None)]
+    #[case::large_manager(512, 375, 20, &[513], false, (512, 1_536), Some(35))]
+    #[case::raw_and_large_managers(512, 258, 20, &[511, 513], false, (512, 2_048), Some(35))]
+    #[case::generic_capacity_feedback(
+        540,
+        5_400,
+        1_079,
+        &[1_079; 47],
+        false,
+        (7_020, 57_780),
+        Some(458)
+    )]
+    fn metadata_manager_terminates_when_its_blocks_fill_the_page(
+        #[case] page: u64,
+        #[case] start: u64,
+        #[case] length: u64,
+        #[case] data_lengths: &[u64],
+        #[case] active: bool,
+        #[case] boundaries: (u64, u64),
+        #[case] large_list_length: Option<usize>,
+    ) {
+        let page = FileSpacePageSize::try_from(page).unwrap();
+        let (raw_start, end) = boundaries;
+        let plan = PagedLayout::new(
+            page,
+            true,
+            StoredAddress::new(start),
+            length,
+            data_lengths
+                .iter()
+                .map(|&length| DataMeasure::new(length, DataKind::Contiguous)),
+            CollectionSections::default(),
+            |_, placed| Ok(placed),
+        )
+        .unwrap();
+        assert_eq!(plan.managers[0].is_some(), active);
+        assert_eq!(
+            plan.managers[1].is_some(),
+            data_lengths.iter().any(|&length| length < page.get())
+        );
+        assert_eq!(
+            plan.managers[2].is_some(),
+            data_lengths.iter().any(|&length| length >= page.get())
+        );
+        assert_eq!(
+            plan.managers[2]
+                .as_ref()
+                .map(|manager| manager.section_list.len()),
+            large_list_length
+        );
+        assert_eq!(plan.raw_start.get(), raw_start);
+        assert_eq!(plan.end.get(), end);
+        if let Some(manager) = &plan.managers[0] {
+            let header = FreeSpaceManagerHeader::parse(WIDTHS, &manager.header).unwrap();
+            let mut sections = format::parse_section_info(
+                WIDTHS,
+                &manager.section_list,
+                manager.header_address,
+                &header,
+            )
+            .unwrap();
+            sections.sort_by_key(|section| section.addr);
+            assert_eq!(
+                sections,
+                [
+                    FreeSection {
+                        addr: StoredAddress::new(477),
+                        size: 35
+                    },
+                    FreeSection {
+                        addr: StoredAddress::new(565),
+                        size: 459
+                    }
+                ]
+            );
+            assert_eq!(header.section_list_allocated(), 53);
+        }
+    }
+
+    #[rstest]
+    #[case::extension(u64::MAX, 1, u64::MAX, 1)]
+    #[case::header_alignment(u64::MAX - 10, 0, u64::MAX - 10, 11)]
+    #[case::list_alignment(u64::MAX - 82, 0, u64::MAX, 1)]
+    fn tail_placement_rejects_address_overflow(
+        #[case] start: u64,
+        #[case] extension: u64,
+        #[case] offset: u64,
+        #[case] length: u64,
+    ) {
+        let error = PagedLayout::new(
+            FileSpacePageSize::try_from(512).unwrap(),
+            true,
+            StoredAddress::new(start),
+            extension,
+            core::iter::once(DataMeasure::new(7, DataKind::Contiguous)),
+            CollectionSections::default(),
+            |_, placed| Ok(placed),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, FormatError::OffsetOverflow { offset, length });
+    }
+
+    #[rstest]
     #[case::extension(u64::MAX, 1, None, u64::MAX, 1)]
     #[case::metadata_padding(u64::MAX - 1, 0, None, u64::MAX - 1, 2)]
     #[case::large_extent_padding(200, 20, Some(u64::MAX), u64::MAX, 1)]
@@ -852,10 +1309,32 @@ mod tests {
 
     #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
     #[rstest]
-    #[case::small(128, "page_bound_records", "page_bound_records_control")]
-    #[case::large(512, "page_many_bound_records", "page_many_bound_records_control")]
+    #[case::small(128, 512, false, "page_bound_records", "page_bound_records_control")]
+    #[case::large(
+        512,
+        512,
+        false,
+        "page_many_bound_records",
+        "page_many_bound_records_control"
+    )]
+    #[case::persistent(
+        512,
+        512,
+        true,
+        "persistent_page_records",
+        "persistent_page_records_control"
+    )]
+    #[case::persistent_large_page(
+        512,
+        1_073_741_824,
+        true,
+        "persistent_large_page_records",
+        "persistent_large_page_records_control"
+    )]
     fn paged_planning_retains_one_record_table(
         #[case] count: usize,
+        #[case] page: u64,
+        #[case] persistent: bool,
         #[case] region: &'static str,
         #[case] control_region: &'static str,
     ) {
@@ -872,8 +1351,8 @@ mod tests {
         let mut calls = 0;
         let (plan, measured) = allocation::measure(region, || {
             PagedLayout::new(
-                FileSpacePageSize::try_from(512).unwrap(),
-                false,
+                FileSpacePageSize::try_from(page).unwrap(),
+                persistent,
                 StoredAddress::new(200),
                 20,
                 (0..count).map(|_| DataMeasure::new(16, DataKind::Contiguous)),
@@ -892,13 +1371,18 @@ mod tests {
             raw_start,
             extension: _,
             slots: _,
-            managers: _,
+            managers,
             metadata_end: _,
             small_end: _,
             end: _,
         } = plan;
         let retained = data.capacity() * mem::size_of_val(data.first().unwrap())
-            + (small.capacity() + large.capacity()) * mem::size_of::<usize>();
+            + (small.capacity() + large.capacity()) * mem::size_of::<usize>()
+            + managers
+                .iter()
+                .flatten()
+                .map(|manager| manager.header.capacity() + manager.section_list.capacity())
+                .sum::<usize>();
         assert_eq!(calls, count);
         assert_eq!(data.len(), count);
         assert_eq!(small, (0..count).collect::<alloc::vec::Vec<_>>());
