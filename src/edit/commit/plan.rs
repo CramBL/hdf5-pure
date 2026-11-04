@@ -37,6 +37,9 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::OriginalSource;
 use crate::type_builders::ObjectRefTarget;
 
+pub(in crate::edit) use counts::CountProjectionError;
+pub(in crate::edit) use counts::CountProjectionProof;
+
 #[cfg_attr(
     not(test),
     expect(

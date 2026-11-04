@@ -2,10 +2,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::edit::analysis::CountPreflight;
+use crate::edit::analysis::CountProjectionIdentity;
 use crate::edit::analysis::DeclaredCountChange;
 use crate::edit::analysis::NetCountPlan;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::SourceRemovalPlan;
+use crate::edit::analysis::counts::changes::owned::OwnedCountChange;
 use crate::edit::analysis::counts::changes::{CountChange, OriginalCount};
 use crate::edit::object_header::reference_count::HeaderCount;
 use crate::edit::object_header::reference_count::HeaderCountError;
@@ -112,6 +115,126 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, CountChange<'plan, 'source
         let mut prepared = Self::project(changes, groups, |source| plan.shares_phase(source))?;
         prepared.disposition.unchanged = unchanged;
         Ok(prepared)
+    }
+}
+
+impl<'region, 'plan> PreparedCounts<'region, &'plan OwnedCountChange> {
+    /// Prepares owned count records under the preflight's checked reconstruction decisions.
+    ///
+    /// Checks each changed target's actual source or replacement disposition against preflight.
+    /// Retains original entries by reference and skips predecessor iteration for empty or entirely
+    /// unchanged work. Leaves all owned records unchanged during construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns the association and framing errors of [`Self::project`],
+    /// [`CountProjectionError::Region`] for ambiguous or unsupported replacement counts, or
+    /// [`CountProjectionError::Reconstruction`] for a changed target with a different
+    /// reconstruction disposition from preflight.
+    pub(super) fn owned(
+        plan: &'plan CountPreflight,
+        groups: impl IntoIterator<Item = &'region mut PreparedGroup>,
+    ) -> Result<OwnedCountProjection<'region, 'plan>, CountProjectionError> {
+        let mut unchanged = Vec::new();
+        let changes = plan.changes().iter().filter_map(|change| {
+            let original = change.original().value();
+            if original == change.remaining() {
+                unchanged.push(change);
+                return None;
+            }
+            Some((
+                CountValues {
+                    object: change.object(),
+                    original,
+                    remaining: change.remaining(),
+                },
+                change,
+            ))
+        });
+        let mut prepared = Self::project(changes, groups, |source| plan.shares_phase(source))?;
+        if let Some((change, error)) = prepared.disposition.opaque.pop() {
+            return Err(CountProjectionError::Region {
+                object: change.object(),
+                error,
+            });
+        }
+        for (change, actual) in prepared
+            .disposition
+            .rebuilt
+            .iter()
+            .map(|change| (change, true))
+            .chain(
+                prepared
+                    .disposition
+                    .source
+                    .iter()
+                    .map(|change| (change, false)),
+            )
+        {
+            let expected = plan.reconstructed(change.object());
+            if actual != expected {
+                return Err(CountProjectionError::Reconstruction {
+                    object: change.object(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+        prepared.disposition.unchanged = unchanged;
+        Ok(OwnedCountProjection {
+            prepared,
+            identity: plan.projection_identity(),
+        })
+    }
+}
+
+/// Checked local count updates associated with one owned preflight.
+///
+/// A completion proof is required to release that preflight's protected source batch.
+/// Source freshness, admission, and publication permissions remain separate.
+pub(super) struct OwnedCountProjection<'region, 'plan> {
+    prepared: PreparedCounts<'region, &'plan OwnedCountChange>,
+    identity: CountProjectionIdentity,
+}
+
+impl<'plan> OwnedCountProjection<'_, 'plan> {
+    /// Applies checked local updates and returns their dispositions with a completion proof.
+    ///
+    /// Preserves each original entry by reference. Inserting a missing local count may allocate.
+    /// Produces a proof only after all selected updates succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`HeaderCount::set`]. Earlier local updates remain applied on error.
+    pub(super) fn apply(
+        self,
+    ) -> Result<
+        (
+            CountDisposition<&'plan OwnedCountChange>,
+            CountProjectionProof,
+        ),
+        HeaderCountError,
+    > {
+        let Self { prepared, identity } = self;
+        Ok((prepared.apply()?, CountProjectionProof { identity }))
+    }
+}
+
+/// Successful local count application associated with its owned preflight.
+///
+/// For changed work, the caller must return this proof to its originating preflight. Empty or
+/// entirely unchanged batches have no protected updates or identity allocation. Source freshness
+/// and publication require separate proof.
+pub(in crate::edit) struct CountProjectionProof {
+    identity: CountProjectionIdentity,
+}
+
+impl CountProjectionProof {
+    /// Returns whether `identity` has the same changed preflight association.
+    ///
+    /// Two absent associations compare equal.
+    pub(in crate::edit) fn matches(&self, identity: &CountProjectionIdentity) -> bool {
+        self.identity.same(identity)
     }
 }
 
@@ -262,7 +385,7 @@ struct CountValues {
 
 /// An inconsistent association or count, or invalid framing in a prepared region.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum CountProjectionError {
+pub(in crate::edit) enum CountProjectionError {
     /// A supported local count different from the original source-bound count.
     Original {
         object: ObjectId,
@@ -272,14 +395,31 @@ pub(super) enum CountProjectionError {
         actual: u32,
     },
     /// A predecessor associated with a different analysis phase.
-    Phase { object: ObjectId },
+    Phase {
+        /// The physical identity of the prepared predecessor.
+        object: ObjectId,
+    },
+    /// A local completion proof from a different changed preflight.
+    Preflight,
+    /// A changed target's actual reconstruction disposition differs from preflight.
+    Reconstruction {
+        /// The physical identity of the changed target.
+        object: ObjectId,
+        /// Whether preflight excluded the target as reconstructed.
+        expected: bool,
+        /// Whether the target has a matched owned replacement region.
+        actual: bool,
+    },
     /// Invalid local framing for a matched source object.
     Region {
         object: ObjectId,
         error: HeaderCountError,
     },
     /// Multiple prepared regions for the same source object.
-    Repeated { object: ObjectId },
+    Repeated {
+        /// The physical identity supplied by multiple prepared predecessors.
+        object: ObjectId,
+    },
 }
 
 #[cfg(test)]
