@@ -2,7 +2,7 @@ use core::num::NonZeroU64;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
-use hdf5_pure_space::__private::SessionSpace;
+use hdf5_pure_space::__private::{Extent, SessionSpace};
 use rstest::rstest;
 
 use crate::FileLocking;
@@ -12,7 +12,9 @@ use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::UserblockSize;
-use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
+use crate::address::{
+    AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
+};
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
@@ -24,6 +26,7 @@ use crate::reader::File;
 use crate::source::MetadataCacheConfig;
 use crate::source::Source;
 use crate::type_builders::DatasetBuilder;
+use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 
 use super::WriteEngine;
@@ -32,6 +35,101 @@ use super::{AggregateSpace, AllocationClass, Placement};
 mod fsm;
 mod immediate;
 mod persistent;
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 65_535)]
+#[case::four(OffsetWidth::Four, 4_294_967_295)]
+fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
+    #[case] offsets: OffsetWidth,
+    #[case] undefined: u64,
+    #[values(0, 512)] base: u64,
+    #[values(AggregateWindows::Empty, AggregateWindows::Occupied)] windows: AggregateWindows,
+) {
+    let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+    let start = undefined - base - 1024;
+    let (mut aggregation, size) = match windows {
+        AggregateWindows::Empty => (AggregateSpace::new(StoredAddress::new(start)), 1),
+        AggregateWindows::Occupied => {
+            let mut aggregation = AggregateSpace::new(StoredAddress::new(start - 4096));
+            aggregation
+                .reserve_with(
+                    offsets,
+                    addresses,
+                    NonZeroU64::new(2000).unwrap(),
+                    AllocationClass::Metadata,
+                    |_, _| panic!("initial metadata reservation releases no spare"),
+                )
+                .unwrap();
+            aggregation
+                .reserve_with(
+                    offsets,
+                    addresses,
+                    NonZeroU64::new(64).unwrap(),
+                    AllocationClass::Raw,
+                    |_, _| panic!("initial raw reservation releases no spare"),
+                )
+                .unwrap();
+            assert_eq!(aggregation.eoa().get(), start);
+            assert_eq!(
+                aggregation.unused().collect::<Vec<_>>(),
+                [
+                    Extent::new(StoredAddress::new(start - 2096), 48).unwrap(),
+                    Extent::new(StoredAddress::new(start - 1984), 1984).unwrap(),
+                ]
+            );
+            (aggregation, 64)
+        }
+    };
+    let before = aggregation;
+    let mut control = aggregation;
+    let mut released = Vec::new();
+    let placement = control
+        .reserve_with(
+            OffsetWidth::Eight,
+            addresses,
+            NonZeroU64::new(size).unwrap(),
+            AllocationClass::Metadata,
+            |eoa, extent| {
+                released.push((eoa, extent));
+                true
+            },
+        )
+        .unwrap();
+    assert_eq!(placement.address(), base + start);
+    assert_eq!(placement.len(), size);
+    assert_eq!(control.eoa().get(), start + 2048);
+    assert_eq!(
+        released,
+        match windows {
+            AggregateWindows::Empty => Vec::new(),
+            AggregateWindows::Occupied => vec![(
+                StoredAddress::new(start + 2048),
+                Extent::new(StoredAddress::new(start - 2096), 48).unwrap()
+            )],
+        }
+    );
+    let mut releases = 0;
+    let error = aggregation
+        .reserve_with(
+            offsets,
+            addresses,
+            NonZeroU64::new(size).unwrap(),
+            AllocationClass::Metadata,
+            |_, _| {
+                releases += 1;
+                true
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::AddressTooLarge {
+        address, offset_size,
+    }) if address == undefined + 1024 - base && offset_size == offsets.get()),
+        "{error:?}"
+    );
+    assert_eq!(aggregation, before);
+    assert_eq!(releases, 0);
+}
 
 #[rstest]
 #[case::segregation(
@@ -504,14 +602,20 @@ impl AggregateSpace {
         size: NonZeroU64,
         class: AllocationClass,
     ) -> Result<Placement, Error> {
-        self.reserve_with(addresses, size, class, |eoa, released| {
-            if let Some((post, _)) = space.flat_post_free(eoa, [released]) {
-                space.adopt_flat_post_free(post);
-                true
-            } else {
-                false
-            }
-        })
+        self.reserve_with(
+            OffsetWidth::Eight,
+            addresses,
+            size,
+            class,
+            |eoa, released| {
+                if let Some((post, _)) = space.flat_post_free(eoa, [released]) {
+                    space.adopt_flat_post_free(post);
+                    true
+                } else {
+                    false
+                }
+            },
+        )
     }
 }
 
@@ -529,4 +633,10 @@ impl WriteEngine {
             .reserve(self.context.addresses(), &mut self.space, size, class)
             .map(Some)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AggregateWindows {
+    Empty,
+    Occupied,
 }

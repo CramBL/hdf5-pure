@@ -2,18 +2,93 @@ use core::cell::Cell;
 use std::io::ErrorKind;
 
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::{ManagerKind, PageType, ReservationWork, SessionSpace};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use hdf5_pure_space::__private::ReservationWork;
+use hdf5_pure_space::__private::{ManagerKind, PageType, SessionSpace};
 use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::allocation;
 
 use crate::FileSpacePageSize;
 use crate::FileSpaceStrategy;
-use crate::address::{StoredAddress, StoredAddressExt};
+use crate::address::{
+    AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
+};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 use crate::edit::reservation::{ReservationChoice, ReservationFailure};
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
+use crate::width::OffsetWidth;
+
+#[rstest]
+#[case::exact(0)]
+#[case::sentinel(1)]
+#[case::beyond(2)]
+fn preferred_reuse_checks_complete_narrow_capacity_and_retains_ownership(
+    #[case] beyond: u64,
+    #[values(OffsetWidth::Two, OffsetWidth::Four)] offsets: OffsetWidth,
+    #[values(0, 512)] base: u64,
+) {
+    let undefined = StoredAddress::undefined(offsets).get();
+    let end = undefined - 1 + beyond;
+    let stored = end - base - 64;
+    let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+    let request = BlockRequest::new(
+        super::request(64, PageType::Raw),
+        16,
+        EncodingDependency::Independent,
+    )
+    .unwrap();
+    assert!(base + stored + request.encoded_length() < undefined);
+    let mut space = super::flat(&[(stored, 64)]);
+    let mut batch = space.reservation_batch(1);
+    let reservation = batch.reserve(request.reservation()).unwrap();
+    batch.finish();
+    let mut unresolved = None;
+    let result =
+        super::ReservationPlan::reused(addresses, offsets, reservation, request, &mut unresolved);
+    if beyond == 0 {
+        let planned = result.unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(planned.range().start().get(), base + stored);
+        assert_eq!(planned.range().end().get(), end);
+        assert_eq!(planned.block.encoding().length(), 16);
+        assert!(unresolved.is_none());
+    } else {
+        let Err(Error::Format(error)) = result else {
+            panic!("expected a narrow-capacity format error")
+        };
+        assert_eq!(
+            error,
+            if beyond == 1 {
+                FormatError::DefinedAddressIsUndefined {
+                    address: end,
+                    offset_size: offsets.get(),
+                }
+            } else {
+                FormatError::AddressTooLarge {
+                    address: end,
+                    offset_size: offsets.get(),
+                }
+            }
+        );
+        assert_eq!(
+            unresolved.as_ref().map(|reservation| reservation.extent()),
+            Some(super::extent(stored, 64))
+        );
+        let planned = super::ReservationPlan::reused(
+            addresses,
+            OffsetWidth::Eight,
+            unresolved.take().unwrap(),
+            request,
+            &mut unresolved,
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(planned.range().start().get(), base + stored);
+        assert_eq!(planned.range().end().get(), end);
+        assert!(unresolved.is_none());
+    }
+    assert_eq!(space.reusable_sections().collect::<Vec<_>>(), []);
+}
 
 #[rstest]
 #[case::preferred(64, ReservationChoice::Preferred, &[0, 16, 48][..], 0)]
