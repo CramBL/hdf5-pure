@@ -21,7 +21,7 @@ use crate::object_path::ObjectPathBuf;
 
 use super::LinkRemovalPlan;
 
-mod source;
+pub(in crate::edit::analysis::deletions::counts) mod source;
 
 #[rstest]
 #[case::one_alias(&["first"], 1)]
