@@ -520,12 +520,6 @@ fn inspect_deferred_pair(path: &Path, header: usize) -> Result<bool, String> {
         .index_block()
         .expect("a published header has its complete index block");
     let range = index.range();
-    if range.start() != array.range().end() {
-        return Err(format!(
-            "index {range:?} does not follow header {:?}",
-            array.range()
-        ));
-    }
     index
         .parse(
             FileRegion::new(
@@ -537,26 +531,59 @@ fn inspect_deferred_pair(path: &Path, header: usize) -> Result<bool, String> {
         )
         .map_err(|error| error.to_string())?;
     let file = crate::File::open(path).map_err(|error| error.to_string())?;
-    if range.end().get() > file.superblock().eof_address {
+    let page = file
+        .file_space_settings()
+        .map_err(|error| error.to_string())?
+        .filter(|settings| settings.strategy() == FileSpaceStrategy::Page)
+        .map(|settings| settings.page_size().get());
+    if header_range.overlaps(range) {
+        return Err(format!("header {header_range:?} overlaps index {range:?}"));
+    }
+    if page.is_none() && header_range.end() != range.start() {
         return Err(format!(
-            "published pair ends at {} past EOF {}",
-            range.end().get(),
-            file.superblock().eof_address
+            "index {range:?} does not follow header {header_range:?}"
         ));
     }
-    for section in file
+    let sections = file
         .persisted_free_sections()
         .map_err(|error| error.to_string())?
-        .unwrap()
-        .free_sections()
-        .sections()
-    {
-        if section.end_address().get() > header_range.start().get()
-            && range.end().get() > section.address().get()
-        {
+        .unwrap();
+    let chunks = file
+        .dataset("d")
+        .and_then(|dataset| dataset.chunks())
+        .map_err(|error| error.to_string())?;
+    for allocation in [header_range, range] {
+        if allocation.end().get() > file.superblock().eof_address {
             return Err(format!(
-                "published pair {header_range:?}..{range:?} overlaps {section:?}"
+                "allocation {allocation:?} exceeds EOF {}",
+                file.superblock().eof_address
             ));
+        }
+        for section in sections.free_sections().sections() {
+            if section.address().get() < allocation.end().get()
+                && allocation.start().get() < section.end_address().get()
+            {
+                return Err(format!("allocation {allocation:?} overlaps {section:?}"));
+            }
+        }
+        if let Some(page) = page {
+            let start = allocation.start().get();
+            let last = allocation.end().get() - 1;
+            if (allocation.length() < page && start / page != last / page)
+                || (allocation.length() >= page && start % page != 0)
+            {
+                return Err(format!(
+                    "allocation {allocation:?} has invalid metadata page placement"
+                ));
+            }
+            for chunk in &chunks {
+                let raw_last = chunk.address + chunk.storage_size - 1;
+                if start / page <= raw_last / page && chunk.address / page <= last / page {
+                    return Err(format!(
+                        "allocation {allocation:?} shares a page with {chunk:?}"
+                    ));
+                }
+            }
         }
     }
     file.close().map_err(|error| error.to_string())?;

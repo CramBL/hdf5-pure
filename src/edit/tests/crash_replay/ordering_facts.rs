@@ -244,13 +244,13 @@ impl DatasetGeometry {
         let skip = if before.index.is_empty() {
             let header = self.index[0];
             let index = self.index[1];
-            assert_eq!(header.end(), index.start());
-            allocations.push(Allocation {
-                range: FileRange::new(header.start(), index.end().get() - header.start().get())
-                    .unwrap(),
+            assert!(!header.overlaps(index));
+            allocations.extend([header, index].map(|range| Allocation {
+                range,
                 fields: vec![self.layout_pointer],
+                reference_address: header.start(),
                 kind: AllocationKind::Index,
-            });
+            }));
             2
         } else {
             0
@@ -294,6 +294,7 @@ impl DatasetGeometry {
             allocations.push(Allocation {
                 range,
                 fields,
+                reference_address: range.start(),
                 kind: if self.index.contains(&range) {
                     AllocationKind::Index
                 } else {
@@ -308,12 +309,14 @@ impl DatasetGeometry {
 struct Allocation {
     range: FileRange,
     fields: Vec<FileRange>,
+    /// The address stored in `fields`, including a header reference for its index block.
+    reference_address: PhysicalAddress,
     kind: AllocationKind,
 }
 
 impl Allocation {
     fn first_reference(&self, recording: &Recording) -> usize {
-        let address = self.range.start().get().to_le_bytes();
+        let address = self.reference_address.get().to_le_bytes();
         recording
             .events
             .iter()
