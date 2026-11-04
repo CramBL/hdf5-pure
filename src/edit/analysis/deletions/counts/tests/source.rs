@@ -36,6 +36,8 @@ use super::super::PlannedDeletion;
 use super::super::SourceCountState;
 use super::super::SourceRemovalPlan;
 
+mod added;
+
 #[rstest]
 #[case::one(&["first"], 1)]
 #[case::final_aliases(&["first", "second"], 0)]
