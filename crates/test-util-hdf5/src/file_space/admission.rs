@@ -185,7 +185,10 @@ impl Chain {
 /// A source file with contiguous chunks, an eligible seed, and a surviving dataset.
 ///
 /// Native files have a separate seed allocation after the chunks. Pure flat files have an
-/// adjacent chunk-index allocation, and pure PAGE files have a separate seed before the chunks.
+/// adjacent chunk-index allocation.
+///
+/// Pure PAGE files have a separate seed before the chunks. Their complete array blocks precede
+/// the seed, fit within one page when smaller than a page, and otherwise start at page boundaries.
 pub struct Fixture {
     seed: Option<&'static str>,
     chain: Chain,
@@ -202,7 +205,7 @@ impl Fixture {
     ///
     /// # Panics
     ///
-    /// Panics if a file operation fails, chunk count, size, or adjacency differs from `chain`,
+    /// Panics if a file operation fails, allocation geometry differs from the selected fixture,
     /// or native reads report different dataset values.
     ///
     /// # Examples
@@ -248,6 +251,7 @@ impl Fixture {
             .into_iter()
             .map(|chunk| Interval::new(chunk.address, chunk.storage_size).unwrap())
             .collect::<Vec<_>>();
+        let keep = file_space::contiguous_extent(&file, "keep");
         let seed = match origin {
             Origin::Native => {
                 let seed = file_space::contiguous_extent(&file, "seed");
@@ -262,7 +266,6 @@ impl Fixture {
                     u64::try_from(bytes::sole_signature(&image, &FIXED_ARRAY_HEADER_SIGNATURE))
                         .unwrap(),
                 );
-                assert_eq!(address.get(), end);
                 let header = FixedArrayHeaderLocator::new(
                     FormatWidths {
                         offsets: file.superblock().offset_size,
@@ -287,6 +290,7 @@ impl Fixture {
                 assert_eq!(block.start(), header.range().end());
                 match chain {
                     Chain::Flat { .. } => {
+                        assert_eq!(address.get(), end);
                         assert!(block.length() >= chain.threshold());
                         expected_reclaimed.extend([header.range(), block].map(|range| {
                             Interval::new(range.start().get(), range.length()).unwrap()
@@ -297,6 +301,26 @@ impl Fixture {
                         let seed = file_space::contiguous_extent(&file, "anchor");
                         assert_eq!(seed.end, first);
                         assert_eq!(seed.end - seed.start, chain.threshold());
+                        let page = file
+                            .file_space_settings()
+                            .unwrap()
+                            .unwrap()
+                            .page_size()
+                            .get();
+                        for range in [header.range(), block] {
+                            assert!(range.end().get() <= seed.start);
+                            assert!(
+                                range.end().get() <= keep.start || keep.end <= range.start().get()
+                            );
+                            if range.length() < page {
+                                assert_eq!(
+                                    range.start().get() / page,
+                                    (range.end().get() - 1) / page
+                                );
+                            } else {
+                                assert_eq!(range.start().get() % page, 0);
+                            }
+                        }
                         expected_reclaimed
                             .push(Interval::new(seed.start, seed.end - seed.start).unwrap());
                         Some("anchor")
@@ -319,7 +343,6 @@ impl Fixture {
                     .unwrap()
                 }),
         );
-        let keep = file_space::contiguous_extent(&file, "keep");
         let survivor = Coverage::new([Interval::new(keep.start, keep.end - keep.start).unwrap()]);
         file.close().unwrap();
         let native = hdf5::File::open(path).unwrap();
