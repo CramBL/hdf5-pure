@@ -1870,6 +1870,7 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
 #[test]
 fn a_commit_after_an_append_preserves_published_raw_page_tails() {
     const PAGE: u64 = 4096;
+    const END: i32 = 1900;
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_interleave.h5");
     let mut b = crate::writer::FileBuilder::new();
@@ -1888,7 +1889,7 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
 
     let mut engine = WriteEngine::open_with_locking(&p, FileLocking::Enabled).unwrap();
     let mut ab = AppendBuilder::new();
-    ab.append_i32(&(64..2000).collect::<Vec<_>>());
+    ab.append_i32(&(64..END).collect::<Vec<_>>());
     engine
         .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab, 4)
         .unwrap();
@@ -1904,6 +1905,13 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
         "ownership publication pads complete PAGE allocations"
     );
 
+    let before = engine.space.paged_sections().unwrap().raw().to_vec();
+    assert!(
+        !before.is_empty(),
+        "the append must leave a reusable raw tail"
+    );
+    assert_eq!(before.iter().map(|extent| extent.len()).sum::<u64>(), 512);
+
     engine.create_group(&ObjectPathBuf::parse("g")).unwrap();
     engine.commit().unwrap();
     let raw_free = engine
@@ -1916,6 +1924,7 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
         !raw_free.is_empty(),
         "the commit packed metadata into the raw page the append left open"
     );
+    assert_eq!(raw_free, before);
     for extent in raw_free {
         assert_eq!(
             extent.end().get() % PAGE,
@@ -1934,7 +1943,7 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
             .unwrap()
             .read_i32()
             .unwrap(),
-        (0..2000).collect::<Vec<_>>()
+        (0..END).collect::<Vec<_>>()
     );
 }
 
