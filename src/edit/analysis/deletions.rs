@@ -21,6 +21,7 @@ use super::CompleteTopology;
 use super::counts::CountQueries;
 
 pub(in crate::edit) use counts::DeclaredCountChange;
+pub(in crate::edit) use counts::NetCountPlan;
 pub(in crate::edit) use counts::SourceRemovalPlan;
 
 #[cfg_attr(

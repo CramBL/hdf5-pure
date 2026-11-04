@@ -35,6 +35,7 @@ use super::reclaim::{self, MAX_LINK_WALK_DEPTH};
 use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
 pub(super) use deletions::DeclaredCountChange;
+pub(super) use deletions::NetCountPlan;
 pub(super) use deletions::PlannedDeletion;
 pub(super) use deletions::SourceRemovalPlan;
 

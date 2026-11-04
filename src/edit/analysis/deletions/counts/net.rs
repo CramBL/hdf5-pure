@@ -1,6 +1,7 @@
 //! Combined declared-count projections for supplied copy users and original hard-link removals.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 
@@ -159,6 +160,16 @@ impl<'phase, 'source> NetCountPlan<'phase, 'source> {
     /// Borrows the original-root phase origin, or returns `None` for an empty plan.
     pub(in crate::edit) fn source(&self) -> Option<&ReconstructionSource> {
         self.source.as_ref()
+    }
+
+    /// Returns whether the reconstruction origin has this plan's shared phase identity.
+    ///
+    /// Returns `false` for an empty plan. Object identity, source freshness, and allocation
+    /// ownership are separate conditions.
+    pub(in crate::edit) fn shares_phase(&self, source: &ReconstructionSource) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|origin| Arc::ptr_eq(&origin.identity, &source.identity))
     }
 
     /// Borrows the compatible removal view, or returns `None` for empty deletion input.
