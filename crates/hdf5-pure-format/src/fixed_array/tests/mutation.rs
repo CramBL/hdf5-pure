@@ -33,6 +33,211 @@ use crate::width::OffsetWidth;
 #[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
 #[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
 #[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn initialized_page_emission_matches_independent_bytes(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(false, true)] filtered: bool,
+    #[values(0, 16)] first: u64,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let client = if filtered {
+        fixture::Client::Filtered { size_bytes: 2 }
+    } else {
+        fixture::Client::Plain
+    };
+    let plan = FixedArrayPlan::new(17, CHUNK_BYTES, widths, filtered)
+        .unwrap()
+        .with_page_bits(PAGE_BITS)
+        .unwrap();
+    let placed = plan
+        .place(StoredAddress::new(HEADER_AT), StoredAddress::new(DATA_AT))
+        .unwrap();
+    let encoded_header = placed.serialize_header().unwrap();
+    assert_eq!(
+        encoded_header,
+        fixture::header(fixture_widths(widths), client, PAGE_BITS, 17, Some(DATA_AT))
+    );
+    let header = parse_header(widths, 0, &encoded_header);
+    let block = header.data_block().unwrap();
+    let page = block.page_for_slot(first).unwrap().unwrap();
+    let slot = if first == 0 { 7 } else { 16 };
+    let record = ChunkRecord {
+        address: StoredAddress::new(0x3456),
+        stored_size: 255,
+        filter_mask: 0x1122_3344,
+    };
+    let window = page
+        .window(slot, NonZeroUsize::new(1).unwrap())
+        .unwrap()
+        .unwrap();
+    let mut output = Vec::new();
+    page.emit_records::<FormatError>(&window, &[Some(record)], |bytes| {
+        output.extend_from_slice(bytes);
+        Ok(())
+    })
+    .unwrap();
+    let slots = page.slots().unwrap();
+    let mut records = vec![None; usize::try_from(slots.end - slots.start).unwrap()];
+    records[usize::try_from(slot - slots.start).unwrap()] = Some(fixture::Entry {
+        address: record.address.get(),
+        stored_size: record.stored_size,
+        filter_mask: record.filter_mask,
+    });
+    assert_eq!(
+        output,
+        fixture::page(fixture_widths(widths), client, &records)
+    );
+    let mut field = [0xcc; 32];
+    let length = header
+        .initialization_plan()
+        .unwrap()
+        .encode_record(&mut field, Some(record))
+        .unwrap();
+    assert_eq!(
+        &field[..length],
+        &fixture::page(
+            fixture_widths(widths),
+            client,
+            &[Some(fixture::Entry {
+                address: record.address.get(),
+                stored_size: record.stored_size,
+                filter_mask: record.filter_mask,
+            })]
+        )[..length]
+    );
+    assert_eq!(field[length], 0xcc);
+    assert_eq!(
+        page.checksummed_range().unwrap().end(),
+        page.checksum_range().unwrap().start()
+    );
+    assert_eq!(
+        block.checksummed_range().unwrap().end(),
+        block.checksum_range().unwrap().start()
+    );
+}
+
+#[rstest]
+#[case::size(Some(ChunkRecord { address: StoredAddress::new(32), stored_size: 65_536, filter_mask: 0 }), FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
+#[case::sentinel(Some(ChunkRecord { address: StoredAddress::new(65_535), stored_size: 1, filter_mask: 0 }), FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
+#[case::address(Some(ChunkRecord { address: StoredAddress::new(65_536), stored_size: 1, filter_mask: 0 }), FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
+fn page_emission_rejects_a_later_record_before_writing(
+    #[case] record: Option<ChunkRecord>,
+    #[case] expected: FormatError,
+) {
+    let widths = FormatWidths::from_sizes(2, 8).unwrap();
+    let header = parse_header(
+        widths,
+        0,
+        &fixture::header(
+            fixture_widths(widths),
+            fixture::Client::Filtered { size_bytes: 2 },
+            PAGE_BITS,
+            17,
+            Some(DATA_AT),
+        ),
+    );
+    let page = header
+        .data_block()
+        .unwrap()
+        .page_for_slot(0)
+        .unwrap()
+        .unwrap();
+    let window = page
+        .window(7, NonZeroUsize::new(2).unwrap())
+        .unwrap()
+        .unwrap();
+    let mut calls = 0;
+    let error = page
+        .emit_records::<FormatError>(&window, &[None, record], |_| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(error, expected);
+    assert_eq!(calls, 0);
+    page.emit_records::<FormatError>(
+        &window,
+        &[
+            None,
+            Some(ChunkRecord {
+                address: StoredAddress::new(65_534),
+                stored_size: 65_535,
+                filter_mask: u32::MAX,
+            }),
+        ],
+        |_| {
+            calls += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(calls > 0);
+}
+
+#[test]
+fn initialized_page_emission_bounds_its_windows() {
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let header = parse_header(
+        widths,
+        0,
+        &fixture::header(
+            fixture_widths(widths),
+            fixture::Client::Plain,
+            16,
+            65_537,
+            Some(DATA_AT),
+        ),
+    );
+    let page = header
+        .data_block()
+        .unwrap()
+        .page_for_slot(65_000)
+        .unwrap()
+        .unwrap();
+    let window = page
+        .window(65_000, NonZeroUsize::new(1).unwrap())
+        .unwrap()
+        .unwrap();
+    let mut total = 0;
+    let mut calls = 0;
+    let mut maximum = 0;
+    page.emit_records::<FormatError>(
+        &window,
+        &[Some(ChunkRecord {
+            address: StoredAddress::new(32),
+            stored_size: CHUNK_BYTES,
+            filter_mask: 0,
+        })],
+        |bytes| {
+            total += bytes.len() as u64;
+            calls += 1;
+            maximum = maximum.max(bytes.len());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!((total, calls, maximum), (524_292, 131, 4_096));
+    let mut calls = 0;
+    let error = page
+        .emit_records::<FormatError>(&window, &[None], |_| {
+            calls += 1;
+            Err(FormatError::InvalidFixedArrayClient(99))
+        })
+        .unwrap_err();
+    assert_eq!(error, FormatError::InvalidFixedArrayClient(99));
+    assert_eq!(calls, 1);
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
 fn empty_emission_preserves_parsed_geometry_and_independent_widths(
     #[case] offsets: OffsetWidth,
     #[case] lengths: LengthWidth,

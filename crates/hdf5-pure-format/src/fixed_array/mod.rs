@@ -335,14 +335,37 @@ impl FixedArrayDataBlockRef {
         Ok(FixedArrayUnpaged { block: *self })
     }
 
-    fn prefix_range(&self) -> Result<FileRange, FormatError> {
+    /// Returns the fixed signature, version, client, and header-address prefix range.
+    ///
+    /// Excludes entry bytes, the page bitmap, and checksums. Version 0 blocks are defined in
+    /// "The Fixed Array Index" of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the physical range overflows.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_fixedarr
+    pub fn prefix_range(&self) -> Result<FileRange, FormatError> {
         FileRange::new(
             self.range.start(),
             data_block_prefix_len(self.geometry.encoding.offsets()),
         )
     }
 
-    fn parse_prefix(&self, region: FileRegion<'_>) -> Result<(), FormatError> {
+    /// Checks the version 0 signature, client, and owner in a data-block prefix.
+    ///
+    /// The caller verifies the checksum separately with [`Self::checksummed_range`] and
+    /// [`Self::checksum_range`]. Accepts paged and unpaged blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] for a missing prefix,
+    /// [`FormatError::InvalidFixedArraySignature`] for a signature other than `FADB`,
+    /// [`FormatError::InvalidFixedArrayVersion`] for a version other than 0,
+    /// [`FormatError::InvalidFixedArrayBlockClient`] for a different client, or
+    /// [`FormatError::InvalidFixedArrayBlockOwner`] for a different owner. Propagates range and
+    /// address-conversion errors.
+    pub fn parse_prefix(&self, region: FileRegion<'_>) -> Result<(), FormatError> {
         let Self {
             base,
             header,

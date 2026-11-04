@@ -118,6 +118,34 @@ pub fn empty_data_block(
     output
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Entry {
+    pub address: u64,
+    pub stored_size: u64,
+    pub filter_mask: u32,
+}
+
+pub fn page(widths: Widths, client: Client, records: &[Option<Entry>]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for record in records {
+        bytes::push_address(
+            &mut output,
+            record.map(|record| record.address),
+            widths.offset,
+        );
+        if let Client::Filtered { size_bytes } = client {
+            bytes::push_uint(
+                &mut output,
+                record.map_or(0, |record| record.stored_size),
+                usize::from(size_bytes),
+            );
+            output.extend_from_slice(&record.map_or(0, |record| record.filter_mask).to_le_bytes());
+        }
+    }
+    checksum::append(&mut output);
+    output
+}
+
 /// The signature of a version 0 Fixed Array header.
 pub const HEADER_SIGNATURE: &[u8; 4] = b"FAHD";
 /// The signature of a version 0 Fixed Array data block.
