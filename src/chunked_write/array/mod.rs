@@ -134,6 +134,8 @@ impl ArrayMeasure {
                 let mut bytes = Vec::new();
                 for block in encoding.blocks() {
                     block.encode_into(&mut bytes)?;
+                    #[cfg(all(test, feature = "std"))]
+                    crate::edit::observations::record_array_encoding(bytes.len());
                     emit(block.address(), &bytes).map_err(EmissionError::Sink)?;
                 }
                 Ok(())
@@ -146,6 +148,8 @@ impl ArrayMeasure {
                     .into());
                 };
                 for (address, bytes) in plan.place(*header, *data)?.serialize_blocks(slots)? {
+                    #[cfg(all(test, feature = "std"))]
+                    crate::edit::observations::record_array_encoding(bytes.len());
                     emit(address, &bytes).map_err(EmissionError::Sink)?;
                 }
                 Ok(())
@@ -235,6 +239,8 @@ impl ArrayMeasure {
     ///
     /// Propagates errors from [`ExtensibleArrayPlan::new`] and [`FixedArrayPlan::new`].
     fn plan(geometry: ChunkArrayGeometry<'_>) -> Result<Self, FormatError> {
+        #[cfg(all(test, feature = "std"))]
+        crate::edit::observations::record_array_plan();
         let ChunkArrayGeometry {
             widths,
             kind,

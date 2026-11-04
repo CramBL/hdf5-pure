@@ -752,7 +752,9 @@ impl ChunkArrayKind {
         has_filters: bool,
         address: StoredAddress,
     ) -> Result<Vec<u8>, FormatError> {
-        match self {
+        #[cfg(all(test, feature = "std"))]
+        crate::edit::observations::record_array_plan();
+        let encoded = match self {
             Self::ExtensibleArray => hdf5_pure_format::__private::build_extensible_array_at(
                 slots,
                 chunk_bytes,
@@ -769,7 +771,12 @@ impl ChunkArrayKind {
                 has_filters,
                 address,
             ),
+        };
+        #[cfg(all(test, feature = "std"))]
+        if let Ok(bytes) = &encoded {
+            crate::edit::observations::record_array_encoding(bytes.len());
         }
+        encoded
     }
 }
 

@@ -9,6 +9,8 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
 use hdf5_pure_space::__private as free_space;
+#[cfg(test)]
+use hdf5_pure_space::__private::ReservationWork;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;
 use hdf5_pure_space::__private::{
@@ -23,6 +25,8 @@ use crate::edit::SyncPolicy;
 use crate::edit::context::SuperblockPublication;
 use crate::edit::free_snapshot::{FlatProjection, FlatTailLayout};
 use crate::edit::object_header;
+#[cfg(test)]
+use crate::edit::observations;
 use crate::edit::retirement::{PendingRootFrees, RootRetirement};
 use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, WriteEngine};
 use crate::edit::{PersistState, paged_persistence};
@@ -561,6 +565,12 @@ impl WriteEngine {
         ))?;
         let new_old_blocks = vec![region];
 
+        #[cfg(test)]
+        observations::record_width_reservations(
+            1,
+            ReservationWork::default(),
+            final_eof.get().saturating_sub(self.image.len()),
+        );
         // The extension and manager blocks remain unreferenced until superblock publication.
         self.write_tail_block(region, ext_addr, &ext_oh)?;
         for block in plan.encode(region.end())? {
@@ -680,6 +690,8 @@ impl WriteEngine {
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
+            #[cfg(test)]
+            observations::record_allocation_probe();
             let allocation = if let Some(limit) = limit {
                 self.space.allocate_flat_below(proposed, limit)
             } else {
@@ -862,6 +874,15 @@ impl WriteEngine {
         let final_eof = base.resolve(final_eoa)?;
 
         if reused {
+            #[cfg(test)]
+            let reserved = {
+                let mut batch = self.space.reservation_batch(1);
+                observations::record_allocation_probe();
+                let reserved = batch.reserve(tail.reservation_request());
+                observations::record_width_reservations(1, batch.work(), 0);
+                reserved
+            };
+            #[cfg(not(test))]
             let reserved = self
                 .space
                 .reservation_batch(1)
@@ -873,6 +894,12 @@ impl WriteEngine {
                 .into());
             }
         } else {
+            #[cfg(test)]
+            observations::record_width_reservations(
+                1,
+                ReservationWork::default(),
+                final_eof.get().saturating_sub(self.image.len()),
+            );
             self.begin_page(PageType::Meta)?;
         }
         // Retain complete owned blocks for reclamation, excluding admitted free gaps.
