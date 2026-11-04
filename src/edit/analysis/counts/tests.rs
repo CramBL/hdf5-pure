@@ -104,7 +104,7 @@ fn an_observed_undercount_returns_a_structured_contradiction(
         CountEvidenceError::Contradiction(CountContradiction {
             object,
             observed: count.unwrap_or(1),
-            incoming
+            minimum: u64::from(incoming)
         })
     );
     assert_eq!(phase.topology().unwrap().incoming(address), Some(incoming));
@@ -142,18 +142,14 @@ fn untrusted_count_forms_preserve_topology_without_bound_evidence(#[case] ambigu
 
 #[rstest]
 #[case::incomplete(FactLimit::Topology)]
-#[case::root(FactLimit::Root)]
 #[case::outside(FactLimit::Outside)]
-fn missing_applicable_topology_or_nonroot_identity_supplies_no_count_evidence(
-    #[case] limit: FactLimit,
-) {
+fn count_evidence_requires_applicable_topology_and_object_identity(#[case] limit: FactLimit) {
     let path = test_util::temp::temp_path("incomplete-count-evidence.h5");
     let address = write_fixture(&path, Subject::Dataset, Some(1), 1);
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let object = ObjectId::new(PhysicalAddress::new(match limit {
         FactLimit::Outside => u64::MAX,
-        FactLimit::Root => Fixture::ROOT,
         FactLimit::Topology => address,
     }));
     if matches!(limit, FactLimit::Topology) {
@@ -169,6 +165,110 @@ fn missing_applicable_topology_or_nonroot_identity_supplies_no_count_evidence(
         phase.counts.len(),
         usize::from(matches!(limit, FactLimit::Topology))
     );
+}
+
+#[rstest]
+#[case::implicit(None, 0)]
+#[case::implicit_undercount(None, 1)]
+#[case::self_link(Some(2), 1)]
+#[case::two_links(Some(3), 2)]
+#[case::excess(Some(7), 2)]
+#[case::maximum(Some(u32::MAX), 1)]
+#[case::missing_superblock_reference(Some(1), 1)]
+#[case::undercount(Some(2), 2)]
+fn root_count_evidence_retains_the_superblock_reference(
+    #[case] count: Option<u32>,
+    #[case] links: u32,
+) {
+    let path = test_util::temp::temp_path("root-count-evidence.h5");
+    let mut fixture = match count {
+        Some(count) => Fixture::new().with_root_reference_count(NonZeroU32::new(count).unwrap()),
+        None => Fixture::new(),
+    };
+    for index in 0..links {
+        fixture.link(&format!("self{index}"), Fixture::ROOT);
+    }
+    fixture.write(&path);
+    let engine = edit_test_util::open_engine(&path);
+    let before = engine.disk_bytes().unwrap();
+    let root =
+        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
+    let mut phase = AnalysisPhase::new(&engine);
+    let original = count.unwrap_or(ROOT_REFERENCE_COUNT);
+    let minimum = u64::from(links) + u64::from(ROOT_REFERENCE_COUNT);
+    let result = phase.count_evidence(root);
+    if u64::from(original) < minimum {
+        let Err(error) = result else {
+            panic!("expected a root undercount")
+        };
+        assert_eq!(
+            error,
+            CountEvidenceError::Contradiction(CountContradiction {
+                object: root,
+                observed: original,
+                minimum
+            })
+        );
+    } else {
+        let Some(CountEvidence::Retained(bound)) = result.unwrap() else {
+            panic!("expected retained root evidence")
+        };
+        assert_eq!(bound.object(), root);
+        assert_eq!(bound.original(), original);
+        assert_eq!(bound.incoming(), links);
+        assert_eq!(bound.field().map(|field| field.value()), count);
+        let Some(CountEvidence::Retained(again)) = phase.count_evidence(root).unwrap() else {
+            panic!("expected cached retained root evidence")
+        };
+        assert_eq!(again.original(), bound.original());
+        assert_eq!(again.field(), bound.field());
+        let deletions = (0..links)
+            .map(|index| {
+                phase
+                    .topology()
+                    .unwrap()
+                    .deletion(&ObjectPathBuf::parse(&format!("self{index}")))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let plan = phase.source_count_plan(&deletions).unwrap();
+        if links == 0 {
+            assert!(plan.is_none());
+        } else {
+            let plan = plan.unwrap();
+            assert_eq!(plan.graph_remaining(root), Some(0));
+            assert_eq!(plan.declared_remaining(root), Some(original - links));
+            assert_eq!(plan.counted_zero_objects().count(), 0);
+            let changes = plan.changes().collect::<Vec<_>>();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].bound().original(), original);
+            assert_eq!(changes[0].remaining(), original - links);
+        }
+    }
+    assert_eq!(
+        phase
+            .topology()
+            .unwrap()
+            .incoming(root.header_address().get())
+            .unwrap_or(0),
+        links
+    );
+    assert_eq!(phase.counts.len(), 1);
+    assert_eq!(engine.disk_bytes().unwrap(), before);
+}
+
+#[rstest]
+#[case::empty(None, 0, 1)]
+#[case::one(Some(1), 1, 2)]
+#[case::maximum(Some(u32::MAX), u32::MAX, u64::from(u32::MAX) + 1)]
+fn root_count_minima_preserve_the_full_visible_count_range(
+    #[case] incoming: Option<u32>,
+    #[case] visible: u32,
+    #[case] minimum: u64,
+) {
+    let count = IncomingLinks::new(ObjectIndex::ROOT, incoming).unwrap();
+    assert_eq!(count.visible(), visible);
+    assert_eq!(count.minimum(), minimum);
 }
 
 #[test]
@@ -379,7 +479,6 @@ fn write_fixture(path: &Path, subject: Subject, count: Option<u32>, aliases: u32
 #[derive(Clone, Copy)]
 enum FactLimit {
     Outside,
-    Root,
     Topology,
 }
 

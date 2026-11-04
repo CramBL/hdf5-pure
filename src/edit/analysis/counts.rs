@@ -1,4 +1,4 @@
-//! Declared counts checked against visible hard-link counts within one source phase.
+//! Declared counts checked against visible hard links and the root's superblock reference.
 //!
 //! Header-subject classification and topology identity are retained with each bound. Allocation
 //! ownership, reference completeness, source freshness, and publication require separate proofs.
@@ -31,17 +31,18 @@ use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
 impl<'source> AnalysisPhase<'source> {
-    /// Returns a positive declared count consistent with this topology's visible lower bound.
+    /// Returns a positive declared count consistent with this topology's reference minimum.
     ///
-    /// Requires complete topology and a non-root object within it. Returns `None` for missing
-    /// applicable topology, root or outside objects, and ambiguous or unsupported observations.
-    /// Preserves excess counts and the original physical field, when present.
+    /// Requires complete topology and an object within it. Returns `None` for missing applicable
+    /// topology, outside objects, and ambiguous or unsupported observations. Includes the
+    /// superblock reference in the root's minimum and returns [`CountEvidence::Retained`] for
+    /// the root. Preserves excess counts and the original physical field, when present.
     /// Header-subject classification remains separate from the numeric bound.
     ///
     /// # Errors
     ///
-    /// Returns [`CountEvidenceError::Contradiction`] if the observed count is below the positive
-    /// visible incoming count, [`CountEvidenceError::Topology`] if a discovered non-root object
+    /// Returns [`CountEvidenceError::Contradiction`] if the observed count is below the applicable
+    /// minimum, [`CountEvidenceError::Topology`] if a discovered non-root object
     /// lacks a positive incoming count, or [`CountEvidenceError::Source`] for errors from
     /// [`Self::object_reference_count`].
     pub(in crate::edit) fn count_evidence(
@@ -111,7 +112,7 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
         self.summary(object).map(|summary| summary.count)
     }
 
-    /// Checks a source count against the original visible lower bound and subject classification.
+    /// Checks a source count against the original reference minimum and subject classification.
     ///
     /// Uses the numeric and applicability requirements of [`AnalysisPhase::count_evidence`].
     /// Engine identity is checked before producing evidence. Source-content validity remains
@@ -144,19 +145,13 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
         let Some(&index) = indices.get(&object) else {
             return Ok(None);
         };
-        if index == ObjectIndex::ROOT {
-            return Ok(None);
-        }
-        let Some(incoming) = incoming
-            .get(&object.header_address().get())
-            .copied()
-            .and_then(NonZeroU32::new)
-        else {
-            return Err(CountEvidenceError::Topology(FormatError::Internal(
-                "a discovered non-root object has no positive incoming count".into(),
-            )));
+        let incoming =
+            IncomingLinks::new(index, incoming.get(&object.header_address().get()).copied())?;
+        let subject = if index == ObjectIndex::ROOT {
+            None
+        } else {
+            graph.object(index).value.count_subject
         };
-        let subject = graph.object(index).value.count_subject;
         let identity = Arc::clone(identity);
         let source = *engine;
         if !std::ptr::eq(query_engine, source) {
@@ -178,18 +173,18 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
             }
         };
         let original = NonZeroU32::new(original)
-            .filter(|&count| count >= incoming)
+            .filter(|count| u64::from(count.get()) >= incoming.minimum())
             .ok_or(CountEvidenceError::Contradiction(CountContradiction {
                 object,
                 observed: original,
-                incoming: incoming.get(),
+                minimum: incoming.minimum(),
             }))?;
         let bound = ObjectReferenceBound {
             source,
             topology: identity,
             object,
             original,
-            incoming,
+            incoming: incoming.visible(),
             field,
             allocation,
         };
@@ -225,12 +220,12 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
 pub(in crate::edit) enum CountEvidence<'source> {
     /// A bound paired with a recognized dataset or group header shape.
     Ordinary(OrdinaryObjectCount<'source>),
-    /// A bound without a supported dataset or group subject classification.
+    /// A bound for the root or a header without a recognized dataset or group shape.
     Retained(ObjectReferenceBound<'source>),
 }
 
 impl<'source> CountEvidence<'source> {
-    /// Borrows the declared count and visible lower bound for either subject class.
+    /// Borrows the original declared count and visible incoming count for either subject class.
     pub(in crate::edit) fn bound(&self) -> &ObjectReferenceBound<'source> {
         match self {
             Self::Ordinary(ordinary) => &ordinary.bound,
@@ -255,8 +250,9 @@ impl OrdinaryObjectCount<'_> {
     }
 }
 
-/// A positive declared count at least as large as the visible incoming count in one topology.
+/// A positive declared count at least as large as the reference minimum in one topology.
 ///
+/// The minimum includes visible hard links and, for the root, the superblock reference.
 /// Retains the original value and physical field, or an implicit one without a field. Both the
 /// engine and topology identities are retained. Optional complete header allocation geometry is
 /// checked independently of the count and header-subject classification. References from outside
@@ -267,7 +263,7 @@ pub(in crate::edit) struct ObjectReferenceBound<'source> {
     topology: Arc<TopologyIdentity>,
     object: ObjectId,
     original: NonZeroU32,
-    incoming: NonZeroU32,
+    incoming: u32,
     field: Option<ObjectReferenceCountField>,
     allocation: Option<HeaderCountAllocation>,
 }
@@ -291,9 +287,11 @@ impl ObjectReferenceBound<'_> {
         self.original.get()
     }
 
-    /// Returns the positive incoming count in the matching root-reachable topology.
+    /// Returns the visible incoming count in the matching root-reachable topology.
+    ///
+    /// The root can have zero visible links. Its superblock reference is excluded from this count.
     pub(in crate::edit) fn incoming(&self) -> u32 {
-        self.incoming.get()
+        self.incoming
     }
 
     /// Returns the original physical count field, or `None` for an implicit one.
@@ -309,10 +307,58 @@ impl ObjectReferenceBound<'_> {
     }
 }
 
+/// Visible incoming links with a separate declared-count minimum for the root.
+#[derive(Clone, Copy)]
+enum IncomingLinks {
+    Object(NonZeroU32),
+    Root(u32),
+}
+
+impl IncomingLinks {
+    /// Establishes a positive visible count for a non-root object or a possibly zero root count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountEvidenceError::Topology`] if a non-root count is missing or zero.
+    fn new(index: ObjectIndex, incoming: Option<u32>) -> Result<Self, CountEvidenceError> {
+        if index == ObjectIndex::ROOT {
+            return Ok(Self::Root(incoming.unwrap_or(0)));
+        }
+        incoming
+            .and_then(NonZeroU32::new)
+            .map(Self::Object)
+            .ok_or_else(|| {
+                CountEvidenceError::Topology(FormatError::Internal(
+                    "a discovered non-root object has no positive incoming count".into(),
+                ))
+            })
+    }
+
+    /// Returns the visible hard-link count without the root's superblock reference.
+    fn visible(self) -> u32 {
+        match self {
+            Self::Object(count) => count.get(),
+            Self::Root(count) => count,
+        }
+    }
+
+    /// Returns the declared-count minimum, including the root's superblock reference.
+    fn minimum(self) -> u64 {
+        match self {
+            Self::Object(count) => u64::from(count.get()),
+            Self::Root(count) => u64::from(count) + u64::from(ROOT_REFERENCE_COUNT),
+        }
+    }
+}
+
+/// The additional declared reference to the root group from the superblock.
+// `H5G_mkroot` adds the superblock reference in `H5Groot.c`, HDF5 1.14.6.
+pub(in crate::edit) const ROOT_REFERENCE_COUNT: u32 = 1;
+
 /// A count contradiction, source observation failure, or internal topology inconsistency.
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::edit) enum CountEvidenceError {
-    /// An observed count below the positive visible incoming count.
+    /// An observed count below the visible-link minimum, including the root's superblock reference.
     Contradiction(CountContradiction),
     /// A parsing or source-read failure while observing the declared count.
     Source(FormatError),
@@ -330,9 +376,12 @@ impl From<FormatError> for CountEvidenceError {
 /// The physical object and counts that establish an observed undercount.
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::edit) struct CountContradiction {
+    /// The object whose declared count is insufficient.
     pub(in crate::edit) object: ObjectId,
+    /// The original declared count, including an implicit one.
     pub(in crate::edit) observed: u32,
-    pub(in crate::edit) incoming: u32,
+    /// The visible-link minimum, including the root's additional superblock reference.
+    pub(in crate::edit) minimum: u64,
 }
 
 /// A dataset or group message shape recognized from the already parsed header.

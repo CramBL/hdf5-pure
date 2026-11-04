@@ -1,4 +1,5 @@
 use core::cell::Cell;
+use core::num::NonZeroU32;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -236,7 +237,11 @@ fn only_eligible_zero_owners_release_their_remaining_child_edges(#[case] mode: O
 #[case::root(Cycle::Root)]
 fn source_count_transitions_keep_positive_cycles_and_exclude_root_candidates(#[case] mode: Cycle) {
     let path = test_util::temp::temp_path("source-cycle-counts.h5");
-    let mut fixture = Fixture::new();
+    let mut fixture = if mode == Cycle::Root {
+        Fixture::new().with_root_reference_count(NonZeroU32::new(2).unwrap())
+    } else {
+        Fixture::new()
+    };
     let child = dataset(&mut fixture, 1);
     let owner = u64::try_from(fixture.image.as_bytes().len()).unwrap();
     assert_eq!(
@@ -297,7 +302,10 @@ fn source_count_transitions_keep_positive_cycles_and_exclude_root_candidates(#[c
         Some(u32::from(mode == Cycle::Keep))
     );
     assert_eq!(plan.graph_remaining(id(Fixture::ROOT)), Some(0));
-    assert_eq!(plan.declared_remaining(id(Fixture::ROOT)), None);
+    assert_eq!(
+        plan.declared_remaining(id(Fixture::ROOT)),
+        if mode == Cycle::Root { Some(1) } else { None }
+    );
 }
 
 #[rstest]
@@ -497,7 +505,7 @@ fn source_planning_propagates_contradictions_and_source_failures() {
         CountEvidenceError::Contradiction(CountContradiction {
             object: id(target),
             observed: 1,
-            incoming: 2
+            minimum: 2
         })
     );
     let failure = FormatError::UnexpectedSourceEof {
