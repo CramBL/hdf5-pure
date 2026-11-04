@@ -185,7 +185,7 @@ impl AddedCopyUsers<'_> {
     ///
     /// Returns [`CopyUsersError::Engine`], [`CopyUsersError::Root`], or [`CopyUsersError::Phase`]
     /// for a mismatched association, or [`CopyUsersError::Address`] for failed root resolution.
-    pub(super) fn source_for(
+    pub(in crate::edit::analysis) fn source_for(
         &self,
         phase: &AnalysisPhase<'_>,
         object: ObjectId,

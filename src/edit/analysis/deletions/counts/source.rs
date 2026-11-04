@@ -21,6 +21,7 @@ use super::LinkRemovalPlan;
 use super::RemovedLinks;
 
 mod added;
+mod net;
 mod surviving;
 
 impl<'source> AnalysisPhase<'source> {

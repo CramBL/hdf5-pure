@@ -178,6 +178,43 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
         field.chunk()
     );
     assert_eq!(observed.added(), count.checked_add(count.get()).unwrap());
+    let deletions = if named {
+        vec![
+            phase
+                .topology()
+                .unwrap()
+                .deletion(&ObjectPathBuf::parse("mytype"))
+                .unwrap(),
+        ]
+    } else {
+        vec![]
+    };
+    let plan = phase.net_count_plan(&deletions, &added).unwrap().unwrap();
+    assert!(plan.same_engine(&engine));
+    let projected = plan.changes().collect::<Vec<_>>();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].object(), target);
+    assert_eq!(projected[0].original(), field.value());
+    assert_eq!(
+        projected[0].remaining(),
+        u32::try_from(3 * count.get()).unwrap()
+    );
+    assert_eq!(projected[0].field(), Some(field));
+    assert_eq!(
+        projected[0].header_allocation().unwrap().range(),
+        field.chunk()
+    );
+    if let Some(removals) = plan.removals() {
+        assert_eq!(removals.graph_remaining(target), Some(0));
+        assert_eq!(removals.counted_zero_objects().count(), 0);
+    }
+    drop(plan);
+    assert_eq!(
+        AnalysisPhase::new(&engine)
+            .object_reference_count(target)
+            .unwrap(),
+        ObjectReferenceCount::Version2(field)
+    );
 }
 
 #[rstest]
