@@ -18,6 +18,7 @@ use hdf5_pure_space::__private::{
     ReturnedExtents,
 };
 
+use self::completion::PublishedTree;
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
@@ -36,6 +37,15 @@ use crate::free_space_manager::EncodedManager;
 use crate::free_space_manager::ManagerProjection;
 use crate::source::Source;
 use crate::width::FormatWidths;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "completion loans are exercised by private owner tests"
+    )
+)]
+mod completion;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
@@ -61,6 +71,26 @@ impl WriteEngine {
     /// Returns the publication, reference-update, or root-reclamation error. Errors after
     /// publication leave rollback disabled.
     pub(super) fn publish_tree(&mut self, tree: AppliedTree) -> Result<(), Error> {
+        self.publish_tree_with_completion(tree, |_| Ok(()))
+    }
+
+    /// Publishes a written tree and calls `complete` after all publication work succeeds.
+    ///
+    /// Uses the publication path of [`Self::publish_tree`]. Calls `complete` after any
+    /// stored-reference updates, root reclamation, and requested truncation succeed. The
+    /// completion callback borrows the engine through [`PublishedTree`] and returns an owned
+    /// result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the publication, reference-update, root-reclamation, or address-resolution error
+    /// before calling `complete`. Returns the error from `complete` if completion fails.
+    /// Errors after publication leave rollback disabled.
+    pub(super) fn publish_tree_with_completion<T>(
+        &mut self,
+        tree: AppliedTree,
+        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let AppliedTree {
             retirement,
             freed,
@@ -81,12 +111,13 @@ impl WriteEngine {
             if let Some(reclamation) = root_reclamation {
                 self.reclaim_root_metadata(reclamation)?;
             }
-            return Ok(());
+            return complete(PublishedTree::new(self)?);
         }
 
         if self.fresh_page_boundary.is_some() {
             self.pad_to_page()?;
-            return self.publish_nonpersisting(new_root, None);
+            self.publish_nonpersisting(new_root, None)?;
+            return complete(PublishedTree::new(self)?);
         }
 
         // The publisher allocates no file storage after replacement placement. Restoring this
@@ -104,7 +135,8 @@ impl WriteEngine {
             self.restore_free(snapshot);
         }
         publication?;
-        self.repoint_stored_references(&relocations)
+        self.repoint_stored_references(&relocations)?;
+        complete(PublishedTree::new(self)?)
     }
 
     /// Publishes a persistent commit and releases eligible unused aggregate spare.
@@ -1187,6 +1219,8 @@ mod tests {
     use crate::address::{StoredAddress, StoredAddressExt};
     use crate::free_space_manager;
     use crate::width::FormatWidths;
+
+    mod completion;
 
     #[rstest]
     #[case::empty(1000, 0, 8, PublicationPurpose::Allocation, None)]
