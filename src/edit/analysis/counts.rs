@@ -1,7 +1,8 @@
-//! Declared counts checked against visible hard links and the root's superblock reference.
+//! Declared count observations and original-reference bounds.
 //!
-//! Header-subject classification and topology identity are retained with each bound. Allocation
-//! ownership, reference completeness, source freshness, and publication require separate proofs.
+//! Complete topology is optional for copy-target count observations. Header-subject classification
+//! and topology identity are retained with each positive bound. Allocation ownership, reference
+//! completeness, source freshness, and publication require separate proofs.
 
 use core::num::NonZeroU32;
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
 mod added_users;
+mod referenced;
 
 impl<'source> AnalysisPhase<'source> {
     /// Returns a positive declared count consistent with this topology's reference minimum.
