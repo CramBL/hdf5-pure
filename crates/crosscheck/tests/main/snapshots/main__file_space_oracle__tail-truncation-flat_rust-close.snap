@@ -20,23 +20,22 @@ file-space properties
 file sizes (absolute bytes)
   Metric                   bytes
   -----------------------  -----
-  hdf5-pure stored EOF     3,284
-  libhdf5 H5Fget_filesize  3,284
-  physical file            3,284
+  hdf5-pure stored EOF     3,212
+  libhdf5 H5Fget_filesize  3,212
+  physical file            3,212
 
 free-space sections (stored addresses, byte lengths)
   index  hdf5-pure address  hdf5-pure length  libhdf5 address  libhdf5 length  match
   -----  -----------------  ----------------  ---------------  --------------  -----
-      0         0x000000b1        0x00000304       0x000000b1      0x00000304  yes
-      1         0x000004da        0x00000356       0x000004da      0x00000356  yes
-      2         0x00000840        0x00000494       0x00000840      0x00000494  yes
+      0         0x000001c4        0x0000066c       0x000001c4      0x0000066c  yes
+      1         0x00000840        0x0000044c       0x00000840      0x0000044c  yes
 
 free-space totals
   measurement               hdf5-pure  libhdf5
   ------------------------  ---------  -------
-  section count                     3        3
-  section bytes                 2,798    2,798
-  H5Fget_freespace                  -    2,798
+  section count                     2        2
+  section bytes                 2,744    2,744
+  H5Fget_freespace                  -    2,744
   reported - section bytes          -        0
 
 comparison
