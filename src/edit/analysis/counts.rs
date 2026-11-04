@@ -9,11 +9,13 @@ use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::MetadataSource;
 use hdf5_pure_format::__private::ObjectReferenceCount;
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 use hdf5_pure_format::__private::ObjectReferenceCountObserver;
 
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddress;
 use crate::edit::WriteEngine;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
@@ -22,6 +24,7 @@ use crate::object_graph::ObjectIndex;
 use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
 use crate::source::SourceMetadata;
+use crate::width::FormatWidths;
 
 use super::AnalysisPhase;
 use super::CompleteTopology;
@@ -381,6 +384,26 @@ pub(super) struct CountObservation {
 }
 
 impl CountObservation {
+    /// Returns the count classification and its independently checked optional allocation.
+    pub(super) fn into_parts(self) -> (ObjectReferenceCount, Option<HeaderCountAllocation>) {
+        let Self { count, allocation } = self;
+        (count, allocation)
+    }
+
+    /// Reads the count and allocation summaries from the engine's current image.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors described by [`Self::read_source`].
+    fn read(engine: &WriteEngine, object: ObjectId) -> Result<Self, FormatError> {
+        Self::read_source(
+            &SourceMetadata(&engine.image()),
+            object,
+            engine.widths(),
+            engine.addresses().effective_base(),
+        )
+    }
+
     /// Reads count and allocation summaries through one complete object-header parse.
     ///
     /// Collects declared chunk ranges temporarily and retains only the count-containing allocation
@@ -391,16 +414,21 @@ impl CountObservation {
     ///
     /// Returns errors from [`ObjectHeader::parse_from_source_with_chunk_observer`],
     /// [`ObjectReferenceCountObserver::observe`], or [`ObjectReferenceCountObserver::finish`].
-    fn read(engine: &WriteEngine, object: ObjectId) -> Result<Self, FormatError> {
+    pub(super) fn read_source(
+        source: &(impl MetadataSource + ?Sized),
+        object: ObjectId,
+        widths: FormatWidths,
+        base: BaseAddress,
+    ) -> Result<Self, FormatError> {
         let observer = ObjectReferenceCountObserver::new(object.header_address());
         let mut observation_error = None;
         let mut allocations = Vec::new();
         let header = ObjectHeader::parse_from_source_with_chunk_observer(
-            &SourceMetadata(&engine.image()),
+            source,
             AccessMode::ReadWrite,
             object.header_address(),
-            engine.widths(),
-            engine.addresses().effective_base(),
+            widths,
+            base,
             MessageFilter::Only(&mut |kind, _| {
                 observer.observe_message_type(kind);
                 false
@@ -418,7 +446,7 @@ impl CountObservation {
         let count = observer.finish(&header)?;
         let allocation = match count {
             ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field) => {
-                HeaderCountAllocation::new(field, &mut allocations, engine.image.len())
+                HeaderCountAllocation::new(field, &mut allocations, source.len())
             }
             ObjectReferenceCount::Ambiguous
             | ObjectReferenceCount::ImplicitOne

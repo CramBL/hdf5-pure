@@ -575,9 +575,21 @@ pub(super) fn fixture_with_retirements(
     storage: CountStorage,
 ) -> RetirementFixture {
     let mut fixture = Fixture::new();
+    let retired = append_retirements(&mut fixture, userblock);
+    RetirementFixture {
+        objects: write_count_fixture(fixture, path, userblock, storage),
+        retired,
+    }
+}
+
+/// Appends metadata and raw retirement bytes and returns their physical ranges and classes.
+pub(super) fn append_retirements(
+    fixture: &mut Fixture,
+    userblock: UserblockSize,
+) -> [(FileRange, FreeClass); 2] {
     let first = u64::try_from(fixture.image.append(&[7; 16])).unwrap();
     let second = u64::try_from(fixture.image.append(&[11; 24])).unwrap();
-    let retired = [
+    [
         (
             FileRange::new(PhysicalAddress::new(first + userblock.get()), 16).unwrap(),
             FreeClass::Page(PageType::Meta),
@@ -586,11 +598,7 @@ pub(super) fn fixture_with_retirements(
             FileRange::new(PhysicalAddress::new(second + userblock.get()), 24).unwrap(),
             FreeClass::Page(PageType::Raw),
         ),
-    ];
-    RetirementFixture {
-        objects: write_count_fixture(fixture, path, userblock, storage),
-        retired,
-    }
+    ]
 }
 
 /// Counted objects and adjacent original retirements in one byte fixture.
@@ -613,6 +621,12 @@ fn write_count_fixture(
     fixture.link("b", a);
     fixture.link("c", c);
     fixture.link("d", c);
+    write_fixture(fixture, path, userblock);
+    (a, c)
+}
+
+/// Writes the fixture with a superblock adjusted for `userblock`.
+pub(super) fn write_fixture(fixture: Fixture, path: &Path, userblock: UserblockSize) {
     fixture.write(path);
     if userblock.get() != 0 {
         let mut image = vec![0; usize::try_from(userblock.get()).unwrap()];
@@ -627,7 +641,6 @@ fn write_count_fixture(
         image[start..start + header.len()].copy_from_slice(&header);
         std::fs::write(path, image).unwrap();
     }
-    (a, c)
 }
 
 pub(super) fn counts(
