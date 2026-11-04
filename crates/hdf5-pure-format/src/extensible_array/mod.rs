@@ -1282,7 +1282,7 @@ impl PageBitmap<'_> {
 fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> u64 {
     SIGNATURE_LEN
         + HEADER_BYTE_FIELDS
-        + STATISTICS * u64::from(lengths.get())
+        + u64::from(STATISTICS) * u64::from(lengths.get())
         + u64::from(offsets.get())
         + CHECKSUM_LEN
 }
@@ -2254,6 +2254,84 @@ pub struct ExtensibleArrayStats {
     pub nelmts: u64,
 }
 
+impl ExtensibleArrayStats {
+    /// Returns the statistics' byte range relative to the Extensible Array header's start.
+    ///
+    /// The fields precede the index-block address and checksum in a version 0 header, as defined
+    /// in "The Extensible Array Index" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+    pub fn fields_range(lengths: LengthWidth) -> Range<u64> {
+        let start = SIGNATURE_LEN + HEADER_BYTE_FIELDS;
+        start..start + u64::from(STATISTICS) * u64::from(lengths.get())
+    }
+
+    /// Encodes the statistics into the start of `output` and returns the byte count.
+    ///
+    /// Writes each field in header order at `lengths`, preserving bytes after the fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LengthTooLarge`] if a statistic exceeds `lengths`, or
+    /// [`FormatError::UnexpectedEof`] if `output` is too short. Preserves `output` on error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth};
+    ///
+    /// let stats = format::ExtensibleArrayStats {
+    ///     nsuper_blks: 1,
+    ///     super_blk_size: 2,
+    ///     ndata_blks: 3,
+    ///     data_blk_size: 4,
+    ///     max_idx_set: 5,
+    ///     nelmts: 6,
+    /// };
+    /// let mut fields = [0xcc; format::ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN];
+    /// let used = stats.encode_fields(&mut fields, LengthWidth::Two)?;
+    /// assert_eq!(used, 12);
+    /// assert_eq!(&fields[..used], &[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
+    /// assert_eq!(format::ExtensibleArrayStats::fields_range(LengthWidth::Two), 12..24);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn encode_fields(
+        &self,
+        output: &mut [u8],
+        lengths: LengthWidth,
+    ) -> Result<usize, FormatError> {
+        let Self {
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        } = *self;
+        let fields = [
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        ];
+        for value in fields {
+            bytes::require_length(value, lengths)?;
+        }
+        let size = usize::from(STATISTICS) * usize::from(lengths.get());
+        bytes::ensure_len(output, 0, size)?;
+        for (index, value) in fields.into_iter().enumerate() {
+            bytes::write_length_at(output, index * usize::from(lengths.get()), value, lengths)?;
+        }
+        Ok(size)
+    }
+
+    /// The maximum encoded statistics length across the supported length widths.
+    pub const MAX_ENCODED_FIELDS_LEN: usize =
+        STATISTICS as usize * LengthWidth::Eight.get() as usize;
+}
+
 /// Header statistics and complete encoded length from Extensible Array measurement.
 ///
 /// The statistics and total length are computed through the same block traversal as
@@ -2433,7 +2511,7 @@ const SIGNATURE_LEN: u64 = 4;
 // The version, client ID, element size, and the five creation parameters of a header.
 const HEADER_BYTE_FIELDS: u64 = 8;
 // The six statistics of a header, each a length, of which "Max Index Set" is the fifth.
-const STATISTICS: u64 = 6;
+const STATISTICS: u8 = 6;
 const STATISTICS_BEFORE_MAX_INDEX_SET: u64 = 4;
 // The version and client ID of a block.
 const BLOCK_BYTE_FIELDS: u64 = 2;
@@ -2452,6 +2530,96 @@ mod tests {
 
     use super::*;
     use crate::width::FormatWidths;
+
+    #[rstest::rstest]
+    #[case::two(LengthWidth::Two, u64::from(u16::MAX))]
+    #[case::four(LengthWidth::Four, u64::from(u32::MAX))]
+    #[case::eight(LengthWidth::Eight, u64::MAX)]
+    fn statistics_encode_exact_width_limits(#[case] lengths: LengthWidth, #[case] maximum: u64) {
+        let stats = ExtensibleArrayStats {
+            nsuper_blks: maximum,
+            super_blk_size: maximum,
+            ndata_blks: maximum,
+            data_blk_size: maximum,
+            max_idx_set: maximum,
+            nelmts: maximum,
+        };
+        let mut output = [0xcc; ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN];
+        let used = stats.encode_fields(&mut output, lengths).unwrap();
+        assert_eq!(used, usize::from(lengths.get()) * STATISTICS as usize);
+        assert_eq!(&output[..used], vec![0xff; used]);
+        assert_eq!(&output[used..], vec![0xcc; output.len() - used]);
+    }
+
+    #[rstest::rstest]
+    #[case::secondary_count(0)]
+    #[case::secondary_bytes(1)]
+    #[case::data_count(2)]
+    #[case::data_bytes(3)]
+    #[case::maximum_index(4)]
+    #[case::elements(5)]
+    fn statistics_reject_overflow_before_modifying_any_field(
+        #[case] field: usize,
+        #[values(LengthWidth::Two, LengthWidth::Four)] lengths: LengthWidth,
+    ) {
+        let value = match lengths {
+            LengthWidth::Two => 65_536,
+            LengthWidth::Four => 4_294_967_296,
+            LengthWidth::Eight => panic!("eight-byte lengths have no larger u64 value"),
+        };
+        let mut fields = [0; STATISTICS as usize];
+        fields[field] = value;
+        let [
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        ] = fields;
+        let stats = ExtensibleArrayStats {
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        };
+        let mut output = [0xcc; ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN];
+        assert_eq!(
+            stats.encode_fields(&mut output, lengths).unwrap_err(),
+            FormatError::LengthTooLarge {
+                length: value,
+                length_size: lengths.get()
+            }
+        );
+        assert_eq!(output, [0xcc; ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN]);
+    }
+
+    #[rstest]
+    #[case::two(LengthWidth::Two)]
+    #[case::four(LengthWidth::Four)]
+    #[case::eight(LengthWidth::Eight)]
+    fn statistics_reject_a_short_output_before_modifying_any_field(#[case] lengths: LengthWidth) {
+        let stats = ExtensibleArrayStats {
+            nsuper_blks: 1,
+            super_blk_size: 2,
+            ndata_blks: 3,
+            data_blk_size: 4,
+            max_idx_set: 5,
+            nelmts: 6,
+        };
+        let size = usize::from(lengths.get()) * STATISTICS as usize;
+        let mut output = vec![0xcc; size - 1];
+        assert_eq!(
+            stats.encode_fields(&mut output, lengths).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: size,
+                available: size - 1
+            }
+        );
+        assert_eq!(output, vec![0xcc; size - 1]);
+    }
 
     // The oracle is `H5EA__dblock_alloc`, which pages a block of more elements than a page.
     #[test]
@@ -3652,7 +3820,7 @@ mod tests {
         fixture.restamp(range);
         let header_len = SIGNATURE_LEN
             + HEADER_BYTE_FIELDS
-            + STATISTICS * u64::from(lengths.get())
+            + u64::from(STATISTICS) * u64::from(lengths.get())
             + u64::from(offsets.get())
             + CHECKSUM_LEN;
         let expected = ExtensibleArrayHeader {

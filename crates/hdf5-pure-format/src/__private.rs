@@ -53,6 +53,7 @@ pub use crate::btree::v2::write::BTreeV2WriteDialect;
 pub use crate::bytes::ensure_len;
 pub use crate::bytes::read_offset_width;
 pub use crate::bytes::write_defined_stored_address_at;
+pub use crate::bytes::write_length_at;
 pub use crate::bytes::write_stored_address_at;
 pub use crate::checksum::JenkinsLookup3;
 pub use crate::checksum::jenkins_lookup3;

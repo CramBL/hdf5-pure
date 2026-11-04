@@ -1,6 +1,7 @@
 //! HDF5 Dataspace message parsing (message type 0x0001).
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::bytes;
 use crate::error::FormatError;
@@ -52,6 +53,49 @@ impl Dataspace {
         data: &[u8],
         length_width: LengthWidth,
     ) -> Result<Dataspace, FormatError> {
+        Self::parse_with_dimension_fields(data, length_width).map(|(dataspace, _)| dataspace)
+    }
+
+    /// Parses a dataspace and returns the byte range of its current dimension fields.
+    ///
+    /// The range is relative to the message body's start and excludes maximum dimensions and
+    /// version 1 permutation fields. It is empty for a rank-zero dataspace.
+    /// Message versions 1 and 2 are defined in "The Dataspace Message" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns the parsing errors of [`Self::parse_with_length_width`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, MaxExtent};
+    ///
+    /// let dataspace = format::Dataspace {
+    ///     space_type: format::DataspaceType::Simple,
+    ///     rank: 1,
+    ///     dimensions: vec![3],
+    ///     max_dimensions: Some(vec![MaxExtent::Fixed(7)]),
+    /// };
+    /// let mut body = dataspace.serialize(2)?;
+    /// let (parsed, dimensions) = format::Dataspace::parse_with_dimension_fields(
+    ///     &body, LengthWidth::Two,
+    /// )?;
+    /// assert_eq!(parsed, dataspace);
+    /// assert_eq!(dimensions, 4..6);
+    /// format::write_length_at(&mut body, dimensions.start, 6, LengthWidth::Two)?;
+    /// let grown = format::Dataspace::parse_with_length_width(&body, LengthWidth::Two)?;
+    /// assert_eq!(grown.dimensions, [6]);
+    /// assert_eq!(grown.max_dimensions, Some(vec![MaxExtent::Fixed(7)]));
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_simple
+    pub fn parse_with_dimension_fields(
+        data: &[u8],
+        length_width: LengthWidth,
+    ) -> Result<(Dataspace, Range<usize>), FormatError> {
         bytes::ensure_len(data, 0, V2_HEADER_SIZE)?;
 
         let version = data[0];
@@ -94,6 +138,8 @@ impl Dataspace {
             pos += ls;
         }
 
+        let dimension_fields = header_size..pos;
+
         // Read max dimensions if flags bit 0 is set
         let max_dimensions = if flags & MAX_DIMENSIONS_FLAG != 0 {
             let mut max_dims = Vec::with_capacity(rank as usize);
@@ -114,12 +160,15 @@ impl Dataspace {
         // of permutation indices here. Nothing below reads `pos`, so they need
         // no skipping. This crate does not expose them.
 
-        Ok(Dataspace {
-            space_type,
-            rank,
-            dimensions,
-            max_dimensions,
-        })
+        Ok((
+            Dataspace {
+                space_type,
+                rank,
+                dimensions,
+                max_dimensions,
+            },
+            dimension_fields,
+        ))
     }
 
     /// Serializes a version 2 dataspace message with `length_size`-byte dimensions.
@@ -302,6 +351,46 @@ mod tests {
     use test_util::dataspace;
 
     use super::*;
+
+    #[rstest::rstest]
+    #[case::version_one(true, dataspace::V1_HEADER_LEN)]
+    #[case::version_two(false, dataspace::V2_HEADER_LEN)]
+    fn dimension_fields_exclude_maximum_extents(
+        #[case] version_one: bool,
+        #[case] start: usize,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    ) {
+        let widths = test_util::widths::Widths::new(8, usize::from(lengths.get()));
+        let mut encoded = if version_one {
+            dataspace::v1_with_widths(
+                2,
+                dataspace::Flags::MAX_DIMS,
+                &[3, 5],
+                Some(&[7, 9]),
+                widths,
+            )
+        } else {
+            dataspace::v2_with_widths(
+                2,
+                dataspace::Flags::MAX_DIMS,
+                dataspace::Kind::SIMPLE,
+                &[3, 5],
+                Some(&[7, 9]),
+                widths,
+            )
+        };
+        let (parsed, fields) = Dataspace::parse_with_dimension_fields(&encoded, lengths).unwrap();
+        assert_eq!(parsed.dimensions, [3, 5]);
+        assert_eq!(
+            parsed.max_dimensions,
+            Some(vec![MaxExtent::Fixed(7), MaxExtent::Fixed(9)])
+        );
+        assert_eq!(fields, start..start + 2 * usize::from(lengths.get()));
+        bytes::write_length_at(&mut encoded, fields.start, 6, lengths).unwrap();
+        let changed = Dataspace::parse_with_length_width(&encoded, lengths).unwrap();
+        assert_eq!(changed.dimensions, [6, 5]);
+        assert_eq!(changed.max_dimensions, parsed.max_dimensions);
+    }
 
     fn build_v1_dataspace(rank: u8, flags: u8, dims: &[u64], max_dims: Option<&[u64]>) -> Vec<u8> {
         dataspace::v1(rank, dataspace::Flags(flags), dims, max_dims)
