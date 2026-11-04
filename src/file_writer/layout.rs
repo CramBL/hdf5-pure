@@ -3,19 +3,15 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
-use hdf5_pure_format::__private::ExtensibleArrayPlan;
-use hdf5_pure_format::__private::FixedArrayPlan;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::SectionInfoCounts;
-use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ManagerKind;
 
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
+pub(super) use crate::chunked_write::ArrayMeasure;
 use crate::chunked_write::ChunkArrayGeometry;
-use crate::chunked_write::ChunkArrayKind;
 use crate::chunked_write::EmptyChunkIndex;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -192,67 +188,6 @@ impl DataMeasure {
             array: _,
         } = self;
         *raw_length == 0 && matches!(kind, DataKind::Contiguous)
-    }
-}
-
-/// Address-independent block geometry for an allocated chunk array.
-///
-/// Empty arrays have scalar geometry. Format plans for occupied arrays include individual block
-/// lengths.
-pub(super) enum ArrayMeasure {
-    Empty(EmptyChunkIndex),
-    Extensible(ExtensibleArrayPlan),
-    Fixed(FixedArrayPlan),
-}
-
-impl ArrayMeasure {
-    /// Plans array blocks, retaining scalar geometry for an empty array.
-    ///
-    /// # Errors
-    ///
-    /// Propagates errors from [`ExtensibleArrayPlan::new`] and [`FixedArrayPlan::new`].
-    fn new(geometry: ChunkArrayGeometry<'_>) -> Result<Self, FormatError> {
-        let ChunkArrayGeometry {
-            kind,
-            occupied,
-            slots,
-            chunk_bytes,
-            filtered,
-        } = geometry;
-        if occupied.is_empty() {
-            return Ok(Self::Empty(EmptyChunkIndex::new(
-                kind,
-                chunk_bytes,
-                slots,
-                filtered,
-            )));
-        }
-        Ok(match kind {
-            ChunkArrayKind::ExtensibleArray => Self::Extensible(ExtensibleArrayPlan::new(
-                ExtensibleArrayCreationParameters::canonical(),
-                SlotOccupancy::Slots(&occupied),
-                slots,
-                chunk_bytes,
-                WIDTHS,
-                filtered,
-            )?),
-            ChunkArrayKind::FixedArray => {
-                Self::Fixed(FixedArrayPlan::new(slots, chunk_bytes, WIDTHS, filtered)?)
-            }
-        })
-    }
-
-    /// Returns the combined length of the array blocks.
-    ///
-    /// # Errors
-    ///
-    /// Propagates errors from [`EmptyChunkIndex::length`].
-    fn length(&self) -> Result<u64, FormatError> {
-        Ok(match self {
-            Self::Empty(index) => return index.length(),
-            Self::Extensible(plan) => plan.total_len(),
-            Self::Fixed(plan) => plan.total_len(),
-        })
     }
 }
 
