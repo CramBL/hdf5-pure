@@ -193,6 +193,42 @@ pub(crate) trait Store: Source {
         bytes: &[u8],
         class: AllocationClass,
     ) -> Result<ProvisionalAllocation, Error>;
+    /// Reserves storage and encodes its bytes for the chosen physical address.
+    ///
+    /// Calls `prepare` once and requires its result to contain exactly `length` bytes. The
+    /// allocation and publication rules match [`Self::allocate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the encoded length differs from the reservation.
+    /// Propagates preparation and allocation errors.
+    fn allocate_encoded<B: AsRef<[u8]>>(
+        &mut self,
+        length: u64,
+        class: AllocationClass,
+        prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+    ) -> Result<ProvisionalAllocation, Error>;
+
+    fn allocate_ea_initialization(
+        &mut self,
+        initialization: &ExtensibleArrayInitialization,
+    ) -> Result<(ProvisionalAllocation, Option<ProvisionalAllocation>), Error> {
+        let addresses = self.addresses();
+        self.allocate_encoded(
+            initialization.allocation_len(),
+            AllocationClass::Metadata,
+            |address| {
+                initialization
+                    .encode_at(addresses.relative(address)?)
+                    .map_err(Error::Format)
+            },
+        )
+        .map(|allocation| (allocation, None))
+    }
+
+    /// Marks allocation publication uncertain after an unconfirmed outcome.
+    fn make_allocation_uncertain(&mut self);
+
     /// Writes reference metadata after every pending allocation has been confirmed.
     ///
     /// # Errors
@@ -1981,6 +2017,54 @@ pub(crate) fn plan_initial_ea_append(
     ))
 }
 
+/// Allocates and publishes an empty Extensible Array before returning its located geometry.
+///
+/// Checks the initialization plan's widths and creation parameters against the store and layout.
+/// Encodes the index for its reserved address, confirms allocation ownership, publishes the
+/// layout's index-header reference, and synchronizes it before rereading the index. Marks
+/// allocation publication uncertain if that final read fails.
+///
+/// # Errors
+///
+/// Returns [`Error::AppendUnsupported`] if initialization properties differ from the file or
+/// layout, or [`FormatError::Internal`] if the published index remains unallocated. Propagates
+/// allocation, encoding, ownership, reference-publication, synchronization, and locate errors.
+pub(crate) fn initialize_ea_index(
+    file: &mut impl Store,
+    oh_addr: u64,
+    index: &UnallocatedIndex,
+    initialization: &ExtensibleArrayInitialization,
+) -> Result<Located, Error> {
+    if initialization.plan().widths() != file.widths()
+        || initialization.plan().creation() != index.creation
+    {
+        return Err(Error::AppendUnsupported(
+            "index initialization differs from the layout or file widths",
+        ));
+    }
+    let (header, index_allocation) = file.allocate_ea_initialization(initialization)?;
+    let publication = file.publish_allocations()?;
+    if let Some(index_allocation) = index_allocation {
+        publication.confirm(index_allocation)?;
+    }
+    let allocation = publication.confirm(header)?;
+    index.reference.publish(file, &allocation)?;
+    file.sync()?;
+    let result =
+        Located::locate_at(file, oh_addr, Error::AppendUnsupported).and_then(
+            |located| match located.located {
+                AppendIndex::Allocated(index) => Ok(index),
+                AppendIndex::Unallocated(_) => {
+                    Err(FormatError::Internal("published index remains unallocated".into()).into())
+                }
+            },
+        );
+    if result.is_err() {
+        file.make_allocation_uncertain();
+    }
+    result
+}
+
 /// Publishes a planned append with synchronization barriers between its storage updates.
 ///
 /// Writes each child before publishing its address, with synchronization barriers between
@@ -2643,6 +2727,70 @@ mod tests {
     use crate::writer::FileBuilder;
 
     mod metadata;
+
+    #[rstest]
+    #[case::widths(true)]
+    #[case::creation(false)]
+    fn index_initialization_rejects_mismatched_properties_before_allocation(#[case] widths: bool) {
+        let mut store = unallocated_index_store(0, false);
+        let address = dataset_address(&store);
+        let state = edit::locate_dataset_state(&store, address).unwrap();
+        let AppendIndex::Unallocated(index) = &state.index else {
+            panic!("the fixture must have no index allocation");
+        };
+        let creation = if widths {
+            index.creation
+        } else {
+            ExtensibleArrayCreationParameters::parse(&[24, 8, 2, 8, 8]).unwrap()
+        };
+        let encoding_widths = if widths {
+            FormatWidths::from_sizes(2, 8).unwrap()
+        } else {
+            store.widths
+        };
+        let initialization = ExtensibleArrayInitialization::new(
+            creation,
+            index.chunk_bytes.to_u64(),
+            encoding_widths,
+            false,
+        )
+        .unwrap();
+        let original = store.data.clone();
+        let Err(error) = initialize_ea_index(&mut store, address, index, &initialization) else {
+            panic!("mismatched initialization must be rejected");
+        };
+        assert!(
+            matches!(
+                error,
+                Error::AppendUnsupported(
+                    "index initialization differs from the layout or file widths"
+                )
+            ),
+            "{error:?}"
+        );
+        assert_eq!(store.data, original);
+        assert!(store.allocations.borrow().is_empty());
+        assert_eq!(store.syncs.get(), 0);
+    }
+
+    #[test]
+    fn prepared_allocations_reject_a_different_encoded_length() {
+        let mut store = WindowProbeStore::open(build_unlimited(4, 1));
+        let original = store.data.clone();
+        let Err(error) = store.allocate_encoded(4, AllocationClass::Metadata, |_| Ok([0; 3]))
+        else {
+            panic!("a different encoded length must be rejected");
+        };
+        let Error::Format(FormatError::Internal(message)) = error else {
+            panic!("expected Internal, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            "prepared allocation length differs from its reservation"
+        );
+        assert_eq!(store.data, original);
+        assert!(store.allocations.borrow().is_empty());
+    }
 
     #[rstest]
     #[case::canonical([32, 4, 4, 16, 10])]
@@ -3393,6 +3541,31 @@ mod tests {
                 bytes.len() as u64,
             )?)
         }
+        fn allocate_encoded<B: AsRef<[u8]>>(
+            &mut self,
+            length: u64,
+            class: AllocationClass,
+            prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+        ) -> Result<ProvisionalAllocation, Error> {
+            self.publication.available()?;
+            let address = self
+                .free
+                .filter(|&(_, available)| available >= length)
+                .map_or(self.data.len().to_u64(), |(address, _)| address);
+            let bytes = prepare(PhysicalAddress::new(address))?;
+            if bytes.as_ref().len().to_u64() != length {
+                return Err(FormatError::Internal(
+                    "prepared allocation length differs from its reservation".into(),
+                )
+                .into());
+            }
+            self.allocate(bytes.as_ref(), class)
+        }
+
+        fn make_allocation_uncertain(&mut self) {
+            self.publication.make_uncertain();
+        }
+
         fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error> {
             let attempt = match self.publication.begin()? {
                 PublicationAction::Current(publication) => {
