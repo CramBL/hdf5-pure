@@ -7,6 +7,7 @@ use hdf5_pure_format::__private::FixedArrayDataBlock;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use hdf5_pure_format::__private::FixedArrayPlan;
 use rstest::rstest;
+use test_util_hdf5::dataset;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
@@ -59,6 +60,7 @@ fn ea_publication_preserves_native_values_and_recorded_widths(
                 state.fill.pattern(state.element_size),
             )
             .unwrap(),
+            AppendIndex::Single(_) => panic!("expected an Extensible Array index"),
             AppendIndex::Unallocated(index) => {
                 let (plan, initialization) = plan_initial_ea_append(
                     index,
@@ -383,6 +385,235 @@ fn native_writes_consume_streamed_empty_fixed_arrays(
     directory.close().unwrap();
 }
 
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn single_chunk_appends_preserve_native_values_and_widths(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(
+        SingleSource::Empty,
+        SingleSource::Unallocated,
+        SingleSource::Native,
+        SingleSource::Rust
+    )]
+    source: SingleSource,
+    #[values(false, true)] filtered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("single.h5");
+    let widths = FormatWidths { offsets, lengths };
+    let (producer, values) = match source {
+        SingleSource::Empty | SingleSource::Unallocated => (Producer::Native, &[][..]),
+        SingleSource::Native => (Producer::Native, &[0][..]),
+        SingleSource::Rust => (Producer::Rust, &[0][..]),
+    };
+    producer.write_finite(&path, widths, 4, filtered, values);
+    let native = file::libhdf5_open_rw(&path);
+    native.link_hard("d", "alias").unwrap();
+    native.close().unwrap();
+    let mut expected = values.to_vec();
+    if matches!(source, SingleSource::Unallocated) {
+        let native = file::libhdf5_open_rw(&path);
+        let dataset = native.dataset("d").unwrap();
+        dataset.resize((3,)).unwrap();
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), [0, 0, 0]);
+        drop(dataset);
+        native.close().unwrap();
+        expected = vec![0; 3];
+    }
+    let mut store = WindowProbeStore::open(fs::read(&path).unwrap());
+    let address = dataset_address(&store);
+    let walk = walk_v2_object_header(&store, address, widths).unwrap();
+    let layout = walk
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let body = store.read_exact_at(layout.data_off, layout.size).unwrap();
+    let DataLayout::Chunked {
+        index:
+            ChunkIndexLayout::SingleChunk {
+                address: chunk,
+                filtered: filter_fields,
+            },
+        ..
+    } = DataLayout::parse_with_widths(&body, widths).unwrap()
+    else {
+        panic!("expected a Single Chunk layout")
+    };
+    assert_eq!(
+        chunk.is_none(),
+        matches!(source, SingleSource::Empty | SingleSource::Unallocated)
+    );
+    assert_eq!(filter_fields.is_some(), filtered);
+    let mut state = edit::locate_dataset_state(&store, address).unwrap();
+    assert_eq!(state.pipeline.is_some(), filtered);
+    assert_eq!(state.index.maximum(), MaxExtent::Fixed(4));
+    while expected.len() < 4 {
+        let value = i32::try_from(expected.len()).unwrap();
+        let raw = i32_bytes(&[value]);
+        let AppendIndex::Single(index) = &mut state.index else {
+            panic!("expected a Single Chunk index")
+        };
+        let plan = index
+            .plan(
+                &store,
+                &state.datatype,
+                &state.spatial,
+                state.pipeline.as_ref(),
+                LossyTailReencoding::Reject,
+                &raw,
+                NonZeroU64::new(1).unwrap(),
+                state.fill.pattern(state.element_size),
+            )
+            .unwrap();
+        index.apply(&mut store, plan, 4).unwrap();
+        expected.push(value);
+        assert_eq!(state.index.current_dim(), expected.len().to_u64());
+        assert_eq!(store.superblock.eof_address, store.data.len().to_u64());
+        let snapshot = directory.path().join("issued-single.h5");
+        fs::write(&snapshot, &store.data).unwrap();
+        let native = file::libhdf5_open(&snapshot);
+        let dataset = native.dataset("d").unwrap();
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
+        assert_eq!(
+            native.dataset("alias").unwrap().read_raw::<i32>().unwrap(),
+            expected
+        );
+        let sizes = native.create_plist().unwrap().get_sizes().unwrap();
+        assert_eq!(
+            (
+                usize::from(sizes.sizeof_addr),
+                usize::from(sizes.sizeof_size)
+            ),
+            (usize::from(offsets.get()), usize::from(lengths.get()))
+        );
+        drop(dataset);
+        native.close().unwrap();
+        let reopened = crate::File::from_bytes(store.data.clone()).unwrap();
+        assert_eq!(reopened.dataset("d").unwrap().read_i32().unwrap(), expected);
+        reopened.close().unwrap();
+        let located = edit::locate_dataset_state(&store, address).unwrap();
+        assert!(matches!(located.index, AppendIndex::Single(_)));
+    }
+    let before = store.data.clone();
+    let retired = store.retired.clone();
+    let AppendIndex::Single(index) = &state.index else {
+        panic!("expected a Single Chunk index")
+    };
+    let error = match index.plan(
+        &store,
+        &state.datatype,
+        &state.spatial,
+        state.pipeline.as_ref(),
+        LossyTailReencoding::Reject,
+        &i32_bytes(&[4]),
+        NonZeroU64::new(1).unwrap(),
+        state.fill.pattern(state.element_size),
+    ) {
+        Ok(_) => panic!("append exceeds its finite maximum"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error,Error::AppendUnsupported(reason) if *reason=="append exceeds the dataset's maximum first dimension"),
+        "{error:?}"
+    );
+    assert_eq!(store.data, before);
+    assert_eq!(store.retired, retired);
+    directory.close().unwrap();
+}
+
+#[rstest]
+#[case::before_extent(2)]
+#[case::after_extent(4)]
+fn single_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(#[case] phase: u8) {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_f32_data(&[1.234])
+        .with_maxshape(&[MaxExtent::Fixed(4)])
+        .with_create_properties(
+            crate::DatasetCreateProperties::new()
+                .with_chunks(&[4])
+                .with_scale_offset(crate::ScaleOffset::FloatDScale(2))
+                .with_partial_edge_filtering(crate::PartialEdgeFiltering::Skip),
+        );
+    let mut store = WindowProbeStore::open(builder.finish().unwrap());
+    let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+    let AppendIndex::Single(index) = &mut state.index else {
+        panic!("expected a Single Chunk index")
+    };
+    let raw = [2.345_f32, 3.456, 4.567]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let plan = index
+        .plan(
+            &store,
+            &state.datatype,
+            &state.spatial,
+            state.pipeline.as_ref(),
+            LossyTailReencoding::Reject,
+            &raw,
+            NonZeroU64::new(3).unwrap(),
+            state.fill.pattern(state.element_size),
+        )
+        .unwrap();
+    index.apply(&mut store, plan, phase).unwrap();
+    assert_eq!(store.retired.len(), if phase == 4 { 2 } else { 1 });
+    assert_eq!(
+        *store.allocations.borrow(),
+        [AllocationClass::Raw, AllocationClass::Raw]
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lossy-single.h5");
+    fs::write(&path, &store.data).unwrap();
+    let native = file::libhdf5_open(&path);
+    let native_values = native.dataset("d").unwrap().read_raw::<f32>().unwrap();
+    native.close().unwrap();
+    let file = crate::File::from_bytes(store.data).unwrap();
+    let actual = file.dataset("d").unwrap().read_f32().unwrap();
+    if phase == 4 {
+        assert_eq!(native_values.len(), 4);
+        assert!(
+            native_values
+                .iter()
+                .zip([1.234_f32, 2.345, 3.456, 4.567])
+                .all(|(actual, expected)| (actual - expected).abs() < 0.011),
+            "{native_values:?}"
+        );
+        assert_eq!(actual.len(), 4);
+        assert!(
+            actual
+                .iter()
+                .zip([1.234_f32, 2.345, 3.456, 4.567])
+                .all(|(actual, expected)| (actual - expected).abs() < 0.011),
+            "{actual:?}"
+        );
+    } else {
+        assert_eq!(actual, [1.234]);
+        assert_eq!(native_values, [1.234]);
+    }
+    file.close().unwrap();
+    directory.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum SingleSource {
+    Empty,
+    Native,
+    Rust,
+    Unallocated,
+}
+
 #[derive(Clone, Copy)]
 enum Producer {
     Native,
@@ -400,6 +631,10 @@ impl Producer {
     ) {
         match self {
             Self::Native => {
+                if maximum == 4 && values.is_empty() {
+                    dataset::write_native_empty_single_chunk_i32(path, widths, filtered);
+                    return;
+                }
                 let native =
                     file::libhdf5_create_v110_with_widths(path, widths.offsets, widths.lengths, 0);
                 let mut builder = native

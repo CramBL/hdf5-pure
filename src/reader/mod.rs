@@ -2869,8 +2869,8 @@ impl File {
     ///
     /// The fast immediate [`Dataset::append`] additionally requires a
     /// latest-format (version-2/3) file with no userblock and an
-    /// Extensible-Array-indexed dataset; [`Dataset::append_staged`] covers the
-    /// general case.
+    /// eligible Extensible Array or finite Single Chunk dataset. See [`Dataset::append`] for
+    /// dataset requirements. [`Dataset::append_staged`] supports other eligible chunk indexes.
     ///
     /// A [`FileSpaceStrategy::Page`] file with persistence disabled supports staged edits
     /// through the whole-file mirror. Allocations use fresh typed pages after the original
@@ -6006,7 +6006,7 @@ impl Dataset {
         Ok(self.resolved()?.at.address)
     }
 
-    /// Appends `data` in place along the first, unlimited dimension.
+    /// Appends `data` in place along the first dimension.
     ///
     /// Every handle onto the dataset reads the new length afterwards.
     ///
@@ -6018,14 +6018,16 @@ impl Dataset {
     ///
     /// The file must have been opened for writing with [`File::open_rw`];
     /// a read-only file returns
-    /// [`Error::ReadOnly`]. The target must be a chunked,
-    /// rank-1, unlimited, Extensible-Array-indexed dataset: anything else returns
-    /// [`Error::AppendInPlaceUnsupported`]. A missing path returns
+    /// [`Error::ReadOnly`]. The target must be chunked and rank one, with either an unlimited
+    /// Extensible Array index or a finite Single Chunk index. A Single Chunk maximum must fit
+    /// within one chunk, and the editor requires complete, disjoint storage ownership.
+    /// An unsupported target returns [`Error::AppendInPlaceUnsupported`]. A missing path returns
     /// [`Error::Format`] with [`FormatError::PathNotFound`], and a header message
     /// that does not read or parse returns [`Error::Format`] with the failure the
     /// read or the parse produced.
     ///
-    /// An eligible empty dataset may have an undefined index-header address. The first nonempty
+    /// An eligible empty Extensible Array dataset may have an undefined index-header address.
+    /// The first nonempty
     /// write initializes the index with the layout's creation parameters. The writer publishes
     /// ownership and EOF for the complete header and index block before linking the header from
     /// the layout message. Empty appends leave index and element storage unallocated.
@@ -6049,8 +6051,10 @@ impl Dataset {
     /// confirming the final filtered record. An interruption between those updates can leave the
     /// completed chunk unfiltered.
     ///
-    /// A trailing chunk absent from the chunk index cannot be read to be grown. Such a dataset
-    /// requires a chunk-aligned starting length or [`append_staged`](Self::append_staged).
+    /// An absent trailing chunk in an Extensible Array requires a chunk-aligned starting length
+    /// or [`append_staged`](Self::append_staged). For an unallocated Single Chunk reference, the
+    /// writer fills the existing prefix from the dataset's fill value. An append beyond a finite
+    /// maximum is rejected before writing any part of that call.
     ///
     /// With ordinary write buffering, the writer preserves publication order under either
     /// [`SyncPolicy`]. Under the default [`SyncPolicy::Always`], the writer forces writes to
@@ -6059,11 +6063,9 @@ impl Dataset {
     /// page buffers at allocation and reference publication boundaries. These ordering guarantees
     /// do not cover torn physical metadata writes.
     ///
-    /// A **SWMR** writer ([`File::open_swmr_writer`]) keeps the narrower rule it
-    /// always had — unfiltered, and chunk-aligned at both ends — because its
-    /// readers are concurrent by contract and a rewritten trailing chunk is one
-    /// they could be crossing. It allocates at end-of-file for that same reason:
-    /// a region this session freed is one a reader may still be inside.
+    /// A **SWMR** writer ([`File::open_swmr_writer`]) requires an unfiltered Extensible Array and
+    /// chunk-aligned extents. It appends at end-of-file and leaves published chunks unchanged
+    /// while concurrent readers may access them.
     ///
     /// The editor tries reusable free space before extending the file. In a persistent session,
     /// it writes provisional content before publishing replacement free-space managers that
@@ -6095,7 +6097,9 @@ impl Dataset {
     /// Returns [`Error::ReadOnly`] if the file is read-only, or [`Error::AppendInPlaceUnsupported`]
     /// if the dataset or input is unsupported or conflicts with staged edits. Returns
     /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
-    /// metadata, allocation, encoding, and I/O errors.
+    /// metadata, allocation, encoding, and I/O errors. Returns
+    /// [`Error::InvalidSpaceOwnershipExtent`] if identified storage overlaps or exceeds the logical
+    /// end of file.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
     /// is uncertain.
     ///
@@ -6105,6 +6109,9 @@ impl Dataset {
     /// chunk encoding and storage. Bounded sessions limit the full-chunk portion of each
     /// batch, allowing at least one chunk and space to complete an existing partial tail.
     /// ASCII and numeric inputs are encoded into a temporary buffer per batch.
+    /// For Single Chunk appends, the editor analyzes reachable storage on first use and caches
+    /// reachable object-header identities until a commit. Payload preparation retains one logical
+    /// chunk, with a second encoded version when completing a raw edge under lossy filters.
     ///
     /// # Examples
     ///
@@ -6130,6 +6137,33 @@ impl Dataset {
     /// let labels = file.dataset("labels")?.read::<FixedAscii<4>>()?;
     /// assert_eq!(labels, [FixedAscii::new("ab")?, FixedAscii::new("xyz")?]);
     /// drop(file);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Appending within a finite Single Chunk maximum:
+    ///
+    /// ```
+    /// use hdf5_pure::{Error, File, FileBuilder, MaxExtent};
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("finite.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("d")
+    ///     .with_i32_data(&[1])
+    ///     .with_maxshape(&[MaxExtent::Fixed(4)])
+    ///     .with_chunks(&[4]);
+    /// builder.write(&path)?;
+    /// let file = File::open_rw(&path)?;
+    /// let mut dataset = file.dataset("d")?;
+    /// dataset.append(&[2_i32, 3, 4])?;
+    /// assert_eq!(dataset.read_i32()?, [1, 2, 3, 4]);
+    /// assert!(matches!(dataset.append(&[5_i32]),
+    ///     Err(Error::AppendInPlaceUnsupported(
+    ///         "append exceeds the dataset's maximum first dimension"
+    ///     ))
+    /// ));
+    /// assert_eq!(dataset.shape()?, [4]);
+    /// drop(dataset);
+    /// file.close()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
@@ -6412,6 +6446,7 @@ impl Dataset {
             chunk_elems,
             element_size: _,
             current_dim: mut dim,
+            maximum,
             lossy_filters: _,
             full_batch_elems,
         }: AppendGeometry,
@@ -6419,6 +6454,18 @@ impl Dataset {
         total_elems: u64,
         fill: impl Fn(&mut AppendBuilder, std::ops::Range<usize>),
     ) -> Result<(), Error> {
+        let end = dim
+            .checked_add(total_elems)
+            .ok_or(Error::AppendInPlaceUnsupported(
+                "append would overflow the dataset dimension",
+            ))?;
+        if let MaxExtent::Fixed(maximum) = maximum
+            && end > maximum
+        {
+            return Err(Error::AppendInPlaceUnsupported(
+                "append exceeds the dataset's maximum first dimension",
+            ));
+        }
         // Worked out once for the whole call: every batch names the same
         // dataset, and an in-place append does not move it.
         let target = self.append_target()?;

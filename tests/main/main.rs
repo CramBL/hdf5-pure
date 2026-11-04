@@ -61,6 +61,7 @@ mod file_widths;
 mod fill_compatibility;
 mod fill_value;
 mod filter_options;
+mod finite_append;
 mod fixed_ascii;
 mod fixed_byte_arrays;
 mod fixed_element_append;

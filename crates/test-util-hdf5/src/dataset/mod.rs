@@ -16,14 +16,64 @@ use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::H5Element;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::ScaleOffset;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure_format::__private::FormatWidths;
 
 mod append;
 
 pub use append::{AppendFilters, AppendMode};
+
+/// Writes dataset `d` with value 0, chunk length 4, and finite maximum 4.
+///
+/// Applies `settings` and optionally deflate level 1. The dataset has a Single Chunk index.
+///
+/// # Panics
+///
+/// Panics if fixture creation or writing `path` fails.
+pub fn write_single_chunk_i32(path: &Path, settings: FileSpaceSettings, filtered: bool) {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(settings);
+    let dataset = builder
+        .create_dataset("d")
+        .with_i32_data(&[0])
+        .with_maxshape(&[MaxExtent::Fixed(4)])
+        .with_chunks(&[4]);
+    if filtered {
+        dataset.with_deflate(DeflateLevel::One);
+    }
+    builder.write(path).unwrap();
+}
+
+/// Writes an empty native dataset `d` with an unallocated Single Chunk reference.
+///
+/// Uses chunk length 4, finite maximum 4, the supplied file widths, and optional deflate level 1.
+/// Releases all native handles before returning.
+///
+/// # Panics
+///
+/// Panics if libhdf5 rejects creation, resizing, or closure.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_native_empty_single_chunk_i32(path: &Path, widths: FormatWidths, filtered: bool) {
+    let native =
+        crate::file::libhdf5_create_v110_with_widths(path, widths.offsets, widths.lengths, 0);
+    let mut builder = native
+        .new_dataset_builder()
+        .empty_as(crate::numeric::ByteOrder::LittleEndian.i32_datatype())
+        .shape((4..=4,))
+        .chunk((4,));
+    if filtered {
+        builder = builder.deflate(1);
+    }
+    let dataset = builder.create("d").unwrap();
+    dataset.resize((0,)).unwrap();
+    drop(dataset);
+    native.close().unwrap();
+}
 
 /// One stage of a filter pipeline. A dataset applies its stages in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq)]

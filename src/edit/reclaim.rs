@@ -64,6 +64,32 @@ struct ChunkedStorageParts {
     index_layout: ChunkIndexLayout,
 }
 
+/// Reachable header identities from a complete analysis of disjoint storage.
+pub(super) struct ExclusiveChunkOwners {
+    headers: BTreeSet<u64>,
+}
+
+impl ExclusiveChunkOwners {
+    /// Checks that `header` belongs to the analyzed reachable object graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the header is absent.
+    pub(super) fn require(&self, header: u64) -> Result<(), Error> {
+        if !self.headers.contains(&header) {
+            return Err(Error::AppendUnsupported(
+                "single-chunk storage has no reachable ownership proof",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.headers.len()
+    }
+}
+
 impl WriteEngine {
     /// Returns the byte ownership this editor can identify for a committed file.
     ///
@@ -82,6 +108,41 @@ impl WriteEngine {
     /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
     /// the logical end of file.
     pub(crate) fn space_ownership(&self) -> Result<SpaceOwnership, Error> {
+        self.space_ownership_with_headers(None)
+    }
+
+    /// Analyzes complete storage ownership and retains reachable object-header identities.
+    ///
+    /// Collects global-heap references during the ownership traversal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if analysis is incomplete. Propagates the metadata,
+    /// geometry, and overlap errors of [`Self::space_ownership`].
+    pub(super) fn exclusive_chunk_owners(&self) -> Result<ExclusiveChunkOwners, Error> {
+        #[cfg(test)]
+        super::observations::record_single_ownership_analysis();
+        let mut headers = BTreeSet::new();
+        let ownership = self.space_ownership_with_headers(Some(&mut headers))?;
+        if !ownership.analysis_complete {
+            return Err(Error::AppendUnsupported(
+                "single-chunk storage ownership analysis is incomplete",
+            ));
+        }
+        Ok(ExclusiveChunkOwners { headers })
+    }
+
+    /// Collects storage ownership and optionally records reachable header identities.
+    ///
+    /// When recording headers, collects global-heap references during the same object walk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the metadata, geometry, and overlap errors of [`Self::space_ownership`].
+    fn space_ownership_with_headers(
+        &self,
+        headers: Option<&mut BTreeSet<u64>>,
+    ) -> Result<SpaceOwnership, Error> {
         let physical_size = self.image.len();
         let logical_size = self.context.superblock().eof_address;
         if logical_size > physical_size {
@@ -99,12 +160,24 @@ impl WriteEngine {
             .addresses()
             .resolve(self.context.superblock().root_group_address)?
             .get();
-        let mut analysis_complete =
-            self.collect_owned_spans(root, &mut live_raw_space, &mut live_metadata_space)?;
+        let mut liveness = headers.as_ref().map(|_| GlobalHeapLiveness {
+            referenced_collections: BTreeSet::new(),
+            analysis_complete: true,
+        });
+        let mut analysis_complete = self.collect_owned_spans(
+            root,
+            &mut live_raw_space,
+            &mut live_metadata_space,
+            headers,
+            liveness.as_mut(),
+        )?;
         let GlobalHeapLiveness {
             referenced_collections,
             analysis_complete: collections_complete,
-        } = self.global_heap_liveness()?;
+        } = match liveness {
+            Some(liveness) => liveness,
+            None => self.global_heap_liveness()?,
+        };
         analysis_complete &= collections_complete;
         for collection in referenced_collections {
             live_raw_space.push(self.collection_span(collection)?);
@@ -1005,10 +1078,19 @@ impl WriteEngine {
         root: u64,
         raw: &mut Vec<FileRange>,
         metadata: &mut Vec<FileRange>,
+        mut headers: Option<&mut BTreeSet<u64>>,
+        mut liveness: Option<&mut GlobalHeapLiveness>,
     ) -> Result<bool, Error> {
         self.walk_reachable_objects([root], |addr, header, child| {
             if header.version != OWNED_HEADER_VERSION {
                 return Ok(false);
+            }
+            if let Some(headers) = &mut headers {
+                headers.insert(addr);
+            }
+            if let Some(liveness) = &mut liveness {
+                liveness.analysis_complete &=
+                    self.collect_object_collections(header, &mut liveness.referenced_collections)?;
             }
             metadata.extend(self.oh_chunk_spans(addr)?);
             self.collect_object_owned_spans(header, raw, metadata, child)

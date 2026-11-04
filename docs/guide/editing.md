@@ -381,7 +381,12 @@ This section mirrors [`examples/append_dataset.rs`](https://github.com/CramBL/hd
 
 ### Streaming appends
 
-[`append_staged`](crate::Dataset::append_staged) rebuilds the dataset's chunk index and relocates its header on every [`commit`](crate::File::commit) (and each new [`File::open_rw`](crate::File::open_rw) re-reads the metadata it needs, or the whole file when it falls back to the mirror), which is the right trade for a one-off append composed alongside other edits, and the wrong one for a high-frequency append loop. For that, open the file **once** with [`File::open_rw`](crate::File::open_rw) and append many times through a [`Dataset`](crate::Dataset) handle, growing the Extensible-Array index *in place*: each append then costs `O(appended bytes)` plus amortized `O(1)` index overhead, with no whole-file re-read and no index rebuild.
+[`append_staged`](crate::Dataset::append_staged) rebuilds the dataset's chunk index and relocates
+its header on each [`commit`](crate::File::commit). For repeated immediate writes, open the file
+once with [`File::open_rw`](crate::File::open_rw) and append through a [`Dataset`](crate::Dataset)
+handle. For an unlimited Extensible Array, the writer extends the index without rebuilding it and
+reads the affected blocks and trailing chunk. For a finite Single Chunk index, the writer prepares
+the whole chunk and replaces it separately from its predecessor.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -438,15 +443,22 @@ published after the new extent.
 
 An immediate append with that permission can publish the replacement tail's index record before its new length. If interrupted there, a reader at the old length can observe re-quantized values. The file remains readable, but preserving old tail values and publishing the length is not one atomic operation. Complete chunks preceding the tail retain their storage.
 
-The appended **length** is unconstrained too. An unaligned length only makes the last chunk the append writes a partial one, and that chunk's index element is a fresh insert past the old dimension, invisible until the dimension is published, exactly like every whole chunk beside it.
+The appended length may be unaligned under a lossless pipeline. For a finite Single Chunk
+index, growth must remain within the maximum first dimension and one chunk. The writer checks
+the complete request before writing a batch.
 
-The SWMR writer is the exception: it keeps the chunk-aligned, unfiltered subset, because its readers are concurrent by contract and follow the chunk-index counts and not the dataspace dimension.
+The SWMR writer requires an unfiltered Extensible Array and chunk-aligned lengths and appends.
+It leaves published chunks unchanged while concurrent readers may access them.
 
-Immediate appends require a rank-1 chunked dataset with an unlimited first dimension, an
-Extensible Array index, a re-encodable filter pipeline, and a single hard link. The
-file-level gates are listed in [the tables above](#choosing-a-write-path). Eligible empty datasets can initialize
-an unallocated Extensible Array index on the first nonempty write. Empty operations leave storage
-deferred.
+Immediate appends require a rank-1 chunked dataset with an unlimited Extensible Array or finite
+Single Chunk index and a re-encodable filter pipeline. Single Chunk datasets may have several hard
+links to the same object. The editor checks complete, disjoint storage ownership before replacing
+Single Chunk storage and caches reachable object-header identities until a commit. The file-level
+gates are listed in [the tables above](#choosing-a-write-path).
+
+For an eligible empty Extensible Array, the writer initializes an unallocated index on the first
+nonempty write. For an unallocated Single Chunk reference, it fills the existing prefix from the
+dataset's fill value before appending. Empty operations leave unallocated storage unchanged.
 
 Eligible retired tails are reusable during the session. Admission and persistence follow the
 [space-reuse rules](#space-reuse-and-truncation), including strategy, threshold, and PAGE class
@@ -517,7 +529,16 @@ This section mirrors [`examples/append_buffered.rs`](https://github.com/CramBL/h
 
 ### Bounded-memory appends
 
-Appending to a large file needs no special entry point: [`File::open_rw`](crate::File::open_rw) already edits a latest-format file bounded, the read-write sibling of [`open_streaming`](crate::File::open_streaming). Reads are served by positioned I/O with the streaming backend's capabilities, and [`Dataset::append`](crate::Dataset::append) runs the same crash-atomic in-place engine as the mirror, reading and patching only bounded windows (the object header, the extensible-array blocks it touches, and the trailing chunk). A large append is applied in whole-chunk batches, each crash-atomic on its own, so peak memory stays at the configured caches plus a few chunks, independent of the file size and of how much one call appends.
+[`File::open_rw`](crate::File::open_rw) supports a bounded backing for latest-format files.
+The writer uses positioned I/O to read and patch the object header, affected index blocks, and
+trailing chunk. For large Extensible Array appends, the writer batches whole chunks and publishes
+each extent after its data and references. The writer holds caches and a few chunks for payload
+preparation, independently of the complete input length.
+
+For Single Chunk appends, the writer prepares the whole logical chunk. Before the first append,
+the editor analyzes reachable storage, with temporary allocation facts and cached object-header
+identities. This metadata memory can grow with the number of identified objects and allocations.
+The editor retains the header identities until a commit.
 
 ```rust
 # let dir = tempfile::tempdir()?;

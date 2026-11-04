@@ -11,8 +11,57 @@ use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
+use crate::object_path::ObjectPathBuf;
 use crate::source::Source;
-use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
+use crate::{
+    File, FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, MaxExtent,
+    UserblockSize,
+};
+
+#[rstest]
+#[case::small(4)]
+#[case::large(64)]
+fn single_chunk_ownership_analysis_is_reused_until_a_commit(#[case] groups: usize) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("owned.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_i32_data(&[0])
+        .with_maxshape(&[MaxExtent::Fixed(16)])
+        .with_chunks(&[16]);
+    for index in 0..groups {
+        let group = builder.create_group(&format!("g{index}")).finish();
+        builder.add_group(group);
+    }
+    builder.write(&path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    observations::reset_single_ownership_analyses();
+    engine.append_inplace_i32_phased("d", &[1], 4).unwrap();
+    assert_eq!(observations::single_ownership_analyses(), 1);
+    assert_eq!(engine.single_ownership.get().unwrap().len(), groups + 2);
+    engine.located.clear();
+    engine.append_inplace_i32_phased("d", &[2], 4).unwrap();
+    assert_eq!(observations::single_ownership_analyses(), 1);
+    engine.single_ownership.take();
+    engine.located.clear();
+    engine.append_inplace_i32_phased("d", &[3], 4).unwrap();
+    assert_eq!(observations::single_ownership_analyses(), 2);
+    engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
+    engine.commit().unwrap();
+    assert!(engine.single_ownership.get().is_none());
+    assert!(engine.located.is_empty());
+    engine.append_inplace_i32_phased("d", &[4], 4).unwrap();
+    assert_eq!(observations::single_ownership_analyses(), 3);
+    assert_eq!(engine.single_ownership.get().unwrap().len(), groups + 3);
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        [0, 1, 2, 3, 4]
+    );
+    file.close().unwrap();
+}
 
 mod growth;
 mod initialization;

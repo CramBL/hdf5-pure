@@ -1,5 +1,5 @@
 //! Thread-local test observations of zero generation, chunk preparation, index encoding, and
-//! reservation work.
+//! reservation work, including Single Chunk ownership analysis.
 
 use core::cell::Cell;
 
@@ -174,6 +174,25 @@ pub(super) fn record_reservations(requests: usize, counted: ReservationWork) {
         work.reservations.restored_extents += restored_extents;
         observed.set(work);
     });
+}
+
+std::thread_local! {
+    static SINGLE_OWNERSHIP_ANALYSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Records one Single Chunk ownership analysis on the current thread.
+pub(super) fn record_single_ownership_analysis() {
+    SINGLE_OWNERSHIP_ANALYSES.with(|count| count.set(count.get() + 1));
+}
+
+/// Returns the current thread's Single Chunk ownership analysis count.
+pub(super) fn single_ownership_analyses() -> u64 {
+    SINGLE_OWNERSHIP_ANALYSES.with(Cell::get)
+}
+
+/// Clears the current thread's Single Chunk ownership analysis count.
+pub(super) fn reset_single_ownership_analyses() {
+    SINGLE_OWNERSHIP_ANALYSES.with(|count| count.set(0));
 }
 
 #[cfg(test)]

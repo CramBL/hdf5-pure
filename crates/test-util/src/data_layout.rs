@@ -54,13 +54,33 @@ pub fn single_chunk(
     filtered: Option<FilteredChunk>,
     address: Option<u64>,
 ) -> Vec<u8> {
-    let mut layout = chunked_prefix(
+    single_chunk_with_geometry(widths, filtered, address, 4, 4)
+}
+
+/// Builds a version 4 Single Chunk layout with explicit one-dimensional chunk geometry.
+///
+/// Writes `chunk_elements` and `element_size` in four-byte fields without semantic checks.
+/// Filter information and the address follow [`single_chunk`]'s encoding.
+///
+/// # Panics
+///
+/// Panics if an encoded width is outside 1 through 8 bytes or a value exceeds its field width.
+pub fn single_chunk_with_geometry(
+    widths: Widths,
+    filtered: Option<FilteredChunk>,
+    address: Option<u64>,
+    chunk_elements: u32,
+    element_size: u32,
+) -> Vec<u8> {
+    let mut layout = chunked_prefix_with_geometry(
         if filtered.is_some() {
             SINGLE_INDEX_WITH_FILTER
         } else {
             NO_CHUNKED_FLAGS
         },
         SINGLE_CHUNK_INDEX,
+        chunk_elements,
+        element_size,
     );
     if let Some(FilteredChunk { size, mask }) = filtered {
         bytes::push_uint(&mut layout, size, widths.length);
@@ -95,6 +115,15 @@ pub fn array_chunk(widths: Widths, index: ArrayIndex, address: Option<u64>) -> V
 }
 
 fn chunked_prefix(flags: u8, index: u8) -> Vec<u8> {
+    chunked_prefix_with_geometry(flags, index, 4, 4)
+}
+
+fn chunked_prefix_with_geometry(
+    flags: u8,
+    index: u8,
+    chunk_elements: u32,
+    element_size: u32,
+) -> Vec<u8> {
     let mut layout = vec![
         VERSION_FOUR,
         CHUNKED_CLASS,
@@ -102,8 +131,8 @@ fn chunked_prefix(flags: u8, index: u8) -> Vec<u8> {
         ONE_DIMENSION_FIELD_COUNT,
         DIMENSION_SIZE_LEN,
     ];
-    layout.extend_from_slice(&4_u32.to_le_bytes());
-    layout.extend_from_slice(&4_u32.to_le_bytes());
+    layout.extend_from_slice(&chunk_elements.to_le_bytes());
+    layout.extend_from_slice(&element_size.to_le_bytes());
     layout.push(index);
     layout
 }
