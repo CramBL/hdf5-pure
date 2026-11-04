@@ -15,6 +15,8 @@ use super::ProtectedCounts;
 mod completion;
 mod current;
 mod prepare;
+#[cfg(test)]
+mod test_util;
 
 impl ProtectedCounts {
     /// Checks pending retirements against complete original count allocations.
