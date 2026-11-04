@@ -521,39 +521,7 @@ impl WriteEngine {
         index: &chunk_index_inplace::UnallocatedIndex,
         initialization: &ExtensibleArrayInitialization,
     ) -> Result<Located, Error> {
-        let addresses = self.context.addresses();
-        let mut store = EditStore { engine: self };
-        let allocation = if store.engine.space.is_paged() {
-            let [header, index] = store.allocate_paged_initialization(initialization)?;
-            let publication = store.publish_allocations()?;
-            publication.confirm(index)?;
-            publication.confirm(header)?
-        } else {
-            let allocation = store.allocate_prepared(
-                initialization.allocation_len(),
-                AllocationClass::Metadata,
-                |address| {
-                    initialization
-                        .encode_at(addresses.relative(address)?)
-                        .map_err(Error::Format)
-                },
-            )?;
-            store.publish_allocations()?.confirm(allocation)?
-        };
-        index.reference.publish(&mut store, &allocation)?;
-        store.sync()?;
-        let result = Located::locate_at(&store, oh_addr, Error::AppendInPlaceUnsupported).and_then(
-            |located| match located.located {
-                AppendIndex::Allocated(index) => Ok(index),
-                AppendIndex::Unallocated(_) => {
-                    Err(FormatError::Internal("published index remains unallocated".into()).into())
-                }
-            },
-        );
-        if result.is_err() {
-            store.engine.make_allocation_uncertain();
-        }
-        result
+        chunk_index_inplace::initialize_ea_index(&mut self.store(), oh_addr, index, initialization)
     }
 
     /// Stops an immediate append at a durability phase boundary for crash tests.
@@ -1074,12 +1042,47 @@ impl Store for EditStore<'_> {
         &self.engine.context.allocations
     }
 
+    fn allocate_ea_initialization(
+        &mut self,
+        initialization: &ExtensibleArrayInitialization,
+    ) -> Result<(ProvisionalAllocation, Option<ProvisionalAllocation>), Error> {
+        if self.engine.space.is_paged() {
+            let [header, index] = self.allocate_paged_initialization(initialization)?;
+            Ok((header, Some(index)))
+        } else {
+            let addresses = self.addresses();
+            self.allocate_encoded(
+                initialization.allocation_len(),
+                AllocationClass::Metadata,
+                |address| {
+                    initialization
+                        .encode_at(addresses.relative(address)?)
+                        .map_err(Error::Format)
+                },
+            )
+            .map(|allocation| (allocation, None))
+        }
+    }
+
     fn allocate(
         &mut self,
         bytes: &[u8],
         class: AllocationClass,
     ) -> Result<ProvisionalAllocation, Error> {
         self.allocate_prepared(bytes.len() as u64, class, |_| Ok(bytes))
+    }
+
+    fn allocate_encoded<B: AsRef<[u8]>>(
+        &mut self,
+        length: u64,
+        class: AllocationClass,
+        prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+    ) -> Result<ProvisionalAllocation, Error> {
+        EditStore::allocate_prepared(self, length, class, prepare)
+    }
+
+    fn make_allocation_uncertain(&mut self) {
+        self.engine.make_allocation_uncertain();
     }
 
     fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error> {
