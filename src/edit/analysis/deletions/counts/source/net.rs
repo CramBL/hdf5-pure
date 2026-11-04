@@ -1,4 +1,4 @@
-//! Combined declared-count projections for supplied copy users and original hard-link removals.
+//! Combined count plans and owned storage summaries for copy users and hard-link removals.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,6 +18,8 @@ use crate::edit::analysis::counts::{CountEvidenceError, HeaderCountAllocation};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
+
+mod storage;
 
 impl<'source> AnalysisPhase<'source> {
     /// Plans declared net counts for supplied copy users and original hard-link removals.

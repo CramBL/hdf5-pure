@@ -6,6 +6,9 @@
 
 use std::sync::Arc;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_space::__private::FreeClass;
+
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::counts::CountEvidence;
@@ -189,6 +192,19 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
                     remaining,
                 })
         })
+    }
+
+    /// Appends supported complete allocations from each eligible object once.
+    ///
+    /// Uses propagation order and preserves the collector's allocation boundaries and free
+    /// classes. Reference completeness, source freshness, and publication require separate proofs.
+    fn collect_storage(&self, out: &mut Vec<(FileRange, FreeClass)>) {
+        for object in self.counted_zero_objects() {
+            self.plan
+                .topology
+                .engine
+                .collect_object_storage(object.id(), out);
+        }
     }
 }
 

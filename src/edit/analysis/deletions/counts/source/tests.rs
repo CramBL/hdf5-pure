@@ -37,7 +37,7 @@ use super::SourceCountState;
 use super::SourceRemovalPlan;
 
 mod added;
-mod net;
+pub(in crate::edit::analysis::deletions::counts::source) mod net;
 
 #[rstest]
 #[case::one(&["first"], 1)]
