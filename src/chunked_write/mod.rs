@@ -1007,6 +1007,28 @@ impl CompressedChunkSet {
         })
     }
 
+    /// Computes the chunk payload length and object-header messages at `address`.
+    ///
+    /// For array layouts, the index address is immediately after the payload. The returned length
+    /// excludes the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a chunk extends past [`u64::MAX`], or
+    /// [`FormatError::Internal`] if the payload ends before `address`. Propagates errors from
+    /// [`Self::header`].
+    #[cfg(feature = "std")]
+    pub(crate) fn measure_payload_at(
+        &self,
+        address: StoredAddress,
+    ) -> Result<(u64, ChunkedHeader), FormatError> {
+        let (records, index) = plan_chunk_slots(self, address)?;
+        let length = index.checked_distance_from(address).ok_or_else(|| {
+            FormatError::Internal("chunk payload ends before its allocation".into())
+        })?;
+        Ok((length, self.header(&records, index)?))
+    }
+
     /// Returns scalar index geometry for an array containing no stored chunks.
     ///
     /// Returns [`None`] for unallocated and single-chunk layouts, or if the set holds chunks
@@ -1119,6 +1141,40 @@ pub(crate) struct EmptyChunkIndex {
 }
 
 impl EmptyChunkIndex {
+    /// Records scalar geometry for an array index with no stored chunks.
+    #[cfg(feature = "std")]
+    pub(crate) fn new(
+        kind: ChunkArrayKind,
+        chunk_bytes: u64,
+        slots: u64,
+        has_filters: bool,
+    ) -> Self {
+        Self {
+            kind,
+            chunk_bytes,
+            slots,
+            has_filters,
+        }
+    }
+
+    /// Computes the index length using the writer's address and length widths.
+    ///
+    /// # Errors
+    ///
+    /// Propagates slot, geometry, and length errors from [`IndexSlots::new`] and
+    /// [`chunk_index_len`].
+    #[cfg(feature = "std")]
+    pub(crate) fn length(self) -> Result<u64, FormatError> {
+        chunk_index_len(
+            self.kind,
+            &IndexSlots::new(&[], &[], self.slots)?,
+            self.chunk_bytes,
+            INDEX_OFFSET_SIZE,
+            INDEX_LENGTH_SIZE,
+            self.has_filters,
+        )
+    }
+
     /// Serializes the empty array index at its assigned stored address.
     ///
     /// # Errors

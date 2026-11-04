@@ -8,10 +8,17 @@ use crate::FillTime;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::attribute_request::PreparedAttributes as AttributeRequest;
-use crate::chunked_write::{
-    self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, ChunkedPlan, CompressedChunkSet,
-    VerbatimLayout, VerbatimPlan,
-};
+use crate::chunked_write;
+use crate::chunked_write::ByteSink;
+use crate::chunked_write::ChunkOptions;
+use crate::chunked_write::ChunkProvider;
+use crate::chunked_write::ChunkedHeader;
+use crate::chunked_write::ChunkedMeasure;
+use crate::chunked_write::ChunkedPlan;
+use crate::chunked_write::CompressedChunkSet;
+use crate::chunked_write::VerbatimChunks;
+use crate::chunked_write::VerbatimLayout;
+use crate::chunked_write::VerbatimPlan;
 use crate::convert::Narrow;
 use crate::dataset_request::{
     DatasetMetadata, PreparedDataset as DatasetRequest, PreparedFill, PreparedStorage,
@@ -30,6 +37,8 @@ use crate::type_builders::{AttributeSpecs, DatasetBuilder};
 
 use super::HeaderOptions;
 use super::UNDEF_ADDRESS;
+use super::layout::DataKind;
+use super::layout::DataMeasure;
 
 /// A dataset's metadata and storage source before assigning file addresses.
 ///
@@ -171,7 +180,7 @@ impl PreparedDataset {
             || self.storage.chunks().is_some()
     }
 
-    /// Computes header and data-region lengths from prepared metadata.
+    /// Computes header lengths and storage geometry from prepared metadata.
     ///
     /// Provider payloads remain unread. For chunked object-reference data, the data length is
     /// zero until the writer resolves references and encodes the chunks.
@@ -189,7 +198,7 @@ impl PreparedDataset {
         libver: LibVer,
         header: HeaderOptions<'_>,
     ) -> Result<DatasetMeasure, FormatError> {
-        let (data_len, messages) = if self.is_chunked() {
+        let (data, messages) = if self.is_chunked() {
             if self.storage.reference_targets().is_some() {
                 let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
                 let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &self.dt)?;
@@ -201,16 +210,22 @@ impl PreparedDataset {
                     FillPattern::from_value(self.fill.as_ref().map(PreparedFill::as_bytes), elem),
                     self.storage.allocation(),
                 )?;
-                (0, Some((header.layout_message, header.pipeline_message)))
-            } else {
-                let measured = self.measure_chunked(data_address, chunk_set)?;
                 (
-                    measured.data_len,
+                    DataMeasure::new(0, DataKind::Chunked),
+                    Some((header.layout_message, header.pipeline_message)),
+                )
+            } else {
+                let (measured, data) = self.measure_chunked_storage(data_address, chunk_set)?;
+                (
+                    data,
                     Some((measured.layout_message, measured.pipeline_message)),
                 )
             }
         } else {
-            (self.contiguous_len(), None)
+            (
+                DataMeasure::new(self.contiguous_len(), DataKind::Contiguous),
+                None,
+            )
         };
         let header_len = self
             .build_header(
@@ -221,10 +236,7 @@ impl PreparedDataset {
                 header,
             )?
             .len();
-        Ok(DatasetMeasure {
-            header_len,
-            data_len,
-        })
+        Ok(DatasetMeasure { header_len, data })
     }
 
     /// Serializes the dataset's header from prepared metadata and storage messages.
@@ -407,13 +419,61 @@ impl PreparedDataset {
             chunked_write::measure_chunked_at(set, data_address)
         }
     }
+
+    /// Measures chunk payloads and retains array geometry for placement.
+    ///
+    /// The writer reads provider payloads during emission. For array layouts, the index is after
+    /// the payload starting at `data_address`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the region extends past [`u64::MAX`], or
+    /// [`FormatError::Internal`] if encoded chunks are required and `chunk_set` is absent.
+    /// Propagates verbatim chunk preparation, array planning, and layout serialization errors.
+    pub(super) fn measure_chunked_storage(
+        &self,
+        data_address: StoredAddress,
+        chunk_set: Option<&CompressedChunkSet>,
+    ) -> Result<(ChunkedHeader, DataMeasure), FormatError> {
+        if let Some(rc) = self.storage.chunks() {
+            let prepared = VerbatimChunks::new(
+                &rc.meta,
+                &self.ds.dimensions,
+                &rc.chunk_dims,
+                rc.element_size,
+                rc.flags,
+                rc.pipeline_message.as_deref(),
+                data_address,
+                self.maxshape.as_deref(),
+            )?;
+            let data = DataMeasure::chunked(prepared.payload_len(), prepared.array_geometry())?;
+            data_address.checked_add(data.length()?)?;
+            Ok((
+                ChunkedHeader {
+                    layout_message: prepared
+                        .layout_message(data_address.checked_add(prepared.payload_len())?)?,
+                    pipeline_message: rc.pipeline_message.clone(),
+                },
+                data,
+            ))
+        } else {
+            let set = chunk_set.ok_or_else(|| {
+                FormatError::Internal("an encoded dataset has no prepared chunk set".into())
+            })?;
+            let (raw_length, header) = set.measure_payload_at(data_address)?;
+            let data = DataMeasure::chunked(raw_length, set.array_geometry())?;
+            data_address.checked_add(data.length()?)?;
+            Ok((header, data))
+        }
+    }
 }
 
-/// The lengths needed to reserve a dataset's object header and data region.
+/// Header length and storage geometry for reserving a dataset's file regions.
 pub(super) struct DatasetMeasure {
     pub(super) header_len: usize,
-    /// The payload and chunk-index length, or zero for unresolved chunked object references.
-    pub(super) data_len: u64,
+    /// Payload length and array geometry, or a zero-length placeholder for unresolved chunked
+    /// object references.
+    pub(super) data: DataMeasure,
 }
 
 /// The position of a reserved hash attribute.
@@ -680,9 +740,10 @@ mod tests {
     use crate::type_builders::DatasetBuilder;
 
     #[rstest]
-    #[case::contiguous(false)]
-    #[case::verbatim_chunks(true)]
-    fn lazy_payload_reads_begin_at_emission(#[case] chunked: bool) {
+    #[case::contiguous(false, false)]
+    #[case::fixed_array(true, false)]
+    #[case::extensible_array(true, true)]
+    fn lazy_payload_reads_begin_at_emission(#[case] chunked: bool, #[case] unlimited: bool) {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider = Box::new(CountingProvider(Arc::clone(&calls)));
         let mut builder = DatasetBuilder::new("values");
@@ -690,7 +751,7 @@ mod tests {
             builder.with_raw_chunks_lazy(
                 crate::make_i32_type(),
                 &[4],
-                None,
+                unlimited.then_some(&[crate::MaxExtent::Unlimited][..]),
                 &[2],
                 NonZeroUsize::new(4).unwrap(),
                 ChunkedLayoutFlags::NONE,
@@ -725,6 +786,20 @@ mod tests {
             )
             .unwrap();
         assert!(measured.header_len > 0);
+        match measured.data.array.as_ref() {
+            Some(super::super::layout::ArrayMeasure::Fixed(plan)) => {
+                assert!(!unlimited);
+                assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [28, 34]);
+            }
+            Some(super::super::layout::ArrayMeasure::Extensible(plan)) => {
+                assert!(unlimited);
+                assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [72, 298]);
+            }
+            Some(super::super::layout::ArrayMeasure::Empty(_)) => {
+                panic!("expected occupied array geometry")
+            }
+            None => assert!(!chunked),
+        }
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         let data = if chunked {
             dataset
@@ -736,13 +811,56 @@ mod tests {
         };
         let mut bytes = Vec::new();
         data.emit(&mut bytes, &dataset.storage).unwrap();
-        assert_eq!(bytes.len() as u64, measured.data_len);
+        assert_eq!(bytes.len() as u64, measured.data.length().unwrap());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         let expected: Vec<_> = [1_i32, 2, 3, 4]
             .into_iter()
             .flat_map(i32::to_le_bytes)
             .collect();
         assert_eq!(&bytes[..expected.len()], expected);
+    }
+
+    #[rstest]
+    #[case::single(1, false, &[])]
+    #[case::fixed(1025, false, &[28, 8227])]
+    #[case::extensible(5, true, &[72, 298, 150])]
+    fn encoded_measurements_retain_array_geometry(
+        #[case] chunks: usize,
+        #[case] unlimited: bool,
+        #[case] expected: &[u64],
+    ) {
+        let values: Vec<_> = (0..i32::try_from(chunks * 2).unwrap()).collect();
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&values).with_chunks(&[2]);
+        if unlimited {
+            builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
+        }
+        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let chunks = dataset.compress_chunks().unwrap();
+        let (_, data) = dataset
+            .measure_chunked_storage(StoredAddress::new(4096), Some(&chunks))
+            .unwrap();
+        let lengths = match data.array.as_ref() {
+            Some(super::super::layout::ArrayMeasure::Fixed(plan)) => {
+                plan.block_lengths().collect::<Vec<_>>()
+            }
+            Some(super::super::layout::ArrayMeasure::Extensible(plan)) => {
+                plan.block_lengths().collect::<Vec<_>>()
+            }
+            Some(super::super::layout::ArrayMeasure::Empty(_)) => {
+                panic!("expected occupied array geometry")
+            }
+            None => Vec::new(),
+        };
+        assert_eq!(lengths, expected);
+        assert_eq!(
+            data.length().unwrap(),
+            values.len() as u64 * 4 + expected.iter().sum::<u64>()
+        );
+        let built = dataset
+            .build_chunked(StoredAddress::new(4096), Some(&chunks))
+            .unwrap();
+        assert_eq!(built.data.len(), data.length().unwrap());
     }
 
     #[test]

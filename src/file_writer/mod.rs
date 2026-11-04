@@ -57,7 +57,8 @@ use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_policy::AttributePolicy;
 use crate::attribute_policy::AttributeStorage;
 use crate::bytes;
-use crate::chunked_write::{self, ByteSink, CompressedChunkSet};
+use crate::chunked_write::ByteSink;
+use crate::chunked_write::CompressedChunkSet;
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::Dataspace;
@@ -1787,10 +1788,10 @@ impl FileWriter {
         // function of chunk count/size, not of the (dummy) data address. For a
         // streamed (lazy) dataset this touches no chunk bytes at all.
         let mut actual_ds_oh_sizes: Vec<usize> = Vec::with_capacity(all_ds.len());
-        // Data-region lengths for allocation and PAGE free-space planning. Reference-bearing
+        // Data-region measurements for allocation and PAGE free-space planning. Reference-bearing
         // chunks have a zero placeholder until their target addresses are resolved and their
         // encoded sizes are known.
-        let mut ds_data_lens: Vec<u64> = Vec::with_capacity(all_ds.len());
+        let mut ds_data_measures: Vec<layout::DataMeasure> = Vec::with_capacity(all_ds.len());
         let mut dummy_cursor = StoredAddress::ZERO;
         for (i, d) in all_ds.iter().enumerate() {
             let dense_plan = ds_dense_plans[i].as_ref();
@@ -1806,9 +1807,9 @@ impl FileWriter {
                 HeaderOptions::PLAIN,
             )?;
             if is_chunked[i] {
-                dummy_cursor = dummy_cursor.checked_add(measured.data_len)?;
+                dummy_cursor = dummy_cursor.checked_add(measured.data.length()?)?;
             }
-            ds_data_lens.push(measured.data_len);
+            ds_data_measures.push(measured.data);
             actual_ds_oh_sizes.push(measured.header_len);
         }
 
@@ -2007,8 +2008,9 @@ impl FileWriter {
                 }
                 if is_chunked[i] {
                     let set = d.compress_chunks()?;
-                    ds_data_lens[i] =
-                        chunked_write::measure_chunked_at(&set, StoredAddress::new(0))?.data_len;
+                    ds_data_measures[i] = d
+                        .measure_chunked_storage(StoredAddress::ZERO, Some(&set))?
+                        .1;
                     chunk_sets[i] = Some(set);
                 }
             }
@@ -2144,17 +2146,6 @@ impl FileWriter {
                     datasets: ds_dense_blobs,
                 },
             ) = dense_reservations.build(&root_attrs, &groups, &all_ds)?;
-            let measurements = ds_data_lens
-                .iter()
-                .zip(&is_chunked)
-                .map(|(&length, &chunked)| {
-                    let kind = if chunked {
-                        layout::DataKind::Chunked
-                    } else {
-                        layout::DataKind::Contiguous
-                    };
-                    layout::DataMeasure::new(length, kind)
-                });
             let layout::PagedLayout {
                 extension:
                     layout::Allocation {
@@ -2175,7 +2166,7 @@ impl FileWriter {
                 persist_paged,
                 allocation.end(),
                 ext_oh.as_ref().map_or(0, |bytes| bytes.len() as u64),
-                measurements,
+                ds_data_measures.iter(),
                 collection_sections,
                 |i, placed: Option<layout::Allocation>| {
                     let dataset = &mut all_ds[i];
@@ -2185,7 +2176,7 @@ impl FileWriter {
                     );
                     if is_chunked[i] {
                         let built = dataset.build_chunked(address, chunk_sets[i].as_ref())?;
-                        if built.data.len() != ds_data_lens[i] {
+                        if built.data.len() != ds_data_measures[i].length()? {
                             return Err(FormatError::Internal(
                                 "chunk data differs from its allocation".into(),
                             ));
@@ -2427,14 +2418,14 @@ impl FileWriter {
         let mut ds_layouts: Vec<DsLayout<'_>> = Vec::new();
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
-                let span = layout::DataMeasure::new(ds_data_lens[i], layout::DataKind::Chunked)
+                let span = ds_data_measures[i]
                     .reserve(&mut allocation)?
                     .ok_or_else(|| {
                         FormatError::Internal("chunk data allocation is absent".into())
                     })?;
                 let data_address = span.address;
                 let built = d.build_chunked(data_address, chunk_sets[i].as_ref())?;
-                if built.data.len() != ds_data_lens[i] {
+                if built.data.len() != ds_data_measures[i].length()? {
                     return Err(FormatError::Internal(
                         "chunk data differs from its allocation".into(),
                     )
