@@ -952,6 +952,35 @@ impl CompressedChunkSet {
         plan_chunk_slots(self, address)
     }
 
+    /// Constructs chunk records and copies logical slots for an occupied array at `address`.
+    ///
+    /// Returns [`None`] for storage without an allocated array or stored chunks. Encoded payload
+    /// and index bytes remain outside the returned descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a chunk's exclusive end exceeds [`u64::MAX`],
+    /// or [`FormatError::Internal`] if the payload end precedes `address`.
+    #[cfg(feature = "std")]
+    pub(crate) fn array_payload_at(
+        &self,
+        address: StoredAddress,
+    ) -> Result<Option<VerbatimPayload>, FormatError> {
+        if self.kind.array_kind().is_none() || self.chunks.is_empty() {
+            return Ok(None);
+        }
+        let (records, end) = self.records_at(address)?;
+        let length = end.checked_distance_from(address).ok_or_else(|| {
+            FormatError::Internal("chunk payload ends before its allocation".into())
+        })?;
+        Ok(Some(VerbatimPayload {
+            records,
+            slot_of_chunk: self.slot_of_chunk.clone(),
+            index_slots: self.index_slots,
+            length,
+        }))
+    }
+
     /// Returns the exclusive stored end of consecutive chunk payloads.
     ///
     /// Uses scalar address arithmetic over the stored chunk lengths.
@@ -2228,6 +2257,34 @@ pub(crate) struct VerbatimPayload {
 }
 
 impl VerbatimPayload {
+    /// Reassigns consecutive stored chunk addresses in place.
+    ///
+    /// Retains vector capacity, stored sizes, filter masks, and logical slots. On overflow, all
+    /// record addresses remain unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the new payload end exceeds [`u64::MAX`].
+    #[cfg(feature = "std")]
+    pub(crate) fn assign_data_address(
+        &mut self,
+        address: StoredAddress,
+    ) -> Result<(), FormatError> {
+        let Self {
+            records,
+            slot_of_chunk: _,
+            index_slots: _,
+            length,
+        } = self;
+        address.checked_add(*length)?;
+        let mut cursor = address;
+        for record in records {
+            record.address = cursor;
+            cursor = cursor.checked_add(record.stored_size)?;
+        }
+        Ok(())
+    }
+
     /// Returns the checked payload byte length, excluding array metadata.
     pub(crate) fn len(&self) -> u64 {
         self.length

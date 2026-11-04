@@ -19,6 +19,7 @@ use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};
 use crate::source::BytesSource;
 use crate::superblock::LocatedSuperblock;
 
+mod array_descriptors;
 // Private attribute messages expose encoding details omitted by decoded values.
 mod attribute_fidelity;
 
