@@ -559,6 +559,79 @@ fn protection_keeps_empty_work_allocation_and_read_free() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
+#[rstest]
+#[case::root(InventoryMutation::Root)]
+#[case::session(InventoryMutation::Session)]
+#[case::uncertain(InventoryMutation::Uncertain)]
+fn owned_count_inventory_preserves_protection_rejections(#[case] mutation: InventoryMutation) {
+    let path = test_util::temp::temp_path("owned-count-protection.h5");
+    let (a, _) = fixture(&path);
+    let mut engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let deletion = phase
+        .topology()
+        .unwrap()
+        .deletion(&ObjectPathBuf::parse("a"))
+        .unwrap();
+    let added = phase.added_copy_users([]).unwrap().unwrap();
+    let plan = phase.net_count_plan([&deletion], &added).unwrap().unwrap();
+    let inventory = plan.owned_counts(&engine).unwrap();
+    drop(plan);
+    drop(phase);
+    let (inventory, surviving) = inventory.partition().into_parts();
+    let before = engine.disk_bytes().unwrap();
+    let root = ObjectId::new(PhysicalAddress::new(Fixture::ROOT));
+    match mutation {
+        InventoryMutation::Root => {
+            let mut proposed = engine.superblock().clone();
+            proposed.root_group_address = StoredAddress::new(a);
+            engine
+                .context
+                .adopt(engine.context.propose(proposed).unwrap())
+                .unwrap();
+        }
+        InventoryMutation::Session => {
+            drop(engine);
+            engine = edit_test_util::open_engine(&path);
+        }
+        InventoryMutation::Uncertain => engine.make_allocation_uncertain(),
+    }
+    assert_eq!(
+        inventory.same_session(&engine),
+        !matches!(mutation, InventoryMutation::Session)
+    );
+    assert_eq!(inventory.root(), Some(root));
+    assert_eq!(inventory.changes().len(), 1);
+    assert_eq!(inventory.changes()[0].field().unwrap().value(), 2);
+    let Err(error) = surviving.protect(&engine, []) else {
+        panic!("expected count protection failure");
+    };
+    match mutation {
+        InventoryMutation::Root => assert!(
+            matches!(error, CountProtectionError::Root { expected, actual } if expected == root && actual == ObjectId::new(PhysicalAddress::new(a))),
+            "{error:?}"
+        ),
+        InventoryMutation::Session => {
+            assert!(matches!(error, CountProtectionError::Session), "{error:?}")
+        }
+        InventoryMutation::Uncertain => assert!(
+            matches!(
+                error,
+                CountProtectionError::Publication(Error::AllocationPublicationUncertain)
+            ),
+            "{error:?}"
+        ),
+    }
+    assert_eq!(engine.disk_bytes().unwrap(), before);
+}
+
+#[derive(Clone, Copy)]
+enum InventoryMutation {
+    Root,
+    Session,
+    Uncertain,
+}
+
 fn fixture(path: &Path) -> (u64, u64) {
     fixture_with_base(path, UserblockSize::NONE)
 }
