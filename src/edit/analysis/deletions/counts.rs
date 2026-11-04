@@ -27,6 +27,8 @@ use super::PlannedDeletion;
 use super::RemovedLinks;
 
 pub(in crate::edit) use net::NetCountPlan;
+pub(in crate::edit) use ownership::inventory::CountPreflight;
+pub(in crate::edit) use ownership::inventory::CountProjectionIdentity;
 
 mod added;
 mod net;

@@ -21,7 +21,7 @@ use crate::object_graph::ObjectIndex;
 
 use super::SourceRemovalPlan;
 
-mod inventory;
+pub(super) mod inventory;
 mod publication;
 
 impl SourceRemovalPlan<'_, '_> {
@@ -219,6 +219,14 @@ pub(in crate::edit) struct ProtectedCounts {
 }
 
 impl ProtectedCounts {
+    /// Creates an empty batch without a source association or heap allocation.
+    fn empty() -> Self {
+        Self {
+            source: None,
+            updates: Vec::new(),
+        }
+    }
+
     /// Omits reconstructed objects and checks complete allocations for the remaining fields.
     ///
     /// Sorts by physical allocation address and retains no source association for an empty result.
