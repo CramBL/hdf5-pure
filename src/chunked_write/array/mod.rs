@@ -78,6 +78,36 @@ impl ArrayMeasure {
         }
     }
 
+    /// Returns the array representation described by this measurement.
+    pub(crate) fn kind(&self) -> ChunkArrayKind {
+        match self {
+            Self::Empty(index) => index.geometry().kind,
+            Self::Extensible(_) => ChunkArrayKind::ExtensibleArray,
+            Self::Fixed(_) => ChunkArrayKind::FixedArray,
+        }
+    }
+
+    /// Serializes complete array blocks at consecutive stored addresses.
+    ///
+    /// Calls `emit` in [`Self::visit_blocks`] order, stopping at its first error. A failure can
+    /// leave partial output. Uses the block buffering described by [`Self::write_at`].
+    ///
+    /// # Errors
+    ///
+    /// Returns callback errors as [`EmissionError::Sink`]. Propagates allocation, address,
+    /// planning, slot, and encoding errors as [`EmissionError::Format`].
+    pub(crate) fn write_consecutive<E>(
+        &self,
+        slots: &IndexSlots<'_>,
+        address: StoredAddress,
+        emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        if let Self::Empty(index) = self {
+            return Self::plan(index.geometry())?.write_consecutive(slots, address, emit);
+        }
+        self.write_at(slots, &self.addresses_at(address)?, emit)
+    }
+
     /// Serializes each complete block at its assigned stored address.
     ///
     /// The caller supplies `addresses` in [`Self::visit_blocks`] order and `slots` with the
@@ -140,19 +170,7 @@ impl ArrayMeasure {
         if let Self::Empty(index) = self {
             return Self::plan(index.geometry())?.build_at(slots, address);
         }
-        let mut addresses = Vec::new();
-        let mut cursor = address;
-        self.visit_blocks(|length| {
-            addresses
-                .try_reserve(1)
-                .map_err(|source| FormatError::AllocationFailed {
-                    values: addresses.len() + 1,
-                    source,
-                })?;
-            addresses.push(cursor);
-            cursor = cursor.checked_add(length)?;
-            Ok(())
-        })?;
+        let addresses = self.addresses_at(address)?;
         let length = self.length()?.to_usize()?;
         let mut bytes = Vec::new();
         bytes
@@ -185,6 +203,30 @@ impl ArrayMeasure {
             Self::Extensible(plan) => plan.total_len(),
             Self::Fixed(plan) => plan.total_len(),
         })
+    }
+
+    /// Assigns consecutive stored addresses in [`Self::visit_blocks`] order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a block's exclusive end exceeds [`u64::MAX`],
+    /// or [`FormatError::AllocationFailed`] if reserving the address vector fails. Propagates
+    /// planning errors from [`Self::visit_blocks`].
+    fn addresses_at(&self, address: StoredAddress) -> Result<Vec<StoredAddress>, FormatError> {
+        let mut addresses = Vec::new();
+        let mut cursor = address;
+        self.visit_blocks(|length| {
+            addresses
+                .try_reserve(1)
+                .map_err(|source| FormatError::AllocationFailed {
+                    values: addresses.len() + 1,
+                    source,
+                })?;
+            addresses.push(cursor);
+            cursor = cursor.checked_add(length)?;
+            Ok(())
+        })?;
+        Ok(addresses)
     }
 
     /// Plans individual blocks using the writer's address and length widths.

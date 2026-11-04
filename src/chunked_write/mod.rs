@@ -635,24 +635,11 @@ impl PartialEdgeFiltering {
     }
 }
 
-/// The most index bytes this writer will emit for element slots that hold no
-/// chunk.
+/// The maximum encoded bytes the writer permits for unoccupied chunk-index elements.
 ///
-/// A chunk index is built as one in-memory buffer and copied into the file image,
-/// measured at about 2.2x the index bytes in peak memory and 4 ms per MiB, so a
-/// geometry refused at this budget was about to cost 0.13 s and 70 MB to produce
-/// a file whose index is mostly empty.
-///
-/// Stated in bytes rather than slots because an element is 8 bytes unfiltered and
-/// 15 to 20 filtered: the slot count this replaced allowed a filtered index two
-/// and a half times the bytes of an unfiltered one, which nobody chose. 32 MiB is
-/// the unfiltered value that bound already had (4,194,304 slots x 8 bytes).
-///
-/// A *Fixed* Array is dense by format — the reference library writes the same
-/// 80 MB for a 10-million-slot one — so for that index this is a bound on what
-/// this writer is willing to hold in memory, not a divergence from the reference.
-/// An Extensible Array allocates only the blocks its chunks land in, so its
-/// unused bytes are the slack inside those blocks.
+/// The writer applies this budget to unused logical slots for fixed arrays and unused elements
+/// within allocated blocks for extensible arrays. Filtered element widths include stored sizes
+/// and filter masks.
 const MAX_UNUSED_INDEX_BYTES: u64 = 32 << 20;
 
 /// Result of building a chunked dataset.
@@ -752,10 +739,10 @@ pub(crate) enum ChunkIndexKind {
 }
 
 /// The array indexing types that have a separate on-disk structure when allocated.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChunkArrayKind {
-    FixedArray,
     ExtensibleArray,
+    FixedArray,
 }
 
 impl ChunkArrayKind {
@@ -916,9 +903,9 @@ pub(crate) fn chunk_index_len(
 
 /// A chunked dataset's encoded chunks and address-independent index properties.
 ///
-/// The writer retains the chunks across sizing and placement. [`measure_chunked_at`] computes
-/// the region length and object-header messages, and [`plan_chunked_at`] finalizes the metadata
-/// for emission at a stored address. [`emit_chunked_data`] borrows the encoded bytes from this set.
+/// The writer retains encoded chunks across measurement, placement, and emission. Payload emission,
+/// object-header preparation, and array encoding use separate operations. For contiguous assembly,
+/// [`plan_chunked_at`] constructs the index for [`emit_chunked_data`].
 pub(crate) struct CompressedChunkSet {
     /// The chunks as the writer stores them, in dense row-major grid order.
     chunks: Vec<PreparedChunk>,
@@ -944,6 +931,85 @@ impl CompressedChunkSet {
     #[cfg(feature = "std")]
     pub(crate) fn chunks(&self) -> &[PreparedChunk] {
         &self.chunks
+    }
+
+    /// Returns the allocated array representation, or [`None`] for single-chunk or unallocated storage.
+    pub(crate) fn array_kind(&self) -> Option<ChunkArrayKind> {
+        self.kind.array_kind()
+    }
+
+    /// Assigns consecutive stored chunk addresses and returns their records and payload end.
+    ///
+    /// Copies stored sizes and filter masks into records in payload order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a chunk's exclusive end exceeds [`u64::MAX`].
+    pub(crate) fn records_at(
+        &self,
+        address: StoredAddress,
+    ) -> Result<(Vec<ChunkRecord>, StoredAddress), FormatError> {
+        plan_chunk_slots(self, address)
+    }
+
+    /// Returns the exclusive stored end of consecutive chunk payloads.
+    ///
+    /// Uses scalar address arithmetic over the stored chunk lengths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a chunk's exclusive end exceeds [`u64::MAX`].
+    pub(crate) fn payload_end_at(
+        &self,
+        address: StoredAddress,
+    ) -> Result<StoredAddress, FormatError> {
+        self.chunks.iter().try_fold(address, |cursor, chunk| {
+            cursor.checked_add(chunk.stored_size())
+        })
+    }
+
+    /// Returns layout and pipeline messages for the assigned storage addresses.
+    ///
+    /// Uses `address` for single-chunk storage and `index` for an allocated array. The writer
+    /// clones the retained filter-pipeline message and uses a stack record for a single chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the layout errors of [`Self::header`].
+    pub(crate) fn header_at(
+        &self,
+        address: StoredAddress,
+        index: StoredAddress,
+    ) -> Result<ChunkedHeader, FormatError> {
+        let record = match self.kind {
+            ChunkIndexKind::SingleChunk => self.chunks.first().map(|chunk| {
+                [ChunkRecord {
+                    address,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
+                }]
+            }),
+            ChunkIndexKind::ExtensibleArray
+            | ChunkIndexKind::FixedArray
+            | ChunkIndexKind::Unallocated(_) => None,
+        };
+        self.header(
+            record.as_ref().map_or(&[], <[ChunkRecord; 1]>::as_slice),
+            index,
+        )
+    }
+
+    /// Writes retained encoded chunks in payload order.
+    ///
+    /// The caller positions `sink` at the payload start. Borrows each chunk's encoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error from [`ByteSink::put`].
+    pub(crate) fn emit_payload<S: ByteSink>(&self, sink: &mut S) -> Result<(), S::Error> {
+        self.chunks
+            .iter()
+            .try_for_each(|chunk| sink.put(chunk.bytes()))
     }
 
     /// Returns object-header messages with an undefined array index address.
@@ -1009,22 +1075,22 @@ impl CompressedChunkSet {
     /// Computes the chunk payload length and object-header messages at `address`.
     ///
     /// For array layouts, the index address is immediately after the payload. The returned length
-    /// excludes the index.
+    /// excludes the index. Uses scalar address arithmetic to size the payload.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if a chunk extends past [`u64::MAX`], or
     /// [`FormatError::Internal`] if the payload ends before `address`. Propagates errors from
-    /// [`Self::header`].
+    /// [`Self::header_at`].
     pub(crate) fn measure_payload_at(
         &self,
         address: StoredAddress,
     ) -> Result<(u64, ChunkedHeader), FormatError> {
-        let (records, index) = plan_chunk_slots(self, address)?;
+        let index = self.payload_end_at(address)?;
         let length = index.checked_distance_from(address).ok_or_else(|| {
             FormatError::Internal("chunk payload ends before its allocation".into())
         })?;
-        Ok((length, self.header(&records, index)?))
+        Ok((length, self.header_at(address, index)?))
     }
 
     /// Returns scalar index geometry for an array containing no stored chunks.
@@ -1193,6 +1259,27 @@ impl EmptyChunkIndex {
     /// Propagates chunk-index slot and array serialization errors.
     pub(crate) fn build_at(self, address: StoredAddress) -> Result<Vec<u8>, FormatError> {
         ArrayMeasure::Empty(self).build_at(&IndexSlots::new(&[], &[], self.slots)?, address)
+    }
+
+    /// Serializes empty array blocks at consecutive stored addresses.
+    ///
+    /// Calls `emit` for each complete block, stopping at the first error. A failure can leave
+    /// partial output.
+    ///
+    /// # Errors
+    ///
+    /// Propagates slot errors from [`IndexSlots::new`] and planning, encoding, and callback errors
+    /// from [`ArrayMeasure::write_consecutive`].
+    pub(crate) fn write_at<E>(
+        self,
+        address: StoredAddress,
+        emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        ArrayMeasure::Empty(self).write_consecutive(
+            &IndexSlots::new(&[], &[], self.slots)?,
+            address,
+            emit,
+        )
     }
 }
 
@@ -1613,9 +1700,7 @@ pub(crate) fn emit_chunked_data<S: ByteSink>(
     set: &CompressedChunkSet,
     plan: &ChunkedPlan,
 ) -> Result<(), EmissionError<S::Error>> {
-    for chunk in &set.chunks {
-        sink.put(chunk.bytes()).map_err(EmissionError::Sink)?;
-    }
+    set.emit_payload(sink).map_err(EmissionError::Sink)?;
     sink.put(&plan.index).map_err(EmissionError::Sink)
 }
 
@@ -1983,7 +2068,6 @@ impl<'a> VerbatimChunks<'a> {
     }
 
     /// Returns the array representation, or [`None`] for a single-chunk layout.
-    #[cfg(feature = "std")]
     pub(crate) fn array_kind(&self) -> Option<ChunkArrayKind> {
         self.kind.array_kind()
     }
@@ -2038,6 +2122,31 @@ impl<'a> VerbatimChunks<'a> {
         emit: impl FnMut(&[u8]) -> Result<(), E>,
     ) -> Result<(), EmissionError<E>> {
         visit_verbatim_chunks(provider, &self.records, emit)
+    }
+
+    /// Retains chunk records and logical slots for provider-backed payload emission.
+    ///
+    /// Moves the record and slot vectors into [`VerbatimPayload`].
+    pub(crate) fn into_payload(self) -> VerbatimPayload {
+        let Self {
+            records,
+            data_address: _,
+            chunk_dims: _,
+            element_size: _,
+            flags: _,
+            pipeline_message: _,
+            kind: _,
+            slot_of_chunk,
+            index_slots,
+            chunk_bytes: _,
+            payload_len,
+        } = self;
+        VerbatimPayload {
+            records,
+            slot_of_chunk,
+            index_slots,
+            length: payload_len,
+        }
     }
 
     /// Plans a contiguous region with its index after the payload.
@@ -2102,6 +2211,56 @@ impl<'a> VerbatimChunks<'a> {
             layout_message,
             pipeline_message: pipeline_message.map(<[u8]>::to_vec),
         })
+    }
+}
+
+/// Stored chunk records and logical slots for provider-backed payload emission.
+///
+/// Payload bytes are supplied through [`ChunkProvider`]. The caller supplies array geometry
+/// separately to encode the view returned by [`Self::index_slots`].
+pub(crate) struct VerbatimPayload {
+    records: Vec<ChunkRecord>,
+    /// Logical slots in retained record order.
+    slot_of_chunk: Vec<u64>,
+    /// The logical slot span, including unallocated positions.
+    index_slots: u64,
+    length: u64,
+}
+
+impl VerbatimPayload {
+    /// Returns the checked payload byte length, excluding array metadata.
+    pub(crate) fn len(&self) -> u64 {
+        self.length
+    }
+
+    /// Returns a logical-slot view borrowing the retained chunk records.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`IndexSlots::new`].
+    pub(crate) fn index_slots(&self) -> Result<IndexSlots<'_>, FormatError> {
+        let Self {
+            records,
+            slot_of_chunk,
+            index_slots,
+            length: _,
+        } = self;
+        IndexSlots::new(records, slot_of_chunk, *index_slots)
+    }
+
+    /// Writes checked provider output in retained record order.
+    ///
+    /// Reuses one scratch buffer across provider calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns the provider, length, and sink errors of [`visit_verbatim_chunks`].
+    pub(crate) fn emit_payload<S: ByteSink>(
+        &self,
+        sink: &mut S,
+        provider: &dyn ChunkProvider,
+    ) -> Result<(), EmissionError<S::Error>> {
+        visit_verbatim_chunks(provider, &self.records, |bytes| sink.put(bytes))
     }
 }
 
