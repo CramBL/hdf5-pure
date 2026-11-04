@@ -48,6 +48,8 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::MetadataCacheConfig;
 use crate::{Datatype, DatatypeByteOrder, FileLocking, FloatingPointType, PhysicalAddress};
 
+mod storage;
+
 #[rstest]
 #[case::named(Some(2), Links::Named, &[], true, false, 3)]
 #[case::outside(Some(1), Links::Anonymous, &[], true, false, 2)]
@@ -189,6 +191,39 @@ fn net_counts_project_each_target_once_with_original_fields(
     assert_eq!(phase.topology.is_some(), !paths.is_empty());
     assert_eq!(phase.object_reference_count(target).unwrap(), observed);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[rstest]
+#[case::addition_only(Links::Named, &[])]
+#[case::anonymous(Links::Anonymous, &[])]
+#[case::source_removed(Links::Named, &["source"])]
+#[case::shared_view(Links::Named, &["type"])]
+fn referenced_targets_remain_storage_reference_roots(#[case] links: Links, #[case] paths: &[&str]) {
+    let path = test_util::temp::temp_path("referenced-storage-roots.h5");
+    let (engine, tree, target, _) = prepared(&path, Some(2), links);
+    let mut phase = AnalysisPhase::new(&engine);
+    let added = additions(&mut phase, &tree, true);
+    let deletions = paths
+        .iter()
+        .map(|path| {
+            phase
+                .topology()
+                .unwrap()
+                .deletion(&ObjectPathBuf::parse(path))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let plan = phase.net_count_plan(&deletions, &added).unwrap().unwrap();
+    let storage = plan.collect_storage();
+    assert_eq!(storage.reference_roots(), [target]);
+    assert!(
+        storage
+            .allocations()
+            .iter()
+            .all(|(range, _)| range.start() != target.header_address())
+    );
+    assert!(storage.same_session(&engine));
+    assert!(storage.shares_phase(plan.source().unwrap()));
 }
 
 #[rstest]
@@ -1049,7 +1084,10 @@ fn prepared(
     (engine, tree, super::id(target), calls)
 }
 
-fn counted_engine(path: &Path) -> (WriteEngine, Arc<AtomicU64>) {
+/// Opens an engine without metadata caching and counts image reads.
+pub(in crate::edit::analysis::deletions::counts) fn counted_engine(
+    path: &Path,
+) -> (WriteEngine, Arc<AtomicU64>) {
     let calls = Arc::new(AtomicU64::new(0));
     let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
         Ok(Box::new(

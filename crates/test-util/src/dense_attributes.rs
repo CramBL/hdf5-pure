@@ -37,10 +37,31 @@ pub enum Fixture {
 impl Fixture {
     /// Encodes the hierarchy and its dense attributes as an independent file image.
     pub fn build(self) -> Vec<u8> {
+        self.build_with_heap_manager(None)
+    }
+
+    /// Returns the number of attributes on the selected owner.
+    pub fn attribute_count(self) -> u16 {
+        match self {
+            Self::Dataset => 50,
+            Self::Root => 20,
+        }
+    }
+
+    /// Returns the attribute names and scalar values in increasing index order.
+    pub fn attributes(self) -> impl Iterator<Item = (String, f64)> {
+        (0..self.attribute_count()).map(move |index| match self {
+            Self::Dataset => (format!("attr_{index:03}"), f64::from(index) * 1.5),
+            Self::Root => (format!("root_attr_{index:02}"), f64::from(index) * 2.0),
+        })
+    }
+
+    /// Encodes the hierarchy with the supplied heap-manager address, or undefined for `None`.
+    fn build_with_heap_manager(self, manager: Option<u64>) -> Vec<u8> {
         let mut image = Image::starting_with(&[0; SUPERBLOCK_SIZE]);
         let (dataset_attributes, root_attributes) = match self {
-            Fixture::Dataset => (Some(dense_storage(&mut image, self)), None),
-            Fixture::Root => (None, Some(dense_storage(&mut image, self))),
+            Fixture::Dataset => (Some(dense_storage(&mut image, self, manager)), None),
+            Fixture::Root => (None, Some(dense_storage(&mut image, self, manager))),
         };
         let (link_name, datatype, raw) = match self {
             Fixture::Dataset => (
@@ -103,22 +124,6 @@ impl Fixture {
                 .build(),
         );
         image.build()
-    }
-
-    /// Returns the number of attributes on the selected owner.
-    pub fn attribute_count(self) -> u16 {
-        match self {
-            Self::Dataset => 50,
-            Self::Root => 20,
-        }
-    }
-
-    /// Returns the attribute names and scalar values in increasing index order.
-    pub fn attributes(self) -> impl Iterator<Item = (String, f64)> {
-        (0..self.attribute_count()).map(move |index| match self {
-            Self::Dataset => (format!("attr_{index:03}"), f64::from(index) * 1.5),
-            Self::Root => (format!("root_attr_{index:02}"), f64::from(index) * 2.0),
-        })
     }
 }
 
@@ -206,6 +211,17 @@ pub fn one_message(message: &[u8], widths: Widths) -> Vec<u8> {
     image.build()
 }
 
+/// Builds [`dense_attrs`] with a heap manager address equal to the file length.
+///
+/// Preserves the attribute payloads and name index, with a valid heap-header checksum. Reading
+/// the referenced manager requires bytes beyond the end of the image.
+pub fn dense_attrs_with_unavailable_heap_manager() -> Vec<u8> {
+    let length = Fixture::Dataset.build().len();
+    let bytes = Fixture::Dataset.build_with_heap_manager(Some(u64::try_from(length).unwrap()));
+    assert_eq!(bytes.len(), length);
+    bytes
+}
+
 /// A selected corruption of the dataset fixture's dense-attribute leaf.
 #[derive(Clone, Copy, Debug)]
 pub enum NodeCorruption {
@@ -265,7 +281,7 @@ pub enum ChecksumUpdate {
     Recompute,
 }
 
-fn dense_storage(image: &mut Image, fixture: Fixture) -> Message {
+fn dense_storage(image: &mut Image, fixture: Fixture, manager: Option<u64>) -> Message {
     let datatype = datatype::f64_le();
     let dataspace = dataspace::scalar();
     let mut objects = Vec::new();
@@ -291,7 +307,12 @@ fn dense_storage(image: &mut Image, fixture: Fixture) -> Message {
         })
         .collect();
     records.sort_by_key(|record| bytes::u32_at(record, HASH_AT));
-    let heap_at = image.append(&heap_header(0, objects.len(), fixture.attribute_count()));
+    let heap_at = image.append(&heap_header(
+        0,
+        objects.len(),
+        fixture.attribute_count(),
+        manager,
+    ));
     let mut block = fractal_heap::DIRECT_BLOCK_SIGNATURE.to_vec();
     block.push(HEAP_VERSION);
     block.extend_from_slice(&(heap_at as u64).to_le_bytes());
@@ -302,7 +323,7 @@ fn dense_storage(image: &mut Image, fixture: Fixture) -> Message {
     let block = image.append(&block) as u64;
     image.place(
         heap_at,
-        &heap_header(block, objects.len(), fixture.attribute_count()),
+        &heap_header(block, objects.len(), fixture.attribute_count(), manager),
     );
     let mut leaf = btree_v2::leaf(ATTRIBUTE_NAME_INDEX, &records);
     leaf.resize(BTREE_NODE_SIZE, 0);
@@ -325,7 +346,7 @@ fn dense_storage(image: &mut Image, fixture: Fixture) -> Message {
 
 // Section `subsec_fmt4_infra_fractalheap`, version 4.0, defines the header's
 // field order and accounting for a single unfiltered managed direct block.
-fn heap_header(block: u64, used: usize, count: u16) -> Vec<u8> {
+fn heap_header(block: u64, used: usize, count: u16, manager: Option<u64>) -> Vec<u8> {
     let mut header = fractal_heap::SIGNATURE.to_vec();
     header.push(HEAP_VERSION);
     header.extend_from_slice(&HEAP_ID_LENGTH.to_le_bytes());
@@ -336,7 +357,7 @@ fn heap_header(block: u64, used: usize, count: u16) -> Vec<u8> {
         0,
         u64::MAX,
         (DIRECT_BLOCK_SIZE - DIRECT_BLOCK_PREFIX - used) as u64,
-        u64::MAX,
+        manager.unwrap_or(u64::MAX),
         DIRECT_BLOCK_SIZE as u64,
         DIRECT_BLOCK_SIZE as u64,
         DIRECT_BLOCK_SIZE as u64,
