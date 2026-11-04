@@ -1,7 +1,9 @@
-//! Borrowed original facts paired with planned declared counts.
+//! Borrowed and owned original facts paired with planned declared counts.
 
 use super::CountEvidence;
 use super::referenced::ReferencedCount;
+
+pub(in crate::edit) mod owned;
 
 /// A planned declared count paired with borrowed original facts.
 ///

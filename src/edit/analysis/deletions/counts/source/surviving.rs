@@ -1,4 +1,4 @@
-//! Owned original count fields and positive planned remainders.
+//! Owned count inventories and positive explicit count batches.
 
 use core::num::NonZeroU32;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use crate::object_graph::ObjectIndex;
 
 use super::SourceRemovalPlan;
 
+mod inventory;
 mod protection;
 
 impl SourceRemovalPlan<'_, '_> {
@@ -120,7 +121,7 @@ impl SurvivingCounts {
         self.source.as_ref().map(|source| source.root)
     }
 
-    /// Borrows known positive count changes in the source plan's topology-index order.
+    /// Borrows positive count entries in the order established by the source plan.
     pub(in crate::edit) fn updates(&self) -> &[SurvivingCount] {
         &self.updates
     }
@@ -147,7 +148,7 @@ impl SurvivingCount {
         self.field
     }
 
-    /// Returns the positive declared remainder after the planned removals.
+    /// Returns the positive declared count after the planned removals and any supplied additions.
     pub(in crate::edit) fn count(&self) -> NonZeroU32 {
         self.count
     }
