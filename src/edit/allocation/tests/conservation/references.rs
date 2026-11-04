@@ -35,6 +35,7 @@ use crate::File;
 use crate::FormatError;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -553,12 +554,14 @@ struct Roles {
     reads: Vec<PointerRead>,
 }
 
-/// A pointer field and the target address and length discovered in the completed fixture.
+/// A pointer field paired with its target allocation and parse length in a successful fixture.
 struct PointerRead {
     role: WriteTarget,
     field: Interval,
-    address: u64,
-    length: u64,
+    /// The complete target allocation, including separately read pages.
+    allocation: FileRange,
+    /// The number of bytes in the target's initial parse range.
+    parse_length: u64,
 }
 
 impl Roles {
@@ -662,8 +665,8 @@ impl Roles {
         let mut reads = vec![PointerRead {
             role: WriteTarget::Layout,
             field: layout_field,
-            address: header.range.start(),
-            length: ea.range().length(),
+            allocation: ea.range(),
+            parse_length: ea.range().length(),
         }];
         let mut direct = None;
         let mut secondary = None;
@@ -740,8 +743,8 @@ impl Roles {
                         reads.push(PointerRead {
                             role: kind,
                             field,
-                            address: range.start().get(),
-                            length,
+                            allocation: range,
+                            parse_length: length,
                         });
                         frames.push((kind, interval(parent)));
                     }
@@ -752,8 +755,8 @@ impl Roles {
                         reads.push(PointerRead {
                             role: kind,
                             field,
-                            address: range.start().get(),
-                            length,
+                            allocation: range,
+                            parse_length: length,
                         });
                         frames.push((kind, interval(parent)));
                     }
@@ -764,8 +767,8 @@ impl Roles {
                         reads.push(PointerRead {
                             role: kind,
                             field,
-                            address: range.start().get(),
-                            length,
+                            allocation: range,
+                            parse_length: length,
                         });
                         frames.push((kind, interval(parent)));
                     }
@@ -908,20 +911,22 @@ impl Roles {
             .superblock_extension_address
             .unwrap()
             .get();
-        let extension_length = workload.snapshots[first_publication + 1]
+        let extension_allocation = workload.snapshots[first_publication + 1]
             .live
             .iter()
             .find(|fact| {
                 fact.kind == AllocationKind::Manager && fact.parsed.start() == extension_address
             })
-            .unwrap()
-            .parsed
-            .length();
+            .unwrap();
         reads.push(PointerRead {
             role: WriteTarget::Superblock,
             field: pointer_field(&published, superblock_frame, extension_address),
-            address: extension_address,
-            length: extension_length,
+            allocation: FileRange::new(
+                PhysicalAddress::new(extension_allocation.range.start()),
+                extension_allocation.range.length(),
+            )
+            .unwrap(),
+            parse_length: extension_allocation.parsed.length(),
         });
         let last_child = pointers
             .iter()
@@ -1448,15 +1453,22 @@ fn assert_torn(image: &[u8], workload: &Workload, target: WriteTarget, range: In
 }
 
 /// Checks parser addresses and errors against an independently decoded interrupted pointer field.
+///
+/// For array pointers, checks overflow against the complete target allocation and end-of-file
+/// errors against the initial parse range.
 fn assert_malformed_pointer(
     image: &[u8],
     workload: &Workload,
-    pointer: &PointerRead,
+    &PointerRead {
+        role: target,
+        field,
+        allocation,
+        parse_length,
+    }: &PointerRead,
     frame: Interval,
 ) {
-    let target = pointer.role;
-    let stored = byte_values::u64_at(image, usize::try_from(pointer.field.start()).unwrap());
-    assert_ne!(stored, pointer.address);
+    let stored = byte_values::u64_at(image, usize::try_from(field.start()).unwrap());
+    assert_ne!(stored, allocation.start().get());
     let file = File::from_bytes(image.to_vec()).unwrap();
     if target == WriteTarget::Superblock {
         let address = crate::superblock::read(image)
@@ -1503,14 +1515,20 @@ fn assert_malformed_pointer(
         };
         assert_eq!(torn.get(), stored);
         assert_ne!(torn, address);
-        let expected = stored.checked_add(pointer.length).unwrap();
+        let expected = match stored.checked_add(parse_length) {
+            Some(expected) => FormatError::UnexpectedSourceEof {
+                expected,
+                available: u64::try_from(image.len()).unwrap(),
+            },
+            None => FormatError::OffsetOverflow {
+                offset: stored,
+                length: parse_length,
+            },
+        };
         assert_eq!(
             extensible_array::read_header(&source::zero_base_source(&source), located.widths, torn)
                 .unwrap_err(),
-            FormatError::UnexpectedSourceEof {
-                expected,
-                available: u64::try_from(image.len()).unwrap()
-            }
+            expected
         );
         return;
     }
@@ -1522,19 +1540,15 @@ fn assert_malformed_pointer(
     .unwrap();
     let index = header.index_block().unwrap();
     let parsed = index.parse(region(image, index.parse_range())).unwrap();
-    let range = match target {
+    let ranges: Vec<_> = match target {
         WriteTarget::Direct => parsed
             .data_blocks()
-            .map(Result::unwrap)
-            .map(|block| block.parse_range())
-            .find(|range| range.end().get() > u64::try_from(image.len()).unwrap())
-            .unwrap(),
+            .map(|block| block.map(|block| block.parse_range()))
+            .collect(),
         WriteTarget::Secondary => parsed
             .super_blocks()
-            .map(Result::unwrap)
-            .map(|block| block.parse_range())
-            .find(|range| range.end().get() > u64::try_from(image.len()).unwrap())
-            .unwrap(),
+            .map(|block| block.map(|block| block.parse_range()))
+            .collect(),
         WriteTarget::Indirect => {
             let parent = parsed
                 .super_blocks()
@@ -1545,21 +1559,35 @@ fn assert_malformed_pointer(
                 .parse(region(image, parent.parse_range()))
                 .unwrap()
                 .data_blocks()
-                .map(Result::unwrap)
-                .map(|block| block.parse_range())
-                .find(|range| range.end().get() > u64::try_from(image.len()).unwrap())
-                .unwrap()
+                .map(|block| block.map(|block| block.parse_range()))
+                .collect()
         }
         _ => panic!("the target stores a child pointer"),
     };
+    if stored.checked_add(allocation.length()).is_none() {
+        let errors: Vec<_> = ranges.into_iter().filter_map(Result::err).collect();
+        assert_eq!(
+            errors,
+            [FormatError::OffsetOverflow {
+                offset: stored,
+                length: allocation.length(),
+            }]
+        );
+        return;
+    }
+    let range = ranges
+        .into_iter()
+        .map(Result::unwrap)
+        .find(|range| range.start().get() == stored)
+        .unwrap();
     assert_eq!(
         (range.start().get(), range.length()),
-        (stored, pointer.length)
+        (stored, parse_length)
     );
     assert_eq!(
         source.read_range(range).unwrap_err(),
         FormatError::UnexpectedSourceEof {
-            expected: stored.checked_add(pointer.length).unwrap(),
+            expected: stored.checked_add(parse_length).unwrap(),
             available: u64::try_from(image.len()).unwrap()
         }
     );
