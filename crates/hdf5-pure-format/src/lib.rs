@@ -36,6 +36,8 @@ mod dense_attribute_write;
 mod dense_link_write;
 mod error;
 mod extensible_array;
+#[cfg(test)]
+mod field_observations;
 mod file_space_info;
 mod fill_value;
 mod filter_pipeline;
