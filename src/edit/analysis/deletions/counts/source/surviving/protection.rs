@@ -79,6 +79,14 @@ pub(in crate::edit) struct ProtectedCounts {
 }
 
 impl ProtectedCounts {
+    /// Creates an empty batch without a source association or heap allocation.
+    pub(super) fn empty() -> Self {
+        Self {
+            source: None,
+            updates: Vec::new(),
+        }
+    }
+
     /// Omits reconstructed objects and checks complete allocations for the remaining fields.
     ///
     /// Sorts by physical allocation address and retains no source association for an empty result.
@@ -87,7 +95,7 @@ impl ProtectedCounts {
     ///
     /// Returns [`CountProtectionError::Allocation`] for missing complete geometry or
     /// [`CountProtectionError::Overlap`] for intersecting original allocations.
-    fn new(
+    pub(super) fn new(
         source: CountSource,
         updates: Vec<SurvivingCount>,
         replaced: &BTreeSet<ObjectId>,
@@ -160,7 +168,7 @@ impl ProtectedCounts {
     /// Returns [`CountProtectionError::Reusable`], [`CountProtectionError::Retained`], or
     /// [`CountProtectionError::Aggregate`] for an intersecting claim, or
     /// [`CountProtectionError::Source`] for address-conversion errors.
-    fn exclude_space(&self, engine: &WriteEngine) -> Result<(), CountProtectionError> {
+    pub(super) fn exclude_space(&self, engine: &WriteEngine) -> Result<(), CountProtectionError> {
         if self.updates.is_empty() {
             return Ok(());
         }
@@ -288,7 +296,7 @@ impl ProtectedCount {
         self.field
     }
 
-    /// Returns the positive declared remainder after the planned removals.
+    /// Returns the positive declared count after the planned removals and any supplied additions.
     pub(in crate::edit) fn count(&self) -> NonZeroU32 {
         self.count
     }
@@ -309,7 +317,7 @@ impl CountSource {
     /// Returns [`CountProtectionError::Phase`] for a different reconstruction phase,
     /// [`CountProtectionError::Repeated`] for a duplicate object, or
     /// [`CountProtectionError::Source`] for root-address errors.
-    fn reconstructions<'origin>(
+    pub(super) fn reconstructions<'origin>(
         &self,
         engine: &WriteEngine,
         reconstructed: impl IntoIterator<Item = &'origin ReconstructionSource>,

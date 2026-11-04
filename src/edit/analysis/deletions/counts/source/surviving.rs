@@ -1,4 +1,4 @@
-//! Owned count inventories and positive explicit count batches.
+//! Owned count inventories, source preflight, and positive explicit count batches.
 
 use core::num::NonZeroU32;
 use std::sync::Arc;
@@ -15,6 +15,9 @@ use crate::object_graph::ObjectId;
 use crate::object_graph::ObjectIndex;
 
 use super::SourceRemovalPlan;
+
+pub(in crate::edit) use inventory::CountPreflight;
+pub(in crate::edit) use inventory::CountProjectionIdentity;
 
 mod inventory;
 mod protection;

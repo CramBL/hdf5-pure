@@ -23,6 +23,9 @@ use super::CompleteTopology;
 use super::LinkRemovalPlan;
 use super::RemovedLinks;
 
+pub(in crate::edit) use surviving::CountPreflight;
+pub(in crate::edit) use surviving::CountProjectionIdentity;
+
 pub(in crate::edit) use net::NetCountPlan;
 
 mod added;

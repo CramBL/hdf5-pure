@@ -7,6 +7,8 @@
 
 use hdf5_pure_space::__private::ReturnedExtents;
 
+pub(in crate::edit) use self::plan::CountProjectionError;
+pub(in crate::edit) use self::plan::CountProjectionProof;
 use self::plan::{CommitPreparation, PreparedCommit};
 pub(super) use self::publish::PublishedTree;
 pub(super) use self::rollback::scoped::JournalScope;

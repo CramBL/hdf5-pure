@@ -1,4 +1,4 @@
-//! Complete owned count inventories and their positive explicit subsets.
+//! Complete owned count inventories, source preflight, and positive explicit subsets.
 
 use std::sync::Arc;
 
@@ -8,6 +8,11 @@ use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::counts::changes::owned::{CountDisposition, OwnedCountChange};
 use crate::edit::analysis::{NetCountPlan, ReconstructionSource};
 use crate::object_graph::ObjectId;
+
+pub(in crate::edit) use preflight::CountPreflight;
+pub(in crate::edit) use preflight::CountProjectionIdentity;
+
+mod preflight;
 
 impl NetCountPlan<'_, '_> {
     /// Copies every represented count and original fact into a session-bound inventory.

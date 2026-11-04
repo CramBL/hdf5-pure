@@ -1,3 +1,4 @@
+use core::mem;
 use core::num::NonZeroU32;
 
 use hdf5_pure_format::__private::MessageRecordLayout;
@@ -10,8 +11,10 @@ use test_util_hdf5::numeric::ByteOrder;
 use crate::AttrValue;
 use crate::MessageType;
 use crate::access_mode::AccessMode;
+use crate::edit::OhRegion;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::NetCountPlan;
 use crate::edit::analysis::counts::OrdinaryCountSubject;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::OriginalCount;
@@ -101,6 +104,7 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
         .unwrap();
     let added = phase.added_copy_users([]).unwrap().unwrap();
     let plan = phase.net_count_plan([&deletion], &added).unwrap().unwrap();
+    let owned_records = project_owned(&engine, &plan, &mut prepared);
     let CountDisposition {
         rebuilt,
         source,
@@ -148,6 +152,7 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
     let mut expected = before;
     expected[at + 1] = 1;
     assert_eq!(&prepared.region[..], expected);
+    assert_eq!(prepared.region.to_vec(), owned_records.to_vec());
     assert_eq!(prepared.region.reference_count_mut().unwrap().count(), 1);
     assert_eq!(plan.changes().next().unwrap().field().unwrap().value(), 2);
     drop(engine);
@@ -260,6 +265,7 @@ fn native_copy_users_project_combined_counts_without_source_writes(#[case] named
         .net_count_plan(deletion.as_ref(), &added)
         .unwrap()
         .unwrap();
+    let owned_records = project_owned(&engine, &plan, &mut prepared);
     let CountDisposition {
         rebuilt,
         source,
@@ -287,6 +293,7 @@ fn native_copy_users_project_combined_counts_without_source_writes(#[case] named
         }
     }
     assert_eq!(&prepared.region[..], expected);
+    assert_eq!(prepared.region.to_vec(), owned_records.to_vec());
     assert_eq!(engine.disk_bytes().unwrap(), disk);
     let (inventory, surviving) = plan.owned_counts(&engine).unwrap().partition().into_parts();
     assert_eq!(inventory.changes().len(), 1);
@@ -406,6 +413,7 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
         removals.declared_remaining(root),
         Some(ROOT_REFERENCE_COUNT)
     );
+    let owned_records = project_owned(&engine, &plan, &mut prepared);
     let CountDisposition {
         rebuilt,
         source,
@@ -442,6 +450,7 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
     );
     assert_eq!(rebuilt[0].remaining(), ROOT_REFERENCE_COUNT);
     assert_eq!(&prepared.region[..], expected);
+    assert_eq!(prepared.region.to_vec(), owned_records.to_vec());
     assert_eq!(engine.disk_bytes().unwrap(), disk);
     drop(engine);
     let native = file::libhdf5_open(&path);
@@ -452,4 +461,32 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
     );
     assert_eq!(native.member_names().unwrap(), ["self"]);
     native.close().unwrap();
+}
+
+/// Applies the owned route, restores the original records, and returns the projected records.
+fn project_owned(
+    engine: &WriteEngine,
+    plan: &NetCountPlan<'_, '_>,
+    prepared: &mut PreparedGroup,
+) -> OhRegion {
+    let original = prepared.region.clone();
+    let checked = plan
+        .owned_counts(engine)
+        .unwrap()
+        .preflight(engine, prepared.replaces.iter().map(ReplacedHeader::source))
+        .unwrap();
+    let (projected, proof) = PreparedCounts::owned(&checked, [&mut *prepared])
+        .unwrap()
+        .apply()
+        .unwrap();
+    assert_eq!(projected.rebuilt.len(), 1);
+    assert!(
+        projected.source.is_empty()
+            && projected.opaque.is_empty()
+            && projected.unchanged.is_empty()
+    );
+    assert!(std::ptr::eq(projected.rebuilt[0], &checked.changes()[0]));
+    drop(projected);
+    assert!(checked.into_parts(proof).unwrap().1.updates().is_empty());
+    mem::replace(&mut prepared.region, original)
 }

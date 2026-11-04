@@ -12,6 +12,7 @@ use test_util::object_header::{Message, MessageFlags, MessageType, v2};
 use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
 use super::super::super::ReplacedHeader;
+use super::super::CountProjectionError;
 use super::super::{CountDisposition, HeaderCountError, PreparedCounts, PreparedGroup};
 use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
@@ -304,6 +305,174 @@ fn combined_projection_partitions_changed_and_unchanged_targets_in_one_batch() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
+#[rstest]
+#[case::explicit(Some(2), false, Local::Matched)]
+#[case::implicit(None, false, Local::Matched)]
+#[case::unchanged(Some(2), true, Local::Matched)]
+#[case::source(Some(2), false, Local::Source)]
+#[case::ambiguous(Some(2), false, Local::Ambiguous)]
+#[case::shared(Some(2), false, Local::Shared)]
+#[case::omitted_explicit(Some(2), false, Local::Omitted)]
+#[case::omitted_implicit(None, false, Local::Omitted)]
+#[case::added_explicit(Some(2), false, Local::Added)]
+fn owned_projection_uses_preflight_facts_and_rejects_opaque_replacements(
+    #[case] original: Option<u32>,
+    #[case] unchanged: bool,
+    #[case] local: Local,
+) {
+    let path = test_util::temp::temp_path("owned-preflight-count-records.h5");
+    let (engine, tree, target, calls) = fixture(&path, original, unchanged);
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase.reconstruction_source(&engine, target).unwrap();
+    let copy = phase.copy_users(&tree).unwrap().unwrap();
+    let added = phase.added_copy_users([Some(&copy)]).unwrap().unwrap();
+    let deletion = unchanged.then(|| {
+        phase
+            .topology()
+            .unwrap()
+            .deletion(&ObjectPathBuf::parse("type"))
+            .unwrap()
+    });
+    let plan = phase
+        .net_count_plan(deletion.as_ref(), &added)
+        .unwrap()
+        .unwrap();
+    let inventory = plan.owned_counts(&engine).unwrap();
+    drop(plan);
+    drop(phase);
+    let checked = inventory
+        .preflight(
+            &engine,
+            (!matches!(local, Local::Source | Local::Added)).then_some(&source),
+        )
+        .unwrap();
+    let mut records = match local {
+        Local::Ambiguous => vec![Message::reference_count(2), Message::reference_count(2)],
+        Local::Shared => vec![Message::reference_count(2).with_flags(MessageFlags::SHARED)],
+        _ => original.into_iter().map(Message::reference_count).collect(),
+    };
+    records.push(Message::new(MessageType::UNKNOWN, &[0xD5; 33]));
+    let mut group = PreparedGroup {
+        region: super::gather(&engine, target.header_address().get())
+            .with_bytes(v2::message_records(&records, v2::HeaderFlags::default())),
+        replaces: (!matches!(local, Local::Source | Local::Omitted))
+            .then_some(ReplacedHeader::Header(source)),
+        ..PreparedGroup::default()
+    };
+    let before = group.region.to_vec();
+    calls.store(0, Ordering::Relaxed);
+    let projection = PreparedCounts::owned(&checked, [&mut group]);
+    if matches!(local, Local::Added | Local::Omitted) {
+        let Err(CountProjectionError::Reconstruction {
+            object,
+            expected,
+            actual,
+        }) = projection
+        else {
+            panic!("expected a reconstruction decision mismatch")
+        };
+        assert_eq!(
+            (object, expected, actual),
+            (
+                target,
+                matches!(local, Local::Omitted),
+                matches!(local, Local::Added)
+            )
+        );
+        assert_eq!(&group.region[..], before);
+        assert_eq!(
+            checked.protected().updates().len(),
+            usize::from(matches!(local, Local::Added))
+        );
+    } else if matches!(local, Local::Ambiguous | Local::Shared) {
+        let Err(CountProjectionError::Region { object, error }) = projection else {
+            panic!("expected an opaque replacement count rejection")
+        };
+        assert_eq!(object, target);
+        assert_eq!(
+            error,
+            if matches!(local, Local::Ambiguous) {
+                HeaderCountError::Ambiguous
+            } else {
+                HeaderCountError::Unsupported(ObjectReferenceCountIssue::Shared)
+            }
+        );
+        assert_eq!(&group.region[..], before);
+    } else {
+        let (disposition, proof) = projection.unwrap().apply().unwrap();
+        assert_eq!(disposition.unchanged.len(), usize::from(unchanged));
+        assert_eq!(
+            disposition.source.len(),
+            usize::from(matches!(local, Local::Source))
+        );
+        assert_eq!(
+            disposition.rebuilt.len(),
+            usize::from(!unchanged && matches!(local, Local::Matched))
+        );
+        assert!(disposition.opaque.is_empty());
+        let actual = disposition
+            .unchanged
+            .iter()
+            .chain(&disposition.source)
+            .chain(&disposition.rebuilt)
+            .next()
+            .unwrap();
+        assert!(std::ptr::eq(*actual, &checked.changes()[0]));
+        if !unchanged && matches!(local, Local::Matched) {
+            let remaining = original.unwrap_or(1) + 1;
+            if original.is_some() {
+                records[0] = Message::reference_count(remaining);
+            } else {
+                records.push(Message::reference_count(remaining));
+            }
+            assert_eq!(
+                &group.region[..],
+                v2::message_records(&records, v2::HeaderFlags::default())
+            );
+        } else {
+            assert_eq!(&group.region[..], before);
+        }
+        drop(disposition);
+        let (inventory, protected) = checked.into_parts(proof).unwrap();
+        assert_eq!(inventory.changes().len(), 1);
+        assert_eq!(
+            protected.updates().len(),
+            usize::from(matches!(local, Local::Source))
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn preflight_rejects_a_projection_proof_from_another_batch() {
+    let path = test_util::temp::temp_path("owned-count-foreign-proof.h5");
+    let (engine, tree, _, _) = fixture(&path, Some(2), false);
+    let mut phase = AnalysisPhase::new(&engine);
+    let copy = phase.copy_users(&tree).unwrap().unwrap();
+    let added = phase.added_copy_users([Some(&copy)]).unwrap().unwrap();
+    let plan = phase.net_count_plan([], &added).unwrap().unwrap();
+    let first = plan
+        .owned_counts(&engine)
+        .unwrap()
+        .preflight(&engine, [])
+        .unwrap();
+    let second = plan
+        .owned_counts(&engine)
+        .unwrap()
+        .preflight(&engine, [])
+        .unwrap();
+    drop(plan);
+    drop(phase);
+    let (disposition, proof) = PreparedCounts::owned(&first, []).unwrap().apply().unwrap();
+    assert_eq!(disposition.source.len(), 1);
+    drop(disposition);
+    let Err(error) = second.into_parts(proof) else {
+        panic!("expected a foreign preflight proof rejection")
+    };
+    assert_eq!(error, CountProjectionError::Preflight);
+    assert_eq!(first.protected().updates().len(), 1);
+}
+
 fn fixture(
     path: &Path,
     original: Option<u32>,
@@ -366,8 +535,10 @@ fn fixture(
 
 #[derive(Clone, Copy)]
 enum Local {
+    Added,
     Ambiguous,
     Matched,
+    Omitted,
     Shared,
     Source,
 }
