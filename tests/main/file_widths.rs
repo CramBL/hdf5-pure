@@ -1,4 +1,5 @@
 use hdf5_pure::Datatype;
+use hdf5_pure::EditBacking;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -9,6 +10,7 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::LengthWidth;
+use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::ReferenceType;
@@ -106,10 +108,16 @@ fn creation_widths_default_to_eight_bytes() {
 }
 
 #[rstest]
-#[case::offset_two(OffsetWidth::Two, LengthWidth::Eight)]
-#[case::length_two(OffsetWidth::Eight, LengthWidth::Two)]
-#[case::both_four(OffsetWidth::Four, LengthWidth::Four)]
-fn creation_preflight_preserves_a_destination_for_unsupported_reopen_widths(
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn creation_returns_an_editable_handle_at_independent_widths(
     #[case] offsets: OffsetWidth,
     #[case] lengths: LengthWidth,
     #[values(
@@ -118,24 +126,330 @@ fn creation_preflight_preserves_a_destination_for_unsupported_reopen_widths(
         MemoryStrategy::Bounded
     )]
     memory: MemoryStrategy,
+    #[values(
+        FileSpaceStrategy::None,
+        FileSpaceStrategy::Aggr,
+        FileSpaceStrategy::FsmAggr,
+        FileSpaceStrategy::Page
+    )]
+    strategy: FileSpaceStrategy,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("preserved.h5");
-    let original = b"existing destination";
-    std::fs::write(&path, original).unwrap();
-    let error = File::create_with_options(
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("editable.h5");
+    let file = File::create_with_options(
         &path,
         FileCreateProperties::new()
             .with_offset_width(offsets)
-            .with_length_width(lengths),
+            .with_length_width(lengths)
+            .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(matches!(
+                strategy,
+                FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page
+            ))),
         FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("d", |dataset| {
+            dataset.with_i32_data(&[11, 13, 17]);
+        })
+        .unwrap();
+    file.root()
+        .create_dataset("empty", |dataset| {
+            dataset.with_i32_data(&[]).with_shape(&[0]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [11, 13, 17]);
+    assert_eq!(
+        file.dataset("empty").unwrap().read_i32().unwrap(),
+        Vec::<i32>::new()
+    );
+    file.close().unwrap();
+    assert_eq!(
+        &std::fs::read(&path).unwrap()[9..11],
+        &[offsets.get(), lengths.get()]
+    );
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(
+        reopened.dataset("d").unwrap().read_i32().unwrap(),
+        [11, 13, 17]
+    );
+    reopened.close().unwrap();
+}
+
+#[rstest]
+#[case::offset_two(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::length_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::both_four(OffsetWidth::Four, LengthWidth::Four)]
+fn creation_preflight_preserves_a_destination_for_unsupported_access(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(AccessConflict::NonpersistentPage, AccessConflict::Userblock)]
+    conflict: AccessConflict,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("preserved.h5");
+    let original = b"existing destination";
+    std::fs::write(&path, original).unwrap();
+    let properties = FileCreateProperties::new()
+        .with_offset_width(offsets)
+        .with_length_width(lengths);
+    let (properties, expected) = match conflict {
+        AccessConflict::NonpersistentPage => (
+            properties.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(false),
+            ),
+            "bounded editing of PAGE files without persisted free space is unsupported; use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits",
+        ),
+        AccessConflict::Userblock => (
+            properties.with_userblock(UserblockSize::try_from(512).unwrap()),
+            "a userblock cannot be combined with MemoryStrategy::Bounded: the bounded engine cannot edit a file with a non-zero base address, so creating one this way would write the file and then refuse to open it; drop the userblock, or leave MemoryStrategy unset to mirror this file",
+        ),
+    };
+    let error = File::create_with_options(
+        &path,
+        properties,
+        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
     )
     .unwrap_err();
     let Error::EditUnsupported(reason) = error else {
-        panic!("expected EditUnsupported, got {error:?}");
+        panic!("expected EditUnsupported, got {error:?}")
     };
-    assert_eq!(reason, "editing requires 8-byte address and length widths");
+    assert_eq!(reason, expected);
     assert_eq!(std::fs::read(&path).unwrap(), original);
+    let file = File::create_with_options(
+        &path,
+        properties,
+        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Auto),
+    )
+    .unwrap();
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    file.root()
+        .create_dataset("d", |dataset| {
+            dataset.with_i32_data(&[11, 13]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(reopened.superblock().offset_size, offsets);
+    assert_eq!(reopened.superblock().length_size, lengths);
+    assert_eq!(reopened.dataset("d").unwrap().read_i32().unwrap(), [11, 13]);
+    reopened.close().unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AccessConflict {
+    NonpersistentPage,
+    Userblock,
+}
+
+#[rstest]
+#[case::dimension(LengthFailure::Dimension)]
+#[case::maximum(LengthFailure::Maximum)]
+#[case::unlimited(LengthFailure::Unlimited)]
+fn staged_length_failures_preserve_published_content(
+    #[case] failure: LengthFailure,
+    #[values(LengthWidth::Two, LengthWidth::Four)] lengths: LengthWidth,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("length-boundary.h5");
+    let beyond = (u64::MAX >> (64 - 8 * lengths.get())) + 1;
+    let (dimension, maximum, length) = match failure {
+        LengthFailure::Dimension => (beyond, None, beyond),
+        LengthFailure::Maximum => (1, Some(MaxExtent::Fixed(beyond)), beyond),
+        LengthFailure::Unlimited => (1, Some(MaxExtent::Unlimited), u64::MAX),
+    };
+    let file = File::create_with_options(
+        &path,
+        FileCreateProperties::new()
+            .with_offset_width(offsets)
+            .with_length_width(lengths)
+            .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::None)),
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("kept", |dataset| {
+            dataset.with_i32_data(&[11, 13]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    let error = file
+        .root()
+        .create_dataset("oversized", |dataset| {
+            dataset.with_unallocated_storage(hdf5_pure::make_u8_type(), &[dimension]);
+            if let Some(maximum) = maximum {
+                dataset.with_maxshape(&[maximum]);
+            }
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::LengthTooLarge { length: actual, length_size }) if actual == length && length_size == lengths.get()),
+        "{error:?}"
+    );
+    assert!(!file.has_staged_edits());
+    assert_eq!(file.dataset("kept").unwrap().read_i32().unwrap(), [11, 13]);
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(reopened.root().datasets().unwrap(), ["kept"]);
+    assert_eq!(
+        reopened.dataset("kept").unwrap().read_i32().unwrap(),
+        [11, 13]
+    );
+    reopened.close().unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LengthFailure {
+    Dimension,
+    Maximum,
+    Unlimited,
+}
+
+#[rstest]
+#[case::two(LengthWidth::Two)]
+#[case::eight(LengthWidth::Eight)]
+fn oversized_commit_reservations_preserve_the_published_root(
+    #[case] lengths: LengthWidth,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("address-boundary.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .with_offset_width(OffsetWidth::Two)
+        .with_length_width(lengths)
+        .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::None));
+    builder.create_dataset("kept").with_u8_data(&[11, 13]);
+    builder.write(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    let root = file.superblock().root_group_address;
+    file.root()
+        .create_dataset("oversized", |dataset| {
+            dataset.with_u8_data(&vec![17; 65_535]);
+        })
+        .unwrap();
+    let error = file.commit().unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::AddressTooLarge { address, offset_size: 2 }) if address == u64::try_from(before.len()).unwrap() + 65_535),
+        "{error:?}"
+    );
+    assert_eq!(file.superblock().root_group_address, root);
+    assert_eq!(file.dataset("kept").unwrap().read_u8().unwrap(), [11, 13]);
+    drop(file);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(reopened.root().datasets().unwrap(), ["kept"]);
+    assert_eq!(
+        reopened.dataset("kept").unwrap().read_u8().unwrap(),
+        [11, 13]
+    );
+    reopened.close().unwrap();
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn mismatched_cross_file_copies_preserve_the_destination(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(WidthAxis::Offsets, WidthAxis::Lengths)] axis: WidthAxis,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("destination.h5");
+    let destination = File::create_with_options(
+        &path,
+        FileCreateProperties::new()
+            .with_offset_width(offsets)
+            .with_length_width(lengths)
+            .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::None)),
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    destination
+        .root()
+        .create_dataset("kept", |dataset| {
+            dataset.with_u8_data(&[11, 13]);
+        })
+        .unwrap();
+    destination.commit().unwrap();
+    destination.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let destination = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    let mut source = FileBuilder::new();
+    source.with_offset_width(offsets).with_length_width(lengths);
+    match axis {
+        WidthAxis::Offsets => {
+            source.with_offset_width(if offsets == OffsetWidth::Eight {
+                OffsetWidth::Two
+            } else {
+                OffsetWidth::Eight
+            });
+        }
+        WidthAxis::Lengths => {
+            source.with_length_width(if lengths == LengthWidth::Eight {
+                LengthWidth::Two
+            } else {
+                LengthWidth::Eight
+            });
+        }
+    }
+    source.create_dataset("source").with_u8_data(&[17, 19]);
+    let source_bytes = source.finish().unwrap();
+    let source = File::from_bytes(source_bytes.clone()).unwrap();
+    let error = destination
+        .copy_from(&source, "source", "copied")
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::EditUnsupported("cross-file copy requires matching address and length widths")
+        ),
+        "{error:?}"
+    );
+    assert!(!destination.has_staged_edits());
+    assert_eq!(
+        destination.dataset("kept").unwrap().read_u8().unwrap(),
+        [11, 13]
+    );
+    assert_eq!(source.as_bytes(), source_bytes);
+    source.close().unwrap();
+    destination.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WidthAxis {
+    Lengths,
+    Offsets,
 }
 
 #[rstest]

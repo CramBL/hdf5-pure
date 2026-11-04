@@ -4,6 +4,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use rstest::rstest;
+use test_util_hdf5::attr;
 use test_util_hdf5::dataset;
 use test_util_hdf5::dataset::AppendMode;
 use test_util_hdf5::dataset::FiniteChunkIndex;
@@ -306,4 +307,60 @@ fn assert_index(path: &Path, index: FiniteChunkIndex, allocated: bool) {
     assert_eq!(address.is_some(), allocated);
     drop(dataset);
     file.close().unwrap();
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn native_reads_preserved_variable_length_append_siblings(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+    #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("siblings.h5");
+    edit_test_util::append_with_variable_length_siblings(
+        &path,
+        FormatWidths { offsets, lengths },
+        memory,
+        strategy,
+    );
+    let native = file::libhdf5_open(&path);
+    assert_eq!(
+        native.dataset("series").unwrap().read_raw::<i32>().unwrap(),
+        (0..16).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        native.dataset("single").unwrap().read_raw::<i32>().unwrap(),
+        [1, 2, 3, 4]
+    );
+    assert_eq!(attr::unicode_array(&native, "labels"), ["alpha", "", "ζ"]);
+    assert_eq!(
+        attr::unicode_array(&native.dataset("series").unwrap(), "labels"),
+        ["alpha", "", "ζ"]
+    );
+    let sizes = native.create_plist().unwrap().get_sizes().unwrap();
+    assert_eq!(
+        (
+            usize::from(sizes.sizeof_addr),
+            usize::from(sizes.sizeof_size)
+        ),
+        (usize::from(offsets.get()), usize::from(lengths.get()))
+    );
+    native.close().unwrap();
+    assert_eq!(
+        dataset::read_libhdf5_strings(&path, "strings"),
+        ["alpha", "", "ζ"]
+    );
+    file_space_oracle::assert_persisted_sections(&path);
+    file_space_oracle::assert_manager_metadata_bytes(&path);
+    directory.close().unwrap();
 }

@@ -19,10 +19,15 @@ $ cargo run --example edit_in_place
 [`File::open_rw`](crate::File::open_rw) selects the backing from the file.
 Eligible latest-format files use bounded memory: the configured caches and the content an edit builds.
 
-Bounded editing requires 8-byte offsets and lengths, a canonical superblock position matching its
-base address, and no userblock. Files with a pre-v2 superblock, a userblock, or non-persistent
+Bounded editing requires a version 2 or 3 superblock at its base address and no userblock. Files
+with a pre-v2 superblock, a userblock, or non-persistent
 [`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page) allocation require a whole-file mirror,
 using memory proportional to file size. File size alone does not affect the selection.
+
+The editor preserves independent address and length widths of 2, 4, or 8 bytes with either backing.
+Select widths for a new file through [`FileCreateProperties`](crate::FileCreateProperties).
+The writer checks addresses and complete allocations against the offset width and encoded lengths
+against the length width. Unlimited maximum extents require eight-byte lengths.
 
 Both backings allocate according to the file-space strategy and publish rebuilt trees through the
 superblock. Tail truncation and hole reuse depend on the allocation strategy: under persistent

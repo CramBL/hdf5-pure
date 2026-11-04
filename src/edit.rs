@@ -74,7 +74,8 @@
 //! refuses with [`Error::EditUnsupported`] any case it cannot reproduce
 //! faithfully. Requirements:
 //!
-//! - The file uses 8-byte offsets/lengths. A **userblock** (non-zero base address, as every MATLAB
+//! - Address and length widths are independently 2, 4, or 8 bytes and remain unchanged during
+//!   editing. A **userblock** (non-zero base address, as every MATLAB
 //!   v7.3 `.mat` file has) is supported: addresses are read and written relative to the base and
 //!   the userblock bytes are preserved verbatim. The engine applies every staged edit to a file
 //!   with a userblock, paged or not: value overwrites, additions of contiguous and
@@ -339,7 +340,6 @@ use crate::superblock::Superblock;
 #[cfg(doc)]
 use crate::type_builders::ObjectRefTarget;
 use crate::width::FormatWidths;
-use crate::width::{LengthWidth, OffsetWidth};
 
 use self::aggregation::AggregateSpace;
 use self::commit::PublicationState;
@@ -910,9 +910,6 @@ pub(crate) fn create_would_refuse_reopen(
     create: &FileCreateProperties,
     access: &FileAccessProperties,
 ) -> Option<&'static str> {
-    if create.offset_width() != OffsetWidth::Eight || create.length_width() != LengthWidth::Eight {
-        return Some("editing requires 8-byte address and length widths");
-    }
     if create.file_space_settings().is_some_and(|settings| {
         settings.strategy() == FileSpaceStrategy::Page && !settings.persist()
     }) && access.memory_strategy() == Some(MemoryStrategy::Bounded)
@@ -1473,7 +1470,7 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] for unsupported address widths or layouts, including
+    /// Returns [`Error::EditUnsupported`] for unsupported layouts, including
     /// a backing that cannot satisfy [`MemoryStrategy::Bounded`]. Other failures are the errors
     /// of [`open_imaged_with_policy`](Self::open_imaged_with_policy).
     #[cfg(any(test, doc))]

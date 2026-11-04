@@ -22,7 +22,11 @@ use crate::AttrValue;
 use crate::Datatype;
 use crate::DeflateLevel;
 use crate::FileBuilder;
+use crate::FileSpaceStrategy;
+use crate::LengthWidth;
 use crate::MaxExtent;
+use crate::MemoryStrategy;
+use crate::OffsetWidth;
 use crate::StoredAddress;
 use crate::UserblockSize;
 use crate::VariableLengthType;
@@ -56,6 +60,33 @@ fn each_supported_form_refers_to_its_collection(#[case] form: Form, #[case] data
     fixture.object("x", messages);
 
     assert_eq!(liveness(fixture), complete([collection]));
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn finite_appends_preserve_variable_length_sibling_collections(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+    #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("siblings.h5");
+    edit_test_util::append_with_variable_length_siblings(
+        &path,
+        format::FormatWidths { offsets, lengths },
+        memory,
+        strategy,
+    );
+    directory.close().unwrap();
 }
 
 #[test]
@@ -395,6 +426,33 @@ fn a_written_file_refers_to_every_collection_it_holds(
 }
 
 /// A variable-length element of length 0.
+#[rstest]
+#[case::contiguous(Written::Dataset)]
+#[case::compact_attributes(Written::Attributes(0))]
+#[case::dense_attributes(Written::Attributes(12))]
+#[case::chunked(Written::Chunked { filtered: false, extendable: false })]
+#[case::filtered(Written::Chunked { filtered: true, extendable: false })]
+fn written_variable_length_storage_uses_independent_widths(
+    #[case] written: Written,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    #[values(0, USERBLOCK_SIZE)] userblock: u64,
+) {
+    let path = temp::temp_path("width_liveness.h5");
+    let mut builder = written.builder(userblock);
+    builder
+        .with_offset_width(offsets)
+        .with_length_width(lengths);
+    builder.write(&path).unwrap();
+    let expected = complete(global_heap::collection_starts(
+        &std::fs::read(&path).unwrap(),
+    ));
+    assert!(!expected.referenced_collections.is_empty());
+    let engine = edit_test_util::open_engine(&path);
+    assert_eq!(engine.global_heap_liveness().unwrap(), expected);
+    drop(engine);
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Element {
     /// Refers to object 1 of a collection.

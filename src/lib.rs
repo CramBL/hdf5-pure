@@ -104,11 +104,11 @@
 //! file-space strategy and the superblock is repointed last. It edits files
 //! written by this crate, the reference HDF5 C library, and h5py across all of
 //! their on-disk formats. Backing selection depends on the file structure: bounded
-//! editing requires 8-byte offsets and lengths, a canonical superblock position
-//! matching its base address, and no userblock. Files with a pre-v2 superblock, a
-//! userblock, or nonpersistent [`FileSpaceStrategy::Page`] require a whole-file
-//! mirror. Space reuse and tail truncation follow the allocation strategy: under
-//! persistent managers, tail truncation and manager rewriting coexist, while
+//! editing requires a version 2 or 3 superblock at its base address and no userblock. Address and
+//! length widths are independently 2, 4, or 8 bytes and are preserved during editing.
+//! Files with a pre-v2 superblock, a userblock, or nonpersistent [`FileSpaceStrategy::Page`]
+//! require a whole-file mirror. Space reuse and tail truncation follow the allocation strategy:
+//! under persistent managers, tail truncation and manager rewriting coexist, while
 //! nonpersistent [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`]
 //! discard freed interior space without truncation.
 //! Durability guarantees depend on publication ordering, synchronization policy,
@@ -411,8 +411,9 @@
 //! managers of a file that persists them - including the per-page-type managers of a paged file,
 //! whose appends stay page-homogeneous. The staged edit surface works here too: it builds what the
 //! edit needs, not a copy of the file. What separates the two backings is which files they accept -
-//! the bounded one requires a latest-format file with 8-byte offsets and no userblock, and
-//! `open_rw` mirrors any other file.
+//! bounded editing requires a version 2 or 3 superblock at base address zero and excludes
+//! nonpersistent [`FileSpaceStrategy::Page`] allocation. The editor preserves both widths
+//! with either backing. [`File::open_rw`] selects a mirror for other supported files.
 //!
 //! The SWMR writer is a restriction of the same immediate append engine - unfiltered, chunk-aligned
 //! appends only - chosen so a concurrent reader never observes a torn view.

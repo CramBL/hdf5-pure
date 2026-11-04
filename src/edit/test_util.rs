@@ -8,13 +8,19 @@ use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 use test_util::disk_log::DiskOp;
 
+use crate::AttrValue;
 use crate::Datatype;
 use crate::DatatypeByteOrder;
+use crate::FileAccessProperties;
+use crate::FileBuilder;
 use crate::FileLocking;
+use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FixedPointType;
 use crate::FloatingPointType;
 use crate::Layout;
+use crate::MaxExtent;
 use crate::PersistedFreeSpacePolicy;
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
@@ -50,6 +56,127 @@ use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::superblock;
 use crate::type_builders::DatasetBuilder;
+use crate::width::FormatWidths;
+
+/// Creates, appends, and reopens finite datasets beside variable-length datasets and attributes.
+///
+/// Checks recorded widths, unchanged heap bytes, values, and a complete set of reachable
+/// collections. Reusable space must be disjoint from every original heap collection. Returns
+/// after releasing all file handles for independent observations.
+pub(in crate::edit) fn append_with_variable_length_siblings(
+    path: &Path,
+    widths: FormatWidths,
+    memory: MemoryStrategy,
+    strategy: FileSpaceStrategy,
+) {
+    let mut builder = FileBuilder::new();
+    builder
+        .with_offset_width(widths.offsets)
+        .with_length_width(widths.lengths)
+        .with_file_space_settings(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(true)
+                .with_threshold(1)
+                .with_page_size(FileSpacePageSize::try_from(512).unwrap()),
+        );
+    let labels = vec!["alpha".to_string(), String::new(), "ζ".to_string()];
+    builder.set_attr("labels", AttrValue::VarLenStringArray(labels.clone()));
+    for value in 0..9 {
+        builder.set_attr(&format!("number_{value}"), AttrValue::I32(value));
+    }
+    builder
+        .create_dataset("strings")
+        .with_vlen_strings(&["alpha", "", "ζ"]);
+    builder
+        .create_dataset("series")
+        .with_i32_data(&[0, 1, 2, 3])
+        .with_chunks(&[4])
+        .with_maxshape(&[MaxExtent::Fixed(16)])
+        .set_attr("labels", AttrValue::VarLenStringArray(labels.clone()));
+    builder
+        .create_dataset("single")
+        .with_i32_data(&[1])
+        .with_chunks(&[4])
+        .with_maxshape(&[MaxExtent::Fixed(4)]);
+    builder.write(path).unwrap();
+    let original = std::fs::read(path).unwrap();
+    let heap_ranges = test_util::global_heap::collection_ranges(
+        &original,
+        test_util::widths::Widths {
+            offset: usize::from(widths.offsets.get()),
+            length: usize::from(widths.lengths.get()),
+        },
+    );
+    assert!(!heap_ranges.is_empty());
+    let expected_collections = heap_ranges.iter().map(|range| range.start).collect();
+    for iteration in 0..3 {
+        let file = File::open_rw_with_options(
+            path,
+            FileAccessProperties::new().with_memory_strategy(memory),
+        )
+        .unwrap();
+        let start = 4 + iteration * 4;
+        file.dataset("series")
+            .unwrap()
+            .append(&(start..start + 4).collect::<Vec<i32>>())
+            .unwrap();
+        file.dataset("single")
+            .unwrap()
+            .append(&[iteration + 2])
+            .unwrap();
+        file.commit().unwrap();
+        assert_eq!(
+            file.dataset("series").unwrap().read_i32().unwrap(),
+            (0..start + 4).collect::<Vec<i32>>()
+        );
+        assert_eq!(
+            file.dataset("single").unwrap().read_i32().unwrap(),
+            (1..iteration + 3).collect::<Vec<i32>>()
+        );
+        assert_eq!(
+            file.dataset("strings").unwrap().read_string().unwrap(),
+            labels
+        );
+        assert_eq!(
+            file.root().attrs().unwrap().remove("labels").unwrap(),
+            AttrValue::VarLenStringArray(labels.clone())
+        );
+        assert_eq!(
+            file.dataset("series")
+                .unwrap()
+                .attrs()
+                .unwrap()
+                .remove("labels")
+                .unwrap(),
+            AttrValue::VarLenStringArray(labels.clone())
+        );
+        file.close().unwrap();
+        let current = std::fs::read(path).unwrap();
+        assert_eq!(
+            &current[9..11],
+            &[widths.offsets.get(), widths.lengths.get()]
+        );
+        for range in &heap_ranges {
+            let start = usize::try_from(range.start).unwrap();
+            let end = usize::try_from(range.end).unwrap();
+            assert_eq!(&current[start..end], &original[start..end]);
+        }
+        let engine = open_engine(path);
+        let live = engine.global_heap_liveness().unwrap();
+        assert!(live.analysis_complete);
+        assert_eq!(live.referenced_collections, expected_collections);
+        let reusable = engine.space_ownership().unwrap();
+        assert!(reusable.analysis_complete);
+        for free in reusable.reusable_free_space {
+            assert!(
+                heap_ranges
+                    .iter()
+                    .all(|heap| free.0 + free.1 <= heap.start || heap.end <= free.0)
+            );
+        }
+        drop(engine);
+    }
+}
 
 impl SpaceOwnership {
     /// Asserts complete classification of every byte in the file.

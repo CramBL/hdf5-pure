@@ -11,7 +11,7 @@ use crate::attribute_info::AttributeInfoMessage;
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::Dataspace;
-use crate::datatype::Datatype;
+use crate::datatype::{self, Datatype};
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
@@ -25,6 +25,7 @@ use crate::source::PhysicalSource;
 use crate::vl_data;
 use crate::vl_data::EmbeddedVlSlot;
 use crate::vl_data::VlElement;
+use crate::width::OffsetWidth;
 
 use super::WriteEngine;
 use super::analysis::AnalysisPhase;
@@ -153,19 +154,21 @@ impl WriteEngine {
         attribute: &AttributeMessage,
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, FormatError> {
-        Ok(match HeapReferences::of(&attribute.datatype)? {
-            HeapReferences::Absent => true,
-            HeapReferences::Located(slots) => {
-                self.collect_element_collections(
-                    &attribute.raw_data,
-                    attribute.dataspace.num_elements(),
-                    &slots,
-                    referenced,
-                )?;
-                true
-            }
-            HeapReferences::Unsupported => false,
-        })
+        Ok(
+            match HeapReferences::of(&attribute.datatype, self.widths().offsets)? {
+                HeapReferences::Absent => true,
+                HeapReferences::Located(slots) => {
+                    self.collect_element_collections(
+                        &attribute.raw_data,
+                        attribute.dataspace.num_elements(),
+                        &slots,
+                        referenced,
+                    )?;
+                    true
+                }
+                HeapReferences::Unsupported => false,
+            },
+        )
     }
 
     /// Adds the collections that a dataset's elements and fill value refer to.
@@ -209,7 +212,7 @@ impl WriteEngine {
         if matches!(layout, DataLayout::Virtual) {
             return Ok(false);
         }
-        let slots = match HeapReferences::of(&datatype)? {
+        let slots = match HeapReferences::of(&datatype, self.widths().offsets)? {
             HeapReferences::Absent => return Ok(true),
             HeapReferences::Located(slots) => slots,
             HeapReferences::Unsupported => return Ok(false),
@@ -219,12 +222,13 @@ impl WriteEngine {
         let pipeline = pipeline
             .map(|m| crate::filter_pipeline::parse_filter_pipeline(&m.data))
             .transpose()?;
-        let spec = RawReadSpec::parse(
+        let spec = RawReadSpec::parse_with_offset_width(
             &layout,
             &dataspace,
             &datatype,
             pipeline.as_ref(),
             FillPattern::ZERO,
+            self.widths().offsets,
         )?;
         Ok(match spec.storage() {
             RawReadStorage::Compact { data } => {
@@ -398,8 +402,7 @@ impl WriteEngine {
         data: &[u8],
         referenced: &mut BTreeSet<u64>,
     ) -> Result<bool, FormatError> {
-        let attribute = match AttributeMessage::parse_with_length_width(data, self.widths().lengths)
-        {
+        let attribute = match AttributeMessage::parse_with_widths(data, self.widths()) {
             Ok(attribute) => attribute,
             Err(FormatError::UnresolvedSharedMessage(_)) => return Ok(false),
             Err(error) => return Err(error),
@@ -472,27 +475,31 @@ enum HeapReferences {
 }
 
 impl HeapReferences {
-    /// Returns how an element of `datatype` refers to global heap objects.
+    /// Returns how a stored element at `offsets` refers to global heap objects.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::ZeroSizedDatatype`] if the size of `datatype` is 0, it holds a file
-    /// address, and the analysis locates each one.
-    fn of(datatype: &Datatype) -> Result<Self, FormatError> {
+    /// address, and the analysis locates each one. Returns stored-size and slot-field errors from
+    /// [`datatype::stored_element_size`] and [`vl_data::embedded_vlen_slots_with_offset_width`],
+    /// including platform-size errors.
+    fn of(datatype: &Datatype, offsets: OffsetWidth) -> Result<Self, FormatError> {
         if !crate::datatype::datatype_holds_file_address(datatype) {
             return Ok(Self::Absent);
         }
         if holds_unlocated_address(datatype) {
             return Ok(Self::Unsupported);
         }
-        let element_size = datatype.element_size()?;
-        Ok(match vl_data::embedded_vlen_slots(datatype) {
-            Some(vlen_slots) => Self::Located(ReferenceSlots {
-                element_size,
-                vlen_slots,
-            }),
-            None => Self::Unsupported,
-        })
+        let element_size = datatype::stored_element_size(datatype, offsets)?;
+        Ok(
+            match vl_data::embedded_vlen_slots_with_offset_width(datatype, offsets)? {
+                Some(vlen_slots) => Self::Located(ReferenceSlots {
+                    element_size,
+                    vlen_slots,
+                }),
+                None => Self::Unsupported,
+            },
+        )
     }
 }
 
