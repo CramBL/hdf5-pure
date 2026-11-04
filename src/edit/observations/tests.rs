@@ -17,6 +17,7 @@ use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
 mod large_page;
+mod widths;
 
 #[derive(Clone, Copy)]
 enum Layout {

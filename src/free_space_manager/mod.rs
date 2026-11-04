@@ -417,6 +417,10 @@ impl ManagerPlan {
                     class,
                     Some(section_list.len()),
                 )?;
+            #[cfg(all(test, feature = "std"))]
+            crate::edit::observations::record_manager_encoding(
+                header_bytes.len() + section_list_bytes.len(),
+            );
             Ok(EncodedManager {
                 header_address: header.start(),
                 header: header_bytes,
@@ -508,6 +512,14 @@ impl ManagerProjection {
         widths: FormatWidths,
         mut metadata_sizes: Option<&mut BTreeSet<u64>>,
     ) -> Result<Self, FormatError> {
+        #[cfg(all(test, feature = "std"))]
+        crate::edit::observations::record_manager_projection(
+            managers.len(),
+            managers
+                .iter()
+                .map(|manager| manager.sections().len())
+                .sum(),
+        );
         let mut blocks = Vec::with_capacity(managers.len());
         for manager in managers {
             let sections: Vec<_> = manager

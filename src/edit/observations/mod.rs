@@ -1,9 +1,135 @@
 //! Thread-local test observations of zero generation, chunk preparation, index encoding, and
-//! reservation work, including finite append ownership analysis.
+//! allocation work, including finite append ownership analysis and manager encoding.
 
 use core::cell::Cell;
 
 use hdf5_pure_space::__private::ReservationWork;
+
+/// Recorded planning, encoding, and allocation work for one test thread.
+///
+/// Reservation totals include normal batches, preferred lookups, and direct manager reservations.
+/// Chunk preparation and index-buffer capacities are observed separately.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WidthWork {
+    /// Array-plan construction attempts.
+    pub(crate) array_plans: u64,
+    /// Complete combined indexes or individual blocks encoded for emission.
+    pub(crate) array_encodings: u64,
+    /// Bytes in the recorded array outputs.
+    pub(crate) array_bytes: u64,
+    /// Free-space layout projection attempts.
+    pub(crate) manager_projections: u64,
+    /// Total input manager counts across projections.
+    pub(crate) projected_managers: u64,
+    /// Total input section counts across projections.
+    pub(crate) projected_sections: u64,
+    /// Complete manager header and section-list pairs prepared for emission.
+    pub(crate) manager_encodings: u64,
+    /// Combined header and section-list bytes in the recorded manager encodings.
+    pub(crate) manager_bytes: u64,
+    /// Recorded request groups, including scalar manager and preferred requests.
+    pub(crate) reservation_batches: u64,
+    /// Requested blocks across the recorded groups.
+    pub(crate) reservations: u64,
+    /// Calls to reusable-space reservation or flat-allocation lookups.
+    pub(crate) allocation_probes: u64,
+    /// Cumulative checked extension capacity in bytes.
+    pub(crate) appended_capacity: u64,
+    /// Reusable blocks that passed complete placement and address checks.
+    pub(crate) reused_blocks: u64,
+    /// Complete allocation bytes in the recorded reused blocks.
+    pub(crate) reused_block_bytes: u64,
+    /// Indexed extents reported by the recorded reservation groups.
+    pub(crate) indexed_extents: u64,
+    /// Indexed lookups reported by the recorded reservation groups.
+    pub(crate) lookups: u64,
+}
+
+std::thread_local! {
+    static WIDTH_WORK: Cell<WidthWork> = Cell::default();
+}
+
+/// Returns the current thread's recorded planning, encoding, and allocation work.
+pub(crate) fn width_work() -> WidthWork {
+    WIDTH_WORK.with(Cell::get)
+}
+
+/// Clears the current thread's planning, encoding, and allocation observations.
+pub(crate) fn reset_width_work() {
+    WIDTH_WORK.with(|work| work.set(WidthWork::default()));
+}
+
+/// Records one array-plan construction attempt.
+pub(crate) fn record_array_plan() {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.array_plans += 1;
+        observed.set(work);
+    });
+}
+
+/// Records one complete array output of `bytes` bytes.
+pub(crate) fn record_array_encoding(bytes: usize) {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.array_encodings += 1;
+        work.array_bytes += bytes as u64;
+        observed.set(work);
+    });
+}
+
+/// Records a free-space layout projection and its input counts.
+pub(crate) fn record_manager_projection(managers: usize, sections: usize) {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.manager_projections += 1;
+        work.projected_managers += managers as u64;
+        work.projected_sections += sections as u64;
+        observed.set(work);
+    });
+}
+
+/// Records a complete manager header and section list with combined length `bytes`.
+pub(crate) fn record_manager_encoding(bytes: usize) {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.manager_encodings += 1;
+        work.manager_bytes += bytes as u64;
+        observed.set(work);
+    });
+}
+
+/// Records block requests, indexed batch work, and checked extension capacity.
+pub(super) fn record_width_reservations(requests: usize, batch: ReservationWork, appended: u64) {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.reservation_batches += 1;
+        work.reservations += requests as u64;
+        work.appended_capacity += appended;
+        work.indexed_extents += batch.indexed_extents;
+        work.lookups += batch.lookups;
+        observed.set(work);
+    });
+}
+
+/// Records one reusable-space lookup attempt.
+pub(super) fn record_allocation_probe() {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.allocation_probes += 1;
+        observed.set(work);
+    });
+}
+
+/// Records a reusable block after its complete range has been checked.
+pub(super) fn record_reused_block(bytes: u64) {
+    WIDTH_WORK.with(|observed| {
+        let mut work = observed.get();
+        work.reused_blocks += 1;
+        work.reused_block_bytes += bytes;
+        observed.set(work);
+    });
+}
 
 /// Zero-generation requests recorded on the current thread.
 ///

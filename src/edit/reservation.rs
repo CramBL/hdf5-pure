@@ -74,7 +74,11 @@ impl<'a> ReservationPlan<'a> {
                 #[cfg(test)]
                 super::observations::record_preferred_probe();
                 let mut batch = plan.engine.space.reservation_batch(1);
+                #[cfg(test)]
+                super::observations::record_allocation_probe();
                 let reservation = batch.reserve(preferred.reservation());
+                #[cfg(test)]
+                super::observations::record_width_reservations(1, batch.work(), 0);
                 batch.finish();
                 if let Some(reservation) = reservation {
                     plan.reservations.push(Self::reused(
@@ -304,6 +308,10 @@ impl<'a> ReservationPlan<'a> {
         mut requests: impl ExactSizeIterator<Item = BlockRequest>,
         mode: ReservationMode,
     ) -> Result<(), Error> {
+        #[cfg(test)]
+        let requests_len = requests.len();
+        #[cfg(test)]
+        let original_eoa = self.end;
         let Self {
             engine,
             reservations,
@@ -348,8 +356,6 @@ impl<'a> ReservationPlan<'a> {
                 .space
                 .reservation_batch(if reuse { requests.len() } else { 0 })
         };
-        #[cfg(test)]
-        let request_count = requests.len();
         let result = requests.try_for_each(|request| {
             let planned = Self::reserve_one(
                 &mut batch,
@@ -365,7 +371,14 @@ impl<'a> ReservationPlan<'a> {
         });
         *work = batch.finish();
         #[cfg(test)]
-        super::observations::record_reservations(request_count, *work);
+        {
+            super::observations::record_reservations(requests_len, *work);
+            super::observations::record_width_reservations(
+                requests_len,
+                *work,
+                end.get().saturating_sub(original_eoa.get()),
+            );
+        }
         if aggregate {
             engine.aggregation = aggregation;
         }
@@ -381,6 +394,10 @@ impl<'a> ReservationPlan<'a> {
         unresolved: &mut Option<ReusableReservation>,
     ) -> Result<PlannedReservation, Error> {
         let request = block_request.reservation();
+        #[cfg(test)]
+        if reuse {
+            super::observations::record_allocation_probe();
+        }
         if reuse && let Some(reservation) = batch.reserve(request) {
             return Self::reused(
                 page.addresses,
@@ -450,6 +467,8 @@ impl<'a> ReservationPlan<'a> {
                 return Err(error.into());
             }
         };
+        #[cfg(test)]
+        super::observations::record_reused_block(block.allocation().length());
         Ok(PlannedReservation {
             placement: Placement::Reused {
                 addr: block.allocation().start().get(),
