@@ -35,6 +35,8 @@ pub use crate::session::SessionSpaceSnapshot;
 
 pub use crate::snapshot::AdmittedFreeSnapshot;
 pub use crate::snapshot::PageClassEvidence;
+pub use crate::snapshot::RetainedExtent;
+pub use crate::snapshot::RetainedKind;
 
 pub use crate::reservation::{
     ReservationBatch, ReservationPlacement, ReservationRequest, ReservationWork,

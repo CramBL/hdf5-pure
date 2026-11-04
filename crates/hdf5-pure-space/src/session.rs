@@ -17,6 +17,7 @@ use super::paged::{
 use super::persistence::ManagerKind;
 use super::reservation::{ReservationBatch, ReservationRequest};
 use super::snapshot::AdmittedFreeSnapshot;
+use super::snapshot::RetainedExtent;
 
 /// The reusable-space strategy active for one editing session.
 ///
@@ -506,6 +507,50 @@ impl SessionSpace {
     /// Returns reusable extents in ascending address order.
     pub fn reusable_sections(&self) -> impl Iterator<Item = Extent> + '_ {
         self.admitted_snapshot().reusable_sections()
+    }
+
+    /// Borrows exact PAGE extents retained as dead, unclassified, or pending padding.
+    ///
+    /// Returns an empty iterator for flat or disabled strategies. Preserves each recorded range
+    /// and kind, with no guaranteed global address order. Excludes discarded returns and retirement
+    /// batches held by the caller. Reusable extents are reported by
+    /// [`Self::reusable_sections`].
+    ///
+    /// The allocator remains borrowed while the iterator is used. The caller keeps copied
+    /// descriptors associated with that state and establishes source consistency separately.
+    ///
+    /// # Performance
+    ///
+    /// Borrows the existing lists and copies one descriptor per entry without allocating,
+    /// sorting, merging, or expanding pages.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
+    /// use hdf5_pure_space::__private::{Extent, RetainedKind, SessionSpace};
+    ///
+    /// let fragment = Extent::new(StoredAddress::new(8), 16).unwrap();
+    /// let space = SessionSpace::from_persisted(
+    ///     Some(FileSpaceStrategy::Page),
+    ///     1,
+    ///     FileSpacePageSize::MIN,
+    ///     [(None, fragment)],
+    /// ).unwrap();
+    /// let mut retained = space.retained_extents();
+    /// let entry = retained.next().unwrap();
+    /// assert_eq!(entry.extent(), fragment);
+    /// assert_eq!(entry.kind(), RetainedKind::Unclassified);
+    /// assert!(retained.next().is_none());
+    /// assert_eq!(space.reusable_bytes().unwrap(), 0);
+    /// ```
+    pub fn retained_extents(&self) -> impl Iterator<Item = RetainedExtent> + '_ {
+        let paged = match self {
+            Self::Paged(space) => Some(&space.paged),
+            Self::Disabled | Self::Flat(_) => None,
+        };
+        paged.into_iter().flat_map(PagedEdit::retained_extents)
     }
 
     /// Returns reusable extents with extra raw allocations folded back into the snapshot.

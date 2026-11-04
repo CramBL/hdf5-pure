@@ -1,4 +1,4 @@
-//! Borrowed views of admitted free-space extents and their cached byte totals.
+//! Borrowed free-space views, cached totals, and exact retained PAGE descriptors.
 
 use alloc::vec::Vec;
 
@@ -10,6 +10,11 @@ use super::list::FreeList;
 use super::paged::{FreeClass, PageType};
 use super::persistence::PageParts;
 use super::session::MergeExtents;
+
+mod retained;
+
+pub use retained::RetainedExtent;
+pub use retained::RetainedKind;
 
 /// Admitted free extents borrowed from one allocator state.
 ///
