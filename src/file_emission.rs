@@ -155,6 +155,12 @@ impl<T> Reservation<T> {
     pub(crate) fn start(&self) -> PhysicalAddress {
         self.range.start()
     }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn into_parts(self) -> (FileRange, T) {
+        let Self { range, value } = self;
+        (range, value)
+    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,8 @@ use hdf5_pure_format::__private::SectionInfoCounts;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ManagerKind;
 
+#[cfg(feature = "std")]
+use crate::address::BaseAddress;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 pub(super) use crate::chunked_write::ArrayMeasure;
@@ -17,6 +19,8 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
 use crate::file_allocation::FileManager;
+#[cfg(feature = "std")]
+use crate::file_emission::Reservation;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::free_space_manager;
@@ -43,6 +47,20 @@ impl Allocation {
     ) -> Result<Self, FormatError> {
         let address = allocation.reserve(length, class)?;
         Ok(Self { address, length })
+    }
+    /// Resolves the complete allocation to a physical output range.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address errors of [`Reservation::new`].
+    #[cfg(feature = "std")]
+    pub(super) fn reservation<T>(
+        &self,
+        base: BaseAddress,
+        value: T,
+    ) -> Result<Reservation<T>, FormatError> {
+        let Self { address, length } = self;
+        Reservation::new(base, *address, *length, value)
     }
 }
 
@@ -344,6 +362,8 @@ pub(super) struct PagedLayout<T> {
     pub(super) extension: Allocation,
     /// Callback results in dataset measurement order.
     pub(super) data: Vec<T>,
+    /// Array block placements paired with dataset indices, in measurement order.
+    pub(super) arrays: Vec<(usize, ArrayAllocation)>,
     /// Dataset indices in the shared small-raw page run.
     pub(super) small: Vec<usize>,
     /// Dataset indices with separate page-aligned runs.
@@ -363,28 +383,32 @@ pub(super) struct PagedLayout<T> {
 }
 
 impl<T> PagedLayout<T> {
-    /// Plans the extension, managers, and dataset regions after the object metadata.
+    /// Plans array blocks, the extension, managers, and payloads after object metadata.
     ///
-    /// `metadata_end` is the stored address before the extension. `sections` contains free
-    /// page tails from collection placement. Small extension and manager blocks stay within
-    /// one page, and blocks at least one page long start at page boundaries. With `persist`,
-    /// serializes the active managers with capacity for their placement gaps.
+    /// `metadata_end` is the stored address before array placement. `sections` contains free
+    /// page tails from collection placement. Reserves each complete array, extension, and manager
+    /// block in metadata pages. Small blocks stay within one page, and blocks at least one page
+    /// long start at page boundaries. With `persist`, serializes the active managers with capacity
+    /// for the placement gaps.
     ///
-    /// Calls `bind` once per dataset in measurement order with its index and allocation,
-    /// passing [`None`] for an empty contiguous region. Small regions share a page run, and
-    /// each large region starts on a page boundary. Stores callback results in [`Self::data`].
+    /// Calls `bind` once per dataset in measurement order with its index, payload allocation, and
+    /// optional array placement. Passes [`None`] for an empty contiguous region's allocation.
+    /// Small payloads share a page run, and each large payload starts on a page boundary.
+    /// Stores callback results in [`Self::data`].
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if a region or its padding exceeds [`u64::MAX`],
     /// or [`FormatError::Internal`] if manager capacity exceeds its section bound or serialized
-    /// lengths differ from their reservations. Propagates errors from `bind` and manager
-    /// serialization.
+    /// lengths differ from their reservations. Returns [`FormatError::AllocationFailed`] if
+    /// reserving array address storage fails. Propagates array planning, `bind`, and manager
+    /// serialization errors.
     ///
     /// # Performance
     ///
-    /// Measures the supplied section sizes before retrying tail placement. Retries use retained
-    /// counts and size groups, without calling `bind` or serializing managers. Serializes each
+    /// Retains one address per complete array block. Measures the supplied section sizes before
+    /// retrying tail placement. Retries use retained counts and size groups, without calling
+    /// `bind` or serializing managers. Serializes each
     /// active manager after placement.
     pub(super) fn new<'a>(
         page: FileSpacePageSize,
@@ -393,13 +417,39 @@ impl<T> PagedLayout<T> {
         extension_length: u64,
         measurements: impl ExactSizeIterator<Item = &'a DataMeasure> + Clone,
         sections: CollectionSections,
-        mut bind: impl FnMut(usize, Option<Allocation>) -> Result<T, FormatError>,
+        mut bind: impl FnMut(
+            usize,
+            Option<Allocation>,
+            Option<&ArrayAllocation>,
+        ) -> Result<T, FormatError>,
     ) -> Result<Self, FormatError> {
         let CollectionSections {
             metadata: mut meta_sections,
             raw: mut raw_sections,
             large: mut large_sections,
         } = sections;
+        let mut array_arena = MetadataArena::new(page, metadata_end);
+        let mut arrays = Vec::new();
+        for (index, measure) in measurements.clone().enumerate() {
+            if let Some(array) = &measure.array {
+                arrays
+                    .try_reserve(1)
+                    .map_err(|source| FormatError::AllocationFailed {
+                        values: arrays.len() + 1,
+                        source,
+                    })?;
+                arrays.push((index, ArrayAllocation::new(&mut array_arena, array)?));
+            }
+        }
+        let MetadataArena {
+            page: _,
+            cursor: array_end,
+            occupied_end: _,
+            metadata,
+            large: padding,
+        } = array_arena;
+        meta_sections.extend(metadata);
+        large_sections.extend(padding);
         let mut small = Vec::new();
         let mut large = Vec::new();
         let mut small_total = 0;
@@ -408,7 +458,7 @@ impl<T> PagedLayout<T> {
             if measure.empty_contiguous() {
                 continue;
             }
-            let length = measure.length()?;
+            let length = measure.payload_length();
             if length < page.get() {
                 small.push(index);
                 small_total = checked_end(small_total, length)?;
@@ -439,7 +489,7 @@ impl<T> PagedLayout<T> {
         } = TailLayout::new(
             page,
             persist,
-            metadata_end,
+            array_end,
             extension_length,
             &meta_sections,
             &raw_sizes,
@@ -470,8 +520,9 @@ impl<T> PagedLayout<T> {
             });
         }
         let mut data = Vec::with_capacity(measurements.len());
+        let mut array_placements = arrays.iter().peekable();
         for (index, measure) in measurements.enumerate() {
-            let length = measure.length()?;
+            let length = measure.payload_length();
             let placed = if measure.empty_contiguous() {
                 None
             } else if length < page.get() {
@@ -494,7 +545,10 @@ impl<T> PagedLayout<T> {
                     length,
                 })
             };
-            data.push(bind(index, placed)?);
+            let array = array_placements
+                .next_if(|(placed_index, _)| *placed_index == index)
+                .map(|(_, array)| array);
+            data.push(bind(index, placed, array)?);
         }
         let mut managers = [None, None, None];
         for ((target, location), sections) in
@@ -510,6 +564,7 @@ impl<T> PagedLayout<T> {
         Ok(Self {
             extension,
             data,
+            arrays,
             small,
             large,
             slots,
@@ -519,6 +574,81 @@ impl<T> PagedLayout<T> {
             small_end,
             end: cursor,
         })
+    }
+}
+
+/// Stored placements for an array's complete metadata blocks.
+///
+/// Block lengths are supplied separately through [`ArrayMeasure`]. Placement gaps are free space,
+/// classified by the metadata arena. The output range includes those gaps between blocks.
+pub(super) struct ArrayAllocation {
+    /// Stored block addresses in [`ArrayMeasure::visit_blocks`] order.
+    pub(super) addresses: Vec<StoredAddress>,
+    /// The exclusive end of the last complete block, before any trailing page padding.
+    end: StoredAddress,
+}
+
+impl ArrayAllocation {
+    /// Reserves each measured block through the shared metadata arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AllocationFailed`] if reserving address storage fails, or
+    /// [`FormatError::Internal`] if the measurement has no blocks. Propagates array planning
+    /// and placement errors from [`ArrayMeasure::visit_blocks`] and [`MetadataArena::reserve`].
+    fn new(arena: &mut MetadataArena, measure: &ArrayMeasure) -> Result<Self, FormatError> {
+        let mut addresses = Vec::new();
+        let mut end = arena.cursor;
+        measure.visit_blocks(|length| {
+            addresses
+                .try_reserve(1)
+                .map_err(|source| FormatError::AllocationFailed {
+                    values: addresses.len() + 1,
+                    source,
+                })?;
+            let allocation = arena.reserve(length)?;
+            addresses.push(allocation.address);
+            end = allocation.address.checked_add(allocation.length)?;
+            Ok(())
+        })?;
+        let allocation = Self { addresses, end };
+        allocation.address()?;
+        Ok(allocation)
+    }
+
+    /// Returns the stored address of the array header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the array has no block placements.
+    pub(super) fn address(&self) -> Result<StoredAddress, FormatError> {
+        self.addresses
+            .first()
+            .copied()
+            .ok_or_else(|| FormatError::Internal("an array has no block allocations".into()))
+    }
+
+    /// Resolves the physical output range from the first block through the last block's end.
+    ///
+    /// Includes gaps between blocks for ordered emission. Allocation ownership is established
+    /// for each complete block separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if placements are empty or the end precedes the first
+    /// block. Propagates physical address errors from [`Reservation::new`].
+    #[cfg(feature = "std")]
+    pub(super) fn reservation<T>(
+        &self,
+        base: BaseAddress,
+        value: T,
+    ) -> Result<Reservation<T>, FormatError> {
+        let Self { addresses: _, end } = self;
+        let address = self.address()?;
+        let length = end
+            .checked_distance_from(address)
+            .ok_or_else(|| FormatError::Internal("an array ends before its first block".into()))?;
+        Reservation::new(base, address, length, value)
     }
 }
 
@@ -993,6 +1123,46 @@ mod tests {
     }
 
     #[rstest]
+    #[case::header(u64::MAX - 1, 2, u64::MAX - 1, 2)]
+    #[case::child(u64::MAX - 32, 2, u64::MAX - 4, 5)]
+    #[case::large_child(u64::MAX - 40, 65, u64::MAX - 12, 13)]
+    fn array_placement_rejects_overflow_before_binding_payloads(
+        #[case] start: u64,
+        #[case] slots: u64,
+        #[case] offset: u64,
+        #[case] length: u64,
+    ) {
+        let measured = DataMeasure::chunked(
+            0,
+            Some(ChunkArrayGeometry {
+                kind: ChunkArrayKind::FixedArray,
+                occupied: Cow::Borrowed(&[]),
+                slots,
+                chunk_bytes: 8,
+                filtered: false,
+            }),
+        )
+        .unwrap();
+        let mut calls = 0;
+        let error = PagedLayout::new(
+            FileSpacePageSize::try_from(512).unwrap(),
+            true,
+            StoredAddress::new(start),
+            20,
+            core::iter::once(&measured),
+            CollectionSections::default(),
+            |_, _, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, FormatError::OffsetOverflow { offset, length });
+        assert_eq!(calls, 0);
+    }
+
+    #[rstest]
     #[case::direct(false)]
     #[case::aggregated(true)]
     fn object_metadata_reservations_keep_header_attribute_and_link_order(#[case] aggregated: bool) {
@@ -1054,12 +1224,13 @@ mod tests {
             20,
             measurements.iter(),
             CollectionSections::default(),
-            |_, allocation| Ok(allocation),
+            |_, allocation, _| Ok(allocation),
         )
         .unwrap();
         let PagedLayout {
             extension,
             data,
+            arrays: _,
             small,
             large,
             slots,
@@ -1113,11 +1284,12 @@ mod tests {
             ]
             .iter(),
             CollectionSections::default(),
-            |_, allocation| Ok(allocation),
+            |_, allocation, _| Ok(allocation),
         )
         .unwrap();
         let PagedLayout {
             data,
+            arrays: _,
             slots,
             managers,
             metadata_end,
@@ -1217,19 +1389,26 @@ mod tests {
     }
 
     #[rstest]
-    #[case::extension_crossing(500, 20, 0, 0)]
-    #[case::extension_one_page(500, 512, 0, 0)]
-    #[case::extension_large(500, 600, 0, 0)]
-    #[case::metadata_large(1_048_576, 20, 64, 0)]
-    #[case::count_width_before(1_048_576, 20, 246, 0)]
-    #[case::count_width_after(1_048_576, 20, 247, 0)]
-    #[case::raw_list_one_page(1_048_576, 20, 0, 54)]
-    #[case::raw_list_large(1_048_576, 20, 0, 100)]
+    #[case::extension_crossing(500, 20, 0, 0, None)]
+    #[case::extension_one_page(500, 512, 0, 0, None)]
+    #[case::extension_large(500, 600, 0, 0, None)]
+    #[case::metadata_large(1_048_576, 20, 64, 0, None)]
+    #[case::count_width_before(1_048_576, 20, 246, 0, None)]
+    #[case::count_width_after(1_048_576, 20, 247, 0, None)]
+    #[case::raw_list_one_page(1_048_576, 20, 0, 54, None)]
+    #[case::raw_list_large(1_048_576, 20, 0, 100, None)]
+    #[case::array_fixed_small(462, 20, 0, 0, Some((ChunkArrayKind::FixedArray, 4, &[0, 1][..])))]
+    #[case::array_fixed_large(510, 20, 0, 0, Some((ChunkArrayKind::FixedArray, 65, &[0, 1][..])))]
+    #[case::array_fixed_paged(510, 20, 0, 0, Some((ChunkArrayKind::FixedArray, 1_025, &[0, 1][..])))]
+    #[case::array_extensible(462, 20, 0, 0, Some((ChunkArrayKind::ExtensibleArray, 2, &[0, 1][..])))]
+    #[case::array_sparse_extensible(510, 20, 0, 0, Some((ChunkArrayKind::ExtensibleArray, 2_000_000, &[0, 1_000_000][..])))]
+    #[case::array_empty(510, 20, 0, 0, Some((ChunkArrayKind::ExtensibleArray, 0, &[][..])))]
     fn tail_blocks_and_free_sections_partition_page_storage(
         #[case] start: u64,
         #[case] extension: u64,
         #[case] metadata_count: usize,
         #[case] raw_count: usize,
+        #[case] array: Option<(ChunkArrayKind, u64, &[u64])>,
     ) {
         let metadata: Vec<_> = (0..metadata_count)
             .map(|index| FreeSection {
@@ -1243,21 +1422,59 @@ mod tests {
                 size: 1,
             })
             .collect();
+        let measurements: Vec<_> = array
+            .map(|(kind, slots, occupied)| {
+                DataMeasure::chunked(
+                    0,
+                    Some(ChunkArrayGeometry {
+                        kind,
+                        occupied: Cow::Borrowed(occupied),
+                        slots,
+                        chunk_bytes: 8,
+                        filtered: false,
+                    }),
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect();
         let plan = PagedLayout::new(
             FileSpacePageSize::try_from(512).unwrap(),
             true,
             StoredAddress::new(start),
             extension,
-            core::iter::empty(),
+            measurements.iter(),
             CollectionSections {
                 metadata: metadata.clone(),
                 raw: raw.clone(),
                 large: Vec::new(),
             },
-            |_, placed| Ok(placed),
+            |_, placed, _| Ok(placed),
         )
         .unwrap();
         let mut occupied = vec![plan.extension];
+        for (index, allocation) in &plan.arrays {
+            let mut addresses = allocation.addresses.iter();
+            measurements[*index]
+                .array
+                .as_ref()
+                .unwrap()
+                .visit_blocks(|length| {
+                    occupied.push(Allocation {
+                        address: *addresses.next().unwrap(),
+                        length,
+                    });
+                    Ok(())
+                })
+                .unwrap();
+            assert!(addresses.next().is_none());
+            if matches!(array, Some((ChunkArrayKind::FixedArray, _, _))) {
+                assert_eq!(allocation.addresses.len(), 2);
+            }
+            assert!(allocation.addresses.len() < 32);
+            assert!(allocation.address().unwrap() < plan.raw_start);
+        }
+
         let mut actual = [Vec::new(), Vec::new(), Vec::new()];
         for (target, manager) in plan.managers.iter().enumerate() {
             let Some(manager) = manager else {
@@ -1379,7 +1596,7 @@ mod tests {
             length,
             measurements.iter(),
             CollectionSections::default(),
-            |_, placed| Ok(placed),
+            |_, placed, _| Ok(placed),
         )
         .unwrap();
         assert_eq!(plan.managers[0].is_some(), active);
@@ -1443,7 +1660,7 @@ mod tests {
             extension,
             core::iter::once(&DataMeasure::new(7, DataKind::Contiguous)),
             CollectionSections::default(),
-            |_, placed| Ok(placed),
+            |_, placed, _| Ok(placed),
         )
         .err()
         .unwrap();
@@ -1472,11 +1689,117 @@ mod tests {
             extension,
             measurements.iter(),
             CollectionSections::default(),
-            |_, allocation| Ok(allocation),
+            |_, allocation, _| Ok(allocation),
         )
         .map(|_| ())
         .unwrap_err();
         assert_eq!(error, FormatError::OffsetOverflow { offset, length });
+    }
+
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::sparse(2_000_000, "page_sparse_array", "page_sparse_array_control")]
+    #[case::larger_span(
+        20_000_000,
+        "page_larger_sparse_array",
+        "page_larger_sparse_array_control"
+    )]
+    fn paged_array_planning_retains_complete_block_addresses(
+        #[case] slots: u64,
+        #[case] region: &'static str,
+        #[case] control_region: &'static str,
+    ) {
+        use core::mem;
+
+        use test_util::allocation;
+
+        let measurement = DataMeasure::chunked(
+            16,
+            Some(ChunkArrayGeometry {
+                kind: ChunkArrayKind::ExtensibleArray,
+                occupied: Cow::Borrowed(&[0, 1_000_000]),
+                slots,
+                chunk_bytes: 8,
+                filtered: false,
+            }),
+        )
+        .unwrap();
+        let mut blocks = 0;
+        let mut large_blocks = 0;
+        measurement
+            .array
+            .as_ref()
+            .unwrap()
+            .visit_blocks(|length| {
+                blocks += 1;
+                large_blocks += usize::from(length > 512);
+                Ok(())
+            })
+            .unwrap();
+        assert!(large_blocks > 0);
+        assert!(blocks < 32);
+        let (control, positive) = allocation::measure(control_region, || {
+            std::hint::black_box(alloc::vec![0_u8; 1024])
+        });
+        assert!(positive.blocks > 0, "{positive}");
+        assert!(positive.peak_bytes >= 1024, "{positive}");
+        drop(control);
+        let (plan, measured) = allocation::measure(region, || {
+            PagedLayout::new(
+                FileSpacePageSize::try_from(512).unwrap(),
+                true,
+                StoredAddress::new(500),
+                20,
+                core::iter::once(&measurement),
+                CollectionSections::default(),
+                |_, allocation, _| Ok(allocation),
+            )
+            .unwrap()
+        });
+        let PagedLayout {
+            extension: _,
+            data,
+            arrays,
+            small,
+            large,
+            slots: _,
+            managers,
+            metadata_end: _,
+            raw_start,
+            small_end: _,
+            end,
+        } = plan;
+        let retained = data.capacity() * mem::size_of_val(data.first().unwrap())
+            + arrays.capacity() * mem::size_of_val(arrays.first().unwrap())
+            + arrays
+                .iter()
+                .map(|(_, array)| array.addresses.capacity() * mem::size_of::<StoredAddress>())
+                .sum::<usize>()
+            + (small.capacity() + large.capacity()) * mem::size_of::<usize>()
+            + managers
+                .iter()
+                .flatten()
+                .map(|manager| manager.header.capacity() + manager.section_list.capacity())
+                .sum::<usize>();
+        assert_eq!(arrays.len(), 1);
+        assert_eq!(arrays[0].1.addresses.len(), blocks);
+        assert_eq!(
+            data,
+            [Some(Allocation {
+                address: raw_start,
+                length: 16
+            })]
+        );
+        assert_eq!(end.checked_distance_from(raw_start), Some(512));
+        assert_eq!(measured.live_bytes, retained as u64, "{measured}");
+        assert!(
+            measured.live_bytes >= (blocks * mem::size_of::<StoredAddress>()) as u64,
+            "{measured}"
+        );
+        assert!(
+            measured.peak_bytes <= measured.live_bytes + 65_536,
+            "{measured}"
+        );
     }
 
     #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -1532,7 +1855,7 @@ mod tests {
                 20,
                 measurements.iter(),
                 CollectionSections::default(),
-                |index, allocation| {
+                |index, allocation, _| {
                     calls += 1;
                     Ok((index, allocation, [0xa5_u8; 256]))
                 },
@@ -1541,6 +1864,7 @@ mod tests {
         });
         let PagedLayout {
             data,
+            arrays: _,
             small,
             large,
             raw_start,

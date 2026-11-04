@@ -405,7 +405,8 @@ impl PreparedDataset {
     ///
     /// Returns [`FormatError::Internal`] if required encoded chunks are absent, the payload length
     /// or array kind differs from `measure`, or array geometry and address presence disagree.
-    /// Returns [`FormatError::OffsetOverflow`] if a payload or array end exceeds [`u64::MAX`].
+    /// Returns [`FormatError::OffsetOverflow`] if a payload or consecutive array end exceeds
+    /// [`u64::MAX`].
     /// Propagates chunk preparation and layout serialization errors.
     pub(super) fn build_chunked<'a>(
         &self,
@@ -515,8 +516,8 @@ impl PreparedDataset {
 
     /// Measures chunk payloads and retains array geometry for placement.
     ///
-    /// The writer reads provider payloads during emission. For array layouts, the index is after
-    /// the payload starting at `data_address`.
+    /// The writer reads provider payloads during emission. Measures consecutive array blocks
+    /// after the payload at `data_address`. The caller assigns final block addresses separately.
     ///
     /// # Errors
     ///
@@ -819,26 +820,31 @@ impl DsData<'_> {
         &self,
         emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
     ) -> Result<(), EmissionError<E>> {
-        match self {
-            Self::Encoded {
-                chunks,
-                data_address,
-                array: Some(array),
-                len: _,
-            } => {
-                let (records, _) = chunks.records_at(*data_address)?;
-                array.emit(&chunks.index_slots(&records)?, emit)
-            }
-            Self::Streamed {
-                payload,
-                array: Some(array),
-                len: _,
-            } => array.emit(&payload.index_slots()?, emit),
-            Self::Encoded { array: None, .. }
-            | Self::Streamed { array: None, .. }
-            | Self::InMemory { .. }
-            | Self::Produced { .. } => Ok(()),
-        }
+        self.emit_array_with(None, emit)
+    }
+
+    /// Writes array blocks at their individually assigned stored addresses.
+    ///
+    /// The caller supplies `addresses` in [`ArrayMeasure::visit_blocks`] order. Resolves physical
+    /// ranges through `base` and writes zero padding before each block. Payload emission is separate.
+    /// A failure can leave partial output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if the first address
+    /// differs from the prepared array root or a block overlaps earlier output. Propagates
+    /// slot, placement, encoding, and physical-range errors as [`EmissionError::Format`] and
+    /// output errors as [`EmissionError::Sink`].
+    pub(super) fn emit_array_at<S: ByteSink>(
+        &self,
+        sink: &mut S,
+        base: BaseAddress,
+        addresses: &[StoredAddress],
+    ) -> Result<(), EmissionError<S::Error>> {
+        self.emit_array_with(Some(addresses), |address, bytes| {
+            put_placed_array_block(sink, base, address, bytes)
+        })
+        .map_err(flatten_emission_error)
     }
 
     /// Returns the combined payload and array byte length.
@@ -849,11 +855,39 @@ impl DsData<'_> {
             DsData::Produced { total_bytes, .. } => *total_bytes,
         }
     }
+
+    fn emit_array_with<E>(
+        &self,
+        addresses: Option<&[StoredAddress]>,
+        emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        match self {
+            Self::Encoded {
+                chunks,
+                data_address,
+                array: Some(array),
+                len: _,
+            } => {
+                let (records, _) = chunks.records_at(*data_address)?;
+                array.emit(&chunks.index_slots(&records)?, addresses, emit)
+            }
+            Self::Streamed {
+                payload,
+                array: Some(array),
+                len: _,
+            } => array.emit(&payload.index_slots()?, addresses, emit),
+            Self::Encoded { array: None, .. }
+            | Self::Streamed { array: None, .. }
+            | Self::InMemory { .. }
+            | Self::Produced { .. } => Ok(()),
+        }
+    }
 }
 
 /// A borrowed array measurement and checked stored root.
 ///
-/// The constructor checks the array kind and exclusive end for the supplied dataset measurement.
+/// The constructor checks the array kind and the consecutive encoding end at the stored root.
+/// Individual block placements are supplied during emission.
 pub(super) struct ArrayEmission<'a> {
     measure: &'a ArrayMeasure,
     address: StoredAddress,
@@ -868,7 +902,7 @@ impl<'a> ArrayEmission<'a> {
     ///
     /// Returns [`FormatError::Internal`] if only some of geometry, kind, and address are present,
     /// or if the measured and supplied array kinds differ. Returns [`FormatError::OffsetOverflow`]
-    /// if the complete array end exceeds [`u64::MAX`].
+    /// if the consecutive array end exceeds [`u64::MAX`].
     /// Propagates errors from [`ArrayMeasure::length`].
     fn new(
         data: &'a DataMeasure,
@@ -887,16 +921,27 @@ impl<'a> ArrayEmission<'a> {
 
     /// Serializes the measured array through complete-block callbacks.
     ///
+    /// Uses supplied block addresses or consecutive placement from the prepared root.
+    ///
     /// # Errors
     ///
-    /// Returns the errors of [`ArrayMeasure::write_consecutive`].
+    /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if supplied addresses
+    /// start at another root. Propagates the errors of [`ArrayMeasure::write_at`] or
+    /// [`ArrayMeasure::write_consecutive`].
     fn emit<E>(
         &self,
         slots: &IndexSlots<'_>,
+        addresses: Option<&[StoredAddress]>,
         emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
     ) -> Result<(), EmissionError<E>> {
         let Self { measure, address } = self;
-        measure.write_consecutive(slots, *address, emit)
+        match addresses {
+            Some(addresses) if addresses.first() == Some(address) => {
+                measure.write_at(slots, addresses, emit)
+            }
+            Some(_) => Err(inconsistent_chunk_measurement().into()),
+            None => measure.write_consecutive(slots, *address, emit),
+        }
     }
 }
 
@@ -942,6 +987,81 @@ pub(super) fn emit_array<S: ByteSink>(
             put_array_block(sink, base, address, bytes)
         })
         .map_err(flatten_emission_error)
+}
+
+/// Writes individually placed array blocks, padding gaps in physical-address order.
+///
+/// The caller supplies `addresses` in [`ArrayMeasure::visit_blocks`] order, with the sink at or
+/// before the first resolved address. A failure can leave partial output.
+///
+/// # Errors
+///
+/// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if a block overlaps earlier
+/// output. Propagates planning, placement, slot, encoding, and physical-range errors as
+/// [`EmissionError::Format`] and output errors as [`EmissionError::Sink`].
+#[cfg(feature = "std")]
+pub(super) fn emit_array_at<S: ByteSink>(
+    sink: &mut S,
+    base: BaseAddress,
+    measure: &ArrayMeasure,
+    slots: &IndexSlots<'_>,
+    addresses: &[StoredAddress],
+) -> Result<(), EmissionError<S::Error>> {
+    measure
+        .write_at(slots, addresses, |address, bytes| {
+            put_placed_array_block(sink, base, address, bytes)
+        })
+        .map_err(flatten_emission_error)
+}
+
+/// Writes an empty array at individual block addresses using scalar index geometry.
+///
+/// The writer constructs block geometry for this emission and pads gaps between blocks.
+/// A failure can leave partial output.
+///
+/// # Errors
+///
+/// Returns output errors as [`EmissionError::Sink`]. Propagates planning, placement, slot,
+/// encoding, and physical-range errors as [`EmissionError::Format`]. Returns
+/// [`EmissionError::Format`] with [`FormatError::Internal`] if a block overlaps earlier output.
+#[cfg(feature = "std")]
+pub(super) fn emit_empty_index_at<S: ByteSink>(
+    sink: &mut S,
+    base: BaseAddress,
+    index: EmptyChunkIndex,
+    addresses: &[StoredAddress],
+) -> Result<(), EmissionError<S::Error>> {
+    index
+        .write_blocks_at(addresses, |address, bytes| {
+            put_placed_array_block(sink, base, address, bytes)
+        })
+        .map_err(flatten_emission_error)
+}
+
+/// Checks a complete physical block range, then pads to its start and writes its bytes.
+///
+/// # Errors
+///
+/// Returns [`EmissionError::Format`] with [`FormatError::OffsetOverflow`] if address resolution
+/// overflows, or [`FormatError::Internal`] if the block starts before the sink's position.
+/// Returns padding and write errors as [`EmissionError::Sink`].
+fn put_placed_array_block<S: ByteSink>(
+    sink: &mut S,
+    base: BaseAddress,
+    address: StoredAddress,
+    bytes: &[u8],
+) -> Result<(), EmissionError<S::Error>> {
+    let start = Reservation::new(base, address, bytes.len().to_u64(), ())?
+        .start()
+        .get();
+    if sink.position() > start {
+        return Err(FormatError::Internal("array blocks overlap earlier output".into()).into());
+    }
+    while sink.position() < start {
+        sink.put_zeros((start - sink.position()).min(65_536).to_usize()?)
+            .map_err(EmissionError::Sink)?;
+    }
+    put_array_block(sink, base, address, bytes)
 }
 
 /// Writes one block after checking its complete physical range and sink position.
@@ -1114,6 +1234,7 @@ mod tests {
 
     use super::PreparedDataset;
     use crate::AttrValue;
+    use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
@@ -1782,7 +1903,7 @@ mod tests {
         };
         let result = super::put_array_block(
             &mut sink,
-            crate::BaseAddress::new(base),
+            BaseAddress::new(base),
             StoredAddress::new(address),
             b"abc",
         );
@@ -1793,6 +1914,38 @@ mod tests {
             result.unwrap();
             assert_eq!(sink.bytes, b"abc");
             assert_eq!(sink.position, base + address + 3);
+        }
+    }
+
+    #[rstest]
+    #[case::padding(0, 7, 3, None)]
+    #[case::overlap(0, 7, 8, Some(FormatError::Internal("array blocks overlap earlier output".into())))]
+    #[case::physical_start(u64::MAX, 1, 0, Some(FormatError::OffsetOverflow { offset: 1, length: u64::MAX }))]
+    #[case::physical_end(u64::MAX - 10, 8, 0, Some(FormatError::OffsetOverflow { offset: u64::MAX - 2, length: 3 }))]
+    fn placed_array_blocks_check_complete_ranges_before_padding(
+        #[case] base: u64,
+        #[case] address: u64,
+        #[case] position: u64,
+        #[case] expected: Option<FormatError>,
+    ) {
+        let mut sink = PositionedBytes {
+            position,
+            bytes: Vec::new(),
+        };
+        let result = super::put_placed_array_block(
+            &mut sink,
+            BaseAddress::new(base),
+            StoredAddress::new(address),
+            b"abc",
+        );
+        if let Some(expected) = expected {
+            assert_eq!(result.unwrap_err().into_format(), expected);
+            assert!(sink.bytes.is_empty());
+            assert_eq!(sink.position, position);
+        } else {
+            result.unwrap();
+            assert_eq!(sink.position, 10);
+            assert_eq!(sink.bytes, [0, 0, 0, 0, b'a', b'b', b'c']);
         }
     }
 

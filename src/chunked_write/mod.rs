@@ -1310,6 +1310,24 @@ impl EmptyChunkIndex {
             emit,
         )
     }
+
+    /// Serializes empty array blocks at individually assigned stored addresses.
+    ///
+    /// The caller supplies addresses in [`ArrayMeasure::visit_blocks`] order. Calls `emit` for
+    /// each complete block, stopping at the first error. A failure can leave partial output.
+    ///
+    /// # Errors
+    ///
+    /// Returns slot errors from [`IndexSlots::new`] and planning, placement, encoding, and
+    /// callback errors from [`ArrayMeasure::write_at`].
+    #[cfg(feature = "std")]
+    pub(crate) fn write_blocks_at<E>(
+        self,
+        addresses: &[StoredAddress],
+        emit: impl FnMut(StoredAddress, &[u8]) -> Result<(), E>,
+    ) -> Result<(), EmissionError<E>> {
+        ArrayMeasure::Empty(self).write_at(&IndexSlots::new(&[], &[], self.slots)?, addresses, emit)
+    }
 }
 
 /// Splits `raw_data` into chunks and encodes each one for storage, the dataset's only pass of the
