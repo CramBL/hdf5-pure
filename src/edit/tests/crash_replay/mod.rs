@@ -19,6 +19,7 @@ use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
 use test_util::disk_log::{self, DiskOp};
 use test_util::object_header::v2;
 
+use crate::File;
 use crate::FileSpaceSettings;
 use crate::PersistedFreeSpacePolicy;
 use crate::access_mode::AccessMode;
@@ -31,6 +32,7 @@ use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
+use crate::image::WriteBuffering;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
@@ -39,8 +41,13 @@ use crate::type_builders::DatasetBuilder;
 use crate::width::FormatWidths;
 use crate::writer::FileBuilder;
 
+use self::publication_cost::PublicationCost;
+use self::publication_cost::WriteCostError;
+use self::publication_cost::WriteCoverage;
+
 mod ordering;
 mod ordering_facts;
+mod publication_cost;
 
 /// What reading one replayed prefix made of it.
 enum Verdict {
@@ -1641,66 +1648,94 @@ fn publishing_a_dimension_in_a_wide_header_survives_a_crash_at_every_write() {
     );
 }
 
-/// Publishing costs the same number of writes whether or not the structure being
-/// published spans a gather page — which is the defect of issue #307 stated as a
-/// rule rather than as one of its consequences.
-///
-/// The sweep above catches the consequence, and only for the object header: it
-/// reads the file back, so it sees a torn publish only where a reader follows the
-/// torn field. This sees the split itself, so it covers every publish an append
-/// makes — the array header's statistics, an index block's element and its data-
-/// block pointers, a data block's element — without needing a workload that
-/// reads each one.
-///
-/// Measured before the fix: 5 writes at 3800 bytes of padding against 6 at 3900,
-/// the extra one being the checksum stranded in the next page. Both buffering
-/// modes are checked, because the unbuffered one splits every publish regardless
-/// of where the pages fall.
-#[test]
-fn a_publish_costs_the_same_whether_or_not_it_spans_a_page() {
-    use crate::image::WriteBuffering;
-
-    for mode in [None, Some(WriteBuffering::Unbuffered)] {
-        let mut counts = Vec::new();
-        // A sweep rather than the two sides of the measured threshold: picking
-        // the boundary by hand is how a fixture ends up just short of the case it
-        // was written for, and stepping across it costs milliseconds.
-        for pad in [0usize, 2000, 3800, 3900, 4200, 8300] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("pad.h5");
-            warmed_base_padded(&path, true, pad, None);
-
-            let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-            s.set_sync_policy(SyncPolicy::OnClose);
-            if let Some(mode) = mode {
-                s.set_write_buffering(mode).unwrap();
-            }
-            let before = s.issued_write_order().len();
-            append(&mut s, WARMUP, ROUND);
-            let made = s.issued_write_order()[before..].to_vec();
-            drop(s);
-            // Whether this padding put the publish across a page: a write that
-            // starts inside the first gather page and reaches past it.
-            let wide = made
-                .iter()
-                .any(|&(off, len)| off < GATHER_PAGE && off + len > GATHER_PAGE);
-            counts.push((pad, made.len(), wide));
-        }
-        // The comparison is only meaningful across the boundary. All-narrow or
-        // all-wide passes with the defect present — measured — so the sweep has to
-        // say it landed on both sides rather than be trusted to.
-        assert!(
-            counts.iter().any(|&(_, _, w)| w) && counts.iter().any(|&(_, _, w)| !w),
-            "{mode:?}: every padding fell on the same side of the {GATHER_PAGE}-byte \
-             page, so this comparison holds nothing: {counts:?}"
-        );
-        let (_, first, _) = counts[0];
-        assert!(
-            counts.iter().all(|&(_, n, _)| n == first),
-            "{mode:?}: one append must cost the same writes at every header width, \
-             but cost {counts:?}"
-        );
+// The oracle separates publication writes, allocation content, and zero-filled EOF padding.
+#[rstest::rstest]
+#[case::unpadded(0, false)]
+#[case::narrow(2_000, false)]
+#[case::near_boundary(3_800, false)]
+#[case::crossing(3_900, true)]
+#[case::wide(4_200, true)]
+#[case::two_pages(8_300, true)]
+fn publication_writes_stay_complete_across_gather_pages(
+    #[case] pad: usize,
+    #[case] wide: bool,
+    #[values(false, true)] gathered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cost.h5");
+    warmed_base_padded(&path, true, pad, None);
+    let base = std::fs::read(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.set_sync_policy(SyncPolicy::OnClose);
+    if !gathered {
+        engine
+            .set_write_buffering(WriteBuffering::Unbuffered)
+            .unwrap();
     }
+    disk_log::start();
+    append(&mut engine, WARMUP, ROUND);
+    let recording = disk_log::finish();
+    let completed = engine
+        .image()
+        .read_exact_at(0, usize::try_from(engine.image().len()).unwrap())
+        .unwrap();
+    drop(engine);
+    let mut replayed = base.clone();
+    for operation in &recording.operations {
+        operation.apply(&mut replayed);
+    }
+    assert_eq!(replayed, completed);
+    let cost = PublicationCost::read(&base, &completed);
+    assert_eq!(cost.crosses_page(), wide);
+    let counts = cost.count(&recording.operations).unwrap();
+    assert_eq!(counts.publications, 4);
+    assert!(counts.content >= 2);
+    assert!(counts.content <= cost.content_allocations());
+    if !gathered {
+        assert_eq!(counts.content, cost.content_allocations());
+    }
+    assert!(counts.padding <= 1);
+    assert_eq!(
+        recording.operations.len(),
+        counts.content + counts.publications + counts.padding
+    );
+    let altered = cost.split_dimension(&recording.operations);
+    let mut altered_image = base;
+    for operation in &altered {
+        operation.apply(&mut altered_image);
+    }
+    assert_eq!(altered_image, completed);
+    assert_eq!(
+        cost.count(&altered).unwrap_err(),
+        WriteCostError::Coverage(WriteCoverage {
+            range: cost.dimension,
+            writes: 2,
+        })
+    );
+    let collapsed = [DiskOp::Write {
+        offset: 0,
+        bytes: completed.clone(),
+    }];
+    assert_eq!(
+        cost.count(&collapsed).unwrap_err(),
+        WriteCostError::MultipleRoles { operation: 0 }
+    );
+    let mut extra = recording.operations.clone();
+    extra.push(DiskOp::Write {
+        offset: 0,
+        bytes: vec![completed[0]],
+    });
+    assert_eq!(
+        cost.count(&extra).unwrap_err(),
+        WriteCostError::UnattributedWrite {
+            operation: recording.operations.len()
+        }
+    );
+    let file = File::from_bytes(completed).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        (0..WARMUP + ROUND).collect::<Vec<_>>()
+    );
 }
 
 /// A publish writes back from the byte it changed, not from the front of the

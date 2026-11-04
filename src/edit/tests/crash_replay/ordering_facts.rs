@@ -145,14 +145,22 @@ impl PublicationFacts {
     }
 }
 
-struct DatasetGeometry {
-    index: Vec<FileRange>,
-    payloads: Vec<FileRange>,
+/// The complete index and payload ranges of the fixture's extensible-array dataset.
+pub(super) struct DatasetGeometry {
+    /// The independently allocated index structures, starting with the header and index block.
+    pub(super) index: Vec<FileRange>,
+    pub(super) payloads: Vec<FileRange>,
     layout_pointer: FileRange,
 }
 
 impl DatasetGeometry {
-    fn parse(bytes: &[u8]) -> Self {
+    /// Reads the fixture's index allocations, payloads, and layout pointer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixture does not parse, has a nonzero base address, or lacks an
+    /// extensible-array dataset named `d`.
+    pub(super) fn parse(bytes: &[u8]) -> Self {
         let located = crate::superblock::read(bytes).unwrap();
         assert_eq!(located.superblock.base_address.get(), 0);
         let widths = located.widths;
@@ -354,14 +362,21 @@ enum AllocationKind {
     Payload,
 }
 
-struct Ownership {
+/// The persisted EOF, free sections, and manager metadata of a fixture.
+pub(super) struct Ownership {
     eof: u64,
     free: Coverage,
-    initialized: Vec<FileRange>,
+    /// The extension chunks, manager headers, and used section-list bytes.
+    pub(super) initialized: Vec<FileRange>,
 }
 
 impl Ownership {
-    fn parse(bytes: &[u8]) -> Self {
+    /// Reads the persisted ownership and the metadata needed to publish it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the superblock or persisted manager metadata does not parse.
+    pub(super) fn parse(bytes: &[u8]) -> Self {
         let located = crate::superblock::read(bytes).unwrap();
         let widths = located.widths;
         let superblock = located.superblock;
