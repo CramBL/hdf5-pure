@@ -244,7 +244,9 @@ fn reusable_space_stats_check_aggregate_byte_sums() {
 #[rstest]
 #[case::index(AllocationClass::Metadata)]
 #[case::chunk(AllocationClass::Raw)]
-fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
+fn array_store_allocations_reuse_partial_pages_of_the_requested_class(
+    #[case] class: AllocationClass,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("page_reuse.h5");
     let mut builder = FileBuilder::new();
@@ -255,7 +257,7 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
     builder.write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let before = engine.space.paged_sections().unwrap();
-    let raw = *before.raw().first().unwrap();
+    let length = engine.image.len();
     assert!(before.metadata().iter().any(|extent| extent.len() >= 8));
     let at = {
         let mut store = engine.store();
@@ -266,13 +268,37 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
             .start()
             .get()
     };
-    assert_eq!(at, engine.addresses().resolve(raw.start()).unwrap().get());
+    let (selected, unchanged) = match class {
+        AllocationClass::Metadata => (before.metadata(), before.raw()),
+        AllocationClass::Raw => (before.raw(), before.metadata()),
+    };
+    let extent = selected
+        .iter()
+        .find(|extent| engine.addresses().resolve(extent.start()).unwrap().get() == at)
+        .unwrap();
+    assert!(extent.len() >= 8);
+    let expected: Vec<_> = selected
+        .iter()
+        .filter_map(|candidate| {
+            if candidate == extent {
+                FreeExtent::new(
+                    candidate.start().checked_add(8).unwrap(),
+                    candidate.len() - 8,
+                )
+            } else {
+                Some(*candidate)
+            }
+        })
+        .collect();
     let after = engine.space.paged_sections().unwrap();
-    assert_eq!(after.metadata(), before.metadata());
-    assert_eq!(
-        after.raw(),
-        [FreeExtent::new(raw.start().checked_add(8).unwrap(), raw.len() - 8).unwrap()]
-    );
+    let (actual, preserved) = match class {
+        AllocationClass::Metadata => (after.metadata(), after.raw()),
+        AllocationClass::Raw => (after.raw(), after.metadata()),
+    };
+    assert_eq!(actual, expected);
+    assert_eq!(preserved, unchanged);
+    assert_eq!(engine.image.len(), length);
+    assert_eq!(engine.image.read_exact_at(at, 8).unwrap(), [0; 8]);
 }
 
 #[rstest]
@@ -1913,7 +1939,7 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
 }
 
 #[test]
-fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
+fn inplace_appends_keep_new_index_allocations_in_metadata_pages() {
     const PAGE: u64 = 4096;
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_raw.h5");
@@ -1933,6 +1959,16 @@ fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
 
     let mut engine = WriteEngine::open_with_locking(&p, FileLocking::Enabled).unwrap();
     let before = engine.image().len();
+    let addr = crate::group::v2::resolve_path_any_from_source(
+        &engine.opened_source(),
+        AccessMode::ReadWrite,
+        engine.superblock(),
+        engine.widths(),
+        &ObjectPath::parse("d"),
+    )
+    .unwrap();
+    let retained = engine.chunked_storage_spans(addr).unwrap();
+    let retained_index = engine.chunked_index_spans(addr).unwrap();
     for range in [64..2000, 2000..4000] {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&range.collect::<Vec<_>>());
@@ -1951,16 +1987,8 @@ fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
         .expect("the file is paged");
     assert!(
         meta_padding.is_empty() && raw_padding.is_empty(),
-        "an in-place append switched page type: meta_pad={meta_padding:?} raw_pad={raw_padding:?}"
+        "published allocations leave pending padding: meta_pad={meta_padding:?} raw_pad={raw_padding:?}"
     );
-    let addr = crate::group::v2::resolve_path_any_from_source(
-        &engine.opened_source(),
-        AccessMode::ReadWrite,
-        engine.superblock(),
-        engine.widths(),
-        &ObjectPath::parse("d"),
-    )
-    .unwrap();
     let spans = engine
         .chunked_storage_spans(addr)
         .expect("a chunked dataset has reclaimable spans");
@@ -1972,13 +2000,60 @@ fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
         fresh > 0,
         "the append allocated nothing above {before}, so the assertion above proves nothing"
     );
-    assert!(
-        spans
+    let index = engine.chunked_index_spans(addr).unwrap();
+    for allocation in &retained_index {
+        assert!(index.contains(allocation));
+        assert!(
+            spans.contains(
+                retained
+                    .iter()
+                    .find(|(range, _)| range == allocation)
+                    .unwrap()
+            )
+        );
+    }
+    let fresh_index: Vec<_> = index
+        .iter()
+        .filter(|range| !retained_index.contains(range))
+        .collect();
+    assert!(!fresh_index.is_empty());
+    for allocation in fresh_index {
+        assert!(spans.contains(&(*allocation, FreeClass::Page(PageType::Meta))));
+        let start = allocation.start().get();
+        let last = allocation.end().get() - 1;
+        if allocation.length() < PAGE {
+            assert_eq!(start / PAGE, last / PAGE);
+        } else {
+            assert_eq!(start % PAGE, 0);
+        }
+        for &(raw, _) in spans
             .iter()
-            .all(|&(_, class)| class == FreeClass::Page(PageType::Raw)),
-        "the reclaim tags every chunked span raw; a metadata or dead tag here would \
-         need the placement rule above to change with it"
+            .filter(|(_, class)| *class == FreeClass::Page(PageType::Raw))
+        {
+            assert!(
+                last / PAGE < raw.start().get() / PAGE
+                    || (raw.end().get() - 1) / PAGE < start / PAGE
+            );
+        }
+    }
+    for &(allocation, class) in &spans {
+        if !index.contains(&allocation) {
+            assert_eq!(class, FreeClass::Page(PageType::Raw));
+        }
+        for free in engine.space.reusable_sections() {
+            let start = engine.addresses().resolve(free.start()).unwrap().get();
+            assert!(
+                allocation.end().get() <= start || start + free.len() <= allocation.start().get()
+            );
+        }
+    }
+    drop(engine);
+    let file = crate::File::open(&p).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        (0..4000).collect::<Vec<_>>()
     );
+    file.close().unwrap();
 }
 
 #[test]
