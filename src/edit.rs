@@ -591,8 +591,8 @@ pub(crate) struct WriteEngine {
     /// [`commit`](Self::commit), since a commit can relocate a cached header or
     /// free the region it points into (see `commit`).
     located: HashMap<u64, LocatedState>,
-    /// Complete source-ownership proof for Single Chunk retirement, cached until a commit begins.
-    single_ownership: OnceLock<Box<reclaim::ExclusiveChunkOwners>>,
+    /// Complete source-ownership proof for finite chunk retirement, cached until a commit begins.
+    chunk_ownership: OnceLock<Box<reclaim::ExclusiveChunkOwners>>,
     /// Physical ranges of global heap collections placed by this session for variable-length
     /// overwrites, keyed by dataset path.
     ///
@@ -1915,7 +1915,7 @@ impl WriteEngine {
             persist: None,
             fresh_page_boundary,
             located: HashMap::new(),
-            single_ownership: OnceLock::new(),
+            chunk_ownership: OnceLock::new(),
             vl_overwrite_heaps: HashMap::new(),
             superseded_heaps: Vec::new(),
             inplace_undo: Vec::new(),

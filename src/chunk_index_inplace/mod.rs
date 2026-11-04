@@ -1,8 +1,9 @@
-//! Immediate mutation of Extensible Array and finite Single Chunk indexes.
+//! Immediate mutation of Extensible Array, Fixed Array, and Single Chunk indexes.
 //!
 //! The edit engine supplies allocation, I/O, and publication through [`Store`]. Extensible
 //! Arrays are extended with data and secondary blocks. The writer replaces a Single Chunk
-//! separately from its predecessor. The writer confirms allocation ownership before publishing a
+//! separately from its predecessor and patches affected Fixed Array entries. The writer confirms
+//! allocation ownership before publishing a
 //! reference and publishes the new extent after the reference's ordering barrier.
 //!
 //! [`Dataset::append`](crate::Dataset::append) supports partial tails and re-encodable filters.
@@ -26,6 +27,8 @@ use hdf5_pure_format::__private::ExtensibleArrayGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 use hdf5_pure_format::__private::ExtensibleArrayStats;
+use hdf5_pure_format::__private::FixedArrayHeader;
+use hdf5_pure_format::__private::FixedArrayPlan;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::MessageRecord;
 use hdf5_pure_format::__private::MessageRecordLayout;
@@ -75,9 +78,13 @@ use crate::source::PhysicalBytes;
 use crate::source::{PhysicalSource, Source};
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
+mod fixed;
 mod metadata;
 mod single;
 
+pub(crate) use fixed::FixedAppend;
+pub(crate) use fixed::FixedIndex;
+pub(crate) use fixed::FixedInitialization;
 pub(crate) use single::SingleAppend;
 pub(crate) use single::SingleIndex;
 
@@ -203,6 +210,33 @@ pub(crate) trait Store: Source {
         prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
     ) -> Result<ProvisionalAllocation, Error>;
 
+    /// Allocates missing Fixed Array storage while retaining any existing header geometry.
+    ///
+    /// The store selects combined or separate placement. The caller confirms the returned
+    /// initialization allocations before publishing the header or data-block reference.
+    ///
+    /// # Errors
+    ///
+    /// Propagates geometry, reservation, emission, and provisioning errors.
+    fn allocate_fixed_initialization(
+        &mut self,
+        plan: &FixedArrayPlan,
+        header: Option<FixedArrayHeader>,
+    ) -> Result<FixedInitialization, Error>
+    where
+        Self: Sized,
+    {
+        FixedInitialization::allocate(self, plan, header)
+    }
+
+    /// Allocates empty Extensible Array storage as combined or separately placed blocks.
+    ///
+    /// Returns the header allocation and, for separate placement, an index-block allocation.
+    /// The caller publishes ownership and confirms every returned token before linking the header.
+    ///
+    /// # Errors
+    ///
+    /// Propagates geometry, placement, encoding, allocation, and I/O errors.
     fn allocate_ea_initialization(
         &mut self,
         initialization: &ExtensibleArrayInitialization,
@@ -365,10 +399,12 @@ pub(crate) struct LocateResult {
     pub spans: MessageSpans,
 }
 
-/// Checked append geometry for an Extensible Array or a finite Single Chunk index.
+/// Checked append geometry for an unlimited Extensible Array or a supported finite index.
 pub(crate) enum AppendIndex {
     /// The index header and index block are allocated.
     Allocated(Located),
+    /// A finite dataset indexed by a retained or deferred Fixed Array.
+    Fixed(Box<FixedIndex>),
     /// A finite dataset whose layout message stores its chunk reference directly.
     Single(SingleIndex),
     /// The empty dataset's index-header address is undefined.
@@ -380,14 +416,16 @@ impl AppendIndex {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AppendUnsupported`] for a Single Chunk index or an unallocated array.
+    /// Returns [`Error::AppendUnsupported`] for a finite index or an unallocated Extensible Array.
     #[cfg(test)]
     fn into_allocated(self) -> Result<Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
-            Self::Single(_) | Self::Unallocated(_) => Err(Error::AppendUnsupported(
-                "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
-            )),
+            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => {
+                Err(Error::AppendUnsupported(
+                    "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
+                ))
+            }
         }
     }
 
@@ -395,14 +433,16 @@ impl AppendIndex {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AppendUnsupported`] for a Single Chunk index or an unallocated array.
+    /// Returns [`Error::AppendUnsupported`] for a finite index or an unallocated Extensible Array.
     #[cfg(test)]
     pub(crate) fn allocated(&self) -> Result<&Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
-            Self::Single(_) | Self::Unallocated(_) => Err(Error::AppendUnsupported(
-                "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
-            )),
+            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => {
+                Err(Error::AppendUnsupported(
+                    "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
+                ))
+            }
         }
     }
 
@@ -410,13 +450,15 @@ impl AppendIndex {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AppendUnsupported`] for a Single Chunk index or an unallocated array.
+    /// Returns [`Error::AppendUnsupported`] for a finite index or an unallocated Extensible Array.
     pub(crate) fn allocated_mut(&mut self) -> Result<&mut Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
-            Self::Single(_) | Self::Unallocated(_) => Err(Error::AppendUnsupported(
-                "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
-            )),
+            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => {
+                Err(Error::AppendUnsupported(
+                    "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
+                ))
+            }
         }
     }
 
@@ -425,6 +467,7 @@ impl AppendIndex {
         match self {
             Self::Allocated(located) => located.chunk_elems,
             Self::Unallocated(index) => index.chunk_elems,
+            Self::Fixed(index) => index.geometry.chunk_elems,
             Self::Single(index) => index.geometry.chunk_elems,
         }
     }
@@ -434,6 +477,7 @@ impl AppendIndex {
         match self {
             Self::Allocated(located) => located.chunk_bytes,
             Self::Unallocated(index) => index.chunk_bytes,
+            Self::Fixed(index) => index.geometry.chunk_bytes,
             Self::Single(index) => index.geometry.chunk_bytes,
         }
     }
@@ -443,6 +487,7 @@ impl AppendIndex {
         match self {
             Self::Allocated(located) => located.elem_bytes,
             Self::Unallocated(index) => index.element_size,
+            Self::Fixed(index) => index.geometry.element_size,
             Self::Single(index) => index.geometry.element_size,
         }
     }
@@ -454,6 +499,7 @@ impl AppendIndex {
         match self {
             Self::Allocated(located) => located.current_dim,
             Self::Unallocated(_) => 0,
+            Self::Fixed(index) => index.geometry.current_dim,
             Self::Single(index) => index.geometry.current_dim,
         }
     }
@@ -462,6 +508,7 @@ impl AppendIndex {
     pub(crate) fn maximum(&self) -> MaxExtent {
         match self {
             Self::Allocated(_) | Self::Unallocated(_) => MaxExtent::Unlimited,
+            Self::Fixed(index) => MaxExtent::Fixed(index.geometry.maximum),
             Self::Single(index) => MaxExtent::Fixed(index.geometry.maximum),
         }
     }
@@ -471,6 +518,7 @@ impl AppendIndex {
         match self {
             Self::Allocated(located) => located.flags,
             Self::Unallocated(index) => index.flags,
+            Self::Fixed(index) => index.geometry.flags,
             Self::Single(index) => index.geometry.flags,
         }
     }
@@ -624,7 +672,8 @@ pub(crate) struct Located {
     /// The flags the chunked layout sets, such as [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`], under which
     /// a partial edge chunk is stored without the filter pipeline.
     ///
-    /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`]: hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS
+    /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`]:
+    /// hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS
     pub flags: ChunkedLayoutFlags,
     /// Elements per chunk along axis 0 (the only varying axis for rank 1).
     pub chunk_elems: u64,
@@ -658,10 +707,12 @@ pub(crate) struct Located {
 impl Located {
     /// Reads the datatype and checked geometry for an immediate append at `oh_addr`.
     ///
-    /// The dataset must be rank one with an unlimited Extensible Array or finite Single Chunk
-    /// index. An undefined Extensible Array header address is accepted only at an empty extent.
-    /// Single Chunk lookup requires complete, disjoint storage ownership and a reachable header.
-    /// The caller supplies `unsupported` for policy rejections and decides which filters it accepts.
+    /// The dataset must be rank one with an unlimited Extensible Array or a finite Single Chunk
+    /// or Fixed Array index. An undefined Extensible Array header address is accepted only at an
+    /// empty extent.
+    /// Finite-index lookup requires complete, disjoint storage ownership and a reachable header.
+    /// The caller supplies `unsupported` for policy rejections and decides which filters it
+    /// accepts.
     /// The result includes filter and fill message locations for that decision.
     ///
     /// For allocated Extensible Arrays, the reader verifies the header, index block, and every
@@ -753,7 +804,10 @@ impl Located {
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
         let (layout, fields) = DataLayout::parse_with_index_fields(&layout_bytes, widths)?;
         if maximum != MaxExtent::Unlimited
-            && !matches!(fields, Some(ChunkIndexFields::SingleChunk(_)))
+            && !matches!(
+                fields,
+                Some(ChunkIndexFields::SingleChunk(_) | ChunkIndexFields::FixedArray { .. })
+            )
         {
             return Err(unsupported("dataset has no unlimited (maxshape) dimension"));
         }
@@ -781,7 +835,10 @@ impl Located {
             ..
         } = ChunkedGeometry::with_offset_width(widths.offsets, &datatype, &dataspace, &layout)?;
         let chunk_elems = spatial[0];
-        let chunk_bytes = if matches!(fields, Some(ChunkIndexFields::SingleChunk(_))) {
+        let chunk_bytes = if matches!(
+            fields,
+            Some(ChunkIndexFields::SingleChunk(_) | ChunkIndexFields::FixedArray { .. })
+        ) {
             let length = chunked_read::bounded_chunk_len(spatial, elem_bytes)?;
             if length > isize::MAX as usize {
                 return Err(FormatError::ValueTooLargeForPlatform {
@@ -799,6 +856,45 @@ impl Located {
             filter: filter_msg.map(|m| (m.data_off, m.size)),
             fill: fill_msg.map(|m| (m.msg_type, m.data_off, m.size)),
         };
+        if let (
+            DataLayout::Chunked {
+                index: ChunkIndexLayout::FixedArray { address },
+                flags,
+                ..
+            },
+            Some(ChunkIndexFields::FixedArray {
+                page_bits,
+                address: field,
+            }),
+        ) = (&layout, &fields)
+        {
+            let MaxExtent::Fixed(maximum) = maximum else {
+                return Err(unsupported("a fixed-array index requires a finite maximum"));
+            };
+            return Ok(LocateResult {
+                datatype,
+                located: AppendIndex::Fixed(Box::new(FixedIndex::new(
+                    file,
+                    oh_addr,
+                    FiniteGeometry {
+                        widths,
+                        dimension,
+                        current_dim,
+                        maximum,
+                        flags: *flags,
+                        chunk_elems,
+                        element_size: elem_bytes,
+                        chunk_bytes,
+                    },
+                    layout_msg,
+                    field.clone(),
+                    *address,
+                    *page_bits,
+                    filter_msg.is_some(),
+                )?)),
+                spans,
+            });
+        }
         if let (
             DataLayout::Chunked {
                 index: ChunkIndexLayout::SingleChunk { address, filtered },
@@ -2319,7 +2415,7 @@ pub(crate) fn initialize_ea_index(
         Located::locate_at(file, oh_addr, Error::AppendUnsupported).and_then(
             |located| match located.located {
                 AppendIndex::Allocated(index) => Ok(index),
-                AppendIndex::Single(_) | AppendIndex::Unallocated(_) => {
+                AppendIndex::Fixed(_) | AppendIndex::Single(_) | AppendIndex::Unallocated(_) => {
                     Err(FormatError::Internal("published index remains unallocated".into()).into())
                 }
             },
@@ -2997,6 +3093,7 @@ mod tests {
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
 
+    mod fixed;
     mod metadata;
     mod single;
 
@@ -3443,7 +3540,6 @@ mod tests {
 
     #[rstest]
     #[case::rank_two(&[0, 2], &[4, 2], &[MaxExtent::Unlimited, MaxExtent::Fixed(2)], "only rank-1 datasets are supported")]
-    #[case::finite(&[0], &[4], &[MaxExtent::Fixed(8)], "dataset has no unlimited (maxshape) dimension")]
     fn empty_index_eligibility_rejects_unsupported_dataspaces(
         #[case] shape: &[u64],
         #[case] chunk: &[u64],
@@ -3936,6 +4032,7 @@ mod tests {
         max_read: Cell<usize>,
         total_read: Cell<usize>,
         reads: RefCell<Vec<(u64, usize)>>,
+        writes: Vec<(u64, usize)>,
         allocations: RefCell<Vec<AllocationClass>>,
         retired: Vec<FileRange>,
         /// How many times the append sequence rewrote the superblock to advance
@@ -3973,6 +4070,7 @@ mod tests {
                 max_read: Cell::new(0),
                 total_read: Cell::new(0),
                 reads: RefCell::new(Vec::new()),
+                writes: Vec::new(),
                 allocations: RefCell::new(Vec::new()),
                 retired: Vec::new(),
                 superblock_patches: Cell::new(0),
@@ -4207,6 +4305,7 @@ mod tests {
         }
         fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
             self.publication.before_reference()?;
+            self.writes.push((offset, bytes.len()));
             let offset = offset.to_usize()?;
             self.data[offset..offset + bytes.len()].copy_from_slice(bytes);
             Ok(())

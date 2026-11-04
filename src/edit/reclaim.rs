@@ -78,7 +78,7 @@ impl ExclusiveChunkOwners {
     pub(super) fn require(&self, header: u64) -> Result<(), Error> {
         if !self.headers.contains(&header) {
             return Err(Error::AppendUnsupported(
-                "single-chunk storage has no reachable ownership proof",
+                "chunk storage has no reachable ownership proof",
             ));
         }
         Ok(())
@@ -121,12 +121,12 @@ impl WriteEngine {
     /// geometry, and overlap errors of [`Self::space_ownership`].
     pub(super) fn exclusive_chunk_owners(&self) -> Result<ExclusiveChunkOwners, Error> {
         #[cfg(test)]
-        super::observations::record_single_ownership_analysis();
+        super::observations::record_chunk_ownership_analysis();
         let mut headers = BTreeSet::new();
         let ownership = self.space_ownership_with_headers(Some(&mut headers))?;
         if !ownership.analysis_complete {
             return Err(Error::AppendUnsupported(
-                "single-chunk storage ownership analysis is incomplete",
+                "chunk storage ownership analysis is incomplete",
             ));
         }
         Ok(ExclusiveChunkOwners { headers })
@@ -1466,8 +1466,8 @@ impl PageAllocation {
 
 /// Returns the PAGE free-space class of a chunk index after its physical placement is known.
 ///
-/// Version 2 B-tree headers and nodes are metadata allocations. The other index structures this
-/// editor emits share raw pages with their chunks where `provably_raw` establishes that placement.
+/// Version 2 B-tree headers and nodes are metadata allocations. Other supported source indexes
+/// are classified as raw only where `provably_raw` establishes that placement.
 /// An index with no established page type remains dead until its whole page becomes free.
 pub(super) fn chunk_index_free_class(index: ChunkIndexLayout, provably_raw: bool) -> FreeClass {
     match index {

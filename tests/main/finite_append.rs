@@ -10,14 +10,16 @@ use hdf5_pure::Layout;
 use hdf5_pure::MemoryStrategy;
 use rstest::rstest;
 use test_util_hdf5::dataset;
+use test_util_hdf5::dataset::FiniteChunkIndex;
 
 #[rstest]
 #[case::none(FileSpaceStrategy::None)]
 #[case::aggregate(FileSpaceStrategy::Aggr)]
 #[case::flat(FileSpaceStrategy::FsmAggr)]
 #[case::page(FileSpaceStrategy::Page)]
-fn single_chunk_public_appends_preserve_finite_extents_after_reopening(
+fn finite_chunk_appends_preserve_extents_after_reopening(
     #[case] strategy: FileSpaceStrategy,
+    #[values(FiniteChunkIndex::Fixed, FiniteChunkIndex::Single)] index: FiniteChunkIndex,
     #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] backing: MemoryStrategy,
     #[values(false, true)] filtered: bool,
     #[values(
@@ -30,20 +32,23 @@ fn single_chunk_public_appends_preserve_finite_extents_after_reopening(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("finite.h5");
-    dataset::write_single_chunk_i32(
+    dataset::write_finite_chunked_i32(
         &path,
         FileSpaceSettings::new(strategy).with_persistence(matches!(
             strategy,
             FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page
         )),
         filtered,
+        index,
     );
-    let access = FileAccessProperties::new().with_memory_strategy(backing);
+    let maximum = i32::try_from(index.maximum()).unwrap();
+    let expected = (0..maximum).collect::<Vec<_>>();
+    let access = byte_observation_access(backing);
     let file = File::open_rw_with_options(&path, access).unwrap();
     let mut target = file.dataset("d").unwrap();
     match operation {
         Operation::Immediate | Operation::Raw => {
-            for value in 1_i32..4 {
+            for value in 1_i32..maximum {
                 if matches!(operation, Operation::Raw) {
                     target.append_raw(&value.to_le_bytes()).unwrap();
                 } else {
@@ -54,25 +59,24 @@ fn single_chunk_public_appends_preserve_finite_extents_after_reopening(
         }
         Operation::Borrowed => {
             let mut appender = target.buffered_appender().unwrap();
-            appender.append(&[1_i32]).unwrap();
-            appender.flush().unwrap();
-            appender.append(&[2_i32]).unwrap();
-            appender.flush().unwrap();
-            appender.append(&[3_i32]).unwrap();
+            for value in 1_i32..maximum {
+                appender.append(&[value]).unwrap();
+                appender.flush().unwrap();
+            }
             appender.finish().unwrap();
         }
         Operation::Owned => {
             let mut appender = target.into_buffered_appender().unwrap();
-            appender.append(&[1_i32, 2, 3]).unwrap();
+            appender.append(&expected[1..]).unwrap();
             appender.finish().unwrap();
             target = file.dataset("d").unwrap();
         }
     }
-    assert_eq!(target.read_i32().unwrap(), [0, 1, 2, 3]);
-    assert_eq!(target.shape().unwrap(), [4]);
+    assert_eq!(target.read_i32().unwrap(), expected);
+    assert_eq!(target.shape().unwrap(), [index.maximum()]);
     assert!(matches!(target.layout().unwrap(), Layout::Chunked { .. }));
     let before = fs::read(&path).unwrap();
-    let error = target.append(&[4_i32]).unwrap_err();
+    let error = target.append(&[maximum]).unwrap_err();
     assert!(
         matches!(&error,Error::AppendInPlaceUnsupported(reason) if *reason=="append exceeds the dataset's maximum first dimension"),
         "{error:?}"
@@ -81,7 +85,7 @@ fn single_chunk_public_appends_preserve_finite_extents_after_reopening(
     drop(target);
     file.close().unwrap();
     let file = File::open_rw_with_options(&path, access).unwrap();
-    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [0, 1, 2, 3]);
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), expected);
     assert_eq!(file.superblock().offset_size.get(), 8);
     assert_eq!(file.superblock().length_size.get(), 8);
     file.close().unwrap();

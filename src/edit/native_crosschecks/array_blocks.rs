@@ -813,7 +813,7 @@ impl ProviderRun {
 }
 
 impl WriteEngine {
-    fn assert_array_metadata_pages(&self, dataset: u64) {
+    pub(super) fn assert_array_metadata_pages(&self, dataset: u64) {
         let index = self.chunked_index_spans(dataset).unwrap();
         let spans = self.chunked_storage_spans(dataset).unwrap();
         let page = self.space.page_size().unwrap().get();

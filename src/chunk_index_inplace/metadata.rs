@@ -257,7 +257,7 @@ pub(super) fn check_block(
     verify_range(file, framing.parse_range())
 }
 
-fn verify_range(file: &impl Store, range: FileRange) -> Result<(), Error> {
+pub(super) fn verify_range(file: &impl Store, range: FileRange) -> Result<(), Error> {
     require_range(file, range)?;
     let content = range
         .length()

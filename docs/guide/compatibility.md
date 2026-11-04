@@ -82,7 +82,7 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 |---|:---:|---|
 | Dataset geometry | 🟡 | Rank-one and chunked, with a finite or unlimited maximum. |
 | Staged append | ✅ | Single Chunk, Fixed Array, or Extensible Array indexes. One hard link. |
-| In-place append | ✅ | Unlimited Extensible Array or finite Single Chunk indexes, allocated or unallocated. |
+| In-place append | ✅ | Unlimited Extensible Array or finite Single Chunk and Fixed Array indexes, allocated or unallocated. |
 | Buffered append | 🟡 | Same geometry as in-place append. No SWMR. |
 | Filtered append | ✅ | Re-encodable pipelines only. |
 | Non-chunk-aligned lossless filtered append | ✅ | |

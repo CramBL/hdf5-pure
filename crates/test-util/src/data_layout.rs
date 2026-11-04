@@ -98,24 +98,47 @@ pub fn single_chunk_with_geometry(
 ///
 /// Panics if `widths.offset` is outside 1 through 8 bytes or `address` exceeds its field width.
 pub fn array_chunk(widths: Widths, index: ArrayIndex, address: Option<u64>) -> Vec<u8> {
+    array_chunk_with_geometry(widths, index, address, 4, 4)
+}
+
+/// Builds a version 4 array-index layout with explicit one-dimensional chunk geometry.
+///
+/// Writes four-byte dimension fields and raw index parameters as in [`array_chunk`].
+///
+/// # Panics
+///
+/// Panics if an offset width is outside 1 through 8 bytes or an address exceeds its field width.
+pub fn array_chunk_with_geometry(
+    widths: Widths,
+    index: ArrayIndex,
+    address: Option<u64>,
+    chunk_elements: u32,
+    element_size: u32,
+) -> Vec<u8> {
     let mut layout = match index {
         ArrayIndex::Fixed { page_bits } => {
-            let mut layout = chunked_prefix(NO_CHUNKED_FLAGS, FIXED_ARRAY_INDEX);
+            let mut layout = chunked_prefix_with_geometry(
+                NO_CHUNKED_FLAGS,
+                FIXED_ARRAY_INDEX,
+                chunk_elements,
+                element_size,
+            );
             layout.push(page_bits);
             layout
         }
         ArrayIndex::Extensible { parameters } => {
-            let mut layout = chunked_prefix(NO_CHUNKED_FLAGS, EXTENSIBLE_ARRAY_INDEX);
+            let mut layout = chunked_prefix_with_geometry(
+                NO_CHUNKED_FLAGS,
+                EXTENSIBLE_ARRAY_INDEX,
+                chunk_elements,
+                element_size,
+            );
             layout.extend_from_slice(&parameters);
             layout
         }
     };
     bytes::push_address(&mut layout, address, widths.offset);
     layout
-}
-
-fn chunked_prefix(flags: u8, index: u8) -> Vec<u8> {
-    chunked_prefix_with_geometry(flags, index, 4, 4)
 }
 
 fn chunked_prefix_with_geometry(
