@@ -66,6 +66,7 @@ fn completion_borrows_the_actual_published_tree_after_its_barrier(
     let observed = engine
         .publish_tree_with_completion(tree, |published| {
             assert_eq!(published.root(), root);
+            assert_eq!(published.requested_root(), requested);
             let end = published.end();
             let engine = published.into_engine();
             assert_eq!(engine.publication, PublicationState::Published);

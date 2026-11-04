@@ -12,6 +12,7 @@ use super::CountProtectionError;
 use super::ProtectedCount;
 use super::ProtectedCounts;
 
+mod completion;
 mod current;
 mod prepare;
 
@@ -93,14 +94,7 @@ impl<'a> CountPublicationPhase<'a> {
         self,
         end: PhysicalAddress,
     ) -> Result<CountPublicationBounds<'a>, Box<CountEndFailure<'a>>> {
-        if let Some(update) = self.counts.updates().last()
-            && end < update.allocation().range().end()
-        {
-            let error = CountPublicationError::Truncation {
-                object: update.object(),
-                allocation: update.allocation().range(),
-                end,
-            };
+        if let Err(error) = CountAllocationEnd::new(&self.counts, end) {
             return Err(Box::new(CountEndFailure { phase: self, error }));
         }
         Ok(CountPublicationBounds { phase: self, end })
@@ -111,6 +105,7 @@ impl<'a> CountPublicationPhase<'a> {
 ///
 /// The engine borrow and original retirement batch are retained through [`CountPublicationPhase`].
 /// The predecessor source root and prospective publication root remain distinct.
+/// [`Self::with_publication`] consumes the original retirement batch and calls the publisher.
 pub(in crate::edit) struct CountPublicationBounds<'a> {
     phase: CountPublicationPhase<'a>,
     end: PhysicalAddress,
@@ -140,6 +135,33 @@ impl<'a> CountPublicationBounds<'a> {
     /// Borrows original count fields and positive remainders in allocation-address order.
     pub(in crate::edit) fn updates(&self) -> &[ProtectedCount] {
         self.phase.counts.updates()
+    }
+}
+
+/// A physical EOA at or beyond every complete protected count allocation.
+struct CountAllocationEnd(PhysicalAddress);
+
+impl CountAllocationEnd {
+    /// Checks the maximal end of the disjoint, address-ordered protected allocations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountPublicationError::Truncation`] if `end` precedes that allocation end.
+    fn new(counts: &ProtectedCounts, end: PhysicalAddress) -> Result<Self, CountPublicationError> {
+        if let Some(update) = counts.updates().last()
+            && end < update.allocation().range().end()
+        {
+            return Err(CountPublicationError::Truncation {
+                object: update.object(),
+                allocation: update.allocation().range(),
+                end,
+            });
+        }
+        Ok(Self(end))
+    }
+
+    fn address(self) -> PhysicalAddress {
+        self.0
     }
 }
 

@@ -18,7 +18,7 @@ use hdf5_pure_space::__private::{
     ReturnedExtents,
 };
 
-use self::completion::PublishedTree;
+pub(in crate::edit) use self::completion::PublishedTree;
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
@@ -96,10 +96,32 @@ impl WriteEngine {
             freed,
             relocations,
         } = tree;
+        let pending = retirement.into_pending_frees(freed, self.image.len());
+        self.publish_pending_tree_with_completion(pending, relocations, complete)
+    }
+
+    /// Publishes a written tree using the supplied retirement batch before calling `complete`.
+    ///
+    /// Consumes `pending` without rebuilding its physical retirement ranges or classes.
+    /// Uses the publication path of [`Self::publish_tree`]. The callback receives the root from
+    /// `pending` and final adopted root and EOA through [`PublishedTree`] after stored-reference
+    /// updates, root reclamation, and requested truncation succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address-conversion, publication, reference-update, or root-reclamation error
+    /// before calling `complete`. Returns the error from `complete` if completion fails.
+    /// Errors after publication leave rollback disabled.
+    pub(in crate::edit) fn publish_pending_tree_with_completion<T>(
+        &mut self,
+        pending: PendingRootFrees,
+        relocations: BTreeMap<u64, u64>,
+        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let PendingRootFrees {
             root: new_root,
             batch,
-        } = retirement.into_pending_frees(freed, self.image.len());
+        } = pending;
         let mut to_free = batch.into_stored(self.context.addresses())?;
         if self.persist.is_some() {
             let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
@@ -111,13 +133,13 @@ impl WriteEngine {
             if let Some(reclamation) = root_reclamation {
                 self.reclaim_root_metadata(reclamation)?;
             }
-            return complete(PublishedTree::new(self)?);
+            return complete(PublishedTree::new(self, new_root)?);
         }
 
         if self.fresh_page_boundary.is_some() {
             self.pad_to_page()?;
             self.publish_nonpersisting(new_root, None)?;
-            return complete(PublishedTree::new(self)?);
+            return complete(PublishedTree::new(self, new_root)?);
         }
 
         // The publisher allocates no file storage after replacement placement. Restoring this
@@ -136,7 +158,7 @@ impl WriteEngine {
         }
         publication?;
         self.repoint_stored_references(&relocations)?;
-        complete(PublishedTree::new(self)?)
+        complete(PublishedTree::new(self, new_root)?)
     }
 
     /// Publishes a persistent commit and releases eligible unused aggregate spare.
