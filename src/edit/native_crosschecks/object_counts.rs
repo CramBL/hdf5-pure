@@ -146,6 +146,35 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
     assert_eq!(fact.minimum().map(|count| count.get()), named.then_some(1));
     assert_eq!(fact.field(), Some(field));
     assert_eq!(fact.header_allocation().unwrap().range(), field.chunk());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let batch = {
+        let (batch, measured) =
+            allocation::measure(&format!("referenced_count_batch_{dense}_{named}"), || {
+                phase.referenced_counts(&added)
+            });
+        let batch = batch.unwrap().unwrap();
+        assert!(
+            measured.blocks > 0 && measured.bytes <= 4_096 && measured.live_bytes <= 4_096,
+            "{measured}"
+        );
+        batch
+    };
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let batch = phase.referenced_counts(&added).unwrap().unwrap();
+    assert!(batch.matches(&phase));
+    let observed = batch.get(target).unwrap();
+    assert_eq!(observed.count().original(), field.value());
+    assert_eq!(observed.count().incoming(), Some(u32::from(named)));
+    assert_eq!(
+        observed.count().minimum().map(|count| count.get()),
+        named.then_some(1)
+    );
+    assert_eq!(observed.count().field(), Some(field));
+    assert_eq!(
+        observed.count().header_allocation().unwrap().range(),
+        field.chunk()
+    );
+    assert_eq!(observed.added(), count.checked_add(count.get()).unwrap());
 }
 
 #[rstest]

@@ -29,6 +29,8 @@ use super::{
     ReferencedCountError,
 };
 
+mod batch;
+
 #[rstest]
 #[case::implicit(None, false)]
 #[case::unproven_zero(Some(0), false)]
