@@ -41,6 +41,15 @@ use super::object_header::OhRegion;
 use super::staging::StagedOp;
 use super::{InvalidatedAddresses, WriteEngine};
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "copied datatype users describe references without authorizing count writes"
+    )
+)]
+pub(super) mod datatype_users;
+
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
