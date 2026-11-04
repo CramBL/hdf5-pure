@@ -88,7 +88,7 @@ use crate::source;
 #[cfg(test)]
 use crate::source::PhysicalBytes;
 use crate::source::{PhysicalSource, Source};
-use crate::width::{FormatWidths, OffsetWidth};
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 mod metadata;
 
@@ -273,7 +273,9 @@ pub(crate) trait Store: Source {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the field extends outside the checksummed body.
-    /// Propagates address-conversion, read, and write errors.
+    /// Returns [`FormatError::OffsetOverflow`] if the complete physical range through the checksum
+    /// exceeds [`u64::MAX`], before reading or writing. Propagates conversion, read, and write
+    /// errors.
     fn publish_checksummed(
         &mut self,
         start: u64,
@@ -281,21 +283,39 @@ pub(crate) trait Store: Source {
         at: u64,
         value: &[u8],
     ) -> Result<(), Error> {
-        let span = (cks_off + 4 - start).to_usize()?;
+        let body_length = cks_off.checked_sub(start).ok_or(Error::AppendUnsupported(
+            "a checksummed structure was patched outside itself",
+        ))?;
+        let span = FileRange::new(
+            PhysicalAddress::new(start),
+            body_length
+                .checked_add(EA_CHECKSUM_SIZE)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: cks_off,
+                    length: EA_CHECKSUM_SIZE,
+                })?,
+        )?
+        .length()
+        .to_usize()?;
+        let body_length = body_length.to_usize()?;
         // A range outside the structure is refused rather than asserted: every
         // offset here is derived from geometry parsed out of the file, so a
         // malformed one is untrusted input, not a broken invariant. Checked
         // before the read, so a refusal costs nothing.
         let from = at
             .checked_sub(start)
-            .and_then(|d| d.to_usize().ok())
-            .filter(|&f| f.checked_add(value.len()).is_some_and(|e| e <= span - 4))
+            .and_then(|offset| offset.to_usize().ok())
+            .filter(|&offset| {
+                offset
+                    .checked_add(value.len())
+                    .is_some_and(|end| end <= body_length)
+            })
             .ok_or(Error::AppendUnsupported(
                 "a checksummed structure was patched outside itself",
             ))?;
         let mut bytes = self.read_exact_at(start, span)?;
         bytes[from..from + value.len()].copy_from_slice(value);
-        let (body, cks_field) = bytes.split_at_mut(span - 4);
+        let (body, cks_field) = bytes.split_at_mut(body_length);
         cks_field.copy_from_slice(&checksum::jenkins_lookup3(body).to_le_bytes());
         self.write_at(at, &bytes[from..])
     }
@@ -427,6 +447,7 @@ impl AppendIndex {
 pub(crate) struct UnallocatedIndex {
     /// Creation parameters from the dataset's layout message.
     pub(crate) creation: ExtensibleArrayCreationParameters,
+    widths: FormatWidths,
     /// Chunk-layout flags for partial-edge filtering.
     pub(crate) flags: ChunkedLayoutFlags,
     /// Elements per chunk along the unlimited axis.
@@ -441,19 +462,66 @@ pub(crate) struct UnallocatedIndex {
 
 /// Checked physical ranges of an undefined index-header field and its object-header chunk.
 pub(crate) struct IndexInitializationReference {
+    header: ObjectHeaderField,
+}
+
+impl IndexInitializationReference {
+    /// Checks the message-local address field and its containing object-header chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns range and geometry errors from [`ObjectHeaderField::new`].
+    fn new(message: &WalkedMessage, field: core::ops::Range<usize>) -> Result<Self, FormatError> {
+        Ok(Self {
+            header: ObjectHeaderField::new(message, field)?,
+        })
+    }
+
+    /// Writes the confirmed index-header address and its containing object-header checksum.
+    ///
+    /// Encodes the address at the store's offset width. The caller synchronizes this reference
+    /// before appending through the initialized index.
+    ///
+    /// # Errors
+    ///
+    /// Propagates allocation-ownership, defined-address encoding, range, and publication errors.
+    pub(crate) fn publish(
+        &self,
+        file: &mut impl Store,
+        allocation: &ConfirmedAllocation,
+    ) -> Result<(), Error> {
+        let allocation = file.allocation_publication().require(allocation)?;
+        let address = file.addresses().relative(allocation.start())?;
+        let mut encoded = [0; 8];
+        hdf5_pure_format::__private::write_defined_stored_address_at(
+            &mut encoded,
+            0,
+            address,
+            file.widths().offsets,
+        )?;
+        self.header
+            .publish(file, &encoded[..usize::from(file.widths().offsets.get())])
+    }
+}
+
+/// A physical field range within a complete checksummed object-header chunk.
+struct ObjectHeaderField {
     field: FileRange,
     chunk: FileRange,
 }
 
-impl IndexInitializationReference {
-    /// Resolves the message-local field range within its checksummed object-header chunk.
+impl ObjectHeaderField {
+    /// Resolves a message-local field and checks it against the chunk's checksum coverage.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OffsetOverflow`] if a physical range exceeds [`u64::MAX`], or
-    /// [`FormatError::InvalidExtensibleArrayGeometry`] if the chunk range is invalid or the
-    /// field lies outside the chunk's checksum coverage.
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the field is empty, exceeds its
+    /// message, or lies outside the chunk body. Returns [`FormatError::OffsetOverflow`] if a
+    /// physical range exceeds [`u64::MAX`].
     fn new(message: &WalkedMessage, field: core::ops::Range<usize>) -> Result<Self, FormatError> {
+        if field.is_empty() || field.end > message.size {
+            return Err(FormatError::InvalidExtensibleArrayGeometry);
+        }
         let field = FileRange::new(
             PhysicalAddress::new(message.data_off).checked_add(field.start.to_u64())?,
             field.len().to_u64(),
@@ -472,42 +540,39 @@ impl IndexInitializationReference {
         Ok(Self { field, chunk })
     }
 
-    /// Writes the confirmed index-header address and its object-header checksum.
+    /// Publishes exactly this field's bytes with the containing chunk's updated checksum.
     ///
-    /// The caller synchronizes this reference before appending through the initialized index.
+    /// Checks the complete chunk against published EOF and physical source bounds before I/O.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AllocationPublicationUncertain`] if ownership is uncertain. Propagates
-    /// errors from checking the allocation's session, converting its address, or reading and
-    /// writing the object-header chunk.
-    pub(crate) fn publish(
-        &self,
-        file: &mut impl Store,
-        allocation: &ConfirmedAllocation,
-    ) -> Result<(), Error> {
-        let allocation = file.allocation_publication().require(allocation)?;
-        let address = file.addresses().relative(allocation.start())?;
+    /// Returns [`FormatError::Internal`] if `bytes` has a different length. Propagates range errors
+    /// from [`metadata::require_range`] and publication errors from [`Store::publish_checksummed`].
+    fn publish(&self, file: &mut impl Store, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.len().to_u64() != self.field.length() {
+            return Err(FormatError::Internal(
+                "an object-header field has a different encoded length".into(),
+            )
+            .into());
+        }
+        metadata::require_range(file, self.chunk)?;
         file.publish_checksummed(
             self.chunk.start().get(),
             self.chunk.end().get() - EA_CHECKSUM_SIZE,
             self.field.start().get(),
-            &address.get().to_le_bytes()[..usize::from(file.widths().offsets.get())],
+            bytes,
         )
     }
 }
 
-/// Allocated index geometry and message locations maintained across appends.
+/// Allocated index geometry and checked message locations maintained across appends.
+///
+/// Retains the parsed address and length widths for planning and field publication.
 pub(crate) struct Located {
-    /// File offset of the dataspace message's first current-dimension value.
-    pub dim0_off: u64,
-    /// Current length along the unlimited (axis-0) dimension.
+    dimension: ObjectHeaderField,
+    /// The currently published length along axis 0.
     pub current_dim: u64,
-    /// Object-header chunk that contains the dataspace message: the byte range
-    /// whose Jenkins checksum must be recomputed after patching the dimension.
-    /// The checksum itself occupies `chunk_msg_end .. chunk_msg_end + 4`.
-    pub ohdr_chunk_start: u64,
-    pub ohdr_chunk_msg_end: u64,
+    length_width: LengthWidth,
 
     /// The flags the chunked layout sets, such as [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`], under which
     /// a partial edge chunk is stored without the filter pipeline.
@@ -624,7 +689,8 @@ impl Located {
 
         // Parse the dataspace: must be rank 1 with one unlimited dimension.
         let ds_bytes = file.read_metadata_at(dataspace_msg.data_off, dataspace_msg.size)?;
-        let dataspace = Dataspace::parse_with_length_width(&ds_bytes, widths.lengths)?;
+        let (dataspace, dimension_fields) =
+            Dataspace::parse_with_dimension_fields(&ds_bytes, widths.lengths)?;
         if dataspace.rank != 1 {
             return Err(unsupported("only rank-1 datasets are supported"));
         }
@@ -635,8 +701,8 @@ impl Located {
             return Err(unsupported("dataset has no unlimited (maxshape) dimension"));
         }
         let current_dim = dataspace.dimensions[0];
-        // v2 dataspace header is 4 bytes (version, rank, flags, type); dim 0 follows.
-        let dim0_off = dataspace_msg.data_off + 4;
+        let dimension = ObjectHeaderField::new(dataspace_msg, dimension_fields)?;
+        metadata::require_range(file, dimension.chunk)?;
 
         // Parse the layout: must be a v4 chunked Extensible Array (index type 4).
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
@@ -655,7 +721,9 @@ impl Located {
         };
         let dt_bytes = file.read_metadata_at(datatype_msg.data_off, datatype_msg.size)?;
         let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
-        let element_size: NonZeroUsize = datatype.element_size()?.narrow()?;
+        crate::file_writer::require_reference_width(widths, &datatype)?;
+        let element_size =
+            hdf5_pure_format::__private::stored_element_size_usize(&datatype, widths.offsets)?;
         if let DataLayout::Chunked {
             chunk_dimensions, ..
         } = &layout
@@ -673,7 +741,7 @@ impl Located {
             element_size: elem_bytes,
             raw_size,
             ..
-        } = ChunkedGeometry::new(&datatype, &dataspace, &layout)?;
+        } = ChunkedGeometry::with_offset_width(widths.offsets, &datatype, &dataspace, &layout)?;
         let chunk_elems = spatial[0];
         let chunk_bytes = raw_size.to_usize()?;
 
@@ -691,18 +759,23 @@ impl Located {
                 datatype,
                 located: AppendIndex::Unallocated(UnallocatedIndex {
                     creation,
+                    widths,
                     flags,
                     chunk_elems,
                     element_size: elem_bytes,
                     chunk_bytes,
-                    reference: IndexInitializationReference::new(
-                        layout_msg,
-                        layout_address.ok_or_else(|| {
-                            FormatError::Internal(
-                                "an extensible-array layout has no address field".into(),
-                            )
-                        })?,
-                    )?,
+                    reference: {
+                        let reference = IndexInitializationReference::new(
+                            layout_msg,
+                            layout_address.ok_or_else(|| {
+                                FormatError::Internal(
+                                    "an extensible-array layout has no address field".into(),
+                                )
+                            })?,
+                        )?;
+                        metadata::require_range(file, reference.header.chunk)?;
+                        reference
+                    },
                 }),
                 spans,
             });
@@ -741,10 +814,9 @@ impl Located {
         let num_chunks = current_dim.div_ceil(chunk_elems);
 
         let mut located = Located {
-            dim0_off,
+            dimension,
             current_dim,
-            ohdr_chunk_start: dataspace_msg.chunk_start,
-            ohdr_chunk_msg_end: dataspace_msg.chunk_msg_end,
+            length_width: widths.lengths,
             flags,
             chunk_elems,
             elem_bytes,
@@ -766,6 +838,12 @@ impl Located {
             located: AppendIndex::Allocated(located),
             spans,
         })
+    }
+
+    /// Returns the physical position of the first current-dimension field.
+    #[cfg(test)]
+    pub(crate) fn dimension_offset(&self) -> u64 {
+        self.dimension.field.start().get()
     }
 
     /// Reads the live partial tail and captures its index reference and complete allocation.
@@ -995,7 +1073,7 @@ impl Located {
             let ib_prefix = (4 + 1 + 1 + os) as u64;
             let slot_off = self.index_block_addr.get() + ib_prefix + e * elem_size;
             let mut buf = [0u8; MAX_EA_ELEM];
-            let n = self.element_bytes(&mut buf, os, rec)?;
+            let n = self.element_bytes(&mut buf, rec)?;
             return self.publish_index_block(file, slot_off, &buf[..n]);
         }
 
@@ -1036,7 +1114,7 @@ impl Located {
                     self.publish_index_block(
                         file,
                         dblk_ptr_off,
-                        &new_addr.get().to_le_bytes()[..os],
+                        &self.address_bytes(new_addr)?[..os],
                     )?;
                 }
                 Parent::Super { .. } => self.publish_super_block(
@@ -1045,7 +1123,7 @@ impl Located {
                     sb_geom,
                     blk_off,
                     dblk_ptr_off,
-                    &new_addr.get().to_le_bytes()[..os],
+                    &self.address_bytes(new_addr)?[..os],
                 )?,
             }
             new_addr
@@ -1058,7 +1136,7 @@ impl Located {
             let block_start = dblk_addr.get();
             let elem_off = block_start + db_prefix + slot * elem_size;
             let mut buf = [0u8; MAX_EA_ELEM];
-            let n = self.element_bytes(&mut buf, os, rec)?;
+            let n = self.element_bytes(&mut buf, rec)?;
             let cks_off = block_start + db_prefix + dblk_nelmts * elem_size;
             file.publish_checksummed(block_start, cks_off, elem_off, &buf[..n])?;
         } else {
@@ -1070,7 +1148,7 @@ impl Located {
             let page_off = dblk_addr.get() + header_size + page * page_bytes;
             let elem_off = page_off + slot_in_page * elem_size;
             let mut buf = [0u8; MAX_EA_ELEM];
-            let n = self.element_bytes(&mut buf, os, rec)?;
+            let n = self.element_bytes(&mut buf, rec)?;
             let page_cks_off = page_off + page_nelmts * elem_size;
             file.publish_checksummed(page_off, page_cks_off, elem_off, &buf[..n])?;
 
@@ -1149,7 +1227,7 @@ impl Located {
             + ib_prefix
             + self.idx_blk_elmts * self.ea_elem_size as u64
             + ((ndblk_addrs + sblk_j) * os) as u64;
-        self.publish_index_block(file, slot_off, &new_addr.get().to_le_bytes()[..os])?;
+        self.publish_index_block(file, slot_off, &self.address_bytes(new_addr)?[..os])?;
         Ok(new_addr)
     }
 
@@ -1220,16 +1298,39 @@ impl Located {
         Ok(())
     }
 
-    /// Lay one Extensible-Array element into `buf`, returning the bytes used.
-    /// Its fields are contiguous, so this is one span rather than the three
-    /// writes it replaced.
-    fn element_bytes(
-        &self,
-        buf: &mut [u8; MAX_EA_ELEM],
-        os: usize,
-        rec: ElemRecord,
-    ) -> Result<usize, Error> {
-        buf[..os].copy_from_slice(&rec.addr.get().to_le_bytes()[..os]);
+    /// Encodes a defined stored address at the recorded width in a zero-padded buffer.
+    ///
+    /// Only the prefix of [`Self::offset_width`] bytes is part of the address field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if the address exceeds the width, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals the undefined marker.
+    fn address_bytes(&self, address: StoredAddress) -> Result<[u8; 8], FormatError> {
+        let mut bytes = [0; 8];
+        hdf5_pure_format::__private::write_defined_stored_address_at(
+            &mut bytes,
+            0,
+            address,
+            self.offset_width,
+        )?;
+        Ok(bytes)
+    }
+
+    /// Encodes one chunk record at the index's recorded widths and returns the bytes used.
+    ///
+    /// # Errors
+    ///
+    /// Returns defined-address encoding errors or the stored-size errors of
+    /// [`Self::check_stored_size`].
+    fn element_bytes(&self, buf: &mut [u8; MAX_EA_ELEM], rec: ElemRecord) -> Result<usize, Error> {
+        let os = usize::from(self.offset_width.get());
+        hdf5_pure_format::__private::write_defined_stored_address_at(
+            buf,
+            0,
+            rec.addr,
+            self.offset_width,
+        )?;
         if self.client_id == 0 {
             return Ok(os);
         }
@@ -1280,53 +1381,36 @@ impl Located {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the statistics lie outside the header, and the
-    /// read, conversion, or write errors of [`Store::publish_checksummed`].
-    pub(crate) fn update_ea_header<F: Store>(
+    /// read, conversion, or write errors of [`Store::publish_checksummed`]. Returns
+    /// [`FormatError::LengthTooLarge`] if a statistic exceeds the store's length width.
+    #[cfg(test)]
+    fn update_ea_header<F: Store>(
         &self,
         file: &mut F,
         stats: ExtensibleArrayStats,
     ) -> Result<(), Error> {
-        let ls = file.widths().lengths.get() as usize;
-        let ea_addr = self.ea_addr.get();
-        // The six statistics are adjacent length-sized fields, so they are one
-        // span and go out as one write. Six writes of eight bytes each into the
-        // same forty-eight are six syscalls and, on flash, six chances to dirty
-        // the same page (issue #288).
-        // On the stack: this runs on every append, and the six fields are at most
-        // forty-eight bytes, so a heap allocation per append would be one the
-        // six separate writes never made.
-        let mut stat_block = [0u8; 6 * 8];
-        let mut at = 0;
-        for value in [
-            stats.nsuper_blks,
-            stats.super_blk_size,
-            stats.ndata_blks,
-            stats.data_blk_size,
-            stats.max_idx_set,
-            stats.nelmts,
-        ] {
-            stat_block[at..at + ls].copy_from_slice(&value.to_le_bytes()[..ls]);
-            at += ls;
-        }
-        let header_len = ExtensibleArrayHeader::serialized_size_with_widths(file.widths()) as u64;
-        let cks_off = ea_addr + header_len - 4;
-        file.publish_checksummed(ea_addr, cks_off, ea_addr + 12, &stat_block[..at])
+        let mut bytes = [0; ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN];
+        let length = stats.encode_fields(&mut bytes, file.widths().lengths)?;
+        self.publish_statistics(file, &bytes[..length])
     }
 
-    /// Publish `new_dim` as the dataspace axis-0 dimension (the commit point) and
-    /// recompute the containing object-header chunk's checksum.
-    pub(crate) fn patch_dimension<F: Store>(
-        &self,
-        file: &mut F,
-        new_dim: u64,
-    ) -> Result<(), Error> {
-        let ls = file.widths().lengths.get() as usize;
-        file.publish_checksummed(
-            self.ohdr_chunk_start,
-            self.ohdr_chunk_msg_end,
-            self.dim0_off,
-            &new_dim.to_le_bytes()[..ls],
-        )
+    /// Publishes pre-encoded statistics at their format-defined header range.
+    ///
+    /// # Errors
+    ///
+    /// Returns geometry-overflow errors from [`ea_sum`] or publication errors from
+    /// [`Store::publish_checksummed`].
+    fn publish_statistics(&self, file: &mut impl Store, bytes: &[u8]) -> Result<(), Error> {
+        let address = self.ea_addr.get();
+        let length = ExtensibleArrayHeader::serialized_size_with_widths(file.widths()).to_u64();
+        let checksum = ea_sum([address, length])?
+            .checked_sub(EA_CHECKSUM_SIZE)
+            .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
+        let start = ea_sum([
+            address,
+            ExtensibleArrayStats::fields_range(file.widths().lengths).start,
+        ])?;
+        file.publish_checksummed(address, checksum, start, bytes)
     }
 
     /// Computes the statistics after inserting chunk records in `first_chunk..num_chunks`.
@@ -1732,6 +1816,7 @@ impl IndexPlanningGeometry<'_> {
 /// The result of planning one in-place Extensible-Array append, computed without a write: the
 /// chunks to write and the counts the write phases publish.
 pub(crate) struct AppendPlan {
+    fields: AppendFields,
     /// The chunks to write, each with its stored bytes and its filter mask, in element order from
     /// `n_full`. The first is the rewritten trailing chunk when the current length is not a
     /// multiple of the chunk length.
@@ -1750,12 +1835,63 @@ pub(crate) struct AppendPlan {
     stats: ExtensibleArrayStats,
 }
 
+/// Encoded dimension and statistics fields paired with the widths used during planning.
+struct AppendFields {
+    widths: FormatWidths,
+    dimension: [u8; 8],
+    statistics: [u8; ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN],
+    statistics_len: usize,
+}
+
+impl AppendFields {
+    /// Checks and encodes the dimension and statistics into fixed-size buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LengthTooLarge`] if any value exceeds the selected length width.
+    fn new(
+        widths: FormatWidths,
+        dimension: u64,
+        stats: ExtensibleArrayStats,
+    ) -> Result<Self, FormatError> {
+        let mut fields = Self {
+            widths,
+            dimension: [0; 8],
+            statistics: [0; ExtensibleArrayStats::MAX_ENCODED_FIELDS_LEN],
+            statistics_len: 0,
+        };
+        hdf5_pure_format::__private::write_length_at(
+            &mut fields.dimension,
+            0,
+            dimension,
+            widths.lengths,
+        )?;
+        fields.statistics_len = stats.encode_fields(&mut fields.statistics, widths.lengths)?;
+        Ok(fields)
+    }
+
+    /// Checks that publication uses the same widths as field planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if either width differs.
+    fn require_widths(&self, widths: FormatWidths) -> Result<(), Error> {
+        if self.widths != widths {
+            return Err(Error::AppendUnsupported(
+                "append field widths changed after planning",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Plans chunk bytes, index counts, and header statistics for an in-place append.
 ///
 /// Checks the element ranges and metadata sizes before reading a trailing chunk or encoding
 /// `raw`, the little-endian bytes of `new_elems` elements. Computes header statistics from
 /// referenced blocks and the blocks needed for the appended chunks. Planning leaves the file
-/// unchanged.
+/// unchanged. Encodes the dimension and statistics at the file's length width before reading
+/// a trailing chunk or preparing new payloads.
 ///
 /// Verifies existing data blocks and initialized pages touched by the append before allocating
 /// storage. Metadata checksum verification is independent of the `checksum` feature.
@@ -1770,7 +1906,8 @@ pub(crate) struct AppendPlan {
 ///
 /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if an index range, metadata size, or
 /// header statistic exceeds [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if metadata
-/// sizes or indexes exceed [`usize::MAX`].
+/// sizes or indexes exceed [`usize::MAX`]. Returns [`FormatError::LengthTooLarge`] if the grown
+/// dimension or a statistic exceeds the file's length width.
 ///
 /// Returns [`Error::AppendUnsupported`] if the new dimension overflows, the index geometry does
 /// not cover the append, a filtered tail rewrite is unsupported, or an encoded chunk size does
@@ -1797,11 +1934,24 @@ pub(crate) fn plan_ea_append<F: Store>(
         .ok_or(Error::AppendUnsupported(
             "append would overflow the dataset dimension",
         ))?;
+    if loc.offset_width != file.widths().offsets || loc.length_width != file.widths().lengths {
+        return Err(Error::AppendUnsupported(
+            "append file widths differ from the located dataset",
+        ));
+    }
+    let mut encoded_dimension = [0; 8];
+    hdf5_pure_format::__private::write_length_at(
+        &mut encoded_dimension,
+        0,
+        new_dim,
+        file.widths().lengths,
+    )?;
     let new_num_chunks = new_dim.div_ceil(chunk_elems);
     loc.dense_prefix_stats(new_num_chunks)?;
     let n_full = current_dim / chunk_elems;
     loc.check_append_metadata(file, n_full, new_num_chunks)?;
     let stats = loc.planned_allocation_stats(file, n_full, new_num_chunks)?;
+    let fields = AppendFields::new(file.widths(), new_dim, stats)?;
     let has_partial = current_dim % chunk_elems != 0;
 
     // `ChunkEncoding::decodable_by` selects bytes readable at both the old and new extents.
@@ -1876,6 +2026,7 @@ pub(crate) fn plan_ea_append<F: Store>(
     }
 
     Ok(AppendPlan {
+        fields,
         chunks,
         completed_tail,
         predecessor,
@@ -1948,7 +2099,8 @@ fn prepare_append_chunks(
 /// # Errors
 ///
 /// Returns [`Error::AppendUnsupported`] if the append exceeds the index geometry or an encoded
-/// chunk exceeds the canonical element width. Propagates geometry, datatype, fill, and filter
+/// chunk exceeds its index record. Returns [`FormatError::LengthTooLarge`] if the dimension or
+/// statistics exceed the file's length width. Propagates geometry, datatype, fill, and filter
 /// encoding errors.
 pub(crate) fn plan_initial_ea_append(
     index: &UnallocatedIndex,
@@ -1961,6 +2113,12 @@ pub(crate) fn plan_initial_ea_append(
     new_elems: u64,
     fill: FillPattern<'_>,
 ) -> Result<(AppendPlan, ExtensibleArrayInitialization), Error> {
+    if widths != index.widths {
+        return Err(Error::AppendUnsupported(
+            "append file widths differ from the located dataset",
+        ));
+    }
+    hdf5_pure_format::__private::write_length_at(&mut [0; 8], 0, new_elems, widths.lengths)?;
     let initialization = ExtensibleArrayInitialization::new(
         index.creation,
         index.chunk_bytes.to_u64(),
@@ -1978,6 +2136,7 @@ pub(crate) fn plan_initial_ea_append(
         offset_width: widths.offsets,
     }
     .dense_prefix_stats(num_chunks)?;
+    let fields = AppendFields::new(widths, new_elems, stats)?;
     let ctx = ChunkContext::from_datatype(spatial, datatype)?;
     let (chunks, completed_tail) = prepare_append_chunks(
         &mut FilterScratch::new(),
@@ -2005,6 +2164,7 @@ pub(crate) fn plan_initial_ea_append(
     }
     Ok((
         AppendPlan {
+            fields,
             chunks,
             completed_tail,
             predecessor: None,
@@ -2036,6 +2196,7 @@ pub(crate) fn initialize_ea_index(
     initialization: &ExtensibleArrayInitialization,
 ) -> Result<Located, Error> {
     if initialization.plan().widths() != file.widths()
+        || index.widths != file.widths()
         || initialization.plan().creation() != index.creation
     {
         return Err(Error::AppendUnsupported(
@@ -2086,11 +2247,13 @@ pub(crate) fn initialize_ea_index(
 /// is invalid. Returns [`Error::AppendUnsupported`] if an index element or publication range
 /// lies outside its block, or a captured tail reference belongs to another index or has changed
 /// since planning. Propagates errors from allocating, reading, writing, or synchronizing file
-/// storage.
+/// storage. Returns [`Error::AppendUnsupported`] before allocation if the file's widths differ
+/// from those used to encode the planned fields.
 pub(crate) fn apply_ea_append<F: Store>(
     file: &mut F,
     loc: &mut Located,
     AppendPlan {
+        fields,
         chunks,
         completed_tail,
         predecessor,
@@ -2101,6 +2264,7 @@ pub(crate) fn apply_ea_append<F: Store>(
     }: AppendPlan,
     max_phase: u8,
 ) -> Result<(), Error> {
+    fields.require_widths(file.widths())?;
     // Phase 1: write payloads and confirm their publication before index updates. A replacement
     // tail is visible at the old dimension, so its complete allocation must be within recorded EOF.
     let mut allocations = Vec::with_capacity(chunks.len());
@@ -2157,7 +2321,7 @@ pub(crate) fn apply_ea_append<F: Store>(
     }
 
     // Phase 3: publish the EA header element count.
-    loc.update_ea_header(file, stats)?;
+    loc.publish_statistics(file, &fields.statistics[..fields.statistics_len])?;
     file.sync()?;
     loc.allocation_stats = Some(stats);
     if max_phase < 4 {
@@ -2165,7 +2329,10 @@ pub(crate) fn apply_ea_append<F: Store>(
     }
 
     // Phase 4: publish the dataspace dimension before publishing a filtered tail.
-    loc.patch_dimension(file, new_dim)?;
+    loc.dimension.publish(
+        file,
+        &fields.dimension[..usize::from(fields.widths.lengths.get())],
+    )?;
     file.sync()?;
 
     loc.current_dim = new_dim;
@@ -2220,7 +2387,7 @@ impl ChunkReferenceOwner {
     fn new(file: &impl Store, located: &Located) -> Self {
         Self {
             index_header: located.ea_addr,
-            dimension_offset: located.dim0_off,
+            dimension_offset: located.dimension.field.start().get(),
             base: file.addresses().effective_base(),
         }
     }
@@ -2727,6 +2894,281 @@ mod tests {
     use crate::writer::FileBuilder;
 
     mod metadata;
+
+    test_util_hdf5::hdf5_1_10_tests! {
+        mod native_crosschecks;
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    #[case::eight(OffsetWidth::Eight)]
+    fn version_one_dataspace_publication_preserves_its_reserved_prefix(
+        #[case] offsets: OffsetWidth,
+    ) {
+        let mut builder = FileBuilder::new();
+        builder.with_offset_width(offsets);
+        builder
+            .create_dataset("d")
+            .with_i32_data(&[0, 1, 2])
+            .with_shape(&[3])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[4]);
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        let walk = walk_v2_object_header(&store, dataset_address(&store), store.widths).unwrap();
+        let mut header = v2_bytes::Header::new();
+        for message in walk.messages {
+            let body = if message.msg_type == MessageType::DATASPACE {
+                test_util::dataspace::v1(
+                    1,
+                    test_util::dataspace::Flags::MAX_DIMS,
+                    &[3],
+                    Some(&[u64::MAX]),
+                )
+            } else {
+                store.read_exact_at(message.data_off, message.size).unwrap()
+            };
+            header = header.message(Message::new(RecordType(message.msg_type.to_u16()), &body));
+        }
+        let address = store.append_bytes(&header.build()).unwrap();
+        store.patch_superblock_eof().unwrap();
+        let mut state = edit::locate_dataset_state(&store, address).unwrap();
+        let walk = walk_v2_object_header(&store, address, store.widths).unwrap();
+        let dataspace = walk
+            .messages
+            .iter()
+            .find(|message| message.msg_type == MessageType::DATASPACE)
+            .unwrap();
+        let field = dataspace.data_off.to_usize().unwrap();
+        let prefix = store.data[field..field + test_util::dataspace::V1_HEADER_LEN].to_vec();
+        append_state(&mut store, &mut state, &[3, 4], 4).unwrap();
+        assert_eq!(
+            &store.data[field..field + test_util::dataspace::V1_HEADER_LEN],
+            prefix
+        );
+        let dimension = field + test_util::dataspace::V1_HEADER_LEN;
+        assert_eq!(&store.data[dimension..dimension + 8], 5_u64.to_le_bytes());
+        assert_eq!(
+            &store.data[dimension + 8..dimension + 16],
+            u64::MAX.to_le_bytes()
+        );
+        assert_eq!(state.index.current_dim(), 5);
+        let checksum = test_util::checksum::lookup3(
+            &store.data[dataspace.chunk_start.to_usize().unwrap()
+                ..dataspace.chunk_msg_end.to_usize().unwrap()],
+        );
+        assert_eq!(
+            &store.data[dataspace.chunk_msg_end.to_usize().unwrap()
+                ..(dataspace.chunk_msg_end + EA_CHECKSUM_SIZE)
+                    .to_usize()
+                    .unwrap()],
+            checksum.to_le_bytes()
+        );
+    }
+
+    #[rstest]
+    #[case::relative_span(0, u64::MAX, EA_CHECKSUM_SIZE)]
+    #[case::physical_end(8, 8, u64::MAX - EA_CHECKSUM_SIZE)]
+    fn checksummed_publication_rejects_a_wrapped_physical_end_before_reading(
+        #[case] start: u64,
+        #[case] expected_offset: u64,
+        #[case] expected_length: u64,
+    ) {
+        let mut store = WindowProbeStore::open(build_unlimited(3, 4));
+        let original = store.data.clone();
+        store.reset_counters();
+        let error = store
+            .publish_checksummed(start, u64::MAX, start, &[1])
+            .unwrap_err();
+        let Error::Format(FormatError::OffsetOverflow { offset, length }) = error else {
+            panic!("expected OffsetOverflow, got {error:?}");
+        };
+        assert_eq!((offset, length), (expected_offset, expected_length));
+        assert_eq!(store.data, original);
+        assert_eq!(store.total_read.get(), 0);
+        assert!(store.allocations.borrow().is_empty());
+        assert_eq!(store.syncs.get(), 0);
+    }
+
+    #[rstest]
+    #[case::recorded_end(true)]
+    #[case::physical_end(false)]
+    fn dimension_publication_checks_the_complete_header_before_reading(#[case] recorded: bool) {
+        let mut store = WindowProbeStore::open(build_unlimited(3, 4));
+        let (index, _) = locate(&store);
+        let range = index.dimension.chunk;
+        if recorded {
+            store.superblock.eof_address = range.end().get() - 1;
+        } else {
+            store
+                .data
+                .truncate((range.end().get() - 1).to_usize().unwrap());
+        }
+        let original = store.data.clone();
+        store.reset_counters();
+        let error = index
+            .dimension
+            .publish(&mut store, &5_u64.to_le_bytes())
+            .unwrap_err();
+        if recorded {
+            let Error::InvalidSpaceOwnershipExtent {
+                address,
+                length,
+                previous_end,
+                logical_size,
+            } = error
+            else {
+                panic!("expected InvalidSpaceOwnershipExtent, got {error:?}");
+            };
+            assert_eq!(
+                (address, length, previous_end, logical_size),
+                (
+                    range.start().get(),
+                    range.length(),
+                    0,
+                    range.end().get() - 1
+                )
+            );
+        } else {
+            let Error::Format(FormatError::UnexpectedSourceEof {
+                expected,
+                available,
+            }) = error
+            else {
+                panic!("expected UnexpectedSourceEof, got {error:?}");
+            };
+            assert_eq!(
+                (expected, available),
+                (range.end().get(), range.end().get() - 1)
+            );
+        }
+        assert_eq!(store.data, original);
+        assert_eq!(store.total_read.get(), 0);
+        assert_eq!(store.syncs.get(), 0);
+        assert!(store.allocations.borrow().is_empty());
+    }
+
+    #[rstest]
+    #[case::offsets(FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Eight })]
+    #[case::lengths(FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Two })]
+    fn append_publication_rejects_changed_widths_before_allocating(#[case] widths: FormatWidths) {
+        let mut store = WindowProbeStore::open(build_unlimited(3, 4));
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let plan = state_plan(&store, &state, &[3, 4]).unwrap();
+        let original = store.data.clone();
+        store.reset_counters();
+        store.widths = widths;
+        let error =
+            apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::AppendUnsupported("append field widths changed after planning")
+            ),
+            "{error:?}"
+        );
+        assert_eq!(store.data, original);
+        assert!(store.allocations.borrow().is_empty());
+        assert!(store.retired.is_empty());
+        assert_eq!(store.syncs.get(), 0);
+        assert_eq!(state.index.current_dim(), 3);
+    }
+
+    #[rstest]
+    #[case::two(LengthWidth::Two, u64::from(u16::MAX) + 1)]
+    #[case::four(LengthWidth::Four, u64::from(u32::MAX) + 1)]
+    fn append_dimension_overflow_is_rejected_before_metadata_or_payload_reads(
+        #[case] lengths: LengthWidth,
+        #[case] dimension: u64,
+    ) {
+        let mut store = WindowProbeStore::open(build_unlimited(3, 4));
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        store.widths.lengths = lengths;
+        let index = state.index.allocated_mut().unwrap();
+        index.length_width = lengths;
+        index.current_dim = dimension - 1;
+        let original = store.data.clone();
+        store.reset_counters();
+        let Err(error) = plan_ea_append(
+            &store,
+            state.index.allocated().unwrap(),
+            &state.datatype,
+            &state.spatial,
+            state.element_size,
+            state.pipeline.as_ref(),
+            true,
+            LossyTailReencoding::Reject,
+            &[],
+            1,
+            state.fill.pattern(state.element_size),
+        ) else {
+            panic!("a dimension past the length width must be rejected");
+        };
+        let Error::Format(FormatError::LengthTooLarge {
+            length,
+            length_size,
+        }) = error
+        else {
+            panic!("expected LengthTooLarge, got {error:?}");
+        };
+        assert_eq!((length, length_size), (dimension, lengths.get()));
+        assert_eq!(store.data, original);
+        assert_eq!(store.total_read.get(), 0);
+        assert!(store.allocations.borrow().is_empty());
+        assert!(store.retired.is_empty());
+    }
+
+    #[rstest]
+    #[case::sentinel(65_535)]
+    #[case::one_beyond(65_536)]
+    fn narrow_append_allocation_rejects_an_unrepresentable_end_before_writes(#[case] end: u64) {
+        let mut builder = FileBuilder::new();
+        builder.with_offset_width(OffsetWidth::Two);
+        builder
+            .create_dataset("d")
+            .with_i32_data(&[0, 1, 2])
+            .with_shape(&[3])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[4]);
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        store.data.resize(65_530, 0);
+        store.patch_superblock_eof().unwrap();
+        let allocation = store.allocate(&[1; 4], AllocationClass::Raw).unwrap();
+        assert_eq!(allocation.range().end().get(), 65_534);
+        store
+            .publish_allocations()
+            .unwrap()
+            .confirm(allocation)
+            .unwrap();
+        let original = store.data.clone();
+        store.reset_counters();
+        let Err(error) = store.allocate(
+            &vec![2; (end - 65_534).to_usize().unwrap()],
+            AllocationClass::Raw,
+        ) else {
+            panic!("an unrepresentable allocation end must be rejected");
+        };
+        match error {
+            Error::Format(FormatError::DefinedAddressIsUndefined {
+                address,
+                offset_size,
+            }) if end == 65_535 => assert_eq!((address, offset_size), (end, 2)),
+            Error::Format(FormatError::AddressTooLarge {
+                address,
+                offset_size,
+            }) if end == 65_536 => assert_eq!((address, offset_size), (end, 2)),
+            error => panic!("expected a width error at {end}, got {error:?}"),
+        }
+        assert_eq!(store.data, original);
+        assert_eq!(store.appends.get(), 0);
+        assert_eq!(store.syncs.get(), 0);
+        assert!(store.allocations.borrow().is_empty());
+        assert!(store.retired.is_empty());
+        store.publication.available().unwrap();
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [0, 1, 2]);
+        file.close().unwrap();
+    }
 
     #[rstest]
     #[case::widths(true)]
@@ -3457,16 +3899,41 @@ mod tests {
 
         /// Extends the image when the free region cannot fit an allocation.
         fn append_bytes(&mut self, bytes: &[u8]) -> Result<u64, Error> {
-            self.appends.set(self.appends.get() + 1);
             let addr = self.data.len() as u64;
+            self.require_allocation_range(addr, bytes.len().to_u64())?;
+            self.appends.set(self.appends.get() + 1);
             self.data.extend_from_slice(bytes);
             Ok(addr)
         }
 
+        fn require_allocation_range(&self, address: u64, length: u64) -> Result<(), Error> {
+            let range = FileRange::new(PhysicalAddress::new(address), length)?;
+            let mut encoded = [0; 8];
+            hdf5_pure_format::__private::write_defined_stored_address_at(
+                &mut encoded,
+                0,
+                self.addresses().relative(range.start())?,
+                self.widths.offsets,
+            )?;
+            hdf5_pure_format::__private::write_defined_stored_address_at(
+                &mut encoded,
+                0,
+                self.addresses().relative(range.end())?,
+                self.widths.offsets,
+            )?;
+            Ok(())
+        }
+
         fn allocate_bytes(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
-            self.allocations.get_mut().push(class);
             let len = bytes.len() as u64;
+            let address = self
+                .free
+                .filter(|&(_, available)| available >= len)
+                .map_or(self.data.len().to_u64(), |(address, _)| address);
+            self.require_allocation_range(address, len)?;
+            self.allocations.get_mut().push(class);
             if let Some((addr, avail)) = self.free.filter(|&(_, avail)| avail >= len) {
+                self.require_allocation_range(addr, len)?;
                 self.reuses.set(self.reuses.get() + 1);
                 self.free = (avail > len).then(|| (addr + len, avail - len));
                 let start = addr.to_usize()?;
@@ -3552,6 +4019,7 @@ mod tests {
                 .free
                 .filter(|&(_, available)| available >= length)
                 .map_or(self.data.len().to_u64(), |(address, _)| address);
+            self.require_allocation_range(address, length)?;
             let bytes = prepare(PhysicalAddress::new(address))?;
             if bytes.as_ref().len().to_u64() != length {
                 return Err(FormatError::Internal(
@@ -3627,7 +4095,7 @@ mod tests {
             ),
             AccessMode::ReadOnly,
             &store.superblock,
-            crate::file_writer::WIDTHS,
+            store.widths,
             &ObjectPath::parse("d"),
         )
         .unwrap()
@@ -4016,6 +4484,7 @@ mod tests {
         }
         let at = store.data.len() as u64;
         store.data.extend(header.build());
+        store.patch_superblock_eof().unwrap();
         let original = store.data.clone();
         let Err(error) = edit::locate_dataset_state(&store, at) else {
             panic!("expected invalid chunk geometry");

@@ -242,7 +242,7 @@ fn failed_immediate_append_preserves_consumed_space(
     let state = engine.located[&address].index.allocated().unwrap();
     let index = state.index_block_addr.get();
     let header = state.ea_addr.get() + HEADER_STATISTICS_OFFSET;
-    let dimension = state.dim0_off;
+    let dimension = state.dimension_offset();
     drop(engine);
     let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, _| {
         Ok(Box::new(FailureImage {

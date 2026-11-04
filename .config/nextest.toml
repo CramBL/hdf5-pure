@@ -89,7 +89,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^swmr_refresh::/) |
     test(/^swmr_successive_readers::/) |
     test(/^test_util::swmr_reader::/)
-) | (package(hdf5-pure) & test(/^edit::native_crosschecks::append_inspection::/))
+) | (package(hdf5-pure) & (test(/^edit::native_crosschecks::append_inspection::/) | test(/^chunk_index_inplace::tests::native_crosschecks::/)))
 '''
 test-group = "append"
 
