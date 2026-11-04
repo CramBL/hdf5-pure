@@ -26,6 +26,116 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 
 #[rstest]
+#[case::compact_named(false, true)]
+#[case::compact_unnamed(false, false)]
+#[case::dense_named(true, true)]
+#[case::dense_unnamed(true, false)]
+fn copied_datatype_users_preserve_native_compact_and_dense_references(
+    #[case] dense: bool,
+    #[case] named: bool,
+) {
+    let path = test_util::temp::temp_path("native-copied-type-users.h5");
+    let native = file::libhdf5_create_v18(&path);
+    let datatype = ByteOrder::LittleEndian.i32_datatype();
+    native.commit_datatype("mytype", &datatype).unwrap();
+    let group = native.create_group("source").unwrap();
+    let payload = vec![7i32; 1_048_576];
+    let dataset = group
+        .new_dataset_builder()
+        .empty_as(&datatype)
+        .shape([payload.len()])
+        .create("data")
+        .unwrap();
+    dataset.write(&payload).unwrap();
+    assert!(dataset.dtype().unwrap().is_committed());
+    drop(dataset);
+    let attrs = if dense { 9 } else { 1 };
+    for index in 0..attrs {
+        group
+            .new_attr_builder()
+            .empty_as(&datatype)
+            .shape([1])
+            .create(format!("attr{index}").as_str())
+            .unwrap()
+            .write(&[index])
+            .unwrap();
+    }
+    drop(group);
+    assert_eq!(
+        native.loc_info_by_name("mytype").unwrap().num_links,
+        attrs + 2
+    );
+    if !named {
+        native.unlink("mytype").unwrap();
+    }
+    drop(datatype);
+    native.close().unwrap();
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let (_, object) = phase
+        .topology()
+        .unwrap()
+        .find_link(&ObjectPathBuf::parse("source"))
+        .unwrap();
+    let tree = WriteEngine::read_copy_subtree(
+        &engine.opened_source(),
+        AccessMode::ReadWrite,
+        object.header_address().get(),
+        false,
+        engine.context.widths(),
+    )
+    .unwrap();
+    assert_eq!(tree.has_dense_attributes(), dense);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let users = {
+        let (copy, control) =
+            allocation::measure(&format!("copied_type_payload_{dense}_{named}"), || {
+                std::hint::black_box(payload.clone())
+            });
+        assert_eq!(copy, payload);
+        assert!(
+            control.blocks > 0
+                && control.bytes >= u64::try_from(payload.len() * size_of::<i32>()).unwrap(),
+            "{control}"
+        );
+        drop(copy);
+        let (users, measured) =
+            allocation::measure(&format!("copied_type_summary_{dense}_{named}"), || {
+                tree.datatype_users(engine.context.widths())
+            });
+        let users = users.unwrap().unwrap();
+        assert!(
+            measured.blocks > 0 && measured.bytes <= 1_024 && measured.live_bytes <= 1_024,
+            "{measured}"
+        );
+        users
+    };
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let users = tree
+        .datatype_users(engine.context.widths())
+        .unwrap()
+        .unwrap();
+    assert!(users.matches(&tree));
+    let users = users.users().collect::<Vec<_>>();
+    assert_eq!(users.len(), 1);
+    let (address, count) = users[0];
+    assert_eq!(count.get(), u64::try_from(attrs + 1).unwrap());
+    let target = ObjectId::resolve(engine.addresses(), address).unwrap();
+    assert_eq!(
+        phase
+            .topology()
+            .unwrap()
+            .incoming(target.header_address().get()),
+        named.then_some(1)
+    );
+    let observed = phase.object_reference_count(target).unwrap();
+    let ObjectReferenceCount::Version2(field) = observed else {
+        panic!("expected a version 2 committed-type count, got {observed:?}")
+    };
+    assert_eq!(u64::from(field.value()), count.get() + u64::from(named));
+}
+
+#[rstest]
 #[case::version_1(false)]
 #[case::version_2(true)]
 fn native_root_counts_include_the_superblock_reference(
