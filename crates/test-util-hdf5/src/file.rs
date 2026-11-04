@@ -67,6 +67,16 @@ pub fn libhdf5_create_page(
         .unwrap_or_else(|error| panic!("create {path:?}: {error}"))
 }
 
+/// Opens an existing file for native read and write observations.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot open `path` for writing.
+#[track_caller]
+pub fn libhdf5_open_rw(path: &Path) -> hdf5::File {
+    hdf5::File::open_rw(path).unwrap_or_else(|error| panic!("open {path:?}: {error}"))
+}
+
 /// A file the C library creates in the 1.8 format or newer: version 2 object
 /// headers and link-message groups. HDF5 2.0 made that the default, and every
 /// earlier release writes version 1 headers by default.

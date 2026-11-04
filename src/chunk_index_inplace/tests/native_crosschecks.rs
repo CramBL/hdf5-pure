@@ -3,11 +3,15 @@ use std::path::Path;
 
 use hdf5_pure_format::__private::ChunkIndexFields;
 use hdf5_pure_format::__private::ChunkRecord;
+use hdf5_pure_format::__private::FixedArrayDataBlock;
+use hdf5_pure_format::__private::FixedArrayHeaderLocator;
+use hdf5_pure_format::__private::FixedArrayPlan;
 use rstest::rstest;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
 use super::*;
+use crate::address::BaseAddressExt;
 
 #[rstest]
 #[case::two(OffsetWidth::Two)]
@@ -229,6 +233,153 @@ fn finite_layout_field_encoders_match_native_storage(
     let reopened = crate::File::from_bytes(store.data).unwrap();
     assert_eq!(reopened.dataset("d").unwrap().read_i32().unwrap(), values);
     reopened.close().unwrap();
+    directory.close().unwrap();
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::four_eight(OffsetWidth::Four, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn native_writes_consume_streamed_empty_fixed_arrays(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(3, 1_025)] entries: usize,
+    #[values(false, true)] filtered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty-fixed.h5");
+    let widths = FormatWidths { offsets, lengths };
+    Producer::Native.write_finite(&path, widths, entries * 4, filtered, &[]);
+    let mut store = WindowProbeStore::open(fs::read(&path).unwrap());
+    let walk = walk_v2_object_header(&store, dataset_address(&store), widths).unwrap();
+    let message = walk
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let body = store.read_exact_at(message.data_off, message.size).unwrap();
+    let (
+        layout,
+        Some(ChunkIndexFields::FixedArray {
+            page_bits,
+            address: field,
+        }),
+    ) = DataLayout::parse_with_index_fields(&body, widths).unwrap()
+    else {
+        panic!("expected Fixed Array fields");
+    };
+    assert!(matches!(
+        layout,
+        DataLayout::Chunked {
+            index: ChunkIndexLayout::FixedArray { address: None },
+            ..
+        }
+    ));
+    let plan = FixedArrayPlan::new(entries.to_u64(), 16, widths, filtered).unwrap();
+    assert_eq!(page_bits, plan.page_bits());
+    let header_length = plan.block_lengths().next().unwrap();
+    let addresses = store.addresses();
+    let allocation = store
+        .allocate_encoded(plan.total_len(), AllocationClass::Metadata, |at| {
+            let header = addresses.relative(at)?;
+            let placed = plan.place(header, header.checked_add(header_length)?)?;
+            let mut output = placed.serialize_header()?;
+            placed.emit_empty_data_block::<FormatError>(|bytes| {
+                output.extend_from_slice(bytes);
+                Ok(())
+            })?;
+            Ok(output)
+        })
+        .unwrap();
+    let confirmed = store
+        .publish_allocations()
+        .unwrap()
+        .confirm(allocation)
+        .unwrap();
+    let range = store.allocation_publication().require(&confirmed).unwrap();
+    let header_address = addresses.relative(range.start()).unwrap();
+    let encoded = field.encode(Some(header_address)).unwrap();
+    ObjectHeaderField::new(message, field.range())
+        .unwrap()
+        .publish(&mut store, encoded.as_bytes())
+        .unwrap();
+    store.sync().unwrap();
+    let locator = FixedArrayHeaderLocator::new(widths, BaseAddress::ZERO, header_address);
+    let header_range = locator.parse_range().unwrap();
+    let header_bytes = store
+        .read_exact_at(
+            header_range.start().get(),
+            header_range.length().to_usize().unwrap(),
+        )
+        .unwrap();
+    let header = locator
+        .parse(FileRegion::new(header_range, &header_bytes).unwrap())
+        .unwrap();
+    assert_eq!(header.entries(), entries.to_u64());
+    assert_eq!(header.is_filtered(), filtered);
+    let block = header.data_block().unwrap();
+    let prefix = block.parse_range().unwrap();
+    let prefix_bytes = store
+        .read_exact_at(prefix.start().get(), prefix.length().to_usize().unwrap())
+        .unwrap();
+    match block
+        .parse(FileRegion::new(prefix, &prefix_bytes).unwrap())
+        .unwrap()
+    {
+        FixedArrayDataBlock::Elements(elements) => {
+            assert_eq!(entries, 3);
+            assert!(elements.records(16).next().is_none());
+        }
+        FixedArrayDataBlock::PageBitmap(bitmap) => {
+            assert_eq!(entries, 1_025);
+            assert!(bitmap.pages().next().is_none());
+            assert!(!bitmap.page_for_slot(0).unwrap().unwrap().1);
+            assert!(
+                !bitmap
+                    .page_for_slot(entries.to_u64() - 1)
+                    .unwrap()
+                    .unwrap()
+                    .1
+            );
+        }
+    }
+    fs::write(&path, &store.data).unwrap();
+    let native = file::libhdf5_open_rw(&path);
+    let dataset = native.dataset("d").unwrap();
+    dataset.resize((1,)).unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [0]);
+    dataset.write_raw(&[37_i32]).unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [37]);
+    let sizes = native.create_plist().unwrap().get_sizes().unwrap();
+    assert_eq!(
+        (
+            usize::from(sizes.sizeof_addr),
+            usize::from(sizes.sizeof_size)
+        ),
+        (usize::from(offsets.get()), usize::from(lengths.get()))
+    );
+    drop(dataset);
+    native.close().unwrap();
+    let reopened = crate::File::from_bytes(fs::read(&path).unwrap()).unwrap();
+    assert_eq!(reopened.dataset("d").unwrap().read_i32().unwrap(), [37]);
+    reopened.close().unwrap();
+    let rewritten = WindowProbeStore::open(fs::read(&path).unwrap());
+    let bytes = rewritten
+        .read_exact_at(
+            header_range.start().get(),
+            header_range.length().to_usize().unwrap(),
+        )
+        .unwrap();
+    let native_header = locator
+        .parse(FileRegion::new(header_range, &bytes).unwrap())
+        .unwrap();
+    assert_eq!(native_header.data_block().unwrap().range(), block.range());
     directory.close().unwrap();
 }
 

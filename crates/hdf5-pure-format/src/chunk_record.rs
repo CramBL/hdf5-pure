@@ -322,6 +322,58 @@ impl ElementEncoding {
         })
     }
 
+    /// Encodes an occupied or unallocated slot into a fixed-size buffer.
+    ///
+    /// An unallocated filtered slot has zero size and mask fields. For an unfiltered slot,
+    /// only the address is encoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if an address exceeds the offset width,
+    /// [`FormatError::DefinedAddressIsUndefined`] if a defined address equals the undefined
+    /// marker, or [`FormatError::LengthTooLarge`] if a filtered size exceeds its entry field.
+    pub(crate) fn encode(self, record: Option<ChunkRecord>) -> Result<EncodedElement, FormatError> {
+        let Self {
+            offsets,
+            client,
+            stride,
+        } = self;
+        let mut element = EncodedElement {
+            bytes: [0; MAX_ELEMENT_LEN],
+            length: stride,
+        };
+        match record {
+            Some(record) => bytes::write_defined_stored_address_at(
+                &mut element.bytes,
+                0,
+                record.address,
+                offsets,
+            )?,
+            None => bytes::write_stored_address_at(
+                &mut element.bytes,
+                0,
+                StoredAddress::undefined(offsets),
+                offsets,
+            )?,
+        }
+        if let ArrayClient::FilteredChunks { chunk_size_len } = client {
+            let value = record.map_or(0, |record| record.stored_size);
+            let encoded = value.to_le_bytes();
+            let field = low_bytes(&encoded, usize::from(chunk_size_len)).ok_or(
+                FormatError::LengthTooLarge {
+                    length: value,
+                    length_size: chunk_size_len,
+                },
+            )?;
+            let position = usize::from(offsets.get());
+            element.bytes[position..position + field.len()].copy_from_slice(field);
+            let position = position + field.len();
+            element.bytes[position..position + usize::from(FILTER_MASK_LEN)]
+                .copy_from_slice(&record.map_or(0, |record| record.filter_mask).to_le_bytes());
+        }
+        Ok(element)
+    }
+
     pub(crate) const fn offsets(self) -> OffsetWidth {
         self.offsets
     }
@@ -379,6 +431,24 @@ impl ElementEncoding {
         }))
     }
 }
+
+/// The checked bytes of one array entry, excluding unused buffer capacity.
+pub(crate) struct EncodedElement {
+    bytes: [u8; MAX_ELEMENT_LEN],
+    length: NonZeroU8,
+}
+
+impl EncodedElement {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        let Self { bytes, length } = self;
+        &bytes[..usize::from(length.get())]
+    }
+}
+
+// "The Fixed Array Index", format specification version 4.0, defines the address, variable
+// size, and mask of a filtered entry for layout version 4.
+const MAX_ELEMENT_LEN: usize =
+    OffsetWidth::Eight.get() as usize + MAX_CHUNK_SIZE_LEN as usize + FILTER_MASK_LEN as usize;
 
 /// The client of a Fixed Array or an Extensible Array, the "Client ID" field of its header and of
 /// its blocks.
