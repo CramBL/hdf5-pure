@@ -32,27 +32,82 @@ pub(super) struct ReservationPlan<'a> {
 }
 
 impl<'a> ReservationPlan<'a> {
+    /// Plans requests under the selected staged or immediate allocation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReservationFailure`] with the partial plan if publication or placement fails.
     fn new(
         engine: &'a mut WriteEngine,
         requests: impl ExactSizeIterator<Item = BlockRequest>,
         mode: ReservationMode,
     ) -> Result<Self, Box<ReservationFailure<'a>>> {
-        let mut plan = Self {
+        let mut plan = Self::empty(engine);
+        plan.reservations.reserve(requests.len());
+        match plan.build(requests, mode) {
+            Ok(()) => Ok(plan),
+            Err(error) => Err(Box::new(ReservationFailure { plan, error })),
+        }
+    }
+
+    /// Plans a preferred reusable allocation or fallback requests before a common suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure described by [`WriteEngine::plan_blocks_with_fallback`].
+    fn with_preferred(
+        engine: &'a mut WriteEngine,
+        preferred: BlockRequest,
+        suffix: &[BlockRequest],
+        fallback: impl FnOnce() -> Result<Vec<BlockRequest>, FormatError>,
+    ) -> Result<(ReservationChoice, Self), Box<ReservationFailure<'a>>> {
+        let mut plan = Self::empty(engine);
+        let result = (|| {
+            plan.engine.context.allocations.available()?;
+            if plan.engine.publication == PublicationState::Uncertain {
+                return Err(Error::AllocationPublicationUncertain);
+            }
+            if plan.engine.fresh_page_boundary.is_none() {
+                let addresses = plan.engine.context.addresses();
+                let mut batch = plan.engine.space.reservation_batch(1);
+                let reservation = batch.reserve(preferred.reservation());
+                batch.finish();
+                if let Some(reservation) = reservation {
+                    plan.reservations.push(Self::reused(
+                        addresses,
+                        reservation,
+                        preferred,
+                        &mut plan.unresolved,
+                    )?);
+                    plan.reservations.reserve(suffix.len());
+                    if !suffix.is_empty() {
+                        plan.build(suffix.iter().copied(), ReservationMode::Staged)?;
+                    }
+                    return Ok(ReservationChoice::Preferred);
+                }
+            }
+            let mut requests = fallback()?;
+            requests.extend_from_slice(suffix);
+            plan.reservations.reserve(requests.len());
+            plan.build(requests.into_iter(), ReservationMode::Staged)?;
+            Ok(ReservationChoice::Fallback)
+        })();
+        match result {
+            Ok(choice) => Ok((choice, plan)),
+            Err(error) => Err(Box::new(ReservationFailure { plan, error })),
+        }
+    }
+
+    /// Starts an empty inline plan at the image's current physical end.
+    fn empty(engine: &'a mut WriteEngine) -> Self {
+        Self {
             end: PhysicalAddress::new(engine.image.len()),
             engine,
-            reservations: if requests.len() <= 1 {
-                Reservations::Scalar(None)
-            } else {
-                Reservations::Batch(Vec::with_capacity(requests.len()))
-            },
+            reservations: Reservations::Scalar(None),
             next: 0,
             failed: false,
             unresolved: None,
             work: ReservationWork::default(),
-        };
-        match plan.build(requests, mode) {
-            Ok(()) => Ok(plan),
-            Err(error) => Err(Box::new(ReservationFailure { plan, error })),
         }
     }
 
@@ -317,26 +372,7 @@ impl<'a> ReservationPlan<'a> {
     ) -> Result<PlannedReservation, Error> {
         let request = block_request.reservation();
         if reuse && let Some(reservation) = batch.reserve(request) {
-            let extent = reservation.extent();
-            let range = match page.physical_range(extent.start(), extent.len()) {
-                Ok(range) => range,
-                Err(error) => {
-                    *unresolved = Some(reservation);
-                    return Err(error.into());
-                }
-            };
-            return Ok(PlannedReservation {
-                placement: Placement::Reused {
-                    addr: range.start().get(),
-                    len: range.length(),
-                },
-                block: PlannedBlock::placed(
-                    page.addresses,
-                    reservation.placement(),
-                    block_request,
-                )?,
-                transition: None,
-            });
+            return Self::reused(page.addresses, reservation, block_request, unresolved);
         }
         if let Some(aggregation) = aggregation {
             let placement = aggregation.reserve_with(
@@ -365,6 +401,36 @@ impl<'a> ReservationPlan<'a> {
             },
             block: PlannedBlock::placed(page.addresses, placement, block_request)?,
             transition,
+        })
+    }
+
+    /// Associates a reusable allocation with a checked physical block.
+    ///
+    /// Moves the reservation into `unresolved` if block construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with the error from [`PlannedBlock::placed`].
+    fn reused(
+        addresses: AddressContext,
+        reservation: ReusableReservation,
+        request: BlockRequest,
+        unresolved: &mut Option<ReusableReservation>,
+    ) -> Result<PlannedReservation, Error> {
+        let block = match PlannedBlock::placed(addresses, reservation.placement(), request) {
+            Ok(block) => block,
+            Err(error) => {
+                *unresolved = Some(reservation);
+                return Err(error.into());
+            }
+        };
+        Ok(PlannedReservation {
+            placement: Placement::Reused {
+                addr: block.allocation().start().get(),
+                len: block.allocation().length(),
+            },
+            block,
+            transition: None,
         })
     }
 }
@@ -536,6 +602,19 @@ enum Reservations {
 }
 
 impl Reservations {
+    /// Reserves additional slots, keeping at most one reservation inline.
+    fn reserve(&mut self, additional: usize) {
+        match self {
+            Self::Batch(reservations) => reservations.reserve(additional),
+            Self::Scalar(slot) if usize::from(slot.is_some()) + additional > 1 => {
+                let mut reservations = Vec::with_capacity(usize::from(slot.is_some()) + additional);
+                reservations.extend(slot.take());
+                *self = Self::Batch(reservations);
+            }
+            Self::Scalar(_) => {}
+        }
+    }
+
     fn push(&mut self, reservation: PlannedReservation) {
         match self {
             Self::Batch(reservations) => reservations.push(reservation),
@@ -615,20 +694,21 @@ impl AppendCursor {
         }
         Ok((range, placement, transition))
     }
-
-    fn physical_range(
-        &self,
-        address: StoredAddress,
-        length: u64,
-    ) -> Result<FileRange, FormatError> {
-        FileRange::new(self.addresses.resolve(address)?, length)
-    }
 }
 
 #[derive(Clone, Copy)]
 enum ReservationMode {
     Immediate,
     Staged,
+}
+
+/// The request prefix selected before a common suffix.
+#[derive(Debug, PartialEq)]
+pub(super) enum ReservationChoice {
+    /// The requests returned by the fallback constructor.
+    Fallback,
+    /// One allocation reserved from reusable space for the preferred request.
+    Preferred,
 }
 
 impl WriteEngine {
@@ -663,6 +743,35 @@ impl WriteEngine {
         requests: &[BlockRequest],
     ) -> Result<ReservationPlan<'_>, Box<ReservationFailure<'_>>> {
         ReservationPlan::new(self, requests.iter().copied(), ReservationMode::Staged)
+    }
+
+    /// Plans a reusable preferred request or fallback requests before a common suffix.
+    ///
+    /// Checks publication availability, then tries `preferred` in reusable space when the session
+    /// permits reuse. Evaluates `fallback` once if the preferred request remains unreserved. The
+    /// selected requests precede `suffix`, with complete capacity reserved before content emission.
+    ///
+    /// The caller retains allocation ownership on success and failure, including unresolved
+    /// reusable allocations, and handles rollback and publication within the enclosing commit.
+    ///
+    /// # Performance
+    ///
+    /// The preferred lookup uses scalar allocation. Batch lookup state is constructed at most
+    /// once for the selected remaining requests. A preferred allocation with an empty suffix stays
+    /// inline. Indexed-work counts exclude scalar searches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReservationFailure`] with the partial plan on publication, fallback preparation,
+    /// or placement errors. Its error is [`Error::AllocationPublicationUncertain`] after uncertain
+    /// publication or [`Error::Format`] for invalid requests or placement geometry.
+    pub(super) fn plan_blocks_with_fallback(
+        &mut self,
+        preferred: BlockRequest,
+        suffix: &[BlockRequest],
+        fallback: impl FnOnce() -> Result<Vec<BlockRequest>, FormatError>,
+    ) -> Result<(ReservationChoice, ReservationPlan<'_>), Box<ReservationFailure<'_>>> {
+        ReservationPlan::with_preferred(self, preferred, suffix, fallback)
     }
 
     /// Reserves complete blocks under the session's immediate-write reuse policy.

@@ -3128,22 +3128,6 @@ impl WriteEngine {
         })
     }
 
-    /// Reserves `len` reusable bytes for `class` and returns their stored address,
-    /// or `None` when no single region is large enough or PAGE persistence is disabled.
-    ///
-    /// A non-paged file keeps one list for the whole file. A paged file keeps one
-    /// per page type and uses the list matching `class`: handing a
-    /// metadata hole to raw data (or the reverse) would mix the two within a page,
-    /// which is the single invariant the paged strategy exists to hold. A page
-    /// holding nothing at all is the exception, and [`SessionSpace::allocate`] is where it is
-    /// spent. [`SessionSpace::Disabled`] draws nothing.
-    fn alloc_free(&mut self, len: u64, class: AllocationClass) -> Option<StoredAddress> {
-        if self.fresh_page_boundary.is_some() {
-            return None;
-        }
-        self.space.allocate(len, class).map(|extent| extent.start())
-    }
-
     /// Write `bytes` at the address [`reserve`](Self::reserve) handed out,
     /// returning that address.
     ///

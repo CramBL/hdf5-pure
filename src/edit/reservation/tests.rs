@@ -34,6 +34,8 @@ use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy
 use super::{AppendCursor, ReservationFailure, ReservationPlan};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 
+mod preferred;
+
 #[rstest]
 #[case::append(FileSpaceStrategy::None, &[0, 16, 48], 72)]
 #[case::aggregates(FileSpaceStrategy::Aggr, &[0, 2048, 16], 4096)]

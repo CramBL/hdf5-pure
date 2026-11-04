@@ -68,12 +68,13 @@ use super::array::ArrayIndexPlan;
 use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::block::{BlockRequest, EncodingDependency};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
+use super::reservation::ReservationChoice;
 use super::reservation::ReservationFailure;
 use super::retirement::ChunkAllocation;
 use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
 
-use super::{AppendBuilder, LOSSY_TAIL_REFUSAL, OhRegion, Placement, UNDEF, WriteEngine};
+use super::{AppendBuilder, LOSSY_TAIL_REFUSAL, OhRegion, UNDEF, WriteEngine};
 
 impl WriteEngine {
     /// Stages a prepared dataset for creation at `path` on the next [`commit`](Self::commit).
@@ -969,13 +970,14 @@ impl WriteEngine {
 
     /// Writes a committed dataset's new PAGE chunks and returns its stored index address.
     ///
-    /// Uses a reusable raw allocation for the complete new payload when available. Otherwise,
-    /// reserves one raw allocation per prepared chunk. The encoded chunk slices are written
-    /// directly. Each complete Extensible Array block is reserved as metadata through
-    /// [`ArrayIndexPlan`].
+    /// Reserves a reusable raw allocation for the complete new payload when available, or one
+    /// raw allocation per prepared chunk. Plans the chosen payload and each complete Extensible
+    /// Array block before emission, reserving metadata through [`ArrayIndexPlan`]. With no new
+    /// chunks, reserves only index metadata.
     ///
-    /// The caller is responsible for allocation rollback and publication within the enclosing
-    /// commit.
+    /// On a preferred allocation, writes the encoded chunk slices through one reserved producer.
+    /// Complete reservations remain unavailable after partial emission. The caller handles
+    /// allocation rollback and publication within the enclosing commit.
     ///
     /// # Errors
     ///
@@ -1016,54 +1018,66 @@ impl WriteEngine {
                     length: chunk.stored_size(),
                 })
         })?;
-        let payload = if length > 0 {
-            self.alloc_free(length, AllocationClass::Raw)
-        } else {
-            None
-        };
-        let mut combined = kept_chunks.to_vec();
-        let mut requests = Vec::new();
-        if let Some(mut address) = payload {
-            for chunk in new_chunks {
-                combined.push(ChunkRecord {
-                    address,
-                    stored_size: chunk.stored_size(),
-                    filter_mask: chunk.filter_mask(),
-                });
-                self.place(
-                    Placement::Reused {
-                        addr: base.resolve(address)?.get(),
-                        len: chunk.stored_size(),
-                    },
-                    chunk.bytes(),
-                )?;
-                address = address.checked_add(chunk.stored_size())?;
-            }
-        } else {
-            for chunk in new_chunks {
-                let length = NonZeroU64::new(chunk.stored_size()).ok_or(
-                    FormatError::InvalidChunkGeometry("chunk allocation is empty"),
-                )?;
-                requests.push(BlockRequest::complete(
+        let (choice, mut reservations) = if let Some(length) = NonZeroU64::new(length) {
+            self.plan_blocks_with_fallback(
+                BlockRequest::complete(
                     ReservationRequest::new(length, AllocationClass::Raw),
                     EncodingDependency::Independent,
-                ));
-            }
+                ),
+                &metadata,
+                || {
+                    new_chunks
+                        .iter()
+                        .map(|chunk| {
+                            Ok(BlockRequest::complete(
+                                ReservationRequest::new(
+                                    NonZeroU64::new(chunk.stored_size()).ok_or(
+                                        FormatError::InvalidChunkGeometry(
+                                            "chunk allocation is empty",
+                                        ),
+                                    )?,
+                                    AllocationClass::Raw,
+                                ),
+                                EncodingDependency::Independent,
+                            ))
+                        })
+                        .collect()
+                },
+            )
+        } else {
+            self.plan_blocks(&metadata)
+                .map(|plan| (ReservationChoice::Fallback, plan))
         }
-        requests.extend(metadata);
-        let mut reservations = self
-            .plan_blocks(&requests)
-            .map_err(ReservationFailure::into_error)?;
-        if payload.is_none() {
-            for (chunk, reservation) in new_chunks.iter().zip(reservations.reservations()) {
-                combined.push(ChunkRecord {
-                    address: base.relative(reservation.range().start())?,
-                    stored_size: chunk.stored_size(),
-                    filter_mask: chunk.filter_mask(),
-                });
+        .map_err(ReservationFailure::into_error)?;
+        let mut combined = kept_chunks.to_vec();
+        match choice {
+            ReservationChoice::Preferred => {
+                let mut address = base.relative(reservations.reservations()[0].range().start())?;
+                for chunk in new_chunks {
+                    combined.push(ChunkRecord {
+                        address,
+                        stored_size: chunk.stored_size(),
+                        filter_mask: chunk.filter_mask(),
+                    });
+                    address = address.checked_add(chunk.stored_size())?;
+                }
+                reservations.write_next_with(|writer| {
+                    new_chunks
+                        .iter()
+                        .try_for_each(|chunk| writer.write(chunk.bytes()))
+                })?;
             }
-            for chunk in new_chunks {
-                reservations.write_next(chunk.bytes())?;
+            ReservationChoice::Fallback => {
+                for (chunk, reservation) in new_chunks.iter().zip(reservations.reservations()) {
+                    combined.push(ChunkRecord {
+                        address: base.relative(reservation.range().start())?,
+                        stored_size: chunk.stored_size(),
+                        filter_mask: chunk.filter_mask(),
+                    });
+                }
+                for chunk in new_chunks {
+                    reservations.write_next(chunk.bytes())?;
+                }
             }
         }
         let address = index.write(&IndexSlots::dense(&combined), &mut reservations)?;
