@@ -14,6 +14,8 @@ use crate::edit::WriteEngine;
 use crate::edit::commit::PublishedTree;
 use crate::error::Error;
 
+mod write;
+
 impl CountPublicationBounds<'_> {
     /// Publishes the associated tree with its original retirements before calling `complete`.
     ///

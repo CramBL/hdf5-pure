@@ -9,6 +9,7 @@ use hdf5_pure_space::__private::ReturnedExtents;
 
 use self::plan::{CommitPreparation, PreparedCommit};
 pub(super) use self::publish::PublishedTree;
+pub(super) use self::rollback::scoped::JournalScope;
 use super::WriteEngine;
 use super::staging::StagedEdits;
 #[cfg(doc)]

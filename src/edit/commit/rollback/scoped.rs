@@ -10,7 +10,7 @@ use crate::error::Error;
 /// After the operation returns, completion releases or restores only its appended journal
 /// entries. Earlier entries remain available for whole rollback. Publication and allocation
 /// permissions remain the caller's responsibility.
-pub(in crate::edit::commit) struct JournalScope<'engine> {
+pub(in crate::edit) struct JournalScope<'engine> {
     engine: &'engine mut WriteEngine,
     checkpoint: usize,
 }
@@ -27,7 +27,7 @@ impl<'engine> JournalScope<'engine> {
     ///
     /// Returns errors from `apply` or the completion barrier. If restoration also fails, returns
     /// [`Error::CommitPartiallyApplied`] with both the original and restoration errors.
-    pub(in crate::edit::commit) fn run(
+    pub(in crate::edit) fn run(
         engine: &'engine mut WriteEngine,
         apply: impl FnOnce(&mut Self) -> Result<(), Error>,
     ) -> Result<(), Error> {
@@ -45,7 +45,7 @@ impl<'engine> JournalScope<'engine> {
     ///
     /// Returns the read or write errors of [`WriteEngine::write_inplace_journaled`]. The journal
     /// entry remains available for restoration after a write error.
-    pub(in crate::edit::commit) fn write(
+    pub(in crate::edit) fn write(
         &mut self,
         at: PhysicalAddress,
         bytes: &[u8],
