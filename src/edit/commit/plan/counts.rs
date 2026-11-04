@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::edit::analysis::DeclaredCountChange;
+use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::SourceRemovalPlan;
 use crate::edit::object_header::reference_count::HeaderCount;
 use crate::edit::object_header::reference_count::HeaderCountError;
@@ -11,17 +12,17 @@ use crate::object_graph::ObjectId;
 use super::PreparedGroup;
 use super::RelocatedDataset;
 
-/// Exclusive checked count views with their planned remainders and replacement dispositions.
+/// Exclusive checked count views with planned values and retained change dispositions.
 ///
 /// Construction leaves owned records unchanged. Application updates or inserts selected local
-/// count records. Original source-bound evidence remains borrowed from the removal plan, with
-/// source-write and retirement permissions established separately.
-pub(super) struct PreparedCounts<'region, 'plan, 'source> {
+/// count records. Each original change value is retained in its replacement disposition.
+/// Source-write and retirement permissions are established separately.
+pub(super) struct PreparedCounts<'region, Change> {
     updates: Vec<(HeaderCount<'region>, u32)>,
-    disposition: CountDisposition<'plan, 'source>,
+    disposition: CountDisposition<Change>,
 }
 
-impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
+impl<'region, 'plan, 'source> PreparedCounts<'region, DeclaredCountChange<'plan, 'source>> {
     /// Matches declared count changes to checked owned replacement records in one batch.
     ///
     /// The caller supplies predecessor associations and their record regions after structural
@@ -40,18 +41,62 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
         plan: Option<&'plan SourceRemovalPlan<'_, 'source>>,
         groups: impl IntoIterator<Item = &'region mut PreparedGroup>,
     ) -> Result<Self, CountProjectionError> {
-        let mut prepared = Self {
+        let Some(plan) = plan else {
+            return Ok(Self::empty());
+        };
+        Self::project(
+            plan.changes().map(|change| {
+                let bound = change.bound();
+                (
+                    CountValues {
+                        object: bound.object(),
+                        original: bound.original(),
+                        remaining: change.remaining(),
+                    },
+                    change,
+                )
+            }),
+            groups,
+            |source| plan.shares_phase(source),
+        )
+    }
+}
+
+impl<'region, Change> PreparedCounts<'region, Change> {
+    /// Creates an empty projection with no heap allocation.
+    fn empty() -> Self {
+        Self {
             updates: Vec::new(),
             disposition: CountDisposition {
                 rebuilt: Vec::new(),
                 source: Vec::new(),
                 opaque: Vec::new(),
             },
-        };
-        let Some(plan) = plan else {
-            return Ok(prepared);
-        };
-        let mut changes = plan.changes().peekable();
+        }
+    }
+
+    /// Prepares checked local updates and retains the supplied change values.
+    ///
+    /// Each entry pairs a unique change with its matching physical identity, original count, and
+    /// planned count. The caller supplies `shares_phase` for the original change phase. Indexes
+    /// prepared predecessors once, checks phase identity and uniqueness, and consumes each matched
+    /// region at most once. Skips group iteration for an empty change iterator.
+    ///
+    /// Retains ambiguous or unsupported replacement counts as opaque dispositions. Construction
+    /// leaves every owned record unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountProjectionError::Phase`] or [`CountProjectionError::Repeated`] for invalid
+    /// predecessor associations, [`CountProjectionError::Region`] for invalid matching framing, or
+    /// [`CountProjectionError::Original`] if a matching local count differs from the original value.
+    fn project(
+        changes: impl IntoIterator<Item = (CountValues, Change)>,
+        groups: impl IntoIterator<Item = &'region mut PreparedGroup>,
+        shares_phase: impl Fn(&ReconstructionSource) -> bool,
+    ) -> Result<Self, CountProjectionError> {
+        let mut prepared = Self::empty();
+        let mut changes = changes.into_iter().peekable();
         if changes.peek().is_none() {
             return Ok(prepared);
         }
@@ -81,7 +126,7 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
                 }));
             for (source, region) in predecessors {
                 let object = source.object();
-                if !plan.shares_phase(source) {
+                if !shares_phase(source) {
                     return Err(CountProjectionError::Phase { object });
                 }
                 if regions.insert(object, region).is_some() {
@@ -89,8 +134,12 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
                 }
             }
         }
-        for change in changes {
-            let object = change.bound().object();
+        for (values, change) in changes {
+            let CountValues {
+                object,
+                original,
+                remaining,
+            } = values;
             let Some(region) = regions.remove(&object) else {
                 prepared.disposition.source.push(change);
                 continue;
@@ -103,14 +152,14 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
                 }
                 Err(error) => return Err(CountProjectionError::Region { object, error }),
             };
-            if projection.count() != change.bound().original() {
+            if projection.count() != original {
                 return Err(CountProjectionError::Original {
                     object,
-                    expected: change.bound().original(),
+                    expected: original,
                     actual: projection.count(),
                 });
             }
-            prepared.updates.push((projection, change.remaining()));
+            prepared.updates.push((projection, remaining));
             prepared.disposition.rebuilt.push(change);
         }
         Ok(prepared)
@@ -124,7 +173,7 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
     /// # Errors
     ///
     /// Returns the errors of [`HeaderCount::set`]. Earlier local updates remain applied on error.
-    pub(super) fn apply(self) -> Result<CountDisposition<'plan, 'source>, HeaderCountError> {
+    pub(super) fn apply(self) -> Result<CountDisposition<Change>, HeaderCountError> {
         let Self {
             updates,
             disposition,
@@ -136,16 +185,23 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, 'plan, 'source> {
     }
 }
 
-/// Declared count changes partitioned by their replacement-record disposition.
+/// Original change values partitioned by their replacement-record disposition.
 ///
 /// Source writes and retirement require separate permissions for every disposition.
-pub(super) struct CountDisposition<'plan, 'source> {
+pub(super) struct CountDisposition<Change> {
     /// Changes matched to checked replacement regions with the same original count.
-    pub(super) rebuilt: Vec<DeclaredCountChange<'plan, 'source>>,
+    pub(super) rebuilt: Vec<Change>,
     /// Changes without a prepared replacement region for their source object.
-    pub(super) source: Vec<DeclaredCountChange<'plan, 'source>>,
+    pub(super) source: Vec<Change>,
     /// Changes with ambiguous or unsupported replacement counts and their exact reasons.
-    pub(super) opaque: Vec<(DeclaredCountChange<'plan, 'source>, HeaderCountError)>,
+    pub(super) opaque: Vec<(Change, HeaderCountError)>,
+}
+
+/// A physical predecessor identity with its original and planned declared counts.
+struct CountValues {
+    object: ObjectId,
+    original: u32,
+    remaining: u32,
 }
 
 /// An inconsistent association or count, or invalid framing in a prepared region.
