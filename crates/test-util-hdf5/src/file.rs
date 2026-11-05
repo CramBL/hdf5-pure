@@ -99,6 +99,30 @@ pub fn libhdf5_create_earliest(path: &Path) -> hdf5::File {
     create_bounded(path, LibraryVersion::Earliest)
 }
 
+/// Creates a native file with the earliest lower format bound.
+///
+/// Sets the address and length widths independently and reserves `userblock` bytes before the
+/// superblock. The upper format bound is [`LibraryVersion::latest`].
+///
+/// # Panics
+///
+/// Panics if libhdf5 rejects the creation properties or cannot create `path`.
+pub fn libhdf5_create_earliest_with_widths(
+    path: &Path,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    userblock: u64,
+) -> hdf5::File {
+    create_with_widths(
+        path,
+        offsets,
+        lengths,
+        userblock,
+        LibraryVersion::Earliest,
+        LibraryVersion::latest(),
+    )
+}
+
 /// Creates a native file under HDF5 1.8 or newer format bounds.
 ///
 /// Sets the address and length widths independently and reserves `userblock` bytes before the
