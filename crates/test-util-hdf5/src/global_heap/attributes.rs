@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5::Attribute;
 use hdf5::Location;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::file::LibraryVersion;
@@ -13,6 +14,20 @@ use crate::absence;
 use crate::file;
 #[cfg(feature = "__hdf5-1.10")]
 use crate::file_space::persisted::PersistedStrategy;
+
+/// Reads variable-length ASCII attribute elements into owned strings.
+///
+/// # Panics
+///
+/// Panics if `attribute` cannot be read as variable-length ASCII strings.
+pub fn ascii_values(attribute: &Attribute) -> Vec<String> {
+    attribute
+        .read_raw::<VarLenAscii>()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().to_owned())
+        .collect()
+}
 
 /// Creates a file containing a variable-length `label` attribute and a guard dataset.
 ///

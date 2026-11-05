@@ -39,6 +39,7 @@ use crate::type_builders::ObjectRefTarget;
 
 pub(in crate::edit) use counts::CountProjectionError;
 pub(in crate::edit) use counts::CountProjectionProof;
+pub(super) use counts::PreparedTreeCounts;
 
 #[cfg_attr(
     not(test),
@@ -108,6 +109,10 @@ pub(super) enum CommitPreparation {
 }
 
 /// Stores prepared writes before application consumes the staged inputs.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "in-place commits retain write descriptors without allocating a tree box"
+)]
 pub(super) enum CommitPlan {
     /// Existing value ranges to overwrite without publishing a replacement root.
     InPlace(Vec<InPlaceWrite>),
@@ -200,6 +205,8 @@ pub(super) struct GroupHeaders {
 ///
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
+    /// Original count facts and their matching local projection retained for publication.
+    pub(super) counts: Option<Box<PreparedTreeCounts>>,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
     pub(super) cross_copies: Vec<CopyDestination>,
@@ -344,6 +351,8 @@ pub(super) enum ChildLink {
 
 /// Stores screened reference targets and storage affected by deletions.
 struct TreeReferences {
+    /// Checked original counts and applied local projections for the prepared tree.
+    counts: Option<Box<PreparedTreeCounts>>,
     deleted_free: Vec<(FileRange, FreeClass)>,
     deleted_collections: CollectionCandidates,
     references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
@@ -435,6 +444,7 @@ impl WriteEngine {
                 .map(|&(_, address)| PhysicalAddress::new(address)),
         );
         let TreeReferences {
+            counts,
             deleted_free,
             deleted_collections,
             references,
@@ -457,6 +467,7 @@ impl WriteEngine {
             .keys
             .sort_by_key(|path| std::cmp::Reverse(path.len()));
         Ok(CommitPlan::Tree(PreparedTree {
+            counts,
             groups: nodes,
             headers,
             cross_copies,
@@ -968,6 +979,7 @@ impl WriteEngine {
         );
         self.check_group_additions(nodes, keys, children, &datasets_by_group)?;
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
+        let counts = PreparedTreeCounts::prepare(self, nodes, analysis)?;
         let delete_targets = staged.deletes();
         let mut deleted_free: Vec<(FileRange, FreeClass)> = Vec::new();
         let deleted_targets = analysis
@@ -975,7 +987,13 @@ impl WriteEngine {
             .collect_free_spans(&mut deleted_free);
         let deleted_collections = analysis.deleted_collections(&deleted_targets);
         let for_copied = InvalidatedAddresses {
-            removed: deleted_free.iter().map(|&(range, _)| range).collect(),
+            removed: deleted_free
+                .iter()
+                .map(|&(range, _)| range)
+                .chain(counts.iter().flat_map(|counts| {
+                    counts.storage.allocations().iter().map(|&(range, _)| range)
+                }))
+                .collect(),
             moved: Vec::new(),
             base: self.context.addresses(),
         };
@@ -1037,6 +1055,7 @@ impl WriteEngine {
         }
 
         Ok(TreeReferences {
+            counts,
             deleted_free,
             deleted_collections,
             references,
@@ -1416,11 +1435,10 @@ pub(in crate::edit) struct OverwriteId {
 
 /// Records physical addresses invalidated by a commit for object-reference screening.
 ///
-/// Removed spans are also used for storage reclamation. Moved entries identify old object-header
-/// addresses whose replacements are published by the commit.
+/// Deletion ranges include supported original allocation evidence. Moved entries identify old
+/// object-header addresses whose replacements are published by the commit.
 pub(in crate::edit) struct InvalidatedAddresses {
-    /// Physical ranges this commit's deletions reclaim, as
-    /// [`collect_free_spans`](WriteEngine::collect_free_spans) reports them.
+    /// Physical ranges selected by deletion allocation collectors for reference screening.
     pub(in crate::edit) removed: Vec<FileRange>,
     /// Superseded object-header addresses from relocating dataset writes and rebuilt groups.
     pub(in crate::edit) moved: Vec<PhysicalAddress>,

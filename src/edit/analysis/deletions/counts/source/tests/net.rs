@@ -41,12 +41,10 @@ use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK, PlannedDeletion};
 use crate::edit::copy::CopyTree;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
-use crate::image::{CountingImage, HandleImage};
 use crate::object_graph::ObjectId;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::source::MetadataCacheConfig;
-use crate::{Datatype, DatatypeByteOrder, FileLocking, FloatingPointType, PhysicalAddress};
+use crate::{Datatype, DatatypeByteOrder, FloatingPointType, PhysicalAddress};
 
 #[rstest]
 #[case::named(Some(2), Links::Named, &[], true, false, 3)]
@@ -1084,23 +1082,7 @@ fn prepared(
 pub(in crate::edit::analysis::deletions::counts::source) fn counted_engine(
     path: &Path,
 ) -> (WriteEngine, Arc<AtomicU64>) {
-    let calls = Arc::new(AtomicU64::new(0));
-    let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
-        Ok(Box::new(
-            CountingImage::new(
-                Box::new(HandleImage::new(
-                    handle,
-                    len,
-                    MetadataCacheConfig::disabled(),
-                )),
-                Arc::default(),
-                Arc::default(),
-            )
-            .with_read_calls(Arc::clone(&calls)),
-        ))
-    })
-    .unwrap();
-    (engine, calls)
+    edit_test_util::open_counted_engine(path)
 }
 
 #[derive(Clone, Copy)]

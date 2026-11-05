@@ -93,7 +93,10 @@ fn the_collections_of_each_kind_of_reference_are_reclaimed_and_reused_for_raw_da
             element.clone()
         })
         .collect();
-    let messages = form.messages(&mut fixture, &datatype, &elements);
+    let mut messages = form.messages(&mut fixture, &datatype, &elements);
+    if matches!(form, Form::CompactAttribute) {
+        messages.extend(Form::CompactDataset.messages(&mut fixture, &datatype, &[]));
+    }
     fixture.object("x", messages);
     let kept = kept_dataset(&mut fixture);
     let path = temp::temp_path("reclaim_each_kind.h5");
@@ -222,11 +225,12 @@ fn deleting_one_of_two_hard_links_keeps_the_collection() {
         global_heap_fixture::reference(4, collection, 2),
     ]
     .concat();
-    let messages = Form::ContiguousDataset.messages(
+    let mut messages = Form::ContiguousDataset.messages(
         &mut fixture,
         &global_heap_fixture::vlen_string(),
         &elements,
     );
+    messages.push(Message::reference_count(2));
     let dataset = fixture.append_header(messages);
     fixture.link("d", dataset);
     fixture.link("d2", dataset);

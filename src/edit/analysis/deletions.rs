@@ -22,6 +22,8 @@ use super::counts::CountQueries;
 
 pub(in crate::edit) use counts::CountPreflight;
 pub(in crate::edit) use counts::CountProjectionIdentity;
+pub(in crate::edit) use counts::CountStorage;
+pub(in crate::edit) use counts::NetCountError;
 
 pub(in crate::edit) use counts::DeclaredCountChange;
 pub(in crate::edit) use counts::NetCountPlan;

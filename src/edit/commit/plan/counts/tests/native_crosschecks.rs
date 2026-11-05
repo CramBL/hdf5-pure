@@ -3,9 +3,14 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_format::__private::MessageRecordLayout;
 use rstest::rstest;
+use test_util::global_heap::Object;
 use test_util::object_header::Message;
 use test_util::object_header::v2;
 use test_util_hdf5::file;
+use test_util_hdf5::global_heap::attributes as native_attributes;
+use test_util_hdf5::global_heap_fixture;
+use test_util_hdf5::global_heap_fixture::Fixture;
+use test_util_hdf5::global_heap_fixture::Form;
 use test_util_hdf5::numeric::ByteOrder;
 
 use crate::AttrValue;
@@ -23,6 +28,9 @@ use crate::edit::analysis::counts::changes::owned::{
 };
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
+use crate::edit::commit::plan::CommitPlan;
+use crate::edit::commit::plan::CommitPreparation;
+use crate::edit::commit::plan::PreparedCommit;
 use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
@@ -460,6 +468,97 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
         7
     );
     assert_eq!(native.member_names().unwrap(), ["self"]);
+    native.close().unwrap();
+}
+
+#[rstest]
+#[case::version_1(true)]
+#[case::version_2(false)]
+fn native_root_count_preparation_preserves_the_superblock_user(#[case] earliest: bool) {
+    let path = test_util::temp::temp_path("native-commit-root-count.h5");
+    let native = if earliest {
+        file::libhdf5_create_earliest(&path)
+    } else {
+        file::libhdf5_create_v18(&path)
+    };
+    native.link_hard("/", "self").unwrap();
+    native
+        .new_attr::<i64>()
+        .create("value")
+        .unwrap()
+        .write_scalar(&7)
+        .unwrap();
+    assert_eq!(native.loc_info_by_name("/").unwrap().num_links, 2);
+    native.close().unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    let before = engine.disk_bytes().unwrap();
+    engine.delete(&ObjectPathBuf::parse("self")).unwrap();
+    let staged = std::mem::take(&mut engine.staged);
+    engine.begin_commit(&staged);
+    let CommitPreparation::Prepared(mut prepared) = PreparedCommit::prepare(&mut engine, staged)
+    else {
+        panic!("expected native root count preparation")
+    };
+    let CommitPlan::Tree(tree) = &mut prepared.plan else {
+        panic!("expected tree preparation")
+    };
+    let counts = tree.counts.as_ref().unwrap();
+    assert_eq!(counts.preflight.changes().len(), 1);
+    assert_eq!(
+        (
+            counts.preflight.changes()[0].original().value(),
+            counts.preflight.changes()[0].remaining()
+        ),
+        (2, 1)
+    );
+    assert!(counts.preflight.protected().updates().is_empty());
+    assert_eq!(
+        tree.groups
+            .get_mut(&ObjectPathBuf::root())
+            .unwrap()
+            .prepared
+            .region
+            .reference_count_mut()
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(engine.disk_bytes().unwrap(), before);
+    engine.apply_commit(prepared).unwrap();
+    drop(engine);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(native.loc_info_by_name("/").unwrap().num_links, 1);
+    assert_eq!(
+        native.attr("value").unwrap().read_scalar::<i64>().unwrap(),
+        7
+    );
+    assert!(native.member_names().unwrap().is_empty());
+    native.close().unwrap();
+}
+
+#[test]
+fn the_attribute_reclamation_fixture_has_a_native_readable_dataset_owner() {
+    let path = test_util::temp::temp_path("native-attribute-owner.h5");
+    let mut fixture = Fixture::new();
+    let collection = fixture.collection(&[Object::new(1, b"alpha")]);
+    let datatype = global_heap_fixture::vlen_string();
+    let mut records = Form::CompactAttribute.messages(
+        &mut fixture,
+        &datatype,
+        &global_heap_fixture::reference(5, collection, 1),
+    );
+    records.extend(Form::CompactDataset.messages(&mut fixture, &datatype, &[]));
+    fixture.object("owner", records);
+    fixture.write(&path);
+    let native = file::libhdf5_open(&path);
+    let owner = native.dataset("owner").unwrap();
+    assert_eq!(owner.shape(), [0]);
+    assert_eq!(
+        native_attributes::ascii_values(&owner.attr("a").unwrap()),
+        ["alpha"]
+    );
+    assert_eq!(native.loc_info_by_name("owner").unwrap().num_links, 1);
+    drop(owner);
     native.close().unwrap();
 }
 

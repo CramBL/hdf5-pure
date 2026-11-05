@@ -36,6 +36,8 @@ use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
 pub(super) use deletions::CountPreflight;
 pub(super) use deletions::CountProjectionIdentity;
+pub(super) use deletions::CountStorage;
+pub(super) use deletions::NetCountError;
 
 pub(super) use deletions::DeclaredCountChange;
 pub(super) use deletions::NetCountPlan;

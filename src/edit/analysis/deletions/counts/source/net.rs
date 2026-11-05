@@ -19,6 +19,8 @@ use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
 
+pub(in crate::edit) use storage::CountStorage;
+
 mod storage;
 
 impl<'source> AnalysisPhase<'source> {

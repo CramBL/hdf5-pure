@@ -155,6 +155,18 @@ pub enum Error {
         /// The stored address of the fractal-heap header.
         address: u64,
     },
+    /// An original declared count is below a proved reference minimum.
+    ///
+    /// Reported during commit preparation, before applying staged edits. The minimum concerns
+    /// original references, before prospective additions from the commit.
+    InvalidObjectReferenceCount {
+        /// The absolute file offset of the original object header.
+        address: u64,
+        /// The original declared count, including an implicit one.
+        observed: u32,
+        /// The proved minimum number of original references.
+        minimum: u64,
+    },
     /// An identified storage extent overlaps another extent or exceeds the logical end of file.
     InvalidSpaceOwnershipExtent {
         /// The absolute file offset of the invalid extent.
@@ -206,6 +218,46 @@ pub enum Error {
     /// [`crate::Dataset::append_staged`], which folds them into the pending
     /// creation.
     NotCommitted(String),
+    /// Accumulated prospective references to one object exceed [`u64::MAX`].
+    ObjectReferenceCountAdditionOverflow {
+        /// The absolute file offset of the original object header.
+        address: u64,
+        /// The prospective references accumulated before this addition.
+        current: u64,
+        /// The prospective references being added.
+        added: u64,
+    },
+    /// An owned replacement count differs from its original source observation.
+    ObjectReferenceCountMismatch {
+        /// The absolute file offset of the original object header.
+        address: u64,
+        /// The count observed in the original source.
+        expected: u32,
+        /// The count parsed from the owned replacement records.
+        actual: u32,
+    },
+    /// A planned net count exceeds the object header's [`u32`] field.
+    ObjectReferenceCountOverflow {
+        /// The absolute file offset of the original object header.
+        address: u64,
+        /// The original declared count, including an implicit one.
+        original: u32,
+        /// The planned additional references.
+        added: u64,
+        /// The planned removals from the original references.
+        removed: u64,
+    },
+    /// A count update is unsupported for the original value, object class, encoding, or allocation
+    /// evidence.
+    ///
+    /// Reported during commit preparation, before applying staged edits. The issue identifies
+    /// the unsupported condition independently of a proved original-count contradiction.
+    ObjectReferenceCountUpdateUnsupported {
+        /// The absolute file offset of the original object header.
+        address: u64,
+        /// The condition that prevents preparing the update.
+        issue: ObjectReferenceCountUpdateIssue,
+    },
     /// Two free sections overlap, including when their extents are identical.
     ///
     /// Addresses use the coordinate system of the inspected sections. Persisted sections use
@@ -312,6 +364,39 @@ pub enum Error {
     },
 }
 
+/// A condition that prevents preparing an object-reference count update.
+///
+/// Reported through [`Error::ObjectReferenceCountUpdateUnsupported`]. A proved original count
+/// below its reference minimum is reported through [`Error::InvalidObjectReferenceCount`].
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectReferenceCountUpdateIssue {
+    /// Complete, disjoint source allocation evidence is unavailable or conflicts with allocator
+    /// claims.
+    AllocationUnavailable,
+    /// A changed positive source count has no explicit field or matching reconstruction.
+    ImplicitSourceField,
+    /// The original declared count is zero, independently of a proved reference minimum.
+    OriginalZero,
+    /// The planned count is zero for a subject ineligible for ordinary-object retirement.
+    RetainedZero,
+    /// An owned replacement has ambiguous or unsupported count framing.
+    UnsupportedEncoding,
+}
+
+#[cfg(feature = "std")]
+impl fmt::Display for ObjectReferenceCountUpdateIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::AllocationUnavailable => "complete exclusive source allocation is unavailable",
+            Self::ImplicitSourceField => "the source has no explicit count field",
+            Self::OriginalZero => "an original zero count is unsupported",
+            Self::RetainedZero => "zero is unsupported for this retained object",
+            Self::UnsupportedEncoding => "the replacement count encoding is unsupported",
+        })
+    }
+}
+
 #[cfg(feature = "std")]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -319,6 +404,43 @@ impl fmt::Display for Error {
             Error::AllocationPublicationUncertain => write!(
                 f,
                 "allocation publication is unconfirmed; close and reopen the file before editing"
+            ),
+            Error::InvalidObjectReferenceCount {
+                address,
+                observed,
+                minimum,
+            } => write!(
+                f,
+                "object reference count at {address} is {observed}, below the original reference minimum {minimum}"
+            ),
+            Error::ObjectReferenceCountAdditionOverflow {
+                address,
+                current,
+                added,
+            } => write!(
+                f,
+                "object reference additions at {address} overflow after {current} + {added}"
+            ),
+            Error::ObjectReferenceCountMismatch {
+                address,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "owned object reference count at {address} is {actual}, expected original count {expected}"
+            ),
+            Error::ObjectReferenceCountOverflow {
+                address,
+                original,
+                added,
+                removed,
+            } => write!(
+                f,
+                "object reference count at {address} overflows after {original} + {added} - {removed}"
+            ),
+            Error::ObjectReferenceCountUpdateUnsupported { address, issue } => write!(
+                f,
+                "unsupported object reference count update at {address}: {issue}"
             ),
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Format(e) => write!(f, "HDF5 format error: {e}"),

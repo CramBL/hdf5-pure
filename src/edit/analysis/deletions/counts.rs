@@ -18,6 +18,8 @@ use super::RemovedLinks;
 
 pub(in crate::edit) use source::CountPreflight;
 pub(in crate::edit) use source::CountProjectionIdentity;
+pub(in crate::edit) use source::CountStorage;
+pub(in crate::edit) use source::NetCountError;
 
 pub(in crate::edit) use source::DeclaredCountChange;
 pub(in crate::edit) use source::NetCountPlan;

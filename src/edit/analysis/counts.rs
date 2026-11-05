@@ -31,8 +31,8 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
-pub(super) mod added_users;
-pub(super) mod balance;
+pub(in crate::edit) mod added_users;
+pub(in crate::edit) mod balance;
 pub(in crate::edit) mod changes;
 pub(super) mod referenced;
 

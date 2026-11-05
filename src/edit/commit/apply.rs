@@ -94,6 +94,7 @@ impl WriteEngine {
         staged: StagedApply,
     ) -> Result<AppliedTree, Error> {
         let PreparedTree {
+            counts,
             mut groups,
             headers,
             cross_copies,
@@ -275,6 +276,7 @@ impl WriteEngine {
         );
         edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
+            counts,
             retirement: RootRetirement::new(PhysicalAddress::new(new_root), tail_allocations),
             freed: to_free,
             relocations,

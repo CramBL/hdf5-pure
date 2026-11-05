@@ -8,12 +8,14 @@ use super::super::protection::ProtectedCounts;
 use super::CountInventory;
 use super::CountSource;
 use super::SurvivingCounts;
+use crate::ObjectReferenceCountUpdateIssue;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::counts::changes::owned::OwnedCountChange;
 use crate::edit::analysis::counts::changes::owned::OwnedOriginalCount;
 use crate::edit::commit::CountProjectionError;
 use crate::edit::commit::CountProjectionProof;
+use crate::error::Error;
 use crate::object_graph::ObjectId;
 
 impl CountInventory {
@@ -231,6 +233,28 @@ pub(in crate::edit) enum CountPreflightError {
         /// The physical identity of the retained target.
         object: ObjectId,
     },
+}
+
+impl From<CountPreflightError> for Error {
+    /// Reports unsupported count facts and preserves protection failures.
+    fn from(error: CountPreflightError) -> Self {
+        let (object, issue) = match error {
+            CountPreflightError::MissingField { object, .. } => {
+                (object, ObjectReferenceCountUpdateIssue::ImplicitSourceField)
+            }
+            CountPreflightError::OriginalZero { object } => {
+                (object, ObjectReferenceCountUpdateIssue::OriginalZero)
+            }
+            CountPreflightError::RetainedZero { object } => {
+                (object, ObjectReferenceCountUpdateIssue::RetainedZero)
+            }
+            CountPreflightError::Protection(error) => return error.into(),
+        };
+        Self::ObjectReferenceCountUpdateUnsupported {
+            address: object.header_address().get(),
+            issue,
+        }
+    }
 }
 
 #[cfg(test)]

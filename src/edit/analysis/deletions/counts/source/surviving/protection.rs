@@ -9,6 +9,7 @@ use hdf5_pure_format::__private::ObjectReferenceCountField;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::RetainedKind;
 
+use crate::ObjectReferenceCountUpdateIssue;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::counts::HeaderCountAllocation;
@@ -424,6 +425,40 @@ pub(in crate::edit) enum CountProtectionError {
     Session,
     /// An error resolving a root or allocator range into physical coordinates.
     Source(FormatError),
+}
+
+impl From<CountProtectionError> for Error {
+    /// Reports unavailable allocation evidence and preserves source or publication failures.
+    ///
+    /// Classifies incompatible source or reconstruction associations as [`FormatError::Internal`].
+    fn from(error: CountProtectionError) -> Self {
+        match error {
+            CountProtectionError::Source(error) => error.into(),
+            CountProtectionError::Publication(error) => error,
+            CountProtectionError::Aggregate { object, .. }
+            | CountProtectionError::Allocation { object }
+            | CountProtectionError::Retained { object, .. }
+            | CountProtectionError::Reusable { object, .. } => {
+                Self::ObjectReferenceCountUpdateUnsupported {
+                    address: object.header_address().get(),
+                    issue: ObjectReferenceCountUpdateIssue::AllocationUnavailable,
+                }
+            }
+            CountProtectionError::Overlap { first, .. } => {
+                Self::ObjectReferenceCountUpdateUnsupported {
+                    address: first.0.header_address().get(),
+                    issue: ObjectReferenceCountUpdateIssue::AllocationUnavailable,
+                }
+            }
+            CountProtectionError::Phase { .. }
+            | CountProtectionError::Repeated { .. }
+            | CountProtectionError::Root { .. }
+            | CountProtectionError::Session => FormatError::Internal(
+                "commit count preflight has an inconsistent source association".into(),
+            )
+            .into(),
+        }
+    }
 }
 
 #[cfg(test)]

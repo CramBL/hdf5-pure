@@ -19,6 +19,7 @@ use hdf5_pure_space::__private::{
 };
 
 pub(in crate::edit) use self::completion::PublishedTree;
+use super::plan::PreparedTreeCounts;
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
@@ -49,6 +50,8 @@ mod completion;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
+    /// Owned count facts retained through the publication attempt.
+    pub(super) counts: Option<Box<PreparedTreeCounts>>,
     /// Replacement root and captured chunk allocations awaiting its publication.
     pub(super) retirement: RootRetirement,
     /// Physical spans eligible for release when the root is published.
@@ -92,12 +95,15 @@ impl WriteEngine {
         complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let AppliedTree {
+            counts,
             retirement,
             freed,
             relocations,
         } = tree;
         let pending = retirement.into_pending_frees(freed, self.image.len());
-        self.publish_pending_tree_with_completion(pending, relocations, complete)
+        let result = self.publish_pending_tree_with_completion(pending, relocations, complete);
+        drop(counts);
+        result
     }
 
     /// Publishes a written tree using the supplied retirement batch before calling `complete`.
