@@ -346,16 +346,6 @@ impl<'source> CurrentCountUpdates<'source> {
         })
     }
 
-    /// Releases the source loan and returns the encoded updates without acquired header buffers.
-    fn into_updates(self) -> Vec<ObjectReferenceCountUpdate> {
-        let Self {
-            engine: _,
-            counts: _,
-            updates,
-        } = self;
-        updates
-    }
-
     /// Borrows each original field with its prepared writes, in allocation-address order.
     pub(in crate::edit) fn updates(
         &self,
@@ -602,7 +592,11 @@ impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
             return Err(Box::new(CountWriteFailure::Uncertain { error }));
         }
         let updates = match CurrentCountUpdates::new(&mut *self.engine, self.counts) {
-            Ok(current) => current.into_updates(),
+            Ok(CurrentCountUpdates {
+                engine: _,
+                counts: _,
+                updates,
+            }) => updates,
             Err(error) => {
                 return Err(Box::new(CountWriteFailure::Preparation {
                     scope: self,
