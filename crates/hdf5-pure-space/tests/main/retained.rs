@@ -31,7 +31,7 @@ fn retained_view_excludes_reusable_and_disabled_extents(
     )
     .unwrap();
     assert_eq!(space.retained_extents().count(), 0);
-    assert_eq!(space.reusable_bytes().unwrap(), reusable);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(reusable));
 }
 
 #[test]
@@ -67,11 +67,11 @@ fn retained_view_preserves_exact_unclassified_dead_and_padding_ranges() {
     assert_eq!(
         space
             .retained_extents()
-            .map(|entry| entry.extent().len())
+            .map(|entry| entry.extent().len().get())
             .sum::<u64>(),
         1_040
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 0);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     assert_eq!(
         space.admitted_snapshot().sections().collect::<Vec<_>>(),
         [(extent(8, 16), FreeClass::Dead)]
@@ -117,8 +117,11 @@ fn retained_view_preserves_only_generic_partial_edges(#[case] page: u64) {
         [extent(2 * page, 2 * page)]
     );
     assert_eq!(
-        retained.iter().map(|(extent, _)| extent.len()).sum::<u64>()
-            + space.reusable_bytes().unwrap(),
+        retained
+            .iter()
+            .map(|(extent, _)| extent.len().get())
+            .sum::<u64>()
+            + space.reusable_bytes().unwrap().get(),
         4 * page - 16
     );
 }
@@ -136,7 +139,7 @@ fn retained_view_follows_promotion_and_complete_allocator_restoration() {
             .collect::<Vec<_>>(),
         [(extent(512, 256), RetainedKind::Dead)]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 0);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     space.record_freed(
         StoredAddress::new(4_096),
         extent(768, 256),
@@ -155,7 +158,7 @@ fn retained_view_follows_promotion_and_complete_allocator_restoration() {
             .collect::<Vec<_>>(),
         [(extent(512, 256), RetainedKind::Dead)]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 0);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
 }
 
 fn extent(start: u64, length: u64) -> Extent {

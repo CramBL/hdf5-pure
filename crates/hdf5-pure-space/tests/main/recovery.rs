@@ -83,7 +83,7 @@ fn bulk_page_recovery_preserves_classified_and_unclassified_edges() {
         pages.unclassified(),
         [extent(8193, 4095), extent(20480, 4160)]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 12320);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(12320));
     assert_eq!(space.paged_tail_type(), Some(None));
     assert_eq!(space.pending_padding(PageType::Meta), Some([].as_slice()));
     assert_eq!(space.pending_padding(PageType::Raw), Some([].as_slice()));
@@ -131,7 +131,7 @@ fn bulk_recovery_keeps_disabled_strategies_empty(#[case] strategy: Option<FileSp
     )
     .unwrap();
     assert!(!space.is_enabled());
-    assert_eq!(space.reusable_bytes().unwrap(), 0);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     assert_eq!(space.reusable_sections().collect::<Vec<_>>(), []);
     assert_eq!(space.allocate(1, AllocationClass::Raw), None);
 }

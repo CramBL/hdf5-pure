@@ -41,8 +41,11 @@ fn admitted_snapshot_preserves_classes_order_and_cached_totals(
     let snapshot = space.admitted_snapshot();
     assert_eq!(snapshot.is_enabled(), strategy != FileSpaceStrategy::None);
     assert_eq!(snapshot.page_size(), page_size);
-    assert_eq!(snapshot.reusable_bytes().unwrap(), reusable);
-    assert_eq!(snapshot.unclassified_bytes(), unclassified);
+    assert_eq!(
+        snapshot.reusable_bytes().unwrap(),
+        ByteLength::new(reusable)
+    );
+    assert_eq!(snapshot.unclassified_bytes(), ByteLength::new(unclassified));
     assert_eq!(
         snapshot.sections().collect::<Vec<_>>(),
         expected
@@ -51,7 +54,10 @@ fn admitted_snapshot_preserves_classes_order_and_cached_totals(
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        snapshot.reusable_sections().map(Extent::len).sum::<u64>(),
+        snapshot
+            .reusable_sections()
+            .map(|extent| extent.len().get())
+            .sum::<u64>(),
         reusable
     );
 }
@@ -85,8 +91,8 @@ fn admitted_snapshot_excludes_pending_padding_and_seedless_small_returns() {
         Some([extent(16448, 4032)].as_slice())
     );
     let snapshot = space.admitted_snapshot();
-    assert_eq!(snapshot.reusable_bytes().unwrap(), 128);
-    assert_eq!(snapshot.unclassified_bytes(), 0);
+    assert_eq!(snapshot.reusable_bytes().unwrap(), ByteLength::new(128));
+    assert_eq!(snapshot.unclassified_bytes(), ByteLength::new(0));
     assert_eq!(
         snapshot.sections().collect::<Vec<_>>(),
         [(admitted, FreeClass::Page(PageType::Raw))]
@@ -121,7 +127,7 @@ fn admitted_snapshot_follows_reservation_and_restored_allocator_state(
         snapshot.reusable_sections().collect::<Vec<_>>(),
         [extent(4192, 96)]
     );
-    assert_eq!(snapshot.reusable_bytes().unwrap(), 96);
+    assert_eq!(snapshot.reusable_bytes().unwrap(), ByteLength::new(96));
     assert_eq!(
         snapshot.sections().collect::<Vec<_>>(),
         [(extent(4192, 96), class)]
@@ -132,7 +138,7 @@ fn admitted_snapshot_follows_reservation_and_restored_allocator_state(
         restored.sections().collect::<Vec<_>>(),
         [(extent(4160, 128), class)]
     );
-    assert_eq!(restored.reusable_bytes().unwrap(), 128);
+    assert_eq!(restored.reusable_bytes().unwrap(), ByteLength::new(128));
 }
 
 #[test]
@@ -192,7 +198,7 @@ fn snapshot_projection_preserves_current_manager_classes(
                 manager
                     .sections()
                     .iter()
-                    .map(|extent| (extent.start().get(), extent.len()))
+                    .map(|extent| (extent.start().get(), extent.len().get()))
                     .collect::<Vec<_>>(),
             ))
             .collect::<Vec<_>>(),
@@ -217,7 +223,7 @@ fn proposed_page_snapshot_excludes_owned_metadata_capacity() {
     assert_eq!(tail.allocation, extent(8192, 128));
     assert_eq!(tail.final_eoa, StoredAddress::new(12288));
     let snapshot = tail.post.admitted_snapshot();
-    assert_eq!(snapshot.reusable_bytes().unwrap(), 8064);
+    assert_eq!(snapshot.reusable_bytes().unwrap(), ByteLength::new(8064));
     assert_eq!(
         snapshot.sections().collect::<Vec<_>>(),
         [
@@ -335,9 +341,12 @@ fn a_page_class_proves_no_ownership_or_availability_outside_its_fragment() {
         space.admitted_snapshot().partial_page_class(query),
         PageClassEvidence::Known(PageType::Meta)
     );
-    assert_eq!(space.allocate(query.len(), AllocationClass::Metadata), None);
     assert_eq!(
-        space.allocate(seed.len(), AllocationClass::Metadata),
+        space.allocate(query.len().get(), AllocationClass::Metadata),
+        None
+    );
+    assert_eq!(
+        space.allocate(seed.len().get(), AllocationClass::Metadata),
         Some(seed)
     );
     assert_eq!(

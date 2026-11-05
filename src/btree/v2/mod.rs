@@ -1294,7 +1294,7 @@ mod tests {
         assert!(
             extents[1..]
                 .iter()
-                .all(|extent| extent.len() == u64::from(BTREE_V2_NODE_SIZE))
+                .all(|extent| extent.len() == ByteLength::new(u64::from(BTREE_V2_NODE_SIZE)))
         );
         assert!(
             extents

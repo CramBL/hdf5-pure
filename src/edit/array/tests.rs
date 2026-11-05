@@ -534,7 +534,7 @@ fn failed_staged_array_writes_restore_reusable_state_and_predecessor_values(#[ca
         engine
             .space
             .reusable_sections()
-            .any(|extent| extent.len() >= 64)
+            .any(|extent| extent.len() >= ByteLength::new(64))
     );
     let mut append = AppendBuilder::new();
     append.append_i32(&[2; 16]);

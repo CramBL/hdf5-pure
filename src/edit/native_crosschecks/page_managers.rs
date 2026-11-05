@@ -112,7 +112,7 @@ pub(super) fn inspect(engine: &WriteEngine, page: u64) -> (u64, Vec<(u64, u64)>)
         .collect::<Vec<_>>();
     owned.sort_unstable();
     for allocation in &owned {
-        if allocation.len() < page {
+        if allocation.len().get() < page {
             assert_eq!(
                 allocation.start().get() / page,
                 (allocation.end().get() - 1) / page,
@@ -153,11 +153,11 @@ pub(super) fn inspect(engine: &WriteEngine, page: u64) -> (u64, Vec<(u64, u64)>)
         FreeList::from_sorted(adopted).unwrap().extents()
     );
     (
-        published.total_bytes(),
+        published.total_bytes().get(),
         actual
             .extents()
             .iter()
-            .map(|allocation| (allocation.start().get(), allocation.len()))
+            .map(|allocation| (allocation.start().get(), allocation.len().get()))
             .collect(),
     )
 }

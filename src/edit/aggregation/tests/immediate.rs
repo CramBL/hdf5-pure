@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
 use rstest::rstest;
 
 use crate::AddressRange;
@@ -55,7 +56,7 @@ fn staged_and_immediate_edits_share_aggregate_windows(
     let state = engine.aggregation.unwrap();
     let raw = state.policy.unused(AllocationClass::Raw).unwrap();
     let metadata = state.policy.unused(AllocationClass::Metadata).unwrap();
-    let fsm_hit = engine.space.largest(AllocationClass::Raw) >= 16;
+    let fsm_hit = engine.space.largest(AllocationClass::Raw) >= ByteLength::new(16);
     alloc_probe::take();
     engine
         .append_inplace_i32_phased("values", &(initial..end).collect::<Vec<_>>(), 4)

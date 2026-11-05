@@ -1,5 +1,6 @@
 use core::iter::Peekable;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
@@ -178,7 +179,7 @@ impl SessionSpace {
     /// )?;
     /// let page = Extent::new(metadata.start(), ByteLength::new(4_096)).unwrap();
     /// assert_eq!(space.paged_sections().unwrap().raw(), [page]);
-    /// assert_eq!(space.reusable_bytes().unwrap(), 4_096);
+    /// assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(4_096));
     /// assert_eq!(space.allocate(4_096, AllocationClass::Metadata), Some(page));
     /// # Ok::<(), hdf5_pure_space::__private::FreeListError>(())
     /// ```
@@ -320,7 +321,7 @@ impl SessionSpace {
     ///     [extent(164, 36), extent(300, 100)]);
     /// let (extent, class, page_type) = reserved.into_parts();
     /// space.return_allocation_with_page_type(extent, class, page_type);
-    /// assert_eq!(space.reusable_bytes()?, 200);
+    /// assert_eq!(space.reusable_bytes()?, ByteLength::new(200));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn reservation_batch(&mut self, requests: usize) -> ReservationBatch<'_> {
@@ -485,9 +486,9 @@ impl SessionSpace {
     /// Returns the largest reusable run available for `class`.
     ///
     /// Returns zero when reusable allocation is disabled.
-    pub fn largest(&self, class: AllocationClass) -> u64 {
+    pub fn largest(&self, class: AllocationClass) -> ByteLength {
         match self {
-            Self::Disabled => 0,
+            Self::Disabled => ByteLength::new(0),
             Self::Flat(space) => space.free.largest(),
             Self::Paged(space) => space.paged.largest(class.into()),
         }
@@ -501,7 +502,7 @@ impl SessionSpace {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the paged free-list total exceeds [`u64::MAX`].
-    pub fn reusable_bytes(&self) -> Result<u64, FormatError> {
+    pub fn reusable_bytes(&self) -> Result<ByteLength, FormatError> {
         self.admitted_snapshot().reusable_bytes()
     }
 
@@ -544,7 +545,7 @@ impl SessionSpace {
     /// assert_eq!(entry.extent(), fragment);
     /// assert_eq!(entry.kind(), RetainedKind::Unclassified);
     /// assert!(retained.next().is_none());
-    /// assert_eq!(space.reusable_bytes().unwrap(), 0);
+    /// assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     /// ```
     pub fn retained_extents(&self) -> impl Iterator<Item = RetainedExtent> + '_ {
         let paged = match self {
@@ -580,7 +581,7 @@ impl SessionSpace {
     ///     [(None, free)],
     /// )?;
     /// let snapshot = space.admitted_snapshot();
-    /// assert_eq!(snapshot.reusable_bytes()?, 64);
+    /// assert_eq!(snapshot.reusable_bytes()?, ByteLength::new(64));
     /// assert_eq!(snapshot.sections().collect::<Vec<_>>(), [(free, FreeClass::Dead)]);
     /// assert_eq!(
     ///     space.allocate(32, AllocationClass::Raw),
@@ -1109,16 +1110,16 @@ mod tests {
             None,
             Extent::new(StoredAddress::new(300), ByteLength::new(60)).unwrap(),
         );
-        assert_eq!(total(&space), 160);
+        assert_eq!(total(&space), ByteLength::new(160));
         let snapshot = space.allocation_snapshot();
         let allocation = space.allocate(40, AllocationClass::Raw).unwrap();
         assert_eq!(
             allocation,
             Extent::new(StoredAddress::new(300), ByteLength::new(40)).unwrap()
         );
-        assert_eq!(total(&space), 120);
+        assert_eq!(total(&space), ByteLength::new(120));
         space.return_allocation(allocation, AllocationClass::Raw);
-        assert_eq!(total(&space), 160);
+        assert_eq!(total(&space), ByteLength::new(160));
         let (post, eoa) = space
             .flat_post_free(
                 StoredAddress::new(1_000),
@@ -1129,12 +1130,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(eoa, StoredAddress::new(1_000));
-        assert_eq!(post.total_bytes(), 260);
-        assert_eq!(total(&space), 160);
+        assert_eq!(post.total_bytes(), ByteLength::new(260));
+        assert_eq!(total(&space), ByteLength::new(160));
         space.adopt_flat_post_free(post);
-        assert_eq!(total(&space), 260);
+        assert_eq!(total(&space), ByteLength::new(260));
         space.restore_allocation(snapshot);
-        assert_eq!(total(&space), 160);
+        assert_eq!(total(&space), ByteLength::new(160));
         assert_eq!(
             space.reusable_sections().collect::<Vec<_>>(),
             [
@@ -1149,7 +1150,7 @@ mod tests {
             ),
             Some(StoredAddress::new(900))
         );
-        assert_eq!(total(&space), 160);
+        assert_eq!(total(&space), ByteLength::new(160));
     }
 
     #[test]
@@ -1224,7 +1225,7 @@ mod tests {
         .unwrap();
         space.record_freed(extent.end(), extent, FreeClass::Page(PageType::Raw));
         let expected = if space.is_enabled() { expected } else { 0 };
-        assert_eq!(space.reusable_bytes().unwrap(), expected);
+        assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(expected));
         if space.is_paged() {
             assert_eq!(space.allocate(1, AllocationClass::Metadata), None);
         }
@@ -1236,7 +1237,7 @@ mod tests {
         } else {
             assert_eq!(space.allocate(1, AllocationClass::Raw), None);
         }
-        assert_eq!(space.reusable_bytes().unwrap(), 0);
+        assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     }
 
     #[rstest]
@@ -1328,11 +1329,11 @@ mod tests {
         space.return_allocation(expected, class);
         assert_eq!(
             space.largest(class),
-            if manager == ManagerKind::PagedSmallMetadata {
+            ByteLength::new(if manager == ManagerKind::PagedSmallMetadata {
                 128
             } else {
                 256
-            }
+            })
         );
         assert_eq!(space.allocate(64, class), Some(expected));
     }

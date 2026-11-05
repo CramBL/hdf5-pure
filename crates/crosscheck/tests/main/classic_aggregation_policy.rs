@@ -112,11 +112,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
     for (step, allocation, end, spare) in observations {
         if let Some(expected) = allocation {
             let allocation = aggregates
-                .allocate(
-                    eoa,
-                    NonZeroByteLength::new(expected.len()).unwrap(),
-                    AllocationClass::Raw,
-                )
+                .allocate(eoa, expected.len().nonzero().unwrap(), AllocationClass::Raw)
                 .unwrap();
             assert_eq!(allocation.extent(), expected, "{step:?}");
             assert_eq!(allocation.released(), None);
@@ -152,8 +148,8 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
         assert_eq!(
             aggregates
                 .unused(AllocationClass::Raw)
-                .map_or(0, Extent::len),
-            spare,
+                .map_or(ByteLength::new(0), Extent::len),
+            ByteLength::new(spare),
             "{step:?}"
         );
         assert_eq!(aggregates.unused(AllocationClass::Metadata), None);

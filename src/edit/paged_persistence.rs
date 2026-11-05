@@ -336,7 +336,7 @@ impl PagedPersistencePlan {
                 .find(|(candidate, _)| *candidate == kind)
                 .map(|(_, allocations)| *allocations)
                 .ok_or_else(|| FormatError::Internal("a PAGE manager has no placement".into()))?;
-            if [allocations[0].len(), allocations[1].len()] != lengths {
+            if [allocations[0].len(), allocations[1].len()] != lengths.map(ByteLength::new) {
                 return Err(FormatError::Internal(
                     "PAGE manager lengths differ from their measured placement".into(),
                 ));
@@ -522,12 +522,12 @@ fn contiguous_extension(
     let Some(len) = tail
         .allocation
         .len()
-        .checked_sub(managers.encoded_len())
-        .filter(|&len| len > 0)
+        .checked_sub(ByteLength::new(managers.encoded_len()))
+        .filter(|len| !len.is_zero())
     else {
         return Ok(None);
     };
-    let ranges = match geometry.contiguous_allocations(tail.allocation.start(), len) {
+    let ranges = match geometry.contiguous_allocations(tail.allocation.start(), len.get()) {
         Ok(ranges) => ranges,
         Err(FormatError::NestingDepthExceeded | FormatError::ValueTooLargeForPlatform { .. }) => {
             return Ok(None);
@@ -542,7 +542,7 @@ fn contiguous_extension(
         })
         .collect::<Result<Vec<_>, _>>()?;
     for &chunk in &extension {
-        if layout::place(page, chunk.start(), chunk.len())? != chunk {
+        if layout::place(page, chunk.start(), chunk.len().get())? != chunk {
             return Ok(None);
         }
     }

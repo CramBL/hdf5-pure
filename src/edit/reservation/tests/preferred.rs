@@ -209,7 +209,7 @@ fn preferred_failures_retain_checked_and_unresolved_ownership(
         },
         16,
     );
-    engine.space = super::flat(&[(extent.start().get(), extent.len())]);
+    engine.space = super::flat(&[(extent.start().get(), extent.len().get())]);
     let calls = Cell::new(0);
     let suffix_requests = if suffix {
         vec![block(u64::MAX)]

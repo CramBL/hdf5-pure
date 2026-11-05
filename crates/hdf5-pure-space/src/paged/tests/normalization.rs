@@ -278,10 +278,10 @@ fn assert_same_state(actual: &PagedEdit, expected: &PagedEdit) {
         &actual.unclassified,
     ] {
         assert_eq!(
-            u128::from(list.total_bytes()),
+            u128::from(list.total_bytes().get()),
             list.extents()
                 .iter()
-                .map(|extent| u128::from(extent.len()))
+                .map(|extent| u128::from(extent.len().get()))
                 .sum::<u128>()
         );
         assert!(
@@ -353,7 +353,8 @@ pub(super) fn release_reference(
             .iter()
             .map(|&(extent, _)| extent)
             .filter(|extent| {
-                (1..page_size).contains(&extent.len()) && !dropped_extents.contains(extent)
+                (ByteLength::new(1)..ByteLength::new(page_size)).contains(&extent.len())
+                    && !dropped_extents.contains(extent)
             })
             .flat_map(|extent| [extent.start().get(), extent.end().get() - 1])
             .map(|addr| StoredAddress::new(addr / page_size * page_size))
@@ -361,7 +362,7 @@ pub(super) fn release_reference(
             .filter(|&page| {
                 [&post.meta, &post.raw, &post.dead]
                     .into_iter()
-                    .map(|list| list.covered_len(page))
+                    .map(|list| list.covered_len(page).get())
                     .sum::<u64>()
                     == page_size
             })
@@ -390,7 +391,7 @@ pub(super) fn release_each_reference(
 ) -> Vec<(Extent, FreeClass)> {
     let (mut pending, eligible): (Vec<_>, Vec<_>) = extents
         .into_iter()
-        .partition(|&(extent, _)| extent.len() < threshold);
+        .partition(|&(extent, _)| extent.len() < ByteLength::new(threshold));
     for (extent, class) in eligible {
         post.track(extent, class);
     }

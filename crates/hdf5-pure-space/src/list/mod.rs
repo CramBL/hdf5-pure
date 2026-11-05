@@ -23,12 +23,12 @@ pub(crate) mod indexed;
 /// fragmentation.
 ///
 /// The cached byte total equals the sum of the region lengths.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FreeList {
     /// Disjoint regions, sorted ascending by address and never adjacent.
     regions: Vec<Extent>,
     /// The sum of the region lengths, maintained by every insertion and removal.
-    total_bytes: u64,
+    total_bytes: ByteLength,
 }
 
 impl FreeList {
@@ -36,7 +36,7 @@ impl FreeList {
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
-            total_bytes: 0,
+            total_bytes: ByteLength::new(0),
         }
     }
 
@@ -62,7 +62,7 @@ impl FreeList {
     /// let second = Extent::new(first.end(), ByteLength::new(30)).unwrap();
     /// let free = FreeList::from_sorted([first, second]).unwrap();
     /// assert_eq!(free.extents(), [Extent::new(first.start(), ByteLength::new(50)).unwrap()]);
-    /// assert_eq!(free.total_bytes(), 50);
+    /// assert_eq!(free.total_bytes(), ByteLength::new(50));
     /// ```
     pub fn from_sorted(extents: impl IntoIterator<Item = Extent>) -> Result<Self, FreeListError> {
         let mut list = Self::new();
@@ -234,7 +234,7 @@ impl FreeList {
         }
         let mut best: Option<usize> = None;
         for (i, extent) in self.regions.iter().enumerate() {
-            if extent.len() >= len
+            if extent.len() >= ByteLength::new(len)
                 && best.is_none_or(|best| extent.len() < self.regions[best].len())
             {
                 best = Some(i);
@@ -251,7 +251,7 @@ impl FreeList {
             self.regions[i] = Extent::between(allocation.end(), region.end())
                 .expect("the remainder is a non-empty suffix of the selected extent");
         }
-        self.subtract_bytes(len);
+        self.subtract_bytes(ByteLength::new(len));
         Some(allocation)
     }
 
@@ -268,7 +268,7 @@ impl FreeList {
             .iter()
             .filter_map(|&region| {
                 let capacity = region.block_capacity(page_size, request.size().get());
-                if capacity < request.size().get() {
+                if capacity < request.size().length() {
                     return None;
                 }
                 let allocation = request
@@ -315,7 +315,7 @@ impl FreeList {
         let mut best: Option<(usize, Extent)> = None;
         for (i, region) in self.regions.iter().enumerate() {
             if let Some(interior) = region.aligned_interior(align)
-                && interior.len() >= len
+                && interior.len() >= ByteLength::new(len)
                 && best.is_none_or(|(_, best)| interior.len() < best.len())
             {
                 best = Some((i, interior));
@@ -340,7 +340,7 @@ impl FreeList {
             );
         }
         self.regions.splice(i..=i, replacement);
-        self.subtract_bytes(len);
+        self.subtract_bytes(ByteLength::new(len));
         Some(allocation)
     }
 
@@ -380,7 +380,7 @@ impl FreeList {
             .regions
             .iter()
             .filter(|extent| {
-                extent.len() >= len
+                extent.len() >= ByteLength::new(len)
                     && extent
                         .start()
                         .checked_add(len)
@@ -452,7 +452,7 @@ impl FreeList {
     /// let removed = FreeList::from_sorted([extent(120, 10), extent(150, 20)]).unwrap();
     /// free.take_ranges(&removed);
     /// assert_eq!(free.extents(), [extent(100, 20), extent(130, 20), extent(170, 30)]);
-    /// assert_eq!(free.total_bytes(), 70);
+    /// assert_eq!(free.total_bytes(), ByteLength::new(70));
     /// ```
     pub fn take_ranges(&mut self, ranges: &Self) {
         if self.is_empty() || ranges.is_empty() {
@@ -514,7 +514,7 @@ impl FreeList {
     /// let right = FreeList::from_sorted([extent(120, 40)]).unwrap();
     /// let common = left.intersection(&right);
     /// assert_eq!(common.extents(), [extent(120, 10), extent(150, 10)]);
-    /// assert_eq!(common.total_bytes(), 20);
+    /// assert_eq!(common.total_bytes(), ByteLength::new(20));
     /// ```
     pub fn intersection(&self, other: &Self) -> Self {
         let mut right = other.regions.iter().peekable();
@@ -553,7 +553,7 @@ impl FreeList {
     pub(crate) fn sections(&self) -> Vec<(u64, u64)> {
         self.regions
             .iter()
-            .map(|extent| (extent.start().get(), extent.len()))
+            .map(|extent| (extent.start().get(), extent.len().get()))
             .collect()
     }
 
@@ -565,7 +565,7 @@ impl FreeList {
     /// Returns the cached sum of the free region lengths in bytes.
     ///
     /// Takes constant time and does not allocate.
-    pub fn total_bytes(&self) -> u64 {
+    pub fn total_bytes(&self) -> ByteLength {
         self.total_bytes
     }
 
@@ -579,12 +579,12 @@ impl FreeList {
     /// Allocation is best-fit over *contiguous* regions, so a list holding plenty of bytes in small
     /// pieces may not satisfy a large request. An in-place append's reserve uses this value to
     /// determine whether it must draw more (issue #387).
-    pub fn largest(&self) -> u64 {
+    pub fn largest(&self) -> ByteLength {
         self.regions
             .iter()
             .map(|extent| extent.len())
             .max()
-            .unwrap_or(0)
+            .unwrap_or(ByteLength::new(0))
     }
 
     /// Returns the largest run of whole `align`-sized units inside any one region, or `0` when no
@@ -596,12 +596,12 @@ impl FreeList {
     /// The whole-page counterpart of [`largest`](Self::largest), for the same caller: on a paged
     /// file an append's reserve may claim whole free pages out of the other page type's list, so
     /// how much it can draw is the larger of this and its own list's `largest`.
-    pub fn largest_whole_units(&self, align: u64) -> u64 {
+    pub fn largest_whole_units(&self, align: u64) -> ByteLength {
         self.regions
             .iter()
             .filter_map(|extent| extent.aligned_interior(align).map(Extent::len))
             .max()
-            .unwrap_or(0)
+            .unwrap_or(ByteLength::new(0))
     }
 
     /// Removes the free region ending at `eof` and returns its stored start address.
@@ -654,12 +654,14 @@ impl FreeList {
     }
 
     /// Returns how many bytes of `extent` the regions cover.
-    pub fn covered_len(&self, extent: Extent) -> u64 {
-        self.regions
-            .iter()
-            .filter_map(|region| region.intersection(extent))
-            .map(Extent::len)
-            .sum()
+    pub fn covered_len(&self, extent: Extent) -> ByteLength {
+        ByteLength::new(
+            self.regions
+                .iter()
+                .filter_map(|region| region.intersection(extent))
+                .map(|extent| extent.len().get())
+                .sum::<u64>(),
+        )
     }
 
     /// Returns `true` if a region of at least `unit` bytes adjoins `extent` at a multiple of
@@ -669,12 +671,18 @@ impl FreeList {
             .iter()
             .any(|region| region.adjoins_whole_unit(extent, unit))
     }
-    fn subtract_bytes(&mut self, length: u64) {
+    fn subtract_bytes(&mut self, length: ByteLength) {
         // Each caller removes an allocation or trailing extent included in the cached total.
         self.total_bytes = self
             .total_bytes
             .checked_sub(length)
             .expect("removed bytes are included in the cached total");
+    }
+}
+
+impl Default for FreeList {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -927,7 +935,7 @@ mod tests {
         let mut fl = FreeList::new();
         fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap());
         assert!(fl.alloc(0).is_none());
-        assert_eq!(fl.total_bytes(), 100);
+        assert_eq!(fl.total_bytes(), ByteLength::new(100));
     }
 
     #[rstest]
@@ -969,7 +977,7 @@ mod tests {
         assert_eq!(free.sections(), remaining);
         assert_eq!(
             free.total_bytes(),
-            remaining.iter().map(|&(_, len)| len).sum::<u64>()
+            ByteLength::new(remaining.iter().map(|&(_, len)| len).sum::<u64>())
         );
     }
 
@@ -1005,7 +1013,7 @@ mod tests {
         assert_eq!(free.sections(), remaining);
         assert_eq!(
             free.total_bytes(),
-            remaining.iter().map(|&(_, len)| len).sum::<u64>()
+            ByteLength::new(remaining.iter().map(|&(_, len)| len).sum::<u64>())
         );
     }
 
@@ -1022,15 +1030,15 @@ mod tests {
     fn is_empty_and_largest_report_the_list() {
         let mut fl = FreeList::new();
         assert!(fl.is_empty());
-        assert_eq!(fl.largest(), 0);
+        assert_eq!(fl.largest(), ByteLength::new(0));
         fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(10)).unwrap());
         fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(40)).unwrap());
         fl.free(Extent::new(StoredAddress::new(400), ByteLength::new(25)).unwrap());
         assert!(!fl.is_empty());
-        assert_eq!(fl.largest(), 40);
+        assert_eq!(fl.largest(), ByteLength::new(40));
         // Coalescing is what `largest` reports over, not the frees as issued.
         fl.free(Extent::new(StoredAddress::new(240), ByteLength::new(40)).unwrap());
-        assert_eq!(fl.largest(), 80);
+        assert_eq!(fl.largest(), ByteLength::new(80));
     }
 
     /// `largest_whole_units` reports exactly what `alloc_whole_units` could take
@@ -1038,18 +1046,18 @@ mod tests {
     #[test]
     fn largest_whole_units_reports_the_aligned_interior() {
         let mut fl = FreeList::new();
-        assert_eq!(fl.largest_whole_units(16), 0);
+        assert_eq!(fl.largest_whole_units(16), ByteLength::new(0));
         // [10, 40): thirty bytes, and the only whole unit in it is [16, 32).
         fl.free(Extent::new(StoredAddress::new(10), ByteLength::new(30)).unwrap());
-        assert_eq!(fl.largest(), 30);
-        assert_eq!(fl.largest_whole_units(16), 16);
+        assert_eq!(fl.largest(), ByteLength::new(30));
+        assert_eq!(fl.largest_whole_units(16), ByteLength::new(16));
         // [100, 110): ten bytes with no whole unit at all.
         fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(10)).unwrap());
-        assert_eq!(fl.largest_whole_units(16), 16);
+        assert_eq!(fl.largest_whole_units(16), ByteLength::new(16));
         // [200, 260): sixty bytes whose whole units are [208, 256), three of them.
         fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(60)).unwrap());
-        assert_eq!(fl.largest_whole_units(16), 48);
-        assert_eq!(fl.largest_whole_units(0), 0);
+        assert_eq!(fl.largest_whole_units(16), ByteLength::new(48));
+        assert_eq!(fl.largest_whole_units(0), ByteLength::new(0));
         // The allocator agrees: that run is claimable in one call, and one unit
         // more is not.
         let mut probe = fl.clone();
@@ -1230,36 +1238,36 @@ mod tests {
             .unwrap())
         );
         assert_eq!(regions(&free), remaining);
-        assert_eq!(free.total_bytes(), total);
+        assert_eq!(free.total_bytes(), ByteLength::new(total));
     }
 
     #[test]
     fn cached_total_covers_the_address_space_and_clones_independently() {
         let mut free = FreeList::default();
-        assert_eq!(free.total_bytes(), 0);
+        assert_eq!(free.total_bytes(), ByteLength::new(0));
         free.free(Extent::new(StoredAddress::new(0), ByteLength::new(u64::MAX - 10)).unwrap());
         free.free(Extent::new(StoredAddress::new(u64::MAX - 10), ByteLength::new(10)).unwrap());
-        assert_eq!(free.total_bytes(), u64::MAX);
+        assert_eq!(free.total_bytes(), ByteLength::new(u64::MAX));
         let snapshot = free.clone();
         assert_eq!(
             free.alloc(10),
             Extent::new(StoredAddress::new(0), ByteLength::new(10))
         );
-        assert_eq!(free.total_bytes(), u64::MAX - 10);
+        assert_eq!(free.total_bytes(), ByteLength::new(u64::MAX - 10));
         free.take_range(Extent::new(StoredAddress::new(20), ByteLength::new(10)).unwrap());
-        assert_eq!(free.total_bytes(), u64::MAX - 20);
+        assert_eq!(free.total_bytes(), ByteLength::new(u64::MAX - 20));
         assert_eq!(
             free.take_trailing(StoredAddress::new(u64::MAX)),
             Some(StoredAddress::new(30))
         );
-        assert_eq!(free.total_bytes(), 10);
-        assert_eq!(snapshot.total_bytes(), u64::MAX);
+        assert_eq!(free.total_bytes(), ByteLength::new(10));
+        assert_eq!(snapshot.total_bytes(), ByteLength::new(u64::MAX));
         free = snapshot;
         assert_eq!(
             free.alloc(u64::MAX),
             Extent::new(StoredAddress::new(0), ByteLength::new(u64::MAX))
         );
-        assert_eq!(free.total_bytes(), 0);
+        assert_eq!(free.total_bytes(), ByteLength::new(0));
         assert_eq!(regions(&free), []);
     }
 
@@ -1278,7 +1286,7 @@ mod tests {
             Some("double-free: [50, 150) overlaps free region [100, 200)")
         );
         assert_eq!(regions(&free), [(0, 50), (100, 100)]);
-        assert_eq!(free.total_bytes(), 150);
+        assert_eq!(free.total_bytes(), ByteLength::new(150));
     }
 
     #[cfg(not(debug_assertions))]
@@ -1301,16 +1309,16 @@ mod tests {
         }
         free.free(Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap());
         assert_eq!(regions(&free), remaining);
-        assert_eq!(free.total_bytes(), total);
+        assert_eq!(free.total_bytes(), ByteLength::new(total));
     }
 
     /// Checks the cached total against the region lengths and returns `(addr, len)` pairs.
     fn regions(fl: &FreeList) -> Vec<(u64, u64)> {
         assert_eq!(
-            u128::from(fl.total_bytes()),
+            u128::from(fl.total_bytes().get()),
             fl.extents()
                 .iter()
-                .map(|extent| u128::from(extent.len()))
+                .map(|extent| u128::from(extent.len().get()))
                 .sum::<u128>()
         );
         fl.sections()

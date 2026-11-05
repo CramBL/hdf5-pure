@@ -140,28 +140,30 @@ fn canonical_intersection_preserves_exact_coverage(
     assert_eq!(intersection.extents(), right.intersection(&left).extents());
     assert_eq!(
         intersection.total_bytes(),
-        right
-            .extents()
-            .iter()
-            .map(|&extent| left.covered_len(extent))
-            .sum::<u64>()
+        ByteLength::new(
+            right
+                .extents()
+                .iter()
+                .map(|&extent| left.covered_len(extent).get())
+                .sum::<u64>()
+        )
     );
     let mut difference = left.clone();
     difference.take_ranges(&right);
     assert_eq!(
-        difference.total_bytes().checked_add(total),
+        difference.total_bytes().checked_add(ByteLength::new(total)),
         Some(left.total_bytes())
     );
 }
 
 fn assert_list(list: &FreeList, expected: &[(u64, u64)], total: u64) {
     assert_eq!(list.extents(), extents(expected));
-    assert_eq!(list.total_bytes(), total);
+    assert_eq!(list.total_bytes(), ByteLength::new(total));
     assert_eq!(
-        u128::from(list.total_bytes()),
+        u128::from(list.total_bytes().get()),
         list.extents()
             .iter()
-            .map(|extent| u128::from(extent.len()))
+            .map(|extent| u128::from(extent.len().get()))
             .sum::<u128>()
     );
 }

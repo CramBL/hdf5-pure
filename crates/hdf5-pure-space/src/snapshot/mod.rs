@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FormatError;
 
@@ -133,22 +134,22 @@ impl<'a> AdmittedFreeSnapshot<'a> {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
-    pub fn reusable_bytes(self) -> Result<u64, FormatError> {
-        let first = self.lists[0].map_or(0, FreeList::total_bytes);
-        let second = self.lists[1].map_or(0, FreeList::total_bytes);
+    pub fn reusable_bytes(self) -> Result<ByteLength, FormatError> {
+        let first = self.lists[0].map_or(ByteLength::new(0), FreeList::total_bytes);
+        let second = self.lists[1].map_or(ByteLength::new(0), FreeList::total_bytes);
         first
             .checked_add(second)
             .ok_or(FormatError::OffsetOverflow {
-                offset: first,
-                length: second,
+                offset: first.get(),
+                length: second.get(),
             })
     }
 
     /// Returns the cached byte total of unclassified PAGE extents.
     ///
     /// Returns zero for another strategy.
-    pub fn unclassified_bytes(self) -> u64 {
-        self.lists[2].map_or(0, FreeList::total_bytes)
+    pub fn unclassified_bytes(self) -> ByteLength {
+        self.lists[2].map_or(ByteLength::new(0), FreeList::total_bytes)
     }
 
     /// Returns reusable extents in ascending stored-address order.

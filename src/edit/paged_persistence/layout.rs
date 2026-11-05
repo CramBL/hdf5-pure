@@ -107,7 +107,7 @@ impl PageLayout {
             let list = place(page, cursor, upper_len)?;
             metadata_start = list.start();
             if let Some(gap) = Extent::between(cursor, metadata_start) {
-                summary.insert(gap.len())?;
+                summary.insert(gap.len().get())?;
                 gaps.push(gap);
                 upper_len = summary.measure(widths, control_count, None, appended)?;
             }
@@ -201,7 +201,7 @@ impl Arena {
             if first.start() != cursor {
                 root = extent(
                     root.start(),
-                    add(root.len(), distance(cursor, first.start())?)?,
+                    add(root.len().get(), distance(cursor, first.start())?)?,
                 )?;
                 cursor = root.end();
             }
@@ -391,7 +391,7 @@ fn place_after(
 ) -> Result<Extent, FormatError> {
     let allocation = place(page, *cursor, len)?;
     if let Some(gap) = Extent::between(*cursor, allocation.start()) {
-        summary.insert(gap.len())?;
+        summary.insert(gap.len().get())?;
         gaps.push(gap);
     }
     *cursor = allocation.end();

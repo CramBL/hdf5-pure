@@ -2,10 +2,15 @@
 
 use alloc::format;
 use alloc::vec::Vec;
+use core::fmt;
 use core::mem;
 use core::num::NonZeroU64;
 
-use hdf5_pure_core::__private::{Address, FileRange, FileRegion, NonEmptyRange};
+use hdf5_pure_core::__private::Address;
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::NonEmptyRange;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{self as format, FreeSpaceManagerHeaderRef};
@@ -28,14 +33,14 @@ use crate::width::FormatWidths;
 /// [`File::reusable_space_stats`](crate::File::reusable_space_stats) reads both values under
 /// the session lock. They include committed changes and immediate appends. Staged edits affect
 /// these values when applied by a commit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ReusableSpaceStats {
-    logical_size: u64,
-    reusable_free_bytes: u64,
+    logical_size: ByteLength,
+    reusable_free_bytes: ByteLength,
 }
 
 impl ReusableSpaceStats {
-    pub(crate) fn new(logical_size: u64, reusable_free_bytes: u64) -> Self {
+    pub(crate) fn new(logical_size: ByteLength, reusable_free_bytes: ByteLength) -> Self {
         Self {
             logical_size,
             reusable_free_bytes,
@@ -52,7 +57,7 @@ impl ReusableSpaceStats {
     /// can therefore make this length exceed
     /// [`Superblock::eof_address`](crate::Superblock::eof_address).
     pub const fn logical_size(&self) -> u64 {
-        self.logical_size
+        self.logical_size.get()
     }
 
     /// Returns the free bytes tracked as reusable when the snapshot was taken.
@@ -87,7 +92,20 @@ impl ReusableSpaceStats {
     /// allocations are excluded from the session's reusable total before ownership publication
     /// removes them from the persisted managers.
     pub const fn reusable_free_bytes(&self) -> u64 {
-        self.reusable_free_bytes
+        self.reusable_free_bytes.get()
+    }
+}
+
+impl fmt::Debug for ReusableSpaceStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            logical_size,
+            reusable_free_bytes,
+        } = self;
+        f.debug_struct("ReusableSpaceStats")
+            .field("logical_size", &logical_size.get())
+            .field("reusable_free_bytes", &reusable_free_bytes.get())
+            .finish()
     }
 }
 
@@ -734,6 +752,32 @@ mod tests {
     use crate::file_space_info::FileSpacePageSize;
     use crate::file_space_info::FileSpaceStrategy;
     use crate::source::BytesSource;
+
+    #[rstest]
+    #[case::empty(0, 0, "ReusableSpaceStats { logical_size: 0, reusable_free_bytes: 0 }")]
+    #[case::ordinary(
+        8_192,
+        128,
+        "ReusableSpaceStats { logical_size: 8192, reusable_free_bytes: 128 }"
+    )]
+    #[case::maximum(
+        u64::MAX,
+        u64::MAX,
+        concat!(
+            "ReusableSpaceStats { logical_size: 18446744073709551615, ",
+            "reusable_free_bytes: 18446744073709551615 }"
+        )
+    )]
+    fn reusable_stats_keep_scalar_getters_and_debug(
+        #[case] logical: u64,
+        #[case] reusable: u64,
+        #[case] expected: &str,
+    ) {
+        let stats = ReusableSpaceStats::new(ByteLength::new(logical), ByteLength::new(reusable));
+        assert_eq!(stats.logical_size(), logical);
+        assert_eq!(stats.reusable_free_bytes(), reusable);
+        assert_eq!(format!("{stats:?}"), expected);
+    }
 
     #[rstest]
     #[case::stored(StoredAddress::new)]

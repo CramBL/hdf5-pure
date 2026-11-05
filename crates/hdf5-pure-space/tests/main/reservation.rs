@@ -35,7 +35,7 @@ fn batch_preserves_flat_best_fit_ties_and_successful_prefix(#[case] count: usize
         space.reusable_sections().collect::<Vec<_>>(),
         [extent(95, 5)]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 5);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(5));
     assert_eq!(work.indexed_extents, if count > 1 { 3 } else { 0 });
     assert_eq!(work.restored_extents, if count > 1 { 1 } else { 0 });
     let (returned, class, page_type) = first.into_parts();
@@ -80,7 +80,7 @@ fn batch_preserves_effective_page_type_and_claimed_page_remainders(
         space.reusable_sections().collect::<Vec<_>>(),
         [extent(12288, 4096)]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 4096);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(4096));
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn batch_whole_page_best_fit_uses_aligned_interiors_and_original_address_ties() 
             (extent(12288, 4095), FreeClass::Page(PageType::Raw)),
         ]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 8190);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(8190));
 }
 
 #[rstest]
@@ -221,7 +221,7 @@ fn failed_later_request_and_batch_drop_preserve_successful_reservations(
         space.reusable_sections().collect::<Vec<_>>(),
         [extent(12288, 200)]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 200);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(200));
     assert_eq!(first.extent(), extent(8192, 60));
     assert_eq!(second.extent(), extent(8252, 40));
 }
@@ -254,7 +254,7 @@ fn disabled_batch_preserves_the_empty_fast_path() {
     let mut batch = space.reservation_batch(10);
     assert_eq!(batch.reserve(request(1, PageType::Raw)), None);
     assert_eq!(batch.finish(), ReservationWork::default());
-    assert_eq!(space.reusable_bytes().unwrap(), 0);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
 }
 
 #[rstest]
@@ -285,7 +285,10 @@ fn batch_builds_indexes_once_and_restores_only_remaining_extents(
     assert_eq!(work.removed_extents, 128);
     assert_eq!(work.inserted_extents, count + 128 - 128 / (64 / size));
     assert_eq!(work.restored_extents, count - 128 / (64 / size));
-    assert_eq!(space.reusable_bytes().unwrap(), count * 64 - 128 * size);
+    assert_eq!(
+        space.reusable_bytes().unwrap(),
+        ByteLength::new(count * 64 - 128 * size)
+    );
 }
 
 #[test]
@@ -304,7 +307,7 @@ fn batch_preserves_the_maximum_checked_extent() {
         extent(0, 1)
     );
     batch.finish();
-    assert_eq!(space.reusable_bytes().unwrap(), 0);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     assert_eq!(space.reusable_sections().collect::<Vec<_>>(), []);
 }
 
@@ -340,7 +343,10 @@ fn page_batch_indexes_a_large_run_without_expanding_pages() {
             ),
         ]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), capacity - 2);
+    assert_eq!(
+        space.reusable_bytes().unwrap(),
+        ByteLength::new(capacity - 2)
+    );
 }
 
 #[test]
@@ -375,7 +381,7 @@ fn batch_coalesces_claimed_page_remainders_before_later_reservations() {
         space.admitted_snapshot().sections().collect::<Vec<_>>(),
         [(extent(12292, 60), FreeClass::Page(PageType::Meta)),]
     );
-    assert_eq!(space.reusable_bytes().unwrap(), 60);
+    assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(60));
 }
 
 #[rstest]
@@ -576,7 +582,7 @@ fn block_reservations_keep_alignment_remainders_and_compact_runs(
     );
     assert_eq!(
         space.reusable_bytes().unwrap(),
-        available - expected.map_or(0, |_| size)
+        ByteLength::new(available - expected.map_or(0, |_| size))
     );
     assert_eq!(work.indexed_extents, u64::from(count > 1));
     assert!(work.inserted_extents <= 3, "{work:?}");

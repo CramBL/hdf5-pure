@@ -585,7 +585,7 @@ mod tests {
         append_one(&mut engine, 4);
         assert_eq!(engine.image.len(), eof);
         assert!(!engine.fsm_dirty);
-        assert!(engine.space.reusable_bytes().unwrap() >= 2048);
+        assert!(engine.space.reusable_bytes().unwrap() >= ByteLength::new(2048));
         engine.finalize_persist().unwrap();
         drop(engine);
         let file = File::open(&path).unwrap();

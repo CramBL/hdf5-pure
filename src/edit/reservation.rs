@@ -740,7 +740,7 @@ impl AppendCursor {
         super::context::require_range(
             *offsets,
             *addresses,
-            FileRange::new(addresses.resolve(start)?, placement.extent().len())?,
+            FileRange::new(addresses.resolve(start)?, placement.extent().len().get())?,
         )?;
         *cursor = end;
         if page_size.is_some() {

@@ -1,6 +1,7 @@
 use core::num::NonZeroUsize;
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_space::__private::AllocationClass;
@@ -162,7 +163,7 @@ fn creation_write_failures_restore_reuse_without_publishing(
         engine
             .space
             .reusable_sections()
-            .any(|extent| extent.len() >= 1_006)
+            .any(|extent| extent.len() >= ByteLength::new(1_006))
     );
     let mut builder = DatasetBuilder::new("d");
     Creation::Fixed(40).configure(&mut builder, false);

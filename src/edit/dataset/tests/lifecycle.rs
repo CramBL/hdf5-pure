@@ -184,7 +184,7 @@ fn fragmented_replacements_preserve_journals_and_uncertain_ownership(
         let reusable = engine
             .space
             .reusable_sections()
-            .map(|extent| (extent.start().get(), extent.len()))
+            .map(|extent| (extent.start().get(), extent.len().get()))
             .collect::<Vec<_>>();
         for allocation in claimed.iter().chain(&predecessors) {
             assert_eq!(
@@ -326,20 +326,21 @@ pub(in crate::edit) fn retire_and_reuse(path: &Path, name: &str, expected: &[i32
     let free = engine
         .space
         .reusable_sections()
-        .map(|extent| (extent.start().get(), extent.len()))
+        .map(|extent| (extent.start().get(), extent.len().get()))
         .collect::<Vec<_>>();
     assert!(
         payload
             .iter()
             .any(|extent| range::covered_len(&free, extent) == extent.end - extent.start)
     );
-    let count = usize::try_from(engine.space.largest(AllocationClass::Raw) / 256 + 1).unwrap() * 64;
+    let count =
+        usize::try_from(engine.space.largest(AllocationClass::Raw).get() / 256 + 1).unwrap() * 64;
     let raw_capacity = engine
         .space
         .admitted_snapshot()
         .sections()
         .filter(|(_, class)| !engine.space.is_paged() || *class == FreeClass::Page(PageType::Raw))
-        .map(|(extent, _)| extent.len())
+        .map(|(extent, _)| extent.len().get())
         .sum::<u64>();
     assert!(raw_capacity >= u64::try_from(count * 4).unwrap());
     let successor = expected
@@ -365,7 +366,7 @@ pub(in crate::edit) fn retire_and_reuse(path: &Path, name: &str, expected: &[i32
         let reusable = classified
             .iter()
             .filter(|(_, current)| !engine.space.is_paged() || *current == class)
-            .map(|(extent, _)| (extent.start().get(), extent.len()))
+            .map(|(extent, _)| (extent.start().get(), extent.len().get()))
             .collect::<Vec<_>>();
         assert_eq!(
             range::covered_len(&live, &below) + range::covered_len(&reusable, &below),

@@ -212,7 +212,10 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     assert_eq!(replacement.props(), fixture.props);
     let allocation = Extent::new(StoredAddress::new(1_024), ByteLength::new(262_144)).unwrap();
     let encoded = build_v2_object_header_allocation(&replacement, allocation).unwrap();
-    assert_eq!(u64::try_from(encoded.len()).unwrap(), allocation.len());
+    assert_eq!(
+        u64::try_from(encoded.len()).unwrap(),
+        allocation.len().get()
+    );
     assert_eq!((source.calls.get(), source.bytes.get()), reads);
     let raw = WriteEngine::gather_oh_messages(
         &source,

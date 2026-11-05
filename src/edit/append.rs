@@ -7,6 +7,7 @@ use core::mem;
 use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 use hdf5_pure_format::__private::FixedArrayHeader;
@@ -1056,9 +1057,9 @@ impl EditStore<'_> {
         let transition = self.engine.space.plan_transition(eoa, PageType::Raw)?;
         let padding = match transition {
             Some(PageTransition::Pad { extent, .. }) => extent.len(),
-            _ => 0,
+            _ => ByteLength::new(0),
         };
-        let address = PhysicalAddress::new(self.engine.image.len()).checked_add(padding)?;
+        let address = PhysicalAddress::new(self.engine.image.len()).checked_add(padding.get())?;
         let bytes = Self::prepare_allocation_bytes(length, address, prepare)?;
         if let Some(transition) = transition {
             if let PageTransition::Pad { extent, .. } = transition {

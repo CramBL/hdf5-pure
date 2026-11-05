@@ -3,6 +3,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
+
 use super::FreeList;
 use crate::admission::AdmissionWork;
 use crate::admission::OrderedReturns;
@@ -61,7 +63,7 @@ impl FreeList {
                 tracked.next();
                 admission.push(extent, true, false);
             } else if let Some((extent, ())) = returned.next() {
-                admission.push(extent, extent.len() >= threshold, true);
+                admission.push(extent, extent.len() >= ByteLength::new(threshold), true);
             }
         }
         admission.finish_run();

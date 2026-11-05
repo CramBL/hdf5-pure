@@ -431,7 +431,7 @@ fn large_measured_manager_lists_do_not_require_page_proportional_header_padding(
         .unwrap();
     assert_eq!(
         engine.space.admitted_snapshot().reusable_bytes().unwrap(),
-        1_600_000
+        ByteLength::new(1_600_000)
     );
     let root = engine
         .context
@@ -443,8 +443,12 @@ fn large_measured_manager_lists_do_not_require_page_proportional_header_padding(
         .unwrap();
     let (chunks, owned) = persistence_allocations(&engine);
     assert!(chunks.len() > 1);
-    assert!(chunks.iter().map(|chunk| chunk.len()).sum::<u64>() < 4_096);
-    assert!(owned.iter().any(|block| block.len() > 14_000_000));
+    assert!(chunks.iter().map(|chunk| chunk.len().get()).sum::<u64>() < 4_096);
+    assert!(
+        owned
+            .iter()
+            .any(|block| block.len() > ByteLength::new(14_000_000))
+    );
     assert_manager_allocations_owned(&engine);
     engine.force_sync().unwrap();
     drop(engine);
@@ -508,7 +512,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             .commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
             .unwrap();
         let (actual_chunks, owned) = persistence_allocations(&engine);
-        let owned_bytes = owned.iter().map(|block| block.len()).sum::<u64>();
+        let owned_bytes = owned.iter().map(|block| block.len().get()).sum::<u64>();
         let address = engine
             .context
             .addresses()
@@ -786,7 +790,10 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
     let zeros = crate::edit::observations::zero_work();
     let (chunks, owned) = persistence_allocations(&engine);
     assert!(chunks.len() > 1);
-    let list = owned.iter().find(|block| block.len() > 65_536).unwrap();
+    let list = owned
+        .iter()
+        .find(|block| block.len() > ByteLength::new(65_536))
+        .unwrap();
     assert!(chunks.iter().any(|chunk| chunk.start() >= list.end()));
     assert!(zeros.bytes > 0);
     assert!(zeros.scratch_peak > 0);
@@ -795,7 +802,7 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
     assert_eq!(after.clean_gap_bytes - before.clean_gap_bytes, 0);
     assert!(after.flush_peak_bytes <= 65_536);
     let appended = engine.image.len() - initial_len;
-    let owned_bytes = owned.iter().map(|block| block.len()).sum::<u64>();
+    let owned_bytes = owned.iter().map(|block| block.len().get()).sum::<u64>();
     assert_eq!(appended, owned_bytes + zeros.bytes);
     assert!(after.write_bytes - before.write_bytes >= appended);
     assert!(after.write_bytes - before.write_bytes <= appended + 4_096);
@@ -989,7 +996,7 @@ fn persistence_allocations(engine: &WriteEngine) -> (Vec<Extent>, Vec<Extent>) {
     }));
     let page = info.page_size.get();
     for block in &owned {
-        if block.len() < page {
+        if block.len() < ByteLength::new(page) {
             assert_eq!(
                 block.start().get() / page,
                 (block.end().get() - 1) / page,
