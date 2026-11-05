@@ -1100,7 +1100,7 @@ impl WriteEngine {
                     self.collect_object_collections(header, &mut liveness.referenced_collections)?;
             }
             metadata.extend(self.oh_chunk_spans(addr.header_address())?);
-            self.collect_object_owned_spans(header, raw, metadata, child)
+            self.collect_object_owned_spans(header, raw, metadata, Some(child))
         })
     }
 
@@ -1141,7 +1141,11 @@ impl WriteEngine {
         Ok(complete && traversal.complete())
     }
 
-    /// Appends storage identified in the header and passes hard-link targets to `child`.
+    /// Appends local storage and optionally visits physical hard-link targets.
+    ///
+    /// With `child`, parses supported link records and dense entries to visit their targets.
+    /// Without `child`, skips link record and dense entry parsing. Topology and reference
+    /// completeness require separate analysis.
     ///
     /// Returns `false` for shared or unrecognized messages, or storage the layout, link, or
     /// attribute collectors cannot classify.
@@ -1151,12 +1155,12 @@ impl WriteEngine {
     /// Returns [`Error::Format`] if supported metadata cannot be parsed. Returns
     /// [`Error::MissingMessage`] if a chunked dataset lacks its dataspace. Returns
     /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
-    fn collect_object_owned_spans(
+    pub(super) fn collect_object_owned_spans(
         &self,
         header: &ObjectHeader,
         raw: &mut Vec<FileRange>,
         metadata: &mut Vec<FileRange>,
-        mut child: impl FnMut(ObjectId),
+        mut child: Option<&mut dyn FnMut(ObjectId)>,
     ) -> Result<bool, Error> {
         let mut complete = true;
         let messages = &header.messages;
@@ -1176,15 +1180,18 @@ impl WriteEngine {
                     complete &= self.collect_layout_owned_spans(messages, data, raw, metadata)?
                 }
                 MessageType::LINK => {
-                    let link = LinkMessage::parse_with_offset_width(data, self.widths().offsets)?;
-                    if let LinkTarget::Hard {
-                        object_header_address,
-                    } = link.link_target
-                    {
-                        child(ObjectId::resolve(
-                            self.context.addresses(),
+                    if let Some(child) = &mut child {
+                        let link =
+                            LinkMessage::parse_with_offset_width(data, self.widths().offsets)?;
+                        if let LinkTarget::Hard {
                             object_header_address,
-                        )?);
+                        } = link.link_target
+                        {
+                            child(ObjectId::resolve(
+                                self.context.addresses(),
+                                object_header_address,
+                            )?);
+                        }
                     }
                 }
                 MessageType::LINK_INFO => {
@@ -1278,19 +1285,22 @@ impl WriteEngine {
         Ok(complete)
     }
 
-    /// Appends dense link storage and passes absolute hard-link targets to `child`.
+    /// Appends dense link allocations and optionally visits physical hard-link targets.
+    ///
+    /// Parses dense entries only when `child` is present.
     ///
     /// Returns `false` when the group's heap ownership is unsupported.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the link information, index, heap, or entries cannot be parsed.
+    /// Returns [`Error::Format`] if the link information, index, heap, or requested entries cannot
+    /// be parsed.
     /// Returns [`Error::InvalidFractalHeapStorage`] if the heap has inconsistent allocation geometry.
     fn collect_group_owned_spans(
         &self,
         data: &[u8],
         metadata: &mut Vec<FileRange>,
-        mut child: impl FnMut(ObjectId),
+        child: &mut Option<&mut dyn FnMut(ObjectId)>,
     ) -> Result<bool, Error> {
         let info = LinkInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         if let Some(heap) = info.fractal_heap_address {
@@ -1309,18 +1319,20 @@ impl WriteEngine {
             if !self.collect_owned_heap(heap, metadata)? {
                 return Ok(false);
             }
-            let entries = crate::group::v2::resolve_dense_entries_from_source(
-                &source,
-                AccessMode::ReadWrite,
-                &info,
-                heap,
-                self.widths(),
-            )?;
-            for entry in entries {
-                child(ObjectId::resolve(
-                    self.context.addresses(),
-                    entry.object_header_address,
-                )?);
+            if let Some(child) = child {
+                let entries = crate::group::v2::resolve_dense_entries_from_source(
+                    &source,
+                    AccessMode::ReadWrite,
+                    &info,
+                    heap,
+                    self.widths(),
+                )?;
+                for entry in entries {
+                    child(ObjectId::resolve(
+                        self.context.addresses(),
+                        entry.object_header_address,
+                    )?);
+                }
             }
         }
 
