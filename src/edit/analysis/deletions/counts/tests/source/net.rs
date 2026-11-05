@@ -41,12 +41,10 @@ use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK, PlannedDeletion};
 use crate::edit::copy::CopyTree;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
-use crate::image::{CountingImage, HandleImage};
 use crate::object_graph::ObjectId;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::source::MetadataCacheConfig;
-use crate::{Datatype, DatatypeByteOrder, FileLocking, FloatingPointType, PhysicalAddress};
+use crate::{Datatype, DatatypeByteOrder, FloatingPointType, PhysicalAddress};
 
 mod storage;
 
@@ -772,7 +770,7 @@ fn owned_inventory_rejects_foreign_engines_and_preserves_empty_association(#[cas
     let (engine, tree, target, _) = prepared(&path, Some(2), Links::Named);
     drop(engine);
     std::fs::copy(&path, &other_path).unwrap();
-    let (engine, calls) = open_counted_engine(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
     let other = edit_test_util::open_engine(&other_path);
     let mut phase = AnalysisPhase::new(&engine);
     let added = additions(&mut phase, &tree, nonempty);
@@ -903,7 +901,7 @@ fn owned_inventory_and_positive_partition_retain_bounded_per_target_state(#[case
     let owner = super::group(&mut fixture, 1, links);
     fixture.link("owner", owner);
     fixture.write(&path);
-    let (engine, calls) = open_counted_engine(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let deletions = (0..count)
         .map(|index| {
@@ -1071,7 +1069,7 @@ fn prepared(
     let source = fixture.append_header(records);
     fixture.link("source", source);
     fixture.write(path);
-    let (engine, calls) = open_counted_engine(path);
+    let (engine, calls) = edit_test_util::open_counted_engine(path);
     let tree = WriteEngine::read_copy_subtree(
         &engine.opened_source(),
         AccessMode::ReadWrite,
@@ -1082,29 +1080,6 @@ fn prepared(
     .unwrap();
     calls.store(0, Ordering::Relaxed);
     (engine, tree, super::id(target), calls)
-}
-
-/// Opens an engine without metadata caching and counts image reads.
-pub(in crate::edit::analysis::deletions::counts) fn open_counted_engine(
-    path: &Path,
-) -> (WriteEngine, Arc<AtomicU64>) {
-    let calls = Arc::new(AtomicU64::new(0));
-    let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
-        Ok(Box::new(
-            CountingImage::new(
-                Box::new(HandleImage::new(
-                    handle,
-                    len,
-                    MetadataCacheConfig::disabled(),
-                )),
-                Arc::default(),
-                Arc::default(),
-            )
-            .with_read_calls(Arc::clone(&calls)),
-        ))
-    })
-    .unwrap();
-    (engine, calls)
 }
 
 #[derive(Clone, Copy)]
