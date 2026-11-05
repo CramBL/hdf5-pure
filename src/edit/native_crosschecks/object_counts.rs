@@ -1,9 +1,15 @@
+use core::mem;
+
 use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use hdf5_pure_format::__private::ObjectReferenceCount;
 use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::allocation;
+use test_util::bytes;
 use test_util::checksum;
+use test_util::fixed_array;
+use test_util::widths::Widths;
 use test_util_hdf5::file;
 use test_util_hdf5::native_fixtures::Fixture;
 use test_util_hdf5::numeric::ByteOrder;
@@ -18,6 +24,7 @@ use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::OrdinaryCountSubject;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::OriginalCount;
+use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::group::GroupInfo;
 use crate::edit::object_header;
 use crate::edit::object_header::PreparedHeader;
@@ -782,4 +789,204 @@ enum CountSource {
 enum Usage {
     CommittedType,
     HardLinks,
+}
+
+#[rstest]
+#[case::legacy(OwnershipSource::Legacy)]
+#[case::modern(OwnershipSource::Modern)]
+#[case::paged_array(OwnershipSource::PagedArray)]
+#[case::filtered_array(OwnershipSource::FilteredArray)]
+fn native_object_ownership_facts_preserve_full_physical_allocations(
+    #[case] source: OwnershipSource,
+) {
+    let path = test_util::temp::temp_path("native-local-ownership.h5");
+    let native = if matches!(source, OwnershipSource::Legacy) {
+        file::libhdf5_create_earliest(&path)
+    } else {
+        file::libhdf5_create_v110(&path)
+    };
+    let (count, chunk) = match source {
+        OwnershipSource::FilteredArray => (262_144, Some(128)),
+        OwnershipSource::PagedArray => (5_000, Some(1)),
+        OwnershipSource::Legacy | OwnershipSource::Modern => (32, None),
+    };
+    let builder = native.new_dataset::<i32>().shape([count]);
+    let builder = if let Some(chunk) = chunk {
+        builder.chunk([chunk])
+    } else {
+        builder
+    };
+    let builder = if matches!(source, OwnershipSource::FilteredArray) {
+        builder.deflate(1)
+    } else {
+        builder
+    };
+    let dataset = builder.create("data").unwrap();
+    drop(builder);
+    dataset.write(&vec![73_i32; count]).unwrap();
+    let stored_size = dataset.storage_size();
+    drop(dataset);
+    native.flush().unwrap();
+    let address = test_util_hdf5::__private::c_object::header_address(&native, "data");
+    native.close().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let engine = edit_test_util::open_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let origin = phase
+        .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap();
+    let ownership = phase.object_ownership(&origin).unwrap();
+    assert!(ownership.is_complete(), "{:?}", ownership.error());
+    assert!(ownership.error().is_none());
+    let allocations = ownership.allocations();
+    assert_eq!(
+        allocations
+            .iter()
+            .filter(|allocation| allocation.kind() == AllocationKind::Header)
+            .count(),
+        1
+    );
+    assert_eq!(
+        allocations
+            .iter()
+            .filter(|allocation| allocation.kind() == AllocationKind::Data)
+            .map(|allocation| allocation.range().length())
+            .sum::<u64>(),
+        stored_size
+    );
+    if let Some(chunk) = chunk {
+        let index = allocations
+            .iter()
+            .filter(|allocation| allocation.kind() == AllocationKind::Metadata)
+            .collect::<Vec<_>>();
+        assert_eq!(index.len(), 2);
+        let signatures = index
+            .iter()
+            .map(|allocation| {
+                engine
+                    .image()
+                    .read_exact_at(
+                        allocation.range().start().get(),
+                        fixed_array::HEADER_SIGNATURE.len(),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            signatures,
+            [
+                fixed_array::HEADER_SIGNATURE.to_vec(),
+                fixed_array::DATA_BLOCK_SIGNATURE.to_vec(),
+            ]
+        );
+        assert!(index[1].range().length() > 4_096);
+        let locator = FixedArrayHeaderLocator::new(
+            engine.widths(),
+            engine.addresses().effective_base(),
+            engine
+                .addresses()
+                .relative(index[0].range().start())
+                .unwrap(),
+        );
+        let range = locator.parse_range().unwrap();
+        let bytes = engine
+            .image()
+            .read_exact_at(
+                range.start().get(),
+                usize::try_from(range.length()).unwrap(),
+            )
+            .unwrap();
+        let widths = Widths::new(
+            usize::from(engine.widths().offsets.get()),
+            usize::from(engine.widths().lengths.get()),
+        );
+        let entry_size = bytes::u8_at(&bytes, fixed_array::HEADER_ENTRY_SIZE_OFFSET);
+        let page_bits = bytes::u8_at(
+            &bytes,
+            fixed_array::HEADER_ENTRY_SIZE_OFFSET + mem::size_of::<u8>(),
+        );
+        let client = if matches!(source, OwnershipSource::FilteredArray) {
+            fixed_array::Client::Filtered {
+                size_bytes: u8::try_from(
+                    usize::from(entry_size) - widths.offset - mem::size_of::<u32>(),
+                )
+                .unwrap(),
+            }
+        } else {
+            fixed_array::Client::Plain
+        };
+        let entries = count.div_ceil(chunk);
+        let stored_header = engine
+            .addresses()
+            .relative(index[0].range().start())
+            .unwrap()
+            .get();
+        let stored_block = engine
+            .addresses()
+            .relative(index[1].range().start())
+            .unwrap()
+            .get();
+        assert_eq!(
+            bytes,
+            fixed_array::header(
+                widths,
+                client,
+                page_bits,
+                u64::try_from(entries).unwrap(),
+                Some(stored_block),
+            )
+        );
+        let expected_block_length =
+            fixed_array::empty_data_block(widths, client, page_bits, entries, stored_header).len();
+        assert_eq!(
+            index[1].range().length(),
+            u64::try_from(expected_block_length).unwrap()
+        );
+        let header = locator
+            .parse(FileRegion::new(range, &bytes).unwrap())
+            .unwrap();
+        let block = header.data_block().unwrap();
+        assert!(block.parse_range().unwrap().length() < block.range().length());
+        assert_eq!(block.range(), index[1].range());
+        assert_eq!(
+            allocations
+                .iter()
+                .filter(|allocation| allocation.kind() == AllocationKind::Data)
+                .count(),
+            count.div_ceil(chunk)
+        );
+        if matches!(source, OwnershipSource::FilteredArray) {
+            assert!(stored_size < u64::try_from(count * 4).unwrap());
+        }
+    } else {
+        assert_eq!(
+            allocations
+                .iter()
+                .filter(|allocation| allocation.kind() == AllocationKind::Data)
+                .count(),
+            1
+        );
+        assert!(
+            !allocations
+                .iter()
+                .any(|allocation| allocation.kind() == AllocationKind::Metadata)
+        );
+    }
+    drop(phase);
+    drop(engine);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(
+        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        vec![73; count]
+    );
+    native.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum OwnershipSource {
+    FilteredArray,
+    Legacy,
+    Modern,
+    PagedArray,
 }

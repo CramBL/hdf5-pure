@@ -188,6 +188,7 @@ impl<'source> AnalysisPhase<'source> {
             identity: _,
             topology,
             counts,
+            ownership: _,
             budget: _,
             root: _,
             reference_roots: _,
