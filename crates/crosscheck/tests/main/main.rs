@@ -140,5 +140,6 @@ mod vlen_chunked;
 mod vlen_metadata;
 mod vlen_string_attrs;
 mod vlen_widths;
+mod width_workload;
 
 mod fail_if_unknown;
