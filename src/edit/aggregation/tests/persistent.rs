@@ -56,7 +56,7 @@ fn persistent_reuse_precedes_aggregates(
     let mut engine = open_engine(&path, backing);
     engine.delete(&ObjectPathBuf::parse("scratch")).unwrap();
     engine.commit().unwrap();
-    let expected = engine.space.allocate(64, class).unwrap();
+    let expected = engine.space.allocate(ByteLength::new(64), class).unwrap();
     engine.space.return_allocation(expected, class);
     let policy = engine.aggregation.unwrap();
     let address = if immediate {

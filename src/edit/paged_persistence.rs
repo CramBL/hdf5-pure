@@ -69,7 +69,13 @@ impl PagedPersistencePlan {
             .map(|range| *range.start())
             .min()
             .ok_or_else(|| FormatError::Internal("a PAGE extension has no root encoding".into()))?;
-        if let Some(tail) = space.plan_paged_tail(eoa, freed, old_blocks, extension_len, false)? {
+        if let Some(tail) = space.plan_paged_tail(
+            eoa,
+            freed,
+            old_blocks,
+            ByteLength::new(extension_len),
+            false,
+        )? {
             if tail.post.admitted_snapshot().sections().next().is_none() {
                 let managers = ManagerProjection::new(tail.post.admitted_snapshot(), widths)?;
                 if let Some(extension) = contiguous_extension(&tail, &managers, geometry, page)? {
@@ -90,7 +96,7 @@ impl PagedPersistencePlan {
             widths,
         )?;
         let rejected = if let Some(tail) =
-            space.plan_paged_tail(eoa, freed, old_blocks, capacity.get(), false)?
+            space.plan_paged_tail(eoa, freed, old_blocks, capacity.bytes.length(), false)?
         {
             let allocation = tail.allocation;
             if let Some(plan) = Self::from_reusable_tail(tail, geometry, page, widths)? {
@@ -101,7 +107,7 @@ impl PagedPersistencePlan {
             None
         };
         if rejected.is_some_and(|allocation| {
-            capacity.get() < page.get()
+            capacity.bytes.length() < ByteLength::new(page.get())
                 && allocation.start().get() / page.get()
                     != (allocation.end().get() - 1) / page.get()
         }) {
@@ -117,7 +123,7 @@ impl PagedPersistencePlan {
             return Ok(None);
         }
         let mut tail = space
-            .plan_paged_tail(eoa, freed, old_blocks, capacity.get(), true)?
+            .plan_paged_tail(eoa, freed, old_blocks, capacity.bytes.length(), true)?
             .ok_or_else(|| {
                 FormatError::Internal("an appended PAGE tail requires no reusable extent".into())
             })?;
@@ -128,7 +134,7 @@ impl PagedPersistencePlan {
                     eoa,
                     freed,
                     old_blocks,
-                    capacity.with_spare_byte()?.get(),
+                    capacity.with_spare_byte()?.bytes.length(),
                     true,
                 )?
                 .ok_or_else(|| {
@@ -159,9 +165,11 @@ impl PagedPersistencePlan {
         let layout = chosen.ok_or_else(|| {
             FormatError::Internal("an appended PAGE reservation has no layout".into())
         })?;
-        let tail = append.reserve(layout.end.checked_distance_from(eoa).ok_or_else(|| {
-            FormatError::Internal("a PAGE reservation ends before its start".into())
-        })?)?;
+        let tail = append.reserve(ByteLength::new(
+            layout.end.checked_distance_from(eoa).ok_or_else(|| {
+                FormatError::Internal("a PAGE reservation ends before its start".into())
+            })?,
+        ))?;
         Self::placed(tail, layout, &[], widths, None).map(Some)
     }
 
@@ -626,11 +634,6 @@ impl ManagerCapacity {
                     length: 1,
                 })?,
         })
-    }
-
-    /// Returns the complete reservation length, in bytes.
-    fn get(&self) -> u64 {
-        self.bytes.get()
     }
 }
 

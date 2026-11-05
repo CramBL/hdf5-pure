@@ -2314,7 +2314,9 @@ fn chunk_index_classes_follow_current_admitted_fragments() {
     engine.collect_chunk_index_free_spans(&[], original.clone(), FreeClass::Dead, &mut before);
     assert_eq!(before, [(original[0], FreeClass::Page(PageType::Meta))]);
     assert_eq!(
-        engine.space.allocate(16, AllocationClass::Metadata),
+        engine
+            .space
+            .allocate(ByteLength::new(16), AllocationClass::Metadata),
         Some(fragment)
     );
     let mut after = Vec::new();

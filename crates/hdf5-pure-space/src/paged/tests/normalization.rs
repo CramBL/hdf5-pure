@@ -305,7 +305,10 @@ fn compare_allocations(mut actual: PagedEdit, mut expected: PagedEdit) {
         (3 * page, PageType::Meta),
     ] {
         assert_eq!(actual.largest(ty), expected.largest(ty));
-        assert_eq!(actual.allocate(len, ty), expected.allocate(len, ty));
+        assert_eq!(
+            actual.allocate(ByteLength::new(len), ty),
+            expected.allocate(ByteLength::new(len), ty)
+        );
         assert_same_state(&actual, &expected);
     }
 }

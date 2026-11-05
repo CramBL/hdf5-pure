@@ -161,7 +161,7 @@ fn indexed_batch_matches_scalar_reservations_and_restoration(
     let mut successes = Vec::new();
     for request in requests {
         let expected = scalar.allocate_with_page_type(
-            request.size().get(),
+            request.size().length(),
             request.class(),
             request.page_type(),
         );

@@ -752,9 +752,11 @@ impl WriteEngine {
             #[cfg(test)]
             observations::record_allocation_probe();
             let allocation = if let Some(limit) = limit {
-                self.space.allocate_flat_below(proposed, limit)
+                self.space
+                    .allocate_flat_below(ByteLength::new(proposed), limit)
             } else {
-                self.space.allocate(proposed, AllocationClass::Metadata)
+                self.space
+                    .allocate(ByteLength::new(proposed), AllocationClass::Metadata)
             };
             let Some(reserved) = allocation else {
                 break;
@@ -764,7 +766,7 @@ impl WriteEngine {
             // Exclude the released suffix before sizing the managers. The tail reservation
             // has already been removed from this list, so the trailing run starts at or
             // above the reservation's end.
-            let eoa = post.release_trailing_run(eoa, proposed);
+            let eoa = post.release_trailing_run(eoa, ByteLength::new(proposed));
             let projection = match FlatProjection::new(post, widths) {
                 Ok(projection) => projection,
                 Err(error) => {

@@ -76,12 +76,12 @@ fn bulk_construction_preserves_best_fit_and_remainders(
         incremental.free(extent);
     }
     assert_eq!(
-        bulk.alloc(requested),
+        bulk.alloc(ByteLength::new(requested)),
         allocation.map(|(start, len)| extent(start, len))
     );
     assert_list(&bulk, expected, total);
     assert_eq!(
-        incremental.alloc(requested),
+        incremental.alloc(ByteLength::new(requested)),
         allocation.map(|(start, len)| extent(start, len))
     );
     assert_eq!(bulk.extents(), incremental.extents());

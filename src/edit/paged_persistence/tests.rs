@@ -206,7 +206,10 @@ fn exact_manager_sizes_can_oscillate_while_owned_capacity_terminates() {
         let managers = ManagerSections::paged(&tail.post.sections(), FileSpacePageSize::DEFAULT);
         160 + free_space_manager::manager_blocks_len(&managers, widths).unwrap()
     };
-    assert_eq!((measure(286), measure(295)), (295, 286));
+    assert_eq!(
+        (measure(ByteLength::new(286)), measure(ByteLength::new(295))),
+        (295, 286)
+    );
     let plan = plan_persistence(
         &space,
         StoredAddress::new(8_192),
@@ -886,9 +889,9 @@ fn planning_reuses_an_aligned_block_after_rejecting_a_crossing_reservation(
     let semantic = space.paged_tail_section_limit([]).unwrap();
     let capacity = ManagerCapacity::new(semantic, RESERVATION_SECTION_LIMIT, 140, widths).unwrap();
     assert_eq!(semantic, 111);
-    assert_eq!(capacity.get(), 2_489);
+    assert_eq!(capacity.bytes.length(), ByteLength::new(2_489));
     let first = space
-        .plan_paged_tail(eoa, &[], &[], capacity.get(), false)
+        .plan_paged_tail(eoa, &[], &[], capacity.bytes.length(), false)
         .unwrap()
         .unwrap();
     assert_eq!(first.allocation, crossing);

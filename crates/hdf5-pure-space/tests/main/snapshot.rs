@@ -119,7 +119,7 @@ fn admitted_snapshot_follows_reservation_and_restored_allocator_state(
         [(extent(4160, 128), class)]
     );
     assert_eq!(
-        space.allocate(32, AllocationClass::Raw),
+        space.allocate(ByteLength::new(32), AllocationClass::Raw),
         Some(extent(4160, 32))
     );
     let snapshot = space.admitted_snapshot();
@@ -215,7 +215,7 @@ fn proposed_page_snapshot_excludes_owned_metadata_capacity() {
             StoredAddress::new(8192),
             &[(extent(4096, 4096), FreeClass::Page(PageType::Raw))],
             &[],
-            128,
+            ByteLength::new(128),
             true,
         )
         .unwrap()
@@ -341,12 +341,9 @@ fn a_page_class_proves_no_ownership_or_availability_outside_its_fragment() {
         space.admitted_snapshot().partial_page_class(query),
         PageClassEvidence::Known(PageType::Meta)
     );
+    assert_eq!(space.allocate(query.len(), AllocationClass::Metadata), None);
     assert_eq!(
-        space.allocate(query.len().get(), AllocationClass::Metadata),
-        None
-    );
-    assert_eq!(
-        space.allocate(seed.len().get(), AllocationClass::Metadata),
+        space.allocate(seed.len(), AllocationClass::Metadata),
         Some(seed)
     );
     assert_eq!(

@@ -122,7 +122,7 @@ impl FileAllocation {
         let Some(length) = NonZeroByteLength::new(length) else {
             return Ok(self.end);
         };
-        if let Some(extent) = self.space.allocate(length.get(), class) {
+        if let Some(extent) = self.space.allocate(length.length(), class) {
             return Ok(extent.start());
         }
         if let Some(mut aggregates) = self.aggregates {

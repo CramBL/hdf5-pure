@@ -61,7 +61,7 @@ fn reusable_sections_precede_retained_aggregate_windows(
     let mut engine = open_engine(&path, backing);
     engine.delete(&ObjectPathBuf::parse("scratch")).unwrap();
     engine.commit().unwrap();
-    let expected = engine.space.allocate(64, class).unwrap();
+    let expected = engine.space.allocate(ByteLength::new(64), class).unwrap();
     engine.space.return_allocation(expected, class);
     let state = engine.aggregation.unwrap();
     let physical = engine.image.len();
