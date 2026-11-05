@@ -400,7 +400,10 @@ mod tests {
     fn every_reader_reads_a_userblock_file_libhdf5_wrote(
         #[values(Reader::Slice, Reader::Bytes, Reader::ReadSeek)] reader: Reader,
     ) {
-        let image = include_bytes!("../tests/data/matlab/test_enum_v73.mat");
+        let image = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/matlab/test_enum_v73.mat"
+        ));
         let LocatedSuperblock {
             address,
             superblock,
