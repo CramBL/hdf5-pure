@@ -266,6 +266,21 @@ pub(super) fn open_engine(path: &Path) -> WriteEngine {
 
 /// Opens an engine without metadata caching and counts image reads.
 pub(in crate::edit) fn open_counted_engine(path: &Path) -> (WriteEngine, Arc<AtomicU64>) {
+    open_counted_engine_with_bytes(path, Arc::default())
+}
+
+/// Opens a fixture with read-byte accounting and requests [`FileLocking::Enabled`].
+///
+/// Adds requested image-read lengths to `bytes`, including failed requests. Returns the engine
+/// and its shared read-call counter. Disables metadata caching and counts reads during opening.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be opened for editing.
+pub(in crate::edit) fn open_counted_engine_with_bytes(
+    path: &Path,
+    bytes: Arc<AtomicU64>,
+) -> (WriteEngine, Arc<AtomicU64>) {
     let calls = Arc::new(AtomicU64::new(0));
     let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
         Ok(Box::new(
@@ -275,7 +290,7 @@ pub(in crate::edit) fn open_counted_engine(path: &Path) -> (WriteEngine, Arc<Ato
                     len,
                     MetadataCacheConfig::disabled(),
                 )),
-                Arc::default(),
+                bytes,
                 Arc::default(),
             )
             .with_read_calls(Arc::clone(&calls)),

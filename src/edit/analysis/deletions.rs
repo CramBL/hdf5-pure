@@ -203,6 +203,7 @@ impl<'source> AnalysisPhase<'source> {
             topology,
             counts,
             ownership: _,
+            physical: _,
             budget: _,
             root: _,
             links: _,
