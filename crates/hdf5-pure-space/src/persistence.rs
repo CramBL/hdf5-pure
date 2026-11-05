@@ -21,7 +21,7 @@ pub enum ManagerKind {
     PagedSmallRaw,
 }
 
-/// Holds the checked semantic extents one free-space manager should persist.
+/// Holds the free regions assigned to one persistence manager.
 pub struct ManagerSections {
     kind: ManagerKind,
     sections: Vec<Extent>,
@@ -55,10 +55,10 @@ impl ManagerSections {
         )
     }
 
-    /// Projects admitted extents into the semantic managers used for persistence.
+    /// Groups the snapshot's free regions by the manager that stores them.
     ///
-    /// Uses the snapshot's page size and classes for PAGE classification. Returns one generic manager
-    /// for a nonempty flat snapshot, or no managers for disabled allocation.
+    /// Uses the snapshot's page size and section classes for PAGE classification. Returns one generic
+    /// manager for a nonempty flat snapshot, and no managers for disabled allocation.
     ///
     /// # Examples
     ///

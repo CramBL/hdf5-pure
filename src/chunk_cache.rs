@@ -267,15 +267,12 @@ impl ChunkCacheStats {
         self.counters.hits.saturating_add(self.counters.misses)
     }
 
-    /// The fraction of chunk lookups served from the cache, or `None` before any
+    /// Returns the fraction of chunk lookups served from the cache, or `None` before any
     /// lookup has happened.
     ///
-    /// `None` rather than `0.0`, which is also what a cache that missed every
-    /// lookup reports: the two mean opposite things to a caller deciding whether
-    /// to raise the budget, and only one of them is a reason to. A *disabled*
-    /// cache is the third case reporting `Some(0.0)` — every lookup is counted a
-    /// miss whether or not the cache was ever allowed to answer — so read it
-    /// beside [`ChunkCacheConfig`], which says whether there was a cache at all.
+    /// Preserves `None` when zero lookups have occurred, distinguishing a cache with
+    /// no lookups from one that missed every lookup. A disabled cache reports `Some(0.0)`.
+    /// Read this beside [`ChunkCacheConfig`], which reports whether the cache is enabled.
     pub fn hit_rate(&self) -> Option<f64> {
         let lookups = self.lookups();
         if lookups == 0 {

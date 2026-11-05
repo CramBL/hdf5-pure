@@ -1476,9 +1476,9 @@ const VL_COUNT_SIZE: usize = 4;
 /// truncated prefix. Saturating is not itself an answer for such a value, only a
 /// refusal to corrupt one; what refuses it differs by caller. A dataset's values
 /// then meet [`encode_fixed_strings`], which finds each one longer than the width
-/// and reports it. An attribute has no such channel — every `set_attr` is
-/// infallible — so it stores the first `u32::MAX` bytes and declares that width,
-/// which [`pad_fixed_strings`] is where it happens. The compact-attribute cap of
+/// and reports it. For attributes whose fixed string width is derived from their
+/// contents, the declared width is capped at [`u32::MAX`]. [`pad_fixed_strings`]
+/// truncates longer values to that width. The compact-attribute cap of
 /// [`OBJECT_HEADER_MESSAGE_MAX`](crate::OBJECT_HEADER_MESSAGE_MAX) does not
 /// refuse the value first: an attribute past it moves to dense storage, and a
 /// 70,000-byte fixed string writes and reads back at its declared width.
@@ -1667,7 +1667,7 @@ pub(crate) fn simple_1d(n: u64) -> Dataspace {
 /// [`Dataset::datatype`](crate::Dataset::datatype) reports for a dataset, and it is what identifies
 /// a `np.bool_` attribute as boolean, where `AttrValue` gives an ordinary one-byte integer. As
 /// [`Dataset::datatype`](crate::Dataset::datatype) does, it resolves a committed (shared) datatype
-/// to the type it refers to, though neither reports that type's name, and neither channel exposes
+/// to the type it refers to, though neither reports that type's name, and neither accessor exposes
 /// an attribute's rank. See the
 /// [groups and attributes guide](crate::_guide::groups_attributes#reading-an-attributes-datatype).
 ///
@@ -2343,11 +2343,11 @@ pub(crate) struct RawChunkPayload {
     /// `Arc<File>`), so it carries no borrowed lifetime.
     ///
     /// Wrapped in [`AssertUnwindSafe`](core::panic::AssertUnwindSafe) so the
-    /// boxed trait object does not strip the `UnwindSafe`/`RefUnwindSafe`
-    /// auto-traits from the public builder types that transitively hold it
-    /// (removing an auto-trait impl is a semver break). The assertion is sound:
+    /// boxed trait object does not strip `UnwindSafe` or `RefUnwindSafe` from
+    /// `DatasetBuilder::raw_chunks` or the containing [`crate::FileBuilder`]
+    /// and [`GroupBuilder`]. The assertion is sound:
     /// the provider performs only immutable reads and leaves no broken state on
-    /// a panic. `ChunkProvider: Send + Sync` keeps the other two auto-traits.
+    /// a panic. `ChunkProvider: Send + Sync` preserves `Send` and `Sync`.
     pub(crate) provider: core::panic::AssertUnwindSafe<Box<dyn ChunkProvider>>,
 }
 
@@ -3105,8 +3105,18 @@ impl DatasetBuilder {
 
     /// Safely encode a slice of compound values field by field.
     ///
-    /// Built-in implementations support numeric tuples with one through twelve
-    /// fields. No Rust struct or tuple padding is copied into the file.
+    /// Encodes elements using the datatype returned by [`CompoundType::datatype`]. Each element
+    /// appends exactly [`Datatype::type_size`] bytes. Built-in numeric tuple implementations
+    /// encode fields in little-endian byte order. User-defined implementations follow their
+    /// datatype's layout and size requirements. No Rust struct or tuple padding is copied
+    /// into the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TypeMismatch`] if the datatype is not compound,
+    /// [`FormatError::InvalidCompoundSize`] if the datatype size is zero, or
+    /// [`FormatError::DataSizeMismatch`] if an encoded element length differs from the
+    /// expected element size. Propagates errors from [`CompoundType::datatype`].
     pub fn with_compound_values<T: CompoundType>(
         &mut self,
         values: &[T],
@@ -3182,12 +3192,11 @@ impl DatasetBuilder {
 
     /// Write a fixed-width ASCII string dataset, sized to the longest value.
     ///
-    /// Every element occupies the same number of bytes — the length of the
-    /// longest value, or one byte when they are all empty — zero-padded on the
-    /// right, and the datatype is `H5T_STRING { STRSIZE = width, NULLPAD,
-    /// ASCII }`. This is the encoding
-    /// [`AttrValue::AsciiStringArray`] writes as an attribute, so the same
-    /// values land on disk the same way whichever they are stored as, and
+    /// Each element uses the longest string's width, with a minimum of one
+    /// byte. Shorter strings are padded with zero bytes. The datatype uses
+    /// ASCII and `NULLPAD`. This matches the encoding
+    /// [`AttrValue::AsciiStringArray`] writes as an attribute, though dataset
+    /// and attribute dataspaces may differ.
     /// [`Dataset::read_string`](crate::Dataset::read_string) reads them back
     /// without the caller trimming anything.
     ///
@@ -3198,9 +3207,12 @@ impl DatasetBuilder {
     /// UTF-8, and [`with_vlen_strings`](Self::with_vlen_strings) when elements
     /// should not share a width at all.
     ///
-    /// Only a value with no fixed-width HDF5 datatype at all — one longer than
-    /// the datatype message's 4-byte size field can describe — is refused, with
-    /// [`FormatError::FixedStringTooLong`].
+    /// # Errors
+    ///
+    /// Returns [`FormatError::FixedStringTooLong`] if any string length exceeds [`u32::MAX`]
+    /// bytes.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::{File, FileBuilder};

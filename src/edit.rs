@@ -3135,7 +3135,8 @@ impl WriteEngine {
 
     /// Reserves a physical allocation with an explicit PAGE placement type.
     ///
-    /// Array chunk indexes retain metadata intent while sharing raw-data pages.
+    /// An array chunk index stored beside chunk data shares its raw-data allocation,
+    /// while a version 2 B-tree chunk index remains metadata.
     ///
     /// # Errors
     ///
@@ -3404,31 +3405,11 @@ fn screen_resolved_references(
     if !datatype::datatype_holds_object_address(dt) {
         return Ok(());
     }
-    // The datatype declares an object reference, so the walker must find one.
-    // Two ways it does not: slots that do not fit the element size (`None`), and
-    // a reference `embedded_reference_slots` does not map - it locates the
-    // 8-byte object reference only, and reports any other width as no slots at
-    // all. Both mean the addresses cannot be read, and an empty list taken for
-    // "nothing to check" would wave through exactly the datatype
-    // `datatype_holds_object_address` had just recognised. Neither shape is
-    // one this crate builds. Reject references past a screen
-    // that could not see them.
+    // The datatype declares an object reference, so the walker must locate its byte offsets.
+    // Rejects both an empty slot list and `None` because neither permits checking referenced
+    // addresses against reclaimed regions.
     let Some(slots) = datatype::embedded_reference_slots(dt).filter(|slots| !slots.is_empty())
     else {
-        // Unconditional, unlike the per-address checks below. Those reject an
-        // address that lands somewhere this commit vacates. This one cannot read
-        // the addresses at all, so there is nothing to compare against and no
-        // amount of screening would help. Every commit that reaches here rebuilds
-        // at least the root group, so `for_supplied.moved` is never empty and
-        // gating this would have changed nothing anyway. A commit whose only
-        // staged edit is a same-length in-place overwrite never reaches here at
-        // all - it takes the fast path above, which vacates nothing. An in-file
-        // copy reaches this only beside a deletion, because it is screened
-        // against `for_copied`, whose `moved` is empty by construction.
-        //
-        // The `filter` is belt-and-braces: `embedded_reference_slots` already
-        // reports an unaddressable reference as `None`, and reading an empty list as "nothing to check" is exactly the
-        // hole this screen was found to have.
         return Err(Error::EditUnsupported(
             "a reference this commit writes sits in a datatype whose addresses this screen \
              cannot read — a width other than eight, a dataset-region reference, a \

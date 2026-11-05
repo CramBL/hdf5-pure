@@ -1,11 +1,9 @@
-//! Public, curated introspection of a dataset's on-disk storage layout and
-//! filter pipeline (issue #149).
+//! Public introspection of a dataset's on-disk storage layout and filter pipeline.
 //!
-//! These types are decoded from the HDF5 data-layout and filter-pipeline
-//! messages but deliberately omit on-disk encoding artifacts (message version
-//! numbers, the addresses of chunk index structures, and a filtered single
-//! chunk's stored size and filter mask), so the public surface is not welded to
-//! the internal parse representation. Obtain them from the [`Dataset`] accessors
+//! [`Layout`] classifies storage layout while omitting on-disk encoding artifacts such as
+//! message version numbers and chunk-index addresses. [`ChunkIndex`] identifies the chunk index
+//! kind. [`Chunk`] exposes allocated chunk addresses, stored sizes, and filter masks.
+//! [`Filter`] describes pipeline filters. Obtain them from the [`Dataset`] accessors
 //! [`layout`], [`chunk_index`], [`chunks`], and [`filter_pipeline`].
 //!
 //! [`Dataset`]: crate::Dataset

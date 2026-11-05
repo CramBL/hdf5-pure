@@ -387,8 +387,9 @@ The allocation categories are:
 | A dense-attribute blob, including embedded huge-object payloads | Metadata |
 | Separately allocated huge-object payloads | Raw |
 
-Array chunk indexes written beside their data are the explicit index exception. The index and
-chunk data form one raw allocation.
+An array index stored beside chunk data shares its raw-data allocation, while a version 2 B-tree
+index remains metadata. The array exception applies only when the index is stored beside chunk data
+in the same allocation.
 
 ### Persistent PAGE editing
 

@@ -170,7 +170,7 @@ builder
 
 ### Combinations that are rejected
 
-Scale-offset and ZFP each consume the raw elements and hand on something else, so anything they would sit on top of has nothing left to work with. A request for both halves of such a pair is a contradiction, and [`finish`](crate::FileBuilder::finish) / [`write`](crate::FileBuilder::write) returns a [`FormatError::FilterError`](crate::FormatError::FilterError) that states which two filters conflict:
+The filter pipeline rejects conflicting filter combinations when [`finish`](crate::FileBuilder::finish), [`finish_to`](crate::FileBuilder::finish_to), or [`write`](crate::FileBuilder::write) serializes the dataset, returning [`FormatError::FilterError`](crate::FormatError::FilterError). Supported pairs include scale-offset followed by Deflate or LZF. The table below lists the rejected pairs:
 
 | Requested with | Rejected |
 | --- | --- |
@@ -178,7 +178,7 @@ Scale-offset and ZFP each consume the raw elements and hand on something else, s
 | [`with_scale_offset`](crate::DatasetBuilder::with_scale_offset) | [`with_shuffle`](crate::DatasetBuilder::with_shuffle), [`with_zfp`](crate::DatasetBuilder::with_zfp) |
 | [`with_lzf`](crate::DatasetBuilder::with_lzf) | [`with_deflate`](crate::DatasetBuilder::with_deflate) |
 
-[`with_lzf`](crate::DatasetBuilder::with_lzf) with [`with_deflate`](crate::DatasetBuilder::with_deflate) is the same shape for a different reason: the two fill one byte-compressor slot, and stacking them is never useful.
+Deflate and LZF are both general-purpose byte compressors. Combining them on the same dataset is rejected with [`FormatError::FilterError`](crate::FormatError::FilterError).
 
 ```rust
 # use hdf5_pure::{Error, FileBuilder, FormatError, ScaleOffset};

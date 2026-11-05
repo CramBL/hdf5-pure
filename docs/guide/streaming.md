@@ -253,7 +253,7 @@ println!("{:?} over {} lookups", stats.hit_rate(), stats.lookups());
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-Two figures need a word of care. [`hit_rate()`](crate::ChunkCacheStats::hit_rate) returns `None` before any lookup, where a cache that missed everything and a cache that was disabled both report `0.0`. Read it beside [`chunk_cache_config()`](crate::Dataset::chunk_cache_config). And [`invalidations()`](crate::ChunkCacheStats::invalidations) counts the whole session: a commit through *any* handle advances the file's content revision, so every dataset handle drops its chunks. A figure approaching [`misses()`](crate::ChunkCacheStats::misses) means the session is rewriting what it caches, and a larger budget will not change that.
+Two figures need a word of care. Cache statistics track hits, misses, evictions, and retained bytes. [`hit_rate()`](crate::ChunkCacheStats::hit_rate) returns the fraction of chunk lookups served from cache, preserving `None` before any lookup has happened (distinguishing a cache that has received no lookups from one that missed everything or was disabled). Read it beside [`chunk_cache_config()`](crate::Dataset::chunk_cache_config). And [`invalidations()`](crate::ChunkCacheStats::invalidations) counts the whole session: a commit through *any* handle advances the file's content revision, so every dataset handle drops its chunks. A figure approaching [`misses()`](crate::ChunkCacheStats::misses) means the session is rewriting what it caches, and a larger budget will not change that.
 
 ### The metadata cache
 

@@ -34,12 +34,12 @@ pub use crate::file_writer::AttrValue;
 /// | [`Compound`](Self::Compound) | compound with classified fields |
 /// | [`Enum`](Self::Enum) | enumeration with member names |
 /// | [`Array`](Self::Array) | fixed-size array of a base type |
-/// | [`Other`](Self::Other) | anything not classified above, carrying the type itself |
+/// | [`Other`](Self::Other) | anything not classified above, carrying the retained [`Datatype`] |
 ///
 /// `DType` is the quick human-readable summary, and
 /// [`Dataset::datatype`](crate::Dataset::datatype) reports exact field offsets, bit precision, and
-/// byte order. A type nested in a compound field or an array base has no such fallback, which is
-/// why [`Other`](Self::Other) carries the [`Datatype`] itself.
+/// byte order. [`DType::Other`] carries the retained [`Datatype`], preserving the full definition
+/// for native complex types and other datatypes.
 ///
 /// Non-exhaustive: variants are added as this crate supports more datatypes, so
 /// match with a `_` arm.
@@ -152,9 +152,8 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
             ..
         } => DType::ObjectReference,
         Datatype::Complex(_) => DType::Other(Box::new(dt.clone())),
-        // The type itself, not a rendering of it: this is the only view a
-        // caller gets of a member or an array base that the curated set has no
-        // name for.
+        // The type itself, not a rendering of it: `DType::Other` preserves the
+        // full `Datatype` for types without a dedicated variant.
         _ => DType::Other(Box::new(dt.clone())),
     }
 }
