@@ -1,3 +1,4 @@
+use core::num::NonZeroU64;
 use std::io::ErrorKind;
 
 use hdf5_pure_format::__private::FixedArrayHeader;

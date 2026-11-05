@@ -1,6 +1,6 @@
-use core::num::NonZeroU64;
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::IndexSlots;
@@ -261,7 +261,7 @@ fn array_emission_follows_preceding_payload_reservations(#[case] kind: ChunkArra
     )
     .unwrap();
     let mut requests = vec![BlockRequest::complete(
-        ReservationRequest::new(NonZeroU64::new(8).unwrap(), AllocationClass::Raw),
+        ReservationRequest::new(NonZeroByteLength::new(8).unwrap(), AllocationClass::Raw),
         EncodingDependency::Independent,
     )];
     requests.extend(index.requests().unwrap());

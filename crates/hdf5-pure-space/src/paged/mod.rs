@@ -2,8 +2,8 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
-use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FormatError;
@@ -535,7 +535,7 @@ impl PagedEdit {
                 .reserve(capacity)
                 .map(Some);
         }
-        let Some(capacity) = NonZeroU64::new(capacity) else {
+        let Some(capacity) = NonZeroByteLength::new(capacity) else {
             return Ok(None);
         };
         self.plan_reusable_tail(
@@ -930,7 +930,7 @@ impl PagedAppend {
                 length: TRAILING_RESERVE_TAILS * 2,
             })?;
         let request = ReservationRequest::new(
-            NonZeroU64::new(capacity).ok_or(FormatError::OffsetOverflow {
+            NonZeroByteLength::new(capacity).ok_or(FormatError::OffsetOverflow {
                 offset: eoa.get(),
                 length: capacity,
             })?,

@@ -1,7 +1,6 @@
 //! Checked chunk-array geometry, metadata requests, and reservation-backed emission.
 
-use core::num::NonZeroU64;
-
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayPlan;
 use hdf5_pure_format::__private::FixedArrayPlan;
@@ -215,7 +214,7 @@ impl ArrayIndexPlanRef<'_> {
     ///
     /// Returns [`FormatError::Internal`] if `length` is zero.
     fn request(length: u64) -> Result<BlockRequest, FormatError> {
-        NonZeroU64::new(length)
+        NonZeroByteLength::new(length)
             .map(|length| {
                 BlockRequest::complete(
                     ReservationRequest::new(length, AllocationClass::Metadata).for_block(),

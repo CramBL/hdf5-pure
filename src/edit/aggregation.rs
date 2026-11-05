@@ -1,8 +1,7 @@
 //! Classic aggregate reservations for staged edits and immediate appends.
 
-use core::num::NonZeroU64;
-
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::AggregationError;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
@@ -86,7 +85,7 @@ impl AggregateSpace {
         &mut self,
         offsets: OffsetWidth,
         addresses: AddressContext,
-        size: NonZeroU64,
+        size: NonZeroByteLength,
         class: AllocationClass,
         mut release: impl FnMut(StoredAddress, Extent) -> bool,
     ) -> Result<Placement, Error> {

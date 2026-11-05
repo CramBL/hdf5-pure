@@ -1,3 +1,4 @@
+use core::num::NonZeroU64;
 use hdf5_pure_format::__private::ChunkIndexFields;
 use hdf5_pure_format::__private::ChunkRecord;
 use rstest::rstest;

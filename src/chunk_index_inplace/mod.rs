@@ -9,10 +9,10 @@
 //! [`Dataset::append`](crate::Dataset::append) supports partial tails and re-encodable filters.
 //! SWMR appends require an unfiltered Extensible Array and chunk-aligned extents.
 
-use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::BlockOffsetWidth;
 use hdf5_pure_format::__private::ChunkIndexFields;
@@ -273,7 +273,7 @@ pub(crate) trait Store: Source {
     /// Propagates reservation, producer, placement, I/O, and allocator restoration errors.
     fn allocate_emitted(
         &mut self,
-        length: NonZeroU64,
+        length: NonZeroByteLength,
         class: AllocationClass,
         emit: impl FnOnce(
             PhysicalAddress,
@@ -4250,7 +4250,7 @@ mod tests {
 
         fn allocate_emitted(
             &mut self,
-            length: NonZeroU64,
+            length: NonZeroByteLength,
             class: AllocationClass,
             emit: impl FnOnce(
                 PhysicalAddress,

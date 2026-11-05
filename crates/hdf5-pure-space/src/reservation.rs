@@ -2,6 +2,7 @@
 
 use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::{FileSpacePageSize, FormatError, StoredAddress};
 
 use crate::admission::TrackedSpace;
@@ -19,7 +20,7 @@ use crate::session::SessionSpace;
 /// independently read block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReservationRequest {
-    size: NonZeroU64,
+    size: NonZeroByteLength,
     class: AllocationClass,
     page_type: PageType,
     kind: ReservationKind,
@@ -27,12 +28,16 @@ pub struct ReservationRequest {
 
 impl ReservationRequest {
     /// Creates a request using the PAGE type corresponding to `class`.
-    pub fn new(size: NonZeroU64, class: AllocationClass) -> Self {
+    pub fn new(size: NonZeroByteLength, class: AllocationClass) -> Self {
         Self::with_page_type(size, class, class.into())
     }
 
     /// Creates a request with a PAGE type independent of its allocation purpose.
-    pub fn with_page_type(size: NonZeroU64, class: AllocationClass, page_type: PageType) -> Self {
+    pub fn with_page_type(
+        size: NonZeroByteLength,
+        class: AllocationClass,
+        page_type: PageType,
+    ) -> Self {
         Self {
             size,
             class,
@@ -66,14 +71,12 @@ impl ReservationRequest {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
     /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest};
     ///
     /// let request = ReservationRequest::new(
-    ///     NonZeroU64::new(100).unwrap(), AllocationClass::Metadata,
+    ///     NonZeroByteLength::new(100).unwrap(), AllocationClass::Metadata,
     /// );
     /// let start = StoredAddress::new(4_000);
     /// let page_size = Some(FileSpacePageSize::DEFAULT);
@@ -119,7 +122,7 @@ impl ReservationRequest {
     }
 
     /// Returns the allocation length in bytes.
-    pub fn size(self) -> NonZeroU64 {
+    pub fn size(self) -> NonZeroByteLength {
         self.size
     }
 
@@ -287,8 +290,9 @@ impl<'a> ReservationBatch<'a> {
                     ReservationKind::Compound => own.allocate(size),
                 };
                 extent.or_else(|| {
-                    let span =
-                        NonZeroU64::new(size.get().checked_next_multiple_of(page_size.get())?)?;
+                    let span = NonZeroByteLength::new(
+                        size.get().checked_next_multiple_of(page_size.get())?,
+                    )?;
                     let claimed = other.allocate_whole_units(span)?;
                     // The claimed whole-page extent is at least as long as the nonempty request.
                     let extent = Extent::new(claimed.start(), size.get())

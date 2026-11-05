@@ -1,6 +1,5 @@
-use core::num::NonZeroU64;
-
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest};
 use rstest::rstest;
@@ -23,7 +22,10 @@ fn block_ranges_preserve_complete_owner_and_encoded_subrange(
 ) {
     let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
     let request = BlockRequest::new(
-        ReservationRequest::new(NonZeroU64::new(64).unwrap(), AllocationClass::Metadata),
+        ReservationRequest::new(
+            NonZeroByteLength::new(64).unwrap(),
+            AllocationClass::Metadata,
+        ),
         encoded,
         EncodingDependency::Allocation,
     )
@@ -60,7 +62,10 @@ fn block_ranges_preserve_complete_owner_and_encoded_subrange(
 #[case::past_end(160, 8)]
 fn block_encoding_outside_owned_allocation_is_rejected(#[case] address: u64, #[case] encoded: u64) {
     let request = BlockRequest::new(
-        ReservationRequest::new(NonZeroU64::new(64).unwrap(), AllocationClass::Metadata),
+        ReservationRequest::new(
+            NonZeroByteLength::new(64).unwrap(),
+            AllocationClass::Metadata,
+        ),
         encoded,
         EncodingDependency::Allocation,
     )
@@ -85,7 +90,7 @@ fn block_encoding_outside_owned_allocation_is_rejected(#[case] address: u64, #[c
 fn block_request_rejects_encoding_larger_than_allocation() {
     assert_eq!(
         BlockRequest::new(
-            ReservationRequest::new(NonZeroU64::new(16).unwrap(), AllocationClass::Raw),
+            ReservationRequest::new(NonZeroByteLength::new(16).unwrap(), AllocationClass::Raw),
             17,
             EncodingDependency::Independent,
         )
@@ -96,8 +101,10 @@ fn block_request_rejects_encoding_larger_than_allocation() {
 
 #[test]
 fn planned_block_rejects_a_different_placement_request() {
-    let reservation =
-        ReservationRequest::new(NonZeroU64::new(64).unwrap(), AllocationClass::Metadata);
+    let reservation = ReservationRequest::new(
+        NonZeroByteLength::new(64).unwrap(),
+        AllocationClass::Metadata,
+    );
     let placement = reservation
         .for_block()
         .place_after(

@@ -1,7 +1,7 @@
-use core::num::NonZeroU64;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::{Extent, SessionSpace};
 use rstest::rstest;
 
@@ -55,7 +55,7 @@ fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
                 .reserve_with(
                     offsets,
                     addresses,
-                    NonZeroU64::new(2000).unwrap(),
+                    NonZeroByteLength::new(2000).unwrap(),
                     AllocationClass::Metadata,
                     |_, _| panic!("initial metadata reservation releases no spare"),
                 )
@@ -64,7 +64,7 @@ fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
                 .reserve_with(
                     offsets,
                     addresses,
-                    NonZeroU64::new(64).unwrap(),
+                    NonZeroByteLength::new(64).unwrap(),
                     AllocationClass::Raw,
                     |_, _| panic!("initial raw reservation releases no spare"),
                 )
@@ -87,7 +87,7 @@ fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
         .reserve_with(
             OffsetWidth::Eight,
             addresses,
-            NonZeroU64::new(size).unwrap(),
+            NonZeroByteLength::new(size).unwrap(),
             AllocationClass::Metadata,
             |eoa, extent| {
                 released.push((eoa, extent));
@@ -113,7 +113,7 @@ fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
         .reserve_with(
             offsets,
             addresses,
-            NonZeroU64::new(size).unwrap(),
+            NonZeroByteLength::new(size).unwrap(),
             AllocationClass::Metadata,
             |_, _| {
                 releases += 1;
@@ -599,7 +599,7 @@ impl AggregateSpace {
         &mut self,
         addresses: AddressContext,
         space: &mut SessionSpace,
-        size: NonZeroU64,
+        size: NonZeroByteLength,
         class: AllocationClass,
     ) -> Result<Placement, Error> {
         self.reserve_with(
@@ -625,7 +625,8 @@ impl WriteEngine {
         len: u64,
         class: AllocationClass,
     ) -> Result<Option<Placement>, Error> {
-        let (Some(aggregation), Some(size)) = (self.aggregation.as_mut(), NonZeroU64::new(len))
+        let (Some(aggregation), Some(size)) =
+            (self.aggregation.as_mut(), NonZeroByteLength::new(len))
         else {
             return Ok(None);
         };

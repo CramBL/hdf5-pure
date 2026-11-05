@@ -4,9 +4,10 @@
 //! Application consumes the matching replacement buffers and resolves variable-length heap
 //! addresses before writing.
 
-use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use core::num::{NonZeroU32, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
@@ -941,7 +942,7 @@ impl WriteEngine {
             let mut requests = new_chunks
                 .iter()
                 .map(|chunk| {
-                    NonZeroU64::new(chunk.stored_size())
+                    NonZeroByteLength::new(chunk.stored_size())
                         .map(|size| {
                             BlockRequest::complete(
                                 ReservationRequest::new(size, AllocationClass::Raw),
@@ -953,7 +954,7 @@ impl WriteEngine {
                         ))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(size) = NonZeroU64::new(index_len) {
+            if let Some(size) = NonZeroByteLength::new(index_len) {
                 requests.push(BlockRequest::complete(
                     ReservationRequest::with_page_type(
                         size,
@@ -1062,7 +1063,7 @@ impl WriteEngine {
                     length: chunk.stored_size(),
                 })
         })?;
-        let (choice, mut reservations) = if let Some(length) = NonZeroU64::new(length) {
+        let (choice, mut reservations) = if let Some(length) = NonZeroByteLength::new(length) {
             self.plan_blocks_with_fallback(
                 BlockRequest::complete(
                     ReservationRequest::new(length, AllocationClass::Raw),
@@ -1075,7 +1076,7 @@ impl WriteEngine {
                         .map(|chunk| {
                             Ok(BlockRequest::complete(
                                 ReservationRequest::new(
-                                    NonZeroU64::new(chunk.stored_size()).ok_or(
+                                    NonZeroByteLength::new(chunk.stored_size()).ok_or(
                                         FormatError::InvalidChunkGeometry(
                                             "chunk allocation is empty",
                                         ),
@@ -1233,7 +1234,7 @@ impl WriteEngine {
         set: &CompressedChunkSet,
     ) -> Result<ChunkedHeader, Error> {
         let length = chunked_write::chunked_data_len(set)?;
-        let Some(size) = NonZeroU64::new(length) else {
+        let Some(size) = NonZeroByteLength::new(length) else {
             let placement = self.reserve(0, AllocationClass::Raw)?;
             let address = self
                 .context
@@ -1432,7 +1433,7 @@ impl WriteEngine {
                     })
             })?
         };
-        if let Some(size) = NonZeroU64::new(preferred)
+        if let Some(size) = NonZeroByteLength::new(preferred)
             && reuse
         {
             self.plan_blocks_with_fallback(
@@ -1448,7 +1449,7 @@ impl WriteEngine {
                         .map(|chunk| {
                             Ok(BlockRequest::complete(
                                 ReservationRequest::new(
-                                    NonZeroU64::new(chunk.stored_size()).ok_or(
+                                    NonZeroByteLength::new(chunk.stored_size()).ok_or(
                                         FormatError::InvalidChunkGeometry(
                                             "chunk allocation is empty",
                                         ),
@@ -1467,7 +1468,7 @@ impl WriteEngine {
             )
         } else {
             let mut requests = Vec::new();
-            if let Some(size) = NonZeroU64::new(preferred) {
+            if let Some(size) = NonZeroByteLength::new(preferred) {
                 requests.push(BlockRequest::complete(
                     ReservationRequest::new(size, AllocationClass::Raw),
                     dependency,
@@ -1624,7 +1625,7 @@ impl WriteEngine {
             filtered,
         )?;
         drop(occupied);
-        let length = NonZeroU64::new(prepared.payload_len()).ok_or(
+        let length = NonZeroByteLength::new(prepared.payload_len()).ok_or(
             FormatError::InvalidChunkGeometry("verbatim chunk storage is empty"),
         )?;
         let mut requests = vec![BlockRequest::complete(

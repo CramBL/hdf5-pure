@@ -5,8 +5,8 @@
 //! between padding chunks, then admits the gaps and checks the final manager projection.
 
 use std::collections::BTreeSet;
-use std::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_format::__private::SectionInfoCounts;
 use hdf5_pure_space::__private::AllocationClass;
@@ -483,7 +483,7 @@ pub(super) fn place(
     start: StoredAddress,
     len: u64,
 ) -> Result<Extent, FormatError> {
-    let size = NonZeroU64::new(len)
+    let size = NonZeroByteLength::new(len)
         .ok_or_else(|| FormatError::Internal("a PAGE block is empty".into()))?;
     Ok(ReservationRequest::new(size, AllocationClass::Metadata)
         .for_block()

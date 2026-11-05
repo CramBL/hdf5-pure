@@ -21,7 +21,7 @@ fn allocation_padding_retains_small_tails_and_promotes_complete_interiors(
         final_eoa: StoredAddress::new(4 * PAGE),
         appended: true,
         request: ReservationRequest::new(
-            NonZeroU64::new(3 * PAGE).unwrap(),
+            NonZeroByteLength::new(3 * PAGE).unwrap(),
             AllocationClass::Metadata,
         ),
     }
@@ -65,7 +65,7 @@ fn allocation_padding_rejects_unowned_or_already_free_bytes(
         final_eoa: StoredAddress::new(4 * PAGE),
         appended: true,
         request: ReservationRequest::new(
-            NonZeroU64::new(3 * PAGE).unwrap(),
+            NonZeroByteLength::new(3 * PAGE).unwrap(),
             AllocationClass::Metadata,
         ),
     };
@@ -89,7 +89,7 @@ fn allocation_padding_rejects_invalid_batches(
         final_eoa: StoredAddress::new(4 * PAGE),
         appended: true,
         request: ReservationRequest::new(
-            NonZeroU64::new(3 * PAGE).unwrap(),
+            NonZeroByteLength::new(3 * PAGE).unwrap(),
             AllocationClass::Metadata,
         ),
     };

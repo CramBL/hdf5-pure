@@ -1,12 +1,11 @@
 #![cfg(feature = "__hdf5-1.10")]
 
-use core::num::NonZeroU64;
-
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::BaseAddress;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
@@ -114,7 +113,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
             let allocation = aggregates
                 .allocate(
                     eoa,
-                    NonZeroU64::new(expected.len()).unwrap(),
+                    NonZeroByteLength::new(expected.len()).unwrap(),
                     AllocationClass::Raw,
                 )
                 .unwrap();
@@ -136,7 +135,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                 let allocation = aggregates
                     .allocate(
                         eoa,
-                        NonZeroU64::new(collection.range().length()).unwrap(),
+                        NonZeroByteLength::new(collection.range().length()).unwrap(),
                         AllocationClass::Raw,
                     )
                     .unwrap();

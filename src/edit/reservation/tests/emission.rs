@@ -1,5 +1,4 @@
-use core::num::NonZeroU64;
-
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::AllocationClass;
 use rstest::rstest;
 use test_util::disk_log;
@@ -229,7 +228,7 @@ fn persistent_stream_failures_restore_prior_root_allocator_and_eof(
     let before = engine.disk_bytes().unwrap();
     let free = engine.space.reusable_sections().collect::<Vec<_>>();
     let error = match engine.store().allocate_emitted(
-        NonZeroU64::new(128).unwrap(),
+        NonZeroByteLength::new(128).unwrap(),
         AllocationClass::Metadata,
         |_, write| {
             if after_write {
@@ -260,7 +259,7 @@ fn persistent_stream_failures_restore_prior_root_allocator_and_eof(
     let allocation = engine
         .store()
         .allocate_emitted(
-            NonZeroU64::new(128).unwrap(),
+            NonZeroByteLength::new(128).unwrap(),
             AllocationClass::Metadata,
             |_, write| {
                 write(&[31; 64])?;
@@ -307,7 +306,7 @@ fn nonpersistent_stream_failures_block_dependent_publication(#[case] strategy: F
         .unwrap();
     let prior = engine.disk_bytes().unwrap();
     let error = match engine.store().allocate_emitted(
-        NonZeroU64::new(16).unwrap(),
+        NonZeroByteLength::new(16).unwrap(),
         AllocationClass::Metadata,
         |_, write| {
             write(&[53; 8])?;
@@ -333,7 +332,7 @@ fn nonpersistent_stream_failures_block_dependent_publication(#[case] strategy: F
     );
     let mut store = engine.store();
     let error = match store.allocate_emitted(
-        NonZeroU64::new(16).unwrap(),
+        NonZeroByteLength::new(16).unwrap(),
         AllocationClass::Metadata,
         |_, _| panic!("uncertain allocation invokes a producer"),
     ) {
@@ -436,7 +435,7 @@ fn streamed_fixed_arrays_use_bounded_heap(
         engine
             .store()
             .allocate_emitted(
-                NonZeroU64::new(length).unwrap(),
+                NonZeroByteLength::new(length).unwrap(),
                 AllocationClass::Metadata,
                 |address, emit| {
                     assert_eq!(address.get(), start);
@@ -505,7 +504,7 @@ fn streamed_reservations_issue_each_fragment_once(#[case] fragments: u64) {
     let allocation = engine
         .store()
         .allocate_emitted(
-            NonZeroU64::new(fragments * 1_024).unwrap(),
+            NonZeroByteLength::new(fragments * 1_024).unwrap(),
             AllocationClass::Metadata,
             |address, write| {
                 assert_eq!(address.get(), start);
@@ -546,7 +545,7 @@ fn streamed_aggregate_capacity_is_padded_once_after_all_fragments() {
     let allocation = engine
         .store()
         .allocate_emitted(
-            NonZeroU64::new(16).unwrap(),
+            NonZeroByteLength::new(16).unwrap(),
             AllocationClass::Raw,
             |address, write| {
                 assert_eq!(address.get(), start);
