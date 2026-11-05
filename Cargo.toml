@@ -421,6 +421,13 @@ required-features = ["ndarray"]
 name = "filter_pipeline_profile"
 required-features = ["deflate"]
 
+# Compare file widths with runtime workloads, phase timings and space observations.
+[[example]]
+name = "width_benchmarks"
+path = "examples/width_benchmarks/main.rs"
+required-features = ["std", "deflate"]
+test = true
+
 [[bench]]
 name = "filtered_chunks"
 harness = false
