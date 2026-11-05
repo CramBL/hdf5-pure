@@ -1,5 +1,6 @@
 //! Classic aggregate reservations for staged edits and immediate appends.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::AggregationError;
@@ -183,14 +184,14 @@ impl AggregateSpace {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
-    pub(super) fn unused_bytes(self) -> Result<u64, FormatError> {
+    pub(super) fn unused_bytes(self) -> Result<ByteLength, FormatError> {
         // The aggregate policy stores at most one metadata span and one raw-data span.
-        self.unused().try_fold(0u64, |total, extent| {
+        self.unused().try_fold(ByteLength::new(0), |total, extent| {
             total
                 .checked_add(extent.len())
                 .ok_or(FormatError::OffsetOverflow {
-                    offset: total,
-                    length: extent.len(),
+                    offset: total.get(),
+                    length: extent.len().get(),
                 })
         })
     }
@@ -275,11 +276,12 @@ impl WriteEngine {
         let retained_start = free_space::trailing_run_start([&post], eoa);
         let released_eoa = post.release_all(persist.threshold, eoa, spare.iter().copied());
         let released_start = free_space::trailing_run_start([&post], released_eoa);
-        let spare_len = spare.iter().map(|extent| extent.len()).sum::<u64>();
-        if retained_start
-            .checked_distance_from(released_start)
-            .unwrap_or(0)
-            <= spare_len
+        let spare_len = ByteLength::new(spare.iter().map(|extent| extent.len().get()).sum::<u64>());
+        if ByteLength::new(
+            retained_start
+                .checked_distance_from(released_start)
+                .unwrap_or(0),
+        ) <= spare_len
         {
             return Ok(());
         }

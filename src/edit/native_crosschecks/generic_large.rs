@@ -92,7 +92,7 @@ impl WriteEngine {
                     &(self.addresses().resolve(extent.start()).unwrap().get()
                         ..self.addresses().resolve(extent.end()).unwrap().get())
                 ),
-                extent.len()
+                extent.len().get()
             );
             assert!(
                 self.space

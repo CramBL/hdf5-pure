@@ -356,7 +356,7 @@ fn large_chunk_appends_retain_only_metadata_spare() {
             .unused(AllocationClass::Metadata)
             .unwrap()
             .len(),
-        1898
+        ByteLength::new(1898)
     );
 }
 

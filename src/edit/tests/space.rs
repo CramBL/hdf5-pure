@@ -139,7 +139,7 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
         .unwrap()
         .old_blocks
         .iter()
-        .map(|extent| (extent.start(), extent.len()))
+        .map(|extent| (extent.start(), extent.len().get()))
         .collect();
     actual.sort_unstable();
     let expected: Vec<_> = expected
@@ -261,7 +261,12 @@ fn array_store_allocations_reuse_partial_pages_of_the_requested_class(
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let before = engine.space.paged_sections().unwrap();
     let length = engine.image.len();
-    assert!(before.metadata().iter().any(|extent| extent.len() >= 8));
+    assert!(
+        before
+            .metadata()
+            .iter()
+            .any(|extent| extent.len() >= ByteLength::new(8))
+    );
     let at = {
         let mut store = engine.store();
         store
@@ -279,14 +284,14 @@ fn array_store_allocations_reuse_partial_pages_of_the_requested_class(
         .iter()
         .find(|extent| engine.addresses().resolve(extent.start()).unwrap().get() == at)
         .unwrap();
-    assert!(extent.len() >= 8);
+    assert!(extent.len() >= ByteLength::new(8));
     let expected: Vec<_> = selected
         .iter()
         .filter_map(|candidate| {
             if candidate == extent {
                 FreeExtent::new(
                     candidate.start().checked_add(8).unwrap(),
-                    ByteLength::new(candidate.len() - 8),
+                    ByteLength::new(candidate.len().get() - 8),
                 )
             } else {
                 Some(*candidate)
@@ -533,7 +538,7 @@ fn reclamation_retains_storage_after_heap_validation_fails(
                 &session,
                 FileRange::new(
                     session.addresses().resolve(extent.start()).unwrap(),
-                    extent.len()
+                    extent.len().get()
                 )
                 .unwrap()
             ),
@@ -736,7 +741,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
                 &session,
                 FileRange::new(
                     session.addresses().resolve(extent.start()).unwrap(),
-                    extent.len()
+                    extent.len().get()
                 )
                 .unwrap()
             ),
@@ -894,23 +899,23 @@ fn page_zero_detection_checks_each_index_span() {
         PAGE,
         c_written
             .iter()
-            .map(|&(addr, len)| (StoredAddress::new(addr), len))
+            .map(|&(addr, len)| (StoredAddress::new(addr), ByteLength::new(len)))
     ));
     assert!(!reclaim::touches_page_zero(
         PAGE,
-        [(StoredAddress::new(1024), 200)]
+        [(StoredAddress::new(1024), ByteLength::new(200))]
     ));
     assert!(reclaim::touches_page_zero(
         PAGE,
-        [(StoredAddress::new(511), 200)]
+        [(StoredAddress::new(511), ByteLength::new(200))]
     ));
     assert!(!reclaim::touches_page_zero(
         PAGE,
-        [(StoredAddress::new(512), 200)]
+        [(StoredAddress::new(512), ByteLength::new(200))]
     ));
     assert!(!reclaim::touches_page_zero(
         PAGE,
-        [(StoredAddress::new(0), 0)]
+        [(StoredAddress::new(0), ByteLength::new(0))]
     ));
     assert!(!reclaim::touches_page_zero(PAGE, []));
 }
@@ -1198,7 +1203,7 @@ fn paged_open_seeds_each_manager_by_slot(
         sections.unclassified().is_empty(),
         "our own paged writer files nothing whose page type is unknown"
     );
-    let flat: u64 = all.iter().map(|extent| extent.len()).sum();
+    let flat: u64 = all.iter().map(|extent| extent.len().get()).sum();
     assert_eq!(
         flat, on_disk,
         "the split lists hold exactly the file's free space"
@@ -1505,8 +1510,12 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         lengths: s.context.superblock().length_size,
     };
 
-    let free_total =
-        |s: &WriteEngine| -> u64 { s.space.reusable_sections().map(|extent| extent.len()).sum() };
+    let free_total = |s: &WriteEngine| -> u64 {
+        s.space
+            .reusable_sections()
+            .map(|extent| extent.len().get())
+            .sum()
+    };
 
     let (mut placed, mut declined) = (0usize, 0usize);
     for hole in 120..420u64 {
@@ -1619,10 +1628,10 @@ fn paged_tail_allocation_releases_unused_page_bytes() {
         .find(|extent| extent.end() == StoredAddress::new(after))
         .expect("the page the tail opened leaves a free remainder at end-of-file");
     assert!(
-        extent.len() < PAGE && extent.start() >= StoredAddress::new(before),
+        extent.len() < ByteLength::new(PAGE) && extent.start() >= StoredAddress::new(before),
         "the tail's blocks take the front of the page it opened and the rest is free ({} of \
          {PAGE} at {}, file {before} -> {after})",
-        extent.len(),
+        extent.len().get(),
         extent.start().get()
     );
 }
@@ -1682,11 +1691,15 @@ fn deleted_chunk_index_is_freed_into_a_raw_manager() {
                 "metadata free section ({}, {}) sits in page {p}, which still holds live raw \
                  chunk data",
                 extent.start().get(),
-                extent.len()
+                extent.len().get()
             );
         }
     }
-    let reclaimed: u64 = s.space.reusable_sections().map(|extent| extent.len()).sum();
+    let reclaimed: u64 = s
+        .space
+        .reusable_sections()
+        .map(|extent| extent.len().get())
+        .sum();
     assert!(reclaimed > 0, "the delete reclaimed nothing");
 }
 
@@ -1950,7 +1963,10 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
         !before.is_empty(),
         "the append must leave a reusable raw tail"
     );
-    assert_eq!(before.iter().map(|extent| extent.len()).sum::<u64>(), 512);
+    assert_eq!(
+        before.iter().map(|extent| extent.len().get()).sum::<u64>(),
+        512
+    );
 
     engine.create_group(&ObjectPathBuf::parse("g")).unwrap();
     engine.commit().unwrap();
@@ -1971,7 +1987,7 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
             0,
             "padding {}+{} does not reach a page boundary",
             extent.start().get(),
-            extent.len()
+            extent.len().get()
         );
     }
 
@@ -2098,7 +2114,8 @@ fn inplace_appends_keep_new_index_allocations_in_metadata_pages() {
         for free in engine.space.reusable_sections() {
             let start = engine.addresses().resolve(free.start()).unwrap().get();
             assert!(
-                allocation.end().get() <= start || start + free.len() <= allocation.start().get()
+                allocation.end().get() <= start
+                    || start + free.len().get() <= allocation.start().get()
             );
         }
     }
@@ -2554,7 +2571,7 @@ fn write_rejected_heap_owner(
         .into_iter()
         .filter(|&(range, _)| {
             heap.allocations().iter().all(|(extent, _)| {
-                (extent.start(), extent.len())
+                (extent.start(), extent.len().get())
                     != (
                         session.addresses().relative(range.start()).unwrap(),
                         range.length(),

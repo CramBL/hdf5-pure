@@ -316,16 +316,19 @@ impl ManagerPlan {
                 sections: _,
                 section_list_len,
             } = block;
-            if header.len() != hdf5_pure_format::__private::free_space_manager_header_len(widths)
-                || section_list.len() < *section_list_len
+            if header.len()
+                != ByteLength::new(hdf5_pure_format::__private::free_space_manager_header_len(
+                    widths,
+                ))
+                || section_list.len() < ByteLength::new(*section_list_len)
             {
                 return Err(FormatError::Internal(
                     "manager allocations differ from their measured lengths".into(),
                 ));
             }
-            if section_list.len() > max_length {
+            if section_list.len() > ByteLength::new(max_length) {
                 return Err(FormatError::LengthTooLarge {
-                    length: section_list.len(),
+                    length: section_list.len().get(),
                     length_size: widths.lengths.get(),
                 });
             }
@@ -415,12 +418,15 @@ impl ManagerPlan {
             }
             block.section_list = manager_extent(
                 block.section_list.start(),
-                block.section_list.len().checked_add(padding).ok_or(
-                    FormatError::OffsetOverflow {
-                        offset: block.section_list.len(),
+                block
+                    .section_list
+                    .len()
+                    .checked_add(ByteLength::new(padding))
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: block.section_list.len().get(),
                         length: padding,
-                    },
-                )?,
+                    })?
+                    .get(),
             )?;
         }
         Ok(Self::new(widths, blocks, allocation_end)?.encode_allocations())
@@ -490,7 +496,7 @@ impl ManagerPlan {
                     header.start(),
                     section_list.start(),
                     class,
-                    Some(section_list.len()),
+                    Some(section_list.len().get()),
                 )?;
             #[cfg(all(test, feature = "std"))]
             crate::edit::observations::record_manager_encoding(
@@ -602,7 +608,7 @@ impl ManagerProjection {
                 .iter()
                 .map(|extent| FreeSection {
                     addr: extent.start(),
-                    size: extent.len(),
+                    size: extent.len().get(),
                 })
                 .collect();
             let section_list_len = if let Some(index) = metadata_sizes

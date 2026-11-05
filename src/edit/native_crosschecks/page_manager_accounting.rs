@@ -95,9 +95,9 @@ fn persisted_page_workloads_keep_live_free_and_padding_accounting_disjoint(
             engine.space.admitted_snapshot().sections().fold(
                 (0_u64, 0_u64, 0_u64),
                 |(metadata, raw, dead), (extent, class)| match class {
-                    FreeClass::Dead => (metadata, raw, dead + extent.len()),
-                    FreeClass::Page(PageType::Meta) => (metadata + extent.len(), raw, dead),
-                    FreeClass::Page(PageType::Raw) => (metadata, raw + extent.len(), dead),
+                    FreeClass::Dead => (metadata, raw, dead + extent.len().get()),
+                    FreeClass::Page(PageType::Meta) => (metadata + extent.len().get(), raw, dead),
+                    FreeClass::Page(PageType::Raw) => (metadata, raw + extent.len().get(), dead),
                 },
             );
         assert_eq!(metadata_list + raw_list, free);

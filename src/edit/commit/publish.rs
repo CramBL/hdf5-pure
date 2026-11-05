@@ -929,7 +929,7 @@ impl WriteEngine {
         let final_geometry = final_header.geometry()?;
         let ext_oh = final_geometry
             .into_placed_allocation(extension.iter().map(|allocation| allocation.range()))?;
-        let physical_region = FileRange::new(base.resolve(region.start())?, region.len())?;
+        let physical_region = FileRange::new(base.resolve(region.start())?, region.len().get())?;
         let final_eof = base.resolve(final_eoa)?;
 
         if reused {
@@ -1043,7 +1043,7 @@ impl WriteEngine {
                     })?;
                 self.fill_zeros(FileRange::new(
                     physical.start().checked_add(offset)?,
-                    gap.len(),
+                    gap.len().get(),
                 )?)?;
             }
             if next_extension == Some(address) {
@@ -1069,7 +1069,7 @@ impl WriteEngine {
                 })?;
             self.fill_zeros(FileRange::new(
                 physical.start().checked_add(offset)?,
-                gap.len(),
+                gap.len().get(),
             )?)?;
         }
         Ok(())

@@ -1,6 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::StoredAddress;
@@ -155,7 +156,7 @@ fn page_admission_bounds_index_queue_and_reconstruction_work(
     assert_eq!(super::paged_sections(&post), [vec![], expected, vec![]]);
     assert_eq!(
         post.raw.total_bytes(),
-        (count_u64 + unrelated_u64 + 1) * PAGE
+        ByteLength::new((count_u64 + unrelated_u64 + 1) * PAGE)
     );
     assert_eq!(work.indexed_extents, unrelated + 1);
     assert_eq!(work.extent_visits, count);
@@ -271,7 +272,7 @@ fn allocation_padding_below_the_return_threshold_is_merged_in_bulk(
         super::paged_sections(&post),
         [vec![], vec![(PAGE, count * PAGE)], vec![]]
     );
-    assert_eq!(post.raw.total_bytes(), count * PAGE);
+    assert_eq!(post.raw.total_bytes(), ByteLength::new(count * PAGE));
     assert_eq!(work.extent_visits, 3 * usize::try_from(count).unwrap());
     assert_eq!(work.integrated_extents, 0);
     assert_eq!(work.indexed_extents, 0);
@@ -306,7 +307,7 @@ fn one_and_billion_page_returns_have_equal_observed_admission_work(#[case] pages
             vec![]
         ]
     );
-    assert_eq!(post.raw.total_bytes(), (pages + 1) * PAGE);
+    assert_eq!(post.raw.total_bytes(), ByteLength::new((pages + 1) * PAGE));
     assert_eq!(work.extent_visits, 2);
     assert_eq!(work.inserted_extents, 2);
     assert_eq!(work.integrated_extents, 2);
@@ -367,7 +368,7 @@ fn empty_and_scalar_page_batches_skip_indexes(
     assert_eq!(post.raw.sections(), expected);
     assert_eq!(
         post.raw.total_bytes(),
-        expected.iter().map(|&(_, len)| len).sum()
+        ByteLength::new(expected.iter().map(|&(_, len)| len).sum::<u64>())
     );
     assert_eq!(
         actual,
@@ -404,7 +405,7 @@ fn dropped_tail_preserves_its_original_partial_head_class() {
         super::paged_sections(&post),
         [vec![(7 * PAGE + 100, PAGE - 100)], vec![], vec![]]
     );
-    assert_eq!(post.meta.total_bytes(), PAGE - 100);
+    assert_eq!(post.meta.total_bytes(), ByteLength::new(PAGE - 100));
     assert_eq!(work.queue_visits, 2);
     assert_eq!(work.inserted_extents, 0);
     assert_eq!(work.integrated_extents, 0);

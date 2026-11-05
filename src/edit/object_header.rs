@@ -993,7 +993,7 @@ pub(crate) fn build_v2_object_header_allocation(
         stamped_prefix(&owned),
         owned.widths(),
         allocation.start(),
-        allocation.len(),
+        allocation.len().get(),
         &owned,
     )?
     .encode())
@@ -1170,7 +1170,7 @@ mod tests {
         assert!(chunks.len() > 1);
         assert_eq!(
             chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>(),
-            allocation.len()
+            allocation.len().get()
         );
         let actual =
             WriteEngine::gather_oh_messages(&src, physical, addresses, crate::file_writer::WIDTHS)

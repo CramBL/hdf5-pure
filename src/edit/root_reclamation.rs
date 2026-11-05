@@ -1,9 +1,9 @@
 //! Reuse of a superseded root header after publication.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ReturnedExtents;
 
-use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
 use crate::object_graph::ObjectId;
@@ -47,7 +47,7 @@ impl WriteEngine {
         }
         if !to_free.entries().iter().any(|&(extent, _)| {
             extent.start() == self.context.superblock().root_group_address
-                && extent.len() < persist.threshold
+                && extent.len() < ByteLength::new(persist.threshold)
         }) {
             return Ok(None);
         }

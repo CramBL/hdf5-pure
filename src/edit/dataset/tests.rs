@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DataLayout;
@@ -298,7 +299,7 @@ fn failed_page_creation_preserves_reusable_state_and_existing_values(
         engine
             .space
             .reusable_sections()
-            .any(|extent| extent.len() >= 640)
+            .any(|extent| extent.len() >= ByteLength::new(640))
     );
     let mut builder = DatasetBuilder::new("d");
     Creation::Fixed(40).configure(&mut builder, false);

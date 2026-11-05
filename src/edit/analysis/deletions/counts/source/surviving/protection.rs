@@ -165,7 +165,10 @@ impl ProtectedCounts {
             return Ok(());
         }
         let resolve = |extent: Extent| {
-            FileRange::new(engine.addresses().resolve(extent.start())?, extent.len())
+            FileRange::new(
+                engine.addresses().resolve(extent.start())?,
+                extent.len().get(),
+            )
         };
         self.exclude_reusable(engine.space.reusable_sections().map(resolve))?;
         self.exclude_retained(

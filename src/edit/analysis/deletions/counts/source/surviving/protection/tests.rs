@@ -302,7 +302,7 @@ fn protection_excludes_retained_claims_without_inferring_page_ownership(
         }
         RetainedKind::Unclassified => {}
     }
-    assert_eq!(engine.space.reusable_bytes().unwrap(), 0);
+    assert_eq!(engine.space.reusable_bytes().unwrap(), ByteLength::new(0));
     let before = engine.disk_bytes().unwrap();
     let result = batch.protect(&engine, []);
     if conflict {
@@ -381,7 +381,7 @@ fn protection_excludes_aggregate_spare_without_combining_free_lists(
             unused,
             FileRange::new(
                 engine.addresses().resolve(spare.start()).unwrap(),
-                spare.len()
+                spare.len().get()
             )
             .unwrap()
         );

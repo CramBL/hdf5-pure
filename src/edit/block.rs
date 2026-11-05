@@ -55,7 +55,10 @@ impl PlannedBlock {
         }
         let allocation = placement.extent();
         Self::new(
-            FileRange::new(addresses.resolve(allocation.start())?, allocation.len())?,
+            FileRange::new(
+                addresses.resolve(allocation.start())?,
+                allocation.len().get(),
+            )?,
             request,
         )
     }
@@ -86,7 +89,10 @@ impl PlannedBlock {
             )));
         }
         let mut block = Self::new(
-            FileRange::new(addresses.resolve(allocation.start())?, allocation.len())?,
+            FileRange::new(
+                addresses.resolve(allocation.start())?,
+                allocation.len().get(),
+            )?,
             request,
         )?;
         block.encoding = FileRange::new(addresses.resolve(address)?, request.encoded_length())?;

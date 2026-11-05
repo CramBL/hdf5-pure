@@ -312,7 +312,10 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].end() == pair[1].start())
         );
-        assert_eq!(pieces.iter().map(|piece| piece.len()).sum::<u64>(), length);
+        assert_eq!(
+            pieces.iter().map(|piece| piece.len().get()).sum::<u64>(),
+            length
+        );
         for partial in [parts.leading, parts.trailing].into_iter().flatten() {
             assert_eq!(
                 partial.start().get() / 4_096,

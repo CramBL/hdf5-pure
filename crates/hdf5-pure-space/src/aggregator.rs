@@ -267,7 +267,7 @@ impl ClassicAggregators {
         };
         let size = size.get();
         if let Some(window) = own {
-            if size <= window.unused().map_or(0, Extent::len) {
+            if ByteLength::new(size) <= window.unused().map_or(ByteLength::new(0), Extent::len) {
                 return Ok(AggregationAllocation {
                     extent: window.take(size)?,
                     eoa,
@@ -1049,7 +1049,7 @@ mod tests {
                 metadata
                     .into_iter()
                     .chain(raw)
-                    .all(|extent| extent.len() < AGGREGATE_BLOCK_SIZE)
+                    .all(|extent| extent.len() < ByteLength::new(AGGREGATE_BLOCK_SIZE))
             );
             eoa = allocation.end_of_allocation();
         }

@@ -177,7 +177,7 @@ fn staged_reservations_use_classic_windows(
     );
     assert_eq!(
         engine.reusable_space_stats().unwrap().reusable_free_bytes(),
-        state.unused().map(|extent| extent.len()).sum::<u64>()
+        state.unused().map(|extent| extent.len().get()).sum::<u64>()
     );
 }
 

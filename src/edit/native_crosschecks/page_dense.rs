@@ -191,8 +191,8 @@ fn allocations(
     for extent in &allocations {
         let offset = extent.start().get() % page;
         assert!(
-            if extent.len() < page {
-                offset + extent.len() <= page
+            if extent.len().get() < page {
+                offset + extent.len().get() <= page
             } else {
                 offset == 0
             },

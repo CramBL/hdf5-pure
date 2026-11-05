@@ -46,7 +46,7 @@ fn dense_attribute_blocks_reuse_only_their_page_class(#[case] lengths: &[usize])
     assert_eq!(engine.image.len(), end);
     assert_eq!(
         engine.space.reusable_bytes().unwrap(),
-        before - expected_bytes
+        ByteLength::new(before.get() - expected_bytes)
     );
     let info =
         AttributeInfoMessage::parse_with_offset_width(&bytes, crate::file_writer::OFFSET_WIDTH)
@@ -139,7 +139,10 @@ fn failed_dense_block_emission_keeps_all_reservations_unavailable() {
     assert_eq!(error.kind(), ErrorKind::Other);
     assert_eq!(error.to_string(), "injected disk write failure");
     assert_eq!(engine.image.len(), length);
-    assert_eq!(engine.space.reusable_bytes().unwrap(), before - size);
+    assert_eq!(
+        engine.space.reusable_bytes().unwrap(),
+        ByteLength::new(before.get() - size)
+    );
     engine.restore_free(snapshot);
     assert_eq!(engine.space.reusable_bytes().unwrap(), before);
 }

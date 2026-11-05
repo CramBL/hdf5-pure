@@ -138,7 +138,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
             [extent(start + 112, 16), extent(start + 336, 48)]
         );
         assert_eq!(work.indexed_extents, 2);
-        assert_eq!(engine.space.reusable_bytes().unwrap(), 64);
+        assert_eq!(engine.space.reusable_bytes().unwrap(), ByteLength::new(64));
     } else {
         assert_eq!(work.indexed_extents, 0);
     }
@@ -256,7 +256,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         sections.iter().map(|&(address, length, class)| {
             [
                 Value::Number(address),
-                Value::Number(length),
+                Value::Number(length.get()),
                 Value::text(format!("{class:?}")),
             ]
         }),

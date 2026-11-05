@@ -391,7 +391,7 @@ impl PagedEdit {
     }
 
     /// Returns the longest run that [`Self::allocate`] can serve for `ty`.
-    pub(crate) fn largest(&self, ty: PageType) -> u64 {
+    pub(crate) fn largest(&self, ty: PageType) -> ByteLength {
         let (own, other) = match ty {
             PageType::Meta => (&self.meta, &self.raw),
             PageType::Raw => (&self.raw, &self.meta),
@@ -895,15 +895,15 @@ impl PagedTail {
 ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
 /// );
 /// let append = space.plan_paged_append(StoredAddress::new(8_192), &[], &[])?;
-/// assert_eq!(append.admitted_snapshot().reusable_bytes()?, 0);
+/// assert_eq!(append.admitted_snapshot().reusable_bytes()?, ByteLength::new(0));
 /// let tail = append.reserve(256)?;
 /// assert_eq!(
 ///     tail.allocation,
 ///     Extent::new(StoredAddress::new(8_192), ByteLength::new(256)).unwrap(),
 /// );
 /// assert_eq!(tail.final_eoa, StoredAddress::new(12_288));
-/// assert_eq!(tail.post.admitted_snapshot().reusable_bytes()?, 3_840);
-/// assert_eq!(space.admitted_snapshot().reusable_bytes()?, 0);
+/// assert_eq!(tail.post.admitted_snapshot().reusable_bytes()?, ByteLength::new(3_840));
+/// assert_eq!(space.admitted_snapshot().reusable_bytes()?, ByteLength::new(0));
 /// # Ok::<(), hdf5_pure_core::FormatError>(())
 /// ```
 pub struct PagedAppend {
@@ -1068,7 +1068,10 @@ impl PagedPostFree {
         let candidates: BTreeSet<_> = extents
             .iter()
             .map(|&(extent, _)| extent)
-            .filter(|extent| (1..page_size).contains(&extent.len()) && !dropped.contains(extent))
+            .filter(|extent| {
+                (ByteLength::new(1)..ByteLength::new(page_size)).contains(&extent.len())
+                    && !dropped.contains(extent)
+            })
             .flat_map(|extent| [extent.start().get(), extent.end().get() - 1])
             .map(|addr| StoredAddress::new(addr / page_size * page_size))
             .filter_map(|page| Extent::new(page, ByteLength::new(page_size)))
@@ -1118,7 +1121,7 @@ impl PagedPostFree {
         mut dropped: Vec<(Extent, FreeClass)>,
     ) -> StoredAddress {
         let page_size = self.page_size.get();
-        dropped.retain(|&(extent, _)| extent.len() >= page_size);
+        dropped.retain(|&(extent, _)| extent.len() >= ByteLength::new(page_size));
         dropped.sort_unstable_by_key(|&(extent, _)| Reverse(extent.start()));
         let mut start = eoa;
         let mut head = None;
@@ -1151,7 +1154,7 @@ impl TrackedSpace for PagedPostFree {
     fn merges(&self, extent: Extent) -> bool {
         let page_size = self.page_size.get();
         let typed = [&self.meta, &self.raw, &self.dead];
-        if extent.len() < page_size {
+        if extent.len() < ByteLength::new(page_size) {
             return typed
                 .into_iter()
                 .any(|list| list.adjoins_within(extent, page_size));
@@ -1256,7 +1259,7 @@ mod tests {
             pages.len()
         );
         assert_eq!(paged.largest(ty), pages.len());
-        assert_eq!(paged.allocate(pages.len() + 1, ty), None);
+        assert_eq!(paged.allocate(pages.len().get() + 1, ty), None);
 
         let mut reopened = PagedEdit::new(page);
         for manager in ManagerSections::paged(&paged.sections(), page) {
@@ -1270,20 +1273,20 @@ mod tests {
         assert_eq!(reopened.sections().unclassified(), edges);
 
         let snapshot = paged.allocation_snapshot();
-        let length = pages.len() - page_size / 2;
+        let length = pages.len().get() - page_size / 2;
         let allocation = Extent::new(pages.start(), ByteLength::new(length)).unwrap();
         assert_eq!(paged.allocate(length, ty), Some(allocation));
         assert_eq!(paged.sections().unclassified(), edges);
         assert_eq!(
             paged.admitted_snapshot().reusable_bytes().unwrap(),
-            page_size / 2
+            ByteLength::new(page_size / 2)
         );
         assert_eq!(paged.allocate(page_size / 2 + 1, ty), None);
         paged.restore_allocation(snapshot);
         assert_eq!(paged.sections().metadata(), []);
         assert_eq!(paged.sections().raw(), [pages]);
         assert_eq!(paged.sections().unclassified(), edges);
-        assert_eq!(paged.allocate(pages.len(), ty), Some(pages));
+        assert_eq!(paged.allocate(pages.len().get(), ty), Some(pages));
         assert_eq!(paged.allocate(1, ty), None);
         assert_eq!(paged.sections().unclassified(), edges);
     }
@@ -1304,7 +1307,10 @@ mod tests {
         assert_eq!(paged.sections().metadata(), []);
         assert_eq!(paged.sections().raw(), []);
         assert_eq!(paged.sections().unclassified(), [section]);
-        assert_eq!(paged.admitted_snapshot().reusable_bytes().unwrap(), 0);
+        assert_eq!(
+            paged.admitted_snapshot().reusable_bytes().unwrap(),
+            ByteLength::new(0)
+        );
         assert_eq!(paged.allocate(1, PageType::Meta), None);
         assert_eq!(paged.allocate(1, PageType::Raw), None);
     }
@@ -1427,7 +1433,7 @@ mod tests {
                 dead.total_bytes(),
                 unclassified.total_bytes()
             ],
-            [100; 4]
+            [ByteLength::new(100); 4]
         );
         assert_eq!(last, tail);
         assert_eq!(meta_pad, [extent(5 * PAGE + 16, 100)]);
@@ -1474,14 +1480,17 @@ mod tests {
         paged.seed(extent(PAGE, PAGE / 2), Some(PageType::Meta));
         paged.track(extent(PAGE + PAGE / 2, PAGE / 2), FreeClass::Dead);
         paged.seed(extent(3 * PAGE + 100, 50), None);
-        assert_eq!(totals(&paged), [PAGE / 2, 0, PAGE / 2, 50]);
+        assert_eq!(
+            totals(&paged),
+            [PAGE / 2, 0, PAGE / 2, 50].map(ByteLength::new)
+        );
         paged.finish_seed();
-        assert_eq!(totals(&paged), [0, PAGE, 0, 50]);
+        assert_eq!(totals(&paged), [0, PAGE, 0, 50].map(ByteLength::new));
         let snapshot = paged.allocation_snapshot();
         assert_eq!(paged.allocate(100, PageType::Meta), Some(extent(PAGE, 100)));
-        assert_eq!(totals(&paged), [PAGE - 100, 0, 0, 50]);
+        assert_eq!(totals(&paged), [PAGE - 100, 0, 0, 50].map(ByteLength::new));
         paged.restore_allocation(snapshot);
-        assert_eq!(totals(&paged), [0, PAGE, 0, 50]);
+        assert_eq!(totals(&paged), [0, PAGE, 0, 50].map(ByteLength::new));
         let (post, eoa) = paged.post_free(
             1,
             StoredAddress::new(6 * PAGE),
@@ -1496,11 +1505,11 @@ mod tests {
                 post.dead.total_bytes(),
                 post.unclassified.total_bytes(),
             ],
-            [50, PAGE + 100, 0, 50]
+            [50, PAGE + 100, 0, 50].map(ByteLength::new)
         );
-        assert_eq!(totals(&paged), [0, PAGE, 0, 50]);
+        assert_eq!(totals(&paged), [0, PAGE, 0, 50].map(ByteLength::new));
         paged.adopt_post_free(post, false, None);
-        assert_eq!(totals(&paged), [50, PAGE + 100, 0, 50]);
+        assert_eq!(totals(&paged), [50, PAGE + 100, 0, 50].map(ByteLength::new));
     }
 
     #[rstest::rstest]
@@ -2071,10 +2080,10 @@ mod tests {
     fn paged_sections(post: &PagedPostFree) -> [Vec<(u64, u64)>; 3] {
         for list in [&post.meta, &post.raw, &post.dead, &post.unclassified] {
             assert_eq!(
-                u128::from(list.total_bytes()),
+                u128::from(list.total_bytes().get()),
                 list.extents()
                     .iter()
-                    .map(|extent| u128::from(extent.len()))
+                    .map(|extent| u128::from(extent.len().get()))
                     .sum::<u128>()
             );
         }

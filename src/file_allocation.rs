@@ -192,7 +192,7 @@ impl FileAllocation {
             .reusable_sections()
             .map(|extent| FreeSection {
                 addr: extent.start(),
-                size: extent.len(),
+                size: extent.len().get(),
             })
             .collect();
         if sections.is_empty() {

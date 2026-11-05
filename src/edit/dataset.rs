@@ -6,6 +6,7 @@
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::AddressRange;
@@ -1417,7 +1418,7 @@ impl WriteEngine {
             && if paged {
                 #[cfg(test)]
                 super::observations::record_raw_capacity_scan();
-                self.space.largest(AllocationClass::Raw) > 0
+                self.space.largest(AllocationClass::Raw) > ByteLength::new(0)
             } else {
                 self.space.reusable_sections().next().is_some()
             };

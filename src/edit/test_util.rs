@@ -349,7 +349,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         let span = (
             FileRange::new(
                 session.addresses().resolve(extent.start()).unwrap(),
-                extent.len(),
+                extent.len().get(),
             )
             .unwrap(),
             FreeClass::Page(kind.allocation_class().into()),

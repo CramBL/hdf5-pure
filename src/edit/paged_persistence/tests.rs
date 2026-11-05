@@ -53,7 +53,7 @@ fn partitions_preserve_complete_allocations_and_exact_gaps(
         .occupied
         .iter()
         .chain(&partition.gaps)
-        .map(|allocation| (allocation.start().get(), allocation.len()))
+        .map(|allocation| (allocation.start().get(), allocation.len().get()))
         .collect::<Vec<_>>();
     assert_eq!(range::covered_len(&pieces, &(100..200)), 100);
     assert_eq!(pieces.iter().map(|&(_, length)| length).sum::<u64>(), 100);
@@ -161,7 +161,7 @@ fn paged_plans_retain_one_fully_occupied_reservation(#[case] hole: u64, #[case] 
     assert_eq!(plan.blocks.len(), managers);
     assert_eq!(plan.extension.first().unwrap().start(), reservation.start());
     let expected_free = plan.tail.post.admitted_snapshot().reusable_bytes().unwrap();
-    assert_eq!(expected_free + reservation.len(), hole);
+    assert_eq!(expected_free.get() + reservation.len().get(), hole);
     let (tail, extension, slots, blocks, coverage) = plan.into_parts();
     assert_eq!(tail.allocation, reservation);
     assert_eq!(extension.first().unwrap().start(), reservation.start());
@@ -284,11 +284,11 @@ fn a_paged_tail_takes_exactly_the_space_it_fills(
         assert_complete_capacity(&plan, widths, 100);
         let sections = plan.tail.post.sections();
         assert_eq!(
-            plan.tail.allocation.len()
+            plan.tail.allocation.len().get()
                 + sections
                     .metadata()
                     .iter()
-                    .map(|extent| extent.len())
+                    .map(|extent| extent.len().get())
                     .sum::<u64>(),
             hole
         );
@@ -385,7 +385,7 @@ fn an_exact_extension_reservation_can_publish_without_managers() {
     .unwrap()
     .unwrap();
     assert!(plan.blocks.is_empty());
-    assert_eq!(plan.tail.allocation.len(), 160);
+    assert_eq!(plan.tail.allocation.len(), ByteLength::new(160));
     assert!(
         plan.slots
             .iter()
@@ -460,10 +460,16 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
         before
     );
     assert_eq!(
-        plan.tail.post.admitted_snapshot().reusable_bytes().unwrap() + plan.tail.allocation.len(),
-        durable.len() + run.len()
+        plan.tail
+            .post
+            .admitted_snapshot()
+            .reusable_bytes()
+            .unwrap()
+            .get()
+            + plan.tail.allocation.len().get(),
+        durable.len().get() + run.len().get()
     );
-    assert!(plan.tail.allocation.len() < page);
+    assert!(plan.tail.allocation.len() < ByteLength::new(page));
     assert_complete_capacity(&plan, widths, 160);
     let reserved = ManagerProjection::new(plan.tail.post.admitted_snapshot(), widths)
         .unwrap()
@@ -514,20 +520,20 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
                 "extension allocation",
                 plan.extension
                     .iter()
-                    .map(|allocation| allocation.len())
+                    .map(|allocation| allocation.len().get())
                     .sum::<u64>(),
             ),
             ("manager encoding", reserved.encoded_bytes),
             (
                 "manager allocations",
-                plan.tail.allocation.len()
+                plan.tail.allocation.len().get()
                     - plan
                         .extension
                         .iter()
-                        .map(|allocation| allocation.len())
+                        .map(|allocation| allocation.len().get())
                         .sum::<u64>(),
             ),
-            ("complete reservation", plan.tail.allocation.len()),
+            ("complete reservation", plan.tail.allocation.len().get()),
         ],
     );
     insta::assert_snapshot!("compact_page_capacity", report.finish());
@@ -639,8 +645,8 @@ fn a_reservation_preserves_a_compact_remaining_run(#[case] pages: u64) {
     assert_complete_capacity(&plan, widths, 160);
     let post = plan.tail.post.admitted_snapshot();
     assert_eq!(
-        post.reusable_bytes().unwrap() + plan.tail.allocation.len(),
-        run.len()
+        post.reusable_bytes().unwrap().get() + plan.tail.allocation.len().get(),
+        run.len().get()
     );
     let managers = ManagerSections::from_snapshot(post);
     let generic = managers
@@ -768,7 +774,7 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
     assert!(
         plan.extension
             .iter()
-            .map(|allocation| allocation.len())
+            .map(|allocation| allocation.len().get())
             .sum::<u64>()
             >= extension
     );
@@ -791,7 +797,7 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
         .unwrap()
         .get();
     for allocation in &allocations {
-        if allocation.len() < page {
+        if allocation.len() < ByteLength::new(page) {
             assert_eq!(
                 allocation.start().get() / page,
                 (allocation.end().get() - 1) / page,
@@ -839,11 +845,11 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
             range::covered_len(
                 &free
                     .iter()
-                    .map(|allocation| (allocation.start().get(), allocation.len()))
+                    .map(|allocation| (allocation.start().get(), allocation.len().get()))
                     .collect::<Vec<_>>(),
                 &(gap.start().get()..gap.end().get())
             ),
-            gap.len()
+            gap.len().get()
         );
     }
 }
@@ -895,7 +901,7 @@ fn planning_reuses_an_aligned_block_after_rejecting_a_crossing_reservation(
     assert_eq!(plan.tail.final_eoa, eoa);
     assert_eq!(
         plan.tail.post.admitted_snapshot().reusable_bytes().unwrap(),
-        before - 2_489
+        ByteLength::new(before.get() - 2_489)
     );
     assert_eq!(space.admitted_snapshot().reusable_bytes().unwrap(), before);
     assert_complete_capacity(&plan, widths, 140);

@@ -285,11 +285,11 @@ fn tolerant_persisted_filtering_preserves_global_conflict_order(
     );
     assert_eq!(
         engine.space.reusable_bytes().unwrap(),
-        if matches!(strategy, PersistedStrategy::Page) {
+        ByteLength::new(if matches!(strategy, PersistedStrategy::Page) {
             80
         } else {
             128
-        }
+        })
     );
     if let Some(pages) = engine.space.paged_sections() {
         assert_eq!(
@@ -321,7 +321,7 @@ fn tolerant_manager_read_failure_excludes_every_manager_from_reuse(
     let bytes = fixture.write(&path);
     let engine = tolerant_engine(&path);
     assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
-    assert_eq!(engine.space.reusable_bytes().unwrap(), 0);
+    assert_eq!(engine.space.reusable_bytes().unwrap(), ByteLength::new(0));
     if let Some(pages) = engine.space.paged_sections() {
         assert_eq!(pages.metadata(), []);
         assert_eq!(pages.raw(), []);

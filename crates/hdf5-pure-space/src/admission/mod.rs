@@ -3,6 +3,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
+
 use super::extent::Extent;
 use super::list::FreeListError;
 use super::paged::FreeClass;
@@ -147,7 +149,7 @@ pub trait TrackedSpace {
         // again until none merges.
         let (mut pending, eligible): (Vec<_>, Vec<_>) = extents
             .into_iter()
-            .partition(|&(extent, _)| extent.len() < threshold);
+            .partition(|&(extent, _)| extent.len() < ByteLength::new(threshold));
         for (extent, class) in eligible {
             self.track(extent, class);
         }
@@ -168,7 +170,7 @@ pub trait TrackedSpace {
         // `H5MF_xfree` (`H5MF.c`, HDF5 1.14.6) adds a section of at least the threshold and merges a
         // smaller one into an adjoining tracked section through `H5FS_sect_try_merge`
         // (`H5FSsection.c`), dropping it where none adjoins.
-        let release = if extent.len() >= threshold {
+        let release = if extent.len() >= ByteLength::new(threshold) {
             Release::Track
         } else if self.merges(extent) {
             Release::Merge

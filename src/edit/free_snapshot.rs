@@ -1,5 +1,6 @@
 //! Borrowed reusable-space queries and owned proposed-state manager projections.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::{AdmittedFreeSnapshot, FreeList};
 
@@ -43,12 +44,12 @@ impl<'a> FreeSpaceSnapshot<'a> {
                 reusable_free_bytes
                     .checked_add(unused)
                     .ok_or(FormatError::OffsetOverflow {
-                        offset: reusable_free_bytes,
-                        length: unused,
+                        offset: reusable_free_bytes.get(),
+                        length: unused.get(),
                     })?;
         }
         Ok(ReusableSpaceStats::new(
-            engine.image.len(),
+            ByteLength::new(engine.image.len()),
             reusable_free_bytes,
         ))
     }
@@ -91,7 +92,7 @@ impl<'a> FreeSpaceSnapshot<'a> {
             .map(|extent| {
                 FileRange::new(
                     engine.context.addresses().resolve(extent.start())?,
-                    extent.len(),
+                    extent.len().get(),
                 )
             })
     }

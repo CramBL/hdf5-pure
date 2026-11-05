@@ -47,7 +47,7 @@ fn allocation_padding_retains_small_tails_and_promotes_complete_interiors(
     );
     assert_eq!(
         tail.post.admitted_snapshot().reusable_bytes().unwrap(),
-        padding.iter().map(|&(_, len)| len).sum()
+        ByteLength::new(padding.iter().map(|&(_, len)| len).sum::<u64>())
     );
 }
 

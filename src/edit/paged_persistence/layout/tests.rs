@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_space::__private::SessionSpace;
@@ -84,7 +85,12 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
     let planned = PageLayout::new(&geometry, page, eoa, None, &base, &sizes, true)
         .unwrap()
         .unwrap();
-    assert!(planned.gaps.iter().any(|gap| gap.len() == 1));
+    assert!(
+        planned
+            .gaps
+            .iter()
+            .any(|gap| gap.len() == ByteLength::new(1))
+    );
     let capacity = planned.end.checked_distance_from(eoa).unwrap();
     let tail = append
         .reserve(capacity)
@@ -94,9 +100,11 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
     let snapshot = tail.post.admitted_snapshot();
     assert_eq!(
         snapshot.reusable_bytes().unwrap(),
-        original
-            + tail.final_eoa.checked_distance_from(planned.end).unwrap()
-            + planned.gaps.iter().map(|gap| gap.len()).sum::<u64>()
+        ByteLength::new(
+            original.get()
+                + tail.final_eoa.checked_distance_from(planned.end).unwrap()
+                + planned.gaps.iter().map(|gap| gap.len().get()).sum::<u64>()
+        )
     );
     let (projection, sizes) = ManagerProjection::indexed(snapshot, widths).unwrap();
     assert_eq!(
@@ -114,7 +122,10 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
                 .find(|(candidate, _)| *candidate == kind)
                 .unwrap()
                 .1;
-            assert_eq!([allocations[0].len(), allocations[1].len()], measured);
+            assert_eq!(
+                [allocations[0].len(), allocations[1].len()],
+                measured.map(ByteLength::new)
+            );
             Ok(allocations)
         })
         .unwrap();
@@ -125,7 +136,7 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
         .chain(managers.allocations())
         .collect::<Vec<_>>();
     for allocation in &occupied {
-        if allocation.len() < page.get() {
+        if allocation.len() < ByteLength::new(page.get()) {
             assert_eq!(
                 allocation.start().get() / page.get(),
                 (allocation.end().get() - 1) / page.get(),
@@ -146,9 +157,13 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
         partition
             .occupied
             .iter()
-            .map(|allocation| allocation.len())
+            .map(|allocation| allocation.len().get())
             .sum::<u64>()
-            + partition.gaps.iter().map(|gap| gap.len()).sum::<u64>(),
+            + partition
+                .gaps
+                .iter()
+                .map(|gap| gap.len().get())
+                .sum::<u64>(),
         capacity
     );
     let metadata_end = planned
@@ -162,7 +177,7 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
         .extension
         .iter()
         .filter(|allocation| allocation.start() >= metadata_end)
-        .map(|allocation| allocation.len())
+        .map(|allocation| allocation.len().get())
         .sum::<u64>();
     assert!(suffix < 100, "{suffix}");
     assert!(planned.extension.len() <= ObjectHeaderAllocationGeometry::MAX_CHUNKS);
@@ -177,7 +192,7 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
     for ((address, bytes), allocation) in encoded.encode_chunks().zip(planned.extension) {
         assert_eq!(
             (address, bytes.len() as u64),
-            (allocation.start(), allocation.len())
+            (allocation.start(), allocation.len().get())
         );
         let data_len = bytes.len() - 4;
         assert_eq!(
@@ -376,13 +391,13 @@ proptest::proptest! {
                 extent(StoredAddress::new(start), 2 * page.get()).unwrap(),
             ));
         }
-        let original_bytes = original.iter().map(|(_, free)| free.len()).sum::<u64>();
+        let original_bytes = original.iter().map(|(_, free)| free.len().get()).sum::<u64>();
         let eoa = StoredAddress::new((original.len() as u64 + 18) * 2 * page.get());
         let space = SessionSpace::from_persisted(
             Some(FileSpaceStrategy::Page), 1, page, original,
         ).unwrap();
         let append = space.plan_paged_append(eoa, &[], &[]).unwrap();
-        assert_eq!(append.admitted_snapshot().reusable_bytes().unwrap(), original_bytes);
+        assert_eq!(append.admitted_snapshot().reusable_bytes().unwrap(), ByteLength::new(original_bytes));
         let flags = if tracked { HeaderFlags::TRACKS_CREATION_ORDER } else { HeaderFlags(0) };
         let prefix = ObjectHeaderPrefix::with_layout(
             MessageRecordLayout::from_header_flags(flags.0),
@@ -403,8 +418,8 @@ proptest::proptest! {
         let snapshot = tail.post.admitted_snapshot();
         assert_eq!(
             snapshot.reusable_bytes().unwrap(),
-            original_bytes + tail.final_eoa.checked_distance_from(layout.end).unwrap()
-                + layout.gaps.iter().map(|gap| gap.len()).sum::<u64>()
+            ByteLength::new(original_bytes + tail.final_eoa.checked_distance_from(layout.end).unwrap()
+                + layout.gaps.iter().map(|gap| gap.len().get()).sum::<u64>())
         );
         let (projection, sizes) = ManagerProjection::indexed(snapshot, widths).unwrap();
         assert_eq!(
@@ -414,7 +429,7 @@ proptest::proptest! {
         let managers = projection.place_with_kind(|kind, lengths| {
             let allocations = layout.managers.iter().find(|(candidate, _)| *candidate == kind)
                 .unwrap().1;
-            assert_eq!([allocations[0].len(), allocations[1].len()], lengths);
+            assert_eq!([allocations[0].len(), allocations[1].len()], lengths.map(ByteLength::new));
             Ok(allocations)
         }).unwrap();
         let mut pieces = layout.extension.iter().copied()
@@ -427,7 +442,7 @@ proptest::proptest! {
         }
         assert_eq!(cursor, layout.end);
         for allocation in layout.extension.iter().copied().chain(managers.allocations()) {
-            if allocation.len() < page.get() {
+            if allocation.len() < ByteLength::new(page.get()) {
                 assert_eq!(
                     allocation.start().get() / page.get(),
                     (allocation.end().get() - 1) / page.get(),
@@ -444,7 +459,7 @@ proptest::proptest! {
             .unwrap();
         for (address, bytes) in encoding.encode_chunks() {
             assert!(layout.extension.iter().any(|chunk|
-                chunk.start() == address && chunk.len() == bytes.len() as u64));
+                chunk.start() == address && chunk.len() == ByteLength::new(bytes.len() as u64)));
             let data_len = bytes.len() - 4;
             assert_eq!(
                 u32::from_le_bytes(bytes[data_len..].try_into().unwrap()),
@@ -462,7 +477,7 @@ proptest::proptest! {
             .unwrap();
         assert_eq!(
             encoding.chunks().collect::<Vec<_>>(),
-            plan.extension.iter().map(|range| (range.start(), range.len())).collect::<Vec<_>>(),
+            plan.extension.iter().map(|range| (range.start(), range.len().get())).collect::<Vec<_>>(),
         );
     }
 }
@@ -498,7 +513,7 @@ fn assert_planned_ranges_cover_the_reservation(
             .sum::<u64>();
         assert_eq!(covered, gap_length);
         free_bytes += gap_length;
-        if allocation.len() < page.get() {
+        if allocation.len() < ByteLength::new(page.get()) {
             assert_eq!(
                 allocation.start().get() / page.get(),
                 (allocation.end().get() - 1) / page.get(),
@@ -540,7 +555,10 @@ fn assert_planned_ranges_cover_the_reservation(
                 .unwrap()
     } else {
         assert_eq!(plan.tail.final_eoa, previous_eoa);
-        original_bytes - plan.tail.allocation.len() + free_bytes
+        original_bytes - plan.tail.allocation.len().get() + free_bytes
     };
-    assert_eq!(snapshot.reusable_bytes().unwrap(), expected);
+    assert_eq!(
+        snapshot.reusable_bytes().unwrap(),
+        ByteLength::new(expected)
+    );
 }

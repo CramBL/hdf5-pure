@@ -440,7 +440,9 @@ impl WriteEngine {
         let eof = self.image.len();
         let index_spans = index
             .iter()
-            .map(|extent| FileRange::new(base.resolve(extent.start()).ok()?, extent.len()).ok())
+            .map(|extent| {
+                FileRange::new(base.resolve(extent.start()).ok()?, extent.len().get()).ok()
+            })
             .collect::<Option<Vec<_>>>()?;
         let mut proven = owned.to_vec();
         proven.extend(index_spans.iter().copied());
@@ -486,7 +488,10 @@ impl WriteEngine {
         fractal_heap_free_spans(self.space.page_size(), &allocations)
             .into_iter()
             .map(|(addr, len, class)| {
-                Some((FileRange::new(base.resolve(addr).ok()?, len).ok()?, class))
+                Some((
+                    FileRange::new(base.resolve(addr).ok()?, len.get()).ok()?,
+                    class,
+                ))
             })
             .collect()
     }
@@ -998,7 +1003,10 @@ impl WriteEngine {
                         .addresses()
                         .relative(range.start())
                         .is_ok_and(|stored| {
-                            !touches_page_zero(page_size, [(stored, range.length())])
+                            !touches_page_zero(
+                                page_size,
+                                [(stored, ByteLength::new(range.length()))],
+                            )
                         })
                 }) && bounds.is_none_or(|(start, end)| data.abuts(start, end))
             }
@@ -1251,7 +1259,7 @@ impl WriteEngine {
                         storage
                             .data
                             .into_iter()
-                            .map(|range| (range.start(), range.length())),
+                            .map(|range| (range.start(), ByteLength::new(range.length()))),
                     )?,
                 );
                 metadata.extend(
@@ -1259,7 +1267,7 @@ impl WriteEngine {
                         storage
                             .index
                             .into_iter()
-                            .map(|range| (range.start(), range.length())),
+                            .map(|range| (range.start(), ByteLength::new(range.length()))),
                     )?,
                 );
             }
@@ -1368,14 +1376,14 @@ impl WriteEngine {
 
     fn absolute_owned_spans(
         &self,
-        spans: impl IntoIterator<Item = (StoredAddress, u64)>,
+        spans: impl IntoIterator<Item = (StoredAddress, ByteLength)>,
     ) -> Result<Vec<FileRange>, Error> {
         spans
             .into_iter()
             .map(|(addr, len)| {
                 Ok(FileRange::new(
                     self.context.addresses().resolve(addr)?,
-                    len,
+                    len.get(),
                 )?)
             })
             .collect()
@@ -1412,7 +1420,7 @@ impl WriteEngine {
         for &(extent, _) in storage.allocations() {
             metadata.push(FileRange::new(
                 self.context.addresses().resolve(extent.start())?,
-                extent.len(),
+                extent.len().get(),
             )?);
         }
         Ok(true)
@@ -1599,9 +1607,10 @@ pub(super) fn collection_free_class(
     stored: StoredAddress,
     len: u64,
 ) -> FreeClass {
+    let len = ByteLength::new(len);
     match page_size {
         Some(page_size) if touches_page_zero(page_size, [(stored, len)]) => FreeClass::Dead,
-        Some(page_size) if len >= page_size.get() => FreeClass::Dead,
+        Some(page_size) if len >= ByteLength::new(page_size.get()) => FreeClass::Dead,
         _ => FreeClass::Page(PageType::Raw),
     }
 }
@@ -1615,11 +1624,11 @@ pub(super) fn collection_free_class(
 /// [`collection_free_class`] a global heap collection.
 pub(super) fn touches_page_zero(
     page_size: FileSpacePageSize,
-    spans: impl IntoIterator<Item = (StoredAddress, u64)>,
+    spans: impl IntoIterator<Item = (StoredAddress, ByteLength)>,
 ) -> bool {
     spans
         .into_iter()
-        .any(|(addr, len)| len > 0 && addr.get() < page_size.get())
+        .any(|(addr, len)| !len.is_zero() && addr.get() < page_size.get())
 }
 
 /// Tags each fractal heap allocation with the free class of the page it occupies.
@@ -1635,8 +1644,8 @@ pub(super) fn touches_page_zero(
 /// [`FractalHeapStorage::allocations`]: crate::fractal_heap_storage::FractalHeapStorage::allocations
 fn fractal_heap_free_spans(
     page_size: Option<FileSpacePageSize>,
-    allocations: &[(StoredAddress, u64, FractalHeapAllocation)],
-) -> Vec<(StoredAddress, u64, FreeClass)> {
+    allocations: &[(StoredAddress, ByteLength, FractalHeapAllocation)],
+) -> Vec<(StoredAddress, ByteLength, FreeClass)> {
     let Some(page_size) = page_size else {
         return allocations
             .iter()
@@ -1644,7 +1653,7 @@ fn fractal_heap_free_spans(
             .collect();
     };
     allocations
-        .chunk_by(|&(addr, len, _), &(next, _, _)| addr.checked_add(len).ok() == Some(next))
+        .chunk_by(|&(addr, len, _), &(next, _, _)| addr.checked_add(len.get()).ok() == Some(next))
         .flat_map(|run| {
             let huge_object_class = huge_object_free_class(page_size, run);
             run.iter().map(move |&(addr, len, kind)| {
@@ -1653,7 +1662,9 @@ fn fractal_heap_free_spans(
                     // page or more to the generic large manager whatever its type, and
                     // `H5MF__alloc_pagefs` starts it on a page boundary and files the rest of its
                     // last page in that manager, so no small allocation belongs in that page.
-                    _ if len >= page_size.get() && addr.get() % page_size.get() == 0 => {
+                    _ if len >= ByteLength::new(page_size.get())
+                        && addr.get() % page_size.get() == 0 =>
+                    {
                         FreeClass::Dead
                     }
                     FractalHeapAllocation::Header
@@ -1682,9 +1693,9 @@ fn fractal_heap_free_spans(
 /// unproven.
 fn huge_object_free_class(
     page_size: FileSpacePageSize,
-    run: &[(StoredAddress, u64, FractalHeapAllocation)],
+    run: &[(StoredAddress, ByteLength, FractalHeapAllocation)],
 ) -> FreeClass {
-    let is_huge_object = |&(_, _, kind): &(StoredAddress, u64, FractalHeapAllocation)| {
+    let is_huge_object = |&(_, _, kind): &(StoredAddress, ByteLength, FractalHeapAllocation)| {
         kind == FractalHeapAllocation::HugeObject
     };
     if run.iter().all(is_huge_object) {
@@ -1796,11 +1807,15 @@ mod tests {
 
         let allocations: Vec<_> = allocations
             .iter()
-            .map(|&(address, length, kind)| (StoredAddress::new(address), length, kind))
+            .map(|&(address, length, kind)| {
+                (StoredAddress::new(address), ByteLength::new(length), kind)
+            })
             .collect();
         let expected: Vec<_> = expected
             .iter()
-            .map(|&(address, length, class)| (StoredAddress::new(address), length, class))
+            .map(|&(address, length, class)| {
+                (StoredAddress::new(address), ByteLength::new(length), class)
+            })
             .collect();
         assert_eq!(
             fractal_heap_free_spans(Some(page_size), &allocations),
@@ -1811,17 +1826,17 @@ mod tests {
     #[test]
     fn without_pages_each_fractal_heap_allocation_takes_its_libhdf5_page_type() {
         let allocations = [
-            (StoredAddress::new(0x0f80), 0x80, HUGE),
-            (StoredAddress::new(0x1000), 0x100, HEADER),
-            (StoredAddress::new(0x1100), 0x80, HUGE),
+            (StoredAddress::new(0x0f80), ByteLength::new(0x80), HUGE),
+            (StoredAddress::new(0x1000), ByteLength::new(0x100), HEADER),
+            (StoredAddress::new(0x1100), ByteLength::new(0x80), HUGE),
         ];
 
         assert_eq!(
             fractal_heap_free_spans(None, &allocations),
             [
-                (StoredAddress::new(0x0f80), 0x80, RAW),
-                (StoredAddress::new(0x1000), 0x100, META),
-                (StoredAddress::new(0x1100), 0x80, RAW)
+                (StoredAddress::new(0x0f80), ByteLength::new(0x80), RAW),
+                (StoredAddress::new(0x1000), ByteLength::new(0x100), META),
+                (StoredAddress::new(0x1100), ByteLength::new(0x80), RAW)
             ]
         );
     }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::ReservationWork;
 use rstest::rstest;
 use test_util::allocation;
@@ -113,7 +114,7 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
     let available = engine
         .space
         .reusable_sections()
-        .map(|extent| (extent.start().get(), extent.len()))
+        .map(|extent| (extent.start().get(), extent.len().get()))
         .collect::<Vec<_>>();
     assert!(available.iter().all(|&(_, length)| length < payload as u64));
     assert!(available.iter().map(|&(_, length)| length).sum::<u64>() >= payload as u64);
@@ -391,16 +392,18 @@ fn fragmented_creation_cycles_bound_work_and_publish_once_per_commit(
         assert!(engine.space_ownership().unwrap().analysis_complete);
         assert_eq!(
             engine.space.reusable_bytes().unwrap(),
-            engine
-                .space
-                .reusable_sections()
-                .map(|extent| extent.len())
-                .sum::<u64>()
+            ByteLength::new(
+                engine
+                    .space
+                    .reusable_sections()
+                    .map(|extent| extent.len().get())
+                    .sum::<u64>()
+            )
         );
         eprintln!(
             "cycle={cycle} {strategy:?} work={work:?} buffering={:?} reusable={} growth={}",
             engine.image.buffering_work(),
-            engine.space.reusable_bytes().unwrap(),
+            engine.space.reusable_bytes().unwrap().get(),
             engine.image.len().saturating_sub(initial_size)
         );
         let observed = File::from_bytes(engine.image.disk_bytes().unwrap()).unwrap();

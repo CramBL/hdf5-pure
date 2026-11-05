@@ -2953,7 +2953,9 @@ impl WriteEngine {
         addr: StoredAddress,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        let size = NonZeroByteLength::new(region.len())
+        let size = region
+            .len()
+            .nonzero()
             .ok_or_else(|| FormatError::Internal("a tail reservation is empty".into()))?;
         let request = BlockRequest::new(
             ReservationRequest::new(size, AllocationClass::Metadata),
@@ -3004,7 +3006,7 @@ impl WriteEngine {
             )
             .into());
         }
-        let range = FileRange::new(start, extent.len())?;
+        let range = FileRange::new(start, extent.len().get())?;
         self.pad_zeros_to(range.end().get())
     }
 

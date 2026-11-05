@@ -80,7 +80,10 @@ fn persistent_reuse_precedes_aggregates(
     if !immediate {
         assert_eq!(engine.aggregation, Some(policy));
     } else {
-        assert_eq!(engine.aggregation.unwrap().unused_bytes().unwrap(), 0);
+        assert_eq!(
+            engine.aggregation.unwrap().unused_bytes().unwrap(),
+            ByteLength::new(0)
+        );
     }
     engine.finalize_persist().unwrap();
     drop(engine);
@@ -639,7 +642,7 @@ fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
             owned
                 .free_space_manager_space
                 .iter()
-                .all(|&(at, len)| { start + extent.len() <= at || at + len <= start })
+                .all(|&(at, len)| { start + extent.len().get() <= at || at + len <= start })
         );
         let file = File::from_bytes(
             engine

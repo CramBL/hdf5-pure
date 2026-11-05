@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use core::mem;
 use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
@@ -23,12 +24,12 @@ use crate::reservation::{ReservationRequest, ReservationWork};
 pub(crate) struct IndexedFreeList<'a> {
     owner: &'a mut FreeList,
     regions: BTreeMap<StoredAddress, Extent>,
-    sizes: BTreeSet<(u64, StoredAddress)>,
-    interiors: BTreeSet<(u64, StoredAddress)>,
+    sizes: BTreeSet<(ByteLength, StoredAddress)>,
+    interiors: BTreeSet<(ByteLength, StoredAddress)>,
     alignment: Option<NonZeroU64>,
     blocks: Option<Box<BlockIndex>>,
     buffer: Vec<Extent>,
-    total_bytes: u64,
+    total_bytes: ByteLength,
     work: ReservationWork,
     restored: bool,
 }
@@ -37,7 +38,7 @@ impl<'a> IndexedFreeList<'a> {
     /// Moves the owner's extents into lookup indexes, retaining its vector for restoration.
     pub(crate) fn new(owner: &'a mut FreeList, alignment: Option<NonZeroU64>) -> Self {
         let mut buffer = mem::take(&mut owner.regions);
-        let total_bytes = mem::replace(&mut owner.total_bytes, 0);
+        let total_bytes = mem::replace(&mut owner.total_bytes, ByteLength::new(0));
         let mut indexed = Self {
             owner,
             regions: BTreeMap::new(),
@@ -63,7 +64,7 @@ impl<'a> IndexedFreeList<'a> {
         self.work.lookups = self.work.lookups.saturating_add(1);
         let &(_, start) = self
             .sizes
-            .range((size.get(), StoredAddress::new(0))..)
+            .range((size.length(), StoredAddress::new(0))..)
             .next()?;
         let region = self.remove(start);
         // The size index selects a nonempty extent at least as long as the request.
@@ -72,7 +73,11 @@ impl<'a> IndexedFreeList<'a> {
         if let Some(remainder) = Extent::between(allocation.end(), region.end()) {
             self.insert(remainder);
         }
-        self.total_bytes -= allocation.len();
+        // The selected allocation is included in the indexed free-byte total.
+        self.total_bytes = self
+            .total_bytes
+            .checked_sub(allocation.len())
+            .expect("the indexed total includes the selected allocation");
         Some(allocation)
     }
 
@@ -105,7 +110,11 @@ impl<'a> IndexedFreeList<'a> {
         if let Some(tail) = Extent::between(allocation.end(), region.end()) {
             self.insert(tail);
         }
-        self.total_bytes -= allocation.len();
+        // The selected allocation is included in the indexed free-byte total.
+        self.total_bytes = self
+            .total_bytes
+            .checked_sub(allocation.len())
+            .expect("the indexed total includes the selected allocation");
         Some(allocation)
     }
 
@@ -122,7 +131,7 @@ impl<'a> IndexedFreeList<'a> {
         debug_assert_eq!(size.get() % alignment.get(), 0);
         let &(_, start) = self
             .interiors
-            .range((size.get(), StoredAddress::new(0))..)
+            .range((size.length(), StoredAddress::new(0))..)
             .next()?;
         let region = self.remove(start);
         // Entries in the interior index have a checked aligned interior of sufficient length.
@@ -137,7 +146,11 @@ impl<'a> IndexedFreeList<'a> {
         if let Some(tail) = Extent::between(allocation.end(), region.end()) {
             self.insert(tail);
         }
-        self.total_bytes -= allocation.len();
+        // The selected allocation is included in the indexed free-byte total.
+        self.total_bytes = self
+            .total_bytes
+            .checked_sub(allocation.len())
+            .expect("the indexed total includes the selected allocation");
         Some(allocation)
     }
 
@@ -198,7 +211,7 @@ impl<'a> IndexedFreeList<'a> {
         }
         *restored = true;
         owner.regions = mem::take(buffer);
-        owner.total_bytes = mem::replace(total_bytes, 0);
+        owner.total_bytes = mem::replace(total_bytes, ByteLength::new(0));
         sizes.clear();
         interiors.clear();
         *blocks = None;
@@ -283,8 +296,8 @@ impl TrackedSpace for IndexedFreeList<'_> {
 /// Indexes single-page capacities and page-aligned suffix lengths by containing extent start.
 struct BlockIndex {
     page_size: FileSpacePageSize,
-    small: BTreeSet<(u64, StoredAddress)>,
-    large: BTreeSet<(u64, StoredAddress)>,
+    small: BTreeSet<(ByteLength, StoredAddress)>,
+    large: BTreeSet<(ByteLength, StoredAddress)>,
 }
 
 impl BlockIndex {
@@ -303,7 +316,7 @@ impl BlockIndex {
             &self.large
         };
         index
-            .range((size.get(), StoredAddress::new(0))..)
+            .range((size.length(), StoredAddress::new(0))..)
             .next()
             .map(|&(_, start)| start)
     }

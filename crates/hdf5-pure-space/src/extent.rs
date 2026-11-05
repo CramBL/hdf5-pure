@@ -30,7 +30,7 @@ impl Extent {
     /// let extent = Extent::new(start, ByteLength::new(32)).unwrap();
     /// assert_eq!(extent.start(), start);
     /// assert_eq!(extent.end(), start.checked_add(32).unwrap());
-    /// assert_eq!(extent.len(), 32);
+    /// assert_eq!(extent.len(), ByteLength::new(32));
     /// assert_eq!(Extent::new(start, ByteLength::new(0)), None);
     /// ```
     ///
@@ -66,8 +66,8 @@ impl Extent {
     }
 
     /// Returns the number of bytes in the extent.
-    pub const fn len(self) -> u64 {
-        self.range.length().get()
+    pub const fn len(self) -> ByteLength {
+        ByteLength::new(self.range.length().get())
     }
 
     /// Returns whether the extent contains no bytes.
@@ -92,7 +92,7 @@ impl Extent {
     /// Returns `true` if this extent is at least `unit` bytes long and touches `other` at a
     /// multiple of `unit`.
     pub(super) fn adjoins_whole_unit(self, other: Self, unit: u64) -> bool {
-        self.len() >= unit
+        self.len() >= ByteLength::new(unit)
             && ((self.end() == other.start() && other.start().get().is_multiple_of(unit))
                 || (self.start() == other.end() && other.end().get().is_multiple_of(unit)))
     }
@@ -112,16 +112,17 @@ impl Extent {
     ///
     /// For `size` smaller than a page, returns the largest part contained in one page. For `size`
     /// of at least one page, returns the suffix starting on a page boundary, or zero if it is empty.
-    pub(crate) fn block_capacity(self, page_size: FileSpacePageSize, size: u64) -> u64 {
+    pub(crate) fn block_capacity(self, page_size: FileSpacePageSize, size: u64) -> ByteLength {
         let page_size = page_size.get();
-        let head = self.len().min(page_size - self.start().get() % page_size);
-        if size < page_size {
-            head.max((self.len() - head).min(page_size))
+        let length = self.len().get();
+        let head = length.min(page_size - self.start().get() % page_size);
+        ByteLength::new(if size < page_size {
+            head.max((length - head).min(page_size))
         } else if self.start().get() % page_size == 0 {
-            self.len()
+            length
         } else {
-            self.len() - head
-        }
+            length - head
+        })
     }
 
     /// Returns the whole `align`-sized units inside this extent, or `None` when it contains none.
@@ -186,7 +187,7 @@ mod tests {
         let range: AddressRange<StoredAddress> = extent.range();
         assert_eq!(extent.start(), start);
         assert_eq!(extent.end(), end);
-        assert_eq!(extent.len(), length);
+        assert_eq!(extent.len(), ByteLength::new(length));
         assert!(!extent.is_empty());
         assert_eq!(range, AddressRange::new(start, length).unwrap());
         assert_eq!(Extent::between(start, end), Some(extent));

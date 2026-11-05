@@ -888,7 +888,7 @@ fn block_reservations_keep_capacity_separate_from_encoding(#[case] reused: bool)
     );
     assert_eq!(
         engine.space.reusable_bytes().unwrap(),
-        if reused { 32 } else { 0 }
+        ByteLength::new(if reused { 32 } else { 0 })
     );
 }
 

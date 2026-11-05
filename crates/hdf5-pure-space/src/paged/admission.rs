@@ -5,6 +5,7 @@ use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::StoredAddress;
 
@@ -103,7 +104,7 @@ impl<'a> PageAdmission<'a> {
         let mut queue = VecDeque::new();
         for (extent, class) in returned {
             work.visit_extent();
-            let state = if extent.len() >= threshold {
+            let state = if extent.len() >= ByteLength::new(threshold) {
                 classes[ClassIndex::slot(class)].insert(extent, work);
                 AdmissionState::Admitted
             } else {
@@ -150,7 +151,7 @@ impl<'a> PageAdmission<'a> {
                 class,
                 state: _,
             } = returned[index];
-            let unclassified_merge = if extent.len() >= page_size.get() {
+            let unclassified_merge = if extent.len() >= ByteLength::new(page_size.get()) {
                 unclassified.adjoins_observed(extent, || work.lookup())
             } else {
                 false
@@ -283,7 +284,7 @@ impl ClassIndex {
         work.lookup();
         let right = self.regions.get(&extent.end()).copied();
         [left, right].into_iter().flatten().any(|region| {
-            if extent.len() < page_size {
+            if extent.len() < ByteLength::new(page_size) {
                 region.adjoins_within(extent, page_size)
             } else {
                 region.adjoins_whole_unit(extent, page_size)

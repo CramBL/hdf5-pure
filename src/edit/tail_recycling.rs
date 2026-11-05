@@ -1,5 +1,6 @@
 //! Recycling of persistent extension and manager storage after publication.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ReturnedExtents;
 
@@ -63,8 +64,10 @@ impl WriteEngine {
         }
         let len = old_blocks
             .iter()
-            .try_fold(0u64, |len, extent| len.checked_add(extent.len()))?;
-        if len >= *threshold {
+            .try_fold(ByteLength::new(0), |len, extent| {
+                len.checked_add(extent.len())
+            })?;
+        if len >= ByteLength::new(*threshold) {
             return None;
         }
         let mut blocks = old_blocks.clone();
@@ -92,7 +95,8 @@ impl WriteEngine {
     ) -> Option<FlatTailLayout> {
         let (post, mut eoa) = self.flat_post_free(eoa, to_free, old_blocks);
         let projection = FlatProjection::new(post, self.context.widths()).ok()?;
-        let len = extension_len.checked_add(projection.managers().encoded_len())?;
+        let len = ByteLength::new(extension_len)
+            .checked_add(ByteLength::new(projection.managers().encoded_len()))?;
         if len > target.len() {
             return None;
         }
@@ -102,8 +106,8 @@ impl WriteEngine {
             target.len()
         };
         if eoa == target.end() {
-            eoa = target.start().checked_add(len).ok()?;
+            eoa = target.start().checked_add(len.get()).ok()?;
         }
-        Some(projection.place(Some(target.start()), len, eoa))
+        Some(projection.place(Some(target.start()), len.get(), eoa))
     }
 }
