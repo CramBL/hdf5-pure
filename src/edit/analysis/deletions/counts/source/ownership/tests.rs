@@ -57,6 +57,8 @@ use crate::source::MetadataCacheConfig;
 use super::CountProtectionError;
 use super::SurvivingCounts;
 
+mod handoff;
+
 #[rstest]
 #[case::retained(0, false)]
 #[case::one_reconstructed(1, false)]

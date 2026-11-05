@@ -24,7 +24,8 @@ use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 
-use super::CountHandoffError;
+use super::super::CountHandoffError;
+use super::super::SurvivingCount;
 
 #[rstest]
 #[case::alias(Some(2), false, Some(1))]
@@ -250,7 +251,7 @@ fn detachment_retains_only_bounded_count_metadata_and_empty_batches_allocate_not
             .collect::<Vec<_>>(),
         expected
     );
-    let retained = u64::try_from(64 * core::mem::size_of::<super::SurvivingCount>()).unwrap();
+    let retained = u64::try_from(64 * core::mem::size_of::<SurvivingCount>()).unwrap();
     assert!(
         measured.blocks > 0 && measured.bytes >= retained,
         "{measured}"
