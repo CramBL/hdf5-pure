@@ -33,13 +33,16 @@ fn bulk_recovery_preserves_incremental_state_and_allocations(
     let sections = sections(input);
     let mut bulk = SessionSpace::from_persisted(
         Some(strategy),
-        threshold,
+        ByteLength::new(threshold),
         FileSpacePageSize::DEFAULT,
         sections.iter().copied(),
     )
     .unwrap();
-    let mut incremental =
-        SessionSpace::from_strategy(Some(strategy), threshold, FileSpacePageSize::DEFAULT);
+    let mut incremental = SessionSpace::from_strategy(
+        Some(strategy),
+        ByteLength::new(threshold),
+        FileSpacePageSize::DEFAULT,
+    );
     for (kind, extent) in sections {
         incremental.seed_persisted(kind, extent);
     }
@@ -64,7 +67,7 @@ fn bulk_recovery_preserves_incremental_state_and_allocations(
 fn bulk_page_recovery_preserves_classified_and_unclassified_edges() {
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        8192,
+        ByteLength::new(8192),
         FileSpacePageSize::DEFAULT,
         sections(&[
             (Some(ManagerKind::PagedSmallMetadata), 4096, 1024),
@@ -109,7 +112,7 @@ fn bulk_recovery_rejects_invalid_global_geometry(
 ) {
     let Err(error) = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         sections(input),
     ) else {
@@ -125,7 +128,7 @@ fn bulk_recovery_rejects_invalid_global_geometry(
 fn bulk_recovery_keeps_disabled_strategies_empty(#[case] strategy: Option<FileSpaceStrategy>) {
     let mut space = SessionSpace::from_persisted(
         strategy,
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         sections(&[(None, 100, 32), (None, 116, 32)]),
     )

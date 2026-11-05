@@ -355,7 +355,7 @@ fn metadata_only_page_space_keeps_one_compound_payload_request() {
     let extent = Extent::new(StoredAddress::new(start), ByteLength::new(64)).unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [(Some(ManagerKind::PagedSmallMetadata), extent)],
     )

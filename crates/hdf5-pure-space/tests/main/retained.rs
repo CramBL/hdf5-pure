@@ -25,7 +25,7 @@ fn retained_view_excludes_reusable_and_disabled_extents(
 ) {
     let space = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [(Some(ManagerKind::PagedSmallMetadata), extent(520, 16))],
     )
@@ -38,7 +38,7 @@ fn retained_view_excludes_reusable_and_disabled_extents(
 fn retained_view_preserves_exact_unclassified_dead_and_padding_ranges() {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [(None, extent(8, 16))],
     )
@@ -95,7 +95,7 @@ fn retained_view_preserves_only_generic_partial_edges(#[case] page: u64) {
     let size = FileSpacePageSize::try_from(page).unwrap();
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         size,
         [(
             Some(ManagerKind::PagedLargeGeneric),
@@ -131,8 +131,11 @@ fn retained_view_preserves_only_generic_partial_edges(#[case] page: u64) {
 
 #[test]
 fn retained_view_follows_promotion_and_complete_allocator_restoration() {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::MIN);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::MIN,
+    );
     space.record_freed(StoredAddress::new(4_096), extent(512, 256), FreeClass::Dead);
     let prior = space.append_snapshot();
     assert_eq!(

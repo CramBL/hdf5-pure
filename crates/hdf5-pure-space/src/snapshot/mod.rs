@@ -99,7 +99,7 @@ impl<'a> AdmittedFreeSnapshot<'a> {
     /// let fragment = Extent::new(StoredAddress::new(400), ByteLength::new(16)).unwrap();
     /// let space = SessionSpace::from_persisted(
     ///     Some(FileSpaceStrategy::Page),
-    ///     1,
+    ///     ByteLength::new(1),
     ///     FileSpacePageSize::MIN,
     ///     [(Some(ManagerKind::PagedSmallMetadata), fragment)],
     /// )?;

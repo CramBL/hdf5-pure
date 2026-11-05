@@ -303,7 +303,7 @@ impl PagedEdit {
             }
             Some(ManagerKind::PagedSmallRaw) => [Some((extent, Some(PageType::Raw))), None, None],
             Some(ManagerKind::PagedLargeGeneric) => {
-                let Some(pages) = extent.aligned_interior(page_size.get()) else {
+                let Some(pages) = extent.aligned_interior(ByteLength::new(page_size.get())) else {
                     return [Some((extent, None)), None, None];
                 };
                 [
@@ -349,7 +349,7 @@ impl PagedEdit {
             return Some(extent);
         }
         let span = ByteLength::new(len.get().checked_next_multiple_of(self.page_size.get())?);
-        let claimed = other.alloc_whole_units(span, self.page_size.get())?;
+        let claimed = other.alloc_whole_units(span, ByteLength::new(self.page_size.get()))?;
         if span == len {
             return Some(claimed);
         }
@@ -378,7 +378,7 @@ impl PagedEdit {
             .get()
             .checked_next_multiple_of(self.page_size.get())
             .map(ByteLength::new)?;
-        let claimed = other.alloc_whole_units(span, self.page_size.get())?;
+        let claimed = other.alloc_whole_units(span, ByteLength::new(self.page_size.get()))?;
         // Whole-page claims start at a page boundary and contain the complete request.
         let allocation = request
             .place_after(claimed.start(), Some(self.page_size))
@@ -397,7 +397,7 @@ impl PagedEdit {
             PageType::Raw => (&self.raw, &self.meta),
         };
         own.largest()
-            .max(other.largest_whole_units(self.page_size.get()))
+            .max(other.largest_whole_units(ByteLength::new(self.page_size.get())))
     }
 
     /// Returns an allocation to the free space of `ty`.
@@ -512,7 +512,7 @@ impl PagedEdit {
     /// reserve exceeds [`u64::MAX`].
     pub(crate) fn plan_tail(
         &self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         freed: &[(Extent, FreeClass)],
         old_blocks: &[Extent],
@@ -564,7 +564,7 @@ impl PagedEdit {
     /// calculation exceeds [`u64::MAX`].
     pub(crate) fn plan_reusable_tail(
         &self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         freed: &[(Extent, FreeClass)],
         old_blocks: &[Extent],
@@ -622,7 +622,7 @@ impl PagedEdit {
     /// Returns [`FormatError::OffsetOverflow`] if the next page boundary exceeds [`u64::MAX`].
     pub(crate) fn plan_append(
         &self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         freed: &[(Extent, FreeClass)],
         old_blocks: &[Extent],
@@ -648,7 +648,7 @@ impl PagedEdit {
     /// Builds the PAGE free-space state that a commit would publish.
     pub(crate) fn post_free(
         &self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         freed: impl IntoIterator<Item = (Extent, FreeClass)>,
         old_blocks: impl IntoIterator<Item = Extent>,
@@ -670,7 +670,7 @@ impl PagedEdit {
     /// [`PagedPostFree::release_batch`].
     fn post_free_with_work(
         &self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         freed: impl IntoIterator<Item = (Extent, FreeClass)>,
         old_blocks: impl IntoIterator<Item = Extent>,
@@ -792,7 +792,7 @@ impl PagedEdit {
         let whole_pages = FreeList::from_sorted(
             runs.extents()
                 .iter()
-                .filter_map(|extent| extent.aligned_interior(page_size.get())),
+                .filter_map(|extent| extent.aligned_interior(ByteLength::new(page_size.get()))),
         )
         .expect("whole-page interiors are sorted and disjoint");
         meta.take_ranges(&whole_pages);
@@ -894,7 +894,7 @@ impl PagedTail {
 /// use hdf5_pure_space::__private::{Extent, SessionSpace};
 ///
 /// let space = SessionSpace::from_strategy(
-///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+///     Some(FileSpaceStrategy::Page), ByteLength::new(1), FileSpacePageSize::DEFAULT,
 /// );
 /// let append = space.plan_paged_append(StoredAddress::new(8_192), &[], &[])?;
 /// assert_eq!(append.admitted_snapshot().reusable_bytes()?, ByteLength::new(0));
@@ -1045,14 +1045,14 @@ impl PagedPostFree {
     /// Panics on overlapping returns as described by [`Self::release_batch`].
     fn release_all(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
         work: &mut AdmissionWork,
     ) -> StoredAddress {
         let extents: Vec<_> = extents.into_iter().collect();
         let mut dropped = self.release_batch(threshold, extents.iter().copied(), work);
-        if threshold > self.page_size.get() {
+        if threshold > ByteLength::new(self.page_size.get()) {
             let completed = self.pages_completed_by_merges(&extents, &dropped);
             dropped.extend(self.release_pages(threshold, completed, work));
         }
@@ -1099,7 +1099,7 @@ impl PagedPostFree {
     /// Applies whole-page threshold admission to each completed page after batch subtraction.
     fn release_pages(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         pages: BTreeSet<Extent>,
         work: &mut AdmissionWork,
     ) -> Vec<(Extent, FreeClass)> {
@@ -1156,9 +1156,9 @@ impl TrackedSpace for PagedPostFree {
     type Class = FreeClass;
 
     fn merges(&self, extent: Extent) -> bool {
-        let page_size = self.page_size.get();
+        let page_size = ByteLength::new(self.page_size.get());
         let typed = [&self.meta, &self.raw, &self.dead];
-        if extent.len() < ByteLength::new(page_size) {
+        if extent.len() < page_size {
             return typed
                 .into_iter()
                 .any(|list| list.adjoins_within(extent, page_size));
@@ -1175,7 +1175,7 @@ impl TrackedSpace for PagedPostFree {
 
     fn release_each(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
     ) -> Vec<(Extent, FreeClass)> {
         self.release_batch(threshold, extents, &mut AdmissionWork::default())
@@ -1401,7 +1401,7 @@ mod tests {
             Some(extent(2 * PAGE + 16, 50))
         );
         let (post, _) = paged.post_free(
-            1,
+            ByteLength::new(1),
             StoredAddress::new(12 * PAGE),
             [(extent(7 * PAGE + 16, 100), FreeClass::Dead)],
             [],
@@ -1505,7 +1505,7 @@ mod tests {
         paged.restore_allocation(snapshot);
         assert_eq!(totals(&paged), [0, PAGE, 0, 50].map(ByteLength::new));
         let (post, eoa) = paged.post_free(
-            1,
+            ByteLength::new(1),
             StoredAddress::new(6 * PAGE),
             [(extent(2 * PAGE, 100), PageType::Raw.into())],
             [extent(4 * PAGE + 100, 50)],
@@ -1533,7 +1533,7 @@ mod tests {
         let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
         let plan = paged
             .plan_tail(
-                threshold,
+                ByteLength::new(threshold),
                 StoredAddress::new(8_192),
                 &[],
                 &[],
@@ -1570,7 +1570,7 @@ mod tests {
         assert!(
             paged
                 .plan_tail(
-                    1,
+                    ByteLength::new(1),
                     StoredAddress::new(8_192),
                     &freed,
                     &old_blocks,
@@ -1582,7 +1582,7 @@ mod tests {
         );
         let appended = paged
             .plan_tail(
-                1,
+                ByteLength::new(1),
                 StoredAddress::new(8_192),
                 &freed,
                 &old_blocks,
@@ -1604,7 +1604,7 @@ mod tests {
         paged.seed(extent(4_096, 4_096), Some(PageType::Raw));
         let plan = paged
             .plan_tail(
-                1,
+                ByteLength::new(1),
                 StoredAddress::new(8_192),
                 &[],
                 &[],
@@ -1665,7 +1665,7 @@ mod tests {
     fn a_tail_plan_rejects_an_overflowing_page_boundary() {
         let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
         assert!(matches!(
-            paged.plan_tail(1, StoredAddress::new(u64::MAX - 1), &[], &[], ByteLength::new(1), true),
+            paged.plan_tail(ByteLength::new(1), StoredAddress::new(u64::MAX - 1), &[], &[], ByteLength::new(1), true),
             Err(FormatError::OffsetOverflow {
                 offset: value,
                 length: 4_096
@@ -1832,7 +1832,7 @@ mod tests {
         let mut post = paged_free_space(&[vec![], vec![], vec![]]);
         assert_eq!(
             post.release(
-                THRESHOLD_IN_A_PAGE,
+                ByteLength::new(THRESHOLD_IN_A_PAGE),
                 Extent::new(StoredAddress::new(EXTENT_AT), ByteLength::new(len)).unwrap(),
                 class
             ),
@@ -1870,7 +1870,7 @@ mod tests {
         let mut post = paged_free_space(&tracked);
         assert_eq!(
             post.release(
-                THRESHOLD_IN_A_PAGE,
+                ByteLength::new(THRESHOLD_IN_A_PAGE),
                 Extent::new(
                     StoredAddress::new(EXTENT_AT),
                     ByteLength::new(SHORT_OF_THRESHOLD)
@@ -1900,7 +1900,7 @@ mod tests {
         let mut post = paged_free_space(&tracked);
         assert_eq!(
             post.release(
-                THRESHOLD_IN_A_PAGE,
+                ByteLength::new(THRESHOLD_IN_A_PAGE),
                 Extent::new(StoredAddress::new(at), ByteLength::new(SHORT_OF_THRESHOLD)).unwrap(),
                 class
             ),
@@ -1933,7 +1933,7 @@ mod tests {
         let mut post = paged_free_space(&tracked);
         assert_eq!(
             post.release(
-                THRESHOLD_OF_THREE_PAGES,
+                ByteLength::new(THRESHOLD_OF_THREE_PAGES),
                 Extent::new(StoredAddress::new(2 * PAGE), ByteLength::new(2 * PAGE)).unwrap(),
                 class
             ),
@@ -1952,7 +1952,7 @@ mod tests {
         let mut post = paged_free_space(&tracked);
         assert_eq!(
             post.release(
-                THRESHOLD_OF_THREE_PAGES,
+                ByteLength::new(THRESHOLD_OF_THREE_PAGES),
                 Extent::new(StoredAddress::new(at), ByteLength::new(2 * PAGE)).unwrap(),
                 RAW
             ),
@@ -1968,7 +1968,7 @@ mod tests {
             .free(Extent::new(StoredAddress::new(4 * PAGE), ByteLength::new(100)).unwrap());
         assert_eq!(
             post.release(
-                THRESHOLD_OF_THREE_PAGES,
+                ByteLength::new(THRESHOLD_OF_THREE_PAGES),
                 Extent::new(StoredAddress::new(2 * PAGE), ByteLength::new(2 * PAGE)).unwrap(),
                 RAW
             ),
@@ -2005,7 +2005,7 @@ mod tests {
         let mut post = paged_free_space(&[vec![], vec![], vec![]]);
         assert_eq!(
             post.release_all(
-                THRESHOLD_OF_THREE_PAGES,
+                ByteLength::new(THRESHOLD_OF_THREE_PAGES),
                 StoredAddress::new(10 * PAGE),
                 extents.iter().map(|&(addr, len)| (
                     Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
@@ -2053,7 +2053,7 @@ mod tests {
         assert_eq!(
             (
                 post.release_all(
-                    THRESHOLD_OF_THREE_PAGES,
+                    ByteLength::new(THRESHOLD_OF_THREE_PAGES),
                     StoredAddress::new(eoa),
                     [(
                         Extent::new(StoredAddress::new(2 * PAGE - 100), ByteLength::new(100))

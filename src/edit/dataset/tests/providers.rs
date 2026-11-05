@@ -273,9 +273,13 @@ fn failed_staged_chunk_copy_restores_original_free_space_before_publication() {
 #[case::large(2_048)]
 fn provider_emission_reuses_one_buffer_without_collecting_payloads(#[case] count: usize) {
     let (_directory, mut engine, _) = engine();
-    engine.space =
-        SessionSpace::from_persisted(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::MIN, [])
-            .unwrap();
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::MIN,
+        [],
+    )
+    .unwrap();
     assert!(engine.image.as_slice().is_none());
     let provider = Provider::new(count, 1_024, ProviderFailure::None);
     let prepared = prepared(count, 1_024);
@@ -380,7 +384,7 @@ fn engine() -> (tempfile::TempDir, WriteEngine, Vec<Extent>) {
     ];
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [
             (

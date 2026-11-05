@@ -98,3 +98,19 @@ fn settings_support_const_construction_and_accessors() {
         (FileSpaceStrategy::Page, true, 0, FileSpacePageSize::MAX)
     );
 }
+
+#[rstest]
+#[case::zero(
+    0,
+    "FileSpaceSettings { strategy: Page, persist: true, threshold: 0, page_size: FileSpacePageSize(4096) }"
+)]
+#[case::maximum(
+    u64::MAX,
+    "FileSpaceSettings { strategy: Page, persist: true, threshold: 18446744073709551615, page_size: FileSpacePageSize(4096) }"
+)]
+fn settings_debug_retains_scalar_thresholds(#[case] threshold: u64, #[case] expected: &str) {
+    let settings = FileSpaceSettings::new(FileSpaceStrategy::Page)
+        .with_persistence(true)
+        .with_threshold(threshold);
+    assert_eq!(format!("{settings:?}"), expected);
+}

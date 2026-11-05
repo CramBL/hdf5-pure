@@ -32,8 +32,11 @@ fn complete_object_headers_use_checked_block_placement(
         userblock::prepend(&path, &vec![0xA5; usize::try_from(base).unwrap()]);
     }
     let mut engine = edit_test_util::open_engine(&path);
-    engine.space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    engine.space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     engine
         .space
         .record_transition(PageType::Meta, PageTransition::Unchanged);

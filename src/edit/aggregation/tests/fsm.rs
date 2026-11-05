@@ -309,7 +309,7 @@ fn stored_aggregate_positions_remain_u64() {
     let mut aggregate = AggregateSpace::new(StoredAddress::new(4_294_967_296));
     let mut space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
     );
     let placement = aggregate

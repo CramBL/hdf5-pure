@@ -160,7 +160,7 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     engine.space = hdf5_pure_space::__private::SessionSpace::from_strategy(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         hdf5_pure_core::FileSpacePageSize::DEFAULT,
     );
     let root = engine

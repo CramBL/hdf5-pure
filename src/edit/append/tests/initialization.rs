@@ -232,8 +232,13 @@ fn engine(
             )
         }
     };
-    engine.space =
-        SessionSpace::from_persisted(Some(FileSpaceStrategy::Page), 1, size, sections).unwrap();
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        size,
+        sections,
+    )
+    .unwrap();
     engine
         .space
         .record_transition(PageType::Meta, PageTransition::Unchanged);

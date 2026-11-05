@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 pub use hdf5_pure_core::FileSpaceInfo;
 pub use hdf5_pure_core::FileSpacePageSize;
@@ -22,13 +23,13 @@ use crate::width::OffsetWidth;
 pub(crate) fn non_persistent(
     _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
-    threshold: u64,
+    threshold: ByteLength,
     page_size: FileSpacePageSize,
 ) -> FileSpaceInfo {
     FileSpaceInfoFields {
         strategy,
         persist: false,
-        threshold,
+        threshold: threshold.get(),
         page_size,
         page_end_meta_threshold: 0,
         eoa_pre_fsm: Some(DecodedStoredAddress::Undefined),
@@ -41,13 +42,13 @@ pub(crate) fn non_persistent(
 /// slots for a newly initialized file before free space is allocated.
 pub(crate) fn persistent_placeholder(
     strategy: FileSpaceStrategy,
-    threshold: u64,
+    threshold: ByteLength,
     page_size: FileSpacePageSize,
 ) -> FileSpaceInfo {
     FileSpaceInfoFields {
         strategy,
         persist: true,
-        threshold,
+        threshold: threshold.get(),
         page_size,
         page_end_meta_threshold: 0,
         eoa_pre_fsm: Some(DecodedStoredAddress::Undefined),
@@ -70,14 +71,14 @@ pub(crate) fn persistent_placeholder(
 pub(crate) fn persistent_empty(
     _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
-    threshold: u64,
+    threshold: ByteLength,
     page_size: FileSpacePageSize,
     eoa_pre_fsm: StoredAddress,
 ) -> FileSpaceInfo {
     FileSpaceInfoFields {
         strategy,
         persist: true,
-        threshold,
+        threshold: threshold.get(),
         page_size,
         page_end_meta_threshold: 0,
         eoa_pre_fsm: Some(DecodedStoredAddress::Defined(eoa_pre_fsm)),
@@ -94,7 +95,7 @@ pub(crate) fn persistent_empty(
 pub(crate) fn persistent_single_manager(
     _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
-    threshold: u64,
+    threshold: ByteLength,
     page_size: FileSpacePageSize,
     manager_addr: StoredAddress,
     eoa_pre_fsm: StoredAddress,
@@ -105,7 +106,7 @@ pub(crate) fn persistent_single_manager(
     FileSpaceInfoFields {
         strategy,
         persist: true,
-        threshold,
+        threshold: threshold.get(),
         page_size,
         page_end_meta_threshold: 0,
         eoa_pre_fsm: Some(DecodedStoredAddress::Defined(eoa_pre_fsm)),
@@ -126,7 +127,7 @@ pub(crate) fn persistent_single_manager(
 /// Inactive slots use [`DecodedStoredAddress::Undefined`].
 pub(crate) fn persistent_managers(
     strategy: FileSpaceStrategy,
-    threshold: u64,
+    threshold: ByteLength,
     page_size: FileSpacePageSize,
     slots: [DecodedStoredAddress; NUM_FILE_FSM_MANAGERS],
     eoa_pre_fsm: StoredAddress,
@@ -135,7 +136,7 @@ pub(crate) fn persistent_managers(
     FileSpaceInfoFields {
         strategy,
         persist: true,
-        threshold,
+        threshold: threshold.get(),
         page_size,
         page_end_meta_threshold: 0,
         eoa_pre_fsm: Some(DecodedStoredAddress::Defined(eoa_pre_fsm)),
@@ -146,6 +147,7 @@ pub(crate) fn persistent_managers(
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use rstest::rstest;
 
     use super::*;
@@ -158,7 +160,12 @@ mod tests {
     #[case::aggregators(FileSpaceStrategy::Aggr)]
     #[case::none(FileSpaceStrategy::None)]
     fn non_persistent_roundtrip_29_bytes(#[case] strategy: FileSpaceStrategy) {
-        let info = non_persistent(OffsetWidth::Eight, strategy, 1, FileSpacePageSize::DEFAULT);
+        let info = non_persistent(
+            OffsetWidth::Eight,
+            strategy,
+            ByteLength::new(1),
+            FileSpacePageSize::DEFAULT,
+        );
         let bytes =
             hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info).unwrap();
         assert_eq!(bytes.len(), 29, "non-persistent message is 29 bytes");
@@ -182,7 +189,7 @@ mod tests {
         let info = non_persistent(
             OffsetWidth::Eight,
             FileSpaceStrategy::None,
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::DEFAULT,
         );
         assert_eq!(
@@ -201,7 +208,7 @@ mod tests {
         slots[6] = 806;
         let info = persistent_managers(
             FileSpaceStrategy::Page,
-            0,
+            ByteLength::new(0),
             FileSpacePageSize::try_from(16384).unwrap(),
             slots.map(|address| {
                 if address == u64::MAX {
@@ -248,7 +255,7 @@ mod tests {
         let info = persistent_single_manager(
             offsets,
             FileSpaceStrategy::FsmAggr,
-            DEFAULT_THRESHOLD,
+            ByteLength::new(DEFAULT_THRESHOLD),
             FileSpacePageSize::DEFAULT,
             StoredAddress::new(0x0a48),
             StoredAddress::new(0x0a48),
@@ -275,7 +282,7 @@ mod tests {
         let info = persistent_empty(
             offsets,
             FileSpaceStrategy::FsmAggr,
-            DEFAULT_THRESHOLD,
+            ByteLength::new(DEFAULT_THRESHOLD),
             FileSpacePageSize::DEFAULT,
             StoredAddress::new(0x0a48),
         );

@@ -39,7 +39,7 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
     let widths = FormatWidths::from_sizes(offsets, lengths).unwrap();
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         page,
         (0..count).map(|index| {
             let start = if distinct {
@@ -268,8 +268,11 @@ fn appended_layout_rejects_an_unaligned_start() {
         &[],
     )
     .unwrap();
-    let space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     let (base, sizes) =
         ManagerProjection::indexed(space.admitted_snapshot(), geometry.widths()).unwrap();
     let error = PageLayout::new(
@@ -394,7 +397,7 @@ proptest::proptest! {
         let original_bytes = original.iter().map(|(_, free)| free.len().get()).sum::<u64>();
         let eoa = StoredAddress::new((original.len() as u64 + 18) * 2 * page.get());
         let space = SessionSpace::from_persisted(
-            Some(FileSpaceStrategy::Page), 1, page, original,
+            Some(FileSpaceStrategy::Page), ByteLength::new(1), page, original,
         ).unwrap();
         let append = space.plan_paged_append(eoa, &[], &[]).unwrap();
         assert_eq!(append.admitted_snapshot().reusable_bytes().unwrap(), ByteLength::new(original_bytes));

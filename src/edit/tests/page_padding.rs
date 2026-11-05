@@ -140,7 +140,7 @@ fn engine(strategy: FileSpaceStrategy, base: u64) -> (tempfile::TempDir, WriteEn
     if strategy == FileSpaceStrategy::Page {
         engine.space = SessionSpace::from_strategy(
             Some(strategy),
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::try_from(PAGE).unwrap(),
         );
         engine

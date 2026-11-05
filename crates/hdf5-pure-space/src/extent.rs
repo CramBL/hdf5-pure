@@ -84,17 +84,17 @@ impl Extent {
 
     /// Returns `true` if this extent touches `other` at an address that is not a multiple of
     /// `unit`.
-    pub(super) fn adjoins_within(self, other: Self, unit: u64) -> bool {
-        (self.end() == other.start() && !other.start().get().is_multiple_of(unit))
-            || (self.start() == other.end() && !other.end().get().is_multiple_of(unit))
+    pub(super) fn adjoins_within(self, other: Self, unit: ByteLength) -> bool {
+        (self.end() == other.start() && !other.start().get().is_multiple_of(unit.get()))
+            || (self.start() == other.end() && !other.end().get().is_multiple_of(unit.get()))
     }
 
     /// Returns `true` if this extent is at least `unit` bytes long and touches `other` at a
     /// multiple of `unit`.
-    pub(super) fn adjoins_whole_unit(self, other: Self, unit: u64) -> bool {
-        self.len() >= ByteLength::new(unit)
-            && ((self.end() == other.start() && other.start().get().is_multiple_of(unit))
-                || (self.start() == other.end() && other.end().get().is_multiple_of(unit)))
+    pub(super) fn adjoins_whole_unit(self, other: Self, unit: ByteLength) -> bool {
+        self.len() >= unit
+            && ((self.end() == other.start() && other.start().get().is_multiple_of(unit.get()))
+                || (self.start() == other.end() && other.end().get().is_multiple_of(unit.get())))
     }
 
     /// Returns the overlap of this extent and `other`, or `None` when they are disjoint.
@@ -136,12 +136,12 @@ impl Extent {
     /// allocation over such interiors ([`crate::__private::FreeList::alloc_whole_units`]) and the
     /// question of how large one is ([`crate::__private::FreeList::largest_whole_units`]) are
     /// defined by this one function, so the two cannot disagree about what counts.
-    pub(super) fn aligned_interior(self, align: u64) -> Option<Self> {
-        if align == 0 {
+    pub(super) fn aligned_interior(self, align: ByteLength) -> Option<Self> {
+        if align.is_zero() {
             return None;
         }
-        let start = StoredAddress::new(self.start().get().checked_next_multiple_of(align)?);
-        let end = StoredAddress::new((self.end().get() / align) * align);
+        let start = StoredAddress::new(self.start().get().checked_next_multiple_of(align.get())?);
+        let end = StoredAddress::new((self.end().get() / align.get()) * align.get());
         Self::between(start, end)
     }
 }

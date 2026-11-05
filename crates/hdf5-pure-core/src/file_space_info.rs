@@ -1,7 +1,9 @@
 use alloc::vec::Vec;
+use core::fmt;
 
 use crate::DecodedStoredAddress;
 use crate::FormatError;
+use crate::quantity::ByteLength;
 
 /// The effective file-space management configuration.
 ///
@@ -11,11 +13,11 @@ use crate::FormatError;
 ///
 /// libhdf5 configures these properties with `H5Pset_file_space_strategy` and
 /// `H5Pset_file_space_page_size`. [`FileSpaceInfo`] provides the raw on-disk message fields.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct FileSpaceSettings {
     strategy: FileSpaceStrategy,
     persist: bool,
-    threshold: u64,
+    threshold: ByteLength,
     page_size: FileSpacePageSize,
 }
 
@@ -48,7 +50,7 @@ impl FileSpaceSettings {
     /// [`FileSpaceStrategy::None`].
     pub const fn with_threshold(mut self, threshold: u64) -> Self {
         self.threshold = match self.strategy {
-            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => threshold,
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => ByteLength::new(threshold),
             FileSpaceStrategy::Aggr | FileSpaceStrategy::None => Self::DEFAULT_THRESHOLD,
         };
         self
@@ -74,7 +76,7 @@ impl FileSpaceSettings {
 
     /// Returns the minimum free-section size for manager tracking, in bytes.
     pub const fn threshold(&self) -> u64 {
-        self.threshold
+        self.threshold.get()
     }
 
     /// Returns the recorded page size, including under strategies that allocate without pages.
@@ -83,13 +85,42 @@ impl FileSpaceSettings {
     }
 
     /// The threshold for newly constructed settings and strategies without managers.
-    const DEFAULT_THRESHOLD: u64 = 1;
+    const DEFAULT_THRESHOLD: ByteLength = ByteLength::new(1);
 }
 
 impl Default for FileSpaceSettings {
     /// Returns [`Self::new`] with [`FileSpaceStrategy::FsmAggr`].
     fn default() -> Self {
         Self::new(FileSpaceStrategy::FsmAggr)
+    }
+}
+
+impl fmt::Debug for FileSpaceSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            strategy,
+            persist,
+            threshold,
+            page_size,
+        } = self;
+        f.debug_struct("FileSpaceSettings")
+            .field("strategy", strategy)
+            .field("persist", persist)
+            .field("threshold", &threshold.get())
+            .field("page_size", page_size)
+            .finish()
+    }
+}
+
+/// Provides the manager tracking threshold as a byte quantity.
+pub trait FileSpaceSettingsExt {
+    /// Returns the minimum free-section size for manager tracking.
+    fn threshold_length(&self) -> ByteLength;
+}
+
+impl FileSpaceSettingsExt for FileSpaceSettings {
+    fn threshold_length(&self) -> ByteLength {
+        self.threshold
     }
 }
 

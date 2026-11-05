@@ -29,7 +29,7 @@ impl FreeList {
     /// space can also panic, including during scalar admission in debug builds.
     pub(super) fn release_batch(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, ())>,
         work: &mut AdmissionWork,
     ) -> Vec<(Extent, ())> {
@@ -63,7 +63,7 @@ impl FreeList {
                 tracked.next();
                 admission.push(extent, true, false);
             } else if let Some((extent, ())) = returned.next() {
-                admission.push(extent, extent.len() >= ByteLength::new(threshold), true);
+                admission.push(extent, extent.len() >= threshold, true);
             }
         }
         admission.finish_run();

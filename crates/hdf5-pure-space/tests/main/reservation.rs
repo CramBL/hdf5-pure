@@ -57,7 +57,7 @@ fn batch_preserves_effective_page_type_and_claimed_page_remainders(
 ) {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        64,
+        ByteLength::new(64),
         FileSpacePageSize::DEFAULT,
         [(Some(ManagerKind::PagedLargeGeneric), extent(8192, 8192))],
     )
@@ -87,7 +87,7 @@ fn batch_preserves_effective_page_type_and_claimed_page_remainders(
 fn batch_whole_page_best_fit_uses_aligned_interiors_and_original_address_ties() {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallRaw), extent(4097, 12286)),
@@ -145,8 +145,12 @@ fn indexed_batch_matches_scalar_reservations_and_restoration(
         ),
         (None, extent(page * 20 + 11, 37)),
     ];
-    let mut scalar = SessionSpace::from_persisted(Some(strategy), 32, page_size, entries).unwrap();
-    let mut indexed = SessionSpace::from_persisted(Some(strategy), 32, page_size, entries).unwrap();
+    let mut scalar =
+        SessionSpace::from_persisted(Some(strategy), ByteLength::new(32), page_size, entries)
+            .unwrap();
+    let mut indexed =
+        SessionSpace::from_persisted(Some(strategy), ByteLength::new(32), page_size, entries)
+            .unwrap();
     let requests = [
         request(19, PageType::Meta),
         request(page + 1, PageType::Raw),
@@ -202,7 +206,7 @@ fn failed_later_request_and_batch_drop_preserve_successful_reservations(
 ) {
     let mut space = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallRaw), extent(8192, 100)),
@@ -266,7 +270,7 @@ fn batch_builds_indexes_once_and_restores_only_remaining_extents(
 ) {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         (0..count).map(|i| (None, extent(i * 128, 64))),
     )
@@ -316,7 +320,7 @@ fn page_batch_indexes_a_large_run_without_expanding_pages() {
     let capacity = 1_u64 << 40;
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [(Some(ManagerKind::PagedLargeGeneric), extent(8192, capacity))],
     )
@@ -353,7 +357,7 @@ fn page_batch_indexes_a_large_run_without_expanding_pages() {
 fn batch_coalesces_claimed_page_remainders_before_later_reservations() {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        128,
+        ByteLength::new(128),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallRaw), extent(8192, 4096)),
@@ -397,7 +401,7 @@ fn aggregate_returns_keep_current_threshold_admission_inside_a_batch(
 ) {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
-        100,
+        ByteLength::new(100),
         FileSpacePageSize::DEFAULT,
         [(None, extent(100, 64)), (None, extent(300, 64))],
     )
@@ -548,8 +552,11 @@ fn block_reservations_keep_alignment_remainders_and_compact_runs(
     #[values(1, 2)] count: usize,
     #[values(PageType::Meta, PageType::Raw)] page_type: PageType,
 ) {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     space.return_allocation_with_page_type(
         extent(start, available),
         AllocationClass::Metadata,
@@ -591,8 +598,11 @@ fn block_reservations_keep_alignment_remainders_and_compact_runs(
 
 #[rstest]
 fn block_reservations_claim_only_complete_pages_from_the_other_type(#[values(1, 2)] count: usize) {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     space.return_allocation(extent(4000, 8292), AllocationClass::Raw);
     let mut batch = space.reservation_batch(count);
     let allocation = batch
@@ -612,8 +622,11 @@ fn block_reservations_claim_only_complete_pages_from_the_other_type(#[values(1, 
 
 #[rstest]
 fn mixed_reservations_update_block_indexes_after_each_split(#[values(1, 3)] count: usize) {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     space.return_allocation(extent(4000, 200), AllocationClass::Metadata);
     let mut batch = space.reservation_batch(count);
     assert_eq!(
@@ -663,8 +676,8 @@ proptest! {
             (Some(if metadata { ManagerKind::PagedSmallMetadata } else { ManagerKind::PagedSmallRaw }),
              extent(8192 + u64::try_from(i).unwrap() * 16384 + offset, length))
         }).collect();
-        let mut scalar = SessionSpace::from_persisted(Some(strategy), 1, FileSpacePageSize::DEFAULT, entries.iter().copied()).unwrap();
-        let mut indexed = SessionSpace::from_persisted(Some(strategy), 1, FileSpacePageSize::DEFAULT, entries).unwrap();
+        let mut scalar = SessionSpace::from_persisted(Some(strategy), ByteLength::new(1), FileSpacePageSize::DEFAULT, entries.iter().copied()).unwrap();
+        let mut indexed = SessionSpace::from_persisted(Some(strategy), ByteLength::new(1), FileSpacePageSize::DEFAULT, entries).unwrap();
         let mut batch = indexed.reservation_batch(requests.len().max(2));
         for (size, metadata, block) in requests {
             let request = request(size, if metadata { PageType::Meta } else { PageType::Raw });
@@ -690,7 +703,7 @@ proptest! {
 fn flat(extents: &[(u64, u64)]) -> SessionSpace {
     SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         extents
             .iter()

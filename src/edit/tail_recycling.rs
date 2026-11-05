@@ -67,7 +67,7 @@ impl WriteEngine {
             .try_fold(ByteLength::new(0), |len, extent| {
                 len.checked_add(extent.len())
             })?;
-        if len >= ByteLength::new(*threshold) {
+        if len >= *threshold {
             return None;
         }
         let mut blocks = old_blocks.clone();

@@ -304,7 +304,7 @@ fn aggregate_spare_admission_is_available_to_later_batch_requests(
     engine.place(second, &[5; 64]).unwrap();
     engine.space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::FsmAggr),
-        threshold,
+        ByteLength::new(threshold),
         FileSpacePageSize::DEFAULT,
     );
     if seed {
@@ -832,7 +832,7 @@ fn engine_with_page(
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
     if strategy == FileSpaceStrategy::Page {
-        engine.space = SessionSpace::from_strategy(Some(strategy), 1, page_size);
+        engine.space = SessionSpace::from_strategy(Some(strategy), ByteLength::new(1), page_size);
     }
     (directory, engine)
 }
@@ -1237,7 +1237,7 @@ fn extent(start: u64, length: u64) -> Extent {
 fn flat(extents: &[(u64, u64)]) -> SessionSpace {
     SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         extents
             .iter()

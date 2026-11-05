@@ -76,7 +76,7 @@ fn continuation_reconstruction_retains_both_widths(
     assert_eq!(source.calls.get(), 3);
     let placeholder = file_space_info::persistent_placeholder(
         FileSpaceStrategy::Page,
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
     );
     let replacement = prepared.rewrite(&placeholder).unwrap();
@@ -185,7 +185,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     };
     let placeholder = file_space_info::persistent_placeholder(
         FileSpaceStrategy::Page,
-        7,
+        ByteLength::new(7),
         FileSpacePageSize::DEFAULT,
     );
     let body =
@@ -195,7 +195,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     assert_eq!(replacement.props(), fixture.props);
     let final_info = file_space_info::persistent_managers(
         FileSpaceStrategy::Page,
-        9,
+        ByteLength::new(9),
         FileSpacePageSize::try_from(8_192).unwrap(),
         core::array::from_fn(|index| {
             DecodedStoredAddress::Defined(StoredAddress::new(

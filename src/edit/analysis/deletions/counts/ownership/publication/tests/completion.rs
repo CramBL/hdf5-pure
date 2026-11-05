@@ -182,7 +182,7 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
             };
             let persist = engine.persist.as_ref().unwrap();
             assert_eq!(persist.strategy, FileSpaceStrategy::FsmAggr);
-            assert!(predecessor.length() < persist.threshold);
+            assert!(ByteLength::new(predecessor.length()) < persist.threshold);
             let region = engine
                 .inspect_group(ObjectId::new(original_root))
                 .unwrap()
@@ -392,7 +392,7 @@ fn ownership_changes_after_the_original_bounds_cannot_grant_a_write_scope(#[case
             Claim::Reusable => {
                 engine.space = SessionSpace::from_persisted(
                     Some(FileSpaceStrategy::FsmAggr),
-                    1,
+                    ByteLength::new(1),
                     FileSpacePageSize::DEFAULT,
                     [(
                         None,

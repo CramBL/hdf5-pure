@@ -11,6 +11,8 @@ use alloc::collections::BTreeMap as HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::FileSpaceSettingsExt;
 use hdf5_pure_core::__private::SuperblockFields;
 pub(crate) use hdf5_pure_format::__private as dense_attribute_write;
 #[cfg(test)]
@@ -1033,9 +1035,9 @@ impl FileWriter {
         let libver = self.resolve_libver()?;
         let file_space = self.file_space_settings;
         let reuse_threshold = match file_space {
-            None => Some(DEFAULT_THRESHOLD),
+            None => Some(ByteLength::new(DEFAULT_THRESHOLD)),
             Some(settings) if settings.strategy() == FileSpaceStrategy::FsmAggr => {
-                Some(settings.threshold())
+                Some(settings.threshold_length())
             }
             Some(_) => None,
         };
@@ -1090,7 +1092,7 @@ impl FileWriter {
                     )
                     .into());
                 }
-                Some((page_size, settings.persist(), settings.threshold()))
+                Some((page_size, settings.persist(), settings.threshold_length()))
             }
             _ => None,
         };
@@ -2939,7 +2941,7 @@ impl FileWriter {
                     Some(manager) => file_space_info::persistent_single_manager(
                         widths.offsets,
                         settings.strategy(),
-                        settings.threshold(),
+                        settings.threshold_length(),
                         settings.page_size(),
                         manager.header_address,
                         cursor2,
@@ -2947,7 +2949,7 @@ impl FileWriter {
                     None => file_space_info::persistent_empty(
                         widths.offsets,
                         settings.strategy(),
-                        settings.threshold(),
+                        settings.threshold_length(),
                         settings.page_size(),
                         cursor2,
                     ),
@@ -3078,14 +3080,14 @@ fn file_space_placeholder(widths: FormatWidths, settings: FileSpaceSettings) -> 
     if settings.persist() {
         file_space_info::persistent_placeholder(
             settings.strategy(),
-            settings.threshold(),
+            settings.threshold_length(),
             settings.page_size(),
         )
     } else {
         file_space_info::non_persistent(
             widths.offsets,
             settings.strategy(),
-            settings.threshold(),
+            settings.threshold_length(),
             settings.page_size(),
         )
     }

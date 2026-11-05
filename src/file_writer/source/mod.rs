@@ -13,6 +13,8 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::FileSpaceSettingsExt;
 use hdf5_pure_core::__private::SuperblockFields;
 use hdf5_pure_format::__private::DenseAttrCreationOrder;
 use hdf5_pure_format::__private::DenseAttrFixup;
@@ -678,9 +680,9 @@ impl<S: ObjectSource> Plan<S> {
         let mut libver = LibVer::resolve_writable(bounds.or(Some((LibVer::Earliest, inherited))))?;
         let mut latest = settings.is_some();
         let threshold = match settings {
-            None => Some(DEFAULT_THRESHOLD),
+            None => Some(ByteLength::new(DEFAULT_THRESHOLD)),
             Some(settings) if settings.strategy() == FileSpaceStrategy::FsmAggr => {
-                Some(settings.threshold())
+                Some(settings.threshold_length())
             }
             _ => None,
         };
@@ -1635,7 +1637,7 @@ impl FileLayout {
             let info = settings.persist().then(|| {
                 file_space_info::persistent_managers(
                     FileSpaceStrategy::Page,
-                    settings.threshold(),
+                    settings.threshold_length(),
                     settings.page_size(),
                     slots,
                     end,
@@ -1669,7 +1671,7 @@ impl FileLayout {
                         Some(manager) => file_space_info::persistent_single_manager(
                             super::OFFSET_WIDTH,
                             settings.strategy(),
-                            settings.threshold(),
+                            settings.threshold_length(),
                             settings.page_size(),
                             manager.header_address,
                             end,
@@ -1677,7 +1679,7 @@ impl FileLayout {
                         None => file_space_info::persistent_empty(
                             super::OFFSET_WIDTH,
                             settings.strategy(),
-                            settings.threshold(),
+                            settings.threshold_length(),
                             settings.page_size(),
                             end,
                         ),

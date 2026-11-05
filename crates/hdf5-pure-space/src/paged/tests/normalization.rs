@@ -112,7 +112,7 @@ proptest! {
         let quarters: u64 = fragments.iter().map(|&(_, quarters)| quarters).sum();
         let eoa = StoredAddress::new(page_size + quarters * page_size / 4);
         let threshold = threshold_quarters * page_size / 4;
-        let (post, actual_eoa) = paged.post_free(threshold, eoa, freed.clone(), old_blocks.clone());
+        let (post, actual_eoa) = paged.post_free(ByteLength::new(threshold), eoa, freed.clone(), old_blocks.clone());
         let mut reference = PagedPostFree {
             page_size: paged.page_size,
             meta: paged.meta.clone(),
@@ -167,7 +167,12 @@ fn adjacent_completed_pages_retain_individual_threshold_admission(
         (extent(3 * PAGE - 100, 100), FreeClass::Dead),
         (extent(4 * PAGE - 100, 100), META),
     ];
-    let (post, eoa) = paged.post_free(threshold, StoredAddress::new(4 * PAGE), freed, []);
+    let (post, eoa) = paged.post_free(
+        ByteLength::new(threshold),
+        StoredAddress::new(4 * PAGE),
+        freed,
+        [],
+    );
     assert_eq!(eoa, StoredAddress::new(expected_eoa));
     assert_eq!(paged_sections(&post), expected);
 }
@@ -333,7 +338,7 @@ pub(super) fn normalize_reference(
         }
     }
     for extent in runs {
-        if let Some(pages) = extent.aligned_interior(page) {
+        if let Some(pages) = extent.aligned_interior(ByteLength::new(page)) {
             meta.take_range(pages);
             raw.take_range(pages);
             dead.take_range(pages);
@@ -402,7 +407,7 @@ pub(super) fn release_each_reference(
         let offered = pending.len();
         pending.retain(|&(extent, class)| {
             *attempts += 1;
-            post.release(threshold, extent, class) == Release::Drop
+            post.release(ByteLength::new(threshold), extent, class) == Release::Drop
         });
         if pending.len() == offered {
             break;

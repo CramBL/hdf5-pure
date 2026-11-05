@@ -36,13 +36,13 @@ pub enum SessionSpace {
 /// Reusable-space state for an unpaged manager strategy.
 pub struct FlatSpace {
     free: FreeList,
-    threshold: u64,
+    threshold: ByteLength,
 }
 
 /// Reusable-space state for the PAGE strategy.
 pub struct PagedSpace {
     paged: PagedEdit,
-    threshold: u64,
+    threshold: ByteLength,
 }
 
 /// The allocation state a failed commit may restore without undoing written PAGE padding.
@@ -126,7 +126,7 @@ impl SessionSpace {
     /// message is normalized by the caller to the default `FSM_AGGR` strategy before this call.
     pub fn from_strategy(
         strategy: Option<FileSpaceStrategy>,
-        threshold: u64,
+        threshold: ByteLength,
         page_size: FileSpacePageSize,
     ) -> Self {
         match strategy {
@@ -170,7 +170,7 @@ impl SessionSpace {
     /// let raw = Extent::new(metadata.end(), ByteLength::new(3_072)).unwrap();
     /// let mut space = SessionSpace::from_persisted(
     ///     Some(FileSpaceStrategy::Page),
-    ///     8_192,
+    ///     ByteLength::new(8_192),
     ///     FileSpacePageSize::DEFAULT,
     ///     [
     ///         (Some(ManagerKind::PagedSmallMetadata), metadata),
@@ -185,7 +185,7 @@ impl SessionSpace {
     /// ```
     pub fn from_persisted(
         strategy: Option<FileSpaceStrategy>,
-        threshold: u64,
+        threshold: ByteLength,
         page_size: FileSpacePageSize,
         sections: impl IntoIterator<Item = (Option<ManagerKind>, Extent)>,
     ) -> Result<Self, FreeListError> {
@@ -239,7 +239,7 @@ impl SessionSpace {
     ///
     /// let page_size = FileSpacePageSize::DEFAULT;
     /// let space = SessionSpace::from_strategy(
-    ///     Some(FileSpaceStrategy::Page), 1, page_size,
+    ///     Some(FileSpaceStrategy::Page), ByteLength::new(1), page_size,
     /// );
     /// let stored_address = StoredAddress::new(page_size.get());
     /// let complete_length = ByteLength::new(page_size.get() + 1);
@@ -308,7 +308,7 @@ impl SessionSpace {
     /// };
     /// let mut space = SessionSpace::from_persisted(
     ///     Some(FileSpaceStrategy::FsmAggr),
-    ///     1,
+    ///     ByteLength::new(1),
     ///     FileSpacePageSize::DEFAULT,
     ///     [(None, extent(100, 100)), (None, extent(300, 100))],
     /// )?;
@@ -357,7 +357,7 @@ impl SessionSpace {
     /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest, SessionSpace};
     ///
     /// let mut space = SessionSpace::from_strategy(
-    ///     Some(FileSpaceStrategy::FsmAggr), 1, FileSpacePageSize::DEFAULT,
+    ///     Some(FileSpaceStrategy::FsmAggr), ByteLength::new(1), FileSpacePageSize::DEFAULT,
     /// );
     /// let spare = Extent::new(StoredAddress::new(100), ByteLength::new(32)).unwrap();
     /// let mut batch = space.reservation_batch_with_returns(2);
@@ -420,7 +420,7 @@ impl SessionSpace {
     /// };
     ///
     /// let mut space = SessionSpace::from_strategy(
-    ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+    ///     Some(FileSpaceStrategy::Page), ByteLength::new(1), FileSpacePageSize::DEFAULT,
     /// );
     /// space.seed_persisted(
     ///     Some(ManagerKind::PagedSmallRaw),
@@ -539,7 +539,7 @@ impl SessionSpace {
     /// let fragment = Extent::new(StoredAddress::new(8), ByteLength::new(16)).unwrap();
     /// let space = SessionSpace::from_persisted(
     ///     Some(FileSpaceStrategy::Page),
-    ///     1,
+    ///     ByteLength::new(1),
     ///     FileSpacePageSize::MIN,
     ///     [(None, fragment)],
     /// ).unwrap();
@@ -579,7 +579,7 @@ impl SessionSpace {
     /// let free = Extent::new(StoredAddress::new(4_096), ByteLength::new(64)).unwrap();
     /// let mut space = SessionSpace::from_persisted(
     ///     Some(FileSpaceStrategy::FsmAggr),
-    ///     1,
+    ///     ByteLength::new(1),
     ///     FileSpacePageSize::DEFAULT,
     ///     [(None, free)],
     /// )?;
@@ -641,7 +641,7 @@ impl SessionSpace {
     /// };
     ///
     /// let mut space = SessionSpace::from_strategy(
-    ///     Some(FileSpaceStrategy::Page), 64, FileSpacePageSize::DEFAULT,
+    ///     Some(FileSpaceStrategy::Page), ByteLength::new(64), FileSpacePageSize::DEFAULT,
     /// );
     /// let retired = Extent::new(StoredAddress::new(8_192), ByteLength::new(128)).unwrap();
     /// space.record_freed(StoredAddress::new(12_288), retired, FreeClass::Page(PageType::Raw));
@@ -749,7 +749,7 @@ impl SessionSpace {
     /// use hdf5_pure_space::__private::SessionSpace;
     ///
     /// let mut space = SessionSpace::from_strategy(
-    ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+    ///     Some(FileSpaceStrategy::Page), ByteLength::new(1), FileSpacePageSize::DEFAULT,
     /// );
     /// let durable = Extent::new(StoredAddress::new(4_096), ByteLength::new(512)).unwrap();
     /// space.seed_persisted(Some(ManagerKind::PagedSmallMetadata), durable);
@@ -973,7 +973,7 @@ impl SessionSpace {
     /// };
     ///
     /// let mut space = SessionSpace::from_strategy(
-    ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+    ///     Some(FileSpaceStrategy::Page), ByteLength::new(1), FileSpacePageSize::DEFAULT,
     /// );
     /// let free = Extent::new(StoredAddress::new(4_112), ByteLength::new(100)).unwrap();
     /// space.seed_persisted(Some(ManagerKind::PagedSmallRaw), free);
@@ -1051,7 +1051,11 @@ mod tests {
     #[case::flat(FileSpaceStrategy::FsmAggr)]
     #[case::page(FileSpaceStrategy::Page)]
     fn append_snapshot_restores_the_session_strategy_state(#[case] strategy: FileSpaceStrategy) {
-        let mut space = SessionSpace::from_strategy(Some(strategy), 1, FileSpacePageSize::DEFAULT);
+        let mut space = SessionSpace::from_strategy(
+            Some(strategy),
+            ByteLength::new(1),
+            FileSpacePageSize::DEFAULT,
+        );
         let original = Extent::new(StoredAddress::new(4_112), ByteLength::new(100)).unwrap();
         space.seed_persisted(Some(ManagerKind::PagedSmallRaw), original);
         space.record_transition(PageType::Raw, PageTransition::Unchanged);
@@ -1096,7 +1100,7 @@ mod tests {
     fn flat_mutations_update_and_restore_cached_total() {
         let mut space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::FsmAggr),
-            50,
+            ByteLength::new(50),
             FileSpacePageSize::DEFAULT,
         );
         let total = |space: &SessionSpace| {
@@ -1162,7 +1166,7 @@ mod tests {
     fn flat_limit_allocation_retains_remainders_below_threshold() {
         let mut space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::FsmAggr),
-            50,
+            ByteLength::new(50),
             FileSpacePageSize::DEFAULT,
         );
         space.seed_persisted(
@@ -1214,7 +1218,11 @@ mod tests {
         )]
         strategy: FileSpaceStrategy,
     ) {
-        let mut space = SessionSpace::from_strategy(Some(strategy), 64, FileSpacePageSize::DEFAULT);
+        let mut space = SessionSpace::from_strategy(
+            Some(strategy),
+            ByteLength::new(64),
+            FileSpacePageSize::DEFAULT,
+        );
         let start = 8192;
         if neighbor {
             space.seed_persisted(
@@ -1257,7 +1265,8 @@ mod tests {
     fn flat_limit_allocation_preserves_other_strategies(
         #[case] strategy: Option<FileSpaceStrategy>,
     ) {
-        let mut space = SessionSpace::from_strategy(strategy, 1, FileSpacePageSize::DEFAULT);
+        let mut space =
+            SessionSpace::from_strategy(strategy, ByteLength::new(1), FileSpacePageSize::DEFAULT);
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
             Extent::new(StoredAddress::new(4_112), ByteLength::new(128)).unwrap(),
@@ -1284,7 +1293,7 @@ mod tests {
     ) {
         let space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::Page),
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::try_from(page_size).unwrap(),
         );
         assert_eq!(
@@ -1306,7 +1315,8 @@ mod tests {
         )]
         strategy: Option<FileSpaceStrategy>,
     ) {
-        let space = SessionSpace::from_strategy(strategy, 1, FileSpacePageSize::DEFAULT);
+        let space =
+            SessionSpace::from_strategy(strategy, ByteLength::new(1), FileSpacePageSize::DEFAULT);
         assert_eq!(
             space.object_header_free_class(StoredAddress::new(4_096), ByteLength::new(8_193)),
             FreeClass::Page(PageType::Meta)
@@ -1323,7 +1333,7 @@ mod tests {
     ) {
         let mut space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::Page),
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::DEFAULT,
         );
         space.seed_persisted(
@@ -1353,7 +1363,7 @@ mod tests {
     fn metadata_array_index_retains_metadata_intent_on_a_raw_page() {
         let mut space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::Page),
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::DEFAULT,
         );
         space.seed_persisted(
@@ -1399,24 +1409,27 @@ mod tests {
     fn fsm_aggr_constructs_flat_space() {
         let space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::FsmAggr),
-            THRESHOLD,
+            ByteLength::new(THRESHOLD),
             FileSpacePageSize::DEFAULT,
         );
         let SessionSpace::Flat(flat) = space else {
             panic!("FSM_AGGR must construct flat reusable space");
         };
-        assert_eq!(flat.threshold, THRESHOLD);
+        assert_eq!(flat.threshold, ByteLength::new(THRESHOLD));
     }
 
     #[test]
     fn page_constructs_paged_space() {
         let page_size = FileSpacePageSize::try_from(8192).unwrap();
-        let space =
-            SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), THRESHOLD, page_size);
+        let space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::Page),
+            ByteLength::new(THRESHOLD),
+            page_size,
+        );
         let SessionSpace::Paged(paged) = space else {
             panic!("PAGE must construct paged reusable space");
         };
-        assert_eq!(paged.threshold, THRESHOLD);
+        assert_eq!(paged.threshold, ByteLength::new(THRESHOLD));
         assert_eq!(paged.paged.page_size(), page_size);
     }
 
@@ -1425,7 +1438,7 @@ mod tests {
         assert!(matches!(
             SessionSpace::from_strategy(
                 Some(FileSpaceStrategy::Aggr),
-                THRESHOLD,
+                ByteLength::new(THRESHOLD),
                 FileSpacePageSize::DEFAULT,
             ),
             SessionSpace::Disabled
@@ -1437,7 +1450,7 @@ mod tests {
         assert!(matches!(
             SessionSpace::from_strategy(
                 Some(FileSpaceStrategy::None),
-                THRESHOLD,
+                ByteLength::new(THRESHOLD),
                 FileSpacePageSize::DEFAULT,
             ),
             SessionSpace::Disabled
@@ -1447,7 +1460,11 @@ mod tests {
     #[test]
     fn unreadable_strategy_constructs_disabled_space() {
         assert!(matches!(
-            SessionSpace::from_strategy(None, THRESHOLD, FileSpacePageSize::DEFAULT),
+            SessionSpace::from_strategy(
+                None,
+                ByteLength::new(THRESHOLD),
+                FileSpacePageSize::DEFAULT
+            ),
             SessionSpace::Disabled
         ));
     }

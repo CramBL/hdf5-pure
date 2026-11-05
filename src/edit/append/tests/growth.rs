@@ -83,7 +83,7 @@ fn immediate_allocations_use_only_matching_partial_page_holes(
     .unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [
             (Some(ManagerKind::PagedSmallRaw), raw),
@@ -192,7 +192,8 @@ fn engine(page: u64, tail: PageType) -> (tempfile::TempDir, WriteEngine) {
     let mut engine = edit_test_util::open_engine(&path);
     engine.sync_policy = SyncPolicy::OnClose;
     assert_eq!(engine.image.len() % page, 0);
-    engine.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, size);
+    engine.space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), ByteLength::new(1), size);
     engine
         .space
         .record_transition(tail, PageTransition::Unchanged);

@@ -101,7 +101,7 @@ fn page_admission_preserves_classes_and_original_dropped_allocations(
         .iter()
         .map(|&(start, len, class)| (super::extent(start, len), class))
         .collect();
-    let actual = post.release_each(threshold, returns.clone());
+    let actual = post.release_each(ByteLength::new(threshold), returns.clone());
     let reference_dropped =
         normalization::release_each_reference(&mut reference, threshold, returns, &mut 0);
     assert_eq!(super::paged_sections(&post), expected);
@@ -147,7 +147,7 @@ fn page_admission_bounds_index_queue_and_reconstruction_work(
     }
     let mut work = AdmissionWork::default();
     assert!(
-        post.release_batch(3 * PAGE, returned.clone(), &mut work)
+        post.release_batch(ByteLength::new(3 * PAGE), returned.clone(), &mut work)
             .is_empty()
     );
     let start = first.min(seed);
@@ -229,7 +229,7 @@ fn complete_post_free_preserves_individual_completed_pages_and_original_classes(
     );
     let mut work = AdmissionWork::default();
     let (post, eoa) = paged.post_free_with_work(
-        threshold,
+        ByteLength::new(threshold),
         StoredAddress::new(4 * PAGE),
         freed,
         old_blocks,
@@ -266,7 +266,8 @@ fn allocation_padding_below_the_return_threshold_is_merged_in_bulk(
     }
     let mut work = AdmissionWork::default();
     let eoa = StoredAddress::new((count + 2) * PAGE);
-    let (post, returned_eoa) = paged.post_free_with_work(10 * PAGE, eoa, [], [], &mut work);
+    let (post, returned_eoa) =
+        paged.post_free_with_work(ByteLength::new(10 * PAGE), eoa, [], [], &mut work);
     assert_eq!(returned_eoa, eoa);
     assert_eq!(
         super::paged_sections(&post),
@@ -289,7 +290,7 @@ fn one_and_billion_page_returns_have_equal_observed_admission_work(#[case] pages
     let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
     let mut work = AdmissionWork::default();
     let (post, eoa) = paged.post_free_with_work(
-        1,
+        ByteLength::new(1),
         StoredAddress::new((pages + 10) * PAGE),
         [
             (super::extent(PAGE, pages * PAGE), META),
@@ -359,7 +360,7 @@ fn empty_and_scalar_page_batches_skip_indexes(
     let mut post = super::paged_free_space(&[vec![], vec![(PAGE, 64)], vec![]]);
     let mut work = AdmissionWork::default();
     let actual = post.release_batch(
-        128,
+        ByteLength::new(128),
         returned
             .iter()
             .map(|&(start, len, class)| (super::extent(start, len), class)),
@@ -394,7 +395,7 @@ fn dropped_tail_preserves_its_original_partial_head_class() {
     ];
     let mut work = AdmissionWork::default();
     let (post, eoa) = paged.post_free_with_work(
-        3 * PAGE,
+        ByteLength::new(3 * PAGE),
         StoredAddress::new(10 * PAGE),
         returned,
         [],

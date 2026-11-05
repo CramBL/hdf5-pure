@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::FreeClass;
@@ -444,7 +445,7 @@ impl Strategy {
         let [predecessor] = spans.as_slice() else {
             panic!("expected one root allocation")
         };
-        assert!(predecessor.length() < engine.persist.as_ref().unwrap().threshold);
+        assert!(ByteLength::new(predecessor.length()) < engine.persist.as_ref().unwrap().threshold);
         let current = engine
             .image()
             .read_exact_at(root.get(), usize::try_from(predecessor.length()).unwrap())
