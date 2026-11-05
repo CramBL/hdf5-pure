@@ -16,6 +16,7 @@ fn native_readers_observe_the_published_count_and_surviving_values(
     #[case] removed: &str,
     #[case] surviving: &str,
     #[case] count: usize,
+    #[values(Publication::Ordered, Publication::Completion)] publication: Publication,
 ) {
     let path = test_util::temp::temp_path("native-published-count.h5");
     fixture.write(&path);
@@ -28,12 +29,16 @@ fn native_readers_observe_the_published_count_and_surviving_values(
         },
     );
     let mut engine = edit_test_util::open_engine(&path);
-    completion_tests::bounds(&mut engine, vec![], &[removed])
-        .with_publication(BTreeMap::new(), |scope| {
-            scope.unwrap().write_counts().unwrap();
-            Ok(())
-        })
-        .unwrap();
+    let bounds = completion_tests::bounds(&mut engine, vec![], &[removed]);
+    match publication {
+        Publication::Ordered => bounds.publish_counts(BTreeMap::new()).unwrap(),
+        Publication::Completion => bounds
+            .with_publication(BTreeMap::new(), |scope| {
+                scope.unwrap().write_counts().unwrap();
+                Ok(())
+            })
+            .unwrap(),
+    }
     drop(engine);
     let native = file::libhdf5_open(&path);
     {
@@ -63,4 +68,10 @@ fn native_readers_observe_the_published_count_and_surviving_values(
         }
     }
     native.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum Publication {
+    Completion,
+    Ordered,
 }

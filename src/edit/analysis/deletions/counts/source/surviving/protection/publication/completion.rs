@@ -1,16 +1,20 @@
-//! Completion scopes for protected count allocations after tree publication.
+//! Count updates ordered around tree publication and checked against protected allocations.
 
 use std::collections::BTreeMap;
 
 use hdf5_pure_core::PhysicalAddress;
 
+use self::write::CountWriteFailure;
 use super::CountAllocationEnd;
 use super::CountProtectionError;
 use super::CountPublicationBounds;
 use super::CountPublicationError;
 use super::CountPublicationPhase;
 use super::ProtectedCounts;
+use super::prepare::CountDirection;
+use super::prepare::CountPreparationError;
 use crate::edit::WriteEngine;
+use crate::edit::commit::JournalScope;
 use crate::edit::commit::PublishedTree;
 use crate::error::Error;
 
@@ -52,6 +56,80 @@ impl CountPublicationBounds<'_> {
         engine.publish_pending_tree_with_completion(retirement, relocations, |published| {
             complete(request.into_write_scope(published))
         })
+    }
+
+    /// Writes count increases before publishing references and decreases after publication.
+    ///
+    /// Prepares each direction from current complete headers. Journals increases through
+    /// reference publication, restoring them on failure before a publication attempt.
+    /// Preserves increases after confirmed or uncertain publication. After confirmed publication,
+    /// checks the protected allocations before preparing decreases and writing through the journal.
+    /// Uses the associated tree's original retirement batch and the existing publication barriers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountPublicationUpdateError::Preparation`] if current-header preparation fails,
+    /// [`CountPublicationUpdateError::Completion`] if post-publication allocation checks fail, or
+    /// [`CountPublicationUpdateError::Operation`] for allocation permission, publication, journal,
+    /// or barrier errors.
+    /// Marks allocation publication uncertain after an error following a publication attempt or
+    /// failed restoration. Failed restoration retains both errors in
+    /// [`Error::CommitPartiallyApplied`].
+    pub(in crate::edit) fn publish_counts(
+        self,
+        relocations: BTreeMap<u64, u64>,
+    ) -> Result<(), CountPublicationUpdateError> {
+        let Self { phase, end } = self;
+        let CountPublicationPhase {
+            engine,
+            counts,
+            retirement,
+        } = phase;
+        engine
+            .context
+            .allocations
+            .before_reference()
+            .map_err(CountPublicationUpdateError::Operation)?;
+        let increases = counts
+            .prepare_updates(engine, CountDirection::Increase)
+            .map_err(CountPublicationUpdateError::Preparation)?;
+        let request = CountCompletion {
+            counts: &counts,
+            root: retirement.root,
+            proposed_end: end,
+        };
+        let result = JournalScope::with_publication(
+            engine,
+            |journal| {
+                for update in increases {
+                    for (range, bytes) in update.writes() {
+                        journal.write(range.start(), bytes)?;
+                    }
+                }
+                Ok(())
+            },
+            |engine| {
+                engine.publish_pending_tree_with_completion(retirement, relocations, |published| {
+                    Ok(match request.into_write_scope(published) {
+                        Ok(scope) => scope.write_decreases().map_err(|failure| (*failure).into()),
+                        Err(error) => Err(CountPublicationUpdateError::Completion(error)),
+                    })
+                })
+            },
+        )
+        .map_err(CountPublicationUpdateError::Operation)
+        .and_then(core::convert::identity);
+        if result.is_err() && engine.publication.attempted()
+            || matches!(
+                &result,
+                Err(CountPublicationUpdateError::Operation(
+                    Error::CommitPartiallyApplied { .. }
+                ))
+            )
+        {
+            engine.make_allocation_uncertain();
+        }
+        result
     }
 }
 
@@ -156,6 +234,28 @@ pub(in crate::edit) enum CountCompletionError {
         /// The root requested in the completed publication call.
         actual: PhysicalAddress,
     },
+}
+
+/// A preparation, publication, or protected-allocation error during ordered count updates.
+#[derive(Debug)]
+pub(in crate::edit) enum CountPublicationUpdateError {
+    /// A failed post-publication root or allocation check.
+    Completion(CountCompletionError),
+    /// An allocation permission, publication, journal, or barrier error, including failed
+    /// restoration.
+    Operation(Error),
+    /// A current-header acquisition, framing, or encoding error.
+    Preparation(CountPreparationError),
+}
+
+impl From<CountWriteFailure<'_, '_>> for CountPublicationUpdateError {
+    fn from(failure: CountWriteFailure<'_, '_>) -> Self {
+        match failure {
+            CountWriteFailure::Preparation { scope: _, error } => Self::Preparation(error),
+            CountWriteFailure::Restored { writes: _, error }
+            | CountWriteFailure::Uncertain { error } => Self::Operation(error),
+        }
+    }
 }
 
 #[cfg(test)]

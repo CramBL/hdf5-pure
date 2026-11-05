@@ -47,6 +47,8 @@ use crate::file_space_info::FileSpaceStrategy;
 use crate::image::WriteBuffering;
 use crate::object_path::LinkNameBuf;
 
+mod ordered;
+
 #[rstest]
 #[case::header(CountStorage::Header)]
 #[case::continuation(CountStorage::Continuation)]

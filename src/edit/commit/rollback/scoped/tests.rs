@@ -19,6 +19,7 @@ use crate::File;
 use crate::Layout;
 use crate::edit::SyncPolicy;
 use crate::edit::WriteEngine;
+use crate::edit::commit::PublicationState;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::WriteBuffering;
@@ -248,6 +249,79 @@ fn an_invalid_undo_checkpoint_preserves_the_existing_journal() {
         1_i32.to_le_bytes()
     );
     drop(engine);
+}
+
+#[rstest]
+#[case::confirmed(Publication::Confirmed)]
+#[case::before(Publication::Before)]
+#[case::uncertain(Publication::Uncertain)]
+fn journaled_prefix_survives_only_a_confirmed_or_uncertain_publication(
+    #[case] publication: Publication,
+) {
+    let (_path, mut engine, address) = fixture(Arc::default(), SyncPolicy::Always);
+    engine
+        .write_inplace_journaled(address.get(), &11_i32.to_le_bytes())
+        .unwrap();
+    let pointer = engine.inplace_undo[0].1.as_ptr();
+    disk_log::start();
+    let result = JournalScope::with_publication(
+        &mut engine,
+        |scope| scope.write(address, &bytes([11, 21, 31])),
+        |engine| {
+            assert_eq!(engine.inplace_undo.len(), 2);
+            assert_eq!(
+                engine.image().read_exact_at(address.get(), 12).unwrap(),
+                bytes([11, 21, 31])
+            );
+            match publication {
+                Publication::Before => Err(refusal()),
+                Publication::Confirmed => {
+                    engine.publication = PublicationState::Published;
+                    Ok(19)
+                }
+                Publication::Uncertain => {
+                    engine.publication = PublicationState::Uncertain;
+                    Err(refusal())
+                }
+            }
+        },
+    );
+    let recording = disk_log::finish();
+    if matches!(publication, Publication::Confirmed) {
+        assert_eq!(result.unwrap(), 19);
+    } else {
+        assert_refusal(result.unwrap_err());
+    }
+    assert_eq!(engine.inplace_undo.len(), 1);
+    assert_eq!(engine.inplace_undo[0].1.as_ptr(), pointer);
+    assert_eq!(
+        engine.image().read_exact_at(address.get(), 12).unwrap(),
+        bytes(if matches!(publication, Publication::Before) {
+            [11, 2, 3]
+        } else {
+            [11, 21, 31]
+        })
+    );
+    let synchronizations = recording
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            IoEvent::Synchronize { kind, outcome } => Some((*kind, *outcome)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut expected = vec![(Synchronization::All, IoOutcome::Succeeded)];
+    if matches!(publication, Publication::Before) {
+        expected.push((Synchronization::Data, IoOutcome::Succeeded));
+    }
+    assert_eq!(synchronizations, expected);
+}
+
+#[derive(Clone, Copy)]
+enum Publication {
+    Before,
+    Confirmed,
+    Uncertain,
 }
 
 fn fixture(syncs: Arc<AtomicU64>, policy: SyncPolicy) -> (TempPath, WriteEngine, PhysicalAddress) {

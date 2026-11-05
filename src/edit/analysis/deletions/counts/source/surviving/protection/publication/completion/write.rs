@@ -4,8 +4,8 @@ use core::fmt;
 
 use hdf5_pure_format::__private::ObjectReferenceCountUpdate;
 
+use super::super::prepare::CountDirection;
 use super::super::prepare::CountPreparationError;
-use super::super::prepare::CurrentCountUpdates;
 use super::CountWriteScope;
 use crate::edit::commit::JournalScope;
 use crate::error::Error;
@@ -33,6 +33,35 @@ impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
     pub(in crate::edit) fn write_counts(
         self,
     ) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
+        self.write_changes(CountDirection::All)
+    }
+
+    /// Prepares and journals only counts below their original observed values.
+    ///
+    /// Uses the current-header preparation, journal barriers, and failure ownership of
+    /// [`Self::write_counts`]. On success, a batch without decreases requires no allocation or
+    /// source reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the preparation, restored-write, or uncertain-publication errors described by
+    /// [`Self::write_counts`].
+    pub(in crate::edit) fn write_decreases(
+        self,
+    ) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
+        self.write_changes(CountDirection::Decrease)
+    }
+
+    /// Prepares matching updates before writing through the undo journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the preparation, restored-write, or uncertain-publication errors described by
+    /// [`Self::write_counts`].
+    fn write_changes(
+        self,
+        direction: CountDirection,
+    ) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
         if self.counts.updates().is_empty() {
             return Ok(());
         }
@@ -40,8 +69,8 @@ impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
             self.engine.make_allocation_uncertain();
             return Err(Box::new(CountWriteFailure::Uncertain { error }));
         }
-        let updates = match CurrentCountUpdates::new(&mut *self.engine, self.counts) {
-            Ok(current) => current.into_updates(),
+        let updates = match self.counts.prepare_updates(self.engine, direction) {
+            Ok(updates) => updates,
             Err(error) => {
                 return Err(Box::new(CountWriteFailure::Preparation {
                     scope: self,

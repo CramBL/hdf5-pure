@@ -85,36 +85,12 @@ impl<'source> CurrentCountUpdates<'source> {
         engine: &'source mut WriteEngine,
         counts: &'source ProtectedCounts,
     ) -> Result<Self, CountPreparationError> {
-        if counts
-            .source
-            .as_ref()
-            .is_some_and(|source| !source.session.same(&engine.context.allocations.session()))
-        {
-            return Err(CountPreparationError::Session);
-        }
-        let mut updates = Vec::with_capacity(counts.updates().len());
-        for original in counts.updates() {
-            updates.push(original.prepare_source(
-                engine.image(),
-                engine.widths(),
-                engine.addresses().effective_base(),
-            )?);
-        }
+        let updates = counts.prepare_updates(engine, CountDirection::All)?;
         Ok(Self {
             engine,
             counts,
             updates,
         })
-    }
-
-    /// Releases the source loan and returns the encoded updates without acquired header buffers.
-    pub(super) fn into_updates(self) -> Vec<ObjectReferenceCountUpdate> {
-        let Self {
-            engine: _,
-            counts: _,
-            updates,
-        } = self;
-        updates
     }
 
     /// Borrows each original field with its prepared writes, in allocation-address order.
@@ -127,6 +103,72 @@ impl<'source> CurrentCountUpdates<'source> {
             updates,
         } = self;
         counts.updates().iter().zip(updates)
+    }
+}
+
+impl ProtectedCounts {
+    /// Prepares matching updates from current complete headers in allocation-address order.
+    ///
+    /// Checks the original allocation session before allocating or reading. Uses the field,
+    /// allocation, and scalar checks described by [`CurrentCountUpdates::new`]. Retains compact
+    /// encoded updates and releases each acquired metadata range before reading the next object.
+    /// A batch without matching updates requires no allocation or source reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the session, source, framing, or encoding errors described by
+    /// [`CurrentCountUpdates::new`].
+    pub(super) fn prepare_updates(
+        &self,
+        engine: &WriteEngine,
+        direction: CountDirection,
+    ) -> Result<Vec<ObjectReferenceCountUpdate>, CountPreparationError> {
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|source| !source.session.same(&engine.context.allocations.session()))
+        {
+            return Err(CountPreparationError::Session);
+        }
+        let capacity = match direction {
+            CountDirection::All => self.updates().len(),
+            _ => self
+                .updates()
+                .iter()
+                .filter(|update| direction.includes(update))
+                .count(),
+        };
+        let mut updates = Vec::with_capacity(capacity);
+        for original in self
+            .updates()
+            .iter()
+            .filter(|update| direction.includes(update))
+        {
+            updates.push(original.prepare_source(
+                engine.image(),
+                engine.widths(),
+                engine.addresses().effective_base(),
+            )?);
+        }
+        Ok(updates)
+    }
+}
+
+/// A selection of count changes relative to their original observed values.
+#[derive(Clone, Copy)]
+pub(super) enum CountDirection {
+    All,
+    Decrease,
+    Increase,
+}
+
+impl CountDirection {
+    fn includes(self, update: &ProtectedCount) -> bool {
+        match self {
+            Self::All => true,
+            Self::Decrease => update.count().get() < update.field().value(),
+            Self::Increase => update.count().get() > update.field().value(),
+        }
     }
 }
 

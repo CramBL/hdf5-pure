@@ -25,6 +25,8 @@ use super::super::super::tests as protection_tests;
 use super::super::CountPublicationBounds;
 use super::super::test_support;
 use super::super::test_support::Form;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use super::CountDirection;
 use super::CountPreparationError;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use super::CurrentCountUpdates;
@@ -45,6 +47,51 @@ use crate::source::BytesSource;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::FormatWidths;
+
+#[rstest]
+#[case::matching(CountDirection::Decrease, 1)]
+#[case::nonmatching(CountDirection::Increase, 0)]
+#[case::all(CountDirection::All, 1)]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn directional_preparation_reads_only_matching_allocations(
+    #[case] direction: CountDirection,
+    #[case] expected: usize,
+) {
+    let path = test_util::temp::temp_path("directional-count-cost.h5");
+    test_support::fixture(
+        &path,
+        Form::Version2,
+        0,
+        NonZeroU32::new(2).unwrap(),
+        c"old",
+    );
+    let (engine, calls) = protection_tests::engine_with_read_call_counter(&path);
+    let (counts, _) = protection_tests::counts(&engine, &["a"]);
+    let protected = counts.protect(&engine, []).unwrap();
+    assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    DISCOVERY_WORK.with(|work| work.set((0, 0)));
+    let (updates, measured) = allocation::measure("directional-count-preparation", || {
+        protected.prepare_updates(&engine, direction).unwrap()
+    });
+    assert_eq!(updates.len(), expected);
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        u64::try_from(expected).unwrap()
+    );
+    if expected == 0 {
+        assert_eq!(measured.blocks, 0, "{measured}");
+        assert_eq!(measured.peak_bytes, 0, "{measured}");
+    } else {
+        assert!(measured.blocks > 0 && measured.live_bytes > 0, "{measured}");
+        assert!(
+            measured.live_bytes
+                <= u64::try_from(core::mem::size_of::<ObjectReferenceCountUpdate>()).unwrap(),
+            "{measured}"
+        );
+    }
+    DISCOVERY_WORK.with(|work| assert_eq!(work.get(), (0, 0)));
+}
 
 #[rstest]
 #[case::v1(Form::Version1)]
