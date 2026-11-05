@@ -772,7 +772,7 @@ fn owned_inventory_rejects_foreign_engines_and_preserves_empty_association(#[cas
     let (engine, tree, target, _) = prepared(&path, Some(2), Links::Named);
     drop(engine);
     std::fs::copy(&path, &other_path).unwrap();
-    let (engine, calls) = counted_engine(&path);
+    let (engine, calls) = open_counted_engine(&path);
     let other = edit_test_util::open_engine(&other_path);
     let mut phase = AnalysisPhase::new(&engine);
     let added = additions(&mut phase, &tree, nonempty);
@@ -903,7 +903,7 @@ fn owned_inventory_and_positive_partition_retain_bounded_per_target_state(#[case
     let owner = super::group(&mut fixture, 1, links);
     fixture.link("owner", owner);
     fixture.write(&path);
-    let (engine, calls) = counted_engine(&path);
+    let (engine, calls) = open_counted_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let deletions = (0..count)
         .map(|index| {
@@ -1071,7 +1071,7 @@ fn prepared(
     let source = fixture.append_header(records);
     fixture.link("source", source);
     fixture.write(path);
-    let (engine, calls) = counted_engine(path);
+    let (engine, calls) = open_counted_engine(path);
     let tree = WriteEngine::read_copy_subtree(
         &engine.opened_source(),
         AccessMode::ReadWrite,
@@ -1085,7 +1085,7 @@ fn prepared(
 }
 
 /// Opens an engine without metadata caching and counts image reads.
-pub(in crate::edit::analysis::deletions::counts) fn counted_engine(
+pub(in crate::edit::analysis::deletions::counts) fn open_counted_engine(
     path: &Path,
 ) -> (WriteEngine, Arc<AtomicU64>) {
     let calls = Arc::new(AtomicU64::new(0));

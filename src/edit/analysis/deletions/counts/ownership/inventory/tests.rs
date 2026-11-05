@@ -375,7 +375,7 @@ fn preflight_protects_each_source_field_with_bounded_storage_and_no_reads(#[case
     .unwrap();
     fixture.link("owner", owner);
     fixture.write(&path);
-    let (engine, calls) = count_tests::counted_engine(&path);
+    let (engine, calls) = count_tests::open_counted_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let added = phase.added_copy_users([]).unwrap().unwrap();
     let deletions = (0..count)
@@ -475,7 +475,7 @@ fn fixture(
     let source = fixture.append_header(records);
     fixture.link("source", source);
     fixture.write(path);
-    let (engine, calls) = count_tests::counted_engine(path);
+    let (engine, calls) = count_tests::open_counted_engine(path);
     let tree = WriteEngine::read_copy_subtree(
         &engine.opened_source(),
         AccessMode::ReadWrite,
