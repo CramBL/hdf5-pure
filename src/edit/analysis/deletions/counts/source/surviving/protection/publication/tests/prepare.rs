@@ -22,12 +22,12 @@ use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture::Fixture;
 
 use super::super::super::tests as protection_tests;
+use super::super::CountPreparationError;
 use super::super::CountPublicationBounds;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use super::super::CurrentCountUpdates;
 use super::super::test_util as count_test_util;
 use super::super::test_util::Form;
-use super::CountPreparationError;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use super::CurrentCountUpdates;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::UserblockSize;
 use crate::address::BaseAddress;

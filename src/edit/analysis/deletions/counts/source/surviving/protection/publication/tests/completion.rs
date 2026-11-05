@@ -22,12 +22,12 @@ use test_util::widths::Widths;
 
 use super::super::super::tests as protection_tests;
 use super::super::super::tests::CountStorage;
+use super::super::CountCompletion;
+use super::super::CountCompletionError;
+use super::super::CountProtectionError;
 use super::super::CountPublicationBounds;
+use super::super::CountPublicationError;
 use super::super::CountPublicationPhase;
-use super::CountCompletion;
-use super::CountCompletionError;
-use super::CountProtectionError;
-use super::CountPublicationError;
 use crate::File;
 use crate::UserblockSize;
 use crate::address::StoredAddress;
