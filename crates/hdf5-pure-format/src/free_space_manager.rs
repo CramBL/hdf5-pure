@@ -1164,30 +1164,112 @@ pub fn parse_section_info(
     header_addr: StoredAddress,
     header: &FreeSpaceManagerHeader,
 ) -> Result<Vec<FreeSection>, FormatError> {
-    let used = header.section_list_used.to_usize()?;
-    let list = data.get(..used).ok_or(FormatError::UnexpectedEof {
-        expected: used,
-        available: data.len(),
-    })?;
-    let prefix_len = section_list_prefix_len(widths.offsets);
-    parse_section_list_prefix(widths.offsets, list, header_addr)?;
-    let body = &list[..list.len() - CHECKSUM_LEN];
-    let sections = header.section_fields(widths.lengths).decode_sets(
-        body,
-        prefix_len,
-        header.total_sections.to_usize()?,
-    )?;
-    let space = sections
-        .iter()
-        .map(|section| u128::from(section.size))
-        .sum::<u128>();
-    if space != u128::from(header.total_space) {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "the sections sum to {space} bytes, not the header's total of {}",
-            header.total_space
-        )));
+    SectionInfo::parse(widths, data, header_addr, header)?.collect()
+}
+
+/// Calls `visit` for each decoded free section in encoded order.
+///
+/// Uses the framing and record checks of [`parse_section_info`] without collecting sections.
+/// The callback may have been called before a later record or the total-space check fails.
+/// The caller must check the result before treating the complete section list as valid.
+///
+/// # Errors
+///
+/// Returns the parsing errors described by [`parse_section_info`].
+pub fn visit_section_info(
+    widths: FormatWidths,
+    data: &[u8],
+    header_addr: StoredAddress,
+    header: &FreeSpaceManagerHeader,
+    visit: impl FnMut(FreeSection),
+) -> Result<(), FormatError> {
+    SectionInfo::parse(widths, data, header_addr, header)?.visit(visit)
+}
+
+/// A borrowed section list with checked framing and a section count that fits a [`usize`].
+///
+/// Record counts, classes, and total space require [`Self::visit`] or [`Self::collect`].
+struct SectionInfo<'a> {
+    /// The used section-list bytes, including the prefix and excluding the checksum.
+    body: &'a [u8],
+    fields: SectionFields,
+    /// The first size group's byte offset in `body`.
+    start: usize,
+    /// The header's declared section count.
+    total: usize,
+    /// The header's declared total free space, in bytes.
+    space: u64,
+}
+
+impl<'a> SectionInfo<'a> {
+    /// Checks the used length and framing before any record storage is allocated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the used length or section count
+    /// exceeds [`usize::MAX`], [`FormatError::UnexpectedEof`] if `data` is shorter than the used
+    /// length, or the framing errors of [`parse_section_list_prefix`].
+    fn parse(
+        widths: FormatWidths,
+        data: &'a [u8],
+        header_addr: StoredAddress,
+        header: &FreeSpaceManagerHeader,
+    ) -> Result<Self, FormatError> {
+        let used = header.section_list_used.to_usize()?;
+        let list = data.get(..used).ok_or(FormatError::UnexpectedEof {
+            expected: used,
+            available: data.len(),
+        })?;
+        let start = section_list_prefix_len(widths.offsets);
+        parse_section_list_prefix(widths.offsets, list, header_addr)?;
+        Ok(Self {
+            body: &list[..list.len() - CHECKSUM_LEN],
+            fields: header.section_fields(widths.lengths),
+            start,
+            total: header.total_sections.to_usize()?,
+            space: header.total_space,
+        })
     }
-    Ok(sections)
+
+    /// Collects checked sections in encoded order with capacity for the declared section count.
+    ///
+    /// # Errors
+    ///
+    /// Returns the record and total-space errors of [`Self::visit`].
+    fn collect(self) -> Result<Vec<FreeSection>, FormatError> {
+        let mut sections = Vec::with_capacity(self.total);
+        self.visit(|section| sections.push(section))?;
+        Ok(sections)
+    }
+
+    /// Checks records and their total space while calling `visit` for each decoded section.
+    ///
+    /// The callback may have been called before a later check fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFreeSpaceManager`] if record decoding fails or the section
+    /// sizes do not sum to the header's total free space.
+    fn visit(self, mut visit: impl FnMut(FreeSection)) -> Result<(), FormatError> {
+        let Self {
+            body,
+            fields,
+            start,
+            total,
+            space: expected,
+        } = self;
+        let mut space = 0_u128;
+        fields.visit_sets(body, start, total, |section| {
+            space += u128::from(section.size);
+            visit(section);
+        })?;
+        if space != u128::from(expected) {
+            return Err(FormatError::InvalidFreeSpaceManager(format!(
+                "the sections sum to {space} bytes, not the header's total of {expected}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The widths in bytes of the variable-size fields of a section list: the number of sections in a
@@ -1235,7 +1317,7 @@ impl SectionFields {
             .map_or(0, |payload| payload / (offset + SECTION_CLASS_LEN).to_u64())
     }
 
-    /// Reads `total` sections from the sets in `body`, starting at byte `start`.
+    /// Calls `visit` for `total` sections from the sets in `body`, starting at byte `start`.
     ///
     /// The caller excludes the checksum from `body`. Ignores unused bytes after the last section.
     ///
@@ -1245,12 +1327,13 @@ impl SectionFields {
     /// set holds 0 sections or sections of 0 bytes, the class of a section is not one of the 3
     /// classes the C library registers for the file client, or the sets hold more than `total`
     /// sections.
-    fn decode_sets(
+    fn visit_sets(
         self,
         body: &[u8],
         start: usize,
         total: usize,
-    ) -> Result<Vec<FreeSection>, FormatError> {
+        mut visit: impl FnMut(FreeSection),
+    ) -> Result<(), FormatError> {
         let Self {
             count: count_width,
             size: size_width,
@@ -1267,9 +1350,9 @@ impl SectionFields {
         };
         // `FreeSpaceManagerHeader::parse` bounds `total` by the sections a section list of the
         // header's used length holds, and `body` is that section list less its checksum.
-        let mut sections = Vec::with_capacity(total);
+        let mut emitted = 0;
         let mut pos = start;
-        while sections.len() < total {
+        while emitted < total {
             let count = field(pos, count_width, "section count of a set")?;
             if count == 0 {
                 return Err(FormatError::InvalidFreeSpaceManager(format!(
@@ -1284,7 +1367,7 @@ impl SectionFields {
             }
             pos += count_width + size_width;
             for _ in 0..count {
-                if sections.len() == total {
+                if emitted == total {
                     return Err(FormatError::InvalidFreeSpaceManager(format!(
                         "the sets hold more sections than the header's count of {total}"
                     )));
@@ -1298,10 +1381,11 @@ impl SectionFields {
                     )));
                 }
                 pos += offset_width + SECTION_CLASS_LEN;
-                sections.push(FreeSection { addr, size });
+                visit(FreeSection { addr, size });
+                emitted += 1;
             }
         }
-        Ok(sections)
+        Ok(())
     }
 
     /// Serializes the section list of the manager whose header is at `fshd_addr`, with the sets
@@ -2551,21 +2635,32 @@ mod tests {
         let len = list.len();
         test_util::checksum::restamp(&mut list, 0, len);
 
+        let expected = vec![
+            section(842, 10),
+            section(5375, 10),
+            section(474, 24),
+            section(2444, 27),
+            section(1595, 47),
+            section(130, 74),
+            section(2618, 194),
+            section(3793, 254),
+            section(1122, 326),
+            section(4385, 393),
+        ];
         assert_eq!(
             parse_section_info(widths(8, 8), &list, StoredAddress::new(48), &header),
-            Ok(vec![
-                section(842, 10),
-                section(5375, 10),
-                section(474, 24),
-                section(2444, 27),
-                section(1595, 47),
-                section(130, 74),
-                section(2618, 194),
-                section(3793, 254),
-                section(1122, 326),
-                section(4385, 393),
-            ])
+            Ok(expected.clone())
         );
+        let mut visited = Vec::new();
+        visit_section_info(
+            widths(8, 8),
+            &list,
+            StoredAddress::new(48),
+            &header,
+            |section| visited.push(section),
+        )
+        .unwrap();
+        assert_eq!(visited, expected);
     }
 
     #[rstest]
@@ -2754,6 +2849,27 @@ mod tests {
             parse_section_info(widths(8, 8), &fsse, StoredAddress::new(619), &header),
             Err(FormatError::InvalidFreeSpaceManager(reason.to_owned()))
         );
+        let mut visited = Vec::new();
+        let error = visit_section_info(
+            widths(8, 8),
+            &fsse,
+            StoredAddress::new(619),
+            &header,
+            |section| visited.push(section),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::InvalidFreeSpaceManager(reason.to_owned())
+        );
+        assert_eq!(
+            visited,
+            if at == 14 && value == 1601u64.to_le_bytes() {
+                vec![section(2848, 1601)]
+            } else {
+                vec![]
+            }
+        );
     }
 
     #[rstest]
@@ -2801,25 +2917,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_set_with_more_sections_than_the_header_counts_fails_to_parse() {
+    #[rstest]
+    #[case::invalid_second_class(
+        &[0x02, 0x64, 0x00, 0x10, 0x00, 0x00, 0x20, 0x00, 0x03], 2,
+        "the class of the section at byte 13 of the section list is 3, not one of the 3 classes of the file client"
+    )]
+    #[case::excess_count(
+        &[0x02, 0x64, 0x00, 0x10, 0x00, 0x00, 0x20, 0x00, 0x00], 1,
+        "the sets hold more sections than the header's count of 1"
+    )]
+    fn a_late_section_failure_retains_only_the_visited_prefix(
+        #[case] payload: &[u8],
+        #[case] total: u64,
+        #[case] reason: &str,
+    ) {
         let widths = widths(2, 2);
-        let list = section_list(
-            widths,
-            0x80,
-            &[0x02, 0x64, 0x00, 0x10, 0x00, 0x00, 0x20, 0x00, 0x00],
-        );
+        let list = section_list(widths, 0x80, payload);
         let header = FreeSpaceManagerHeader {
             max_section_size: 0xFFFD,
             addr_space_bits: AddressSpaceBits(15),
-            ..header_of(&list, 1)
+            ..header_of(&list, total)
         };
-
+        let expected = FormatError::InvalidFreeSpaceManager(reason.to_owned());
+        let mut visited = Vec::new();
+        assert_eq!(
+            visit_section_info(
+                widths,
+                &list,
+                StoredAddress::new(0x80),
+                &header,
+                |section| visited.push(section)
+            ),
+            Err(expected.clone())
+        );
+        assert_eq!(visited, vec![section(16, 100)]);
         assert_eq!(
             parse_section_info(widths, &list, StoredAddress::new(0x80), &header),
-            Err(FormatError::InvalidFreeSpaceManager(
-                "the sets hold more sections than the header's count of 1".to_owned()
-            ))
+            Err(expected)
         );
     }
 

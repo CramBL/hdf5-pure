@@ -13,6 +13,7 @@ mod group_link_inspection;
 mod independent_widths;
 mod large_page;
 mod link_patches;
+mod manager_allocations;
 mod symbol_table_links;
 mod version_1_attributes;
 
