@@ -122,10 +122,8 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
     );
     expected.resize(usize::try_from(end).unwrap().max(expected.len()), 0);
     for (index, request) in requests.iter().enumerate() {
-        let bytes = vec![
-            u8::try_from(7 + index).unwrap();
-            usize::try_from(request.encoded_length()).unwrap()
-        ];
+        let bytes =
+            vec![u8::try_from(7 + index).unwrap(); request.encoded_length().to_usize().unwrap()];
         let at = plan.write_next(&bytes).unwrap().get();
         let local = usize::try_from(at).unwrap();
         expected[local..local + bytes.len()].copy_from_slice(&bytes);
@@ -231,7 +229,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
                     Value::Number(stored),
                     Value::Number(physical),
                     Value::Number(allocation),
-                    Value::Number(encoding),
+                    Value::Number(encoding.get()),
                     Value::text(format!("{page:?}")),
                 ]
             }),
@@ -376,7 +374,7 @@ fn request(allocation: u64, encoding: u64, page_type: PageType) -> BlockRequest 
             class,
             page_type,
         ),
-        encoding,
+        ByteLength::new(encoding),
         EncodingDependency::Independent,
     )
     .unwrap()

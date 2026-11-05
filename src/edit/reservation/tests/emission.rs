@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::AllocationClass;
 use rstest::rstest;
@@ -27,7 +28,7 @@ fn streamed_blocks_preserve_complete_capacity_and_neighbors(
     }
     let blocks = [BlockRequest::new(
         request(64, PageType::Raw),
-        32,
+        ByteLength::new(32),
         EncodingDependency::Allocation,
     )
     .unwrap()];
@@ -177,7 +178,7 @@ fn streamed_padding_failures_prevent_plan_completion(#[case] strategy: FileSpace
         .unwrap();
     let blocks = [BlockRequest::new(
         request(64, PageType::Raw),
-        16,
+        ByteLength::new(16),
         EncodingDependency::Allocation,
     )
     .unwrap()];
@@ -372,7 +373,7 @@ fn empty_encodings_preserve_complete_reserved_capacity(#[case] reused: bool) {
     }
     let requests = [BlockRequest::new(
         request(64, PageType::Raw),
-        0,
+        ByteLength::new(0),
         EncodingDependency::Independent,
     )
     .unwrap()];

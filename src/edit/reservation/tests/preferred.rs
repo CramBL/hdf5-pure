@@ -36,11 +36,11 @@ fn preferred_reuse_checks_complete_narrow_capacity_and_retains_ownership(
     let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
     let request = BlockRequest::new(
         super::request(64, PageType::Raw),
-        16,
+        ByteLength::new(16),
         EncodingDependency::Independent,
     )
     .unwrap();
-    assert!(base + stored + request.encoded_length() < undefined);
+    assert!(base + stored + request.encoded_length().get() < undefined);
     let mut space = super::flat(&[(stored, 64)]);
     let mut batch = space.reservation_batch(1);
     let reservation = batch.reserve(request.reservation()).unwrap();

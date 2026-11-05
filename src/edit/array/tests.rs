@@ -101,7 +101,7 @@ fn array_blocks_follow_complete_metadata_reservations(
         reservation.is_block()
             && reservation.class() == AllocationClass::Metadata
             && reservation.page_type() == PageType::Meta
-            && request.encoded_length() == reservation.size().get()
+            && request.encoded_length() == reservation.size().length()
             && request.dependency() == EncodingDependency::Reservations
     }));
     let addresses = engine.context.addresses();
@@ -201,7 +201,16 @@ fn array_emission_rejects_incompatible_reservations(#[case] mismatch: Mismatch) 
                 EncodingDependency::Reservations
             };
             requests[0] = if matches!(mismatch, Mismatch::Encoding) {
-                BlockRequest::new(reservation, reservation.size().get() - 1, dependency).unwrap()
+                BlockRequest::new(
+                    reservation,
+                    reservation
+                        .size()
+                        .length()
+                        .checked_sub(ByteLength::new(1))
+                        .unwrap(),
+                    dependency,
+                )
+                .unwrap()
             } else {
                 BlockRequest::complete(reservation, dependency)
             };
@@ -403,11 +412,11 @@ fn extensible_array_emission_keeps_one_block_buffer(#[case] count: usize) {
     let requests = index.requests().unwrap();
     let encoded: u64 = requests
         .iter()
-        .map(|request| request.encoded_length())
+        .map(|request| request.encoded_length().get())
         .sum();
     let largest = requests
         .iter()
-        .map(|request| request.encoded_length())
+        .map(|request| request.encoded_length().get())
         .max()
         .unwrap();
     assert!(
@@ -559,21 +568,20 @@ fn failed_staged_array_writes_restore_reusable_state_and_predecessor_values(#[ca
     let expected = if writes == 0 {
         16 * size_of::<i32>()
     } else {
-        usize::try_from(
-            ArrayIndexPlan::new(
-                ChunkArrayKind::ExtensibleArray,
-                SlotOccupancy::Dense(2),
-                2,
-                64,
-                FormatWidths::from_sizes(8, 8).unwrap(),
-                false,
-            )
-            .unwrap()
-            .requests()
-            .unwrap()[0]
-                .encoded_length(),
+        ArrayIndexPlan::new(
+            ChunkArrayKind::ExtensibleArray,
+            SlotOccupancy::Dense(2),
+            2,
+            64,
+            FormatWidths::from_sizes(8, 8).unwrap(),
+            false,
         )
         .unwrap()
+        .requests()
+        .unwrap()[0]
+            .encoded_length()
+            .to_usize()
+            .unwrap()
     };
     assert_eq!(failed, [expected]);
     if writes > 0 {

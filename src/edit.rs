@@ -2958,7 +2958,7 @@ impl WriteEngine {
             .ok_or_else(|| FormatError::Internal("a tail reservation is empty".into()))?;
         let request = BlockRequest::new(
             ReservationRequest::new(size, AllocationClass::Metadata),
-            bytes.len() as u64,
+            ByteLength::new(bytes.len().to_u64()),
             EncodingDependency::Allocation,
         )?;
         let block = PlannedBlock::within(self.context.addresses(), region, addr, request)?;
