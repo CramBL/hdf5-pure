@@ -18,6 +18,7 @@ use hdf5_pure_space::__private::ReservationRequest;
 use hdf5_pure_space::__private::{PageTransition, PageType};
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 
@@ -1087,7 +1088,7 @@ impl EditStore<'_> {
         class: AllocationClass,
         prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
     ) -> Result<u64, Error> {
-        let Some(size) = NonZeroU64::new(length) else {
+        let Some(size) = NonZeroByteLength::new(length) else {
             return self.append_into_raw_page(length, prepare);
         };
         let request = match class {
@@ -1289,7 +1290,7 @@ impl Store for EditStore<'_> {
         class: AllocationClass,
         prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
     ) -> Result<ProvisionalAllocation, Error> {
-        let Some(length) = NonZeroU64::new(length) else {
+        let Some(length) = NonZeroByteLength::new(length) else {
             return EditStore::allocate_prepared(self, 0, class, prepare);
         };
         self.allocate_emitted(length, class, |address, emit| {
@@ -1300,7 +1301,7 @@ impl Store for EditStore<'_> {
 
     fn allocate_emitted(
         &mut self,
-        length: NonZeroU64,
+        length: NonZeroByteLength,
         class: AllocationClass,
         emit: impl FnOnce(
             PhysicalAddress,

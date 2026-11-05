@@ -1,7 +1,6 @@
-use core::num::NonZeroU64;
-
 use std::path::Path;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
@@ -316,7 +315,7 @@ fn stored_aggregate_positions_remain_u64() {
         .reserve(
             AddressContext::from_effective_base(BaseAddress::ZERO),
             &mut space,
-            NonZeroU64::new(64).unwrap(),
+            NonZeroByteLength::new(64).unwrap(),
             AllocationClass::Raw,
         )
         .unwrap();

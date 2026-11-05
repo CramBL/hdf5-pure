@@ -1,5 +1,4 @@
-use core::num::NonZeroU64;
-
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, FormatError, StoredAddress};
 use hdf5_pure_space::__private::{
@@ -18,7 +17,7 @@ fn batch_preserves_flat_best_fit_ties_and_successful_prefix(#[case] count: usize
     let mut batch = space.reservation_batch(count);
     let first = batch
         .reserve(ReservationRequest::new(
-            NonZeroU64::new(15).unwrap(),
+            NonZeroByteLength::new(15).unwrap(),
             AllocationClass::Raw,
         ))
         .unwrap();
@@ -65,7 +64,7 @@ fn batch_preserves_effective_page_type_and_claimed_page_remainders(
     let mut batch = space.reservation_batch(3);
     let first = batch
         .reserve(ReservationRequest::with_page_type(
-            NonZeroU64::new(17).unwrap(),
+            NonZeroByteLength::new(17).unwrap(),
             class,
             page_type,
         ))
@@ -550,7 +549,7 @@ fn block_reservations_keep_alignment_remainders_and_compact_runs(
         page_type,
     );
     let request = ReservationRequest::with_page_type(
-        NonZeroU64::new(size).unwrap(),
+        NonZeroByteLength::new(size).unwrap(),
         AllocationClass::Metadata,
         page_type,
     )
@@ -695,7 +694,7 @@ fn flat(extents: &[(u64, u64)]) -> SessionSpace {
 
 fn request(size: u64, page_type: PageType) -> ReservationRequest {
     ReservationRequest::with_page_type(
-        NonZeroU64::new(size).unwrap(),
+        NonZeroByteLength::new(size).unwrap(),
         match page_type {
             PageType::Meta => AllocationClass::Metadata,
             PageType::Raw => AllocationClass::Raw,

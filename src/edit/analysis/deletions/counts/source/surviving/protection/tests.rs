@@ -1,6 +1,5 @@
 use core::cell::Cell;
 use core::iter;
-use core::num::NonZeroU64;
 use std::path::Path;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::Arc;
@@ -10,6 +9,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
@@ -354,7 +354,7 @@ fn protection_excludes_aggregate_spare_without_combining_free_lists(
         .reserve_with(
             engine.widths().offsets,
             engine.addresses(),
-            NonZeroU64::new(1).unwrap(),
+            NonZeroByteLength::new(1).unwrap(),
             class,
             |_, _| panic!("a fresh aggregate returns no previous spare"),
         )

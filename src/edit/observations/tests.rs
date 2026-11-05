@@ -1,5 +1,4 @@
-use core::num::NonZeroU64;
-
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{
     AllocationClass, Extent, PageType, ReservationRequest, ReservationWork, SessionSpace,
@@ -367,7 +366,11 @@ fn request(allocation: u64, encoding: u64, page_type: PageType) -> BlockRequest 
         PageType::Raw => AllocationClass::Raw,
     };
     BlockRequest::new(
-        ReservationRequest::with_page_type(NonZeroU64::new(allocation).unwrap(), class, page_type),
+        ReservationRequest::with_page_type(
+            NonZeroByteLength::new(allocation).unwrap(),
+            class,
+            page_type,
+        ),
         encoding,
         EncodingDependency::Independent,
     )

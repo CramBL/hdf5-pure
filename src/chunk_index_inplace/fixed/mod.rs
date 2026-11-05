@@ -4,6 +4,7 @@ use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayHeader;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
@@ -616,7 +617,8 @@ impl FixedInitialization {
                 FormatError::Internal("fixed-array data-block length is absent".into())
             })?
         };
-        let length = NonZeroU64::new(length).ok_or(FormatError::InvalidFixedArrayGeometry)?;
+        let length =
+            NonZeroByteLength::new(length).ok_or(FormatError::InvalidFixedArrayGeometry)?;
         let addresses = file.addresses();
         let mut placement = None;
         let allocation =

@@ -1,7 +1,7 @@
-use core::num::NonZeroU64;
 use std::io::ErrorKind;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{
     AllocationClass, Extent, PageTransition, PageType, ReservationRequest, SessionSpace,
@@ -1226,7 +1226,7 @@ fn request(length: u64, page_type: PageType) -> ReservationRequest {
         PageType::Meta => AllocationClass::Metadata,
         PageType::Raw => AllocationClass::Raw,
     };
-    ReservationRequest::with_page_type(NonZeroU64::new(length).unwrap(), class, page_type)
+    ReservationRequest::with_page_type(NonZeroByteLength::new(length).unwrap(), class, page_type)
 }
 
 fn extent(start: u64, length: u64) -> Extent {

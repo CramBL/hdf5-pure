@@ -1,10 +1,9 @@
 //! Storage reclamation, page classification, free lists, and immediate allocation.
 
-use core::num::NonZeroU64;
-
 use std::path::Path;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private as format;
 #[cfg(feature = "deflate")]
 use hdf5_pure_format::__private::BTreeV2Layout;
@@ -228,7 +227,7 @@ fn reusable_space_stats_check_aggregate_byte_sums() {
         .reserve(
             session.context.addresses(),
             &mut session.space,
-            NonZeroU64::new(1).unwrap(),
+            NonZeroByteLength::new(1).unwrap(),
             AllocationClass::Raw,
         )
         .unwrap();

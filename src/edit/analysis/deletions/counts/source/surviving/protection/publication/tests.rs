@@ -1,9 +1,9 @@
-use core::num::NonZeroU64;
 use std::sync::Arc;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
@@ -314,7 +314,7 @@ fn publication_rechecks_mutable_allocator_and_session_facts(#[case] mutation: Mu
                 .reserve_with(
                     engine.widths().offsets,
                     engine.addresses(),
-                    NonZeroU64::new(1).unwrap(),
+                    NonZeroByteLength::new(1).unwrap(),
                     AllocationClass::Metadata,
                     |_, _| panic!("a fresh aggregate has no previous spare"),
                 )

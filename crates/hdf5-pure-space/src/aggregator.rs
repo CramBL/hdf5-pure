@@ -1,8 +1,8 @@
 //! Session allocation policy for separate metadata and raw aggregates.
 
 use core::fmt;
-use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
 
@@ -45,16 +45,14 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{AllocationClass, ClassicAggregators, Extent};
     ///
     /// let mut aggregates = ClassicAggregators::new();
     /// let snapshot = aggregates;
     /// let allocation = aggregates.allocate(
-    ///     StoredAddress::new(8_192), NonZeroU64::new(64).unwrap(), AllocationClass::Raw,
+    ///     StoredAddress::new(8_192), NonZeroByteLength::new(64).unwrap(), AllocationClass::Raw,
     /// )?;
     /// assert_eq!(allocation.extent(), Extent::new(StoredAddress::new(8_192), 64).unwrap());
     /// assert_eq!(allocation.end_of_allocation(), StoredAddress::new(10_240));
@@ -65,7 +63,7 @@ impl ClassicAggregators {
     pub fn allocate(
         &mut self,
         eoa: StoredAddress,
-        size: NonZeroU64,
+        size: NonZeroByteLength,
         class: AllocationClass,
     ) -> Result<AggregationAllocation, AggregationError> {
         let minimum = self.minimum_eoa();
@@ -91,15 +89,13 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{AllocationClass, ClassicAggregators};
     ///
     /// let mut aggregates = ClassicAggregators::new();
     /// let allocation = aggregates.allocate(
-    ///     StoredAddress::new(8_192), NonZeroU64::new(64).unwrap(), AllocationClass::Raw,
+    ///     StoredAddress::new(8_192), NonZeroByteLength::new(64).unwrap(), AllocationClass::Raw,
     /// )?;
     /// let eoa = aggregates.release_tail(allocation.end_of_allocation())?;
     /// assert_eq!(eoa, StoredAddress::new(8_256));
@@ -138,18 +134,18 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{AllocationClass, ClassicAggregators, Extent};
     ///
     /// let mut aggregates = ClassicAggregators::new();
     /// let metadata = aggregates.allocate(
-    ///     StoredAddress::new(8_192), NonZeroU64::new(64).unwrap(), AllocationClass::Metadata,
+    ///     StoredAddress::new(8_192),
+    ///     NonZeroByteLength::new(64).unwrap(),
+    ///     AllocationClass::Metadata,
     /// )?;
     /// let raw = aggregates.allocate(
-    ///     metadata.end_of_allocation(), NonZeroU64::new(64).unwrap(), AllocationClass::Raw,
+    ///     metadata.end_of_allocation(), NonZeroByteLength::new(64).unwrap(), AllocationClass::Raw,
     /// )?;
     /// let released = aggregates.reset(raw.end_of_allocation())?;
     /// assert_eq!(released.end_of_allocation(), StoredAddress::new(10_304));
@@ -186,9 +182,7 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{
     ///     AggregationError, AllocationClass, ClassicAggregators, Extent,
@@ -196,7 +190,9 @@ impl ClassicAggregators {
     ///
     /// let mut aggregates = ClassicAggregators::new();
     /// let reservation = aggregates.allocate(
-    ///     StoredAddress::new(8_192), NonZeroU64::new(64).unwrap(), AllocationClass::Metadata,
+    ///     StoredAddress::new(8_192),
+    ///     NonZeroByteLength::new(64).unwrap(),
+    ///     AllocationClass::Metadata,
     /// )?;
     /// let before = aggregates;
     /// assert_eq!(
@@ -209,12 +205,12 @@ impl ClassicAggregators {
     /// assert_eq!(aggregates, before);
     /// aggregates.allocate(
     ///     reservation.end_of_allocation(),
-    ///     NonZeroU64::new(1_984).unwrap(),
+    ///     NonZeroByteLength::new(1_984).unwrap(),
     ///     AllocationClass::Metadata,
     /// )?;
     /// aggregates.reconcile_eoa(StoredAddress::new(8_256))?;
     /// let raw = aggregates.allocate(
-    ///     StoredAddress::new(8_256), NonZeroU64::new(64).unwrap(), AllocationClass::Raw,
+    ///     StoredAddress::new(8_256), NonZeroByteLength::new(64).unwrap(), AllocationClass::Raw,
     /// )?;
     /// assert_eq!(raw.extent(), Extent::new(StoredAddress::new(8_256), 64).unwrap());
     /// # Ok::<(), AggregationError>(())
@@ -254,7 +250,7 @@ impl ClassicAggregators {
     fn reserve(
         &mut self,
         mut eoa: StoredAddress,
-        size: NonZeroU64,
+        size: NonZeroByteLength,
         class: AllocationClass,
     ) -> Result<AggregationAllocation, AggregationError> {
         let Self { metadata, raw } = self;
@@ -464,10 +460,10 @@ pub const AGGREGATE_BLOCK_SIZE: u64 = 2048;
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU64;
 
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::__private::NonZeroByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
@@ -487,7 +483,7 @@ mod tests {
         aggregates
             .allocate(
                 StoredAddress::new(8_192),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
@@ -495,7 +491,7 @@ mod tests {
             aggregates
                 .allocate(
                     StoredAddress::new(10_240),
-                    NonZeroU64::new(1984).unwrap(),
+                    NonZeroByteLength::new(1984).unwrap(),
                     AllocationClass::Metadata,
                 )
                 .unwrap();
@@ -510,7 +506,7 @@ mod tests {
             aggregates
                 .allocate(
                     StoredAddress::new(eoa),
-                    NonZeroU64::new(1).unwrap(),
+                    NonZeroByteLength::new(1).unwrap(),
                     AllocationClass::Raw,
                 )
                 .unwrap();
@@ -543,7 +539,7 @@ mod tests {
         let allocation = aggregates
             .allocate(
                 StoredAddress::new(start),
-                NonZeroU64::new(size).unwrap(),
+                NonZeroByteLength::new(size).unwrap(),
                 class,
             )
             .unwrap();
@@ -568,14 +564,14 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
         let second = aggregates
             .allocate(
                 first.end_of_allocation(),
-                NonZeroU64::new(1984).unwrap(),
+                NonZeroByteLength::new(1984).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -587,7 +583,7 @@ mod tests {
         let third = aggregates
             .allocate(
                 second.end_of_allocation(),
-                NonZeroU64::new(1).unwrap(),
+                NonZeroByteLength::new(1).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -608,21 +604,21 @@ mod tests {
         let metadata = aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
         let raw = aggregates
             .allocate(
                 metadata.end_of_allocation(),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
         let second = aggregates
             .allocate(
                 raw.end_of_allocation(),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
@@ -653,14 +649,14 @@ mod tests {
         aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
         let allocation = aggregates
             .allocate(
                 StoredAddress::new(eoa),
-                NonZeroU64::new(4000).unwrap(),
+                NonZeroByteLength::new(4000).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -697,7 +693,7 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(2047).unwrap(),
+                NonZeroByteLength::new(2047).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
@@ -707,14 +703,18 @@ mod tests {
             aggregates
                 .allocate(
                     first.end_of_allocation(),
-                    NonZeroU64::new(used - 2047).unwrap(),
+                    NonZeroByteLength::new(used - 2047).unwrap(),
                     AllocationClass::Metadata,
                 )
                 .unwrap()
                 .end_of_allocation()
         };
         let raw = aggregates
-            .allocate(eoa, NonZeroU64::new(64).unwrap(), AllocationClass::Raw)
+            .allocate(
+                eoa,
+                NonZeroByteLength::new(64).unwrap(),
+                AllocationClass::Raw,
+            )
             .unwrap();
         assert_eq!(
             raw.extent(),
@@ -730,21 +730,21 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(2000).unwrap(),
+                NonZeroByteLength::new(2000).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
         let raw = aggregates
             .allocate(
                 first.end_of_allocation(),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
         let second = aggregates
             .allocate(
                 raw.end_of_allocation(),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
@@ -768,14 +768,14 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
         aggregates
             .allocate(
                 first.end_of_allocation(),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -795,7 +795,11 @@ mod tests {
     fn tail_release_preserves_consumed_prefix(#[case] class: AllocationClass) {
         let mut aggregates = ClassicAggregators::new();
         aggregates
-            .allocate(StoredAddress::new(100), NonZeroU64::new(64).unwrap(), class)
+            .allocate(
+                StoredAddress::new(100),
+                NonZeroByteLength::new(64).unwrap(),
+                class,
+            )
             .unwrap();
         assert_eq!(
             aggregates.release_tail(StoredAddress::new(2148)).unwrap(),
@@ -816,7 +820,7 @@ mod tests {
         let error = aggregates
             .allocate(
                 StoredAddress::new(u64::MAX - 100),
-                NonZeroU64::new(size).unwrap(),
+                NonZeroByteLength::new(size).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap_err();
@@ -831,7 +835,7 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(u64::MAX - 2048),
-                NonZeroU64::new(2047).unwrap(),
+                NonZeroByteLength::new(2047).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -839,7 +843,7 @@ mod tests {
         let error = aggregates
             .allocate(
                 first.end_of_allocation(),
-                NonZeroU64::new(size.max(2)).unwrap(),
+                NonZeroByteLength::new(size.max(2)).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap_err();
@@ -859,14 +863,14 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(u64::MAX - 4096),
-                NonZeroU64::new(2047).unwrap(),
+                NonZeroByteLength::new(2047).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
         let second = aggregates
             .allocate(
                 first.end_of_allocation(),
-                NonZeroU64::new(2).unwrap(),
+                NonZeroByteLength::new(2).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
@@ -874,7 +878,7 @@ mod tests {
         let error = aggregates
             .allocate(
                 second.end_of_allocation(),
-                NonZeroU64::new(4000).unwrap(),
+                NonZeroByteLength::new(4000).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap_err();
@@ -894,7 +898,7 @@ mod tests {
         aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
@@ -907,7 +911,7 @@ mod tests {
             aggregates
                 .allocate(
                     StoredAddress::new(2147),
-                    NonZeroU64::new(1).unwrap(),
+                    NonZeroByteLength::new(1).unwrap(),
                     AllocationClass::Raw
                 )
                 .unwrap_err(),
@@ -934,7 +938,7 @@ mod tests {
         let first = aggregates
             .allocate(
                 StoredAddress::new(100),
-                NonZeroU64::new(64).unwrap(),
+                NonZeroByteLength::new(64).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -942,7 +946,7 @@ mod tests {
         let allocation = aggregates
             .allocate(
                 first.end_of_allocation(),
-                NonZeroU64::new(4000).unwrap(),
+                NonZeroByteLength::new(4000).unwrap(),
                 AllocationClass::Raw,
             )
             .unwrap();
@@ -952,7 +956,7 @@ mod tests {
             aggregates
                 .allocate(
                     first.end_of_allocation(),
-                    NonZeroU64::new(4000).unwrap(),
+                    NonZeroByteLength::new(4000).unwrap(),
                     AllocationClass::Raw
                 )
                 .unwrap(),
@@ -974,7 +978,7 @@ mod tests {
             };
             let size = [1, 64, 2000, 2047, 2048, 4000][index % 6];
             let allocation = aggregates
-                .allocate(eoa, NonZeroU64::new(size).unwrap(), class)
+                .allocate(eoa, NonZeroByteLength::new(size).unwrap(), class)
                 .unwrap();
             assert!(allocation.end_of_allocation() >= eoa);
             assert!(

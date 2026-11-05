@@ -1,9 +1,9 @@
 //! Attribute edit preparation and compact and dense storage placement.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
 use std::ops::Range;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::{
     DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedAttributeMessage,
     PreparedDenseAttrs, RecordSplice,
@@ -186,7 +186,7 @@ impl WriteEngine {
             .block_lengths()
             .zip(plan.block_kinds())
             .map(|(length, kind)| {
-                NonZeroU64::new(length)
+                NonZeroByteLength::new(length)
                     .map(|length| {
                         BlockRequest::complete(
                             ReservationRequest::new(

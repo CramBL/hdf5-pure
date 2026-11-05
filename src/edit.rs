@@ -276,7 +276,6 @@
 
 #![allow(clippy::self_named_module_files)]
 
-use core::num::NonZeroU64;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -284,6 +283,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::ObjectHeaderChunk;
@@ -2950,7 +2950,7 @@ impl WriteEngine {
         addr: StoredAddress,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        let size = NonZeroU64::new(region.len())
+        let size = NonZeroByteLength::new(region.len())
             .ok_or_else(|| FormatError::Internal("a tail reservation is empty".into()))?;
         let request = BlockRequest::new(
             ReservationRequest::new(size, AllocationClass::Metadata),
@@ -3144,7 +3144,7 @@ impl WriteEngine {
         class: AllocationClass,
         page_type: PageType,
     ) -> Result<Placement, Error> {
-        if let Some(size) = NonZeroU64::new(len) {
+        if let Some(size) = NonZeroByteLength::new(len) {
             return self
                 .reserve_request(ReservationRequest::with_page_type(size, class, page_type));
         }

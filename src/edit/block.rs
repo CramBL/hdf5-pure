@@ -150,7 +150,7 @@ impl BlockRequest {
         if encoded_length > reservation.size().get() {
             return Err(FormatError::SerializationError(format!(
                 "a block reserves {} bytes but encodes {encoded_length}",
-                reservation.size(),
+                reservation.size().get(),
             )));
         }
         Ok(Self {

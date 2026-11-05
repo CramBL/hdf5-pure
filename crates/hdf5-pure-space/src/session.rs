@@ -1,6 +1,6 @@
 use core::iter::Peekable;
-use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
 use hdf5_pure_core::FormatError;
@@ -295,9 +295,7 @@ impl SessionSpace {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
     /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest, SessionSpace};
     ///
@@ -309,7 +307,7 @@ impl SessionSpace {
     ///     [(None, extent(100, 100)), (None, extent(300, 100))],
     /// )?;
     /// let request = |size| ReservationRequest::new(
-    ///     NonZeroU64::new(size).unwrap(), AllocationClass::Raw,
+    ///     NonZeroByteLength::new(size).unwrap(), AllocationClass::Raw,
     /// );
     /// let mut batch = space.reservation_batch(2);
     /// let reserved = batch.reserve(request(64)).unwrap();
@@ -348,9 +346,7 @@ impl SessionSpace {
     /// # Examples
     ///
     /// ```
-    /// use core::num::NonZeroU64;
-    ///
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
     /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest, SessionSpace};
     ///
@@ -360,7 +356,9 @@ impl SessionSpace {
     /// let spare = Extent::new(StoredAddress::new(100), 32).unwrap();
     /// let mut batch = space.reservation_batch_with_returns(2);
     /// assert!(batch.release_aggregate(StoredAddress::new(1_000), spare));
-    /// let request = ReservationRequest::new(NonZeroU64::new(16).unwrap(), AllocationClass::Raw);
+    /// let request = ReservationRequest::new(
+    ///     NonZeroByteLength::new(16).unwrap(), AllocationClass::Raw,
+    /// );
     /// assert_eq!(batch.reserve(request).unwrap().extent(),
     ///     Extent::new(StoredAddress::new(100), 16).unwrap());
     /// batch.finish();
@@ -816,7 +814,7 @@ impl SessionSpace {
         eoa: StoredAddress,
         freed: &[(Extent, FreeClass)],
         old_blocks: &[Extent],
-        capacity: NonZeroU64,
+        capacity: NonZeroByteLength,
     ) -> Result<Option<PagedTail>, FormatError> {
         let Self::Paged(space) = self else {
             return Err(FormatError::Internal(

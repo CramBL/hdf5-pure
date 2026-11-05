@@ -1,8 +1,9 @@
 //! Pure placement and encoding of extension chunks and managers for a persistent PAGE edit.
 
-use core::num::NonZeroU64;
 use std::collections::BTreeSet;
 
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_space::__private::ManagerKind;
@@ -564,7 +565,7 @@ fn contiguous_extension(
 /// Holds a positive byte bound for PAGE managers and the superblock extension.
 #[derive(Debug)]
 struct ManagerCapacity {
-    bytes: NonZeroU64,
+    bytes: NonZeroByteLength,
 }
 
 impl ManagerCapacity {
@@ -602,7 +603,7 @@ impl ManagerCapacity {
                 length: section_limit as u64,
             })?;
         Ok(Self {
-            bytes: NonZeroU64::new(bytes).ok_or_else(|| {
+            bytes: NonZeroByteLength::new(bytes).ok_or_else(|| {
                 FormatError::Internal("PAGE manager capacity contains no headers".into())
             })?,
         })
@@ -617,7 +618,9 @@ impl ManagerCapacity {
         Ok(Self {
             bytes: self
                 .bytes
-                .checked_add(1)
+                .length()
+                .checked_add(ByteLength::new(1))
+                .and_then(ByteLength::nonzero)
                 .ok_or(FormatError::OffsetOverflow {
                     offset: self.bytes.get(),
                     length: 1,

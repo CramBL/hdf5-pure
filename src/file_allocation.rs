@@ -1,8 +1,8 @@
 //! Stored-address allocation for new files.
 
 use alloc::vec::Vec;
-use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
 use hdf5_pure_format::__private::FreeSection;
@@ -119,7 +119,7 @@ impl FileAllocation {
         length: u64,
         class: AllocationClass,
     ) -> Result<StoredAddress, FormatError> {
-        let Some(length) = NonZeroU64::new(length) else {
+        let Some(length) = NonZeroByteLength::new(length) else {
             return Ok(self.end);
         };
         if let Some(extent) = self.space.allocate(length.get(), class) {

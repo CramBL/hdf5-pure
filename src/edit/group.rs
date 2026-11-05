@@ -2,8 +2,8 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
@@ -350,7 +350,7 @@ impl WriteEngine {
             let requests = plan
                 .block_lengths()
                 .map(|length| {
-                    NonZeroU64::new(length)
+                    NonZeroByteLength::new(length)
                         .map(|length| {
                             BlockRequest::complete(
                                 ReservationRequest::new(length, AllocationClass::Metadata)

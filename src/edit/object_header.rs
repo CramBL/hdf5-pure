@@ -1,9 +1,9 @@
 //! Object-header traversal and reconstruction for staged edits.
 
 use std::collections::VecDeque;
-use std::num::NonZeroU64;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
@@ -48,7 +48,7 @@ impl WriteEngine {
     /// Returns [`FormatError::Internal`] if `bytes` is empty. Propagates reservation and write
     /// errors from [`reserve_request`](Self::reserve_request) and [`place`](Self::place).
     pub(super) fn place_object_header(&mut self, bytes: &[u8]) -> Result<ObjectId, Error> {
-        let size = NonZeroU64::new(bytes.len() as u64)
+        let size = NonZeroByteLength::new(bytes.len() as u64)
             .ok_or_else(|| FormatError::Internal("an object header is empty".into()))?;
         let request = ReservationRequest::new(size, AllocationClass::Metadata).for_block();
         let placement = self.reserve_request(request)?;

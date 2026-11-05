@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use core::mem;
 use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
 
@@ -58,7 +59,7 @@ impl<'a> IndexedFreeList<'a> {
     }
 
     /// Reserves a prefix of the smallest sufficient extent, retaining any remainder.
-    pub(crate) fn allocate(&mut self, size: NonZeroU64) -> Option<Extent> {
+    pub(crate) fn allocate(&mut self, size: NonZeroByteLength) -> Option<Extent> {
         self.work.lookups = self.work.lookups.saturating_add(1);
         let &(_, start) = self
             .sizes
@@ -115,7 +116,7 @@ impl<'a> IndexedFreeList<'a> {
     /// # Panics
     ///
     /// Panics in debug builds if `size` is not a multiple of the configured alignment.
-    pub(crate) fn allocate_whole_units(&mut self, size: NonZeroU64) -> Option<Extent> {
+    pub(crate) fn allocate_whole_units(&mut self, size: NonZeroByteLength) -> Option<Extent> {
         self.work.lookups = self.work.lookups.saturating_add(1);
         let alignment = self.alignment?;
         debug_assert_eq!(size.get() % alignment.get(), 0);
@@ -295,7 +296,7 @@ impl BlockIndex {
         }
     }
 
-    fn find(&self, size: NonZeroU64) -> Option<StoredAddress> {
+    fn find(&self, size: NonZeroByteLength) -> Option<StoredAddress> {
         let index = if size.get() < self.page_size.get() {
             &self.small
         } else {
