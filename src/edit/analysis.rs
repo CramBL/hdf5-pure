@@ -32,6 +32,7 @@ use self::counts::OrdinaryCountSubject;
 use self::heap::CollectionContents;
 use self::heap::HeapReferenceError;
 use self::ownership::ObjectOwnership;
+use self::physical::PhysicalStorage;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::GlobalHeapLiveness;
@@ -71,6 +72,15 @@ pub(in crate::edit) mod heap;
 )]
 pub(in crate::edit) mod ownership;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "physical storage facts do not authorize retirement"
+    )
+)]
+pub(in crate::edit) mod physical;
+
 /// Lazy topology, object-count, reference, and allocation queries for unchanged source contents.
 ///
 /// Queries borrow the engine for the phase. The caller establishes source consistency and starts
@@ -97,6 +107,8 @@ pub(super) struct AnalysisPhase<'a> {
     counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     /// Local allocation ranges and collection outcomes, including cached failures.
     ownership: BTreeMap<ObjectId, ObjectOwnership>,
+    /// Local file framing, recorded metadata capacity, and cached problems.
+    physical: Option<PhysicalStorage>,
     #[cfg(test)]
     candidate_lookups: u64,
 }
@@ -116,6 +128,7 @@ impl<'a> AnalysisPhase<'a> {
             allocations: BTreeMap::new(),
             counts: BTreeMap::new(),
             ownership: BTreeMap::new(),
+            physical: None,
             #[cfg(test)]
             candidate_lookups: 0,
         }
@@ -190,6 +203,7 @@ impl<'a> AnalysisPhase<'a> {
             allocations: _,
             counts: _,
             ownership: _,
+            physical: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -545,6 +559,7 @@ impl<'a> AnalysisPhase<'a> {
             allocations: _,
             counts: _,
             ownership: _,
+            physical: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -615,6 +630,7 @@ impl<'a> AnalysisPhase<'a> {
             allocations,
             counts: _,
             ownership: _,
+            physical: _,
             candidate_lookups,
         } = self;
         let topology = topology.as_ref().and_then(Option::as_ref);
