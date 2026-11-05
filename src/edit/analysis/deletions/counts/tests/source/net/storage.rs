@@ -351,7 +351,7 @@ fn retained_storage_uses_bounded_metadata_without_source_reads(#[case] count: us
     let (owner, _) = append(&mut fixture, links);
     fixture.link("owner", owner);
     fixture.write(&path);
-    let (engine, calls) = super::open_counted_engine(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let added = phase.added_copy_users([]).unwrap().unwrap();
     let deletions = (0..count)

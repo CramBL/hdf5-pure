@@ -37,8 +37,8 @@ use crate::edit::analysis::AnalysisPhase;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::edit::analysis::DISCOVERY_WORK;
 use crate::edit::analysis::counts::test_util as count_test_util;
-use crate::edit::analysis::deletions::counts::tests::source::net as count_tests;
 use crate::edit::copy::CopyTree;
+use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
@@ -375,7 +375,7 @@ fn preflight_protects_each_source_field_with_bounded_storage_and_no_reads(#[case
     .unwrap();
     fixture.link("owner", owner);
     fixture.write(&path);
-    let (engine, calls) = count_tests::open_counted_engine(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let added = phase.added_copy_users([]).unwrap().unwrap();
     let deletions = (0..count)
@@ -475,7 +475,7 @@ fn fixture(
     let source = fixture.append_header(records);
     fixture.link("source", source);
     fixture.write(path);
-    let (engine, calls) = count_tests::open_counted_engine(path);
+    let (engine, calls) = edit_test_util::open_counted_engine(path);
     let tree = WriteEngine::read_copy_subtree(
         &engine.opened_source(),
         AccessMode::ReadWrite,

@@ -1,6 +1,8 @@
 //! Editing fixtures and storage-ownership assertions for private tests.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
@@ -42,6 +44,8 @@ use crate::error::FormatError;
 use crate::file_writer::OFFSET_WIDTH;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::free_space_manager;
+use crate::image::CountingImage;
+use crate::image::HandleImage;
 use crate::image::WriteBuffering;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
@@ -258,6 +262,27 @@ pub(super) fn open_engine(path: &Path) -> WriteEngine {
         PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap()
+}
+
+/// Opens an engine without metadata caching and counts image reads.
+pub(in crate::edit) fn open_counted_engine(path: &Path) -> (WriteEngine, Arc<AtomicU64>) {
+    let calls = Arc::new(AtomicU64::new(0));
+    let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
+        Ok(Box::new(
+            CountingImage::new(
+                Box::new(HandleImage::new(
+                    handle,
+                    len,
+                    MetadataCacheConfig::disabled(),
+                )),
+                Arc::default(),
+                Arc::default(),
+            )
+            .with_read_calls(Arc::clone(&calls)),
+        ))
+    })
+    .unwrap();
+    (engine, calls)
 }
 
 /// Deletes `g` after checking its reclaim plan against its subtree's allocations.
