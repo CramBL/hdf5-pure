@@ -51,8 +51,8 @@ use std::sync::{Arc, Mutex};
 /// rather than a split that would cut an element in half.
 const TARGET_BLOCK_BYTES: u64 = 1 << 20;
 
-/// One block the writer is asking for: everything a producer needs to fill it,
-/// handed over rather than looked up.
+/// One block the writer requests: its block index, first element index,
+/// element count, and element size.
 ///
 /// The contract travels with the request on purpose. A producer that had to
 /// fetch its own copy of the blocking beforehand could fetch one that disagrees
@@ -98,6 +98,10 @@ impl Block {
 
 /// Yields a dataset's raw, uncompressed element bytes on demand, one block at a
 /// time.
+///
+/// Each block request provides its index, first element, element count, and
+/// element size. The producer generates exactly [`Block::len`] bytes in
+/// MATLAB linear element order.
 ///
 /// The writer calls [`block_bytes`](Self::block_bytes) once per block, in
 /// ascending index order, during the emission pass — never during layout, which
@@ -194,8 +198,9 @@ impl Blocking {
     }
 }
 
-/// Elements a MATLAB shape holds. An empty shape (`[]`) is one element, matching
-/// [`matrix_dims`](crate::mat::dims::matrix_dims)'s scalar collapse.
+/// Elements a MATLAB shape holds. Zero elements select MATLAB's empty marker
+/// without invoking the producer. An empty dimension list `[]` means one scalar element,
+/// matching [`matrix_dims`](crate::mat::dims::matrix_dims)'s scalar collapse.
 ///
 /// Saturates rather than overflows: dimensions come from the caller, so an
 /// absurd shape must reach the planner's refusal rather than panic a debug build
@@ -265,10 +270,11 @@ fn too_large(value: u64) -> MatError {
 /// Adapts a [`DataProducer`] to the writer's block provider: checks each block's
 /// length and carries a producer's own error back out.
 ///
-/// The error detour exists because the writer's provider seam speaks
-/// [`FormatError`], which cannot carry a [`MatError`]. Stashing the real error
-/// here and swapping it back in `MatBuilder`'s finalizers keeps a producer's
-/// failure intact instead of flattening it to a message.
+/// In [`ChunkProvider::chunk_bytes`], the adapter returns `Result<(), FormatError>`.
+/// When the producer fails, [`ProducerChunks`] stores the first [`MatError`] and returns
+/// a [`FormatError::SerializationError`] placeholder. [`MatBuilder`](crate::mat::MatBuilder)'s
+/// finalizer retrieves the stored error when locking succeeds. If the slot is empty or the
+/// lock is poisoned, the finalizer falls back to the HDF5 error.
 pub(crate) struct ProducerChunks {
     pub(crate) producer: Box<dyn DataProducer>,
     pub(crate) blocking: Blocking,
@@ -517,9 +523,9 @@ mod tests {
         assert_eq!(b.total_len(), 2 * 10 * 4);
     }
 
-    /// `MatBuilder` now transitively holds a boxed producer and an
-    /// `Arc<Mutex<..>>`, either of which could strip an auto-trait. Losing one is
-    /// a semver break, so pin all four the way `FileBuilder` does.
+    /// `MatBuilder` contains a dataset's `ProducedPayload` and a shared
+    /// `Arc<Mutex<Option<MatError>>>`. Pin `Send`, `Sync`, `UnwindSafe`, and
+    /// `RefUnwindSafe` the way `FileBuilder` does.
     #[test]
     fn mat_builder_keeps_its_auto_traits() {
         fn assert_auto_traits<

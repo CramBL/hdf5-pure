@@ -101,8 +101,8 @@ pub enum FormatError {
     },
     /// Chunked dataset read error.
     ChunkedReadError(String),
-    /// A dataset or attribute refers to a committed datatype whose encoding differs
-    /// from its own.
+    /// A dataset or attribute's declared datatype differs from the committed datatype
+    /// at `path`. Comparison includes the stored datatype encoding.
     CommittedDatatypeMismatch {
         /// Path of the referenced committed datatype object.
         path: String,
@@ -1337,8 +1337,7 @@ pub enum FormatError {
         /// The source's extent in bytes.
         available: u64,
     },
-    /// A dataset or attribute refers to a committed datatype at a path where the file
-    /// being written places no such object.
+    /// Occurs when a path does not identify a committed datatype in the file being written.
     UnknownCommittedDatatype(String),
     /// The dataset's Fill Value message could not be parsed, and a read needed
     /// it: part of the dataset's storage was never allocated, so what those

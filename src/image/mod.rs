@@ -890,23 +890,19 @@ impl BufferedWrites {
         Ok(())
     }
 
-    /// Physically resize the file to `len`, dropping the pending writes the new
-    /// length puts past end-of-file and issuing the rest first, so a run below the
-    /// cut still lands.
+    /// Resizes the file to `len`, discards pending writes beyond the new length, and flushes remaining writes.
+    ///
+    /// The operations run in order:
+    ///
+    /// 1. `set_len` resizes the file. A resize failure leaves pending writes unchanged.
+    /// 2. Discard pending bytes beyond the new end of file, trimming a crossing run.
+    /// 3. `flush` writes surviving runs within range. A flush failure leaves unwritten in-range bytes queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if resizing the file fails. Propagates errors from flushing
+    /// queued writes.
     pub(crate) fn set_len(&mut self, len: u64) -> Result<(), Error> {
-        // Two rules meet here, and the order is the only one that keeps both.
-        // Nothing may write bytes the truncate is about to remove, so the doomed
-        // runs must go before the flush. And `discard_from` permanently forgets
-        // them, so it must not run ahead of a step that can fail — discarding
-        // first leaves a failed truncate reporting a length whose bytes nothing
-        // will ever write, against `flush`'s own contract that an error leaves
-        // the writes pending rather than gone. The truncate therefore goes first:
-        // it is the step that dooms them, and until it succeeds they are alive.
-        //
-        // What that leaves is a failed *flush* after a successful truncate, which
-        // keeps every surviving run pending but has already moved the file. That
-        // is an error path in both orders; this one is the half that cannot lose
-        // a write.
         #[cfg(not(test))]
         self.handle.set_len(len).map_err(Error::Io)?;
         #[cfg(test)]
@@ -917,8 +913,7 @@ impl BufferedWrites {
         Ok(())
     }
 
-    /// Forget every pending byte at or past `len`, trimming a run that straddles
-    /// it. Those bytes are about to stop existing.
+    /// Discards every pending byte at or past `len`, trimming a run that crosses the boundary.
     fn discard_from(&mut self, len: u64) {
         let doomed: Vec<u64> = self.runs.range(len..).map(|(&k, _)| k).collect();
         for k in doomed {

@@ -2847,7 +2847,10 @@ pub(crate) struct ZfpFilterMeta {
 ///
 /// It checks the magic bytes and reads the scalar type, dimensions, and bit budget from
 /// the short or long mode field. The version word and other mode parameters are ignored.
-/// Returns `None` if the required bytes are missing or the magic bytes differ.
+///
+/// Skips `cd_values[0]` and reads subsequent words as a little-endian byte stream.
+/// Returns `None` if required words are missing, including a truncated long-mode field, or
+/// the magic bytes differ.
 #[cfg(test)]
 pub(crate) fn zfp_filter_meta_from_cd_values(cd_values: &[u32]) -> Option<ZfpFilterMeta> {
     if cd_values.len() < 4 {
@@ -2935,8 +2938,8 @@ pub(crate) fn zfp_filter_meta_from_cd_values(cd_values: &[u32]) -> Option<ZfpFil
 /// Reads a rate from the bit budget in H5Z-ZFP client data.
 ///
 /// The parser checks the magic bytes and reads `maxbits` from a short or long mode field.
-/// It uses no heap allocation. Returns `None` if the required words are missing or the
-/// magic bytes differ.
+/// It uses no heap allocation. Returns `None` if required words are missing, including
+/// a truncated long-mode field, or the magic bytes differ.
 pub(crate) fn zfp_rate_from_cd_values(cd_values: &[u32]) -> Option<f64> {
     if cd_values.len() < 4 {
         return None;

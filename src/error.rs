@@ -173,13 +173,12 @@ pub enum Error {
     MissingMessage(MessageType),
     /// The object at the given path is not a dataset.
     NotADataset(String),
-    /// The object at the given path is not a group. A name that resolves to
-    /// nothing at all is [`FormatError::PathNotFound`] instead.
+    /// The object at `path` is not a group.
     ///
-    /// The path may be an *intermediate* component of the one that was asked
-    /// for: resolving `a/b/c` opens `a` and then `a/b` to look inside them, so
-    /// a dataset at `a/b` reports `NotAGroup("a/b")` rather than anything about
-    /// `a/b/c`.
+    /// Every intermediate component must be a group: if `a/b` is a dataset, resolving `a/b/c`
+    /// through [`File::group`](crate::File::group) or [`File::dataset`](crate::File::dataset)
+    /// returns `Error::NotAGroup("a/b")`. A missing component returns
+    /// [`FormatError::PathNotFound`] instead.
     NotAGroup(String),
     /// The child of the given name is not a committed (`H5Tcommit`) datatype. A
     /// name that resolves to nothing at all is [`FormatError::PathNotFound`]

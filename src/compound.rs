@@ -18,7 +18,12 @@ pub trait CompoundField: Sized {
     /// Canonical datatype used when writing this field.
     fn datatype() -> Result<Datatype, FormatError>;
 
-    /// Append this field's canonical byte representation to `output`.
+    /// Appends this field's byte representation to `output` using the datatype
+    /// returned by [`datatype`](Self::datatype).
+    ///
+    /// Built-in numeric fields write in little-endian byte order. User-defined
+    /// implementations write bytes matching the size and layout defined by their
+    /// associated datatype.
     fn encode_field(&self, output: &mut Vec<u8>);
 
     /// Decode this field from bytes described by `datatype`.
@@ -44,7 +49,12 @@ pub trait CompoundType: Sized {
     /// Canonical datatype used when creating a dataset for this type.
     fn datatype() -> Result<Datatype, FormatError>;
 
-    /// Append one canonical compound element to `output`.
+    /// Appends one compound element to `output` using the datatype returned by
+    /// [`datatype`](Self::datatype).
+    ///
+    /// Built-in numeric tuple implementations encode each field in little-endian
+    /// byte order. User-defined implementations write bytes matching the member
+    /// offsets and total size defined by their associated datatype.
     fn encode(&self, output: &mut Vec<u8>);
 
     /// Decode one element from `bytes` using its exact on-disk datatype.

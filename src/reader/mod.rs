@@ -372,7 +372,7 @@ pub enum PersistedFreeSpacePolicy {
 /// | no C counterpart | [`with_memory_strategy`](Self::with_memory_strategy), [`MemoryStrategy`] | **Behavioral** | How much memory a read-write open may spend holding the file, overriding the dispatch above. `Bounded` rejects a file with a pre-v2 superblock, a userblock, or non-persistent PAGE allocation. `Auto`, which is what [`File::open_rw`](crate::File::open_rw) uses unset, falls back to the mirror, and `Mirrored` always mirrors. Non-persistent PAGE files support mirrored staged edits with the restrictions documented by [`File::open_rw`](crate::File::open_rw). [`File::edit_backing`](crate::File::edit_backing) reports which backend an open resolved to, as an [`EditBacking`] (`Bounded` or `Mirrored`), a separate type because `Auto` is a preference between the two and never an outcome. libhdf5 has no analogue: `H5Fopen` picks its own caching with no caller-visible memory contract. |
 /// | `H5F_ACC_SWMR_READ` / `H5F_ACC_SWMR_WRITE` | [`File::open_swmr`](crate::File::open_swmr) / [`open_swmr_writer`](crate::File::open_swmr_writer) (`*_with_options`) | **Genuine** | No OS lock. The writer raises the superblock SWMR-write flag (a v3 superblock is required, as in the C library) and appends alone. It always mirrors, so it accepts `MemoryStrategy::Auto` and `Mirrored` and rejects an explicit `Bounded`. |
 /// | superblock status flags (`h5clear --status`) | checked by [`File::open`](crate::File::open), [`open_streaming`](crate::File::open_streaming), [`from_source`](crate::File::from_source), [`open_rw`](crate::File::open_rw), [`open_swmr`](crate::File::open_swmr) and [`open_swmr_writer`](crate::File::open_swmr_writer), and cleared by [`File::clear_status_flags`](crate::File::clear_status_flags) | **Genuine** | A file the byte marks as held by a writer is rejected with [`Error::FileMarkedInUse`], as `H5Fopen` rejects it. [`File::open_swmr`](crate::File::open_swmr) follows such a file, and rejects a half-set mark alone. Version-3 superblocks only, which is where the C library checks. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte, and neither, therefore, does [`mat::from_file`](crate::mat::from_file), so a caller holding the bytes can still read a flagged file, at the cost of a copy of it. |
-/// | no C counterpart | [`with_write_mark_policy`](Self::with_write_mark_policy), [`WriteMarkPolicy`] | **Behavioral** | Whether a read-only open proceeds past a file marked open for write by a non-SWMR writer, bit 0 alone, which is what a page-buffered session raises and what no SWMR reader can follow, so such a file is otherwise readable only by copying it through [`File::from_bytes`](crate::File::from_bytes). `AllowSnapshot` reads it as it stands, on the caller's assertion that the writer has flushed ([`File::sync`](crate::File::sync), or a clean close), which the byte cannot record and this crate therefore cannot check. It admits nothing else: a SWMR pair belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) and [`File::open_swmr_writer`](crate::File::open_swmr_writer) are rejected whatever it says. The default `Refuse` is what `H5Fopen` does, and `H5Fopen` offers no override at all: `h5clear` is its one way through, and it edits the file. |
+/// | no C counterpart | [`with_write_mark_policy`](Self::with_write_mark_policy), [`WriteMarkPolicy`] | **Behavioral** | Whether a read-only open proceeds past a file marked open for write with write-access bit 0 set and SWMR-write bit 2 clear, which `File::open_swmr` rejects. `AllowSnapshot` accepts write-access alone and rejects files with SWMR-write set. The caller must ensure the writer has flushed ([`File::sync`](crate::File::sync) or a clean close). The snapshot open does not check this. It admits nothing else: a SWMR pair belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) and [`File::open_swmr_writer`](crate::File::open_swmr_writer) are rejected whatever it says. The default `Refuse` is what `H5Fopen` does (`H5F_open` in `H5Fint.c`, HDF5 2.2.0), and `H5Fopen` offers no override at all: `h5clear` is its one way through, and it edits the file. |
 /// | `H5Pset_file_locking` + `HDF5_USE_FILE_LOCKING` | [`with_locking`](Self::with_locking), [`FileLocking`] | **Genuine** | Exclusive advisory lock on both read-write paths, mirror and bounded, taken non-blocking, so a lock another process holds is [`Error::FileLocked`]. The environment-variable override recognizes the same values as the C library. Readers and the SWMR writer run without a lock by design and ignore the setting. |
 /// | `H5Fget_libver_bounds` (read) | [`File::libver_bound`](crate::File::libver_bound) | **Read-only** | Reports the low library-version bound the superblock version implies. |
 /// | `H5Pset_cache` (`rdcc`) / `H5Pset_chunk_cache` (`dapl`) | [`with_chunk_cache`](Self::with_chunk_cache), [`DatasetAccessProperties::with_chunk_cache`](crate::DatasetAccessProperties::with_chunk_cache) | **Genuine (all backends)** | A cache of decompressed chunks and parsed indexes, 1 MiB in 16 slots by default. `rdcc_nslots` and `rdcc_nbytes` map directly. There is no write coalescing, since a mutation clears the cache, and no `rdcc_w0`, for the reason below. [`Dataset::chunk_cache_stats`](crate::Dataset::chunk_cache_stats) reports what it did. |
@@ -2809,7 +2809,8 @@ impl File {
     /// Returns [`FormatError::TruncatedFile`] through [`Error::Format`] if the superblock version
     /// is 0, 1, or 2 and the physical file is shorter than the recorded EOF after relocation.
     /// Returns [`Error::FileMarkedInUse`] if exactly one of the version-3 superblock's write-access
-    /// and SWMR-write flags is set. A file with both flags set can be read alongside its SWMR writer.
+    /// bit 0 and SWMR-write bit 2 is set. A file with both flags set can be read alongside
+    /// its SWMR writer.
     #[doc(alias = "H5F_ACC_SWMR_READ")]
     pub fn open_swmr<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Ok(File {
@@ -3572,9 +3573,9 @@ impl File {
     /// # Errors
     ///
     /// Returns [`Error::NotADataset`] if the path names something that is not a
-    /// dataset, and [`Error::NotAGroup`] if a component *along* the path is not
-    /// a group: resolving `a/b/c` opens `a` and then `a/b` to look inside them,
-    /// so a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
+    /// dataset. Every intermediate component must be a group: if `a/b` is a dataset,
+    /// resolving `a/b/c` returns [`Error::NotAGroup`] with `"a/b"`. Missing components
+    /// return [`FormatError::PathNotFound`] instead.
     ///
     /// Returns [`FormatError::DanglingSoftLink`] if a soft target has a missing component,
     /// [`FormatError::SoftLinkTraversalLimit`] if resolution would follow more than 64 soft
@@ -3626,14 +3627,12 @@ impl File {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotAGroup`] if the path names an object that is not a
-    /// group, the way [`dataset`](Self::dataset) returns
-    /// [`Error::NotADataset`] for the mirror case, and
-    /// [`FormatError::PathNotFound`] if it names nothing.
+    /// Returns [`Error::NotAGroup`] if the path identifies an object that is not a
+    /// group, and [`FormatError::PathNotFound`] if it identifies nothing.
     ///
-    /// The same error reports a component *along* the path that is not a group,
-    /// naming that component's own path rather than the one asked for: `a/b/c`
-    /// stopped by a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
+    /// Every intermediate component must be a group: if `a/b` is a dataset,
+    /// resolving `a/b/c` returns [`Error::NotAGroup`] with `"a/b"`. Missing components
+    /// return [`FormatError::PathNotFound`] instead.
     ///
     /// Returns [`FormatError::DanglingSoftLink`] if a soft target has a missing component,
     /// [`FormatError::SoftLinkTraversalLimit`] if resolution would follow more than 64 soft
@@ -4722,10 +4721,6 @@ impl Group {
             return Err(Error::NotAGroup(reported_path(self.path.as_ref())));
         }
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        // Two threads can re-resolve at once. The older answer must not land on
-        // top of the newer one, or the newer handle would go on serving an
-        // address the file has already moved past. A handle that had no memo
-        // takes this one: any address beats naming nothing.
         if state.is_none_or(|memo| at.address_revision >= memo.address_revision) {
             *state = Some(at);
         }
@@ -5099,15 +5094,12 @@ impl Group {
     /// name — including compound field offsets, integer widths and enumeration
     /// members.
     ///
-    /// This is the type channel to [`attrs`](Self::attrs)'s value channel, the
-    /// pair a dataset already has in [`Dataset::datatype`] and its `read_*`
-    /// methods. An [`AttrValue`] is a deliberately lossy view of the value, so an
-    /// attribute's byte order, sub-width precision, string padding and
-    /// enumeration members are recoverable only from here — its width is not,
-    /// since [`attrs`](Self::attrs) keeps that. Its *rank* is not either: that
-    /// lives in the
-    /// dataspace, which nothing public exposes, so a rank-2 attribute still
-    /// reads as a flat `AttrValue` array with no way to recover its shape.
+    /// [`attr_datatypes`](Self::attr_datatypes) returns stored datatypes, while
+    /// [`attrs`](Self::attrs) returns decoded values. An [`AttrValue`] is a simplified
+    /// representation of the value, so an attribute's byte order, bit precision, string
+    /// padding, string width, and enumeration members are recoverable from the stored
+    /// datatype. The original rank of multi-dimensional attribute dataspaces is not
+    /// preserved by `attrs`, which returns decoded values as flat sequences.
     ///
     /// **Every attribute message is reported, including the ones `attrs` omits**
     /// because no `AttrValue` can carry them, so a name missing from that map can
@@ -5120,11 +5112,15 @@ impl Group {
     /// What it does *not* carry is the name: two attributes sharing `/mytype`
     /// report the same [`Datatype`] as one that spells it out inline.
     ///
-    /// A boolean attribute is the case that needs both channels. libhdf5
-    /// gives `H5T_NATIVE_HBOOL` — what h5py writes for every `np.bool_` — a
-    /// [`Datatype::Enumeration`] of `FALSE` and `TRUE` over an 8-bit base, and
-    /// `attrs` decodes it through that base, so the value arrives as `0` or `1`
-    /// and only the datatype records that it was a bool.
+    /// A boolean attribute requires both accessors. By default, h5py stores boolean
+    /// attributes as an 8-bit enumeration with `FALSE` and `TRUE` members (`_c_bool` in
+    /// `h5t.pyx`, h5py 3.14.0). [`attrs`](Self::attrs) decodes the integer base, while the
+    /// stored datatype preserves the enumeration members.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from resolving the group, reading its metadata, or parsing
+    /// attribute messages.
     pub fn attr_datatypes(&self) -> Result<HashMap<String, Datatype>, Error> {
         Ok(self
             .attr_messages()?
@@ -5731,11 +5727,10 @@ struct DatasetState {
 /// one. Cloning gives a second handle to the same dataset, sharing its chunk
 /// cache.
 ///
-/// Three accessors cannot report a handle that no longer resolves, because they
-/// return no `Result`: [`filters`](Self::filters) and
-/// [`filter_pipeline`](Self::filter_pipeline) answer empty, the same answer an
-/// unfiltered dataset gives, and [`is_chunked`](Self::is_chunked) answers
-/// `false`. Every other reader of the header says what went wrong.
+/// [`filters`](Self::filters) and [`filter_pipeline`](Self::filter_pipeline)
+/// return errors if the dataset cannot be resolved or its filter metadata
+/// cannot be read or parsed. [`is_chunked`](Self::is_chunked) returns `false`
+/// if the layout cannot be read or is not chunked.
 ///
 /// # Reading
 ///
@@ -6051,10 +6046,6 @@ impl Dataset {
         let fresh = Arc::new(DatasetState { at, header });
         self.chunk_cache.clear();
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        // Two threads can re-resolve at once. The older answer must not land on
-        // top of the newer one, or the newer handle would go on serving a header
-        // the file has already moved past. A handle that had no memo takes this
-        // one: any header beats naming nothing.
         if state
             .as_ref()
             .is_none_or(|memo| at.content_revision >= memo.at.content_revision)
@@ -6941,12 +6932,10 @@ the same commit to replace it",
             .map(<[MaxExtent]>::to_vec))
     }
 
-    /// Whether the dataset uses chunked storage (as opposed to contiguous or
-    /// compact). Filtered datasets are always chunked. Returns `false` for a
-    /// dataset with no data-layout message, for a non-chunked layout, and — like
-    /// the other accessors that return no `Result` — for a handle that can no
-    /// longer be resolved. A dataset this session has staged and not yet
-    /// committed answers with the storage its builder selected.
+    /// Returns whether the dataset uses chunked storage.
+    ///
+    /// Filtered datasets are always chunked. Returns `false` when the layout cannot be read or is
+    /// not chunked. A staged dataset returns the storage its builder selected.
     pub fn is_chunked(&self) -> bool {
         if let Ok(Some(meta)) = self.staged_meta() {
             return meta.chunked;
@@ -6980,7 +6969,7 @@ the same commit to replace it",
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the filter message or known filter parameters are invalid.
-    /// Propagates errors from resolving the dataset or reading its metadata.
+    /// Propagates errors from resolving the dataset, reading its metadata, or parsing messages.
     pub fn filters(&self) -> Result<Vec<FilterId>, Error> {
         if let Some(meta) = self.staged_meta()? {
             return Ok(meta.filters.into_iter().map(|(id, _)| id).collect());
@@ -6995,14 +6984,11 @@ the same commit to replace it",
     /// How and where this dataset's raw data is stored: compact, contiguous,
     /// chunked, or virtual.
     ///
-    /// The structured companion to [`is_chunked`](Self::is_chunked) and
-    /// [`chunk_shape`](Self::chunk_shape), which it subsumes: one call that
-    /// classifies the layout and, for a [`Layout::Contiguous`] dataset, gives the
-    /// absolute address and byte size to seek to, or for a [`Layout::Chunked`]
-    /// dataset the chunk shape and [`ChunkIndex`] kind. This parses only the
-    /// data-layout message; it never walks the chunk index or reads any data —
-    /// use [`chunks`](Self::chunks) for per-chunk locations. The curated analogue
-    /// of `H5Pget_layout`.
+    /// Classifies on-disk storage layout while omitting on-disk encoding artifacts such as
+    /// message version numbers and chunk-index addresses. For chunk index details, see
+    /// [`chunk_index`](Self::chunk_index). For per-chunk addresses, stored sizes, and filter
+    /// masks, see [`chunks`](Self::chunks). For pipeline filters, see
+    /// [`filter_pipeline`](Self::filter_pipeline).
     ///
     /// # Errors
     ///
@@ -7106,7 +7092,7 @@ the same commit to replace it",
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the filter message or known filter parameters are invalid.
-    /// Propagates errors from resolving the dataset or reading its metadata.
+    /// Propagates errors from resolving the dataset, reading its metadata, or parsing messages.
     pub fn filter_pipeline(&self) -> Result<Vec<Filter>, Error> {
         if let Some(meta) = self.staged_meta()? {
             return Ok(meta
@@ -7734,10 +7720,15 @@ the same commit to replace it",
     /// The exact on-disk [`Datatype`] of every attribute on this dataset, keyed
     /// by name.
     ///
-    /// See [`Group::attr_datatypes`] for what this channel carries that
+    /// See [`Group::attr_datatypes`] for what stored datatypes preserve that
     /// [`attrs`](Self::attrs) cannot, including how a boolean attribute is
     /// recognized. Note that this describes the *attributes*, not the dataset's
     /// own element type — that is [`datatype`](Self::datatype).
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from resolving the dataset, reading its metadata, or parsing
+    /// attribute messages.
     pub fn attr_datatypes(&self) -> Result<HashMap<String, Datatype>, Error> {
         Ok(self
             .attr_messages()?

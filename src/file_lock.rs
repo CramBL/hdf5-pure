@@ -153,10 +153,11 @@ pub enum WriteMarkPolicy {
     /// `H5Fopen` does with the same byte.
     #[default]
     Refuse,
-    /// Read the file as it stands, on the caller's assertion that the writer
-    /// has flushed: it called [`crate::File::sync`], or it stopped after a flush
-    /// and the mark stands only because nothing cleared it. Every other refusal
-    /// stays in place.
+    /// Read the file as it stands when write-access bit 0 is set alone, on the
+    /// caller's assertion that the writer has flushed: it called [`crate::File::sync`],
+    /// or it stopped after a flush. Rejects the open if SWMR-write bit 2 is set. The
+    /// snapshot open does not check that the writer has flushed. The caller must
+    /// ensure it.
     AllowSnapshot,
 }
 

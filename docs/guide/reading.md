@@ -23,7 +23,7 @@ The [`groups_and_attributes`](https://github.com/CramBL/hdf5-pure/blob/main/exam
 [`File::open`](crate::File::open), [`File::open_streaming`](crate::File::open_streaming) and [`File::from_source`](crate::File::from_source) reject a file whose superblock marks it as held by a writer, with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). `H5Fopen` checks the same byte. Which reader gets at such a file depends on which mark it carries:
 
 - **both bits, a SWMR writer**: follow it with [`File::open_swmr`](crate::File::open_swmr), which also picks up what the writer appends later.
-- **the write bit alone**, which is what a [page-buffered](crate::_guide::editing#letting-pages-live-longer) writer leaves: no SWMR reader can follow it, so read a snapshot through any `*_with_options` open under [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy). That asserts the writer has flushed, through [`File::sync`](crate::File::sync) or a close, which this crate cannot check for you.
+- **write-access bit 0 set and SWMR-write bit 2 clear**, which is what a [page-buffered](crate::_guide::editing#letting-pages-live-longer) writer leaves: [`File::open_swmr`](crate::File::open_swmr) rejects this combination. Read a snapshot under [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy), which accepts write-access alone and rejects files with SWMR-write set. The caller must ensure the writer has flushed (via [`File::sync`](crate::File::sync) or closure). The snapshot open does not check this.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -272,7 +272,7 @@ let values = file.dataset("temperature")?.read_f64()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-A typed read costs about what its result costs. The numeric readers decode the dataset a row window at a time, so what stands beside the returned `Vec<T>` is one window of stored bytes, roughly a mebibyte, and never a second copy of the whole dataset. [`read_u8`](crate::Dataset::read_u8) and [`read_raw`](crate::Dataset::read_raw) hand back the stored bytes themselves and have nothing to decode.
+A typed read allocates the returned `Vec<T>` and decodes the dataset using a normal 1 MiB row-window target. A row or chunk band wider than 1 MiB may exceed this target because windows align to whole rows and chunks. Additional memory includes backing storage, metadata and chunk caches, chunk decoding buffers, and a whole-read fallback buffer when stored and decoded element widths differ. [`read_raw`](crate::Dataset::read_raw) returns raw element bytes without numeric conversion. [`read_u8`](crate::Dataset::read_u8) decodes numeric elements as `u8` values.
 
 ### Generic reads
 

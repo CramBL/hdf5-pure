@@ -582,8 +582,11 @@ impl MatBuilder {
     /// `int16` array, `write_blocks::<(i16, i16)>` a complex one, and
     /// `write_blocks::<bool>` a `logical`.
     ///
-    /// An empty shape writes the same MATLAB empty marker the other writers do
-    /// and never calls the producer.
+    /// Zero elements select MATLAB's empty marker without invoking the producer.
+    /// An empty dimension list `[]` means one scalar element. Each block request
+    /// identifies its index, first element, element count, and element size. The
+    /// producer generates exactly [`Block::len`](crate::mat::Block::len) bytes in
+    /// MATLAB linear element order.
     ///
     /// # Errors
     ///
@@ -998,10 +1001,9 @@ impl MatBuilder {
         Ok(())
     }
 
-    /// Replace a write failure with the producer error that actually caused it,
-    /// if a [`DataProducer`] stashed one. The writer's provider seam cannot carry
-    /// a `MatError`, so without this a producer's own failure would surface as
-    /// the placeholder the writer substituted.
+    /// Retrieves the stored producer error from `stash` when locking succeeds.
+    ///
+    /// If the slot is empty or the lock is poisoned, returns the fallback HDF5 error.
     fn attribute_failure(stash: &Arc<Mutex<Option<MatError>>>, fallback: crate::Error) -> MatError {
         match stash.lock() {
             Ok(mut slot) => slot.take().unwrap_or(MatError::Hdf5(fallback)),

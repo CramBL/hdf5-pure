@@ -30,10 +30,12 @@ use crate::reader::Dataset;
 ///
 /// # Buffering and recovery
 ///
-/// Automatic writes end at a chunk boundary and leave the remaining bytes buffered.
-/// [`flush`](Self::flush) writes a partial trailing chunk and retains the appender.
-/// [`finish`](Self::finish) flushes and consumes it, including on error.
-/// [`discard`](Self::discard) consumes it and returns the pending bytes without writing them.
+/// An automatic write requires at least one chunk's worth of newly buffered elements. It writes
+/// the prefix ending at a chunk boundary and retains the remaining elements in the buffer.
+/// An explicit [`flush`](Self::flush) writes any partial trailing chunk subject to the filter policy
+/// and retains the appender. [`finish`](Self::finish) flushes and consumes the appender, returning
+/// any error. [`discard`](Self::discard) consumes the appender and returns the pending bytes without
+/// writing them.
 ///
 /// For a finite maximum, the writer checks the published length plus all pending input before
 /// automatic writes. It rejects excessive new input and preserves the prior buffer. The writer
@@ -172,6 +174,10 @@ impl<'a> BufferedAppender<'a> {
 
     /// Buffers typed elements and writes complete chunks automatically.
     ///
+    /// An automatic write requires at least one chunk's worth of newly buffered elements. It
+    /// writes the prefix ending at a chunk boundary and retains the remaining elements in the
+    /// buffer.
+    ///
     /// Supports the element types of [`H5Element`], including fixed byte arrays and
     /// [`FixedAscii`](crate::FixedAscii) strings. Datatype compatibility follows
     /// [`Dataset::append`]. A mismatch is reported when this call or a later operation writes
@@ -234,7 +240,8 @@ impl<'a> BufferedAppender<'a> {
         self.state.chunk_elems.get()
     }
 
-    /// Writes every buffered element to the file, including a partial trailing chunk.
+    /// Writes every buffered element to the file, including a partial trailing chunk subject
+    /// to the filter policy.
     ///
     /// A partial tail is rewritten by the next write. Under
     /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), it stays unfiltered
@@ -425,6 +432,10 @@ impl OwnedBufferedAppender {
 
     /// Buffers typed elements and writes complete chunks automatically.
     ///
+    /// An automatic write requires at least one chunk's worth of newly buffered elements. It
+    /// writes the prefix ending at a chunk boundary and retains the remaining elements in the
+    /// buffer.
+    ///
     /// Supports the element types of [`H5Element`], including fixed byte arrays and
     /// [`FixedAscii`](crate::FixedAscii) strings. Datatype compatibility follows
     /// [`Dataset::append`]. A mismatch is reported when this call or a later operation writes
@@ -487,7 +498,8 @@ impl OwnedBufferedAppender {
         self.state.chunk_elems.get()
     }
 
-    /// Writes every buffered element to the file, including a partial trailing chunk.
+    /// Writes every buffered element to the file, including a partial trailing chunk subject
+    /// to the filter policy.
     ///
     /// A partial tail is rewritten by the next write. Under
     /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), it stays unfiltered
