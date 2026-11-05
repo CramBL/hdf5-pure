@@ -71,7 +71,7 @@ The editor appends allocations in typed pages at or beyond the first page bounda
 
 An I/O error can occur after the complete batch is published. While PAGE publication recovery is unresolved, session reads are insufficient to determine the publication outcome. A subsequent commit first drains retained writes under the selected synchronization policy and verifies the issued superblock against the accepted image and expected framing. Explicit [`File::sync`](crate::File::sync) performs that verification after a durable synchronization barrier. Successful recovery adopts the verified root. Recovery failures leave later staged edits pending. Byte or framing mismatches return [`Error::EditUnsupported`](crate::Error::EditUnsupported) and require closing and reopening the file. An interrupted file can fail to reopen.
 
-A paged commit keeps each page homogeneous, so raw data and file metadata never share a page, apart from a chunked dataset's index, which travels with its chunk data. It also page-aligns the end of allocation, so libhdf5 reopens the result as a paged file. With persistence enabled, a free hole belongs to the page type of the page it sits in, and an allocation draws only on holes of its own type. A page holding nothing at all belongs to neither, so either type may open one. The page types are set out in the [file-space strategy](crate::_guide::file_space) guide.
+PAGE separates raw-data allocations from metadata allocations. An array chunk index allocated beside its chunk data shares that raw-data allocation. Version 2 B-tree chunk indexes remain metadata. A paged commit also page-aligns the end of allocation, so libhdf5 reopens the result as a paged file. With persistence enabled, a free hole belongs to the page type of the page it sits in, and an allocation draws only on holes of its own type. A page holding nothing at all belongs to neither, so either type may open one. The page types are set out in the [file-space strategy](crate::_guide::file_space) guide.
 
 For a brand-new file, use [`FileBuilder`](crate::FileBuilder), which [Writing files](crate::_guide::writing) walks. To append while readers are live, use the [SWMR writer](crate::_guide::swmr). To compact a file or drop objects across a reopen, use [`repack`](crate::repack()). The [file-creation](crate::FileCreateProperties#supported-properties) and [file-access](crate::FileAccessProperties#supported-properties) property tables list what each path supports.
 
@@ -478,7 +478,7 @@ This section mirrors [`examples/append_streaming.rs`](https://github.com/CramBL/
 
 [`Dataset::append`](crate::Dataset::append) writes each batch immediately, with barriers governed by [`SyncPolicy`](crate::SyncPolicy). A caller appending fewer elements than a chunk holds can buffer them to reduce file writes.
 
-[`Dataset::buffered_appender`](crate::Dataset::buffered_appender) returns a [`BufferedAppender`](crate::BufferedAppender) that holds appended elements in memory and writes them only when they complete a chunk. It is this crate's equivalent of libhdf5's raw-data chunk cache, and it carries the same bargain: buffered elements are not in the file until the appender flushes.
+[`Dataset::buffered_appender`](crate::Dataset::buffered_appender) returns a [`BufferedAppender`](crate::BufferedAppender) that buffers appended elements in memory. It is this crate's equivalent of libhdf5's raw-data chunk cache: buffered elements remain in memory and are written to the file only when the appender flushes or writes a completed chunk.
 
 [`Dataset::into_buffered_appender`](crate::Dataset::into_buffered_appender) consumes the dataset and returns an [`OwnedBufferedAppender`](crate::OwnedBufferedAppender). It can be stored in a struct without a lifetime parameter and retains the editing session after the original [`File`](crate::File) is dropped. Both ownership forms use the same buffering and recovery rules.
 
@@ -510,7 +510,7 @@ appender.finish()?;                             // the partial tail reaches the 
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-Automatic writes end at a chunk boundary and leave the remainder buffered. Each write uses the immediate append path, including its quantization and interruption behavior when lossy-tail re-encoding is permitted.
+Once at least one chunk's worth of new elements is buffered, the appender writes a prefix ending at a chunk boundary and retains the remainder. An explicit flush can write the partial tail, subject to the filter policy. Completing an existing partial chunk with fewer new elements does not auto-trigger writing. Each write uses the immediate append path, including its quantization and interruption behavior when lossy-tail re-encoding is permitted.
 
 Elements kept only in the buffer are lost on a crash. [`flush`](crate::BufferedAppender::flush) publishes the buffered tail and retains recovery access. [`finish`](crate::BufferedAppender::finish) flushes and consumes the appender, including on error. [`discard`](crate::BufferedAppender::discard) consumes it and returns the pending bytes without writing them. Dropping attempts a terminal flush unless a write has failed, and ignores its error. These operations have the same behavior for both ownership forms.
 
@@ -530,7 +530,7 @@ The session rejects staged edits to a live appender's dataset or an ancestor, an
 
 A **SWMR** writer requires the appended length to be chunk-aligned as well, so it can never write a partial trailing chunk. [`buffered_appender`](crate::Dataset::buffered_appender) rejects such a session outright, and never takes elements it could not flush.
 
-Memory follows the buffer and not the file: an appender holds the unwritten elements plus a copy of the prefix it is writing, so peak is about twice the chunk size above whatever one call hands it. That is a different bound from the one [`Dataset::append`](crate::Dataset::append) gives ([Bounded-memory appends](#bounded-memory-appends)), which is independent of how much a single call appends.
+The appender copies each call's input into its pending buffer. Before writing, it also copies the write prefix. For a large batch, two batch-sized internal buffers can coexist with the caller's input and the append operation's working memory. Removing written elements does not shrink the pending buffer's capacity. That is a different bound from the one [`Dataset::append`](crate::Dataset::append) gives ([Bounded-memory appends](#bounded-memory-appends)), which is independent of how much a single call appends.
 
 This section mirrors [`examples/append_buffered.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/append_buffered.rs). Run it with `cargo run --example append_buffered`.
 
@@ -847,7 +847,7 @@ validate structural fields and object bounds without establishing the complete b
 integrity. In a filtered heap, the whole direct block is read and decoded for a lookup, and the
 editor validates the checksum on the decoded bytes.
 
-On a persistent paged file ([`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page)) an allocation is served from free space of the page type it is writing, or from a page that is wholly free, since a page with nothing in it has no type to contradict, so reuse cannot make metadata and raw data share a page. From a recognized generic-large PAGE section, complete interior pages are seeded as raw pages, while partial edges remain unclassified. Freed space whose page type cannot be established, or a chunk index placed among metadata, is recorded and never handed out, which costs some space and keeps the page separation.
+In a persistent paged file ([`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page)), PAGE separates raw-data allocations from metadata allocations. An array chunk index allocated beside its chunk data shares that raw-data allocation. Version 2 B-tree chunk indexes remain metadata. An allocation is served from free space of the page type it is writing, or from a page that is wholly free, so reuse cannot make metadata and raw data share a page. From a recognized generic-large PAGE section, complete interior pages are seeded as raw pages, while partial edges remain unclassified. Freed index storage with an established metadata page type follows the metadata reuse rules. A partial-page region whose type remains unknown or has conflicting evidence is unavailable for reuse until the whole page is free.
 
 The editor places persistent extension and manager blocks in reusable free space where they fit,
 or appends them when no region is large enough. Under `FsmAggr`, it can recycle a contiguous allocation

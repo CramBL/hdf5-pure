@@ -482,12 +482,9 @@ impl BufferedWrites {
         let Some((_, max_bytes)) = self.mode.budget() else {
             return self.issue(offset, bytes);
         };
-        // A write the budget cannot hold gains nothing from being held: it is
-        // already at least a page, so it merges with nothing, and absorbing it
-        // first would copy it into a run only to flush that run on the next line.
-        // Measured on a 16 MiB staged commit, that copy was the whole dataset a
-        // second time. Flush before issuing so this cannot overtake a pending
-        // byte at a lower address.
+        // A write at least as large as `max_bytes` bypasses this buffer. Flush
+        // pending writes first, then issue the new write directly. This avoids
+        // copying the new payload into the buffer.
         //
         // The threshold is the **budget**, not the page. `H5PB_write` bypasses at
         // `size >= page_size`, and the difference is what the two are for: the C
@@ -498,15 +495,15 @@ impl BufferedWrites {
         // reduction. A chunked dataset with 8 KiB chunks would go from adjacent
         // chunks joined into one issue to one issue per chunk.
         //
-        // The rule would also buy nothing to offset that, because this engine's
-        // writes are far smaller than a page. Measured on a page-buffered session,
-        // incoming sizes: 32 chunk appends into eight datasets are 184 writes with
-        // a median of 60 bytes and a maximum of 256, none of them a page; one
-        // 4 MiB append is 32,912 writes with a median of 256 bytes, of which 34 —
-        // 0.1% of the writes and 0.5% of the bytes — reach 4 KiB. What looks like
-        // one long run at the dataset level arrives here as tens of thousands of
-        // small writes, and merging them into that run is this type's whole job
-        // (issue #357).
+        // Bypassing at the page size would avoid no cache pollution, because
+        // this engine's writes are far smaller than a page. Measured on a
+        // page-buffered session, incoming sizes: 32 chunk appends into eight
+        // datasets are 184 writes with a median of 60 bytes and a maximum of
+        // 256, none of them a page. One 4 MiB append is 32,912 writes with a
+        // median of 256 bytes, of which 34 (0.1% of the writes and 0.5% of the
+        // bytes) reach 4 KiB. What looks like one long run at the dataset level
+        // arrives here as tens of thousands of small writes, and merging them
+        // into that run is this type's whole job (issue #357).
         if bytes.len() >= max_bytes {
             self.flush()?;
             return self.issue(offset, bytes);
@@ -1465,12 +1462,12 @@ impl FileImage for HandleImage {
 
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         let addr = self.len;
-        // The trait requires this. It is belt-and-braces for *this* image, whose
-        // reads past end-of-file are refused: the only way a cached entry can
-        // cover an address an append reuses is a preceding `truncate`, and that
-        // already invalidated everything it discarded. It is kept because the
-        // obligation belongs to the contract, not to this implementation's
-        // read-bounds policy.
+        // The trait requires this invalidation. It is redundant for *this*
+        // image implementation because reads past end-of-file are rejected: the
+        // only way a cached entry can cover an address an append reuses is a
+        // preceding `truncate`, which already invalidated everything it
+        // discarded. It is kept because the obligation belongs to the contract,
+        // not to this implementation's read-bounds policy.
         self.invalidate(addr, bytes.len() as u64);
         self.writes.write_at(addr, bytes)?;
         self.len += bytes.len() as u64;

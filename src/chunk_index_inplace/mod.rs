@@ -1416,9 +1416,9 @@ impl Located {
         // they sit above the slot below, which is in the index block near the
         // front, so without this the two are one barrier-free window and a
         // gathering image issues them in *address* order — the pointer first
-        // (issue #288). A block drawn from freed space may land either side of
-        // the slot, and which it is is not knowable here, so the barrier stands
-        // unconditionally. See `Store::allocate`.
+        // (issue #288). A block drawn from freed space may lie at an address
+        // below or above the slot, and its relative address is not knowable
+        // here, so the barrier stands unconditionally. See `Store::allocate`.
         let publication = file.publish_allocations()?;
         let allocation = publication.confirm(allocation)?;
         let range = file.allocation_publication().require(&allocation)?;

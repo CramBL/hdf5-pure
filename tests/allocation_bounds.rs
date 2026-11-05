@@ -2025,14 +2025,10 @@ fn a_page_buffer_does_not_recopy_what_it_holds_across_operations() {
     assert_eq!(back, expected);
 }
 
-/// A write too large for the gather budget is issued rather than copied into it.
+/// A write at least as large as the gather budget is issued directly.
 ///
-/// Gathering holds a write so it can be merged with its neighbours, and a write
-/// already larger than the whole budget has no neighbours it could be merged
-/// with — it is flushed on the very next line. Absorbing it first therefore buys
-/// nothing and costs a full copy of it, which for a staged commit is a second
-/// copy of the dataset (issue #288). The bound is on bytes because that is the
-/// only axis this moves: the allocation *count* is identical either way.
+/// Pending writes are flushed before the request is issued. This avoids copying
+/// the entire payload into the gather buffer.
 #[test]
 fn a_write_larger_than_the_gather_budget_is_not_copied_into_it() {
     const ELEMS: usize = 2 * 1024 * 1024;

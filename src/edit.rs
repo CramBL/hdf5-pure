@@ -540,39 +540,11 @@ pub(crate) struct WriteEngine {
     /// and found one" are the same instruction to the caller: walk. Only the
     /// proof is worth carrying.
     ///
-    /// Cleared by any commit that could introduce a reference the walk has not
-    /// seen. Exactly one of [`StagedEdits`]' nine collections can: `datasets`,
-    /// which carries a datatype and attributes the caller chose. The check
-    /// covers four, and the other three are belt-and-braces rather than
-    /// load-bearing — recorded here because a reason that does not hold is worse
-    /// than no reason:
-    ///
-    /// - `writes` is a value overwrite, whose datatype must be compatible with
-    ///   the on-disk datatype. A reference-typed one therefore overwrites a dataset
-    ///   that already held references, which a file proved free of them does not
-    ///   have. Checked anyway, because that match is a commit-time check running
-    ///   after this one, so `fd.dt` here is still whatever the caller supplied.
-    /// - `copies` re-emits an object *from this same file* — one the walk that
-    ///   granted the proof had already visited and found reference-free.
-    /// - `cross_copies` reads from another file, where `reject_foreign_addresses`
-    ///   refuses a reference datatype outright.
-    ///
-    /// The remaining five cannot, and these reasons do hold:
-    ///
-    /// - `groups` stages a bare path: no datatype, no data, no attributes.
-    /// - Group and dataset attribute edits contain a [`crate::type_builders::AttrValue`],
-    ///   which has no reference variant.
-    /// - `appends` grows an *existing* dataset along its own datatype, so it can
-    ///   only add references to a dataset that already held them.
-    /// - `deletes` removes objects and adds nothing.
-    ///
-    /// The commit fast path returns before the check and needs no reason of its
-    /// own: it is taken only when every staged edit is a same-length in-place
-    /// overwrite, which is the `writes` case above.
-    ///
-    /// A tenth collection would have to be classified the same way; the check
-    /// sits beside the reference screen in `commit`, which iterates the same
-    /// datatype-carrying collections.
+    /// The commit clears this flag if a staged dataset's datatype or one of its
+    /// attribute datatypes contains object references, if a staged overwrite's
+    /// datatype contains them, or if either copy collection is nonempty.
+    /// Copies invalidate the cached result even when they contain no
+    /// references. The in-place-only commit path returns before this check.
     proved_free_of_references: bool,
     /// Free-space persistence read from the file's superblock extension on
     /// `open` (the file-creation `H5Pset_file_space_strategy(persist = true)`
@@ -3395,8 +3367,8 @@ fn screen_shared_message_records(
 /// holds zero, which [`InvalidatedAddresses::refusal`] passes, and the target
 /// that replaces it is screened by `resolve_reference_target` - by name
 /// for a path, by address for a raw one. So this runs over every staged
-/// dataset's `raw` without inspecting which builder filled it: the rule is about the
-/// bytes, not the door they came through.
+/// dataset's `raw` without inspecting which builder filled it: the rule inspects the
+/// serialized reference bytes directly, regardless of which builder method populated them.
 fn screen_resolved_references(
     dt: &Datatype,
     raw: &[u8],

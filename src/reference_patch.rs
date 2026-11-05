@@ -912,15 +912,16 @@ fn element_slots(dt: &Datatype) -> Option<Vec<usize>> {
 /// find and repoint*.
 ///
 /// The same question [`element_slots`] answers for the scan itself, exposed so an
-/// edit can refuse to move such an attribute somewhere the walk does not reach —
-/// a dense attribute heap, which [`scan_object`] reads as unproven and collects
-/// nothing from (issue #102).
+/// edit can reject moving such an attribute somewhere the walk does not reach
+/// (a dense attribute heap, which [`scan_object`] reads as unproven and collects
+/// nothing from, issue #102).
 ///
-/// Asking the walk's own predicate is what keeps that refusal from being wider
-/// than the guarantee it protects. A reference this walk never repointed even
-/// with the attribute in the object header — one wider than 8 bytes, a
-/// dataset-region reference, a variable length of references — is no worse off in
-/// a heap, and refusing to move it would buy nothing.
+/// Evaluating the walk's own predicate keeps that rejection from being wider
+/// than the guarantee it protects. A reference this walk never repointed even with
+/// the attribute in the object header (one wider than 8 bytes, a dataset-region
+/// reference, or a variable length of references) is no worse off in a heap.
+/// Rejecting the move would prevent moving attributes without avoiding
+/// reference corruption.
 pub(crate) fn attribute_references_are_repointable(dt: &Datatype) -> bool {
     element_slots(dt).is_some()
 }

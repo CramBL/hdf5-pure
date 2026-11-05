@@ -107,7 +107,7 @@ fb.create_dataset("station")
 
 [`with_ascii_strings_sized(&[&str], width)`](crate::DatasetBuilder::with_ascii_strings_sized) and [`with_strings_sized`](crate::DatasetBuilder::with_strings_sized) take the width from the caller, where the two above derive it from the values. Reach for those when the values in hand are not all the values the dataset will hold: a dataset can be extended, and a width taken from the first batch leaves a later, longer string with nowhere to go. A value that does not fit the declared width is rejected with [`FormatError::FixedStringTooLong`](crate::FormatError::FixedStringTooLong), never stored as a truncated prefix, and a width of zero is rejected with [`FormatError::ZeroFixedStringWidth`](crate::FormatError::ZeroFixedStringWidth), since no HDF5 string datatype may be zero bytes wide.
 
-The same values written as an attribute ([`AttrValue::AsciiString`](crate::AttrValue::AsciiString), [`AttrValue::AsciiStringArray`](crate::AttrValue::AsciiStringArray)) reach the file under the same encoding, so a value does not change shape by moving between the two.
+[`with_ascii_strings`](crate::DatasetBuilder::with_ascii_strings), [`AsciiString`](crate::AttrValue::AsciiString), and [`AsciiStringArray`](crate::AttrValue::AsciiStringArray) use ASCII and `NULLPAD`. They derive the element width from the longest string, with a minimum of one byte, and zero-pad shorter strings. An explicitly sized dataset can use a different width. Dataset and attribute dataspaces may also differ.
 
 For strings that should not share a width at all, [`with_vlen_strings`](crate::DatasetBuilder::with_vlen_strings) writes a variable-length dataset whose payloads live in the file's global heap. Either kind reads back through [`Dataset::read_string`](crate::Dataset::read_string), which dispatches on the datatype and trims the padding for you. The [variable-length strings](crate::_guide::vlen_strings) guide has the read side in full.
 
@@ -181,7 +181,7 @@ builder
 
 [`GroupBuilder::commit_datatype`](crate::GroupBuilder::commit_datatype) commits a type inside a group, which a dataset refers to by path, as in [`with_committed_datatype("sensors/reading_t")`](crate::DatasetBuilder::with_committed_datatype). A leading `/` is accepted.
 
-The referring object still declares its own element type, and the two must agree: [`with_i32_data`](crate::DatasetBuilder::with_i32_data) above against a committed i32. A dataset whose element type differs from the type it refers to, or whose committed path the file holds nothing at, fails the write, so the element bytes and the declared type always agree in the file that lands.
+Writing returns [`FormatError::UnknownCommittedDatatype`](crate::FormatError::UnknownCommittedDatatype) if the path does not identify a committed datatype. It returns [`FormatError::CommittedDatatypeMismatch`](crate::FormatError::CommittedDatatypeMismatch) if the referring dataset or attribute declares a different datatype. The comparison includes the serialized datatype encoding.
 
 Committed datatypes survive [`repack`](crate::repack()), but cannot be added to an existing file in place: the in-place engine appends into a fixed layout with nowhere to put the new object. Read them back with [`Group::named_datatypes`](crate::Group::named_datatypes) and [`Group::named_datatype`](crate::Group::named_datatype). A name that reaches anything else, a dataset included, is [`Error::NotANamedDatatype`](crate::Error::NotANamedDatatype).
 

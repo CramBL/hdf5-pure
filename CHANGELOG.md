@@ -1098,7 +1098,7 @@ Internal robustness and tests ([#26](https://github.com/CramBL/hdf5-pure/issues/
 
 ### Changed
 
-- **Breaking:** the public API is now a curated surface; internal format modules are `pub(crate)` ([#33](https://github.com/CramBL/hdf5-pure/issues/33)). Code using the documented reader/writer/builder API is unaffected; code reaching into internal module paths (e.g. `hdf5_pure::object_header::…`) must stop.
+- **Breaking:** internal format modules such as `hdf5_pure::object_header` are `pub(crate)`, leaving documented reader, writer and builder APIs unchanged ([#33](https://github.com/CramBL/hdf5-pure/issues/33)).
 
 ### Added
 

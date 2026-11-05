@@ -1891,7 +1891,7 @@ fn c_written_attribute_encodings_survive_a_repack() {
 ///
 /// By default the reference library does not allocate a contiguous or chunked
 /// dataset's storage until something is written to it, so one created and never
-/// written holds nothing at all. (Compact data is inline in the layout message
+/// written allocates no raw data in the file. (Compact data is inline in the layout message
 /// and is always present, which is why it is not among the layouts below.)
 /// Since #292 reading one answers its fill value for every element, and
 /// repack used to write those values out — turning a schema-only file into a

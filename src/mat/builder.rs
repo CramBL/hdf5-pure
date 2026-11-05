@@ -102,10 +102,12 @@ pub struct MatBuilder {
     /// Set by [`CellWriter`] before pushing a cell element; consumed by the
     /// next write to redirect the dataset/group into `#refs#`.
     next_target: Option<NextTarget>,
-    /// Where a [`DataProducer`]'s own error lands. The writer's provider seam
-    /// speaks `FormatError` and cannot carry a `MatError`, so a producer failing
-    /// mid-write stashes the real error here and the finalizers swap it back for
-    /// the placeholder the writer surfaced. Empty unless a producer failed.
+    /// Where a [`DataProducer`]'s own error lands. The writer's data-provider
+    /// interface returns [`FormatError`](crate::FormatError) and cannot carry a [`MatError`], so a
+    /// producer failing mid-write stores the real error here. The finalizers
+    /// restore the stored producer error when locking succeeds. If the lock is
+    /// poisoned, they return the fallback HDF5 error. Empty unless a producer
+    /// failed.
     producer_error: Arc<Mutex<Option<MatError>>>,
 }
 
@@ -560,10 +562,12 @@ impl MatBuilder {
     /// dataset is never fully resident.
     ///
     /// `producer` is called once per block, in ascending index order, while the
-    /// file is being emitted — not while it is being laid out, which works from
+    /// file is being emitted, not while it is being laid out, which works from
     /// the shape alone. Combined with [`finish_to`](Self::finish_to), which does
-    /// not hold the assembled file either, this writes a `.mat` in one block plus
-    /// the file's metadata, whatever its size.
+    /// not hold the assembled file either, the writer reuses one output buffer
+    /// for this dataset and writes each block to the sink. Total memory also
+    /// includes file metadata, other staged dataset buffers, and allocations
+    /// retained by the producer or sink.
     ///
     /// Each call hands the producer a [`Block`](crate::mat::Block) carrying its
     /// index, its first element's position, and how many elements to write, so a

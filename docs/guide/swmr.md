@@ -129,7 +129,7 @@ barriers. While the flags are set, plain reads, editing opens, and a second SWMR
 follows the flagged file. [`File::from_bytes`](crate::File::from_bytes) skips this check because
 its caller supplies a snapshot of the bytes.
 
-A page-buffered writer raises bit 0 of the same byte *without* the SWMR bit, and no SWMR reader can follow half a pair. That mark has a reader of its own: [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy), which admits a snapshot read of it and never of a SWMR pair. See [Reading files](crate::_guide::reading).
+A page-buffered writer raises bit 0 of the same byte *without* the SWMR bit, and a SWMR reader rejects a file setting bit 0 without bit 2. That mark has a reader of its own: [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy), which admits a snapshot read of it and never of a SWMR pair. See [Reading files](crate::_guide::reading).
 
 [`File::clear_status_flags`](crate::File::clear_status_flags) clears status flags left by an
 interrupted ordinary or SWMR writer, including a page-buffered session. It is equivalent to

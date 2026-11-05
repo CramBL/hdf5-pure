@@ -23,8 +23,8 @@ use hdf5_pure::File;
 use hdf5_pure::mat::{Block, Blocking, DataProducer, MatBuilder, MatError, Options};
 use std::sync::{Arc, Mutex};
 
-/// Stands in for an acquisition: yields interleaved channel samples computed
-/// from their position, so a dataset of any size costs nothing to generate.
+/// Generates simulated acquisition data: yields interleaved channel samples,
+/// generating each value from its index without retaining the complete dataset.
 ///
 /// A real one would drain a capture buffer, read a socket, or `mmap` a raw file.
 /// The only contract is that block `i` continues where block `i - 1` stopped, and
