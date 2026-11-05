@@ -19,6 +19,7 @@ pub mod creation_holes;
 pub mod ownership_append;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod unallocated_append;
+pub mod width_workload;
 
 /// Sets the extensible-array index address to undefined in a single-dataset fixture.
 ///
