@@ -216,7 +216,7 @@ fn reusable_space_stats_check_aggregate_byte_sums() {
     let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     session.space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
     );
     session.space.seed_persisted(
@@ -1324,7 +1324,7 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
         let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
         s.space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::Page),
-            0,
+            ByteLength::new(0),
             FileSpacePageSize::DEFAULT,
         );
         if let Some((addr, len)) = meta {
@@ -1453,7 +1453,7 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::FsmAggr),
-        0,
+        ByteLength::new(0),
         FileSpacePageSize::DEFAULT,
     );
     let root = s
@@ -1521,7 +1521,7 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
     for hole in 120..420u64 {
         s.space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::FsmAggr),
-            0,
+            ByteLength::new(0),
             FileSpacePageSize::DEFAULT,
         );
         s.space.seed_persisted(
@@ -1610,8 +1610,11 @@ fn paged_tail_allocation_releases_unused_page_bytes() {
     let before = std::fs::metadata(&path).unwrap().len();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    s.space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, FileSpacePageSize::DEFAULT);
+    s.space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(0),
+        FileSpacePageSize::DEFAULT,
+    );
     s.create_group(&ObjectPathBuf::parse("g")).unwrap();
     s.commit().unwrap();
 
@@ -2192,7 +2195,7 @@ fn chunk_index_classes_use_independent_snapshot_and_payload_facts(
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         seeds.iter().map(|&(kind, start, length)| {
             (
@@ -2245,7 +2248,7 @@ fn canonical_index_classes_borrow_state_for_page_aligned_chunk_data(#[case] coun
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         (0..count).map(|page| {
             (
@@ -2304,7 +2307,7 @@ fn chunk_index_classes_follow_current_admitted_fragments() {
     let fragment = FreeExtent::new(StoredAddress::new(1_400), ByteLength::new(16)).unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [(Some(ManagerKind::PagedSmallMetadata), fragment)],
     )
@@ -2673,7 +2676,11 @@ fn physical_ranges(bounds: &[(u64, u64)]) -> Vec<FileRange> {
 impl WriteEngine {
     fn clear_page_class_facts(&mut self) {
         if let Some(page_size) = self.space.page_size() {
-            self.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, page_size);
+            self.space = SessionSpace::from_strategy(
+                Some(FileSpaceStrategy::Page),
+                ByteLength::new(1),
+                page_size,
+            );
         }
     }
 }

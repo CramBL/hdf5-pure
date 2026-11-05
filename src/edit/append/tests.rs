@@ -212,7 +212,8 @@ fn engine(base: u64) -> (tempfile::TempDir, WriteEngine) {
     );
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
-    engine.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, page);
+    engine.space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), ByteLength::new(1), page);
     engine
         .space
         .record_transition(PageType::Meta, PageTransition::Unchanged);

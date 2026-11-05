@@ -167,7 +167,8 @@ fn engine() -> (tempfile::TempDir, WriteEngine, u64) {
     engine
         .append(&vec![13; usize::try_from(3 * PAGE).unwrap()])
         .unwrap();
-    engine.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, page);
+    engine.space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), ByteLength::new(1), page);
     engine.space.return_allocation(
         Extent::new(StoredAddress::new(start + 1_024), ByteLength::new(131_072)).unwrap(),
         AllocationClass::Raw,

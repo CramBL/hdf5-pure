@@ -455,8 +455,11 @@ fn flat_projection(widths: FormatWidths) -> ManagerProjection {
 }
 
 fn paged_projection(widths: FormatWidths) -> ManagerProjection {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(0),
+        FileSpacePageSize::DEFAULT,
+    );
     space.seed_persisted(Some(ManagerKind::PagedSmallMetadata), extent(100, 200));
     space.seed_persisted(Some(ManagerKind::PagedSmallRaw), extent(5000, 200));
     space.seed_persisted(Some(ManagerKind::PagedLargeGeneric), extent(8192, 4096));

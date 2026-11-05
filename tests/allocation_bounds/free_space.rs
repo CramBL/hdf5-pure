@@ -19,7 +19,7 @@ use test_util::allocation;
 fn partial_page_queries_borrow_canonical_state(#[case] count: u64, #[case] stride: u64) {
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         (0..count).map(|page| {
             (

@@ -141,8 +141,11 @@ fn partitions_include_complete_manager_capacity() {
 #[case::extension_only(160, 0)]
 #[case::with_manager(4096, 1)]
 fn paged_plans_retain_one_fully_occupied_reservation(#[case] hole: u64, #[case] managers: usize) {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(0),
+        FileSpacePageSize::DEFAULT,
+    );
     space.seed_persisted(Some(ManagerKind::PagedSmallMetadata), extent(4096, hole));
     let plan = plan_persistence(
         &space,
@@ -191,8 +194,11 @@ fn paged_plans_retain_one_fully_occupied_reservation(#[case] hole: u64, #[case] 
 
 #[test]
 fn exact_manager_sizes_can_oscillate_while_owned_capacity_terminates() {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     let freed = [(
         Extent::new(StoredAddress::new(100), ByteLength::new(3_801)).unwrap(),
         FreeClass::Page(PageType::Meta),
@@ -261,8 +267,11 @@ fn a_paged_tail_takes_exactly_the_space_it_fills(
     )]
     hole: u64,
 ) {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(0),
+        FileSpacePageSize::DEFAULT,
+    );
     space.seed_persisted(
         Some(ManagerKind::PagedSmallMetadata),
         Extent::new(StoredAddress::new(4_096), ByteLength::new(hole)).unwrap(),
@@ -311,8 +320,11 @@ fn a_paged_tail_takes_exactly_the_space_it_fills(
 #[case::reusable(1_000, true)]
 #[case::whole_page(4_096, true)]
 fn pure_reuse_planning_keeps_all_capacity_owned(#[case] hole: u64, #[case] fits: bool) {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     space.seed_persisted(
         Some(ManagerKind::PagedSmallMetadata),
         Extent::new(StoredAddress::new(4_096), ByteLength::new(hole)).unwrap(),
@@ -347,7 +359,11 @@ fn appended_capacity_preserves_even_the_smallest_known_tail(
     #[case] page: u64,
 ) {
     let page = FileSpacePageSize::try_from(page).unwrap();
-    let space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), page.get() * 2, page);
+    let space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(page.get() * 2),
+        page,
+    );
     let widths = FormatWidths::from_sizes(8, 8).unwrap();
     let plan = plan_persistence(
         &space,
@@ -369,8 +385,11 @@ fn appended_capacity_preserves_even_the_smallest_known_tail(
 
 #[test]
 fn an_exact_extension_reservation_can_publish_without_managers() {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     space.seed_persisted(
         Some(ManagerKind::PagedSmallMetadata),
         Extent::new(StoredAddress::new(4_096), ByteLength::new(160)).unwrap(),
@@ -398,8 +417,11 @@ fn an_exact_extension_reservation_can_publish_without_managers() {
 
 #[test]
 fn padded_managers_preserve_unclassified_generic_fragments() {
-    let mut space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let mut space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     let fragment = Extent::new(StoredAddress::new(5_694), ByteLength::new(450)).unwrap();
     space.seed_persisted(Some(ManagerKind::PagedLargeGeneric), fragment);
     let widths = FormatWidths::from_sizes(8, 8).unwrap();
@@ -429,7 +451,7 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
     let run = extent(4 * page, pages * page);
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallMetadata), durable),
@@ -568,7 +590,7 @@ fn compact_capacity_contains_size_groups_and_reservation_effects(
     }
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         sections,
     )
@@ -624,7 +646,7 @@ fn a_reservation_preserves_a_compact_remaining_run(#[case] pages: u64) {
     let run = extent(page, pages * page);
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [(Some(ManagerKind::PagedLargeGeneric), run)],
     )
@@ -678,7 +700,7 @@ fn legacy_per_page_input_is_persisted_as_a_complete_run() {
     let page = FileSpacePageSize::DEFAULT.get();
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallMetadata), extent(100, 2_048)),
@@ -870,7 +892,7 @@ fn planning_reuses_an_aligned_block_after_rejecting_a_crossing_reservation(
     let generic = extent(33 * page, 17 * page);
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         page_size,
         [
             (Some(ManagerKind::PagedLargeGeneric), generic),

@@ -36,7 +36,7 @@ impl PagedPostFree {
     /// own class can also panic, including during scalar admission in debug builds.
     pub(super) fn release_batch(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
         work: &mut AdmissionWork,
     ) -> Vec<(Extent, FreeClass)> {
@@ -88,7 +88,7 @@ impl<'a> PageAdmission<'a> {
     /// Panics if an eligible return overlaps indexed space of its class.
     fn new(
         post: &'a PagedPostFree,
-        threshold: u64,
+        threshold: ByteLength,
         returned: OrderedReturns<FreeClass>,
         work: &mut AdmissionWork,
     ) -> Self {
@@ -104,7 +104,7 @@ impl<'a> PageAdmission<'a> {
         let mut queue = VecDeque::new();
         for (extent, class) in returned {
             work.visit_extent();
-            let state = if extent.len() >= ByteLength::new(threshold) {
+            let state = if extent.len() >= threshold {
                 classes[ClassIndex::slot(class)].insert(extent, work);
                 AdmissionState::Admitted
             } else {
@@ -159,7 +159,7 @@ impl<'a> PageAdmission<'a> {
             if !unclassified_merge
                 && !classes
                     .iter()
-                    .any(|list| list.merges(extent, page_size.get(), work))
+                    .any(|list| list.merges(extent, page_size, work))
             {
                 continue;
             }
@@ -274,7 +274,13 @@ impl ClassIndex {
     }
 
     /// Tests within-page or whole-unit adjacency for this class.
-    fn merges(&self, extent: Extent, page_size: u64, work: &mut AdmissionWork) -> bool {
+    fn merges(
+        &self,
+        extent: Extent,
+        page_size: FileSpacePageSize,
+        work: &mut AdmissionWork,
+    ) -> bool {
+        let page_size = ByteLength::new(page_size.get());
         work.lookup();
         let left = self
             .regions
@@ -284,7 +290,7 @@ impl ClassIndex {
         work.lookup();
         let right = self.regions.get(&extent.end()).copied();
         [left, right].into_iter().flatten().any(|region| {
-            if extent.len() < ByteLength::new(page_size) {
+            if extent.len() < page_size {
                 region.adjoins_within(extent, page_size)
             } else {
                 region.adjoins_whole_unit(extent, page_size)

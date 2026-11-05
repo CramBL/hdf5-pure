@@ -13,7 +13,7 @@ fn returned_allocations_reach_admission_with_their_original_boundaries(
 ) {
     let mut space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::FsmAggr),
-        64,
+        ByteLength::new(64),
         FileSpacePageSize::DEFAULT,
     );
     if seed {

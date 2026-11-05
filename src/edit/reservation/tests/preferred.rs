@@ -1,6 +1,7 @@
 use core::cell::Cell;
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hdf5_pure_space::__private::ReservationWork;
@@ -108,7 +109,7 @@ fn preferred_reuse_preserves_ties_and_builds_only_the_needed_batch(
     let stored = start - base;
     engine.space = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [0, 128, 256].map(|offset| {
             (

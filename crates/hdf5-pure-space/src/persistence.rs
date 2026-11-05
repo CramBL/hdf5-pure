@@ -1,6 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 
 use super::extent::Extent;
@@ -155,7 +156,7 @@ pub(super) struct PageParts {
 impl PageParts {
     /// Splits `extent` into at most two partial edges and one complete aligned interior.
     pub(super) fn new(extent: Extent, page_size: FileSpacePageSize) -> Self {
-        if let Some(interior) = extent.aligned_interior(page_size.get()) {
+        if let Some(interior) = extent.aligned_interior(ByteLength::new(page_size.get())) {
             return Self {
                 leading: Extent::between(extent.start(), interior.start()),
                 interior: Some(interior),

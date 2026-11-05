@@ -1101,7 +1101,7 @@ mod tests {
     ) {
         let info = file_space_info::persistent_placeholder(
             FileSpaceStrategy::Page,
-            7,
+            ByteLength::new(7),
             FileSpacePageSize::DEFAULT,
         );
         let body =
@@ -1272,7 +1272,7 @@ mod tests {
         );
         let info = file_space_info::persistent_placeholder(
             FileSpaceStrategy::FsmAggr,
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::DEFAULT,
         );
 
@@ -1302,7 +1302,7 @@ mod tests {
     ) {
         let info = file_space_info::persistent_placeholder(
             FileSpaceStrategy::Page,
-            7,
+            ByteLength::new(7),
             FileSpacePageSize::DEFAULT,
         );
         let mut bytes = if after_replacement {
@@ -1333,7 +1333,7 @@ mod tests {
     ) {
         let info = file_space_info::persistent_placeholder(
             FileSpaceStrategy::Page,
-            7,
+            ByteLength::new(7),
             FileSpacePageSize::DEFAULT,
         );
         let source = OhRegion::new(

@@ -309,7 +309,7 @@ fn publication_rechecks_mutable_allocator_and_session_facts(#[case] mutation: Mu
                 } else {
                     FileSpaceStrategy::FsmAggr
                 }),
-                1,
+                ByteLength::new(1),
                 FileSpacePageSize::MIN,
                 [(None, extent)],
             )
@@ -423,7 +423,7 @@ fn publication_bounds_reuse_one_phase_with_zero_allocations_and_source_reads() {
     let (mut engine, calls) = protection_tests::engine_with_read_call_counter(&path);
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         (0..256).map(|at| {
             (

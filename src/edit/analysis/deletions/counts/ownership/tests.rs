@@ -222,7 +222,7 @@ fn protection_excludes_every_reusable_class_from_complete_allocations(
         } else {
             FileSpaceStrategy::FsmAggr
         }),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [(
             kind,
@@ -279,7 +279,7 @@ fn protection_excludes_retained_claims_without_inferring_page_ownership(
     engine.aggregation = None;
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         if kind == RetainedKind::Unclassified {
             Some((None, extent))
@@ -517,7 +517,7 @@ fn protection_keeps_empty_work_allocation_and_read_free() {
     let (mut engine, calls) = engine_with_read_call_counter(&path);
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         (0..256).map(|index| {
             (

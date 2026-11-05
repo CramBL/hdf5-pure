@@ -1,7 +1,6 @@
 //! Reusable-space reservations and indexed batch accounting.
 
-use core::num::NonZeroU64;
-
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::{FileSpacePageSize, FormatError, StoredAddress};
 
@@ -228,7 +227,7 @@ impl<'a> ReservationBatch<'a> {
         }
     }
 
-    pub(crate) fn flat(free: &'a mut FreeList, threshold: u64) -> Self {
+    pub(crate) fn flat(free: &'a mut FreeList, threshold: ByteLength) -> Self {
         Self {
             state: ReservationState::Flat {
                 free: IndexedFreeList::new(free, None),
@@ -243,7 +242,7 @@ impl<'a> ReservationBatch<'a> {
         page_size: FileSpacePageSize,
     ) -> Self {
         // FileSpacePageSize construction requires at least 512 bytes.
-        let alignment = NonZeroU64::new(page_size.get()).expect("the page size is nonzero");
+        let alignment = NonZeroByteLength::new(page_size.get()).expect("the page size is nonzero");
         Self {
             state: ReservationState::Paged {
                 meta: IndexedFreeList::new(meta, Some(alignment)),
@@ -388,7 +387,7 @@ enum ReservationState<'a> {
     Disabled,
     Flat {
         free: IndexedFreeList<'a>,
-        threshold: u64,
+        threshold: ByteLength,
     },
     Paged {
         meta: IndexedFreeList<'a>,

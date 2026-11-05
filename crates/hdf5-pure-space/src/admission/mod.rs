@@ -142,14 +142,14 @@ pub trait TrackedSpace {
     /// A shorter extent may merge into one this call tracked, whatever the order of `extents`.
     fn release_each(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, Self::Class)>,
     ) -> Vec<(Extent, Self::Class)> {
         // The extents of at least the threshold are tracked first, and the smaller ones are offered
         // again until none merges.
         let (mut pending, eligible): (Vec<_>, Vec<_>) = extents
             .into_iter()
-            .partition(|&(extent, _)| extent.len() < ByteLength::new(threshold));
+            .partition(|&(extent, _)| extent.len() < threshold);
         for (extent, class) in eligible {
             self.track(extent, class);
         }
@@ -166,11 +166,11 @@ pub trait TrackedSpace {
 
     /// Tracks `extent` if it is at least `threshold` bytes long or merges into tracked space, and
     /// returns which [`Release`] applies.
-    fn release(&mut self, threshold: u64, extent: Extent, class: Self::Class) -> Release {
+    fn release(&mut self, threshold: ByteLength, extent: Extent, class: Self::Class) -> Release {
         // `H5MF_xfree` (`H5MF.c`, HDF5 1.14.6) adds a section of at least the threshold and merges a
         // smaller one into an adjoining tracked section through `H5FS_sect_try_merge`
         // (`H5FSsection.c`), dropping it where none adjoins.
-        let release = if extent.len() >= ByteLength::new(threshold) {
+        let release = if extent.len() >= threshold {
             Release::Track
         } else if self.merges(extent) {
             Release::Merge
@@ -364,7 +364,7 @@ mod tests {
 
         assert_eq!(
             fl.release(
-                THRESHOLD,
+                ByteLength::new(THRESHOLD),
                 Extent::new(StoredAddress::new(500), ByteLength::new(len)).unwrap(),
                 ()
             ),
@@ -389,7 +389,7 @@ mod tests {
 
         assert_eq!(
             fl.release(
-                THRESHOLD,
+                ByteLength::new(THRESHOLD),
                 Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
                 ()
             ),
@@ -405,12 +405,12 @@ mod tests {
         assert_eq!(
             [
                 fl.release(
-                    THRESHOLD,
+                    ByteLength::new(THRESHOLD),
                     Extent::new(StoredAddress::new(0), ByteLength::new(THRESHOLD - 1)).unwrap(),
                     ()
                 ),
                 fl.release(
-                    THRESHOLD,
+                    ByteLength::new(THRESHOLD),
                     Extent::new(
                         StoredAddress::new(THRESHOLD - 1),
                         ByteLength::new(THRESHOLD - 1)

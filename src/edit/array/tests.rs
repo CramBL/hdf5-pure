@@ -312,7 +312,7 @@ fn partial_array_emission_keeps_every_reserved_allocation_unavailable() {
     ];
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         original.map(|extent| (Some(ManagerKind::PagedSmallMetadata), extent)),
     )

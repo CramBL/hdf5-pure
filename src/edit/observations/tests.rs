@@ -53,14 +53,18 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
     let mut engine = edit_test_util::open_engine(&path);
     engine.aggregation = None;
     if matches!(layout, Layout::Paged | Layout::PagedUserblock) {
-        engine.space = SessionSpace::from_strategy(Some(strategy), 1, FileSpacePageSize::DEFAULT);
+        engine.space = SessionSpace::from_strategy(
+            Some(strategy),
+            ByteLength::new(1),
+            FileSpacePageSize::DEFAULT,
+        );
     }
     let start = engine.image.len();
     if matches!(layout, Layout::Fragmented) {
         engine.append(&[13; 512]).unwrap();
         engine.space = SessionSpace::from_persisted(
             Some(strategy),
-            1,
+            ByteLength::new(1),
             FileSpacePageSize::DEFAULT,
             [(None, extent(start, 128)), (None, extent(start + 256, 128))],
         )

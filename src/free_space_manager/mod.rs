@@ -1339,7 +1339,11 @@ mod tests {
     #[test]
     fn semantic_paged_managers_keep_the_existing_wire_slots_and_classes() {
         let page_size = FileSpacePageSize::DEFAULT;
-        let mut space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, page_size);
+        let mut space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::Page),
+            ByteLength::new(0),
+            page_size,
+        );
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
             Extent::new(StoredAddress::new(100), ByteLength::new(200)).unwrap(),

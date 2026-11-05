@@ -47,7 +47,7 @@ impl WriteEngine {
         }
         if !to_free.entries().iter().any(|&(extent, _)| {
             extent.start() == self.context.superblock().root_group_address
-                && extent.len() < ByteLength::new(persist.threshold)
+                && extent.len() < persist.threshold
         }) {
             return Ok(None);
         }
@@ -64,7 +64,7 @@ impl WriteEngine {
         let [target_range] = old_spans.as_slice() else {
             return Ok(None);
         };
-        if target_range.length() >= persist.threshold {
+        if ByteLength::new(target_range.length()) >= persist.threshold {
             return Ok(None);
         }
         let new_spans = self.oh_chunk_spans(new_root)?;

@@ -4,7 +4,6 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::mem;
-use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
@@ -26,7 +25,7 @@ pub(crate) struct IndexedFreeList<'a> {
     regions: BTreeMap<StoredAddress, Extent>,
     sizes: BTreeSet<(ByteLength, StoredAddress)>,
     interiors: BTreeSet<(ByteLength, StoredAddress)>,
-    alignment: Option<NonZeroU64>,
+    alignment: Option<NonZeroByteLength>,
     blocks: Option<Box<BlockIndex>>,
     buffer: Vec<Extent>,
     total_bytes: ByteLength,
@@ -36,7 +35,7 @@ pub(crate) struct IndexedFreeList<'a> {
 
 impl<'a> IndexedFreeList<'a> {
     /// Moves the owner's extents into lookup indexes, retaining its vector for restoration.
-    pub(crate) fn new(owner: &'a mut FreeList, alignment: Option<NonZeroU64>) -> Self {
+    pub(crate) fn new(owner: &'a mut FreeList, alignment: Option<NonZeroByteLength>) -> Self {
         let mut buffer = mem::take(&mut owner.regions);
         let total_bytes = mem::replace(&mut owner.total_bytes, ByteLength::new(0));
         let mut indexed = Self {
@@ -136,7 +135,7 @@ impl<'a> IndexedFreeList<'a> {
         let region = self.remove(start);
         // Entries in the interior index have a checked aligned interior of sufficient length.
         let interior = region
-            .aligned_interior(alignment.get())
+            .aligned_interior(alignment.length())
             .expect("the indexed region contains whole units");
         let allocation = Extent::new(interior.start(), size.length())
             .expect("the allocation fits inside the indexed interior");
@@ -241,7 +240,7 @@ impl<'a> IndexedFreeList<'a> {
         regions.insert(extent.start(), extent);
         sizes.insert((extent.len(), extent.start()));
         if let Some(interior) =
-            alignment.and_then(|alignment| extent.aligned_interior(alignment.get()))
+            alignment.and_then(|alignment| extent.aligned_interior(alignment.length()))
         {
             interiors.insert((interior.len(), extent.start()));
         }
@@ -268,7 +267,7 @@ impl<'a> IndexedFreeList<'a> {
         }
         sizes.remove(&(extent.len(), start));
         if let Some(interior) =
-            alignment.and_then(|alignment| extent.aligned_interior(alignment.get()))
+            alignment.and_then(|alignment| extent.aligned_interior(alignment.length()))
         {
             interiors.remove(&(interior.len(), start));
         }

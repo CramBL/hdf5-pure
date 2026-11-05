@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::{AllocationClass, PageType, ReservationRequest, SessionSpace};
 use rstest::rstest;
@@ -40,7 +41,8 @@ fn large_page_reservations_bound_zero_scratch_and_copy_work(
     )
     .unwrap();
     engine.aggregation = None;
-    engine.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, page_size);
+    engine.space =
+        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), ByteLength::new(1), page_size);
     let budget = if ample { 4 * page as usize } else { 131_072 };
     engine
         .set_write_buffering(buffering.mode(page, budget))

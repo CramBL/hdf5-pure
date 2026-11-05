@@ -202,7 +202,7 @@ impl FreeList {
     /// in the list.
     pub fn release_all(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         eoa: StoredAddress,
         extents: impl IntoIterator<Item = Extent>,
     ) -> StoredAddress {
@@ -301,8 +301,8 @@ impl FreeList {
     /// # Panics
     ///
     /// Panics in debug builds if `align` is nonzero and `len` is not a multiple of `align`.
-    pub fn alloc_whole_units(&mut self, len: ByteLength, align: u64) -> Option<Extent> {
-        if len.is_zero() || align == 0 {
+    pub fn alloc_whole_units(&mut self, len: ByteLength, align: ByteLength) -> Option<Extent> {
+        if len.is_zero() || align.is_zero() {
             return None;
         }
         // Whole units in, whole units out. This keeps both leftovers aligned and inside pages of
@@ -311,7 +311,7 @@ impl FreeList {
         // mix page types, which paging prevents. The caller supplies a rounded length and the unit.
         // Every caller is in this crate, so construction enforces the invariant.
         debug_assert_eq!(
-            len.get() % align,
+            len.get() % align.get(),
             0,
             "alloc_whole_units takes a whole number of units"
         );
@@ -607,7 +607,7 @@ impl FreeList {
     /// The whole-page counterpart of [`largest`](Self::largest), for the same caller: on a paged
     /// file an append's reserve may claim whole free pages out of the other page type's list, so
     /// how much it can draw is the larger of this and its own list's `largest`.
-    pub fn largest_whole_units(&self, align: u64) -> ByteLength {
+    pub fn largest_whole_units(&self, align: ByteLength) -> ByteLength {
         self.regions
             .iter()
             .filter_map(|extent| extent.aligned_interior(align).map(Extent::len))
@@ -658,7 +658,7 @@ impl FreeList {
 
     /// Returns `true` if a region adjoins `extent` inside one `unit`, at an address that is not a
     /// multiple of `unit`.
-    pub fn adjoins_within(&self, extent: Extent, unit: u64) -> bool {
+    pub fn adjoins_within(&self, extent: Extent, unit: ByteLength) -> bool {
         self.regions
             .iter()
             .any(|region| region.adjoins_within(extent, unit))
@@ -677,7 +677,7 @@ impl FreeList {
 
     /// Returns `true` if a region of at least `unit` bytes adjoins `extent` at a multiple of
     /// `unit`.
-    pub fn adjoins_whole_unit(&self, extent: Extent, unit: u64) -> bool {
+    pub fn adjoins_whole_unit(&self, extent: Extent, unit: ByteLength) -> bool {
         self.regions
             .iter()
             .any(|region| region.adjoins_whole_unit(extent, unit))
@@ -750,7 +750,7 @@ impl TrackedSpace for FreeList {
 
     fn release_each(
         &mut self,
-        threshold: u64,
+        threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, ())>,
     ) -> Vec<(Extent, ())> {
         self.release_batch(threshold, extents, &mut AdmissionWork::default())
@@ -1057,24 +1057,42 @@ mod tests {
     #[test]
     fn largest_whole_units_reports_the_aligned_interior() {
         let mut fl = FreeList::new();
-        assert_eq!(fl.largest_whole_units(16), ByteLength::new(0));
+        assert_eq!(
+            fl.largest_whole_units(ByteLength::new(16)),
+            ByteLength::new(0)
+        );
         // [10, 40): thirty bytes, and the only whole unit in it is [16, 32).
         fl.free(Extent::new(StoredAddress::new(10), ByteLength::new(30)).unwrap());
         assert_eq!(fl.largest(), ByteLength::new(30));
-        assert_eq!(fl.largest_whole_units(16), ByteLength::new(16));
+        assert_eq!(
+            fl.largest_whole_units(ByteLength::new(16)),
+            ByteLength::new(16)
+        );
         // [100, 110): ten bytes with no whole unit at all.
         fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(10)).unwrap());
-        assert_eq!(fl.largest_whole_units(16), ByteLength::new(16));
+        assert_eq!(
+            fl.largest_whole_units(ByteLength::new(16)),
+            ByteLength::new(16)
+        );
         // [200, 260): sixty bytes whose whole units are [208, 256), three of them.
         fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(60)).unwrap());
-        assert_eq!(fl.largest_whole_units(16), ByteLength::new(48));
-        assert_eq!(fl.largest_whole_units(0), ByteLength::new(0));
+        assert_eq!(
+            fl.largest_whole_units(ByteLength::new(16)),
+            ByteLength::new(48)
+        );
+        assert_eq!(
+            fl.largest_whole_units(ByteLength::new(0)),
+            ByteLength::new(0)
+        );
         // The allocator agrees: that run is claimable in one call, and one unit
         // more is not.
         let mut probe = fl.clone();
-        assert_eq!(probe.alloc_whole_units(ByteLength::new(64), 16), None);
         assert_eq!(
-            probe.alloc_whole_units(ByteLength::new(48), 16),
+            probe.alloc_whole_units(ByteLength::new(64), ByteLength::new(16)),
+            None
+        );
+        assert_eq!(
+            probe.alloc_whole_units(ByteLength::new(48), ByteLength::new(16)),
             Some(Extent::new(StoredAddress::new(208), ByteLength::new(48)).unwrap())
         );
     }
@@ -1206,7 +1224,7 @@ mod tests {
 
         assert_eq!(
             fl.release_all(
-                THRESHOLD,
+                ByteLength::new(THRESHOLD),
                 StoredAddress::new(950),
                 extents.iter().map(|&(addr, len)| Extent::new(
                     StoredAddress::new(addr),
@@ -1241,7 +1259,7 @@ mod tests {
         let mut free = FreeList::new();
         free.free(Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap());
         assert_eq!(
-            free.alloc_whole_units(ByteLength::new(requested), alignment),
+            free.alloc_whole_units(ByteLength::new(requested), ByteLength::new(alignment)),
             allocated.map(|(start, length)| Extent::new(
                 StoredAddress::new(start),
                 ByteLength::new(length)

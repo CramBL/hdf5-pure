@@ -29,7 +29,7 @@ fn admitted_snapshot_preserves_classes_order_and_cached_totals(
 ) {
     let space = SessionSpace::from_persisted(
         Some(strategy),
-        8192,
+        ByteLength::new(8192),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallMetadata), extent(4160, 64)),
@@ -66,7 +66,7 @@ fn admitted_snapshot_preserves_classes_order_and_cached_totals(
 fn admitted_snapshot_excludes_pending_padding_and_seedless_small_returns() {
     let mut space = SessionSpace::from_strategy(
         Some(FileSpaceStrategy::Page),
-        64,
+        ByteLength::new(64),
         FileSpacePageSize::DEFAULT,
     );
     let admitted = extent(8256, 128);
@@ -108,7 +108,7 @@ fn admitted_snapshot_follows_reservation_and_restored_allocator_state(
 ) {
     let mut space = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [(Some(ManagerKind::PagedSmallRaw), extent(4160, 128))],
     )
@@ -146,7 +146,7 @@ fn admitted_snapshot_keeps_long_page_runs_compact() {
     let run = extent(4096, 1 << 40);
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [(Some(ManagerKind::PagedLargeGeneric), run)],
     )
@@ -179,7 +179,7 @@ fn snapshot_projection_preserves_current_manager_classes(
 ) {
     let space = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
         [
             (Some(ManagerKind::PagedSmallMetadata), extent(100, 200)),
@@ -208,8 +208,11 @@ fn snapshot_projection_preserves_current_manager_classes(
 
 #[test]
 fn proposed_page_snapshot_excludes_owned_metadata_capacity() {
-    let space =
-        SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT);
+    let space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::DEFAULT,
+    );
     let tail = space
         .plan_paged_tail(
             StoredAddress::new(8192),
@@ -277,7 +280,7 @@ fn partial_page_classes_require_consistent_typed_fragments(
     };
     let space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::try_from(page).unwrap(),
         sections
             .iter()
@@ -312,7 +315,7 @@ fn a_snapshot_without_page_geometry_cannot_establish_a_page_class(
 ) {
     let space = SessionSpace::from_persisted(
         Some(strategy),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [(Some(ManagerKind::PagedSmallMetadata), extent(400, 16))],
     )
@@ -331,7 +334,7 @@ fn a_page_class_proves_no_ownership_or_availability_outside_its_fragment() {
     let query = extent(100, 20);
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
-        1,
+        ByteLength::new(1),
         FileSpacePageSize::MIN,
         [(Some(ManagerKind::PagedSmallMetadata), seed)],
     )

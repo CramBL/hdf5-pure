@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
@@ -30,7 +31,7 @@ impl FileAllocation {
     ///
     /// With `threshold` set, tracks abandoned aggregate spare of at least that size for reuse
     /// during construction. Active aggregate spare remains reserved.
-    pub(crate) fn new(end: StoredAddress, aggregated: bool, threshold: Option<u64>) -> Self {
+    pub(crate) fn new(end: StoredAddress, aggregated: bool, threshold: Option<ByteLength>) -> Self {
         Self {
             widths: crate::file_writer::WIDTHS,
             base: BaseAddress::ZERO,
@@ -38,7 +39,7 @@ impl FileAllocation {
             aggregates: aggregated.then(ClassicAggregators::new),
             space: SessionSpace::from_strategy(
                 threshold.map(|_| FileSpaceStrategy::FsmAggr),
-                threshold.unwrap_or_default(),
+                threshold.unwrap_or(ByteLength::new(0)),
                 FileSpacePageSize::DEFAULT,
             ),
         }
@@ -57,7 +58,7 @@ impl FileAllocation {
         base: BaseAddress,
         end: StoredAddress,
         aggregated: bool,
-        threshold: Option<u64>,
+        threshold: Option<ByteLength>,
     ) -> Result<Self, FormatError> {
         let mut allocation = Self::new(end, aggregated, threshold);
         allocation.widths = widths;
@@ -260,6 +261,7 @@ pub(crate) struct FileManager {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private::FreeSection;
     use hdf5_pure_format::__private::FreeSpaceManagerHeader;
     use hdf5_pure_space::__private::AllocationClass;
@@ -289,7 +291,7 @@ mod tests {
             BaseAddress::ZERO,
             StoredAddress::new(48),
             true,
-            Some(threshold),
+            Some(ByteLength::new(threshold)),
         )
         .unwrap();
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
@@ -337,7 +339,8 @@ mod tests {
 
     #[test]
     fn persistence_keeps_abandoned_and_settled_spare() {
-        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
+        let mut allocation =
+            FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         allocation.reserve(64, AllocationClass::Raw).unwrap();
         allocation
@@ -376,7 +379,8 @@ mod tests {
 
     #[test]
     fn an_empty_free_list_emits_no_manager() {
-        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
+        let mut allocation =
+            FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         let (end, manager) = allocation.finish_persisted().unwrap();
         assert_eq!(end, StoredAddress::new(112));
@@ -387,7 +391,8 @@ mod tests {
     #[case::header(u64::MAX, true)]
     #[case::section_list(u64::MAX - 100, false)]
     fn persistent_manager_placement_checks_its_end(#[case] offset: u64, #[case] header: bool) {
-        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
+        let mut allocation =
+            FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
         allocation.reserve(64, AllocationClass::Metadata).unwrap();
         allocation.reserve(32, AllocationClass::Raw).unwrap();
         allocation.end = StoredAddress::new(offset);
@@ -423,7 +428,11 @@ mod tests {
             AllocationClass::Metadata => AllocationClass::Raw,
             AllocationClass::Raw => AllocationClass::Metadata,
         };
-        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(threshold));
+        let mut allocation = FileAllocation::new(
+            StoredAddress::new(48),
+            true,
+            Some(ByteLength::new(threshold)),
+        );
         assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
         assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
         assert_eq!(allocation.reserve(2_000, class).unwrap().get(), 4_144);
@@ -442,7 +451,8 @@ mod tests {
         #[case] class: AllocationClass,
         #[case] other: AllocationClass,
     ) {
-        let mut allocation = FileAllocation::new(StoredAddress::new(48), true, Some(1));
+        let mut allocation =
+            FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
         assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
         assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
         assert_eq!(allocation.space.reusable_sections().count(), 0);
@@ -461,7 +471,7 @@ mod tests {
     fn large_bypasses_preserve_an_older_window(
         #[case] class: AllocationClass,
         #[case] other: AllocationClass,
-        #[values(None, Some(1))] threshold: Option<u64>,
+        #[values(None, Some(ByteLength::new(1)))] threshold: Option<ByteLength>,
     ) {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), true, threshold);
         assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
@@ -474,12 +484,12 @@ mod tests {
 
     #[rstest]
     #[case::aggregated(true, None, 2_096)]
-    #[case::reusable(true, Some(1), 2_096)]
-    #[case::high_threshold(true, Some(u64::MAX), 2_096)]
+    #[case::reusable(true, Some(ByteLength::new(1)), 2_096)]
+    #[case::high_threshold(true, Some(ByteLength::new(u64::MAX)), 2_096)]
     #[case::direct(false, None, 112)]
     fn finishing_releases_only_the_unused_tail(
         #[case] aggregated: bool,
-        #[case] threshold: Option<u64>,
+        #[case] threshold: Option<ByteLength>,
         #[case] expected_end: u64,
     ) {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), aggregated, threshold);
@@ -502,11 +512,15 @@ mod tests {
 
     #[rstest]
     #[case::aggregated(true, None, hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE)]
-    #[case::reusable(true, Some(1), hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE)]
+    #[case::reusable(
+        true,
+        Some(ByteLength::new(1)),
+        hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE
+    )]
     #[case::direct(false, None, 1)]
     fn overflowing_reservations_preserve_the_end(
         #[case] aggregated: bool,
-        #[case] threshold: Option<u64>,
+        #[case] threshold: Option<ByteLength>,
         #[case] length: u64,
     ) {
         let mut allocation =
@@ -594,7 +608,7 @@ mod tests {
             BaseAddress::ZERO,
             StoredAddress::new(start),
             true,
-            Some(1),
+            Some(ByteLength::new(1)),
         )
         .unwrap();
         let before = allocation.aggregates;

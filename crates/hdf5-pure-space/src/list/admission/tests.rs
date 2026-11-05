@@ -36,7 +36,7 @@ fn batch_admission_preserves_seeded_runs_and_original_dropped_allocations(
 ) {
     let mut free = free_list(existing);
     let mut work = AdmissionWork::default();
-    let actual = free.release_batch(16, returns(returned), &mut work);
+    let actual = free.release_batch(ByteLength::new(16), returns(returned), &mut work);
     assert_eq!(free.sections(), admitted);
     assert_eq!(
         free.total_bytes(),
@@ -59,7 +59,7 @@ fn batch_admission_preserves_seeded_runs_and_original_dropped_allocations(
 #[case::exact(8)]
 fn eligible_original_lengths_seed_all_runs(#[case] threshold: u64) {
     let mut free = FreeList::new();
-    let dropped = free.release_each(threshold, returns(&[(0, 8), (16, 8)]));
+    let dropped = free.release_each(ByteLength::new(threshold), returns(&[(0, 8), (16, 8)]));
     assert!(dropped.is_empty());
     assert_eq!(free.sections(), [(0, 8), (16, 8)]);
     assert_eq!(free.total_bytes(), ByteLength::new(16));
@@ -77,7 +77,7 @@ fn empty_and_scalar_batches_skip_global_preparation(
 ) {
     let mut free = free_list(&[(100, 8)]);
     let mut work = AdmissionWork::default();
-    let actual = free.release_batch(16, returns(returned), &mut work);
+    let actual = free.release_batch(ByteLength::new(16), returns(returned), &mut work);
     assert_eq!(free.sections(), expected);
     assert_eq!(
         free.total_bytes(),
@@ -114,7 +114,7 @@ fn high_end_seed_admission_bounds_ordering_and_complete_integration(
     let mut free = free_list(&existing);
     let mut work = AdmissionWork::default();
     assert!(
-        free.release_batch(16, returned.clone(), &mut work)
+        free.release_batch(ByteLength::new(16), returned.clone(), &mut work)
             .is_empty()
     );
     let mut expected = vec![(0, seed + 8)];
@@ -222,7 +222,7 @@ fn complete_flat_release_shrinks_only_dropped_tails(
     let mut free = free_list(existing);
     assert_eq!(
         free.release_all(
-            16,
+            ByteLength::new(16),
             StoredAddress::new(eoa),
             returns(returned).into_iter().map(|(extent, ())| extent)
         ),
@@ -267,7 +267,7 @@ proptest! {
         }
         let original = FreeList::from_sorted(existing).unwrap();
         let mut actual = original.clone();
-        let mut actual_dropped = actual.release_each(16, returned.clone());
+        let mut actual_dropped = actual.release_each(ByteLength::new(16), returned.clone());
         let (reference, mut reference_dropped, _) = reference_admission(original, 16, returned);
         actual_dropped.sort_unstable_by_key(|&(extent, ())| extent.start());
         reference_dropped.sort_unstable_by_key(|&(extent, ())| extent.start());
@@ -293,7 +293,7 @@ fn reference_admission(
         let offered = pending.len();
         pending.retain(|&(extent, ())| {
             attempts += 1;
-            free.release(threshold, extent, ()) == Release::Drop
+            free.release(ByteLength::new(threshold), extent, ()) == Release::Drop
         });
         if pending.len() == offered {
             break;
