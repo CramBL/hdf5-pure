@@ -37,6 +37,11 @@ use super::CountEndFailure;
 use super::CountProtectionError;
 use super::CountPublicationError;
 
+mod completion;
+mod current;
+mod prepare;
+mod write;
+
 #[rstest]
 #[case::prefix(Relation::Prefix, FreeClass::Page(PageType::Meta))]
 #[case::suffix(Relation::Suffix, FreeClass::Page(PageType::Raw))]

@@ -19,12 +19,12 @@ use test_util::disk_log::IoOutcome;
 use test_util::disk_log::Synchronization;
 use test_util_hdf5::global_heap_fixture::Fixture;
 
-use super::super::super::super::tests as protection_tests;
-use super::super::super::test_util as count_test_util;
-use super::super::super::test_util::Form;
-use super::super::tests as completion_tests;
-use super::CountPreparationError;
-use super::CountWriteFailure;
+use super::super::super::tests as protection_tests;
+use super::super::CountPreparationError;
+use super::super::CountWriteFailure;
+use super::super::test_util as count_test_util;
+use super::super::test_util::Form;
+use super::completion as completion_tests;
 use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::edit::SyncPolicy;

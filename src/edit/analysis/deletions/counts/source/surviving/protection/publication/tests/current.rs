@@ -14,8 +14,8 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 
-use super::CurrentMetadata;
-use super::CurrentMetadataError;
+use super::super::CurrentMetadata;
+use super::super::CurrentMetadataError;
 
 #[rstest]
 #[case::contained(5, 2, &[])]
