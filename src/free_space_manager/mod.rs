@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
@@ -791,7 +792,7 @@ impl ManagerProjection {
 ///
 /// Returns [`FormatError::OffsetOverflow`] if `length` is zero or the exclusive end overflows.
 fn manager_extent(start: StoredAddress, length: u64) -> Result<Extent, FormatError> {
-    Extent::new(start, length).ok_or(FormatError::OffsetOverflow {
+    Extent::new(start, ByteLength::new(length)).ok_or(FormatError::OffsetOverflow {
         offset: start.get(),
         length,
     })
@@ -876,6 +877,7 @@ pub(crate) fn plan_managers(
 mod tests {
     use core::cell::RefCell;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_space::__private::{Extent, FreeList, SessionSpace};
     use rstest::rstest;
@@ -1150,7 +1152,10 @@ mod tests {
     #[case::padded(16)]
     fn projected_manager_retains_measured_geometry_through_encoding(#[case] padding: u64) {
         let free =
-            FreeList::from_sorted([Extent::new(StoredAddress::new(2848), 1600).unwrap()]).unwrap();
+            FreeList::from_sorted([
+                Extent::new(StoredAddress::new(2848), ByteLength::new(1600)).unwrap()
+            ])
+            .unwrap();
         let projection =
             ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths(8, 8)).unwrap();
         let expected_length = u64::try_from(
@@ -1194,7 +1199,10 @@ mod tests {
     #[test]
     fn manager_encoding_rejects_capacity_shorter_than_its_projection() {
         let free =
-            FreeList::from_sorted([Extent::new(StoredAddress::new(2848), 1600).unwrap()]).unwrap();
+            FreeList::from_sorted([
+                Extent::new(StoredAddress::new(2848), ByteLength::new(1600)).unwrap()
+            ])
+            .unwrap();
         let projection =
             ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths(8, 8)).unwrap();
         let plan = projection.into_plan(StoredAddress::new(619)).unwrap();
@@ -1328,15 +1336,15 @@ mod tests {
         let mut space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 0, page_size);
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
-            Extent::new(StoredAddress::new(100), 200).unwrap(),
+            Extent::new(StoredAddress::new(100), ByteLength::new(200)).unwrap(),
         );
         space.seed_persisted(
             Some(ManagerKind::PagedSmallRaw),
-            Extent::new(StoredAddress::new(5000), 200).unwrap(),
+            Extent::new(StoredAddress::new(5000), ByteLength::new(200)).unwrap(),
         );
         space.seed_persisted(
             Some(ManagerKind::PagedLargeGeneric),
-            Extent::new(StoredAddress::new(8192), page_size.get()).unwrap(),
+            Extent::new(StoredAddress::new(8192), ByteLength::new(page_size.get())).unwrap(),
         );
         let managers = ManagerSections::paged(
             &space.paged_sections().expect("the strategy is PAGE"),
@@ -1478,7 +1486,10 @@ mod tests {
         #[case] length: u64,
         #[case] offset: u64,
     ) {
-        let managers = ManagerSections::flat([Extent::new(StoredAddress::new(16), 8).unwrap()]);
+        let managers =
+            ManagerSections::flat([
+                Extent::new(StoredAddress::new(16), ByteLength::new(8)).unwrap()
+            ]);
         let error = plan_managers(&managers, StoredAddress::new(start), widths(8, 8))
             .map(|_| ())
             .unwrap_err();
@@ -1487,7 +1498,10 @@ mod tests {
 
     #[test]
     fn manager_placement_preserves_the_maximum_exclusive_end() {
-        let managers = ManagerSections::flat([Extent::new(StoredAddress::new(16), 8).unwrap()]);
+        let managers =
+            ManagerSections::flat([
+                Extent::new(StoredAddress::new(16), ByteLength::new(8)).unwrap()
+            ]);
         let length = manager_blocks_len(&managers, widths(8, 8)).unwrap();
         let start = StoredAddress::new(u64::MAX - length);
         let plan = plan_managers(&managers, start, widths(8, 8)).unwrap();

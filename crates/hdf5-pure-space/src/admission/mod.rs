@@ -32,12 +32,12 @@ impl ReturnedExtents {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{Extent, FreeClass, ReturnedExtents};
     ///
-    /// let first = Extent::new(StoredAddress::new(100), 32).unwrap();
-    /// let second = Extent::new(first.end(), 32).unwrap();
+    /// let first = Extent::new(StoredAddress::new(100), ByteLength::new(32)).unwrap();
+    /// let second = Extent::new(first.end(), ByteLength::new(32)).unwrap();
     /// let returned = ReturnedExtents::from_sorted(vec![
     ///     (first, FreeClass::Dead),
     ///     (second, FreeClass::Dead),
@@ -198,6 +198,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
@@ -223,7 +224,10 @@ mod tests {
                 } else {
                     FreeClass::Dead
                 };
-                (Extent::new(StoredAddress::new(start), len).unwrap(), class)
+                (
+                    Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap(),
+                    class,
+                )
             })
             .collect();
         let returned = ReturnedExtents::from_sorted(entries.clone()).unwrap();
@@ -243,8 +247,9 @@ mod tests {
         #[case] next_len: u64,
         #[case] overlap: bool,
     ) {
-        let previous = Extent::new(StoredAddress::new(first_start), first_len).unwrap();
-        let next = Extent::new(StoredAddress::new(next_start), next_len).unwrap();
+        let previous =
+            Extent::new(StoredAddress::new(first_start), ByteLength::new(first_len)).unwrap();
+        let next = Extent::new(StoredAddress::new(next_start), ByteLength::new(next_len)).unwrap();
         let error = ReturnedExtents::from_sorted(vec![
             (previous, FreeClass::Dead),
             (next, FreeClass::Dead),
@@ -269,9 +274,9 @@ mod tests {
         #[case] len: u64,
         #[case] index: usize,
     ) {
-        let first = Extent::new(StoredAddress::new(100), 20).unwrap();
-        let second = Extent::new(StoredAddress::new(140), 20).unwrap();
-        let inserted = Extent::new(StoredAddress::new(start), len).unwrap();
+        let first = Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap();
+        let second = Extent::new(StoredAddress::new(140), ByteLength::new(20)).unwrap();
+        let inserted = Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap();
         let entries = vec![
             (first, FreeClass::Dead),
             (second, FreeClass::Page(PageType::Meta)),
@@ -304,26 +309,31 @@ mod tests {
     ) {
         let entries = vec![
             (
-                Extent::new(StoredAddress::new(100), 20).unwrap(),
+                Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap(),
                 FreeClass::Dead,
             ),
             (
-                Extent::new(StoredAddress::new(140), 20).unwrap(),
+                Extent::new(StoredAddress::new(140), ByteLength::new(20)).unwrap(),
                 FreeClass::Page(PageType::Meta),
             ),
         ];
         let mut returned = ReturnedExtents::from_sorted(entries.clone()).unwrap();
         let error = returned
             .insert(
-                Extent::new(StoredAddress::new(start), len).unwrap(),
+                Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap(),
                 FreeClass::Page(PageType::Raw),
             )
             .unwrap_err();
         assert_eq!(
             error,
             FreeListError::Overlap {
-                previous: Extent::new(StoredAddress::new(previous_start), previous_len).unwrap(),
-                next: Extent::new(StoredAddress::new(next_start), next_len).unwrap(),
+                previous: Extent::new(
+                    StoredAddress::new(previous_start),
+                    ByteLength::new(previous_len)
+                )
+                .unwrap(),
+                next: Extent::new(StoredAddress::new(next_start), ByteLength::new(next_len))
+                    .unwrap(),
             }
         );
         assert_eq!(returned.entries(), entries);
@@ -348,12 +358,12 @@ mod tests {
         #[case] expected: &[(u64, u64)],
     ) {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(0), 100).unwrap());
+        fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap());
 
         assert_eq!(
             fl.release(
                 THRESHOLD,
-                Extent::new(StoredAddress::new(500), len).unwrap(),
+                Extent::new(StoredAddress::new(500), ByteLength::new(len)).unwrap(),
                 ()
             ),
             release
@@ -372,13 +382,13 @@ mod tests {
     ) {
         let mut fl = FreeList::new();
         for &(addr, len) in tracked {
-            fl.free(Extent::new(StoredAddress::new(addr), len).unwrap());
+            fl.free(Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap());
         }
 
         assert_eq!(
             fl.release(
                 THRESHOLD,
-                Extent::new(StoredAddress::new(addr), len).unwrap(),
+                Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
                 ()
             ),
             Release::Merge
@@ -394,12 +404,16 @@ mod tests {
             [
                 fl.release(
                     THRESHOLD,
-                    Extent::new(StoredAddress::new(0), THRESHOLD - 1).unwrap(),
+                    Extent::new(StoredAddress::new(0), ByteLength::new(THRESHOLD - 1)).unwrap(),
                     ()
                 ),
                 fl.release(
                     THRESHOLD,
-                    Extent::new(StoredAddress::new(THRESHOLD - 1), THRESHOLD - 1).unwrap(),
+                    Extent::new(
+                        StoredAddress::new(THRESHOLD - 1),
+                        ByteLength::new(THRESHOLD - 1)
+                    )
+                    .unwrap(),
                     ()
                 ),
             ],

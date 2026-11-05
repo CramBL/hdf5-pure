@@ -1,5 +1,6 @@
 //! Allocation ownership and retirement through replacement publication.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, FreeClass, PageType, ReturnedExtents};
@@ -31,7 +32,7 @@ impl ChunkAllocation {
         chunk: &ChunkInfo,
     ) -> Result<Self, FormatError> {
         let range = FileRange::new(addresses.resolve(chunk.address)?, chunk.chunk_size.get())?;
-        let extent = Extent::new(chunk.address, range.length()).ok_or(
+        let extent = Extent::new(chunk.address, ByteLength::new(range.length())).ok_or(
             FormatError::InvalidChunkGeometry("chunk allocation is empty"),
         )?;
         Ok(Self {
@@ -134,11 +135,12 @@ impl ProvenRetirementBatch {
             .into_iter()
             .map(|(range, class)| {
                 let start = addresses.relative(range.start())?;
-                let extent = Extent::new(start, range.length()).ok_or_else(|| {
-                    FormatError::Internal(
-                        "a proven retirement allocation is empty or overflowing".into(),
-                    )
-                })?;
+                let extent =
+                    Extent::new(start, ByteLength::new(range.length())).ok_or_else(|| {
+                        FormatError::Internal(
+                            "a proven retirement allocation is empty or overflowing".into(),
+                        )
+                    })?;
                 Ok((extent, class))
             })
             .collect::<Result<Vec<_>, FormatError>>()?;
@@ -152,6 +154,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::Path;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::FileRange;
     use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_space::__private::{Extent, FreeClass, PageType};
@@ -202,11 +205,11 @@ mod tests {
             batch.entries(),
             [
                 (
-                    Extent::new(StoredAddress::new(100), 20).unwrap(),
+                    Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap(),
                     FreeClass::Page(PageType::Meta)
                 ),
                 (
-                    Extent::new(StoredAddress::new(120), 30).unwrap(),
+                    Extent::new(StoredAddress::new(120), ByteLength::new(30)).unwrap(),
                     FreeClass::Page(PageType::Raw)
                 ),
             ]
@@ -268,11 +271,11 @@ mod tests {
                 .entries(),
             [
                 (
-                    Extent::new(StoredAddress::new(100), 20).unwrap(),
+                    Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap(),
                     FreeClass::Dead
                 ),
                 (
-                    Extent::new(StoredAddress::new(120), 20).unwrap(),
+                    Extent::new(StoredAddress::new(120), ByteLength::new(20)).unwrap(),
                     FreeClass::Page(PageType::Raw)
                 ),
             ]

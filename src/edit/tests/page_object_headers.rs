@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::{AllocationClass, Extent, PageTransition, PageType, SessionSpace};
 use rstest::rstest;
 use test_util::object_header::v2::{Header, HeaderFlags};
@@ -42,7 +43,7 @@ fn complete_object_headers_use_checked_block_placement(
     if reused {
         engine.append(&[13; 12_288]).unwrap();
         engine.space.return_allocation(
-            Extent::new(StoredAddress::new(stored + 4_000), 8_192).unwrap(),
+            Extent::new(StoredAddress::new(stored + 4_000), ByteLength::new(8_192)).unwrap(),
             AllocationClass::Metadata,
         );
     } else {

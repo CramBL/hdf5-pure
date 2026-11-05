@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, FormatError, StoredAddress};
@@ -704,5 +705,5 @@ fn request(size: u64, page_type: PageType) -> ReservationRequest {
 }
 
 fn extent(start: u64, length: u64) -> Extent {
-    Extent::new(StoredAddress::new(start), length).unwrap()
+    Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap()
 }

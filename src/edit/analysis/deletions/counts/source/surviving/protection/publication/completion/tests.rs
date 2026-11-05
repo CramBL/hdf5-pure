@@ -5,6 +5,7 @@ use std::path::Path;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::atomic::Ordering;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::Extent;
@@ -112,11 +113,13 @@ fn confirmed_scope_keeps_original_facts_and_consumes_the_original_retirement_car
                             .addresses()
                             .relative(fixture.retired[0].0.start())
                             .unwrap(),
-                        fixture
-                            .retired
-                            .iter()
-                            .map(|(range, _)| range.length())
-                            .sum(),
+                        ByteLength::new(
+                            fixture
+                                .retired
+                                .iter()
+                                .map(|(range, _)| range.length())
+                                .sum()
+                        ),
                     )
                     .unwrap()
                 ]
@@ -194,7 +197,7 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
                         .addresses()
                         .relative(PhysicalAddress::new(engine.image().len()))
                         .unwrap(),
-                    predecessor.length(),
+                    ByteLength::new(predecessor.length()),
                 )
                 .unwrap(),
             )
@@ -395,7 +398,7 @@ fn ownership_changes_after_the_original_bounds_cannot_grant_a_write_scope(#[case
                         None,
                         Extent::new(
                             StoredAddress::new(reusable.start().get()),
-                            reusable.length(),
+                            ByteLength::new(reusable.length()),
                         )
                         .unwrap(),
                     )],

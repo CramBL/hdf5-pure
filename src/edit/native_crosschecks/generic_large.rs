@@ -1,5 +1,6 @@
 //! Generic-large fragments and continuation tails in native files.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use rstest::rstest;
@@ -55,12 +56,12 @@ fn native_generic_large_reclamation_keeps_partial_tails_unavailable() {
     assert!(tail_start < tail_end);
     let tail = Extent::new(
         engine.addresses().relative(tail_start).unwrap(),
-        tail_end.checked_distance_from(tail_start).unwrap(),
+        ByteLength::new(tail_end.checked_distance_from(tail_start).unwrap()),
     )
     .unwrap();
     let padding = Extent::new(
         engine.addresses().relative(tail_end).unwrap(),
-        page - tail_end.get() % page,
+        ByteLength::new(page - tail_end.get() % page),
     )
     .unwrap();
     assert_eq!(

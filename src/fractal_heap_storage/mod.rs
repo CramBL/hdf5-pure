@@ -10,6 +10,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::DecodedStoredAddress;
 #[cfg(test)]
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
@@ -650,10 +651,11 @@ fn extent_in_source(
     address: StoredAddress,
     length: u64,
 ) -> Result<Extent, FractalHeapStorageError> {
-    let extent = Extent::new(address, length).ok_or(FormatError::OffsetOverflow {
-        offset: address.get(),
-        length,
-    })?;
+    let extent =
+        Extent::new(address, ByteLength::new(length)).ok_or(FormatError::OffsetOverflow {
+            offset: address.get(),
+            length,
+        })?;
     if extent.end().get() > source.len() {
         return Err(FormatError::UnexpectedSourceEof {
             expected: extent.end().get(),
@@ -670,6 +672,7 @@ mod tests {
     use alloc::string::ToString;
     use core::cell::RefCell;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::MetadataBytes;
     use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_format::__private;
@@ -797,7 +800,10 @@ mod tests {
         len: u64,
         kind: FractalHeapAllocation,
     ) -> (Extent, FractalHeapAllocation) {
-        (Extent::new(StoredAddress::new(start), len).unwrap(), kind)
+        (
+            Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap(),
+            kind,
+        )
     }
 
     fn collect_storage(file: &[u8]) -> Result<FractalHeapStorage, FractalHeapStorageError> {

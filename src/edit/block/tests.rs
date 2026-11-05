@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
@@ -32,7 +33,7 @@ fn block_ranges_preserve_complete_owner_and_encoded_subrange(
     .unwrap();
     let block = PlannedBlock::within(
         addresses,
-        Extent::new(StoredAddress::new(100), 64).unwrap(),
+        Extent::new(StoredAddress::new(100), ByteLength::new(64)).unwrap(),
         StoredAddress::new(address),
         request,
     )
@@ -72,7 +73,7 @@ fn block_encoding_outside_owned_allocation_is_rejected(#[case] address: u64, #[c
     .unwrap();
     let Err(error) = PlannedBlock::within(
         AddressContext::from_effective_base(BaseAddress::ZERO),
-        Extent::new(StoredAddress::new(100), 64).unwrap(),
+        Extent::new(StoredAddress::new(100), ByteLength::new(64)).unwrap(),
         StoredAddress::new(address),
         request,
     ) else {

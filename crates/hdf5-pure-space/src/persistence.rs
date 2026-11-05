@@ -62,13 +62,13 @@ impl ManagerSections {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{
     ///     AdmittedFreeSnapshot, Extent, FreeList, ManagerKind, ManagerSections,
     /// };
     ///
-    /// let extent = Extent::new(StoredAddress::new(100), 32).unwrap();
+    /// let extent = Extent::new(StoredAddress::new(100), ByteLength::new(32)).unwrap();
     /// let free = FreeList::from_sorted([extent])?;
     /// let managers = ManagerSections::from_snapshot(AdmittedFreeSnapshot::flat(&free));
     /// assert_eq!(managers.len(), 1);
@@ -197,6 +197,7 @@ pub const TRAILING_RESERVE_TAILS: u64 = 4;
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
 
@@ -206,7 +207,7 @@ mod tests {
     use crate::paged::{PageType, PagedEdit};
 
     fn extent(addr: u64, len: u64) -> Extent {
-        Extent::new(StoredAddress::new(addr), len).unwrap()
+        Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap()
     }
 
     #[test]

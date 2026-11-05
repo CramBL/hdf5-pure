@@ -3,6 +3,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::FileSpacePageSize;
@@ -217,10 +218,11 @@ impl PagedEdit {
             return Ok(PageTransition::Unchanged);
         }
         let pad_len = page_size - eoa.get() % page_size;
-        let extent = Extent::new(eoa, pad_len).ok_or(FormatError::OffsetOverflow {
-            offset: eoa.get(),
-            length: pad_len,
-        })?;
+        let extent =
+            Extent::new(eoa, ByteLength::new(pad_len)).ok_or(FormatError::OffsetOverflow {
+                offset: eoa.get(),
+                length: pad_len,
+            })?;
         Ok(PageTransition::Pad {
             extent,
             track_as: self.last,
@@ -245,10 +247,11 @@ impl PagedEdit {
             return Ok(None);
         }
         let pad_len = page_size - eoa.get() % page_size;
-        let extent = Extent::new(eoa, pad_len).ok_or(FormatError::OffsetOverflow {
-            offset: eoa.get(),
-            length: pad_len,
-        })?;
+        let extent =
+            Extent::new(eoa, ByteLength::new(pad_len)).ok_or(FormatError::OffsetOverflow {
+                offset: eoa.get(),
+                length: pad_len,
+            })?;
         Ok(Some(PageTransition::Pad {
             extent,
             track_as: self.last,
@@ -351,9 +354,9 @@ impl PagedEdit {
         if span == len {
             return Some(claimed);
         }
-        let allocation = Extent::new(claimed.start(), len)
+        let allocation = Extent::new(claimed.start(), ByteLength::new(len))
             .expect("the allocation is a non-empty prefix of the claimed extent");
-        let remainder = Extent::new(allocation.end(), span - len)
+        let remainder = Extent::new(allocation.end(), ByteLength::new(span - len))
             .expect("the remainder is a non-empty suffix of the claimed extent");
         own.free(remainder);
         Some(allocation)
@@ -884,7 +887,7 @@ impl PagedTail {
 /// # Examples
 ///
 /// ```
-/// use hdf5_pure_core::__private::StoredAddressExt;
+/// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
 /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
 /// use hdf5_pure_space::__private::{Extent, SessionSpace};
 ///
@@ -894,7 +897,10 @@ impl PagedTail {
 /// let append = space.plan_paged_append(StoredAddress::new(8_192), &[], &[])?;
 /// assert_eq!(append.admitted_snapshot().reusable_bytes()?, 0);
 /// let tail = append.reserve(256)?;
-/// assert_eq!(tail.allocation, Extent::new(StoredAddress::new(8_192), 256).unwrap());
+/// assert_eq!(
+///     tail.allocation,
+///     Extent::new(StoredAddress::new(8_192), ByteLength::new(256)).unwrap(),
+/// );
 /// assert_eq!(tail.final_eoa, StoredAddress::new(12_288));
 /// assert_eq!(tail.post.admitted_snapshot().reusable_bytes()?, 3_840);
 /// assert_eq!(space.admitted_snapshot().reusable_bytes()?, 0);
@@ -1065,7 +1071,7 @@ impl PagedPostFree {
             .filter(|extent| (1..page_size).contains(&extent.len()) && !dropped.contains(extent))
             .flat_map(|extent| [extent.start().get(), extent.end().get() - 1])
             .map(|addr| StoredAddress::new(addr / page_size * page_size))
-            .filter_map(|page| Extent::new(page, page_size))
+            .filter_map(|page| Extent::new(page, ByteLength::new(page_size)))
             .collect();
         // The PAGE classes track disjoint bytes, and adjacent bytes form one canonical run.
         let runs = FreeList::from_lists([&self.meta, &self.raw, &self.dead])
@@ -1193,6 +1199,7 @@ impl Clone for PagedPostFree {
 mod tests {
     use alloc::vec;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
@@ -1264,7 +1271,7 @@ mod tests {
 
         let snapshot = paged.allocation_snapshot();
         let length = pages.len() - page_size / 2;
-        let allocation = Extent::new(pages.start(), length).unwrap();
+        let allocation = Extent::new(pages.start(), ByteLength::new(length)).unwrap();
         assert_eq!(paged.allocate(length, ty), Some(allocation));
         assert_eq!(paged.sections().unclassified(), edges);
         assert_eq!(
@@ -1663,7 +1670,7 @@ mod tests {
                 .plan_transition(StoredAddress::new(5000), PageType::Raw)
                 .unwrap(),
             PageTransition::Pad {
-                extent: Extent::new(StoredAddress::new(5000), 3192).unwrap(),
+                extent: Extent::new(StoredAddress::new(5000), ByteLength::new(3192)).unwrap(),
                 track_as: Some(PageType::Meta),
             }
         );
@@ -1678,7 +1685,7 @@ mod tests {
                 .plan_transition(StoredAddress::new(5000), PageType::Meta)
                 .unwrap(),
             PageTransition::Pad {
-                extent: Extent::new(StoredAddress::new(5000), 3192).unwrap(),
+                extent: Extent::new(StoredAddress::new(5000), ByteLength::new(3192)).unwrap(),
                 track_as: Some(PageType::Raw),
             }
         );
@@ -1692,7 +1699,7 @@ mod tests {
                 .plan_transition(StoredAddress::new(5000), PageType::Meta)
                 .unwrap(),
             PageTransition::Pad {
-                extent: Extent::new(StoredAddress::new(5000), 3192).unwrap(),
+                extent: Extent::new(StoredAddress::new(5000), ByteLength::new(3192)).unwrap(),
                 track_as: None,
             }
         );
@@ -1708,7 +1715,7 @@ mod tests {
                 .plan_transition(StoredAddress::new(1500), PageType::Raw)
                 .unwrap(),
             PageTransition::Pad {
-                extent: Extent::new(StoredAddress::new(1500), 500).unwrap(),
+                extent: Extent::new(StoredAddress::new(1500), ByteLength::new(500)).unwrap(),
                 track_as: Some(PageType::Meta),
             }
         );
@@ -1719,16 +1726,16 @@ mod tests {
         let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
         paged
             .meta
-            .free(Extent::new(StoredAddress::new(PAGE), 2048).unwrap());
+            .free(Extent::new(StoredAddress::new(PAGE), ByteLength::new(2048)).unwrap());
         paged
             .dead
-            .free(Extent::new(StoredAddress::new(PAGE + 2048), 2048).unwrap());
+            .free(Extent::new(StoredAddress::new(PAGE + 2048), ByteLength::new(2048)).unwrap());
         paged
             .dead
-            .free(Extent::new(StoredAddress::new(2 * PAGE), PAGE).unwrap());
+            .free(Extent::new(StoredAddress::new(2 * PAGE), ByteLength::new(PAGE)).unwrap());
         paged
             .raw
-            .free(Extent::new(StoredAddress::new(3 * PAGE + 1024), 1024).unwrap());
+            .free(Extent::new(StoredAddress::new(3 * PAGE + 1024), ByteLength::new(1024)).unwrap());
         paged.finish_seed();
         assert_eq!(
             paged.raw.sections(),
@@ -1743,10 +1750,10 @@ mod tests {
         let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
         paged
             .dead
-            .free(Extent::new(StoredAddress::new(PAGE), 512).unwrap());
+            .free(Extent::new(StoredAddress::new(PAGE), ByteLength::new(512)).unwrap());
         paged
             .raw
-            .free(Extent::new(StoredAddress::new(PAGE + 512), 1024).unwrap());
+            .free(Extent::new(StoredAddress::new(PAGE + 512), ByteLength::new(1024)).unwrap());
         paged.finish_seed();
         assert_eq!(paged.dead.sections(), [(PAGE, 512)]);
         assert_eq!(paged.raw.sections(), [(PAGE + 512, 1024)]);
@@ -1790,7 +1797,7 @@ mod tests {
         assert_eq!(
             post.release(
                 THRESHOLD_IN_A_PAGE,
-                Extent::new(StoredAddress::new(EXTENT_AT), len).unwrap(),
+                Extent::new(StoredAddress::new(EXTENT_AT), ByteLength::new(len)).unwrap(),
                 class
             ),
             release
@@ -1828,7 +1835,11 @@ mod tests {
         assert_eq!(
             post.release(
                 THRESHOLD_IN_A_PAGE,
-                Extent::new(StoredAddress::new(EXTENT_AT), SHORT_OF_THRESHOLD).unwrap(),
+                Extent::new(
+                    StoredAddress::new(EXTENT_AT),
+                    ByteLength::new(SHORT_OF_THRESHOLD)
+                )
+                .unwrap(),
                 class
             ),
             Release::Merge
@@ -1854,7 +1865,7 @@ mod tests {
         assert_eq!(
             post.release(
                 THRESHOLD_IN_A_PAGE,
-                Extent::new(StoredAddress::new(at), SHORT_OF_THRESHOLD).unwrap(),
+                Extent::new(StoredAddress::new(at), ByteLength::new(SHORT_OF_THRESHOLD)).unwrap(),
                 class
             ),
             Release::Drop
@@ -1887,7 +1898,7 @@ mod tests {
         assert_eq!(
             post.release(
                 THRESHOLD_OF_THREE_PAGES,
-                Extent::new(StoredAddress::new(2 * PAGE), 2 * PAGE).unwrap(),
+                Extent::new(StoredAddress::new(2 * PAGE), ByteLength::new(2 * PAGE)).unwrap(),
                 class
             ),
             Release::Merge
@@ -1906,7 +1917,7 @@ mod tests {
         assert_eq!(
             post.release(
                 THRESHOLD_OF_THREE_PAGES,
-                Extent::new(StoredAddress::new(at), 2 * PAGE).unwrap(),
+                Extent::new(StoredAddress::new(at), ByteLength::new(2 * PAGE)).unwrap(),
                 RAW
             ),
             Release::Drop
@@ -1918,11 +1929,11 @@ mod tests {
     fn a_paged_extent_of_pages_below_the_threshold_merges_beside_an_unclassified_section() {
         let mut post = paged_free_space(&[vec![], vec![], vec![]]);
         post.unclassified
-            .free(Extent::new(StoredAddress::new(4 * PAGE), 100).unwrap());
+            .free(Extent::new(StoredAddress::new(4 * PAGE), ByteLength::new(100)).unwrap());
         assert_eq!(
             post.release(
                 THRESHOLD_OF_THREE_PAGES,
-                Extent::new(StoredAddress::new(2 * PAGE), 2 * PAGE).unwrap(),
+                Extent::new(StoredAddress::new(2 * PAGE), ByteLength::new(2 * PAGE)).unwrap(),
                 RAW
             ),
             Release::Merge
@@ -1960,9 +1971,10 @@ mod tests {
             post.release_all(
                 THRESHOLD_OF_THREE_PAGES,
                 StoredAddress::new(10 * PAGE),
-                extents
-                    .iter()
-                    .map(|&(addr, len)| (Extent::new(StoredAddress::new(addr), len).unwrap(), RAW)),
+                extents.iter().map(|&(addr, len)| (
+                    Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
+                    RAW
+                )),
                 &mut AdmissionWork::default(),
             ),
             StoredAddress::new(expected)
@@ -2008,7 +2020,8 @@ mod tests {
                     THRESHOLD_OF_THREE_PAGES,
                     StoredAddress::new(eoa),
                     [(
-                        Extent::new(StoredAddress::new(2 * PAGE - 100), 100).unwrap(),
+                        Extent::new(StoredAddress::new(2 * PAGE - 100), ByteLength::new(100))
+                            .unwrap(),
                         RAW
                     )],
                     &mut AdmissionWork::default(),
@@ -2042,7 +2055,7 @@ mod tests {
         let list = |regions: &[(u64, u64)]| {
             let mut list = FreeList::new();
             for &(addr, len) in regions {
-                list.free(Extent::new(StoredAddress::new(addr), len).unwrap());
+                list.free(Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap());
             }
             list
         };
@@ -2068,6 +2081,6 @@ mod tests {
         [&post.meta, &post.raw, &post.dead].map(FreeList::sections)
     }
     fn extent(start: u64, len: u64) -> Extent {
-        Extent::new(StoredAddress::new(start), len).unwrap()
+        Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap()
     }
 }

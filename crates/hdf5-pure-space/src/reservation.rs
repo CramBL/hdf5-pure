@@ -71,7 +71,7 @@ impl ReservationRequest {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
+    /// use hdf5_pure_core::__private::{ByteLength, NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
     /// use hdf5_pure_space::__private::{AllocationClass, Extent, ReservationRequest};
     ///
@@ -81,11 +81,14 @@ impl ReservationRequest {
     /// let start = StoredAddress::new(4_000);
     /// let page_size = Some(FileSpacePageSize::DEFAULT);
     /// let compound = request.place_after(start, page_size)?;
-    /// assert_eq!(compound.extent(), Extent::new(start, 100).unwrap());
+    /// assert_eq!(compound.extent(), Extent::new(start, ByteLength::new(100)).unwrap());
     ///
     /// let block = request.for_block().place_after(start, page_size)?;
     /// assert_eq!(block.request(), request.for_block());
-    /// assert_eq!(block.extent(), Extent::new(StoredAddress::new(4_096), 100).unwrap());
+    /// assert_eq!(
+    ///     block.extent(),
+    ///     Extent::new(StoredAddress::new(4_096), ByteLength::new(100)).unwrap(),
+    /// );
     /// # Ok::<(), hdf5_pure_core::FormatError>(())
     /// ```
     pub fn place_after(
@@ -106,7 +109,7 @@ impl ReservationRequest {
         } else {
             start
         };
-        let extent = Extent::new(start, self.size.get()).ok_or(FormatError::OffsetOverflow {
+        let extent = Extent::new(start, self.size.length()).ok_or(FormatError::OffsetOverflow {
             offset: start.get(),
             length: self.size.get(),
         })?;
@@ -295,7 +298,7 @@ impl<'a> ReservationBatch<'a> {
                     )?;
                     let claimed = other.allocate_whole_units(span)?;
                     // The claimed whole-page extent is at least as long as the nonempty request.
-                    let extent = Extent::new(claimed.start(), size.get())
+                    let extent = Extent::new(claimed.start(), size.length())
                         .expect("the allocation fits inside the claimed pages");
                     if let Some(remainder) = Extent::between(extent.end(), claimed.end()) {
                         own.free(remainder);

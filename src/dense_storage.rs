@@ -99,6 +99,7 @@ fn collect_index_storage(
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
     use test_util::btree::v2 as btree_v2;
     use test_util::widths::Widths;
@@ -131,12 +132,12 @@ mod tests {
         vec![
             Extent::new(
                 StoredAddress::new(u64::try_from(header_at).unwrap()),
-                u64::try_from(header.len()).unwrap(),
+                ByteLength::new(u64::try_from(header.len()).unwrap()),
             )
             .unwrap(),
             Extent::new(
                 StoredAddress::new(u64::try_from(root_at).unwrap()),
-                NODE_SIZE,
+                ByteLength::new(NODE_SIZE),
             )
             .unwrap(),
         ]

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
@@ -597,8 +598,8 @@ pub(in crate::edit) fn assert_generic_large_sections(
         .to_vec();
     let reusable: Vec<_> = s.space.reusable_sections().collect();
     for &(addr, size) in &fragments {
-        let fragment =
-            FreeExtent::new(StoredAddress::new(addr), size).expect("wire sections are non-empty");
+        let fragment = FreeExtent::new(StoredAddress::new(addr), ByteLength::new(size))
+            .expect("wire sections are non-empty");
         assert!(
             unclassified.contains(&fragment),
             "fragment ({addr}, {size}) must be recorded as unclassified, not lost"

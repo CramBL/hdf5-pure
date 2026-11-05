@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::Extent;
 use rstest::rstest;
 use test_util::object_header::Message as WireMessage;
@@ -182,7 +183,7 @@ fn strict_persisted_adjacent_sections_are_admitted(#[case] separate: bool) {
     let engine = strict_engine(&path);
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
-        [Extent::new(StoredAddress::new(SECTION), 64).unwrap()]
+        [Extent::new(StoredAddress::new(SECTION), ByteLength::new(64)).unwrap()]
     );
     assert_eq!(
         engine.persist.as_ref().unwrap().old_blocks.len(),
@@ -211,7 +212,7 @@ fn strict_persisted_page_roles_preserve_admission(
     let bytes = fixture.write(&path);
     let engine = strict_engine(&path);
     let pages = engine.space.paged_sections().unwrap();
-    let extent = [Extent::new(StoredAddress::new(address), length).unwrap()];
+    let extent = [Extent::new(StoredAddress::new(address), ByteLength::new(length)).unwrap()];
     assert_eq!(
         pages.metadata(),
         if matches!(admission, Admission::Metadata) {
@@ -349,7 +350,7 @@ fn tolerant_engine(path: &Path) -> WriteEngine {
 }
 
 fn extent(start: u64, length: u64) -> Extent {
-    Extent::new(StoredAddress::new(start), length).unwrap()
+    Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap()
 }
 
 fn strict_engine(path: &Path) -> WriteEngine {

@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
@@ -306,8 +307,8 @@ fn partial_array_emission_keeps_every_reserved_allocation_unavailable() {
     let second = stored.checked_add(lengths[0] + 16).unwrap();
     assert!(lengths[0] + 16 + lengths[1] <= 512);
     let original = [
-        Extent::new(stored, lengths[0]).unwrap(),
-        Extent::new(second, lengths[1]).unwrap(),
+        Extent::new(stored, ByteLength::new(lengths[0])).unwrap(),
+        Extent::new(second, ByteLength::new(lengths[1])).unwrap(),
     ];
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),

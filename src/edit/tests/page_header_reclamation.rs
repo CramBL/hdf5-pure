@@ -1,5 +1,6 @@
 use std::fs;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
@@ -170,7 +171,7 @@ fn assert_large_header_tail(engine: &WriteEngine) {
     assert!(
         sections
             .unclassified()
-            .contains(&Extent::new(StoredAddress::new(5_694), 450).unwrap())
+            .contains(&Extent::new(StoredAddress::new(5_694), ByteLength::new(450)).unwrap())
     );
     assert!(
         sections

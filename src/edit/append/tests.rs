@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, PageTransition, PageType, SessionSpace};
 use rstest::rstest;
@@ -93,7 +94,7 @@ fn raw_fallback_prepares_the_chosen_address_before_bounded_padding(
     assert_eq!(engine.space.paged_tail_type(), Some(Some(PageType::Raw)));
     assert_eq!(
         engine.space.pending_padding(PageType::Meta).unwrap(),
-        [Extent::new(StoredAddress::new(start - base), PAGE - 19).unwrap()]
+        [Extent::new(StoredAddress::new(start - base), ByteLength::new(PAGE - 19)).unwrap()]
     );
     assert_eq!(
         engine

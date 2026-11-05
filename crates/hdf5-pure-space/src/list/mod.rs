@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::fmt;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
 
 use super::admission::AdmissionWork;
@@ -53,14 +54,14 @@ impl FreeList {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{Extent, FreeList};
     ///
-    /// let first = Extent::new(StoredAddress::new(100), 20).unwrap();
-    /// let second = Extent::new(first.end(), 30).unwrap();
+    /// let first = Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap();
+    /// let second = Extent::new(first.end(), ByteLength::new(30)).unwrap();
     /// let free = FreeList::from_sorted([first, second]).unwrap();
-    /// assert_eq!(free.extents(), [Extent::new(first.start(), 50).unwrap()]);
+    /// assert_eq!(free.extents(), [Extent::new(first.start(), ByteLength::new(50)).unwrap()]);
     /// assert_eq!(free.total_bytes(), 50);
     /// ```
     pub fn from_sorted(extents: impl IntoIterator<Item = Extent>) -> Result<Self, FreeListError> {
@@ -242,7 +243,7 @@ impl FreeList {
         let i = best?;
         let region = self.regions[i];
         // `len <= region.len()`, so construction cannot pass the already-checked end of `region`.
-        let allocation = Extent::new(region.start(), len)
+        let allocation = Extent::new(region.start(), ByteLength::new(len))
             .expect("a non-empty allocation fits inside the selected extent");
         if allocation.end() == region.end() {
             self.regions.remove(i);
@@ -323,7 +324,7 @@ impl FreeList {
         let (i, interior) = best?;
         let region = self.regions[i];
         // `len <= interior.len()`, so construction cannot pass `interior.end()`.
-        let allocation = Extent::new(interior.start(), len)
+        let allocation = Extent::new(interior.start(), ByteLength::new(len))
             .expect("a non-empty allocation fits inside the aligned interior");
         let mut replacement = Vec::with_capacity(2);
         if allocation.start() > region.start() {
@@ -386,7 +387,7 @@ impl FreeList {
                         .is_ok_and(|end| end <= limit)
             })
             .min_by_key(|extent| extent.len())?;
-        let allocation = Extent::new(extent.start(), len)?;
+        let allocation = Extent::new(extent.start(), ByteLength::new(len))?;
         self.take_range(allocation);
         Some(allocation)
     }
@@ -440,11 +441,13 @@ impl FreeList {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{Extent, FreeList};
     ///
-    /// let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
+    /// let extent = |start, len| {
+    ///     Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap()
+    /// };
     /// let mut free = FreeList::from_sorted([extent(100, 100)]).unwrap();
     /// let removed = FreeList::from_sorted([extent(120, 10), extent(150, 20)]).unwrap();
     /// free.take_ranges(&removed);
@@ -500,11 +503,13 @@ impl FreeList {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{Extent, FreeList};
     ///
-    /// let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
+    /// let extent = |start, len| {
+    ///     Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap()
+    /// };
     /// let left = FreeList::from_sorted([extent(100, 30), extent(150, 20)]).unwrap();
     /// let right = FreeList::from_sorted([extent(120, 40)]).unwrap();
     /// let common = left.intersection(&right);
@@ -777,6 +782,7 @@ mod tests {
     #[cfg(debug_assertions)]
     use std::panic::{self, AssertUnwindSafe};
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
@@ -798,11 +804,9 @@ mod tests {
         #[case] expected: &[(u64, u64)],
     ) {
         let lists = inputs.map(|extents| {
-            FreeList::from_sorted(
-                extents
-                    .iter()
-                    .map(|&(start, len)| Extent::new(StoredAddress::new(start), len).unwrap()),
-            )
+            FreeList::from_sorted(extents.iter().map(|&(start, len)| {
+                Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap()
+            }))
             .unwrap()
         });
         let merged = FreeList::from_lists(lists.each_ref()).unwrap();
@@ -813,8 +817,8 @@ mod tests {
     #[case::overlap(110)]
     #[case::duplicate(100)]
     fn merging_lists_rejects_overlapping_classes(#[case] start: u64) {
-        let previous = Extent::new(StoredAddress::new(100), 20).unwrap();
-        let next = Extent::new(StoredAddress::new(start), 20).unwrap();
+        let previous = Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap();
+        let next = Extent::new(StoredAddress::new(start), ByteLength::new(20)).unwrap();
         let first = FreeList::from_sorted([previous]).unwrap();
         let second = FreeList::from_sorted([next]).unwrap();
         assert_eq!(
@@ -826,14 +830,14 @@ mod tests {
     #[test]
     fn free_into_empty_list() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 50).unwrap());
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(50)).unwrap());
         assert_eq!(regions(&fl), [(100, 50)]);
     }
 
     #[test]
     fn zero_length_free_is_noop_at_the_boundary() {
         let mut fl = FreeList::new();
-        if let Some(extent) = Extent::new(StoredAddress::new(100), 0) {
+        if let Some(extent) = Extent::new(StoredAddress::new(100), ByteLength::new(0)) {
             fl.free(extent);
         }
         assert!(regions(&fl).is_empty());
@@ -842,53 +846,56 @@ mod tests {
     #[test]
     fn disjoint_frees_stay_sorted() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(300), 10).unwrap());
-        fl.free(Extent::new(StoredAddress::new(100), 10).unwrap());
-        fl.free(Extent::new(StoredAddress::new(200), 10).unwrap());
+        fl.free(Extent::new(StoredAddress::new(300), ByteLength::new(10)).unwrap());
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(10)).unwrap());
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(10)).unwrap());
         assert_eq!(regions(&fl), [(100, 10), (200, 10), (300, 10)]);
     }
 
     #[test]
     fn coalesce_with_right_neighbor() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(200), 50).unwrap()); // [200, 250)
-        fl.free(Extent::new(StoredAddress::new(150), 50).unwrap());
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(50)).unwrap()); // [200, 250)
+        fl.free(Extent::new(StoredAddress::new(150), ByteLength::new(50)).unwrap());
         assert_eq!(regions(&fl), [(150, 100)]);
     }
 
     #[test]
     fn coalesce_with_left_neighbor() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(150), 50).unwrap()); // [150, 200)
-        fl.free(Extent::new(StoredAddress::new(200), 50).unwrap());
+        fl.free(Extent::new(StoredAddress::new(150), ByteLength::new(50)).unwrap()); // [150, 200)
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(50)).unwrap());
         assert_eq!(regions(&fl), [(150, 100)]);
     }
 
     #[test]
     fn coalesce_bridges_gap_between_two() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 50).unwrap()); // [100, 150)
-        fl.free(Extent::new(StoredAddress::new(250), 50).unwrap()); // [250, 300)
-        fl.free(Extent::new(StoredAddress::new(150), 100).unwrap()); // [150, 250) bridges the two
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(50)).unwrap()); // [100, 150)
+        fl.free(Extent::new(StoredAddress::new(250), ByteLength::new(50)).unwrap()); // [250, 300)
+        fl.free(Extent::new(StoredAddress::new(150), ByteLength::new(100)).unwrap()); // [150, 250) bridges the two
         assert_eq!(regions(&fl), [(100, 200)]);
     }
 
     #[test]
     fn no_coalesce_when_gap_remains() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 50).unwrap()); // [100, 150)
-        fl.free(Extent::new(StoredAddress::new(151), 50).unwrap()); // [151, 201) one byte gap
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(50)).unwrap()); // [100, 150)
+        fl.free(Extent::new(StoredAddress::new(151), ByteLength::new(50)).unwrap()); // [151, 201) one byte gap
         assert_eq!(regions(&fl), [(100, 50), (151, 50)]);
     }
 
     #[test]
     fn alloc_best_fit_chooses_smallest_sufficient() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(0), 100).unwrap()); // big
-        fl.free(Extent::new(StoredAddress::new(200), 30).unwrap());
-        fl.free(Extent::new(StoredAddress::new(400), 60).unwrap()); // medium
+        fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap()); // big
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(30)).unwrap());
+        fl.free(Extent::new(StoredAddress::new(400), ByteLength::new(60)).unwrap()); // medium
         let allocated = fl.alloc(30).unwrap();
-        assert_eq!(allocated, Extent::new(StoredAddress::new(200), 30).unwrap());
+        assert_eq!(
+            allocated,
+            Extent::new(StoredAddress::new(200), ByteLength::new(30)).unwrap()
+        );
         // The 30-byte region is consumed exactly. The others remain.
         assert_eq!(regions(&fl), [(0, 100), (400, 60)]);
     }
@@ -896,11 +903,11 @@ mod tests {
     #[test]
     fn alloc_splits_remainder() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(1000), 100).unwrap());
+        fl.free(Extent::new(StoredAddress::new(1000), ByteLength::new(100)).unwrap());
         let allocated = fl.alloc(40).unwrap();
         assert_eq!(
             allocated,
-            Extent::new(StoredAddress::new(1000), 40).unwrap()
+            Extent::new(StoredAddress::new(1000), ByteLength::new(40)).unwrap()
         );
         assert_eq!(regions(&fl), [(1040, 60)]);
     }
@@ -908,8 +915,8 @@ mod tests {
     #[test]
     fn alloc_none_when_nothing_fits() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(0), 10).unwrap());
-        fl.free(Extent::new(StoredAddress::new(100), 20).unwrap());
+        fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(10)).unwrap());
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap());
         assert!(fl.alloc(50).is_none());
         // List is unchanged on a failed allocation.
         assert_eq!(regions(&fl), [(0, 10), (100, 20)]);
@@ -918,7 +925,7 @@ mod tests {
     #[test]
     fn alloc_zero_returns_none() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(0), 100).unwrap());
+        fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap());
         assert!(fl.alloc(0).is_none());
         assert_eq!(fl.total_bytes(), 100);
     }
@@ -949,11 +956,15 @@ mod tests {
     ) {
         let mut free = FreeList::new();
         for &(start, len) in initial {
-            free.free(Extent::new(StoredAddress::new(start), len).unwrap());
+            free.free(Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap());
         }
         assert_eq!(
             free.alloc_below(len, StoredAddress::new(limit)),
-            expected.map(|(start, len)| Extent::new(StoredAddress::new(start), len).unwrap())
+            expected.map(|(start, len)| Extent::new(
+                StoredAddress::new(start),
+                ByteLength::new(len)
+            )
+            .unwrap())
         );
         assert_eq!(free.sections(), remaining);
         assert_eq!(
@@ -985,7 +996,7 @@ mod tests {
     ) {
         let mut free = FreeList::new();
         for &(start, len) in initial {
-            free.free(Extent::new(StoredAddress::new(start), len).unwrap());
+            free.free(Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap());
         }
         assert_eq!(
             free.release_trailing_run(StoredAddress::new(eoa), tail_len),
@@ -1001,7 +1012,7 @@ mod tests {
     #[test]
     fn alloc_then_free_roundtrips() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(0), 100).unwrap());
+        fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap());
         let allocated = fl.alloc(40).unwrap();
         fl.free(allocated); // give it back
         assert_eq!(regions(&fl), [(0, 100)]); // coalesced back to whole
@@ -1012,13 +1023,13 @@ mod tests {
         let mut fl = FreeList::new();
         assert!(fl.is_empty());
         assert_eq!(fl.largest(), 0);
-        fl.free(Extent::new(StoredAddress::new(100), 10).unwrap());
-        fl.free(Extent::new(StoredAddress::new(200), 40).unwrap());
-        fl.free(Extent::new(StoredAddress::new(400), 25).unwrap());
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(10)).unwrap());
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(40)).unwrap());
+        fl.free(Extent::new(StoredAddress::new(400), ByteLength::new(25)).unwrap());
         assert!(!fl.is_empty());
         assert_eq!(fl.largest(), 40);
         // Coalescing is what `largest` reports over, not the frees as issued.
-        fl.free(Extent::new(StoredAddress::new(240), 40).unwrap());
+        fl.free(Extent::new(StoredAddress::new(240), ByteLength::new(40)).unwrap());
         assert_eq!(fl.largest(), 80);
     }
 
@@ -1029,14 +1040,14 @@ mod tests {
         let mut fl = FreeList::new();
         assert_eq!(fl.largest_whole_units(16), 0);
         // [10, 40): thirty bytes, and the only whole unit in it is [16, 32).
-        fl.free(Extent::new(StoredAddress::new(10), 30).unwrap());
+        fl.free(Extent::new(StoredAddress::new(10), ByteLength::new(30)).unwrap());
         assert_eq!(fl.largest(), 30);
         assert_eq!(fl.largest_whole_units(16), 16);
         // [100, 110): ten bytes with no whole unit at all.
-        fl.free(Extent::new(StoredAddress::new(100), 10).unwrap());
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(10)).unwrap());
         assert_eq!(fl.largest_whole_units(16), 16);
         // [200, 260): sixty bytes whose whole units are [208, 256), three of them.
-        fl.free(Extent::new(StoredAddress::new(200), 60).unwrap());
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(60)).unwrap());
         assert_eq!(fl.largest_whole_units(16), 48);
         assert_eq!(fl.largest_whole_units(0), 0);
         // The allocator agrees: that run is claimable in one call, and one unit
@@ -1045,14 +1056,14 @@ mod tests {
         assert_eq!(probe.alloc_whole_units(64, 16), None);
         assert_eq!(
             probe.alloc_whole_units(48, 16),
-            Some(Extent::new(StoredAddress::new(208), 48).unwrap())
+            Some(Extent::new(StoredAddress::new(208), ByteLength::new(48)).unwrap())
         );
     }
 
     #[test]
     fn take_trailing_at_eof() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(500), 100).unwrap()); // [500, 600)
+        fl.free(Extent::new(StoredAddress::new(500), ByteLength::new(100)).unwrap()); // [500, 600)
         let cut = fl.take_trailing(StoredAddress::new(600));
         assert_eq!(cut, Some(StoredAddress::new(500)));
         assert!(regions(&fl).is_empty());
@@ -1061,7 +1072,7 @@ mod tests {
     #[test]
     fn take_trailing_none_when_not_at_eof() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(500), 100).unwrap()); // [500, 600)
+        fl.free(Extent::new(StoredAddress::new(500), ByteLength::new(100)).unwrap()); // [500, 600)
         assert_eq!(fl.take_trailing(StoredAddress::new(700)), None);
         assert_eq!(regions(&fl), [(500, 100)]); // unchanged
     }
@@ -1069,8 +1080,8 @@ mod tests {
     #[test]
     fn take_trailing_only_cuts_the_tail_region() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 50).unwrap()); // interior hole [100, 150)
-        fl.free(Extent::new(StoredAddress::new(500), 100).unwrap()); // trailing [500, 600)
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(50)).unwrap()); // interior hole [100, 150)
+        fl.free(Extent::new(StoredAddress::new(500), ByteLength::new(100)).unwrap()); // trailing [500, 600)
         let cut = fl.take_trailing(StoredAddress::new(600));
         assert_eq!(cut, Some(StoredAddress::new(500)));
         assert_eq!(regions(&fl), [(100, 50)]); // interior hole preserved
@@ -1088,9 +1099,9 @@ mod tests {
         // and reaching end-of-file: the run starts where the metadata does, and
         // no single list can say so.
         let (mut meta, mut raw, mut dead) = (FreeList::new(), FreeList::new(), FreeList::new());
-        meta.free(Extent::new(StoredAddress::new(400), 100).unwrap()); // [400, 500)
-        raw.free(Extent::new(StoredAddress::new(500), 50).unwrap()); // [500, 550)
-        dead.free(Extent::new(StoredAddress::new(550), 50).unwrap()); // [550, 600)
+        meta.free(Extent::new(StoredAddress::new(400), ByteLength::new(100)).unwrap()); // [400, 500)
+        raw.free(Extent::new(StoredAddress::new(500), ByteLength::new(50)).unwrap()); // [500, 550)
+        dead.free(Extent::new(StoredAddress::new(550), ByteLength::new(50)).unwrap()); // [550, 600)
         assert_eq!(
             trailing_run_start([&meta, &raw, &dead], StoredAddress::new(600)),
             StoredAddress::new(400)
@@ -1100,8 +1111,8 @@ mod tests {
     #[test]
     fn trailing_run_start_stops_at_the_first_live_gap() {
         let (mut meta, mut raw) = (FreeList::new(), FreeList::new());
-        meta.free(Extent::new(StoredAddress::new(100), 100).unwrap());
-        raw.free(Extent::new(StoredAddress::new(400), 200).unwrap()); // [400, 600)
+        meta.free(Extent::new(StoredAddress::new(100), ByteLength::new(100)).unwrap());
+        raw.free(Extent::new(StoredAddress::new(400), ByteLength::new(200)).unwrap()); // [400, 600)
         assert_eq!(
             trailing_run_start([&meta, &raw], StoredAddress::new(600)),
             StoredAddress::new(400)
@@ -1111,7 +1122,7 @@ mod tests {
     #[test]
     fn trailing_run_start_is_eof_when_the_last_byte_is_live() {
         let mut meta = FreeList::new();
-        meta.free(Extent::new(StoredAddress::new(400), 100).unwrap());
+        meta.free(Extent::new(StoredAddress::new(400), ByteLength::new(100)).unwrap());
         assert_eq!(
             trailing_run_start([&meta], StoredAddress::new(600)),
             StoredAddress::new(600)
@@ -1125,27 +1136,27 @@ mod tests {
     #[test]
     fn take_range_splits_the_region_around_it() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 100).unwrap()); // [100, 200)
-        fl.take_range(Extent::new(StoredAddress::new(120), 30).unwrap()); // [120, 150)
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(100)).unwrap()); // [100, 200)
+        fl.take_range(Extent::new(StoredAddress::new(120), ByteLength::new(30)).unwrap()); // [120, 150)
         assert_eq!(regions(&fl), [(100, 20), (150, 50)]);
     }
 
     #[test]
     fn take_range_spanning_several_regions_keeps_only_the_edges() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 50).unwrap()); // [100, 150)
-        fl.free(Extent::new(StoredAddress::new(200), 50).unwrap()); // [200, 250)
-        fl.free(Extent::new(StoredAddress::new(300), 50).unwrap()); // [300, 350)
-        fl.take_range(Extent::new(StoredAddress::new(120), 200).unwrap()); // [120, 320)
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(50)).unwrap()); // [100, 150)
+        fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(50)).unwrap()); // [200, 250)
+        fl.free(Extent::new(StoredAddress::new(300), ByteLength::new(50)).unwrap()); // [300, 350)
+        fl.take_range(Extent::new(StoredAddress::new(120), ByteLength::new(200)).unwrap()); // [120, 320)
         assert_eq!(regions(&fl), [(100, 20), (320, 30)]);
     }
 
     #[test]
     fn take_range_tolerates_a_range_that_is_not_free() {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(StoredAddress::new(100), 50).unwrap());
-        fl.take_range(Extent::new(StoredAddress::new(300), 50).unwrap()); // wholly outside the list
-        fl.take_range(Extent::new(StoredAddress::new(140), 20).unwrap()); // half inside it
+        fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(50)).unwrap());
+        fl.take_range(Extent::new(StoredAddress::new(300), ByteLength::new(50)).unwrap()); // wholly outside the list
+        fl.take_range(Extent::new(StoredAddress::new(140), ByteLength::new(20)).unwrap()); // half inside it
         assert_eq!(regions(&fl), [(100, 40)]);
     }
 
@@ -1171,16 +1182,18 @@ mod tests {
     ) {
         let mut fl = FreeList::new();
         for &(addr, len) in tracked {
-            fl.free(Extent::new(StoredAddress::new(addr), len).unwrap());
+            fl.free(Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap());
         }
 
         assert_eq!(
             fl.release_all(
                 THRESHOLD,
                 StoredAddress::new(950),
-                extents
-                    .iter()
-                    .map(|&(addr, len)| Extent::new(StoredAddress::new(addr), len).unwrap()),
+                extents.iter().map(|&(addr, len)| Extent::new(
+                    StoredAddress::new(addr),
+                    ByteLength::new(len)
+                )
+                .unwrap()),
             ),
             StoredAddress::new(expected_eoa)
         );
@@ -1207,11 +1220,14 @@ mod tests {
         #[case] total: u64,
     ) {
         let mut free = FreeList::new();
-        free.free(Extent::new(StoredAddress::new(start), length).unwrap());
+        free.free(Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap());
         assert_eq!(
             free.alloc_whole_units(requested, alignment),
-            allocated
-                .map(|(start, length)| Extent::new(StoredAddress::new(start), length).unwrap())
+            allocated.map(|(start, length)| Extent::new(
+                StoredAddress::new(start),
+                ByteLength::new(length)
+            )
+            .unwrap())
         );
         assert_eq!(regions(&free), remaining);
         assert_eq!(free.total_bytes(), total);
@@ -1221,13 +1237,16 @@ mod tests {
     fn cached_total_covers_the_address_space_and_clones_independently() {
         let mut free = FreeList::default();
         assert_eq!(free.total_bytes(), 0);
-        free.free(Extent::new(StoredAddress::new(0), u64::MAX - 10).unwrap());
-        free.free(Extent::new(StoredAddress::new(u64::MAX - 10), 10).unwrap());
+        free.free(Extent::new(StoredAddress::new(0), ByteLength::new(u64::MAX - 10)).unwrap());
+        free.free(Extent::new(StoredAddress::new(u64::MAX - 10), ByteLength::new(10)).unwrap());
         assert_eq!(free.total_bytes(), u64::MAX);
         let snapshot = free.clone();
-        assert_eq!(free.alloc(10), Extent::new(StoredAddress::new(0), 10));
+        assert_eq!(
+            free.alloc(10),
+            Extent::new(StoredAddress::new(0), ByteLength::new(10))
+        );
         assert_eq!(free.total_bytes(), u64::MAX - 10);
-        free.take_range(Extent::new(StoredAddress::new(20), 10).unwrap());
+        free.take_range(Extent::new(StoredAddress::new(20), ByteLength::new(10)).unwrap());
         assert_eq!(free.total_bytes(), u64::MAX - 20);
         assert_eq!(
             free.take_trailing(StoredAddress::new(u64::MAX)),
@@ -1238,7 +1257,7 @@ mod tests {
         free = snapshot;
         assert_eq!(
             free.alloc(u64::MAX),
-            Extent::new(StoredAddress::new(0), u64::MAX)
+            Extent::new(StoredAddress::new(0), ByteLength::new(u64::MAX))
         );
         assert_eq!(free.total_bytes(), 0);
         assert_eq!(regions(&free), []);
@@ -1248,10 +1267,10 @@ mod tests {
     #[test]
     fn rejected_overlap_preserves_the_cached_total() {
         let mut free = FreeList::new();
-        free.free(Extent::new(StoredAddress::new(0), 50).unwrap());
-        free.free(Extent::new(StoredAddress::new(100), 100).unwrap());
+        free.free(Extent::new(StoredAddress::new(0), ByteLength::new(50)).unwrap());
+        free.free(Extent::new(StoredAddress::new(100), ByteLength::new(100)).unwrap());
         let error = panic::catch_unwind(AssertUnwindSafe(|| {
-            free.free(Extent::new(StoredAddress::new(50), 100).unwrap());
+            free.free(Extent::new(StoredAddress::new(50), ByteLength::new(100)).unwrap());
         }))
         .unwrap_err();
         assert_eq!(
@@ -1278,9 +1297,9 @@ mod tests {
     ) {
         let mut free = FreeList::new();
         for &(start, length) in initial {
-            free.free(Extent::new(StoredAddress::new(start), length).unwrap());
+            free.free(Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap());
         }
-        free.free(Extent::new(StoredAddress::new(start), length).unwrap());
+        free.free(Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap());
         assert_eq!(regions(&free), remaining);
         assert_eq!(free.total_bytes(), total);
     }
@@ -1312,13 +1331,17 @@ mod tests {
         #[case] expected: bool,
     ) {
         let extent = |start, len| Extent::new(StoredAddress::new(start), len).unwrap();
-        let free = FreeList::from_sorted([extent(100, 20), extent(200, 20)]).unwrap();
+        let free = FreeList::from_sorted([
+            extent(100, ByteLength::new(20)),
+            extent(200, ByteLength::new(20)),
+        ])
+        .unwrap();
         let mut lookups = 0;
         assert_eq!(
-            free.adjoins_observed(extent(start, len), || lookups += 1),
+            free.adjoins_observed(extent(start, ByteLength::new(len)), || lookups += 1),
             expected
         );
-        assert_eq!(free.adjoins(extent(start, len)), expected);
+        assert_eq!(free.adjoins(extent(start, ByteLength::new(len))), expected);
         assert_eq!(lookups, if start == 120 { 1 } else { 2 });
     }
 

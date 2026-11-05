@@ -159,6 +159,7 @@ impl AdmissionWork {
 mod tests {
     use alloc::vec;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
@@ -172,8 +173,8 @@ mod tests {
     #[case::sorted(false)]
     #[case::reordered(true)]
     fn ordered_returns_preserve_original_lengths_and_classes(#[case] reverse: bool) {
-        let first = Extent::new(StoredAddress::new(100), 8).unwrap();
-        let second = Extent::new(first.end(), 8).unwrap();
+        let first = Extent::new(StoredAddress::new(100), ByteLength::new(8)).unwrap();
+        let second = Extent::new(first.end(), ByteLength::new(8)).unwrap();
         let mut entries = vec![(first, 1), (second, 2)];
         if reverse {
             entries.reverse();
@@ -189,8 +190,8 @@ mod tests {
     #[case::sorted(false)]
     #[case::reordered(true)]
     fn ordered_returns_reject_overlapping_allocations(#[case] reverse: bool) {
-        let previous = Extent::new(StoredAddress::new(100), 16).unwrap();
-        let next = Extent::new(StoredAddress::new(108), 8).unwrap();
+        let previous = Extent::new(StoredAddress::new(100), ByteLength::new(16)).unwrap();
+        let next = Extent::new(StoredAddress::new(108), ByteLength::new(8)).unwrap();
         let mut entries = vec![(previous, ()), (next, ())];
         if reverse {
             entries.reverse();

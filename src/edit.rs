@@ -282,6 +282,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::OnceLock;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
@@ -2163,7 +2164,9 @@ impl WriteEngine {
                         continue;
                     };
                     for &section in sections {
-                        let Some(extent) = FreeExtent::new(section.addr, section.size) else {
+                        let Some(extent) =
+                            FreeExtent::new(section.addr, ByteLength::new(section.size))
+                        else {
                             continue;
                         };
                         tagged.push((*kind, extent));
@@ -2190,7 +2193,7 @@ impl WriteEngine {
             sections.sort_unstable_by_key(|section| section.addr);
             let mut prev_end = StoredAddress::ZERO;
             let admitted = sections.into_iter().filter_map(|section| {
-                let extent = FreeExtent::new(section.addr, section.size)?;
+                let extent = FreeExtent::new(section.addr, ByteLength::new(section.size))?;
                 if extent.end() > eoa || extent.start() < prev_end {
                     return None;
                 }
@@ -2261,7 +2264,7 @@ impl WriteEngine {
             .iter()
             .flat_map(|manager| {
                 manager.free_sections().sections().iter().map(|section| {
-                    FreeExtent::new(section.address(), section.length().get())
+                    FreeExtent::new(section.address(), ByteLength::new(section.length().get()))
                         .map(|extent| {
                             (
                                 free_space_manager::manager_kind(info.strategy, manager.slot()),
@@ -2327,7 +2330,7 @@ impl WriteEngine {
             .ok()?;
         FreeSpaceManagerHeader::parse(widths, &fshd)
             .ok()
-            .and_then(|_| FreeExtent::new(addr, len))
+            .and_then(|_| FreeExtent::new(addr, ByteLength::new(len)))
     }
 
     /// Converts a nonempty physical range to a stored-coordinate allocator extent.
@@ -2336,7 +2339,7 @@ impl WriteEngine {
     fn stored_extent(&self, range: FileRange) -> Option<FreeExtent> {
         FreeExtent::new(
             self.context.addresses().relative(range.start()).ok()?,
-            range.length(),
+            ByteLength::new(range.length()),
         )
     }
 

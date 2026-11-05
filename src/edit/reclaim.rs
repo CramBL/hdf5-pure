@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_space::__private::Extent;
@@ -838,7 +839,7 @@ impl WriteEngine {
                 let class = addresses
                     .relative(range.start())
                     .ok()
-                    .and_then(|start| Extent::new(start, range.length()))
+                    .and_then(|start| Extent::new(start, ByteLength::new(range.length())))
                     .map_or(PageClassEvidence::Unknown, |extent| {
                         snapshot.partial_page_class(extent)
                     });

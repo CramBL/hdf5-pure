@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::ManagerKind;
@@ -74,8 +75,12 @@ fn immediate_allocations_use_only_matching_partial_page_holes(
     engine.pad_to_page().unwrap();
     let start = engine.image.len();
     engine.append(&[17; 1_536]).unwrap();
-    let raw = Extent::new(StoredAddress::new(start + page + 16), 64).unwrap();
-    let meta = Extent::new(StoredAddress::new(start + 2 * page + 16), 64).unwrap();
+    let raw = Extent::new(StoredAddress::new(start + page + 16), ByteLength::new(64)).unwrap();
+    let meta = Extent::new(
+        StoredAddress::new(start + 2 * page + 16),
+        ByteLength::new(64),
+    )
+    .unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
         1,

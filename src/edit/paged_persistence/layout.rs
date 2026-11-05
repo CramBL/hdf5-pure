@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_format::__private::SectionInfoCounts;
@@ -492,7 +493,7 @@ pub(super) fn place(
 }
 
 fn extent(start: StoredAddress, len: u64) -> Result<Extent, FormatError> {
-    Extent::new(start, len).ok_or(FormatError::OffsetOverflow {
+    Extent::new(start, ByteLength::new(len)).ok_or(FormatError::OffsetOverflow {
         offset: start.get(),
         length: len,
     })

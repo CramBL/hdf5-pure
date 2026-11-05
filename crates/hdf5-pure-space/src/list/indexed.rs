@@ -67,7 +67,7 @@ impl<'a> IndexedFreeList<'a> {
             .next()?;
         let region = self.remove(start);
         // The size index selects a nonempty extent at least as long as the request.
-        let allocation = Extent::new(region.start(), size.get())
+        let allocation = Extent::new(region.start(), size.length())
             .expect("the allocation fits inside the indexed extent");
         if let Some(remainder) = Extent::between(allocation.end(), region.end()) {
             self.insert(remainder);
@@ -129,7 +129,7 @@ impl<'a> IndexedFreeList<'a> {
         let interior = region
             .aligned_interior(alignment.get())
             .expect("the indexed region contains whole units");
-        let allocation = Extent::new(interior.start(), size.get())
+        let allocation = Extent::new(interior.start(), size.length())
             .expect("the allocation fits inside the indexed interior");
         if let Some(head) = Extent::between(region.start(), allocation.start()) {
             self.insert(head);

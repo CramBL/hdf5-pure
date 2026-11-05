@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::HDF5_SIGNATURE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeList;
@@ -570,7 +571,9 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
                 .free_sections()
                 .sections()
                 .iter()
-                .map(|section| Extent::new(section.address(), section.length().get()).unwrap())
+                .map(|section| {
+                    Extent::new(section.address(), ByteLength::new(section.length().get())).unwrap()
+                })
                 .collect(),
         );
         assert_eq!(persisted_free, normalized_owned(free));
@@ -962,7 +965,7 @@ fn persistence_allocations(engine: &WriteEngine) -> (Vec<Extent>, Vec<Extent>) {
                 .addresses()
                 .relative(chunk.span.start())
                 .unwrap(),
-            chunk.span.length(),
+            ByteLength::new(chunk.span.length()),
         )
         .unwrap()
     })
@@ -980,7 +983,7 @@ fn persistence_allocations(engine: &WriteEngine) -> (Vec<Extent>, Vec<Extent>) {
     owned.extend(managers.into_iter().map(|range| {
         Extent::new(
             engine.context.addresses().relative(range.start()).unwrap(),
-            range.length(),
+            ByteLength::new(range.length()),
         )
         .unwrap()
     }));

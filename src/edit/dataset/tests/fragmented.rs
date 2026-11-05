@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::{Extent, ManagerKind, SessionSpace};
 use rstest::rstest;
 use test_util::disk_log;
@@ -351,7 +352,7 @@ fn metadata_only_page_space_keeps_one_compound_payload_request() {
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
     let start = engine.append(&[13; 64]).unwrap();
-    let extent = Extent::new(StoredAddress::new(start), 64).unwrap();
+    let extent = Extent::new(StoredAddress::new(start), ByteLength::new(64)).unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
         1,

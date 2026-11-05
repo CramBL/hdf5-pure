@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
+use hdf5_pure_core::__private::ByteLength;
 use rstest::rstest;
 
 use crate::AttrValue;
@@ -267,7 +268,7 @@ fn persistent_settlement_failure_preserves_publication_order(
     engine.commit().unwrap();
     let vacant = engine.image.append(&[0; 16_384]).unwrap();
     engine.space.return_allocation(
-        Extent::new(StoredAddress::new(vacant), 16_384).unwrap(),
+        Extent::new(StoredAddress::new(vacant), ByteLength::new(16_384)).unwrap(),
         AllocationClass::Raw,
     );
     engine.synchronize_aggregates().unwrap();
@@ -331,7 +332,7 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
             .unwrap();
         engine.place(placement, &bytes).unwrap();
     }
-    let extent = Extent::new(StoredAddress::new(start + 2000), 48).unwrap();
+    let extent = Extent::new(StoredAddress::new(start + 2000), ByteLength::new(48)).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         if tracked { vec![extent] } else { vec![] }

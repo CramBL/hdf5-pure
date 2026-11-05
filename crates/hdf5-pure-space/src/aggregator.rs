@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
@@ -45,7 +46,7 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
+    /// use hdf5_pure_core::__private::{ByteLength, NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{AllocationClass, ClassicAggregators, Extent};
     ///
@@ -54,7 +55,10 @@ impl ClassicAggregators {
     /// let allocation = aggregates.allocate(
     ///     StoredAddress::new(8_192), NonZeroByteLength::new(64).unwrap(), AllocationClass::Raw,
     /// )?;
-    /// assert_eq!(allocation.extent(), Extent::new(StoredAddress::new(8_192), 64).unwrap());
+    /// assert_eq!(
+    ///     allocation.extent(),
+    ///     Extent::new(StoredAddress::new(8_192), ByteLength::new(64)).unwrap(),
+    /// );
     /// assert_eq!(allocation.end_of_allocation(), StoredAddress::new(10_240));
     /// aggregates = snapshot;
     /// assert_eq!(aggregates.unused(AllocationClass::Raw), None);
@@ -134,7 +138,7 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
+    /// use hdf5_pure_core::__private::{ByteLength, NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{AllocationClass, ClassicAggregators, Extent};
     ///
@@ -151,7 +155,7 @@ impl ClassicAggregators {
     /// assert_eq!(released.end_of_allocation(), StoredAddress::new(10_304));
     /// assert_eq!(
     ///     released.released(AllocationClass::Metadata),
-    ///     Extent::new(StoredAddress::new(8_256), 1_984),
+    ///     Extent::new(StoredAddress::new(8_256), ByteLength::new(1_984)),
     /// );
     /// assert_eq!(released.released(AllocationClass::Raw), None);
     /// assert_eq!(aggregates, ClassicAggregators::new());
@@ -182,7 +186,7 @@ impl ClassicAggregators {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::{NonZeroByteLength, StoredAddressExt};
+    /// use hdf5_pure_core::__private::{ByteLength, NonZeroByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::{
     ///     AggregationError, AllocationClass, ClassicAggregators, Extent,
@@ -212,7 +216,10 @@ impl ClassicAggregators {
     /// let raw = aggregates.allocate(
     ///     StoredAddress::new(8_256), NonZeroByteLength::new(64).unwrap(), AllocationClass::Raw,
     /// )?;
-    /// assert_eq!(raw.extent(), Extent::new(StoredAddress::new(8_256), 64).unwrap());
+    /// assert_eq!(
+    ///     raw.extent(),
+    ///     Extent::new(StoredAddress::new(8_256), ByteLength::new(64)).unwrap(),
+    /// );
     /// # Ok::<(), AggregationError>(())
     /// ```
     pub fn reconcile_eoa(&mut self, eoa: StoredAddress) -> Result<(), AggregationError> {
@@ -303,21 +310,24 @@ impl ClassicAggregators {
             *other = None;
         }
         if size >= AGGREGATE_BLOCK_SIZE {
-            let extent = Extent::new(eoa, size).ok_or(AggregationError::OffsetOverflow {
-                offset: eoa.get(),
-                length: size,
-            })?;
+            let extent = Extent::new(eoa, ByteLength::new(size)).ok_or(
+                AggregationError::OffsetOverflow {
+                    offset: eoa.get(),
+                    length: size,
+                },
+            )?;
             return Ok(AggregationAllocation {
                 extent,
                 eoa: extent.end(),
                 released: None,
             });
         }
-        let range =
-            Extent::new(eoa, AGGREGATE_BLOCK_SIZE).ok_or(AggregationError::OffsetOverflow {
+        let range = Extent::new(eoa, ByteLength::new(AGGREGATE_BLOCK_SIZE)).ok_or(
+            AggregationError::OffsetOverflow {
                 offset: eoa.get(),
                 length: AGGREGATE_BLOCK_SIZE,
-            })?;
+            },
+        )?;
         let released = own.and_then(Aggregate::unused);
         let mut window = Aggregate { range, cursor: eoa };
         let extent = window.take(size)?;
@@ -434,10 +444,12 @@ struct Aggregate {
 impl Aggregate {
     fn take(&mut self, size: u64) -> Result<Extent, AggregationError> {
         let Self { range, cursor } = self;
-        let extent = Extent::new(*cursor, size).ok_or(AggregationError::OffsetOverflow {
-            offset: cursor.get(),
-            length: size,
-        })?;
+        let extent = Extent::new(*cursor, ByteLength::new(size)).ok_or(
+            AggregationError::OffsetOverflow {
+                offset: cursor.get(),
+                length: size,
+            },
+        )?;
         debug_assert!(
             extent.end() <= range.end(),
             "allocation exceeds its aggregate"
@@ -463,6 +475,7 @@ mod tests {
 
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::NonZeroByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::StoredAddress;
@@ -545,7 +558,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             allocation.extent(),
-            Extent::new(StoredAddress::new(start), size).unwrap()
+            Extent::new(StoredAddress::new(start), ByteLength::new(size)).unwrap()
         );
         assert_eq!(
             allocation.end_of_allocation(),
@@ -554,7 +567,10 @@ mod tests {
         assert_eq!(allocation.released(), None);
         assert_eq!(
             aggregates.unused(class),
-            Extent::new(StoredAddress::new(start + size), reserved - size)
+            Extent::new(
+                StoredAddress::new(start + size),
+                ByteLength::new(reserved - size)
+            )
         );
     }
 
@@ -577,7 +593,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             second.extent(),
-            Extent::new(StoredAddress::new(164), 1984).unwrap()
+            Extent::new(StoredAddress::new(164), ByteLength::new(1984)).unwrap()
         );
         assert_eq!(aggregates.unused(AllocationClass::Raw), None);
         let third = aggregates
@@ -589,12 +605,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             third.extent(),
-            Extent::new(StoredAddress::new(2148), 1).unwrap()
+            Extent::new(StoredAddress::new(2148), ByteLength::new(1)).unwrap()
         );
         assert_eq!(third.end_of_allocation(), StoredAddress::new(4196));
         assert_eq!(
             aggregates.unused(AllocationClass::Raw),
-            Extent::new(StoredAddress::new(2149), 2047)
+            Extent::new(StoredAddress::new(2149), ByteLength::new(2047))
         );
     }
 
@@ -624,20 +640,20 @@ mod tests {
             .unwrap();
         assert_eq!(
             raw.extent(),
-            Extent::new(StoredAddress::new(2148), 64).unwrap()
+            Extent::new(StoredAddress::new(2148), ByteLength::new(64)).unwrap()
         );
         assert_eq!(
             second.extent(),
-            Extent::new(StoredAddress::new(164), 64).unwrap()
+            Extent::new(StoredAddress::new(164), ByteLength::new(64)).unwrap()
         );
         assert_eq!(second.end_of_allocation(), StoredAddress::new(4196));
         assert_eq!(
             aggregates.unused(AllocationClass::Metadata),
-            Extent::new(StoredAddress::new(228), 1920)
+            Extent::new(StoredAddress::new(228), ByteLength::new(1920))
         );
         assert_eq!(
             aggregates.unused(AllocationClass::Raw),
-            Extent::new(StoredAddress::new(2212), 1984)
+            Extent::new(StoredAddress::new(2212), ByteLength::new(1984))
         );
     }
 
@@ -662,7 +678,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             allocation.extent(),
-            Extent::new(StoredAddress::new(start), 4000).unwrap()
+            Extent::new(StoredAddress::new(start), ByteLength::new(4000)).unwrap()
         );
         assert_eq!(allocation.end_of_allocation(), StoredAddress::new(end));
         assert_eq!(allocation.released(), None);
@@ -674,13 +690,18 @@ mod tests {
                 } else {
                     StoredAddress::new(164)
                 },
-                1984
+                ByteLength::new(1984)
             )
         );
     }
 
     #[rstest]
-    #[case::below_one_block(2047, 2148, 4196, Extent::new(StoredAddress::new(2147), 1))]
+    #[case::below_one_block(
+        2047,
+        2148,
+        4196,
+        Extent::new(StoredAddress::new(2147), ByteLength::new(1))
+    )]
     #[case::exactly_one_block(2048, 2148, 4196, None)]
     #[case::above_one_block(2049, 2149, 4197, None)]
     fn other_aggregate_tail_reuse_requires_one_consumed_block(
@@ -718,7 +739,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             raw.extent(),
-            Extent::new(StoredAddress::new(start), 64).unwrap()
+            Extent::new(StoredAddress::new(start), ByteLength::new(64)).unwrap()
         );
         assert_eq!(raw.end_of_allocation(), StoredAddress::new(end));
         assert_eq!(aggregates.unused(AllocationClass::Metadata), remaining);
@@ -750,15 +771,22 @@ mod tests {
             .unwrap();
         assert_eq!(
             second.extent(),
-            Extent::new(StoredAddress::new(4196), 64).unwrap()
+            Extent::new(StoredAddress::new(4196), ByteLength::new(64)).unwrap()
         );
-        assert_eq!(second.released(), Extent::new(StoredAddress::new(2100), 48));
+        assert_eq!(
+            second.released(),
+            Extent::new(StoredAddress::new(2100), ByteLength::new(48))
+        );
         assert_eq!(second.end_of_allocation(), StoredAddress::new(6244));
     }
 
     #[rstest]
     #[case::trailing(4196, 2212, None)]
-    #[case::interior(5000, 5000, Extent::new(StoredAddress::new(2212), 1984))]
+    #[case::interior(
+        5000,
+        5000,
+        Extent::new(StoredAddress::new(2212), ByteLength::new(1984))
+    )]
     fn reset_releases_interior_spare_and_trims_only_eof(
         #[case] eoa: u64,
         #[case] end: u64,
@@ -783,7 +811,7 @@ mod tests {
         assert_eq!(release.end_of_allocation(), StoredAddress::new(end));
         assert_eq!(
             release.released(AllocationClass::Metadata),
-            Extent::new(StoredAddress::new(164), 1984)
+            Extent::new(StoredAddress::new(164), ByteLength::new(1984))
         );
         assert_eq!(release.released(AllocationClass::Raw), raw);
         assert_eq!(aggregates, ClassicAggregators::new());

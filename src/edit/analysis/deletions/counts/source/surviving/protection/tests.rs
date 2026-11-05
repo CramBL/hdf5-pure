@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicU64;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::atomic::Ordering;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
@@ -223,7 +224,7 @@ fn protection_excludes_every_reusable_class_from_complete_allocations(
         FileSpacePageSize::MIN,
         [(
             kind,
-            Extent::new(StoredAddress::new(start), length).unwrap(),
+            Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap(),
         )],
     )
     .unwrap();
@@ -272,7 +273,7 @@ fn protection_excludes_retained_claims_without_inferring_page_ownership(
     let (batch, _) = counts(&engine, &["a"]);
     let allocation = batch.updates()[0].header_allocation().unwrap().range();
     let start = a.checked_add_signed(offset).unwrap();
-    let extent = Extent::new(StoredAddress::new(start), 1).unwrap();
+    let extent = Extent::new(StoredAddress::new(start), ByteLength::new(1)).unwrap();
     engine.aggregation = None;
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
@@ -516,7 +517,12 @@ fn protection_keeps_empty_work_allocation_and_read_free() {
         Some(FileSpaceStrategy::FsmAggr),
         1,
         FileSpacePageSize::MIN,
-        (0..256).map(|index| (None, Extent::new(StoredAddress::new(index * 2), 1).unwrap())),
+        (0..256).map(|index| {
+            (
+                None,
+                Extent::new(StoredAddress::new(index * 2), ByteLength::new(1)).unwrap(),
+            )
+        }),
     )
     .unwrap();
     assert!(engine.aggregation.is_some());

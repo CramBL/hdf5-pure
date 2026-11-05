@@ -2,6 +2,7 @@ use core::num::NonZeroUsize;
 use std::io::ErrorKind;
 use std::sync::Mutex;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::ManagerKind;
 use hdf5_pure_space::__private::PageType;
@@ -359,17 +360,21 @@ fn engine() -> (tempfile::TempDir, WriteEngine, Vec<Extent>) {
     let metadata = engine.append(&[0; 512]).unwrap();
     let addresses = engine.context.addresses();
     let original = vec![
-        Extent::new(addresses.relative(PhysicalAddress::new(raw)).unwrap(), 640).unwrap(),
+        Extent::new(
+            addresses.relative(PhysicalAddress::new(raw)).unwrap(),
+            ByteLength::new(640),
+        )
+        .unwrap(),
         Extent::new(
             addresses.relative(PhysicalAddress::new(metadata)).unwrap(),
-            28,
+            ByteLength::new(28),
         )
         .unwrap(),
         Extent::new(
             addresses
                 .relative(PhysicalAddress::new(metadata + 64))
                 .unwrap(),
-            338,
+            ByteLength::new(338),
         )
         .unwrap(),
     ];
@@ -380,11 +385,15 @@ fn engine() -> (tempfile::TempDir, WriteEngine, Vec<Extent>) {
         [
             (
                 Some(ManagerKind::PagedLargeGeneric),
-                Extent::new(original[0].start(), 512).unwrap(),
+                Extent::new(original[0].start(), ByteLength::new(512)).unwrap(),
             ),
             (
                 Some(ManagerKind::PagedSmallRaw),
-                Extent::new(original[0].start().checked_add(512).unwrap(), 128).unwrap(),
+                Extent::new(
+                    original[0].start().checked_add(512).unwrap(),
+                    ByteLength::new(128),
+                )
+                .unwrap(),
             ),
             (Some(ManagerKind::PagedSmallMetadata), original[1]),
             (Some(ManagerKind::PagedSmallMetadata), original[2]),

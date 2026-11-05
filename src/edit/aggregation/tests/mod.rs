@@ -1,6 +1,7 @@
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::{Extent, SessionSpace};
 use rstest::rstest;
@@ -73,8 +74,8 @@ fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
             assert_eq!(
                 aggregation.unused().collect::<Vec<_>>(),
                 [
-                    Extent::new(StoredAddress::new(start - 2096), 48).unwrap(),
-                    Extent::new(StoredAddress::new(start - 1984), 1984).unwrap(),
+                    Extent::new(StoredAddress::new(start - 2096), ByteLength::new(48)).unwrap(),
+                    Extent::new(StoredAddress::new(start - 1984), ByteLength::new(1984)).unwrap(),
                 ]
             );
             (aggregation, 64)
@@ -104,7 +105,7 @@ fn narrow_aggregate_capacity_failure_preserves_state_and_free_space(
             AggregateWindows::Empty => Vec::new(),
             AggregateWindows::Occupied => vec![(
                 StoredAddress::new(start + 2048),
-                Extent::new(StoredAddress::new(start - 2096), 48).unwrap()
+                Extent::new(StoredAddress::new(start - 2096), ByteLength::new(48)).unwrap()
             )],
         }
     );

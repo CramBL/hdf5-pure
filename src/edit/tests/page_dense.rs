@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{DenseAttrCreationOrder, ObjectHeaderPrefix};
 use hdf5_pure_space::__private::{AllocationClass, Extent, SessionSpace};
@@ -165,11 +166,15 @@ fn engine() -> (tempfile::TempDir, WriteEngine, u64) {
         .unwrap();
     engine.space = SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), 1, page);
     engine.space.return_allocation(
-        Extent::new(StoredAddress::new(start + 1_024), 131_072).unwrap(),
+        Extent::new(StoredAddress::new(start + 1_024), ByteLength::new(131_072)).unwrap(),
         AllocationClass::Raw,
     );
     engine.space.return_allocation(
-        Extent::new(StoredAddress::new(start + PAGE + 1_024), 8_192).unwrap(),
+        Extent::new(
+            StoredAddress::new(start + PAGE + 1_024),
+            ByteLength::new(8_192),
+        )
+        .unwrap(),
         AllocationClass::Metadata,
     );
     (directory, engine, start)
