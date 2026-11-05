@@ -1,0 +1,11 @@
+extends: existence
+message: "For '%s', name which information is included, omitted, or normalized."
+level: error
+scope: text
+ignorecase: true
+nonword: true
+tokens:
+  - '\bcurated\s+introspection\b'
+  - '\bcurated\s+analogue\b'
+  - '\bcurated\s+surface\b'
+  - '\bcurated,\s+named\s+form\b'

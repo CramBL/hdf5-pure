@@ -1,7 +1,7 @@
 # A sentence states the current behaviour on its own, never against a
 # historical or hypothetical alternative.
 extends: existence
-message: "Contrastive '%s': state the current behaviour without the alternative."
+message: "State the behavior directly. Preserve distinctions that define return values, defaults, error handling, or safety."
 level: error
 ignorecase: true
 nonword: true
