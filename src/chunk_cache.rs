@@ -159,7 +159,7 @@ impl Default for ChunkCacheConfig {
 /// single chunk has been read, and nothing else reports whether it was the right
 /// one:
 ///
-/// - [`hit_rate`](Self::hit_rate) says whether the cache is earning its memory.
+/// - [`hit_rate`](Self::hit_rate) measures cache reuse across repeated chunk lookups.
 /// - [`rejections`](Self::rejections) and [`evictions`](Self::evictions)
 ///   together say whether the working set outgrew the budget. **Read both**:
 ///   which of the two moves depends on how the dataset is being read, and each
@@ -224,13 +224,14 @@ impl ChunkCacheStats {
     /// Chunks offered to the cache and not retained, because it was already full
     /// of chunks the same read had placed or been served.
     ///
-    /// A whole read visits each of its chunks exactly once, so once it has filled
-    /// the cache there is nothing to gain by evicting one of its own chunks for
-    /// another; it stops offering instead. That makes this the budget signal on
-    /// that path and [`evictions`](Self::evictions) useless there: a whole read of
-    /// a dataset eight times the budget reports seven eighths of its chunks here
-    /// and no evictions at all. A row window reverses the two — it evicts by plain
-    /// LRU and never reaches this.
+    /// A whole read visits each of its chunks exactly once. Once the cache is full,
+    /// evicting an earlier chunk to insert a later one serves no subsequent lookup
+    /// in the same pass, so the reader stops offering chunks instead. That makes
+    /// this the budget signal on that path. Whole reads protect chunks inserted or
+    /// reused during the current pass, but can evict other cached chunks. From an
+    /// initially empty cache sized to retain exactly one eighth of equally sized
+    /// chunks, the read rejects the other seven eighths without evictions. A row
+    /// window reverses the two: it evicts by plain LRU and never reaches this.
     ///
     /// Counted apart from [`oversize_chunks`](Self::oversize_chunks), which more
     /// slots would not fix.
@@ -271,8 +272,9 @@ impl ChunkCacheStats {
     /// lookup has happened.
     ///
     /// Preserves `None` when zero lookups have occurred, distinguishing a cache with
-    /// no lookups from one that missed every lookup. A disabled cache reports `Some(0.0)`.
-    /// Read this beside [`ChunkCacheConfig`], which reports whether the cache is enabled.
+    /// no lookups from one that missed every lookup. After at least one lookup, a
+    /// disabled cache reports `Some(0.0)` because every lookup misses. Read this
+    /// beside [`ChunkCacheConfig`], which reports whether the cache is enabled.
     pub fn hit_rate(&self) -> Option<f64> {
         let lookups = self.lookups();
         if lookups == 0 {
@@ -338,9 +340,9 @@ struct CachedChunk {
 /// # Being served a chunk claims it, too
 ///
 /// The same reasoning reaches one step further than placing a chunk does. A pass
-/// owns any slot it has been *served* from as well as any it filled, because a
-/// chunk this read has already used is worth at least as much as one it has not
-/// reached yet — and giving it back buys the same nothing.
+/// owns any slot it has been *served* from as well as any it filled, because
+/// replacing a chunk this read already reused with another chunk read only once
+/// incurs eviction and insertion churn without increasing hits.
 ///
 /// Left out, that cost a repeat read everything the previous read had saved for
 /// it. A second read of a dataset larger than the cache hit all `max_slots`

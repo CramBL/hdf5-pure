@@ -12,8 +12,8 @@
 
 use hdf5_pure::mat::{Block, Blocking, DataProducer, MatBuilder, MatError, Options};
 
-/// Generates `f64` elements from their linear index, so a multi-block dataset
-/// costs nothing to produce and its expected values are computable.
+/// Generates `f64` elements, generating each value from its index without
+/// retaining the complete dataset. Its expected values are computable.
 struct Ramp;
 
 impl Ramp {

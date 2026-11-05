@@ -717,11 +717,12 @@ fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
     );
 }
 
-/// The refusal above is on *moving* a reference attribute out of the header, not
-/// on rebuilding a heap that already holds one. An object the C library already
-/// stored densely keeps its references outside the repointing walk whatever this
-/// edit does, so refusing there would cost the capability and buy nothing — and
-/// the reference has to come back out of the rebuilt heap intact.
+/// The rejection above is on moving a reference attribute out of the header,
+/// not on rebuilding a heap that already holds one. An object the C library
+/// already stored densely keeps its references outside the repointing walk
+/// whatever this edit does. Rejecting the edit would prevent modifying dense
+/// attributes without avoiding reference corruption, and the reference must
+/// emerge from the rebuilt heap intact.
 #[test]
 fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};

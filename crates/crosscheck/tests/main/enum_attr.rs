@@ -138,7 +138,7 @@ fn a_c_written_bool_attribute_keeps_its_enumeration_in_the_datatype_channel() {
     );
 
     // The one-byte integer beside it is what a bool has to be told apart *from*,
-    // and the value channel cannot do it.
+    // and decoded attribute values alone cannot distinguish them.
     assert!(
         matches!(
             datatypes.get("count"),

@@ -166,7 +166,7 @@ The chunk cache configured here is the file-wide default and applies to every da
 
 ### Per-dataset overrides
 
-To override the chunk cache for a single dataset, open it with [`dataset_with_options(name, DatasetAccessProperties)`](crate::File::dataset_with_options). This is the analogue of HDF5's per-dataset access property list (`H5Pset_chunk_cache`). The override replaces the file-wide default for that one dataset, and other datasets keep the default. A dataset that is read once front-to-back, for instance, gains nothing from caching its decompressed chunks, so you can disable the cache with [`ChunkCacheConfig::disabled()`](crate::ChunkCacheConfig::disabled):
+To override the chunk cache for a single dataset, open it with [`dataset_with_options(name, DatasetAccessProperties)`](crate::File::dataset_with_options). This is the analogue of HDF5's per-dataset access property list (`H5Pset_chunk_cache`). The override replaces the file-wide default for that one dataset, and other datasets keep the default. A single whole-dataset read from an initially empty chunk cache visits each chunk once. Retaining those chunks provides no reuse within that read. If there will be no later reads, disable chunk caching to avoid retaining their bytes. Successive row-window reads can reuse a chunk even when they read each row only once. You can disable the cache with [`ChunkCacheConfig::disabled()`](crate::ChunkCacheConfig::disabled):
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -178,7 +178,7 @@ To override the chunk cache for a single dataset, open it with [`dataset_with_op
 use hdf5_pure::{ChunkCacheConfig, DatasetAccessProperties, File};
 
 let file = File::open(&path)?;
-// This dataset is read once front-to-back: skip caching its decompressed chunks.
+// This dataset is read once in a single whole-dataset call.
 let dapl = DatasetAccessProperties::new().with_chunk_cache(ChunkCacheConfig::disabled());
 let ds = file.dataset_with_options("scan", dapl)?;
 let values = ds.read_f64()?;
@@ -222,7 +222,7 @@ assert!(stats.cached_chunks() > 0);
 | whole ([`read_f64`](crate::Dataset::read_f64) and friends) | [`rejections()`](crate::ChunkCacheStats::rejections) | [`evictions()`](crate::ChunkCacheStats::evictions) |
 | partial selections (`read_*_region` or `read_*_rows`) | [`evictions()`](crate::ChunkCacheStats::evictions) | [`rejections()`](crate::ChunkCacheStats::rejections) |
 
-A whole read visits each of its chunks exactly once, so a full cache rejects the chunks that follow and keeps the ones it has already placed, which no later chunk of that read would have been served from anyway: a dataset eight times the budget reports seven eighths of its chunks rejected and no evictions at all. Reading it again hits the retained chunks and rejects the rest, so a settled cache costs nothing to keep. A partial region or row-window read uses the LRU rule, retaining recently accessed chunks for later reads. Either counter climbing while [`hit_rate()`](crate::ChunkCacheStats::hit_rate) stays low is the same finding.
+A whole read visits each of its chunks exactly once, so a full cache rejects the chunks that follow and keeps the ones it has already placed, which no later chunk of that read would have been served from anyway. Whole reads protect chunks inserted or reused during the current pass, but can evict other cached chunks. From an initially empty cache sized to retain exactly one eighth of equally sized chunks, the read rejects the other seven eighths without evictions. Repeating the whole-dataset read reuses retained chunks and rejects the remaining chunks. The retained set stays unchanged, avoiding further insertions and evictions for that access pattern. Memory and lookup work remain. A partial region or row-window read uses the LRU rule, retaining recently accessed chunks for later reads. Either counter climbing while [`hit_rate()`](crate::ChunkCacheStats::hit_rate) stays low is the same finding.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -257,7 +257,7 @@ Two figures need a word of care. Cache statistics track hits, misses, evictions,
 
 ### The metadata cache
 
-A cache budget is a number chosen before a single read has happened. [`File::metadata_cache_stats`](crate::File::metadata_cache_stats) reports what it bought, so the next number is measured and not guessed. It is the counterpart of `H5Fget_mdc_hit_rate` and `H5Fget_mdc_size`, and returns `None` when the open has no metadata cache to report on.
+A cache budget is a number chosen before a single read has happened. [`File::metadata_cache_stats`](crate::File::metadata_cache_stats) reports cache hits, lookups, and retained metadata bytes, so the next budget is measured and not guessed. It is the counterpart of `H5Fget_mdc_hit_rate` and `H5Fget_mdc_size`, and returns `None` when the open has no metadata cache to report on.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -289,7 +289,7 @@ println!("{:?} over {} reads, {} of {} bytes held", stats.hit_rate(), stats.read
 Which figure to read depends on the question:
 
 - **[`hit_rate`](crate::MetadataCacheStats::hit_rate)** is the headline: the fraction of eligible reads served without touching the file. `None` means no eligible read has happened yet, which is not the same as a cache that has missed everything.
-- **[`evictions`](crate::MetadataCacheStats::evictions)** is what says a larger budget would help. A disappointing hit rate *with* evictions is a budget too small for the working set. The same hit rate with none is a workload that reads each piece of metadata once, and raising the budget will not change it.
+- **[`evictions`](crate::MetadataCacheStats::evictions)** counts removals needed to keep the cache within its budget. A low hit rate with frequent evictions can indicate insufficient capacity for reusable metadata. Without evictions, possible causes include one-time reads, invalidated entries, and borrowed bytes that the cache does not retain.
 - **[`oversize_reads`](crate::MetadataCacheStats::oversize_reads)** counts reads turned away, for exceeding [`max_entry_bytes`](crate::MetadataCacheConfig::max_entry_bytes) or the budget itself, before the cache saw them. A file with large fractal heaps or index blocks can be missing from the cache entirely for this reason while the hit rate looks healthy.
 - **[`invalidations`](crate::MetadataCacheStats::invalidations)** applies to a read-write session: entries dropped because a write overlapped them. Approaching the miss count, it means the session is rewriting the metadata it is caching.
 

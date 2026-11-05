@@ -420,8 +420,7 @@ fn a_write_marked_file_names_a_recovery_that_works(#[case] backend: ReadBackend)
     };
     test_util_hdf5::assertion::file_marked_in_use(err, SuperblockStatusFlags::write_marked(), open);
 
-    // The mark is half a pair, so the SWMR reader refuses it — the behaviour the
-    // error text used to send callers into, and which stays as it is.
+    // The status flags set bit 0 without bit 2, so the SWMR reader rejects the file.
     test_util_hdf5::assertion::file_marked_in_use(
         File::open_swmr(&path).unwrap_err(),
         SuperblockStatusFlags::write_marked(),

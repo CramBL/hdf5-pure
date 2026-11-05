@@ -1199,11 +1199,8 @@ fn both_read_write_backings_reuse_a_freed_hole_alike() {
 
 #[test]
 fn churn_of_groups_attributes_and_datasets_stays_bounded() {
-    // The whole free-space story on one file: groups carrying attributes, plain
-    // and filtered chunked datasets, deleted by subtree and rewritten identically,
-    // round after round. Every round frees exactly what the next one needs, so a
-    // file that reuses its free space returns to the same size each time while one
-    // that appends grows by a full round's worth per cycle.
+    // Each round changes attribute and dataset values while preserving their shapes.
+    // The final file size must remain below `baseline + baseline / 4`.
     //
     // A "ceiling" dataset written above the first round is what makes this a test
     // of *reuse*. Without it every freed round would reach end-of-file and be

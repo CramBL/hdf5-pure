@@ -30,9 +30,9 @@ struct Log {
     high_water: usize,
 }
 
-/// Generates `f64` elements as a function of their linear index, so a dataset of
-/// any size costs nothing to produce and the expected bytes are computable
-/// without holding them.
+/// Generates `f64` elements, generating each value from its index without
+/// retaining the complete dataset. The expected bytes are computable without
+/// holding them.
 struct Ramp {
     log: Arc<Mutex<Log>>,
     /// Deliberately break the contract on this block, to prove the emitter
@@ -472,9 +472,6 @@ fn a_block_of_the_wrong_size_is_refused() {
     }
 }
 
-/// A producer's own failure has to survive the trip through the writer's
-/// provider seam, which speaks a different error type. Flattening it to a
-/// message would make a mid-write failure untraceable to its cause.
 #[test]
 fn a_producers_own_error_is_surfaced_verbatim() {
     const DIMS: [usize; 2] = [4, 100_000];
@@ -491,11 +488,6 @@ fn a_producers_own_error_is_surfaced_verbatim() {
     }
 }
 
-/// The same trip, for a producer that failed in its *own* error type rather
-/// than a message. This is the one path that puts a caller's error down and
-/// picks it up again — the provider seam stashes it and hands the writer a
-/// placeholder to carry, which the finalizer swaps back — so it is the one that
-/// could substitute a different error and still look right from the outside.
 #[test]
 fn a_producers_error_keeps_its_own_type() {
     use std::error::Error;

@@ -41,7 +41,7 @@ use crate::filter_pipeline::FilterDescription;
 
 /// How a dataset's raw data is arranged on disk.
 ///
-/// The curated analogue of HDF5's layout class (`H5Pget_layout`), enriched with
+/// An enumeration of HDF5 layout classes (`H5Pget_layout`), normalized into
 /// the per-class facts needed to locate or size the data without decoding it.
 /// Obtain it with [`Dataset::layout`](crate::Dataset::layout).
 ///
@@ -87,7 +87,7 @@ pub enum Layout {
 
 /// The kind of index a chunked dataset uses to locate its chunks.
 ///
-/// The curated, named form of HDF5's chunk-index type. The index kind is fixed
+/// An enumeration naming HDF5 chunk-index types (`H5D_CHUNK_IDX_*`). The index kind is fixed
 /// at dataset creation by the shape and its extensibility, and it determines
 /// whether the dataset can be grown in place: see
 /// [`supports_inplace_append`](ChunkIndex::supports_inplace_append).

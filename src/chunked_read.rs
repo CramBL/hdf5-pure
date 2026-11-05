@@ -4077,8 +4077,8 @@ mod tests {
     /// buffered entry point short-circuits `num_elements == 0` in
     /// `read_raw_data_full_from_source` before it dispatches on the layout at
     /// all — so one of these three call sites is unreachable from there, and a
-    /// test that went in by the front door would leave it untested while looking
-    /// like coverage.
+    /// test calling `Dataset::read_raw` directly would leave it untested while
+    /// appearing to provide coverage.
     #[test]
     fn every_whole_dataset_reader_materializes_an_unallocated_dataset() {
         let layout = DataLayout::Chunked {

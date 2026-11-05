@@ -2856,7 +2856,7 @@ pub(crate) fn zfp_filter_meta_from_cd_values(cd_values: &[u32]) -> Option<ZfpFil
     if cd_values.len() < 4 {
         return None;
     }
-    // cd_values[0] is the version word; we trust it shape-wise.
+    // cd_values[0] holds the filter version word.
     // Treat cd_values[1..] as a little-endian byte stream.
     let mut bytes: Vec<u8> = Vec::with_capacity((cd_values.len() - 1) * 4);
     for &w in &cd_values[1..] {

@@ -45,19 +45,16 @@ use crate::mat::error::MatError;
 use crate::type_builders::{self, CompoundTypeBuilder};
 use std::sync::{Arc, Mutex};
 
-/// Byte size a block aims for. Large enough that a producer call's overhead is
-/// negligible, small enough to be an unremarkable allocation. Blocks are whole
-/// numbers of elements, so an element wider than this gets one element per block
-/// rather than a split that would cut an element in half.
+/// Target block size: 1 MiB. Blocks contain whole elements. An element larger
+/// than the target occupies a block by itself.
 const TARGET_BLOCK_BYTES: u64 = 1 << 20;
 
 /// One block the writer requests: its block index, first element index,
 /// element count, and element size.
 ///
-/// The contract travels with the request on purpose. A producer that had to
-/// fetch its own copy of the blocking beforehand could fetch one that disagrees
-/// with the dataset it is later staged against — a mismatch nothing would catch
-/// until the write was already partly on the sink.
+/// The writer passes this value to [`DataProducer::block_bytes`]. The producer
+/// must append [`Block::len()`] bytes for the block in MATLAB's linear
+/// element order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Block {
