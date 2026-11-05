@@ -25,6 +25,7 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
+use crate::object_graph::ObjectId;
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::source::PhysicalSource;
@@ -60,7 +61,7 @@ impl SingleIndex {
     /// incomplete, or the header is unreachable. Propagates field, range, and metadata errors.
     pub(super) fn new(
         file: &impl Store,
-        header: u64,
+        header: ObjectId,
         geometry: FiniteGeometry,
         message: &WalkedMessage,
         field: SingleChunkField,

@@ -5,6 +5,7 @@ use rstest::rstest;
 use test_util_hdf5::creation_order::Indexing;
 use test_util_hdf5::page_dense::{self, Contents};
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
 use crate::edit::attributes;
@@ -93,7 +94,7 @@ fn allocations(
     .unwrap();
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        address,
+        PhysicalAddress::new(address),
         engine.addresses(),
         crate::file_writer::WIDTHS,
     )

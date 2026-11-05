@@ -376,7 +376,7 @@ fn malformed_authoritative_managers_reject_allocation_before_mutation(
                 .unwrap();
             let extension = object_header::read_oh_chunks(
                 &BytesSource::new(&bytes),
-                extension,
+                PhysicalAddress::new(extension),
                 context.addresses(),
                 crate::file_writer::WIDTHS,
             )
@@ -579,15 +579,20 @@ fn observe(bytes: &[u8]) -> OwnershipObservation {
         .map(|range: &FileRange| (range.start().get(), range.end().get()))
         .collect();
     metadata.extend(
-        object_header::read_oh_chunks(&source, extension, context.addresses(), context.widths())
-            .unwrap()
-            .into_iter()
-            .map(|chunk| {
-                (
-                    chunk.span.start().get(),
-                    chunk.span.start().get() + chunk.span.length(),
-                )
-            }),
+        object_header::read_oh_chunks(
+            &source,
+            PhysicalAddress::new(extension),
+            context.addresses(),
+            context.widths(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|chunk| {
+            (
+                chunk.span.start().get(),
+                chunk.span.start().get() + chunk.span.length(),
+            )
+        }),
     );
     OwnershipObservation {
         free: normalized(free),

@@ -1,6 +1,7 @@
 use rstest::rstest;
 use test_util_hdf5::page_object_headers::{self, Observation, SourceLayout};
 
+use crate::PhysicalAddress;
 use crate::edit::test_util;
 use crate::source::Source;
 use crate::{AttrValue, File};
@@ -144,7 +145,9 @@ fn ordinary_editor_headers_obey_page_geometry_and_native_reads(
     let engine = test_util::open_engine(&path);
     assert_eq!(engine.context.addresses().effective_base().get(), base);
     for (index, address) in headers.into_iter().enumerate() {
-        let spans = engine.oh_chunk_spans(address).unwrap();
+        let spans = engine
+            .oh_chunk_spans(PhysicalAddress::new(address))
+            .unwrap();
         assert_eq!(spans.len(), 1);
         let span = spans[0];
         if index < 3 {

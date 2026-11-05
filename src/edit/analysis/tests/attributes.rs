@@ -63,7 +63,7 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
     let engine = edit_test_util::open_engine(&path);
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        owner,
+        PhysicalAddress::new(owner),
         engine.context.addresses(),
         engine.context.widths(),
     )
@@ -133,7 +133,7 @@ fn allocator_restoration_does_not_restore_attribute_reference_facts() {
     let root = engine.context.superblock().root_group_address;
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        owner,
+        PhysicalAddress::new(owner),
         engine.context.addresses(),
         engine.context.widths(),
     )
@@ -210,7 +210,7 @@ fn unknown_attribute_evidence_does_not_reject_preparation(#[case] evidence: Unkn
     let engine = edit_test_util::open_engine(&path);
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        owner,
+        PhysicalAddress::new(owner),
         engine.context.addresses(),
         engine.context.widths(),
     )

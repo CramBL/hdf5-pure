@@ -552,26 +552,27 @@ fn scan_object<S: OriginalSource + ?Sized>(
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
     let base = src.addresses();
-    let chunks = match edit::object_header::read_oh_chunks(src, addr, base, widths) {
-        Ok(chunks) => chunks,
-        Err(Error::EditUnsupported(edit::object_header::VERSION_TWO_REQUIRED)) => {
-            return Ok(Scanned {
-                descend: true,
-                holds_a_reference: false,
-                fully_read: false,
-                header_located: false,
-            });
-        }
-        Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error),
-        Err(_) => {
-            return Ok(Scanned {
-                descend: true,
-                holds_a_reference: false,
-                fully_read: false,
-                header_located: false,
-            });
-        }
-    };
+    let chunks =
+        match edit::object_header::read_oh_chunks(src, PhysicalAddress::new(addr), base, widths) {
+            Ok(chunks) => chunks,
+            Err(Error::EditUnsupported(edit::object_header::VERSION_TWO_REQUIRED)) => {
+                return Ok(Scanned {
+                    descend: true,
+                    holds_a_reference: false,
+                    fully_read: false,
+                    header_located: false,
+                });
+            }
+            Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error),
+            Err(_) => {
+                return Ok(Scanned {
+                    descend: true,
+                    holds_a_reference: false,
+                    fully_read: false,
+                    header_located: false,
+                });
+            }
+        };
     // Resolve committed datatype addresses through the opened source's effective base.
     let resolver = crate::shared_message::SourceResolver::new(
         src,

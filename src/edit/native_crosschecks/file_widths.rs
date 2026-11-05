@@ -72,12 +72,16 @@ fn native_header_reconstruction_preserves_independent_widths(
         .get();
     let encoded = {
         let source = BytesSource::new(bytes.as_slice());
-        let chunks = object_header::read_oh_chunks(&source, root, addresses, widths).unwrap();
+        let chunks =
+            object_header::read_oh_chunks(&source, PhysicalAddress::new(root), addresses, widths)
+                .unwrap();
         assert!(
             chunks.len() > 1,
             "native root has no continuation: {widths:?}"
         );
-        let mut region = WriteEngine::gather_oh_messages(&source, root, addresses, widths).unwrap();
+        let mut region =
+            WriteEngine::gather_oh_messages(&source, PhysicalAddress::new(root), addresses, widths)
+                .unwrap();
         assert_eq!(region.widths(), widths);
         let mut position = 0;
         let mut data = None;

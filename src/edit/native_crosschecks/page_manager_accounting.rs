@@ -86,7 +86,7 @@ fn persisted_page_workloads_keep_live_free_and_padding_accounting_disjoint(
             .unwrap();
         let extension = engine.context.addresses().resolve(extension).unwrap();
         let extension_bytes: u64 = engine
-            .oh_chunk_spans(extension.get())
+            .oh_chunk_spans(extension)
             .unwrap()
             .iter()
             .map(|range| range.length())

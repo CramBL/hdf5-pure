@@ -114,7 +114,7 @@ impl WriteEngine {
             Self::read_copy_subtree(
                 opened,
                 source.access_mode(),
-                src_addr,
+                ObjectId::new(PhysicalAddress::new(src_addr)),
                 true,
                 source.widths(),
             )
@@ -151,11 +151,11 @@ impl WriteEngine {
     pub(super) fn read_object(
         src: &(impl OriginalSource + ?Sized),
         access_mode: AccessMode,
-        addr: u64,
+        addr: ObjectId,
         widths: FormatWidths,
     ) -> Result<ObjModel, Error> {
         let base = src.addresses();
-        let region = Self::gather_oh_messages(src, addr, base, widths)?;
+        let region = Self::gather_oh_messages(src, addr.header_address(), base, widths)?;
 
         reject_external_storage(&region)?;
         require_copy_reference_widths(src, &region)?;
@@ -177,10 +177,13 @@ impl WriteEngine {
 
         // Read dense attributes into owned messages and check that they can be serialized.
         let dense_attrs = if dense {
-            let stored =
-                attributes::read_object_attrs(src, access_mode, addr, widths, |datatype| {
-                    file_writer::require_reference_width(widths, datatype)
-                })?;
+            let stored = attributes::read_object_attrs(
+                src,
+                access_mode,
+                addr.header_address().get(),
+                widths,
+                |datatype| file_writer::require_reference_width(widths, datatype),
+            )?;
             let set = attributes::dense_attr_set(&region, stored)?;
             DenseAttrSet::new(widths, set.attrs, set.creation, [])?
         } else {
@@ -331,7 +334,7 @@ impl WriteEngine {
     pub(super) fn read_copy_subtree(
         src: &OpenedSource<'_>,
         access_mode: AccessMode,
-        addr: u64,
+        addr: ObjectId,
         cross_file: bool,
         widths: FormatWidths,
     ) -> Result<CopyTree, Error> {
@@ -875,7 +878,7 @@ impl CopyReader<'_> {
     /// hard link or the editor cannot reproduce the source storage, and
     /// [`Error::TraversalLimitExceeded`] if the source holds more objects or hard links than
     /// `budget` allows. Propagates metadata and payload read or parse errors.
-    pub(super) fn read(&self, budget: TraversalBudget, addr: u64) -> Result<CopyTree, Error> {
+    pub(super) fn read(&self, budget: TraversalBudget, addr: ObjectId) -> Result<CopyTree, Error> {
         self.build_copy_tree(self.discover(budget, addr)?)
     }
 
@@ -889,10 +892,9 @@ impl CopyReader<'_> {
     fn discover(
         &self,
         budget: TraversalBudget,
-        addr: u64,
+        addr: ObjectId,
     ) -> Result<ObjectTree<CopySource, usize>, Error> {
-        let root = ObjectId::new(PhysicalAddress::new(addr));
-        ObjectGraph::discover(budget, root, |id| self.expand(id))?
+        ObjectGraph::discover(budget, addr, |id| self.expand(id))?
             .into_tree()
             .or(Err(Error::EditUnsupported(COPY_REPEATED_OBJECT)))
     }
@@ -935,7 +937,7 @@ impl CopyReader<'_> {
         let (source, links) = CopySource::split(WriteEngine::read_object(
             &src,
             access_mode,
-            id.header_address().get(),
+            id,
             self.widths,
         )?);
         if cross_file {

@@ -57,7 +57,7 @@ impl WriteEngine {
         if old_root >= new_root {
             return Ok(None);
         }
-        let Ok(old_spans) = self.oh_chunk_spans(old_root.get()) else {
+        let Ok(old_spans) = self.oh_chunk_spans(old_root) else {
             return Ok(None);
         };
         let [target_range] = old_spans.as_slice() else {
@@ -66,7 +66,7 @@ impl WriteEngine {
         if target_range.length() >= persist.threshold {
             return Ok(None);
         }
-        let new_spans = self.oh_chunk_spans(new_root.get())?;
+        let new_spans = self.oh_chunk_spans(new_root)?;
         let [source_range] = new_spans.as_slice() else {
             return Ok(None);
         };

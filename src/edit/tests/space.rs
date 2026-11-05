@@ -112,7 +112,7 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
     std::fs::write(&path, &bytes).unwrap();
     let mut expected: Vec<_> = edit::object_header::read_oh_chunks(
         &BytesSource::new(&bytes),
-        extension,
+        PhysicalAddress::new(extension),
         AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
     )
@@ -796,7 +796,10 @@ fn deleting_a_compact_group_with_symbolic_links_reclaims_its_hard_linked_subtree
             &ObjectPathBuf::parse(object_path).as_path(),
         )
         .unwrap();
-        (addr, session.oh_chunk_spans(addr).unwrap())
+        (
+            addr,
+            session.oh_chunk_spans(PhysicalAddress::new(addr)).unwrap(),
+        )
     };
     let (group, _) = header_spans("/g");
     let mut expected: Vec<(FileRange, FreeClass)> = ["/g", "/g/d", "/g/σ", "/g/σ/v"]
@@ -2005,8 +2008,12 @@ fn inplace_appends_keep_new_index_allocations_in_metadata_pages() {
         &ObjectPath::parse("d"),
     )
     .unwrap();
-    let retained = engine.chunked_storage_spans(addr).unwrap();
-    let retained_index = engine.chunked_index_spans(addr).unwrap();
+    let retained = engine
+        .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(addr)))
+        .unwrap();
+    let retained_index = engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(addr)))
+        .unwrap();
     for range in [64..2000, 2000..4000] {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&range.collect::<Vec<_>>());
@@ -2028,7 +2035,7 @@ fn inplace_appends_keep_new_index_allocations_in_metadata_pages() {
         "published allocations leave pending padding: meta_pad={meta_padding:?} raw_pad={raw_padding:?}"
     );
     let spans = engine
-        .chunked_storage_spans(addr)
+        .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(addr)))
         .expect("a chunked dataset has reclaimable spans");
     let fresh = spans
         .iter()
@@ -2038,7 +2045,9 @@ fn inplace_appends_keep_new_index_allocations_in_metadata_pages() {
         fresh > 0,
         "the append allocated nothing above {before}, so the assertion above proves nothing"
     );
-    let index = engine.chunked_index_spans(addr).unwrap();
+    let index = engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(addr)))
+        .unwrap();
     for allocation in &retained_index {
         assert!(index.contains(allocation));
         assert!(
@@ -2336,7 +2345,7 @@ fn dense_attribute_owner(session: &WriteEngine, object: &ObjectPathBuf) -> Dense
         &object.as_path(),
     )
     .unwrap();
-    let header_spans = session.oh_chunk_spans(addr).unwrap();
+    let header_spans = session.oh_chunk_spans(PhysicalAddress::new(addr)).unwrap();
     let mut storage = session
         .dense_attribute_storage_spans(&header_region(session, addr), &header_spans)
         .expect("the dense attribute storage is structurally complete");
@@ -2351,7 +2360,7 @@ fn dense_attribute_owner(session: &WriteEngine, object: &ObjectPathBuf) -> Dense
 fn header_region(session: &WriteEngine, addr: u64) -> OhRegion {
     WriteEngine::gather_oh_messages(
         &session.image(),
-        addr,
+        PhysicalAddress::new(addr),
         session.addresses(),
         crate::file_writer::WIDTHS,
     )

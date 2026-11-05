@@ -233,7 +233,7 @@ enum Damage {
 struct Fixture {
     store: WindowProbeStore,
     located: Located,
-    dataset: u64,
+    dataset: ObjectId,
     role: Role,
     parse: FileRange,
     complete: FileRange,

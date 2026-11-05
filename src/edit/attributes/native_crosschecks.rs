@@ -56,7 +56,9 @@ fn attribute_plans_preserve_native_values_at_independent_widths(
         .get();
     let mut edited = {
         let source = BytesSource::new(bytes.as_slice());
-        let region = WriteEngine::gather_oh_messages(&source, root, addresses, widths).unwrap();
+        let region =
+            WriteEngine::gather_oh_messages(&source, PhysicalAddress::new(root), addresses, widths)
+                .unwrap();
         assert!(!super::region_uses_dense_attrs(&region).unwrap());
         let source = OpenedSource::for_test(&source, addresses);
         let slots = super::read_attr_slots(&source, &region).unwrap().0;

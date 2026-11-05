@@ -184,7 +184,8 @@ fn finite_layout_field_encoders_match_native_storage(
     drop(dataset);
     native.close().unwrap();
     let store = WindowProbeStore::open(fs::read(&path).unwrap());
-    let walk = walk_v2_object_header(&store, dataset_address(&store), widths).unwrap();
+    let walk =
+        walk_v2_object_header(&store, dataset_address(&store).header_address(), widths).unwrap();
     let message = walk
         .messages
         .iter()
@@ -265,7 +266,8 @@ fn native_writes_consume_streamed_empty_fixed_arrays(
     let widths = FormatWidths { offsets, lengths };
     Producer::Native.write_finite(&path, widths, entries * 4, filtered, &[]);
     let mut store = WindowProbeStore::open(fs::read(&path).unwrap());
-    let walk = walk_v2_object_header(&store, dataset_address(&store), widths).unwrap();
+    let walk =
+        walk_v2_object_header(&store, dataset_address(&store).header_address(), widths).unwrap();
     let message = walk
         .messages
         .iter()
@@ -527,7 +529,12 @@ fn append_fixed_until(store: &mut WindowProbeStore, expected: &mut Vec<i32>, end
 }
 
 fn fixed_header(store: &WindowProbeStore) -> Option<FixedArrayHeader> {
-    let walk = walk_v2_object_header(store, dataset_address(store), store.widths()).unwrap();
+    let walk = walk_v2_object_header(
+        store,
+        dataset_address(store).header_address(),
+        store.widths(),
+    )
+    .unwrap();
     let message = walk
         .messages
         .iter()
@@ -704,7 +711,7 @@ fn single_chunk_appends_preserve_native_values_and_widths(
     }
     let mut store = WindowProbeStore::open(fs::read(&path).unwrap());
     let address = dataset_address(&store);
-    let walk = walk_v2_object_header(&store, address, widths).unwrap();
+    let walk = walk_v2_object_header(&store, address.header_address(), widths).unwrap();
     let layout = walk
         .messages
         .iter()

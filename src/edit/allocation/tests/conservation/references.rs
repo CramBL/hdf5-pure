@@ -607,7 +607,7 @@ impl Roles {
         let mut dataspace_body = None;
         for chunk in object_header::read_oh_chunks(
             &source,
-            dataset.header_address().unwrap(),
+            PhysicalAddress::new(dataset.header_address().unwrap()),
             addresses,
             crate::file_writer::WIDTHS,
         )

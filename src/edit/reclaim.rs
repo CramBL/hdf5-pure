@@ -66,7 +66,7 @@ struct ChunkedStorageParts {
 
 /// Reachable header identities from a complete analysis of disjoint storage.
 pub(super) struct ExclusiveChunkOwners {
-    headers: BTreeSet<u64>,
+    headers: BTreeSet<ObjectId>,
 }
 
 impl ExclusiveChunkOwners {
@@ -75,7 +75,7 @@ impl ExclusiveChunkOwners {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the header is absent.
-    pub(super) fn require(&self, header: u64) -> Result<(), Error> {
+    pub(super) fn require(&self, header: ObjectId) -> Result<(), Error> {
         if !self.headers.contains(&header) {
             return Err(Error::AppendUnsupported(
                 "chunk storage has no reachable ownership proof",
@@ -141,7 +141,7 @@ impl WriteEngine {
     /// Returns the metadata, geometry, and overlap errors of [`Self::space_ownership`].
     fn space_ownership_with_headers(
         &self,
-        headers: Option<&mut BTreeSet<u64>>,
+        headers: Option<&mut BTreeSet<ObjectId>>,
     ) -> Result<SpaceOwnership, Error> {
         let physical_size = self.image.len();
         let logical_size = self.context.superblock().eof_address;
@@ -158,8 +158,8 @@ impl WriteEngine {
         let root = self
             .context
             .addresses()
-            .resolve(self.context.superblock().root_group_address)?
-            .get();
+            .resolve(self.context.superblock().root_group_address)?;
+        let root = ObjectId::new(root);
         let mut liveness = headers.as_ref().map(|_| GlobalHeapLiveness {
             referenced_collections: BTreeSet::new(),
             analysis_complete: true,
@@ -197,11 +197,11 @@ impl WriteEngine {
         if let Some(extension) = self.context.superblock().superblock_extension_address
             && !extension.is_undefined(self.widths().offsets)
         {
-            let extension = self.context.addresses().resolve(extension)?.get();
+            let extension = self.context.addresses().resolve(extension)?;
             let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
-                extension,
+                extension.get(),
                 self.widths(),
                 self.context.addresses().effective_base(),
             )?;
@@ -319,7 +319,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
     /// parsing and source-read errors from [`super::object_header::read_oh_chunks`].
-    pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<FileRange>, Error> {
+    pub(super) fn oh_chunk_spans(&self, addr: PhysicalAddress) -> Result<Vec<FileRange>, Error> {
         Ok(super::object_header::read_oh_chunks(
             &self.image(),
             addr,
@@ -559,7 +559,7 @@ impl WriteEngine {
         object: ObjectId,
         out: &mut Vec<(FileRange, FreeClass)>,
     ) -> Option<ObjectStorageKind> {
-        let addr = object.header_address().get();
+        let addr = object.header_address();
         let base = self.context.addresses();
         let file_len = self.image().len();
         // The header's own chunks. If they cannot be mapped, account for nothing.
@@ -587,7 +587,7 @@ impl WriteEngine {
         match Self::read_object(
             &self.opened_source(),
             AccessMode::ReadWrite,
-            addr,
+            object,
             self.context.widths(),
         ) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
@@ -626,7 +626,7 @@ impl WriteEngine {
             // bounds/overlap check), leaving the whole dataset as dead bytes and not freeing a
             // region that might still be in use.
             Ok(ObjModel::DatasetChunked { .. }) => {
-                let storage = self.chunked_storage_spans(addr)?;
+                let storage = self.chunked_storage_spans(object)?;
                 self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
                 // Already page-typed: chunk data is raw, and the index class follows its
                 // format allocation type or proven physical placement.
@@ -743,7 +743,10 @@ impl WriteEngine {
     /// This method only locates the layout and dataspace messages and validates
     /// the result. The global heap collections that the chunks refer to are
     /// excluded, as in [`collect_free_spans`](Self::collect_free_spans).
-    pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(FileRange, FreeClass)>> {
+    pub(super) fn chunked_storage_spans(
+        &self,
+        addr: ObjectId,
+    ) -> Option<Vec<(FileRange, FreeClass)>> {
         let split = self.chunked_storage_parts(addr)?;
         let mut spans: Vec<_> = split
             .data
@@ -884,11 +887,11 @@ impl WriteEngine {
     }
 
     /// Returns the raw chunk data and metadata index blocks of a chunked dataset separately.
-    fn chunked_storage_parts(&self, addr: u64) -> Option<ChunkedStorageParts> {
+    fn chunked_storage_parts(&self, addr: ObjectId) -> Option<ChunkedStorageParts> {
         // Locate the data-layout and dataspace messages in the object header.
         let region = Self::gather_oh_messages(
             &self.image(),
-            addr,
+            addr.header_address(),
             self.context.addresses(),
             self.context.widths(),
         )
@@ -1020,10 +1023,10 @@ impl WriteEngine {
     /// kept chunk data is never freed. Base-aware and validated
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
     /// violation.
-    pub(super) fn chunked_index_spans(&self, addr: u64) -> Option<Vec<FileRange>> {
+    pub(super) fn chunked_index_spans(&self, addr: ObjectId) -> Option<Vec<FileRange>> {
         let region = Self::gather_oh_messages(
             &self.image(),
-            addr,
+            addr.header_address(),
             self.context.addresses(),
             self.context.widths(),
         )
@@ -1075,10 +1078,10 @@ impl WriteEngine {
     /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
     fn collect_owned_spans(
         &self,
-        root: u64,
+        root: ObjectId,
         raw: &mut Vec<FileRange>,
         metadata: &mut Vec<FileRange>,
-        mut headers: Option<&mut BTreeSet<u64>>,
+        mut headers: Option<&mut BTreeSet<ObjectId>>,
         mut liveness: Option<&mut GlobalHeapLiveness>,
     ) -> Result<bool, Error> {
         self.walk_reachable_objects([root], |addr, header, child| {
@@ -1092,7 +1095,7 @@ impl WriteEngine {
                 liveness.analysis_complete &=
                     self.collect_object_collections(header, &mut liveness.referenced_collections)?;
             }
-            metadata.extend(self.oh_chunk_spans(addr)?);
+            metadata.extend(self.oh_chunk_spans(addr.header_address())?);
             self.collect_object_owned_spans(header, raw, metadata, child)
         })
     }
@@ -1100,9 +1103,8 @@ impl WriteEngine {
     /// Visits each object reachable from the object headers in `roots` once, and returns whether
     /// the walk is complete.
     ///
-    /// `visit` receives the absolute address of an object header, the parsed header, and a
-    /// callback that adds a child object to the walk by the absolute address of its header. The
-    /// walk is incomplete if `visit` returns `false` for an object, or if the walk skips an object
+    /// `visit` receives an [`ObjectId`], the parsed header, and a callback for adding child identities.
+    /// The walk is incomplete if `visit` returns `false` for an object, or if the walk skips an object
     /// [`MAX_LINK_WALK_DEPTH`] links from a root or after visiting [`MAX_LINK_GRAPH_NODES`] objects.
     ///
     /// # Errors
@@ -1110,14 +1112,12 @@ impl WriteEngine {
     /// Returns [`Error::Format`] if an object header is malformed, and any error `visit` returns.
     pub(super) fn walk_reachable_objects(
         &self,
-        roots: impl IntoIterator<Item = u64>,
-        mut visit: impl FnMut(u64, &ObjectHeader, &mut dyn FnMut(u64)) -> Result<bool, Error>,
+        roots: impl IntoIterator<Item = ObjectId>,
+        mut visit: impl FnMut(ObjectId, &ObjectHeader, &mut dyn FnMut(ObjectId)) -> Result<bool, Error>,
     ) -> Result<bool, Error> {
         let mut complete = true;
         let mut traversal = ObjectTraversal::new(
-            roots
-                .into_iter()
-                .map(|root| ObjectId::new(PhysicalAddress::new(root))),
+            roots,
             TraversalBudget::new(MAX_LINK_GRAPH_NODES as usize, usize::MAX),
             MAX_LINK_WALK_DEPTH,
         );
@@ -1130,8 +1130,8 @@ impl WriteEngine {
                 self.widths(),
                 self.context.addresses().effective_base(),
             )?;
-            complete &= visit(addr, &header, &mut |child| {
-                traversal.push_child(ObjectId::new(PhysicalAddress::new(child)), depth);
+            complete &= visit(id, &header, &mut |child| {
+                traversal.push_child(child, depth);
             })?;
         }
         Ok(complete && traversal.complete())
@@ -1152,7 +1152,7 @@ impl WriteEngine {
         header: &ObjectHeader,
         raw: &mut Vec<FileRange>,
         metadata: &mut Vec<FileRange>,
-        mut child: impl FnMut(u64),
+        mut child: impl FnMut(ObjectId),
     ) -> Result<bool, Error> {
         let mut complete = true;
         let messages = &header.messages;
@@ -1177,12 +1177,10 @@ impl WriteEngine {
                         object_header_address,
                     } = link.link_target
                     {
-                        child(
-                            self.context
-                                .addresses()
-                                .resolve(object_header_address)?
-                                .get(),
-                        );
+                        child(ObjectId::resolve(
+                            self.context.addresses(),
+                            object_header_address,
+                        )?);
                     }
                 }
                 MessageType::LINK_INFO => {
@@ -1288,7 +1286,7 @@ impl WriteEngine {
         &self,
         data: &[u8],
         metadata: &mut Vec<FileRange>,
-        mut child: impl FnMut(u64),
+        mut child: impl FnMut(ObjectId),
     ) -> Result<bool, Error> {
         let info = LinkInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         if let Some(heap) = info.fractal_heap_address {
@@ -1315,12 +1313,10 @@ impl WriteEngine {
                 self.widths(),
             )?;
             for entry in entries {
-                child(
-                    self.context
-                        .addresses()
-                        .resolve(entry.object_header_address)?
-                        .get(),
-                );
+                child(ObjectId::resolve(
+                    self.context.addresses(),
+                    entry.object_header_address,
+                )?);
             }
         }
 

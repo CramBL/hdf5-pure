@@ -7,6 +7,7 @@ use test_util_hdf5::global_heap::attributes::Owner;
 use test_util_hdf5::global_heap::attributes::Storage;
 
 use crate::AttrValue;
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
 use crate::edit::attributes;
@@ -42,7 +43,7 @@ fn native_attribute_edits_retire_complete_original_collections(
     .unwrap();
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        address,
+        PhysicalAddress::new(address),
         engine.context.addresses(),
         engine.context.widths(),
     )

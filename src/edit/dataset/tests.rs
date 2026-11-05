@@ -27,6 +27,7 @@ use crate::FillTime;
 use crate::MemoryStrategy;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -51,6 +52,7 @@ use crate::fill_value::FillPattern;
 use crate::filters::ChunkContext;
 use crate::image::WriteBuffering;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -239,7 +241,9 @@ fn staged_page_creation_preserves_values_and_complete_index_allocations(
     drop(dataset);
     file.close().unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let index = engine.chunked_index_spans(header).unwrap();
+    let index = engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
+        .unwrap();
     match creation {
         Creation::Fixed(0 | 1) => assert!(index.is_empty()),
         Creation::Fixed(_) | Creation::FixedSparse => assert_eq!(index.len(), 2),

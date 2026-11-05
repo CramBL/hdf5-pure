@@ -34,6 +34,7 @@ use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_writer;
 use crate::image::WriteBuffering;
+use crate::object_graph::ObjectId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::page_publication_failure::{
     BarrierRecord, PagePublicationFailure as Failure, PublicationFailureImage,
@@ -124,7 +125,9 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
         .resolve(engine.context.superblock().root_group_address)
         .unwrap()
         .get();
-    let root_spans = engine.oh_chunk_spans(old_root).unwrap();
+    let root_spans = engine
+        .oh_chunk_spans(PhysicalAddress::new(old_root))
+        .unwrap();
     disk_log::start();
     let (raw, header, root) = engine.place_dataset_and_root();
     assert!(raw >= boundary);
@@ -232,7 +235,7 @@ impl WriteEngine {
             .get();
         let mut region = WriteEngine::gather_oh_messages(
             &self.image(),
-            old_root,
+            PhysicalAddress::new(old_root),
             self.context.addresses(),
             self.context.widths(),
         )
@@ -402,7 +405,9 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
         &ObjectPathBuf::parse("chunks").as_path(),
     )
     .unwrap();
-    let index_spans = engine.chunked_index_spans(chunks_addr).unwrap();
+    let index_spans = engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(chunks_addr)))
+        .unwrap();
     assert!(owned.analysis_complete);
     assert_eq!(index_spans.len(), 2);
     let metadata_pages = owned

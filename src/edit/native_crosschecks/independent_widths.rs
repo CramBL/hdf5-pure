@@ -31,6 +31,7 @@ use crate::LibVer;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
 use crate::address::AddressContext;
@@ -705,7 +706,7 @@ fn assert_reference_attribute_storage(file: &File, bytes: &[u8], site: Reference
     };
     let region = WriteEngine::gather_oh_messages(
         &BytesSource::new(bytes),
-        file.root().header_address().unwrap(),
+        PhysicalAddress::new(file.root().header_address().unwrap()),
         AddressContext::from_effective_base(file.superblock().base_address),
         widths,
     )
@@ -843,7 +844,7 @@ fn assert_dense(file: &File, dense: bool) {
     let address = file.group("g").unwrap().header_address().unwrap();
     let region = WriteEngine::gather_oh_messages(
         &source,
-        address,
+        PhysicalAddress::new(address),
         AddressContext::from_effective_base(file.superblock().base_address),
         widths,
     )

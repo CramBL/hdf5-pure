@@ -65,7 +65,7 @@ impl WriteEngine {
     /// Space Info message. Propagates parsing, source-read, and encoding errors.
     pub(super) fn rewrite_extension_region(
         &self,
-        ext_addr: u64,
+        ext_addr: PhysicalAddress,
         info: &FileSpaceInfo,
     ) -> Result<OhRegion, Error> {
         let widths = self.context.widths();
@@ -86,7 +86,7 @@ impl WriteEngine {
     /// parsing, checksum, and source-read errors from [`visit_oh_chunks`].
     pub(super) fn gather_oh_messages<S: Source + ?Sized>(
         src: &S,
-        addr: u64,
+        addr: PhysicalAddress,
         base: AddressContext,
         widths: FormatWidths,
     ) -> Result<OhRegion, Error> {
@@ -115,7 +115,7 @@ impl<'a, S: Source + ?Sized> ExtensionReconstruction<'a, S> {
     /// Returns the traversal errors from [`visit_oh_chunks`].
     pub(crate) fn read(
         src: &'a S,
-        addr: u64,
+        addr: PhysicalAddress,
         base: AddressContext,
         widths: FormatWidths,
     ) -> Result<Self, Error> {
@@ -171,7 +171,7 @@ impl PreparedHeader {
 
 fn gather_records<S: Source + ?Sized>(
     src: &S,
-    addr: u64,
+    addr: PhysicalAddress,
     base: AddressContext,
     widths: FormatWidths,
     records: HeaderRecords,
@@ -462,25 +462,28 @@ impl<'a> HeaderRewrite<'a> {
     }
 }
 
-/// Returns the absolute chunk 0 message range and parsed prefix properties.
+/// Returns the physical chunk 0 message range and parsed prefix properties.
 ///
-/// `prefix` starts at `addr` and contains up to [`OBJECT_HEADER_PREFIX_MAX_LEN`] bytes.
-/// `file_len` bounds the message region and its trailing checksum. The version 2 prefix and
-/// chunk fields are defined in "Version 2 Data Object Header Prefix" of the [format
-/// specification, version 4.0][spec].
+/// `prefix` starts at `addr` and contains up to [`OBJECT_HEADER_PREFIX_MAX_LEN`] bytes. The returned
+/// [`FileRange`] excludes the prefix and trailing checksum. Both the message region and checksum
+/// must end at or before the exclusive physical endpoint `file_end`. The version 2 prefix and chunk
+/// fields are defined in "Version 2 Data Object Header Prefix" of the [format specification,
+/// version 4.0][spec].
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if the header is not version 2, the prefix is truncated,
-/// or the chunk or its checksum extends past `file_len`. Returns [`Error::Format`] for other
+/// or the chunk or its checksum extends past `file_end`. Returns [`Error::Format`] for other
 /// prefix errors.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
 pub(super) fn oh_region_at(
     prefix: &[u8],
-    addr: u64,
-    file_len: u64,
-) -> Result<(u64, u64, ObjectHeaderPrefix), Error> {
+    addr: PhysicalAddress,
+    file_end: PhysicalAddress,
+) -> Result<(FileRange, ObjectHeaderPrefix), Error> {
+    let addr = addr.get();
+    let file_len = file_end.get();
     let parsed = ObjectHeaderPrefix::parse(prefix).map_err(|err| match err {
         FormatError::InvalidObjectHeaderSignature | FormatError::InvalidObjectHeaderVersion(_) => {
             Error::EditUnsupported(VERSION_TWO_REQUIRED)
@@ -499,7 +502,13 @@ pub(super) fn oh_region_at(
                 .is_some_and(|end| end <= file_len)
         })
         .ok_or(Error::EditUnsupported("truncated object header"))?;
-    Ok((region_start, region_end, parsed.prefix))
+    Ok((
+        FileRange::new(
+            PhysicalAddress::new(region_start),
+            region_end - region_start,
+        )?,
+        parsed.prefix,
+    ))
 }
 
 /// A bounded version 2 header chunk and its full on-disk extent.
@@ -544,28 +553,27 @@ impl OhChunk {
 /// Returns [`Error::EditUnsupported`] for an unsupported or truncated header. Returns
 /// [`FormatError::ChecksumMismatch`] if checksum verification is enabled and the checksum is
 /// invalid. Propagates parsing and source-read errors.
-fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Error> {
+fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: PhysicalAddress) -> Result<OhChunk, Error> {
     let file_len = src.len();
     let window = file_len
-        .saturating_sub(addr)
+        .saturating_sub(addr.get())
         .min(OBJECT_HEADER_PREFIX_MAX_LEN as u64)
         .to_usize()?;
-    let prefix = src.read_metadata_at(addr, window)?;
-    let (rs, re, props) = oh_region_at(&prefix, addr, file_len)?;
+    let prefix = src.read_metadata_at(addr.get(), window)?;
+    let (region, props) = oh_region_at(&prefix, addr, PhysicalAddress::new(file_len))?;
+    let rs = region.start().get();
+    let re = region.end().get();
     // `re >= rs > addr`, so both differences are non-negative, and `oh_region_at`
     // has checked that the 4-byte checksum past `re` is present.
-    let len = (re - addr).to_usize()?;
-    let span = FileRange::new(
-        PhysicalAddress::new(addr),
-        re - addr + OBJECT_HEADER_CHECKSUM_SIZE.to_u64(),
-    )?;
-    let mut buf = src.read_metadata_at(addr, span.length().to_usize()?)?;
+    let len = (re - addr.get()).to_usize()?;
+    let span = FileRange::new(addr, re - addr.get() + OBJECT_HEADER_CHECKSUM_SIZE.to_u64())?;
+    let mut buf = src.read_metadata_at(addr.get(), span.length().to_usize()?)?;
     hdf5_pure_format::__private::verify_trailing(&buf)?;
     buf.truncate(len);
     Ok(OhChunk {
         span,
         buf,
-        messages_start: (rs - addr).to_usize()?,
+        messages_start: (rs - addr.get()).to_usize()?,
         props,
     })
 }
@@ -583,7 +591,7 @@ fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Err
 /// [`read_oh_chunk0`] and [`ContinuationChunk::read`].
 pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     src: &S,
-    addr: u64,
+    addr: PhysicalAddress,
     base: AddressContext,
     widths: FormatWidths,
 ) -> Result<Vec<OhChunk>, Error> {
@@ -608,7 +616,7 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
 /// checksum, and visitor errors.
 fn visit_oh_chunks<S: Source + ?Sized>(
     src: &S,
-    addr: u64,
+    addr: PhysicalAddress,
     base: AddressContext,
     widths: FormatWidths,
     mut visit: impl FnMut(OhChunk) -> Result<(), Error>,
@@ -1154,22 +1162,17 @@ mod tests {
         let mut image = vec![0; usize::try_from(physical.get()).unwrap()];
         image.extend(encoded);
         let src = BytesSource::new(&image);
-        let chunks =
-            read_oh_chunks(&src, physical.get(), addresses, crate::file_writer::WIDTHS).unwrap();
+        let chunks = read_oh_chunks(&src, physical, addresses, crate::file_writer::WIDTHS).unwrap();
         assert!(chunks.len() > 1);
         assert_eq!(
             chunks.iter().map(|chunk| chunk.span.length()).sum::<u64>(),
             allocation.len()
         );
-        let actual = WriteEngine::gather_oh_messages(
-            &src,
-            physical.get(),
-            addresses,
-            crate::file_writer::WIDTHS,
-        )
-        .unwrap()
-        .without_nil()
-        .unwrap();
+        let actual =
+            WriteEngine::gather_oh_messages(&src, physical, addresses, crate::file_writer::WIDTHS)
+                .unwrap()
+                .without_nil()
+                .unwrap();
         assert_eq!(&actual[..], &rewritten.without_nil().unwrap()[..]);
         assert_eq!(actual.props().layout, props.layout);
         assert_eq!(
@@ -1212,7 +1215,7 @@ mod tests {
         let expected = build_v2_object_header(&region).unwrap();
         let expected = WriteEngine::gather_oh_messages(
             &BytesSource::new(expected),
-            0,
+            PhysicalAddress::new(0),
             addresses,
             crate::file_writer::WIDTHS,
         )
@@ -1224,7 +1227,7 @@ mod tests {
         .unwrap();
         let actual = WriteEngine::gather_oh_messages(
             &BytesSource::new(bytes),
-            0,
+            PhysicalAddress::new(0),
             addresses,
             crate::file_writer::WIDTHS,
         )

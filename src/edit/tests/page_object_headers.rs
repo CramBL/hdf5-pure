@@ -4,6 +4,7 @@ use test_util::object_header::v2::{Header, HeaderFlags};
 use test_util::object_header::{Message, MessageType};
 use test_util_hdf5::userblock;
 
+use crate::PhysicalAddress;
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::test_util as edit_test_util;
 use crate::source::Source;
@@ -56,7 +57,10 @@ fn complete_object_headers_use_checked_block_placement(
     let address = engine.place_object_header(&header).unwrap();
     assert_eq!(address, physical + PAGE);
     assert_eq!(
-        engine.oh_chunk_spans(address).unwrap()[0].length(),
+        engine
+            .oh_chunk_spans(PhysicalAddress::new(address))
+            .unwrap()[0]
+            .length(),
         length as u64
     );
     assert_eq!(

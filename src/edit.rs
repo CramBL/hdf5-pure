@@ -327,6 +327,7 @@ use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
@@ -590,7 +591,7 @@ pub(crate) struct WriteEngine {
     /// across appends; cleared wholesale at the entry of every non-trivial
     /// [`commit`](Self::commit), since a commit can relocate a cached header or
     /// free the region it points into (see `commit`).
-    located: HashMap<u64, LocatedState>,
+    located: HashMap<ObjectId, LocatedState>,
     /// Complete source-ownership proof for finite chunk retirement, cached until a commit begins.
     chunk_ownership: OnceLock<Box<reclaim::ExclusiveChunkOwners>>,
     /// Physical ranges of global heap collections placed by this session for variable-length
@@ -666,7 +667,7 @@ pub(crate) struct WriteEngine {
     /// An in-place append never moves an object header — that is why
     /// [`located`](Self::located) can be keyed by address and survive appends —
     /// so only a commit can stale an entry, and it clears both together.
-    resolved: HashMap<ObjectPathBuf, u64>,
+    resolved: HashMap<ObjectPathBuf, ObjectId>,
     /// Whether this session splits a large in-place append into batches, trading
     /// whole-call crash atomicity for a peak memory that does not scale with the
     /// call. Set by [`open_rw_with_strategy`](Self::open_rw_with_strategy); see

@@ -630,8 +630,12 @@ impl WriteEngine {
                         ));
                     }
                 }
-                let region =
-                    Self::gather_oh_messages(&self.image(), addr, base, self.context.widths())?;
+                let region = Self::gather_oh_messages(
+                    &self.image(),
+                    PhysicalAddress::new(addr),
+                    base,
+                    self.context.widths(),
+                )?;
                 let attributes = attributes::plan_attr_ops(&self.opened_source(), &region, &ops)?;
                 edits.collections.extend(analysis.attribute_collections(
                     ObjectId::new(PhysicalAddress::new(addr)),
@@ -718,7 +722,7 @@ impl WriteEngine {
             let tree = Self::read_copy_subtree(
                 &self.opened_source(),
                 AccessMode::ReadWrite,
-                src_addr,
+                ObjectId::new(PhysicalAddress::new(src_addr)),
                 false,
                 self.context.widths(),
             )?;

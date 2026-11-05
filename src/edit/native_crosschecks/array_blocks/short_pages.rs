@@ -15,8 +15,10 @@ use crate::File;
 use crate::FileAccessProperties;
 use crate::FileSpacePageSize;
 use crate::MemoryStrategy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::edit::test_util;
+use crate::object_graph::ObjectId;
 
 #[rstest]
 #[case::direct(Growth::Direct)]
@@ -139,7 +141,10 @@ fn assert_geometry(
     let mut blocks = 0;
     let mut secondary = 0;
     let mut largest = 0;
-    for range in engine.chunked_index_spans(header).unwrap() {
+    for range in engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
+        .unwrap()
+    {
         let signature = engine
             .image()
             .read_exact_at(range.start().get(), extensible_array::SIGNATURE.len())

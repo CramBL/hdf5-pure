@@ -35,6 +35,7 @@ use crate::datatype::Datatype;
 use crate::error::{Error, FormatError};
 use crate::filter_pipeline::FilterPipeline;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::primitive_bytes::PrimitiveBytes;
 use crate::reader::OpenedSource;
@@ -614,7 +615,7 @@ impl WriteEngine {
     /// Propagates allocation, encoding, publication, synchronization, and metadata read errors.
     fn initialize_append_index(
         &mut self,
-        oh_addr: u64,
+        oh_addr: ObjectId,
         index: &chunk_index_inplace::UnallocatedIndex,
         initialization: &ExtensibleArrayInitialization,
     ) -> Result<Located, Error> {
@@ -651,7 +652,7 @@ impl WriteEngine {
     /// Returns [`Error::AppendInPlaceUnsupported`] for a userblock, an older superblock,
     /// non-persistent PAGE storage, conflicting staged edits, or an unsupported dataset. Returns
     /// metadata read and parse errors.
-    pub(super) fn append_prepare(&mut self, target: AppendTarget<'_>) -> Result<u64, Error> {
+    pub(super) fn append_prepare(&mut self, target: AppendTarget<'_>) -> Result<ObjectId, Error> {
         // Immediate append requires base-zero addresses and a version 2 or 3 superblock.
         if !self.context.superblock().base_address.is_zero() {
             return Err(Error::AppendInPlaceUnsupported(
@@ -709,6 +710,7 @@ impl WriteEngine {
                         self.context.widths(),
                         &dataset.as_path(),
                     )?;
+                    let addr = ObjectId::new(PhysicalAddress::new(addr));
                     self.resolved.insert(dataset.clone(), addr);
                     addr
                 }
@@ -765,7 +767,7 @@ impl WriteEngine {
         };
         let Ok(region) = Self::gather_oh_messages(
             &self.image(),
-            addr,
+            PhysicalAddress::new(addr),
             self.context.addresses(),
             self.context.widths(),
         ) else {
@@ -855,7 +857,7 @@ impl WriteEngine {
 #[derive(Clone, Copy)]
 pub(crate) enum AppendTarget<'a> {
     Path(&'a ObjectPathBuf),
-    Header(u64),
+    Header(ObjectId),
 }
 
 /// Describes chunk-aligned batching without materializing append bytes.
@@ -1209,7 +1211,7 @@ impl Store for EditStore<'_> {
         self.engine.context.superblock().eof_address
     }
 
-    fn require_exclusive_chunk_storage(&self, header: u64) -> Result<(), Error> {
+    fn require_exclusive_chunk_storage(&self, header: ObjectId) -> Result<(), Error> {
         let owners = match self.engine.chunk_ownership.get() {
             Some(owners) => owners,
             None => {
@@ -1437,7 +1439,7 @@ pub(super) fn datatypes_match(stored: &Datatype, input: &Datatype) -> bool {
 /// metadata read and parse errors.
 pub(crate) fn locate_dataset_state<F: Store>(
     file: &F,
-    oh_addr: u64,
+    oh_addr: ObjectId,
 ) -> Result<LocatedState, Error> {
     let result = Located::locate_at(file, oh_addr, Error::AppendInPlaceUnsupported)?;
     let datatype = result.datatype;

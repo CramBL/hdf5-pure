@@ -13,8 +13,10 @@ use crate::Layout;
 use crate::MemoryStrategy;
 use crate::MetadataCacheConfig;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 
 #[rstest]
@@ -200,7 +202,8 @@ fn single_chunk_plans_reject_changed_fields_before_allocating(#[case] stale: Sta
             store.data[usize::try_from(index.geometry.dimension.field.start().get()).unwrap()] = 2
         }
         Stale::Reference => {
-            let walk = walk_v2_object_header(&store, address, store.widths()).unwrap();
+            let walk =
+                walk_v2_object_header(&store, address.header_address(), store.widths()).unwrap();
             let message = walk
                 .messages
                 .iter()
@@ -360,7 +363,7 @@ fn single_chunk_storage_overlapping_its_header_is_rejected() {
         false,
     );
     let address = dataset_address(&store);
-    let walk = walk_v2_object_header(&store, address, store.widths()).unwrap();
+    let walk = walk_v2_object_header(&store, address.header_address(), store.widths()).unwrap();
     let message = walk
         .messages
         .iter()
@@ -374,7 +377,7 @@ fn single_chunk_storage_overlapping_its_header_is_rejected() {
     };
     let encoded = field
         .encode(Some(ChunkRecord {
-            address: StoredAddress::new(address),
+            address: StoredAddress::new(address.header_address().get()),
             stored_size: 16,
             filter_mask: 0,
         }))
@@ -418,7 +421,8 @@ fn single_chunk_overlapping_live_storage_is_rejected_before_publication(#[case] 
     let root = store.superblock.root_group_address.get();
     let (target, previous_end) = match overlap {
         Overlap::Root => {
-            let root_header = walk_v2_object_header(&store, root, store.widths()).unwrap();
+            let root_header =
+                walk_v2_object_header(&store, PhysicalAddress::new(root), store.widths()).unwrap();
             let message = &root_header.messages[0];
             (root + 1, message.chunk_msg_end + EA_CHECKSUM_SIZE)
         }
@@ -431,7 +435,9 @@ fn single_chunk_overlapping_live_storage_is_rejected_before_publication(#[case] 
             let address = dataset.header_address().unwrap();
             drop(dataset);
             file.close().unwrap();
-            let header = walk_v2_object_header(&store, address, store.widths()).unwrap();
+            let header =
+                walk_v2_object_header(&store, PhysicalAddress::new(address), store.widths())
+                    .unwrap();
             let message = header
                 .messages
                 .iter()
@@ -456,7 +462,7 @@ fn single_chunk_overlapping_live_storage_is_rejected_before_publication(#[case] 
         }
     };
     let address = dataset_address(&store);
-    let header = walk_v2_object_header(&store, address, store.widths()).unwrap();
+    let header = walk_v2_object_header(&store, address.header_address(), store.widths()).unwrap();
     let message = header
         .messages
         .iter()
@@ -519,7 +525,8 @@ fn single_chunk_storage_requires_complete_reachable_ownership(#[case] ownership:
         false,
     );
     let old_address = dataset_address(&store);
-    let header = walk_v2_object_header(&store, old_address, store.widths()).unwrap();
+    let header =
+        walk_v2_object_header(&store, old_address.header_address(), store.widths()).unwrap();
     let mut messages = header
         .messages
         .into_iter()
@@ -727,7 +734,8 @@ fn single_chunk_plans_reject_a_different_dataset_before_allocating() {
         &ObjectPath::parse("other"),
     )
     .unwrap();
-    let mut second = edit::locate_dataset_state(&store, other).unwrap();
+    let mut second =
+        edit::locate_dataset_state(&store, ObjectId::new(PhysicalAddress::new(other))).unwrap();
     let AppendIndex::Single(first) = &mut first.index else {
         panic!("expected a Single Chunk index")
     };

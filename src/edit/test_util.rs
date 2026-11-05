@@ -307,7 +307,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         .unwrap()
     };
     let addr = resolve(&object);
-    let header_spans = session.oh_chunk_spans(addr).unwrap();
+    let header_spans = session.oh_chunk_spans(PhysicalAddress::new(addr)).unwrap();
     let header = ObjectHeader::parse_from_source_with_widths(
         &SourceMetadata(&session.image()),
         AccessMode::ReadWrite,
@@ -377,7 +377,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         .chain(data_blocks)
         .chain(link_names.iter().flat_map(|link_name| {
             let child = resolve(&ObjectPathBuf::parse(&format!("/g/{link_name}")));
-            reclaim::meta_spans(session.oh_chunk_spans(child).unwrap())
+            reclaim::meta_spans(session.oh_chunk_spans(PhysicalAddress::new(child)).unwrap())
         }))
         .collect();
     expected.sort_unstable_by_key(|&(range, _)| range.start());
@@ -642,10 +642,12 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByte
     )
     .unwrap();
     let index_spans = s
-        .chunked_index_spans(victim_addr)
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(victim_addr)))
         .expect("the extensible-array index is enumerable");
     assert!(!index_spans.is_empty());
-    let allocations = s.chunked_storage_spans(victim_addr).unwrap();
+    let allocations = s
+        .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(victim_addr)))
+        .unwrap();
     assert_eq!(
         allocations
             .iter()
@@ -718,8 +720,13 @@ pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
         .resolve(located.superblock.superblock_extension_address.unwrap())
         .unwrap()
         .get();
-    let region =
-        WriteEngine::gather_oh_messages(source, extension, addresses, located.widths).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        source,
+        PhysicalAddress::new(extension),
+        addresses,
+        located.widths,
+    )
+    .unwrap();
     let splice = region
         .splice_first(MessageType::FILE_SPACE_INFO)
         .unwrap()

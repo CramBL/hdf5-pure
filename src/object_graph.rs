@@ -14,6 +14,8 @@ use alloc::vec::Vec;
 #[cfg(test)]
 use core::borrow::Borrow;
 use core::fmt;
+use core::hash::Hash;
+use core::hash::Hasher;
 
 use hdf5_pure_core::PhysicalAddress;
 
@@ -362,6 +364,12 @@ impl ObjectId {
 
     pub(crate) const fn header_address(self) -> PhysicalAddress {
         self.0
+    }
+}
+
+impl Hash for ObjectId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.get().hash(state);
     }
 }
 
