@@ -53,8 +53,8 @@ fn bulk_recovery_preserves_incremental_state_and_allocations(
         (1, AllocationClass::Raw),
     ] {
         assert_eq!(
-            bulk.allocate(length, class),
-            incremental.allocate(length, class)
+            bulk.allocate(ByteLength::new(length), class),
+            incremental.allocate(ByteLength::new(length), class)
         );
         assert_state(&bulk, &incremental);
     }
@@ -133,7 +133,10 @@ fn bulk_recovery_keeps_disabled_strategies_empty(#[case] strategy: Option<FileSp
     assert!(!space.is_enabled());
     assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
     assert_eq!(space.reusable_sections().collect::<Vec<_>>(), []);
-    assert_eq!(space.allocate(1, AllocationClass::Raw), None);
+    assert_eq!(
+        space.allocate(ByteLength::new(1), AllocationClass::Raw),
+        None
+    );
 }
 
 fn assert_state(actual: &SessionSpace, expected: &SessionSpace) {

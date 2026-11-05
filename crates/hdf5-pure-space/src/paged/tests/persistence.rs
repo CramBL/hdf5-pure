@@ -1,5 +1,6 @@
 use alloc::vec;
 
+use hdf5_pure_core::__private::NonZeroByteLength;
 use rstest::rstest;
 
 use super::super::*;

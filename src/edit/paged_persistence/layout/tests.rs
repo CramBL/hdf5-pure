@@ -93,7 +93,7 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
     );
     let capacity = planned.end.checked_distance_from(eoa).unwrap();
     let tail = append
-        .reserve(capacity)
+        .reserve(ByteLength::new(capacity))
         .unwrap()
         .with_metadata_padding(&planned.gaps)
         .unwrap();
@@ -414,7 +414,7 @@ proptest::proptest! {
         let layout = PageLayout::new(&geometry, page, eoa, None, &base, &sizes, true)
             .unwrap().unwrap();
         let capacity = layout.end.checked_distance_from(eoa).unwrap();
-        let tail = append.reserve(capacity).unwrap().with_metadata_padding(&layout.gaps).unwrap();
+        let tail = append.reserve(ByteLength::new(capacity)).unwrap().with_metadata_padding(&layout.gaps).unwrap();
         let snapshot = tail.post.admitted_snapshot();
         assert_eq!(
             snapshot.reusable_bytes().unwrap(),

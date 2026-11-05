@@ -686,7 +686,8 @@ impl WriteEngine {
                 let stored = self.context.addresses().relative(range.start())?;
                 Ok((
                     range,
-                    self.space.object_header_free_class(stored, range.length()),
+                    self.space
+                        .object_header_free_class(stored, ByteLength::new(range.length())),
                 ))
             })
             .collect()

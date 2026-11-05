@@ -228,13 +228,13 @@ impl FreeList {
     /// Best-fit uses the smallest region that fits to keep large runs intact. The allocation is
     /// taken from the low end of the chosen region. Any remainder stays free. `len` of 0 returns
     /// `None` (nothing to allocate).
-    pub fn alloc(&mut self, len: u64) -> Option<Extent> {
-        if len == 0 {
+    pub fn alloc(&mut self, len: ByteLength) -> Option<Extent> {
+        if len.is_zero() {
             return None;
         }
         let mut best: Option<usize> = None;
         for (i, extent) in self.regions.iter().enumerate() {
-            if extent.len() >= ByteLength::new(len)
+            if extent.len() >= len
                 && best.is_none_or(|best| extent.len() < self.regions[best].len())
             {
                 best = Some(i);
@@ -243,7 +243,7 @@ impl FreeList {
         let i = best?;
         let region = self.regions[i];
         // `len <= region.len()`, so construction cannot pass the already-checked end of `region`.
-        let allocation = Extent::new(region.start(), ByteLength::new(len))
+        let allocation = Extent::new(region.start(), len)
             .expect("a non-empty allocation fits inside the selected extent");
         if allocation.end() == region.end() {
             self.regions.remove(i);
@@ -251,7 +251,7 @@ impl FreeList {
             self.regions[i] = Extent::between(allocation.end(), region.end())
                 .expect("the remainder is a non-empty suffix of the selected extent");
         }
-        self.subtract_bytes(ByteLength::new(len));
+        self.subtract_bytes(len);
         Some(allocation)
     }
 
@@ -267,7 +267,7 @@ impl FreeList {
             .regions
             .iter()
             .filter_map(|&region| {
-                let capacity = region.block_capacity(page_size, request.size().get());
+                let capacity = region.block_capacity(page_size, request.size().length());
                 if capacity < request.size().length() {
                     return None;
                 }
@@ -297,8 +297,12 @@ impl FreeList {
     /// coalesce into the single hole the dataset that vacated both needs (issue #261).
     ///
     /// `len` or `align` of 0 returns `None`.
-    pub fn alloc_whole_units(&mut self, len: u64, align: u64) -> Option<Extent> {
-        if len == 0 || align == 0 {
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `align` is nonzero and `len` is not a multiple of `align`.
+    pub fn alloc_whole_units(&mut self, len: ByteLength, align: u64) -> Option<Extent> {
+        if len.is_zero() || align == 0 {
             return None;
         }
         // Whole units in, whole units out. This keeps both leftovers aligned and inside pages of
@@ -307,7 +311,7 @@ impl FreeList {
         // mix page types, which paging prevents. The caller supplies a rounded length and the unit.
         // Every caller is in this crate, so construction enforces the invariant.
         debug_assert_eq!(
-            len % align,
+            len.get() % align,
             0,
             "alloc_whole_units takes a whole number of units"
         );
@@ -315,7 +319,7 @@ impl FreeList {
         let mut best: Option<(usize, Extent)> = None;
         for (i, region) in self.regions.iter().enumerate() {
             if let Some(interior) = region.aligned_interior(align)
-                && interior.len() >= ByteLength::new(len)
+                && interior.len() >= len
                 && best.is_none_or(|(_, best)| interior.len() < best.len())
             {
                 best = Some((i, interior));
@@ -324,7 +328,7 @@ impl FreeList {
         let (i, interior) = best?;
         let region = self.regions[i];
         // `len <= interior.len()`, so construction cannot pass `interior.end()`.
-        let allocation = Extent::new(interior.start(), ByteLength::new(len))
+        let allocation = Extent::new(interior.start(), len)
             .expect("a non-empty allocation fits inside the aligned interior");
         let mut replacement = Vec::with_capacity(2);
         if allocation.start() > region.start() {
@@ -340,7 +344,7 @@ impl FreeList {
             );
         }
         self.regions.splice(i..=i, replacement);
-        self.subtract_bytes(ByteLength::new(len));
+        self.subtract_bytes(len);
         Some(allocation)
     }
 
@@ -349,21 +353,28 @@ impl FreeList {
     /// Retains [`TRAILING_RESERVE_TAILS`] times `tail_len` bytes for future manager tails.
     /// Releases space only when at least that many bytes can be removed. Returns `eoa` and
     /// preserves the list if the run is too short or the reserve arithmetic overflows.
-    pub fn release_trailing_run(&mut self, eoa: StoredAddress, tail_len: u64) -> StoredAddress {
+    pub fn release_trailing_run(
+        &mut self,
+        eoa: StoredAddress,
+        tail_len: ByteLength,
+    ) -> StoredAddress {
         let run_start = trailing_run_start([&*self], eoa);
-        let Some(keep) = TRAILING_RESERVE_TAILS.checked_mul(tail_len) else {
+        let Some(keep) = TRAILING_RESERVE_TAILS
+            .checked_mul(tail_len.get())
+            .map(ByteLength::new)
+        else {
             return eoa;
         };
-        let Some(release_min) = keep.checked_mul(2) else {
+        let Some(release_min) = keep.get().checked_mul(2).map(ByteLength::new) else {
             return eoa;
         };
         if eoa
             .checked_distance_from(run_start)
-            .is_none_or(|length| length < release_min)
+            .is_none_or(|length| ByteLength::new(length) < release_min)
         {
             return eoa;
         }
-        let Ok(cut) = run_start.checked_add(keep) else {
+        let Ok(cut) = run_start.checked_add(keep.get()) else {
             return eoa;
         };
         let Some(released) = Extent::between(cut, eoa) else {
@@ -375,19 +386,19 @@ impl FreeList {
 
     /// Reserves the first `len` bytes of the smallest free region whose allocation ends at or
     /// below `limit`.
-    pub(crate) fn alloc_below(&mut self, len: u64, limit: StoredAddress) -> Option<Extent> {
+    pub(crate) fn alloc_below(&mut self, len: ByteLength, limit: StoredAddress) -> Option<Extent> {
         let extent = self
             .regions
             .iter()
             .filter(|extent| {
-                extent.len() >= ByteLength::new(len)
+                extent.len() >= len
                     && extent
                         .start()
-                        .checked_add(len)
+                        .checked_add(len.get())
                         .is_ok_and(|end| end <= limit)
             })
             .min_by_key(|extent| extent.len())?;
-        let allocation = Extent::new(extent.start(), ByteLength::new(len))?;
+        let allocation = Extent::new(extent.start(), len)?;
         self.take_range(allocation);
         Some(allocation)
     }
@@ -899,7 +910,7 @@ mod tests {
         fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap()); // big
         fl.free(Extent::new(StoredAddress::new(200), ByteLength::new(30)).unwrap());
         fl.free(Extent::new(StoredAddress::new(400), ByteLength::new(60)).unwrap()); // medium
-        let allocated = fl.alloc(30).unwrap();
+        let allocated = fl.alloc(ByteLength::new(30)).unwrap();
         assert_eq!(
             allocated,
             Extent::new(StoredAddress::new(200), ByteLength::new(30)).unwrap()
@@ -912,7 +923,7 @@ mod tests {
     fn alloc_splits_remainder() {
         let mut fl = FreeList::new();
         fl.free(Extent::new(StoredAddress::new(1000), ByteLength::new(100)).unwrap());
-        let allocated = fl.alloc(40).unwrap();
+        let allocated = fl.alloc(ByteLength::new(40)).unwrap();
         assert_eq!(
             allocated,
             Extent::new(StoredAddress::new(1000), ByteLength::new(40)).unwrap()
@@ -925,7 +936,7 @@ mod tests {
         let mut fl = FreeList::new();
         fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(10)).unwrap());
         fl.free(Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap());
-        assert!(fl.alloc(50).is_none());
+        assert!(fl.alloc(ByteLength::new(50)).is_none());
         // List is unchanged on a failed allocation.
         assert_eq!(regions(&fl), [(0, 10), (100, 20)]);
     }
@@ -934,7 +945,7 @@ mod tests {
     fn alloc_zero_returns_none() {
         let mut fl = FreeList::new();
         fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap());
-        assert!(fl.alloc(0).is_none());
+        assert!(fl.alloc(ByteLength::new(0)).is_none());
         assert_eq!(fl.total_bytes(), ByteLength::new(100));
     }
 
@@ -967,7 +978,7 @@ mod tests {
             free.free(Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap());
         }
         assert_eq!(
-            free.alloc_below(len, StoredAddress::new(limit)),
+            free.alloc_below(ByteLength::new(len), StoredAddress::new(limit)),
             expected.map(|(start, len)| Extent::new(
                 StoredAddress::new(start),
                 ByteLength::new(len)
@@ -1007,7 +1018,7 @@ mod tests {
             free.free(Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap());
         }
         assert_eq!(
-            free.release_trailing_run(StoredAddress::new(eoa), tail_len),
+            free.release_trailing_run(StoredAddress::new(eoa), ByteLength::new(tail_len)),
             StoredAddress::new(expected)
         );
         assert_eq!(free.sections(), remaining);
@@ -1021,7 +1032,7 @@ mod tests {
     fn alloc_then_free_roundtrips() {
         let mut fl = FreeList::new();
         fl.free(Extent::new(StoredAddress::new(0), ByteLength::new(100)).unwrap());
-        let allocated = fl.alloc(40).unwrap();
+        let allocated = fl.alloc(ByteLength::new(40)).unwrap();
         fl.free(allocated); // give it back
         assert_eq!(regions(&fl), [(0, 100)]); // coalesced back to whole
     }
@@ -1061,9 +1072,9 @@ mod tests {
         // The allocator agrees: that run is claimable in one call, and one unit
         // more is not.
         let mut probe = fl.clone();
-        assert_eq!(probe.alloc_whole_units(64, 16), None);
+        assert_eq!(probe.alloc_whole_units(ByteLength::new(64), 16), None);
         assert_eq!(
-            probe.alloc_whole_units(48, 16),
+            probe.alloc_whole_units(ByteLength::new(48), 16),
             Some(Extent::new(StoredAddress::new(208), ByteLength::new(48)).unwrap())
         );
     }
@@ -1230,7 +1241,7 @@ mod tests {
         let mut free = FreeList::new();
         free.free(Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap());
         assert_eq!(
-            free.alloc_whole_units(requested, alignment),
+            free.alloc_whole_units(ByteLength::new(requested), alignment),
             allocated.map(|(start, length)| Extent::new(
                 StoredAddress::new(start),
                 ByteLength::new(length)
@@ -1250,7 +1261,7 @@ mod tests {
         assert_eq!(free.total_bytes(), ByteLength::new(u64::MAX));
         let snapshot = free.clone();
         assert_eq!(
-            free.alloc(10),
+            free.alloc(ByteLength::new(10)),
             Extent::new(StoredAddress::new(0), ByteLength::new(10))
         );
         assert_eq!(free.total_bytes(), ByteLength::new(u64::MAX - 10));
@@ -1264,7 +1275,7 @@ mod tests {
         assert_eq!(snapshot.total_bytes(), ByteLength::new(u64::MAX));
         free = snapshot;
         assert_eq!(
-            free.alloc(u64::MAX),
+            free.alloc(ByteLength::new(u64::MAX)),
             Extent::new(StoredAddress::new(0), ByteLength::new(u64::MAX))
         );
         assert_eq!(free.total_bytes(), ByteLength::new(0));

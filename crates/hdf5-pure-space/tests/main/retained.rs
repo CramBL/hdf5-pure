@@ -82,7 +82,10 @@ fn retained_view_preserves_exact_unclassified_dead_and_padding_ranges() {
             .partial_page_class(extent(2_048, 8)),
         PageClassEvidence::Unknown
     );
-    assert_eq!(space.allocate(1, AllocationClass::Metadata), None);
+    assert_eq!(
+        space.allocate(ByteLength::new(1), AllocationClass::Metadata),
+        None
+    );
 }
 
 #[rstest]

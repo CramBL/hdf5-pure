@@ -112,11 +112,15 @@ impl Extent {
     ///
     /// For `size` smaller than a page, returns the largest part contained in one page. For `size`
     /// of at least one page, returns the suffix starting on a page boundary, or zero if it is empty.
-    pub(crate) fn block_capacity(self, page_size: FileSpacePageSize, size: u64) -> ByteLength {
+    pub(crate) fn block_capacity(
+        self,
+        page_size: FileSpacePageSize,
+        size: ByteLength,
+    ) -> ByteLength {
         let page_size = page_size.get();
         let length = self.len().get();
         let head = length.min(page_size - self.start().get() % page_size);
-        ByteLength::new(if size < page_size {
+        ByteLength::new(if size < ByteLength::new(page_size) {
             head.max((length - head).min(page_size))
         } else if self.start().get() % page_size == 0 {
             length

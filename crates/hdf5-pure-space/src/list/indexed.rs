@@ -322,19 +322,23 @@ impl BlockIndex {
     }
 
     fn insert(&mut self, extent: Extent) {
-        self.small
-            .insert((extent.block_capacity(self.page_size, 1), extent.start()));
+        self.small.insert((
+            extent.block_capacity(self.page_size, ByteLength::new(1)),
+            extent.start(),
+        ));
         self.large.insert((
-            extent.block_capacity(self.page_size, self.page_size.get()),
+            extent.block_capacity(self.page_size, ByteLength::new(self.page_size.get())),
             extent.start(),
         ));
     }
 
     fn remove(&mut self, extent: Extent) {
-        self.small
-            .remove(&(extent.block_capacity(self.page_size, 1), extent.start()));
+        self.small.remove(&(
+            extent.block_capacity(self.page_size, ByteLength::new(1)),
+            extent.start(),
+        ));
         self.large.remove(&(
-            extent.block_capacity(self.page_size, self.page_size.get()),
+            extent.block_capacity(self.page_size, ByteLength::new(self.page_size.get())),
             extent.start(),
         ));
     }
