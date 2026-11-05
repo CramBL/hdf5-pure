@@ -5,6 +5,7 @@ use alloc::format;
 
 use core::convert::Infallible;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 
@@ -12,7 +13,6 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::chunked_write::ByteSink;
-use crate::convert::Narrow;
 use crate::error::FormatError;
 
 /// Merges reservation sources while retaining one pending reservation from each.
@@ -45,7 +45,7 @@ impl<'a, T, const N: usize> Emission<'a, T, N> {
     pub(crate) fn emit<S: ByteSink>(
         self,
         sink: &mut S,
-        eof: u64,
+        eof: PhysicalAddress,
         mut emit: impl FnMut(&mut S, T) -> Result<(), EmissionError<S::Error>>,
     ) -> Result<(), EmissionError<S::Error>> {
         if sink.position() > eof {
@@ -70,19 +70,19 @@ impl<'a, T, const N: usize> Emission<'a, T, N> {
                     FormatError::Internal("the selected output source is empty".into()).into(),
                 );
             };
-            if range.start().get() < sink.position() || range.end().get() > eof {
+            if range.start() < sink.position() || range.end() > eof {
                 return Err(FormatError::Internal(
                     "output reservations overlap or extend beyond the file".into(),
                 )
                 .into());
             }
-            Self::pad_to(sink, range.start().get())?;
+            Self::pad_to(sink, range.start())?;
             emit(sink, value)?;
-            if sink.position() != range.end().get() {
+            if sink.position() != range.end() {
                 return Err(FormatError::Internal(format!(
                     "output reservation ends at {}, but emission ends at {}",
                     range.end().get(),
-                    sink.position(),
+                    sink.position().get(),
                 ))
                 .into());
             }
@@ -91,10 +91,13 @@ impl<'a, T, const N: usize> Emission<'a, T, N> {
         Self::pad_to(sink, eof)
     }
 
-    fn pad_to<S: ByteSink>(sink: &mut S, end: u64) -> Result<(), EmissionError<S::Error>> {
-        while sink.position() < end {
-            let length = (end - sink.position()).min(65_536).to_usize()?;
-            sink.put_zeros(length).map_err(EmissionError::Sink)?;
+    fn pad_to<S: ByteSink>(
+        sink: &mut S,
+        end: PhysicalAddress,
+    ) -> Result<(), EmissionError<S::Error>> {
+        while let Some(length) = sink.remaining_to(end)?.nonzero() {
+            sink.put_zeros(length.length().min(ByteLength::new(65_536)).to_usize()?)
+                .map_err(EmissionError::Sink)?;
         }
         Ok(())
     }
@@ -142,12 +145,12 @@ impl<T> Reservation<T> {
     pub(crate) fn new(
         base: BaseAddress,
         address: StoredAddress,
-        length: u64,
+        length: ByteLength,
         value: T,
     ) -> Result<Self, FormatError> {
         let start = base.resolve(address)?;
         Ok(Self {
-            range: FileRange::new(start, length)?,
+            range: FileRange::new(start, length.get())?,
             value,
         })
     }
@@ -169,6 +172,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::__private::ByteLength;
+    use hdf5_pure_core::PhysicalAddress;
     use rstest::rstest;
 
     use super::Emission;
@@ -187,21 +192,33 @@ mod tests {
     fn reservation_sources_merge_in_address_order(#[case] base: u64) {
         let base = BaseAddress::new(base);
         let mut first = [
-            Reservation::new(base, StoredAddress::new(7), 2, b"cd".as_slice()),
-            Reservation::new(base, StoredAddress::new(10), 1, b"e".as_slice()),
+            Reservation::new(
+                base,
+                StoredAddress::new(7),
+                ByteLength::new(2),
+                b"cd".as_slice(),
+            ),
+            Reservation::new(
+                base,
+                StoredAddress::new(10),
+                ByteLength::new(1),
+                b"e".as_slice(),
+            ),
         ]
         .into_iter();
         let mut second = core::iter::once(Reservation::new(
             base,
             StoredAddress::new(2),
-            3,
+            ByteLength::new(3),
             b"abc".as_slice(),
         ));
         let mut sink = vec![0xAB; base.get() as usize];
         Emission::new([&mut first, &mut second])
-            .emit(&mut sink, base.get() + 12, |sink, bytes| {
-                sink.put(bytes).map_err(EmissionError::Sink)
-            })
+            .emit(
+                &mut sink,
+                PhysicalAddress::new(base.get() + 12),
+                |sink, bytes| sink.put(bytes).map_err(EmissionError::Sink),
+            )
             .unwrap();
         let mut expected = vec![0xAB; base.get() as usize];
         expected.extend_from_slice(b"\0\0abc\0\0cd\0e\0");
@@ -224,11 +241,16 @@ mod tests {
     ) {
         let base = BaseAddress::new(0);
         let mut source = [
-            Reservation::new(base, StoredAddress::new(first), length, length),
+            Reservation::new(
+                base,
+                StoredAddress::new(first),
+                ByteLength::new(length),
+                length,
+            ),
             Reservation::new(
                 base,
                 StoredAddress::new(second),
-                second_length,
+                ByteLength::new(second_length),
                 second_length,
             ),
         ]
@@ -238,7 +260,7 @@ mod tests {
             ..CountingSink::default()
         };
         let error = Emission::new([&mut source])
-            .emit(&mut sink, eof, |sink, length| {
+            .emit(&mut sink, PhysicalAddress::new(eof), |sink, length| {
                 sink.put_zeros(usize::try_from(length).unwrap())
                     .map_err(EmissionError::Sink)
             })
@@ -265,11 +287,11 @@ mod tests {
         let mut source = core::iter::once(Reservation::new(
             BaseAddress::new(base),
             StoredAddress::new(start),
-            length,
+            ByteLength::new(length),
             (),
         ));
         let error = Emission::new([&mut source])
-            .emit(&mut Vec::new(), u64::MAX, |_, ()| {
+            .emit(&mut Vec::new(), PhysicalAddress::new(u64::MAX), |_, ()| {
                 Err(FormatError::Internal("unexpected output reservation".into()).into())
             })
             .unwrap_err();
@@ -290,11 +312,11 @@ mod tests {
         let mut source = core::iter::once(Reservation::new(
             BaseAddress::new(0),
             StoredAddress::new(3),
-            2,
+            ByteLength::new(2),
             bytes,
         ));
         let error = Emission::new([&mut source])
-            .emit(&mut Vec::new(), 5, |sink, bytes| {
+            .emit(&mut Vec::new(), PhysicalAddress::new(5), |sink, bytes| {
                 sink.put(bytes).map_err(EmissionError::Sink)
             })
             .unwrap_err();
@@ -313,14 +335,16 @@ mod tests {
         let mut source = core::iter::once(Reservation::new(
             BaseAddress::new(512),
             StoredAddress::new(start),
-            1,
+            ByteLength::new(1),
             b"x".as_slice(),
         ));
         let mut sink = CountingSink::default();
         Emission::new([&mut source])
-            .emit(&mut sink, start + 515, |sink, bytes| {
-                sink.put(bytes).map_err(EmissionError::Sink)
-            })
+            .emit(
+                &mut sink,
+                PhysicalAddress::new(start + 515),
+                |sink, bytes| sink.put(bytes).map_err(EmissionError::Sink),
+            )
             .unwrap();
         assert_eq!(sink.position, start + 515);
         assert_eq!(sink.writes, [(start + 512, 1)]);
@@ -338,7 +362,7 @@ mod tests {
             ..CountingSink::default()
         };
         Emission::new([&mut source])
-            .emit(&mut sink, eof, |_, ()| {
+            .emit(&mut sink, PhysicalAddress::new(eof), |_, ()| {
                 Err(FormatError::Internal("unexpected output reservation".into()).into())
             })
             .unwrap();
@@ -355,7 +379,7 @@ mod tests {
             ..CountingSink::default()
         };
         let error = Emission::new([])
-            .emit(&mut sink, position, |_, ()| Ok(()))
+            .emit(&mut sink, PhysicalAddress::new(position), |_, ()| Ok(()))
             .unwrap_err();
         assert_eq!(
             error,
@@ -368,15 +392,25 @@ mod tests {
     #[test]
     fn callback_errors_stop_before_later_reservations() {
         let mut source = [
-            Reservation::new(BaseAddress::new(0), StoredAddress::new(3), 1, 1),
-            Reservation::new(BaseAddress::new(0), StoredAddress::new(5), 1, 2),
+            Reservation::new(
+                BaseAddress::new(0),
+                StoredAddress::new(3),
+                ByteLength::new(1),
+                1,
+            ),
+            Reservation::new(
+                BaseAddress::new(0),
+                StoredAddress::new(5),
+                ByteLength::new(1),
+                2,
+            ),
         ]
         .into_iter();
         let mut calls = Vec::new();
         let mut sink = CountingSink::default();
         let expected = FormatError::SerializationError("source failed".into());
         let error = Emission::new([&mut source])
-            .emit(&mut sink, 6, |_, index| {
+            .emit(&mut sink, PhysicalAddress::new(6), |_, index| {
                 calls.push(index);
                 Err(expected.clone().into())
             })
@@ -399,7 +433,7 @@ mod tests {
         let mut source = core::iter::once(Reservation::new(
             BaseAddress::new(0),
             StoredAddress::new(start),
-            1,
+            ByteLength::new(1),
             b"x".as_slice(),
         ));
         let mut calls = 0;
@@ -409,7 +443,7 @@ mod tests {
                     accepted,
                     position: 0,
                 },
-                start + 2,
+                PhysicalAddress::new(start + 2),
                 |sink, bytes| {
                     calls += 1;
                     sink.put(bytes).map_err(EmissionError::Sink)
@@ -454,8 +488,8 @@ mod tests {
             self.accept(length)
         }
 
-        fn position(&self) -> u64 {
-            self.position
+        fn position(&self) -> PhysicalAddress {
+            PhysicalAddress::new(self.position)
         }
     }
 
@@ -480,8 +514,8 @@ mod tests {
             Ok(())
         }
 
-        fn position(&self) -> u64 {
-            self.position
+        fn position(&self) -> PhysicalAddress {
+            PhysicalAddress::new(self.position)
         }
     }
 }

@@ -49,7 +49,6 @@ use crate::DeflateLevel;
 use crate::FileSpaceSettings;
 use crate::FillTime;
 use crate::LinkPhaseChange;
-use crate::PhysicalAddress;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
 #[cfg(test)]
@@ -2327,7 +2326,7 @@ impl FileWriter {
                     .ok_or_else(|| {
                         FormatError::Internal("small raw regions end before their start".into())
                     })?;
-            let eof_addr2 = base.resolve(eoa_pre_fsm)?.get();
+            let eof_addr2 = base.resolve(eoa_pre_fsm)?;
 
             allocation.require_end(eoa_pre_fsm)?;
             let ds_oh_bytes = build_ds_ohs(widths, &all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
@@ -2361,7 +2360,7 @@ impl FileWriter {
             };
             debug_assert_eq!(ByteLength::new(real_ext_oh.len().to_u64()), ext_len);
 
-            sink.reserve(eof_addr2)?;
+            sink.reserve(ByteLength::new(eof_addr2.get()))?;
             Self::put_userblock(sink, ub, &self.userblock_content)?;
             let sb = SuperblockFields {
                 status: SuperblockStatus::new(
@@ -2371,7 +2370,7 @@ impl FileWriter {
                 offset_size: widths.offsets,
                 length_size: widths.lengths,
                 base_address: base,
-                eof_address: eof_addr2,
+                eof_address: eof_addr2.get(),
                 root_group_address: root_group_addr,
                 group_leaf_node_k: None,
                 group_internal_node_k: None,
@@ -2398,13 +2397,13 @@ impl FileWriter {
                 }))
                 .flatten();
             for (address, collection) in paged_collection_addresses.iter().zip(collections) {
-                let physical = base.resolve(StoredAddress::new(*address))?.get();
-                sink.put_zeros((physical - sink.position()).to_usize()?)
+                let physical = base.resolve(StoredAddress::new(*address))?;
+                sink.put_zeros(sink.remaining_to(physical)?.to_usize()?)
                     .map_err(EmissionError::Sink)?;
                 sink.put(collection).map_err(EmissionError::Sink)?;
             }
-            let root_physical = base.resolve(root_group_addr)?.get();
-            sink.put_zeros((root_physical - sink.position()).to_usize()?)
+            let root_physical = base.resolve(root_group_addr)?;
+            sink.put_zeros(sink.remaining_to(root_physical)?.to_usize()?)
                 .map_err(EmissionError::Sink)?;
 
             // Root group OH + dense blob.
@@ -2498,14 +2497,12 @@ impl FileWriter {
                     ]
                 }))
                 .map(|(address, bytes)| {
-                    Reservation::new(base, address, bytes.len().to_u64(), bytes)
+                    Reservation::new(base, address, ByteLength::new(bytes.len().to_u64()), bytes)
                 });
-            Emission::new([&mut tail]).emit(
-                sink,
-                base.resolve(meta_end)?.get(),
-                |sink, bytes| sink.put(bytes).map_err(EmissionError::Sink),
-            )?;
-            debug_assert_eq!(sink.position(), base.resolve(meta_end)?.get());
+            Emission::new([&mut tail]).emit(sink, base.resolve(meta_end)?, |sink, bytes| {
+                sink.put(bytes).map_err(EmissionError::Sink)
+            })?;
+            debug_assert_eq!(sink.position(), base.resolve(meta_end)?);
 
             // Raw data region: metadata page tail, then small data, DRAW tail,
             // large runs (with their fragments), padded to the page-aligned EOA.
@@ -2519,7 +2516,7 @@ impl FileWriter {
             )
             .map_err(EmissionError::Sink)?;
             for &i in &small_indices {
-                let at = base.resolve(ds_layouts[i].data_addr)?.get();
+                let at = base.resolve(ds_layouts[i].data_addr)?;
                 debug_assert_eq!(sink.position(), at);
                 ds_layouts[i].data.emit_payload(sink, &all_ds[i].storage)?;
             }
@@ -2531,17 +2528,17 @@ impl FileWriter {
                 .map_err(EmissionError::Sink)?;
             }
             for &i in &large_indices {
-                let gap = base.resolve(ds_layouts[i].data_addr)?.get() - sink.position();
+                let gap = sink.remaining_to(base.resolve(ds_layouts[i].data_addr)?)?;
                 sink.put_zeros(gap.to_usize()?)
                     .map_err(EmissionError::Sink)?;
                 ds_layouts[i].data.emit_payload(sink, &all_ds[i].storage)?;
-                let end_rel = base.relative(PhysicalAddress::new(sink.position()))?.get();
+                let end_rel = base.relative(sink.position())?.get();
                 sink.put_zeros(
                     ((page_size.get() - end_rel % page_size.get()) % page_size.get()).to_usize()?,
                 )
                 .map_err(EmissionError::Sink)?;
             }
-            let final_pad = eof_addr2 - sink.position();
+            let final_pad = sink.remaining_to(eof_addr2)?;
             sink.put_zeros(final_pad.to_usize()?)
                 .map_err(EmissionError::Sink)?;
             debug_assert_eq!(sink.position(), eof_addr2);
@@ -2715,10 +2712,10 @@ impl FileWriter {
 
         // eof_address is absolute file size (includes userblock + GCOLs + ext)
         let base = BaseAddress::new(ub as u64);
-        let eof_addr2 = base.resolve(cursor2)?.get();
+        let eof_addr2 = base.resolve(cursor2)?;
 
         // Buffered sinks reserve the complete output capacity. Streaming sinks ignore the hint.
-        sink.reserve(eof_addr2)?;
+        sink.reserve(ByteLength::new(eof_addr2.get()))?;
 
         // Userblock: the caller's header bytes, then zeros.
         Self::put_userblock(sink, ub, &self.userblock_content)?;
@@ -2731,7 +2728,7 @@ impl FileWriter {
             offset_size: widths.offsets,
             length_size: widths.lengths,
             base_address: base,
-            eof_address: eof_addr2,
+            eof_address: eof_addr2.get(),
             root_group_address: root_group_addr,
             group_leaf_node_k: None,
             group_internal_node_k: None,
@@ -2796,7 +2793,7 @@ impl FileWriter {
                             Reservation::new(
                                 base,
                                 address,
-                                collection.len() as u64,
+                                ByteLength::new(collection.len() as u64),
                                 FileData::Bytes(collection),
                             )
                         }),
@@ -2830,7 +2827,7 @@ impl FileWriter {
                             Reservation::new(
                                 base,
                                 address,
-                                collection.len() as u64,
+                                ByteLength::new(collection.len() as u64),
                                 FileData::Bytes(collection),
                             )
                         }),
@@ -2869,14 +2866,14 @@ impl FileWriter {
         let mut root_header = core::iter::once(Reservation::new(
             base,
             root_group_addr,
-            root_oh.len() as u64,
+            ByteLength::new(root_oh.len() as u64),
             FileData::Bytes(&root_oh),
         ));
         let mut group_headers = group_addrs2.iter().enumerate().map(|(gi, &address)| {
             Reservation::new(
                 base,
                 address,
-                group_oh_sizes[gi] as u64,
+                ByteLength::new(group_oh_sizes[gi] as u64),
                 FileData::Group(gi),
             )
         });
@@ -2885,13 +2882,23 @@ impl FileWriter {
                 .iter()
                 .zip(&committed_oh)
                 .map(|(&address, oh)| {
-                    Reservation::new(base, address, oh.len() as u64, FileData::Bytes(oh))
+                    Reservation::new(
+                        base,
+                        address,
+                        ByteLength::new(oh.len() as u64),
+                        FileData::Bytes(oh),
+                    )
                 });
         let mut dataset_headers = ds_oh_addrs2
             .iter()
             .zip(&ds_oh_bytes2)
             .map(|(&address, oh)| {
-                Reservation::new(base, address, oh.len() as u64, FileData::Bytes(oh))
+                Reservation::new(
+                    base,
+                    address,
+                    ByteLength::new(oh.len() as u64),
+                    FileData::Bytes(oh),
+                )
             });
         let mut dense_blobs = dense_spans
             .root
@@ -2908,7 +2915,7 @@ impl FileWriter {
                 Reservation::new(
                     base,
                     *span,
-                    blob.blob.len() as u64,
+                    ByteLength::new(blob.blob.len() as u64),
                     FileData::Bytes(&blob.blob),
                 )
             });
@@ -2924,7 +2931,7 @@ impl FileWriter {
                 Reservation::new(
                     base,
                     span.0,
-                    image.bytes.len().to_u64(),
+                    ByteLength::new(image.bytes.len().to_u64()),
                     FileData::Bytes(&image.bytes),
                 )
             });
@@ -2936,7 +2943,7 @@ impl FileWriter {
                 Reservation::new(
                     base,
                     layout.data_addr,
-                    layout.data.len(),
+                    ByteLength::new(layout.data.len()),
                     FileData::Dataset(i),
                 )
             });
@@ -2983,7 +2990,7 @@ impl FileWriter {
             (Some(bytes), Some(address)) => Some(Reservation::new(
                 base,
                 address,
-                bytes.len() as u64,
+                ByteLength::new(bytes.len() as u64),
                 FileData::Bytes(bytes),
             )),
             (None, None) => None,
@@ -3010,7 +3017,12 @@ impl FileWriter {
                 ]
             })
             .map(|(address, bytes)| {
-                Reservation::new(base, address, bytes.len() as u64, FileData::Bytes(bytes))
+                Reservation::new(
+                    base,
+                    address,
+                    ByteLength::new(bytes.len() as u64),
+                    FileData::Bytes(bytes),
+                )
             });
         let sources: [&mut dyn Iterator<Item = Result<Reservation<FileData<'_>>, FormatError>>;
             11] = [

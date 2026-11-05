@@ -60,7 +60,7 @@ impl Allocation {
         value: T,
     ) -> Result<Reservation<T>, FormatError> {
         let Self { address, length } = self;
-        Reservation::new(base, *address, length.get(), value)
+        Reservation::new(base, *address, *length, value)
     }
 }
 
@@ -655,7 +655,7 @@ impl ArrayAllocation {
         let length = end
             .checked_distance_from(address)
             .ok_or_else(|| FormatError::Internal("an array ends before its first block".into()))?;
-        Reservation::new(base, address, length, value)
+        Reservation::new(base, address, ByteLength::new(length), value)
     }
 }
 

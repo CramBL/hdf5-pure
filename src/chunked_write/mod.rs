@@ -14,6 +14,8 @@ const HADDR_UNDEF: u64 = u64::MAX;
 use core::convert::Infallible;
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FilteredSingleChunk;
@@ -2014,8 +2016,21 @@ pub(crate) trait ByteSink {
     ///
     /// Returns [`Self::Error`] if writing the padding fails.
     fn put_zeros(&mut self, n: usize) -> Result<(), Self::Error>;
-    /// Returns the number of bytes written for comparison with planned layout addresses.
-    fn position(&self) -> u64;
+    /// Returns the current physical position within the output image.
+    fn position(&self) -> PhysicalAddress;
+
+    /// Returns the byte distance from the current position to `end`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `end` precedes the current position.
+    fn remaining_to(&self, end: PhysicalAddress) -> Result<ByteLength, FormatError> {
+        end.checked_distance_from(self.position())
+            .map(ByteLength::new)
+            .ok_or_else(|| {
+                FormatError::Internal("output padding ends before the sink position".into())
+            })
+    }
     /// Reserves capacity for additional output bytes when supported by the sink.
     ///
     /// Buffered sinks narrow the count when reserving memory. Streaming sinks may ignore it.
@@ -2028,7 +2043,7 @@ pub(crate) trait ByteSink {
     /// # Panics
     ///
     /// A buffered sink may panic if its capacity would exceed [`isize::MAX`].
-    fn reserve(&mut self, _additional: u64) -> Result<(), FormatError> {
+    fn reserve(&mut self, _additional: ByteLength) -> Result<(), FormatError> {
         Ok(())
     }
 }
@@ -2044,10 +2059,10 @@ impl ByteSink for Vec<u8> {
         self.resize(self.len() + n, 0u8);
         Ok(())
     }
-    fn position(&self) -> u64 {
-        self.len() as u64
+    fn position(&self) -> PhysicalAddress {
+        PhysicalAddress::new(self.len().to_u64())
     }
-    fn reserve(&mut self, additional: u64) -> Result<(), FormatError> {
+    fn reserve(&mut self, additional: ByteLength) -> Result<(), FormatError> {
         Vec::reserve(self, additional.to_usize()?);
         Ok(())
     }

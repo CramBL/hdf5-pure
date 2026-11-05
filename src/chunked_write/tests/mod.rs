@@ -23,6 +23,65 @@ mod partial_edge;
 mod verbatim;
 mod zfp;
 
+#[rstest]
+#[case::empty(5, 5, 0)]
+#[case::gap(5, 7, 2)]
+#[case::limit(u64::MAX - 1, u64::MAX, 1)]
+fn sink_padding_measures_physical_distances(
+    #[case] position: u64,
+    #[case] end: u64,
+    #[case] expected: u64,
+) {
+    let sink = PositionedSink {
+        position,
+        ..PositionedSink::default()
+    };
+    assert_eq!(
+        sink.remaining_to(PhysicalAddress::new(end)).unwrap(),
+        ByteLength::new(expected)
+    );
+    assert!(sink.writes.is_empty());
+}
+
+#[test]
+fn sink_padding_rejects_an_end_before_its_position() {
+    let sink = PositionedSink {
+        position: 5,
+        ..PositionedSink::default()
+    };
+    assert_eq!(
+        sink.remaining_to(PhysicalAddress::new(4)).unwrap_err(),
+        FormatError::Internal("output padding ends before the sink position".into())
+    );
+    assert_eq!(sink.position, 5);
+    assert!(sink.writes.is_empty());
+}
+
+#[derive(Default)]
+struct PositionedSink {
+    position: u64,
+    writes: Vec<usize>,
+}
+
+impl ByteSink for PositionedSink {
+    type Error = FormatError;
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+        self.put_zeros(bytes.len())
+    }
+
+    fn put_zeros(&mut self, length: usize) -> Result<(), FormatError> {
+        let position = self.position().checked_add(length as u64)?;
+        self.writes.push(length);
+        self.position = position.get();
+        Ok(())
+    }
+
+    fn position(&self) -> PhysicalAddress {
+        PhysicalAddress::new(self.position)
+    }
+}
+
 fn make_f64_type() -> Datatype {
     Datatype::FloatingPoint(
         FloatingPointType::from_layout(
@@ -1609,7 +1668,7 @@ fn direct_emission_uses_retained_chunks_and_matches_assembly(
     emit_chunked_data(&mut sink, &plan).unwrap();
     assert_eq!(sink.bytes, assembled.data_bytes);
     assert_eq!(measured.data_len, plan.data_len);
-    assert_eq!(plan.data_len, sink.position());
+    assert_eq!(plan.data_len, sink.position().get());
     assert_eq!(plan.layout_message, assembled.layout_message);
     assert_eq!(plan.layout_message, measured.layout_message);
     assert_eq!(plan.pipeline_message, assembled.pipeline_message);
@@ -1642,8 +1701,8 @@ impl ByteSink for ChunkSlices {
         Err(FormatError::Internal("unexpected chunk padding".into()))
     }
 
-    fn position(&self) -> u64 {
-        self.bytes.len() as u64
+    fn position(&self) -> PhysicalAddress {
+        PhysicalAddress::new(self.bytes.len() as u64)
     }
 }
 
@@ -1763,8 +1822,8 @@ impl ByteSink for FailingChunkSink {
         Err(ChunkSinkFailure::Padding)
     }
 
-    fn position(&self) -> u64 {
-        0
+    fn position(&self) -> PhysicalAddress {
+        PhysicalAddress::new(0)
     }
 }
 

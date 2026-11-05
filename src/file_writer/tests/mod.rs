@@ -1,3 +1,4 @@
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::BTreeV2Header;
 use rstest::rstest;
 
@@ -542,8 +543,8 @@ impl ByteSink for SparseSink {
         Ok(())
     }
 
-    fn position(&self) -> u64 {
-        self.position
+    fn position(&self) -> PhysicalAddress {
+        PhysicalAddress::new(self.position)
     }
 }
 
