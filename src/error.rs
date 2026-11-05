@@ -78,33 +78,18 @@ pub enum Error {
     /// filters, incompatible element datatypes, sparse chunk grids, and shared hard links can
     /// also cause this error. The payload is a human-readable reason.
     AppendUnsupported(&'static str),
-    /// A [`commit`](crate::File::commit) failed, *and* could not put back a
-    /// value it had already written over - so the file holds part of a batch
-    /// that was rejected.
+    /// A commit failed and could not restore bytes it had already overwritten.
     ///
-    /// Every other edit a commit applies lands where nothing reaches it until
-    /// the superblock is repointed, so a commit that stops short of that leaves
-    /// the file exactly as it found it. A same-length value overwrite is the
-    /// exception: it writes straight over the dataset's existing data block,
-    /// which the live root already reaches. A rejected commit therefore replays
-    /// the prior bytes over each such write before returning, and this is what
-    /// it returns instead when that replay itself failed.
+    /// In-place dataset values and object-reference counts can be overwritten before tree
+    /// publication. If restoring their original bytes fails, the affected values or metadata can
+    /// remain partially updated. Read the affected file contents again before further use.
     ///
-    /// It is the one rejection after which a caller must **re-read**: the
-    /// datasets the batch overwrote may hold either value.
-    ///
-    /// Both errors are carried because in the shape this is most likely to take
-    /// they say different things: a commit rejected for a reason the caller can
-    /// act on, followed by an I/O failure that prevented the restore. Reporting
-    /// only the second would leave the caller retrying a batch without knowing
-    /// what was wrong with it.
+    /// Retains both the operation error and the restoration error. The restoration error is
+    /// available through [`source`](std::error::Error::source).
     CommitPartiallyApplied {
-        /// Why the commit was rejected - what a caller must fix before staging
-        /// the batch again.
+        /// The error that prevented the commit from completing.
         refusal: Box<Error>,
-        /// The write failure that then prevented the prior values being put
-        /// back. This is the one that proves the file changed, so it is what
-        /// [`source`](std::error::Error::source) reports.
+        /// The write error that prevented restoration of the original bytes.
         restore: Box<Error>,
     },
     /// The copy screen could not read a message of an object this commit copies:
@@ -227,13 +212,13 @@ pub enum Error {
         /// The prospective references being added.
         added: u64,
     },
-    /// An owned replacement count differs from its original source observation.
+    /// An object-reference count differs from its original source observation.
     ObjectReferenceCountMismatch {
         /// The absolute file offset of the original object header.
         address: u64,
         /// The count observed in the original source.
         expected: u32,
-        /// The count parsed from the owned replacement records.
+        /// The count parsed from owned replacement records or current source bytes.
         actual: u32,
     },
     /// A planned net count exceeds the object header's [`u32`] field.
@@ -250,8 +235,8 @@ pub enum Error {
     /// A count update is unsupported for the original value, object class, encoding, or allocation
     /// evidence.
     ///
-    /// Reported during commit preparation, before applying staged edits. The issue identifies
-    /// the unsupported condition independently of a proved original-count contradiction.
+    /// The editor can report this during commit preparation or publication. The unsupported
+    /// condition is separate from a proved original-count contradiction.
     ObjectReferenceCountUpdateUnsupported {
         /// The absolute file offset of the original object header.
         address: u64,
@@ -380,7 +365,7 @@ pub enum ObjectReferenceCountUpdateIssue {
     OriginalZero,
     /// The planned count is zero for a subject ineligible for ordinary-object retirement.
     RetainedZero,
-    /// An owned replacement has ambiguous or unsupported count framing.
+    /// Count framing is ambiguous, unsupported, or differs from the original source observation.
     UnsupportedEncoding,
 }
 
@@ -427,7 +412,7 @@ impl fmt::Display for Error {
                 actual,
             } => write!(
                 f,
-                "owned object reference count at {address} is {actual}, expected original count {expected}"
+                "object reference count at {address} is {actual}, expected original count {expected}"
             ),
             Error::ObjectReferenceCountOverflow {
                 address,

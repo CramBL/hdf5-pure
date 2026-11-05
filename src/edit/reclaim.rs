@@ -1,10 +1,8 @@
-//! Collects the storage a commit frees, with the [`FreeClass`] of each span.
+//! Complete physical allocations for ownership accounting and retirement.
 //!
-//! A commit frees an object's storage when it deletes the object's last hard link, a global heap
-//! collection when the objects it deletes are the only ones that refer to the collection, and the
-//! storage of a dense attribute set or a chunk index when it replaces one. The walk returns a span
-//! only once it accounts for every allocation of the structure the span belongs to, and leaves a
-//! structure it cannot account for in full allocated.
+//! The collectors preserve allocation boundaries and [`FreeClass`] values, including independently
+//! proven storage when other ownership is unavailable. Object retirement eligibility, absence of
+//! collection references, and permission to reuse storage require separate evidence.
 
 use std::collections::BTreeSet;
 
@@ -493,53 +491,9 @@ impl WriteEngine {
     /// Discovers the current root's hard-link topology for incoming-link checks.
     ///
     /// Enumerates group links through [`group_v2::resolve_group_entries_from_source`]. Returns
-    /// `None` if complete discovery fails. The caller supplies the topology to
-    /// [`Self::collect_free_spans`] to require one incoming hard link before reclamation.
+    /// `None` if complete discovery fails.
     pub(super) fn count_incoming_hard_links(&self) -> Option<CompleteTopology<'_>> {
         CompleteTopology::discover(self).ok()
-    }
-
-    /// Appends supported storage selected by the single-incoming-link deletion policy.
-    ///
-    /// Requires a count of one in `incoming` before collecting an object's storage. For a
-    /// recognized group, visits children in topology order, stopping at [`MAX_LINK_WALK_DEPTH`].
-    /// Counts describe the root-reachable topology, and the caller establishes deletion and
-    /// publication conditions.
-    ///
-    /// Uses [`Self::collect_object_storage`] for each eligible object's physical allocations and
-    /// free classes. The caller screens shared global heap collections separately through
-    /// [`AnalysisPhase::unreferenced_collection_spans`].
-    pub(super) fn collect_free_spans(
-        &self,
-        addr: u64,
-        depth: u32,
-        incoming: &CompleteTopology<'_>,
-        out: &mut Vec<(FileRange, FreeClass)>,
-    ) {
-        // `addr` is an absolute file offset (the caller resolves it from the live
-        // file, and the topology retains each child's physical address). `incoming`
-        // is keyed by absolute offset, and `oh_chunk_spans`/`chunked_storage_spans`
-        // both take an absolute address and return absolute spans, so the whole
-        // walk works in absolute file offsets. The stored address `read_object`
-        // returns for a contiguous data block is converted to an absolute offset
-        // before it is bounds-checked or recorded.
-        if depth >= MAX_LINK_WALK_DEPTH {
-            return;
-        }
-        // Reclaim only when this delete removes the object's last hard link. A
-        // count other than 1 (it has surviving links, or the graph walk could
-        // not account for it) means the object and a group's whole subtree stay live and must
-        // not be freed.
-        if incoming.incoming(addr) != Some(1) {
-            return;
-        }
-        if self.collect_object_storage(ObjectId::new(PhysicalAddress::new(addr)), out)
-            == Some(ObjectStorageKind::Group)
-        {
-            for child in incoming.children(addr) {
-                self.collect_free_spans(child, depth + 1, incoming, out);
-            }
-        }
     }
 
     /// Appends supported complete physical allocations owned by one object.
@@ -725,7 +679,7 @@ impl WriteEngine {
     /// block.
     ///
     /// The object-header chunks are freed by the caller
-    /// ([`collect_free_spans`](Self::collect_free_spans)). This returns only the
+    /// ([`collect_object_storage`](Self::collect_object_storage)). This returns only the
     /// storage the data-layout message points at.
     ///
     /// Returns `None` and contributes nothing, leaving the object as dead bytes whenever the
@@ -742,7 +696,7 @@ impl WriteEngine {
     /// [`chunked_read::collect_chunked_storage_spans`].
     /// This method only locates the layout and dataspace messages and validates
     /// the result. The global heap collections that the chunks refer to are
-    /// excluded, as in [`collect_free_spans`](Self::collect_free_spans).
+    /// excluded, as in [`collect_object_storage`](Self::collect_object_storage).
     pub(super) fn chunked_storage_spans(&self, addr: u64) -> Option<Vec<(FileRange, FreeClass)>> {
         let split = self.chunked_storage_parts(addr)?;
         let mut spans: Vec<_> = split

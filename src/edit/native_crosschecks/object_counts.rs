@@ -694,6 +694,90 @@ fn native_count_fields_prepare_only_scalar_and_checksum_bytes(#[case] earliest: 
     native.close().unwrap();
 }
 
+#[rstest]
+#[case::legacy_aliases(CountSource::Legacy)]
+#[case::modern_aliases(CountSource::Modern)]
+#[case::committed_copy(CountSource::Copy)]
+#[case::page_aliases(CountSource::Page)]
+fn native_files_observe_committed_source_count_changes(#[case] source: CountSource) {
+    let path = test_util::temp::temp_path("native-active-counts.h5");
+    let native = match source {
+        CountSource::Legacy => file::libhdf5_create_earliest(&path),
+        CountSource::Copy | CountSource::Modern => file::libhdf5_create_v18(&path),
+        CountSource::Page => file::libhdf5_create_page(
+            &path,
+            4_096_u64.try_into().unwrap(),
+            0_u64.try_into().unwrap(),
+            false,
+        ),
+    };
+    let copy = matches!(source, CountSource::Copy);
+    let datatype = ByteOrder::LittleEndian.i32_datatype();
+    if copy {
+        native.commit_datatype("type", &datatype).unwrap();
+    }
+    let dataset = native
+        .new_dataset_builder()
+        .empty_as(&datatype)
+        .shape([1])
+        .create("source")
+        .unwrap();
+    dataset.write(&[17_i32]).unwrap();
+    drop(dataset);
+    if !copy {
+        native.link_hard("source", "alias").unwrap();
+    }
+    assert_eq!(
+        native
+            .loc_info_by_name(if copy { "type" } else { "source" })
+            .unwrap()
+            .num_links,
+        2
+    );
+    drop(datatype);
+    native.close().unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    if copy {
+        engine
+            .copy(
+                &ObjectPathBuf::parse("source"),
+                &ObjectPathBuf::parse("copy"),
+            )
+            .unwrap();
+    } else {
+        engine.delete(&ObjectPathBuf::parse("alias")).unwrap();
+    }
+    engine.commit().unwrap();
+    drop(engine);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(
+        native
+            .loc_info_by_name(if copy { "type" } else { "source" })
+            .unwrap()
+            .num_links,
+        if copy { 3 } else { 1 }
+    );
+    assert_eq!(
+        native.dataset("source").unwrap().read_raw::<i32>().unwrap(),
+        [17]
+    );
+    if copy {
+        let dataset = native.dataset("copy").unwrap();
+        assert!(dataset.dtype().unwrap().is_committed());
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), [17]);
+        drop(dataset);
+    }
+    native.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum CountSource {
+    Copy,
+    Legacy,
+    Modern,
+    Page,
+}
+
 #[derive(Clone, Copy)]
 enum Usage {
     CommittedType,

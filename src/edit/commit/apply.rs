@@ -10,12 +10,14 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{FreeClass, PageType};
 
+use super::plan::PreparedCountWork;
 use super::plan::{
     self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, InPlaceWrite, Node,
     OverwritePayloads, PreparedCommit, PreparedGroup, PreparedReference, PreparedTree,
     ReferenceTarget, RelocatedDataset, ReplacedHeader,
 };
 use super::publish::AppliedTree;
+use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::PlannedDeletion;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
@@ -23,10 +25,8 @@ use crate::edit::group;
 use crate::edit::object_header;
 use crate::edit::retirement::RootRetirement;
 use crate::edit::staging::StagedApply;
-use crate::edit::{self, WriteEngine};
 use crate::error::{Error, FormatError};
 use crate::object_path::ObjectPathBuf;
-use crate::source::Source;
 use crate::type_builders;
 
 impl WriteEngine {
@@ -84,6 +84,11 @@ impl WriteEngine {
 
     /// Places replacement objects and records the addresses needed for publication.
     ///
+    /// Retains original allocation boundaries and classes in the replacement storage batch.
+    /// After replacement and in-place value writes, screens collection candidates against the
+    /// applicable prospective root union. Unavailable count evidence excludes general collection
+    /// retirement. Exclusive same-session overwrite retirement is independent.
+    ///
     /// # Errors
     ///
     /// Returns the reclamation, placement, serialization, or write error.
@@ -94,13 +99,12 @@ impl WriteEngine {
         staged: StagedApply,
     ) -> Result<AppliedTree, Error> {
         let PreparedTree {
-            counts,
+            mut counts,
             mut groups,
             headers,
             cross_copies,
             inplace_writes,
-            deleted_free,
-            collection_candidates,
+            mut collection_candidates,
             mut references,
         } = tree;
         let GroupHeaders {
@@ -126,7 +130,14 @@ impl WriteEngine {
                 .copies
                 .push((leaf, tree));
         }
-        let mut to_free = self.prepare_reclamation(&groups, deleted_free)?;
+        let deleted = match &mut counts {
+            PreparedCountWork::Complete(counts) => {
+                collection_candidates.extend(core::mem::take(&mut counts.collections))?;
+                counts.storage.take_allocations()
+            }
+            PreparedCountWork::Empty | PreparedCountWork::Unavailable => Vec::new(),
+        };
+        let mut to_free = self.prepare_reclamation(&groups, deleted)?;
         let mut tail_allocations = Vec::new();
         let base = self.context.addresses();
         let mut path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
@@ -265,16 +276,26 @@ impl WriteEngine {
             }
         }
         let new_root = path_addr[&ObjectPathBuf::root()];
-        to_free.extend(
-            AnalysisPhase::prospective(self, PhysicalAddress::new(new_root))
-                .unreferenced_collection_spans(collection_candidates),
-        );
+        if !collection_candidates.is_empty() {
+            match &counts {
+                PreparedCountWork::Complete(counts) => to_free.extend(
+                    counts
+                        .storage
+                        .reference_phase(self, PhysicalAddress::new(new_root), &relocations)?
+                        .unreferenced_collection_spans(collection_candidates),
+                ),
+                PreparedCountWork::Empty => to_free.extend(
+                    AnalysisPhase::prospective(self, PhysicalAddress::new(new_root))
+                        .unreferenced_collection_spans(collection_candidates),
+                ),
+                PreparedCountWork::Unavailable => {}
+            }
+        }
         to_free.extend(
             self.superseded_heaps
                 .drain(..)
                 .map(|range| (range, FreeClass::Page(PageType::Raw))),
         );
-        edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
             counts,
             retirement: RootRetirement::new(PhysicalAddress::new(new_root), tail_allocations),
@@ -282,10 +303,10 @@ impl WriteEngine {
             relocations,
         })
     }
-    /// Enumerates storage superseded by prepared group and dataset replacements.
+    /// Combines original retirement allocations with storage superseded by prepared replacements.
     ///
-    /// The returned spans remain allocated until publication. Storage whose ownership
-    /// cannot be established is excluded.
+    /// Preserves allocation boundaries and classes. The returned spans remain allocated until
+    /// publication. Storage whose ownership cannot be established is excluded.
     ///
     /// # Errors
     ///
@@ -392,8 +413,6 @@ impl WriteEngine {
                 }
             }
         }
-
-        edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
 
         Ok(to_free)
     }

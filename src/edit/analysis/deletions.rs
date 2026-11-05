@@ -1,14 +1,12 @@
 //! Deletion names and physical edges bound to one complete topology instance.
 //!
-//! Edge identity and target identity are retained separately. Allocation collection uses the
-//! phase's reclamation policy, and collection-reference analysis uses the distinct target set.
+//! Edge identity and target identity are retained separately for count planning.
 
 use std::sync::Arc;
 
-use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::FreeClass;
 
+#[cfg(test)]
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_graph::LinkIndex;
@@ -130,34 +128,18 @@ impl<'topology, 'source> RemovedLinks<'topology, 'source> {
     }
 }
 
+#[cfg(test)]
 impl RemovedLinks<'_, '_> {
-    /// Appends allocations selected by reclamation policy and returns distinct physical targets.
-    ///
-    /// With complete topology, calls [`CompleteTopology::collect_free_spans`] once per target
-    /// using the original incoming-link counts. Without it, appends no allocations. Returns
-    /// targets in address order for separate collection-candidate discovery by the caller.
-    pub(in crate::edit) fn collect_free_spans(
-        self,
-        out: &mut Vec<(FileRange, FreeClass)>,
-    ) -> Vec<u64> {
-        let Self {
-            topology,
-            edges,
-            unresolved,
-        } = self;
-        let mut targets = edges
+    fn targets(self) -> Vec<u64> {
+        let mut targets = self
+            .edges
             .into_iter()
             .map(|(_, object)| object)
-            .chain(unresolved)
+            .chain(self.unresolved)
             .map(|object| object.header_address().get())
             .collect::<Vec<_>>();
         targets.sort_unstable();
         targets.dedup();
-        if let Some(topology) = topology {
-            for &target in &targets {
-                topology.collect_free_spans(target, 0, out);
-            }
-        }
         targets
     }
 }
@@ -172,6 +154,7 @@ impl<'source> AnalysisPhase<'source> {
     ///
     /// Returns [`FormatError::Internal`] if an identified edge belongs to a different topology
     /// instance, including when this phase has no complete topology.
+    #[cfg(test)]
     pub(in crate::edit) fn removed_links<'deletion>(
         &mut self,
         deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,

@@ -245,6 +245,7 @@ impl<'a> AnalysisPhase<'a> {
     ///
     /// `deleted` contains physical object-header addresses. Returns an empty union if reference
     /// discovery fails or is incomplete. Collections that cannot be parsed are excluded.
+    #[cfg(test)]
     pub(super) fn deleted_collections(&mut self, deleted: &[u64]) -> CollectionCandidates {
         if deleted.is_empty() {
             return CollectionCandidates::default();
@@ -768,18 +769,6 @@ impl<'a> CompleteTopology<'a> {
         })
     }
 
-    /// Appends allocations selected by the session's reclamation policy.
-    ///
-    /// Uses the reclamation policy of [`WriteEngine::collect_free_spans`], starting at `depth`.
-    pub(super) fn collect_free_spans(
-        &self,
-        address: u64,
-        depth: u32,
-        out: &mut Vec<(FileRange, FreeClass)>,
-    ) {
-        self.engine.collect_free_spans(address, depth, self, out);
-    }
-
     /// Returns the number of hard links targeting a physical object-header address.
     ///
     /// Returns `None` if the topology contains no link to `address`.
@@ -898,6 +887,10 @@ pub(super) struct CollectionCandidates {
 }
 
 impl CollectionCandidates {
+    pub(super) fn is_empty(&self) -> bool {
+        self.collections.is_empty()
+    }
+
     /// Merges candidates and their recorded origins from `other`.
     ///
     /// # Errors

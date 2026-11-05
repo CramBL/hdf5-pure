@@ -1,7 +1,8 @@
 //! Root publication, persistent free-space metadata, and PAGE publication recovery.
 //!
-//! Content is written before the publication barrier. The superblock write and its barrier
-//! precede truncation and stored-reference updates. Durability follows [`SyncPolicy`].
+//! Content is written before the publication barrier. The editor writes protected count increases
+//! before publishing references, and decreases after publication is confirmed. The superblock write
+//! and its barrier precede truncation and stored-reference updates. Durability follows [`SyncPolicy`].
 
 use std::collections::BTreeMap;
 
@@ -19,6 +20,7 @@ use hdf5_pure_space::__private::{
 };
 
 pub(in crate::edit) use self::completion::PublishedTree;
+use super::plan::PreparedCountWork;
 use super::plan::PreparedTreeCounts;
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
@@ -39,22 +41,15 @@ use crate::free_space_manager::ManagerProjection;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "completion loans are exercised by private owner tests"
-    )
-)]
 mod completion;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
-    /// Owned count facts retained through the publication attempt.
-    pub(super) counts: Option<Box<PreparedTreeCounts>>,
+    /// Prepared count-work state retained through the publication attempt.
+    pub(super) counts: PreparedCountWork,
     /// Replacement root and captured chunk allocations awaiting its publication.
     pub(super) retirement: RootRetirement,
-    /// Physical spans eligible for release when the root is published.
+    /// Original physical allocations eligible for release after confirmed publication.
     pub(super) freed: Vec<(FileRange, FreeClass)>,
     /// Absolute old and replacement header addresses for stored-reference updates.
     pub(super) relocations: BTreeMap<u64, u64>,
@@ -63,6 +58,8 @@ pub(super) struct AppliedTree {
 impl WriteEngine {
     /// Publishes a written tree through the session's persistent or non-persistent path.
     ///
+    /// Writes protected source count increases before reference publication and decreases after
+    /// confirmed publication. Uses the original retirement batch.
     /// Stored-reference updates run after root publication. Non-persistent PAGE commits require
     /// a tree proved free of object references and retain superseded storage.
     /// For non-persistent commits without paging, the publisher restores allocation state saved
@@ -71,24 +68,24 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns the publication, reference-update, or root-reclamation error. Errors after
-    /// publication leave rollback disabled.
+    /// Returns count-preparation, allocation-protection, publication, reference-update, or
+    /// root-reclamation errors. Errors after publication leave rollback disabled.
     pub(super) fn publish_tree(&mut self, tree: AppliedTree) -> Result<(), Error> {
         self.publish_tree_with_completion(tree, |_| Ok(()))
     }
 
     /// Publishes a written tree and calls `complete` after all publication work succeeds.
     ///
-    /// Uses the publication path of [`Self::publish_tree`]. Calls `complete` after any
-    /// stored-reference updates, root reclamation, and requested truncation succeed. The
-    /// completion callback borrows the engine through [`PublishedTree`] and returns an owned
-    /// result.
+    /// Uses the original retirement batch and the publication path of [`Self::publish_tree`].
+    /// Calls `complete` after source count updates, stored-reference updates, root reclamation,
+    /// and requested truncation succeed. The completion callback borrows the engine through
+    /// [`PublishedTree`] and returns an owned result.
     ///
     /// # Errors
     ///
-    /// Returns the publication, reference-update, root-reclamation, or address-resolution error
-    /// before calling `complete`. Returns the error from `complete` if completion fails.
-    /// Errors after publication leave rollback disabled.
+    /// Returns count-preparation, allocation-protection, publication, reference-update,
+    /// root-reclamation, or address-resolution errors before calling `complete`. Returns the
+    /// error from `complete` if completion fails. Errors after publication leave rollback disabled.
     pub(super) fn publish_tree_with_completion<T>(
         &mut self,
         tree: AppliedTree,
@@ -101,9 +98,28 @@ impl WriteEngine {
             relocations,
         } = tree;
         let pending = retirement.into_pending_frees(freed, self.image.len());
-        let result = self.publish_pending_tree_with_completion(pending, relocations, complete);
-        drop(counts);
-        result
+        if let Some(counts) = counts.into_checked() {
+            let PreparedTreeCounts {
+                preflight,
+                projection,
+                storage: _,
+                collections: _,
+            } = *counts;
+            let (_, protected) = preflight.into_parts(projection)?;
+            if protected.updates().is_empty() {
+                return self.publish_pending_tree_with_completion(pending, relocations, complete);
+            }
+            let requested_root = pending.root;
+            let end = PhysicalAddress::new(self.image.len());
+            protected
+                .before_publication(self, pending)?
+                .at_end(end)
+                .map_err(|failure| Error::from(failure.error))?
+                .publish_counts(relocations)?;
+            complete(PublishedTree::new(self, requested_root)?)
+        } else {
+            self.publish_pending_tree_with_completion(pending, relocations, complete)
+        }
     }
 
     /// Publishes a written tree using the supplied retirement batch before calling `complete`.
@@ -1249,6 +1265,7 @@ mod tests {
     use crate::width::FormatWidths;
 
     mod completion;
+    mod counts;
 
     #[rstest]
     #[case::empty(1000, 0, 8, PublicationPurpose::Allocation, None)]

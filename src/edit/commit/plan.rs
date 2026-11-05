@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::vec;
 
 use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_space::__private::FreeClass;
 
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
@@ -39,6 +38,7 @@ use crate::type_builders::ObjectRefTarget;
 
 pub(in crate::edit) use counts::CountProjectionError;
 pub(in crate::edit) use counts::CountProjectionProof;
+pub(super) use counts::PreparedCountWork;
 pub(super) use counts::PreparedTreeCounts;
 
 #[cfg_attr(
@@ -205,15 +205,13 @@ pub(super) struct GroupHeaders {
 ///
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
-    /// Original count facts and their matching local projection retained for publication.
-    pub(super) counts: Option<Box<PreparedTreeCounts>>,
+    /// Count-work classification and any matching original facts and local projection.
+    pub(super) counts: PreparedCountWork,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
     pub(super) cross_copies: Vec<CopyDestination>,
     pub(super) inplace_writes: Vec<InPlaceWrite>,
-    /// Absolute spans whose ownership was established while planning deletions.
-    pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
-    /// Attribute and deletion candidates awaiting reference analysis from the replacement root.
+    /// Collection candidates from replaced or removed attributes.
     pub(super) collection_candidates: CollectionCandidates,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
@@ -349,12 +347,10 @@ pub(super) enum ChildLink {
     },
 }
 
-/// Stores screened reference targets and storage affected by deletions.
+/// Stores screened reference targets and count-plan retirement evidence.
 struct TreeReferences {
-    /// Checked original counts and applied local projections for the prepared tree.
-    counts: Option<Box<PreparedTreeCounts>>,
-    deleted_free: Vec<(FileRange, FreeClass)>,
-    deleted_collections: CollectionCandidates,
+    /// Count-work classification and any checked original counts and local projections.
+    counts: PreparedCountWork,
     references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
     invalidates_reference_proof: bool,
 }
@@ -445,8 +441,6 @@ impl WriteEngine {
         );
         let TreeReferences {
             counts,
-            deleted_free,
-            deleted_collections,
             references,
             invalidates_reference_proof,
         } = self.prepare_tree_references(
@@ -458,7 +452,6 @@ impl WriteEngine {
             moved_headers,
             &mut analysis,
         )?;
-        collections.extend(deleted_collections)?;
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
         }
@@ -472,7 +465,6 @@ impl WriteEngine {
             headers,
             cross_copies,
             inplace_writes,
-            deleted_free,
             collection_candidates: collections,
             references,
         }))
@@ -981,18 +973,11 @@ impl WriteEngine {
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         let counts = PreparedTreeCounts::prepare(self, nodes, analysis)?;
         let delete_targets = staged.deletes();
-        let mut deleted_free: Vec<(FileRange, FreeClass)> = Vec::new();
-        let deleted_targets = analysis
-            .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
-            .collect_free_spans(&mut deleted_free);
-        let deleted_collections = analysis.deleted_collections(&deleted_targets);
         let for_copied = InvalidatedAddresses {
-            removed: deleted_free
-                .iter()
-                .map(|&(range, _)| range)
-                .chain(counts.iter().flat_map(|counts| {
-                    counts.storage.allocations().iter().map(|&(range, _)| range)
-                }))
+            removed: counts
+                .checked()
+                .into_iter()
+                .flat_map(|counts| counts.storage.allocations().iter().map(|&(range, _)| range))
                 .collect(),
             moved: Vec::new(),
             base: self.context.addresses(),
@@ -1056,8 +1041,6 @@ impl WriteEngine {
 
         Ok(TreeReferences {
             counts,
-            deleted_free,
-            deleted_collections,
             references,
             invalidates_reference_proof,
         })
@@ -1438,7 +1421,7 @@ pub(in crate::edit) struct OverwriteId {
 /// Deletion ranges include supported original allocation evidence. Moved entries identify old
 /// object-header addresses whose replacements are published by the commit.
 pub(in crate::edit) struct InvalidatedAddresses {
-    /// Physical ranges selected by deletion allocation collectors for reference screening.
+    /// Original physical allocations selected by count planning for reference screening.
     pub(in crate::edit) removed: Vec<FileRange>,
     /// Superseded object-header addresses from relocating dataset writes and rebuilt groups.
     pub(in crate::edit) moved: Vec<PhysicalAddress>,

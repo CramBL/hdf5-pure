@@ -61,6 +61,7 @@ use crate::edit::aggregation::AggregateSpace;
 use crate::edit::commit::PublicationPurpose;
 use crate::edit::reclaim;
 use crate::edit::reclaim::ObjectStorageKind;
+use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_lock::FileLocking;
@@ -343,9 +344,7 @@ fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(
 
         session.assert_ownership_covers_storage(&storage, false);
 
-        let incoming = session.count_incoming_hard_links().unwrap();
-        let mut planned = Vec::new();
-        incoming.collect_free_spans(addr, 0, &mut planned);
+        let planned = edit_test_util::retirement_spans(&session, &object);
         for span in &storage {
             assert!(planned.contains(span), "{span:?} is not in {planned:?}");
         }
@@ -798,16 +797,13 @@ fn deleting_a_compact_group_with_symbolic_links_reclaims_its_hard_linked_subtree
         .unwrap();
         (addr, session.oh_chunk_spans(addr).unwrap())
     };
-    let (group, _) = header_spans("/g");
     let mut expected: Vec<(FileRange, FreeClass)> = ["/g", "/g/d", "/g/σ", "/g/σ/v"]
         .into_iter()
         .flat_map(|object_path| reclaim::meta_spans(header_spans(object_path).1))
         .chain(data_blocks)
         .collect();
     expected.sort_unstable_by_key(|&(range, _)| range.start());
-    let incoming = session.count_incoming_hard_links().unwrap();
-    let mut planned = Vec::new();
-    incoming.collect_free_spans(group, 0, &mut planned);
+    let mut planned = edit_test_util::retirement_spans(&session, &ObjectPathBuf::parse("/g"));
     planned.sort_unstable_by_key(|&(range, _)| range.start());
     assert_eq!(planned, expected);
 

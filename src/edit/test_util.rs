@@ -412,9 +412,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         }))
         .collect();
     expected.sort_unstable_by_key(|&(range, _)| range.start());
-    let incoming = session.count_incoming_hard_links().unwrap();
-    let mut planned = Vec::new();
-    incoming.collect_free_spans(addr, 0, &mut planned);
+    let mut planned = retirement_spans(&session, &object);
     planned.sort_unstable_by_key(|&(range, _)| range.start());
     assert_eq!(planned, expected);
 
@@ -809,4 +807,24 @@ impl File {
         assert_eq!(info.threshold, 1);
         assert_eq!(info.page_size.get(), 4096);
     }
+}
+
+/// Collects original allocations selected by a source-bound count plan for deleting `path`.
+///
+/// # Panics
+///
+/// Panics if topology, deletion identity, or count planning is unavailable.
+pub(super) fn retirement_spans(
+    engine: &WriteEngine,
+    path: &ObjectPathBuf,
+) -> Vec<(FileRange, FreeClass)> {
+    let mut phase = super::analysis::AnalysisPhase::new(engine);
+    let deletion = phase.topology().unwrap().deletion(path).unwrap();
+    let users = super::analysis::counts::added_users::CopyUsersUnion::new().finish();
+    phase
+        .net_count_plan([&deletion], &users)
+        .unwrap()
+        .unwrap()
+        .collect_storage()
+        .take_allocations()
 }

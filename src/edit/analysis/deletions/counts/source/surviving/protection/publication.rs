@@ -4,8 +4,10 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::FreeClass;
 
+use crate::ObjectReferenceCountUpdateIssue;
 use crate::edit::WriteEngine;
 use crate::edit::retirement::PendingRootFrees;
+use crate::error::Error;
 use crate::object_graph::ObjectId;
 
 use super::CountProtectionError;
@@ -200,6 +202,22 @@ pub(in crate::edit) enum CountPublicationError {
         /// The proposed physical EOA.
         end: PhysicalAddress,
     },
+}
+
+impl From<CountPublicationError> for Error {
+    /// Reports overlapping retirements or truncation as unsupported count updates.
+    fn from(error: CountPublicationError) -> Self {
+        match error {
+            CountPublicationError::Protection(error) => error.into(),
+            CountPublicationError::Retirement { object, .. }
+            | CountPublicationError::Truncation { object, .. } => {
+                Self::ObjectReferenceCountUpdateUnsupported {
+                    address: object.header_address().get(),
+                    issue: ObjectReferenceCountUpdateIssue::AllocationUnavailable,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

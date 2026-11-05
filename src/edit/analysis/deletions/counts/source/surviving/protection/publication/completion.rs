@@ -15,8 +15,10 @@ use super::prepare::CountDirection;
 use super::prepare::CountPreparationError;
 use crate::edit::WriteEngine;
 use crate::edit::commit::JournalScope;
+use crate::edit::commit::PublicationState;
 use crate::edit::commit::PublishedTree;
 use crate::error::Error;
+use crate::error::FormatError;
 
 mod write;
 
@@ -72,9 +74,9 @@ impl CountPublicationBounds<'_> {
     /// [`CountPublicationUpdateError::Completion`] if post-publication allocation checks fail, or
     /// [`CountPublicationUpdateError::Operation`] for allocation permission, publication, journal,
     /// or barrier errors.
-    /// Marks allocation publication uncertain after an error following a publication attempt or
-    /// failed restoration. Failed restoration retains both errors in
-    /// [`Error::CommitPartiallyApplied`].
+    /// After a publication attempt, marks allocation publication uncertain on error, except for
+    /// the existing nonpersistent PAGE recovery state. Failed restoration also marks publication
+    /// uncertain and retains both errors in [`Error::CommitPartiallyApplied`].
     pub(in crate::edit) fn publish_counts(
         self,
         relocations: BTreeMap<u64, u64>,
@@ -119,7 +121,10 @@ impl CountPublicationBounds<'_> {
         )
         .map_err(CountPublicationUpdateError::Operation)
         .and_then(core::convert::identity);
-        if result.is_err() && engine.publication.attempted()
+        if result.is_err()
+            && engine.publication.attempted()
+            && !(engine.fresh_page_boundary.is_some()
+                && engine.publication == PublicationState::Uncertain)
             || matches!(
                 &result,
                 Err(CountPublicationUpdateError::Operation(
@@ -254,6 +259,32 @@ impl From<CountWriteFailure<'_, '_>> for CountPublicationUpdateError {
             CountWriteFailure::Preparation { scope: _, error } => Self::Preparation(error),
             CountWriteFailure::Restored { writes: _, error }
             | CountWriteFailure::Uncertain { error } => Self::Operation(error),
+        }
+    }
+}
+
+impl From<CountCompletionError> for Error {
+    /// Converts allocation failures and inconsistent roots to public errors.
+    ///
+    /// Reports an inconsistent root through [`FormatError::Internal`].
+    fn from(error: CountCompletionError) -> Self {
+        match error {
+            CountCompletionError::Protection(error) => error.into(),
+            CountCompletionError::Root { .. } => FormatError::Internal(
+                "count completion has an inconsistent publication root".into(),
+            )
+            .into(),
+        }
+    }
+}
+
+impl From<CountPublicationUpdateError> for Error {
+    /// Returns operation errors unchanged and converts preparation and completion failures.
+    fn from(error: CountPublicationUpdateError) -> Self {
+        match error {
+            CountPublicationUpdateError::Completion(error) => error.into(),
+            CountPublicationUpdateError::Preparation(error) => error.into(),
+            CountPublicationUpdateError::Operation(error) => error,
         }
     }
 }

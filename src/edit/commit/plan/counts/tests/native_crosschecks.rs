@@ -513,7 +513,7 @@ fn native_root_count_preparation_preserves_the_superblock_user(#[case] earliest:
     let CommitPlan::Tree(tree) = &mut prepared.plan else {
         panic!("expected tree preparation")
     };
-    let counts = tree.counts.as_ref().unwrap();
+    let counts = tree.counts.checked().unwrap();
     assert_eq!(counts.preflight.changes().len(), 1);
     assert_eq!(
         (

@@ -27,6 +27,7 @@ use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
 use crate::file_writer;
 use crate::object_graph::ObjectId;
+use crate::object_path::ObjectPathBuf;
 use crate::type_builders;
 
 #[rstest]
@@ -82,6 +83,7 @@ fn group_storage_excludes_children_and_aliases_prevent_retirement() {
         ),
         Message::new(MessageType::GROUP_INFO, &group::GROUP_INFO_BODY),
         global_heap_fixture::hard_link("value", value),
+        Message::reference_count(2),
     ]);
     let owner_len = u64::try_from(fixture.image.as_bytes().len()).unwrap() - owner;
     fixture.link("first", owner);
@@ -112,9 +114,7 @@ fn group_storage_excludes_children_and_aliases_prevent_retirement() {
             (range(data, 8), FreeClass::Page(PageType::Raw)),
         ]
     );
-    let mut retirement = Vec::new();
-    topology.collect_free_spans(owner, 0, &mut retirement);
-    assert!(retirement.is_empty());
+    assert!(edit_test_util::retirement_spans(&engine, &ObjectPathBuf::parse("first")).is_empty());
 }
 
 #[rstest]

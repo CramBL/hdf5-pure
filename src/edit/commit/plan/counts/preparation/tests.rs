@@ -80,7 +80,7 @@ fn commit_preparation_retains_exact_count_storage_and_source_protection(
     let CommitPlan::Tree(tree) = prepared.plan else {
         panic!("expected tree preparation")
     };
-    let counts = tree.counts.unwrap();
+    let counts = tree.counts.into_checked().unwrap();
     let entries = counts.preflight.changes();
     assert_eq!(entries.len(), 1);
     assert_eq!(
@@ -162,7 +162,7 @@ fn commit_preparation_retains_collections_from_count_eligible_objects() {
     let CommitPlan::Tree(tree) = prepared.plan else {
         panic!("expected tree preparation")
     };
-    let counts = tree.counts.unwrap();
+    let counts = tree.counts.into_checked().unwrap();
     assert_eq!(counts.storage.allocations().len(), 1);
     assert_eq!(
         counts
@@ -224,7 +224,7 @@ fn actual_copy_emissions_share_the_commit_count_plan(
     let CommitPlan::Tree(tree) = prepared.plan else {
         panic!("expected tree preparation")
     };
-    let counts = tree.counts.unwrap();
+    let counts = tree.counts.into_checked().unwrap();
     assert_eq!(counts.preflight.changes().len(), 1);
     let entry = &counts.preflight.changes()[0];
     assert_eq!(
@@ -262,7 +262,7 @@ fn reconstructed_root_counts_are_projected_before_application() {
     let CommitPlan::Tree(mut tree) = prepared.plan else {
         panic!("expected tree preparation")
     };
-    let counts = tree.counts.unwrap();
+    let counts = tree.counts.into_checked().unwrap();
     let root = tree.groups.get_mut(&ObjectPathBuf::root()).unwrap();
     assert_eq!(
         root.prepared.region.reference_count_mut().unwrap().count(),
@@ -329,7 +329,7 @@ fn count_preparation_without_users_requires_no_reads_or_allocations(#[case] work
     });
     assert_eq!((measured.blocks, measured.bytes), (0, 0), "{measured}");
     assert_eq!(reads.load(Ordering::Relaxed), 0);
-    assert!(prepared.is_none());
+    assert!(matches!(prepared, super::PreparedCountWork::Empty));
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

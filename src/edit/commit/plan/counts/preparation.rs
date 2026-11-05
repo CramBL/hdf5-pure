@@ -23,6 +23,34 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
 
+/// Prepared count work and the availability of original retirement evidence.
+pub(in crate::edit::commit) enum PreparedCountWork {
+    /// Checked original facts, owned projections, supported allocations, and collection candidates.
+    Complete(Box<PreparedTreeCounts>),
+    /// A plan without count changes.
+    Empty,
+    /// Unavailable count evidence, which excludes general collection retirement.
+    Unavailable,
+}
+
+impl PreparedCountWork {
+    /// Borrows checked work, or returns `None` for empty or unavailable evidence.
+    pub(in crate::edit::commit) fn checked(&self) -> Option<&PreparedTreeCounts> {
+        match self {
+            Self::Complete(counts) => Some(counts),
+            Self::Empty | Self::Unavailable => None,
+        }
+    }
+
+    /// Returns owned checked work, or `None` for empty or unavailable evidence.
+    pub(in crate::edit::commit) fn into_checked(self) -> Option<Box<PreparedTreeCounts>> {
+        match self {
+            Self::Complete(counts) => Some(counts),
+            Self::Empty | Self::Unavailable => None,
+        }
+    }
+}
+
 /// Owned count facts and a matching local projection retained through tree publication.
 ///
 /// Changed positive source fields outside the reconstruction set have checked allocation evidence.
@@ -44,8 +72,9 @@ impl PreparedTreeCounts {
     ///
     /// Uses the supplied analysis phase, preserves original count facts, and applies checked
     /// changes to owned replacement records. Retains collection candidates from eligible objects.
-    /// Returns `None` when planning supplies no count changes. Boxes nonempty work with its source
-    /// protection and matching completion proof.
+    /// Returns [`PreparedCountWork::Empty`] for a plan without count changes, or
+    /// [`PreparedCountWork::Unavailable`] when original count planning is unavailable. Boxes
+    /// nonempty checked work with its source protection and matching completion proof.
     /// Source writes, reference completeness, admission, and retirement require separate evidence.
     ///
     /// # Errors
@@ -57,7 +86,7 @@ impl PreparedTreeCounts {
         engine: &WriteEngine,
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         analysis: &mut AnalysisPhase<'_>,
-    ) -> Result<Option<Box<Self>>, Error> {
+    ) -> Result<PreparedCountWork, Error> {
         let mut union = CopyUsersUnion::new();
         for tree in nodes
             .values()
@@ -82,10 +111,10 @@ impl PreparedTreeCounts {
                     "copied datatype reference counts are unavailable",
                 ));
             }
-            return Ok(None);
+            return Ok(PreparedCountWork::Unavailable);
         };
         if plan.evidence_changes().next().is_none() {
-            return Ok(None);
+            return Ok(PreparedCountWork::Empty);
         }
         let mut storage = plan.collect_storage();
         let inventory = plan.owned_counts(engine).map_err(|error| {
@@ -110,7 +139,7 @@ impl PreparedTreeCounts {
         .apply()
         .map_err(HeaderCountError::into_application_error)?;
         drop(disposition);
-        Ok(Some(Box::new(Self {
+        Ok(PreparedCountWork::Complete(Box::new(Self {
             preflight,
             projection,
             storage,

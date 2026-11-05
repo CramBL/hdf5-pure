@@ -171,6 +171,13 @@ impl CountStorage {
         &self.allocations
     }
 
+    /// Transfers the original allocation batch without sorting or coalescing.
+    ///
+    /// Returns each physical range and free class unchanged. Subsequent calls return an empty batch.
+    pub(in crate::edit) fn take_allocations(&mut self) -> Vec<(FileRange, FreeClass)> {
+        core::mem::take(&mut self.allocations)
+    }
+
     /// Borrows each retained object once for reference analysis.
     ///
     /// Touched removal-view objects are in topology index order, followed by other reference

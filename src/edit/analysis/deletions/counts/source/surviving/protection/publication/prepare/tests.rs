@@ -30,6 +30,7 @@ use super::CountDirection;
 use super::CountPreparationError;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use super::CurrentCountUpdates;
+use crate::ObjectReferenceCountUpdateIssue;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::UserblockSize;
 use crate::address::BaseAddress;
@@ -41,6 +42,7 @@ use crate::edit::analysis::DISCOVERY_WORK;
 use crate::edit::analysis::counts::CountObservation;
 use crate::edit::retirement::RootRetirement;
 use crate::edit::test_util as edit_test_util;
+use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
 use crate::source::BytesSource;
@@ -200,6 +202,26 @@ fn preparation_rejects_changed_framing_and_counts(#[case] change: Change) {
                     actual: 3
                 }
             );
+            let mapped = Error::from(CountPreparationError::Update { object, error });
+            assert_eq!(
+                mapped.to_string(),
+                format!(
+                    "object reference count at {} is 3, expected original count 2",
+                    fixture.object.header_address().get()
+                )
+            );
+            let Error::ObjectReferenceCountMismatch {
+                address,
+                expected,
+                actual,
+            } = mapped
+            else {
+                panic!("expected a caller-visible count mismatch")
+            };
+            assert_eq!(
+                (address, expected, actual),
+                (fixture.object.header_address().get(), 2, 3)
+            );
         }
         (
             change,
@@ -235,6 +257,22 @@ fn preparation_rejects_changed_framing_and_counts(#[case] change: Change) {
                 }
                 Change::Count => panic!("expected a scalar count mismatch"),
             }
+            let Error::ObjectReferenceCountUpdateUnsupported { address, issue } =
+                Error::from(CountPreparationError::Field {
+                    object,
+                    expected: actual_expected,
+                    actual,
+                })
+            else {
+                panic!("expected a caller-visible encoding failure")
+            };
+            assert_eq!(
+                (address, issue),
+                (
+                    fixture.object.header_address().get(),
+                    ObjectReferenceCountUpdateIssue::UnsupportedEncoding
+                )
+            );
         }
         (_, other) => panic!("unexpected preparation error: {other:?}"),
     }

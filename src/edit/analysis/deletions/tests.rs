@@ -54,12 +54,7 @@ fn removed_edge_multiplicity_is_separate_from_distinct_targets(
     let removed = phase.removed_links(&deletions).unwrap();
     assert_eq!(removed.edges.len(), edges);
     assert!(removed.unresolved.is_empty());
-    let mut spans = Vec::new();
-    assert_eq!(
-        removed.collect_free_spans(&mut spans),
-        [if leaf { value } else { owner }]
-    );
-    assert!(spans.is_empty());
+    assert_eq!(removed.targets(), [if leaf { value } else { owner }]);
 }
 
 #[test]
@@ -87,17 +82,11 @@ fn removed_edges_reject_another_topology_from_the_same_source() {
         reason,
         "a removed link belongs to another analysis topology"
     );
-    assert_eq!(
-        first
-            .removed_links([&deletion])
-            .unwrap()
-            .collect_free_spans(&mut Vec::new()),
-        [value]
-    );
+    assert_eq!(first.removed_links([&deletion]).unwrap().targets(), [value]);
 }
 
 #[test]
-fn incomplete_topology_preserves_deletion_targets_without_allocation_retirement() {
+fn incomplete_topology_preserves_unresolved_deletion_targets() {
     let path = test_util::temp::temp_path("unresolved-deletion.h5");
     let mut fixture = Fixture::new();
     let value = fixture.append_header(Vec::new());
@@ -110,12 +99,10 @@ fn incomplete_topology_preserves_deletion_targets_without_allocation_retirement(
         LinkNameBuf::new("value").unwrap(),
         PhysicalAddress::new(value),
     );
-    let mut spans = Vec::new();
     let removed = phase.removed_links([&deletion]).unwrap();
     assert!(removed.topology.is_none());
     assert!(removed.edges.is_empty());
-    assert_eq!(removed.collect_free_spans(&mut spans), [value]);
-    assert!(spans.is_empty());
+    assert_eq!(removed.targets(), [value]);
 }
 
 #[test]
@@ -125,14 +112,6 @@ fn empty_removed_link_batch_skips_topology_discovery() {
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     DISCOVERY_WORK.with(|work| work.set((0, 0)));
-    let mut spans = Vec::new();
-    assert!(
-        phase
-            .removed_links([])
-            .unwrap()
-            .collect_free_spans(&mut spans)
-            .is_empty()
-    );
-    assert!(spans.is_empty());
+    assert!(phase.removed_links([]).unwrap().targets().is_empty());
     assert_eq!(DISCOVERY_WORK.with(Cell::get), (0, 0));
 }

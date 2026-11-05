@@ -25,6 +25,7 @@ use crate::convert;
 use crate::edit::SyncPolicy;
 use crate::edit::WriteEngine;
 use crate::edit::commit::PublicationState;
+use crate::edit::commit::plan::PreparedCountWork;
 use crate::edit::retirement::RootRetirement;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
@@ -409,7 +410,7 @@ fn fixture(path: &Path, strategy: Strategy, base: u64) -> WriteEngine {
 
 fn tree(root: PhysicalAddress) -> AppliedTree {
     AppliedTree {
-        counts: None,
+        counts: PreparedCountWork::Empty,
         retirement: RootRetirement::new(root, vec![]),
         freed: vec![],
         relocations: BTreeMap::new(),

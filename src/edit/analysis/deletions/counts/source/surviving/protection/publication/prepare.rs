@@ -12,9 +12,11 @@ use super::ProtectedCount;
 use super::ProtectedCounts;
 use super::current::CurrentMetadata;
 use super::current::CurrentMetadataError;
+use crate::ObjectReferenceCountUpdateIssue;
 use crate::address::BaseAddress;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::CountObservation;
+use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
 use crate::source::Source;
@@ -283,6 +285,55 @@ pub(in crate::edit) enum CountPreparationError {
         /// The count or checksum preparation error.
         error: ObjectReferenceCountUpdateError,
     },
+}
+
+impl From<CountPreparationError> for Error {
+    /// Converts source preparation failures to public errors.
+    ///
+    /// Returns source errors and scalar mismatches through their corresponding public variants.
+    /// Reports inconsistent source associations through [`FormatError::Internal`].
+    fn from(error: CountPreparationError) -> Self {
+        match error {
+            CountPreparationError::Read { error, .. }
+            | CountPreparationError::Parse { error, .. }
+            | CountPreparationError::Update {
+                error: ObjectReferenceCountUpdateError::Format(error),
+                ..
+            } => error.into(),
+            CountPreparationError::Update {
+                object,
+                error:
+                    ObjectReferenceCountUpdateError::Value {
+                        expected, actual, ..
+                    },
+            } => Self::ObjectReferenceCountMismatch {
+                address: object.header_address().get(),
+                expected,
+                actual,
+            },
+            CountPreparationError::Allocation { object, .. } => {
+                Self::ObjectReferenceCountUpdateUnsupported {
+                    address: object.header_address().get(),
+                    issue: ObjectReferenceCountUpdateIssue::AllocationUnavailable,
+                }
+            }
+            CountPreparationError::Field { object, .. } => {
+                Self::ObjectReferenceCountUpdateUnsupported {
+                    address: object.header_address().get(),
+                    issue: ObjectReferenceCountUpdateIssue::UnsupportedEncoding,
+                }
+            }
+            CountPreparationError::Range { .. }
+            | CountPreparationError::Session
+            | CountPreparationError::Update {
+                error: ObjectReferenceCountUpdateError::Chunk { .. },
+                ..
+            } => FormatError::Internal(
+                "source count preparation has an inconsistent allocation association".into(),
+            )
+            .into(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ use crate::object_graph::ObjectId;
 use super::PreparedGroup;
 use super::RelocatedDataset;
 
+pub(in crate::edit::commit) use preparation::PreparedCountWork;
 pub(in crate::edit::commit) use preparation::PreparedTreeCounts;
 
 mod preparation;
