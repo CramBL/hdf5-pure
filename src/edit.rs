@@ -643,7 +643,7 @@ pub(crate) struct WriteEngine {
     /// a dataset with more than one hard link
     /// ([`count_incoming_hard_links`](Self::count_incoming_hard_links)), so it
     /// would start refusing overwrites this engine accepts today.
-    inplace_undo: Vec<(u64, Vec<u8>)>,
+    inplace_undo: Vec<(PhysicalAddress, Vec<u8>)>,
     /// True when this engine was opened for SWMR writing
     /// ([`open_swmr_writer`](Self::open_swmr_writer)): the append engine then
     /// enforces the SWMR subset (unfiltered, chunk-aligned) so a concurrent
@@ -3454,11 +3454,13 @@ fn screen_resolved_references(
 ///
 /// [`reference_patch::Plan`]: crate::reference_patch::Plan
 impl crate::reference_patch::PatchTarget for WriteEngine {
-    fn read(&self, at: u64, len: usize) -> Result<Vec<u8>, Error> {
-        self.image().read_exact_at(at, len).map_err(Error::Format)
+    fn read(&self, at: PhysicalAddress, len: usize) -> Result<Vec<u8>, Error> {
+        self.image()
+            .read_exact_at(at.get(), len)
+            .map_err(Error::Format)
     }
-    fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
-        self.image.write_at(at, bytes)
+    fn write(&mut self, at: PhysicalAddress, bytes: &[u8]) -> Result<(), Error> {
+        self.image.write_at(at.get(), bytes)
     }
 }
 

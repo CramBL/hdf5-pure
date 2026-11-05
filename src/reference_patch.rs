@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
 
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
@@ -51,19 +52,17 @@ use crate::width::{FormatWidths, OffsetWidth};
 /// block stands alone.
 #[derive(Debug, Default)]
 pub(crate) struct Plan {
-    /// Edits in a dataset's data block: `(absolute file offset, the
-    /// base-relative address to store there)`. A data block carries no checksum,
-    /// so each of these is an independent eight-byte publish. A crash between
-    /// two of them leaves some elements repointed and some not — a mixture of
-    /// the pre-commit address and the post-commit one, which is the state every
-    /// such element was left in before this existed.
-    data_writes: Vec<(u64, StoredAddress)>,
+    /// Physical patch positions and stored replacement addresses in dataset data blocks.
+    ///
+    /// Each element is an independent eight-byte write. A crash between writes can leave some
+    /// references at their prior addresses and others at their replacement addresses.
+    data_writes: Vec<(PhysicalAddress, StoredAddress)>,
     /// Edits within version 2 header chunks, grouped by complete physical range.
     ///
     /// Each `(offset, value)` uses a byte displacement from the chunk's start. [`Plan::apply`]
     /// reads the complete chunk, recalculates its checksum, and writes the changed suffix and
     /// checksum together.
-    header_writes: BTreeMap<FileRange, Vec<(usize, StoredAddress)>>,
+    header_writes: BTreeMap<FileRange, Vec<(HeaderOffset, StoredAddress)>>,
     /// Whether the walk reached every object in the file and found none whose
     /// datatype holds an object address — the proof that no later commit on this
     /// session need walk it again, provided nothing is added meanwhile.
@@ -76,13 +75,23 @@ pub(crate) struct Plan {
     proved_free_of_references: bool,
 }
 
-/// The file a [`Plan`] is applied to. Readable as well as writable, because an
-/// object header is republished as a whole checksummed chunk: the bytes around
-/// an edit have to be read back before the checksum over them can be
-/// recomputed.
+/// A readable and writable destination for reference patches.
+///
+/// The writer reads complete header chunks before recalculating their checksums.
 pub(crate) trait PatchTarget {
-    fn read(&self, at: u64, len: usize) -> Result<Vec<u8>, Error>;
-    fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error>;
+    /// Reads exactly `len` bytes at the physical position `at`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the destination's read error.
+    fn read(&self, at: PhysicalAddress, len: usize) -> Result<Vec<u8>, Error>;
+
+    /// Writes `bytes` at the physical position `at`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the destination's write error.
+    fn write(&mut self, at: PhysicalAddress, bytes: &[u8]) -> Result<(), Error>;
 }
 
 impl Plan {
@@ -106,14 +115,15 @@ impl Plan {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if a header chunk is shorter than its checksum or an
-    /// edit extends outside its message bytes. Returns [`Error::Format`] if a chunk's length
-    /// exceeds [`usize::MAX`]. Propagates patch-target read and write errors.
+    /// edit extends into or past the checksum. Returns [`Error::Format`] if a chunk's length
+    /// exceeds [`usize::MAX`] or a physical patch position overflows [`u64`]. Propagates
+    /// patch-target read and write errors.
     pub(crate) fn apply(&self, target: &mut impl PatchTarget) -> Result<(), Error> {
         for &(at, value) in &self.data_writes {
             target.write(at, &value.get().to_le_bytes())?;
         }
         for (&range, edits) in &self.header_writes {
-            let at = range.start().get();
+            let at = range.start();
             let len = range.length();
             // `read_oh_chunks` produced this span from a header it had already
             // bounds-checked, and the length always covers the trailing
@@ -125,6 +135,7 @@ impl Plan {
             let mut chunk = target.read(at, len)?;
             let mut from = body_len;
             for &(offset, value) in edits {
+                let offset = offset.get();
                 // Refused rather than asserted away: every offset here is derived
                 // from geometry parsed out of the file, so one that leaves the
                 // chunk is untrusted input rather than a broken invariant.
@@ -138,7 +149,7 @@ impl Plan {
             }
             let checksum = checksum::jenkins_lookup3(&chunk[..body_len]);
             chunk[body_len..].copy_from_slice(&checksum.to_le_bytes());
-            target.write(at + from as u64, &chunk[from..])?;
+            target.write(at.checked_add(from.to_u64())?, &chunk[from..])?;
         }
         Ok(())
     }
@@ -152,17 +163,39 @@ impl Plan {
 
     /// The addresses this plan rewrites, for tests that pin *where* it acts.
     #[cfg(test)]
-    pub(crate) fn sites(&self) -> Vec<u64> {
+    pub(crate) fn sites(&self) -> Vec<PhysicalAddress> {
         let headers = self.header_writes.iter().flat_map(|(&range, edits)| {
             edits
                 .iter()
-                .map(move |&(o, _)| range.start().checked_add(o as u64).unwrap().get())
+                .map(move |&(o, _)| range.start().checked_add(o.get().to_u64()).unwrap())
         });
         self.data_writes
             .iter()
             .map(|&(at, _)| at)
             .chain(headers)
             .collect()
+    }
+}
+
+/// A byte displacement from the start of an object-header chunk.
+///
+/// The displacement fits [`usize`]. [`Plan::apply`] checks that each complete reference ends
+/// at or before the trailing checksum's start.
+#[derive(Clone, Copy, Debug)]
+struct HeaderOffset(usize);
+
+impl HeaderOffset {
+    /// Computes a displacement from the start of `chunk`.
+    ///
+    /// Returns `None` if `at` precedes the start or the displacement exceeds [`usize::MAX`].
+    fn new(chunk: FileRange, at: PhysicalAddress) -> Option<Self> {
+        at.checked_distance_from(chunk.start())
+            .and_then(|offset| usize::try_from(offset).ok())
+            .map(Self)
+    }
+
+    fn get(self) -> usize {
+        self.0
     }
 }
 
@@ -291,7 +324,6 @@ fn walk(
     let mut saw_reference = false;
     let mut complete = true;
     while let Some((id, depth)) = traversal.next_matching(|id| !relocations.contains_key(&id)) {
-        let addr = id.header_address().get();
         // One pass over the header serves both needs: it collects the byte edits
         // this object owes, and it reports whether the object is a group. Only a
         // group is parsed a second time, into the form
@@ -303,7 +335,7 @@ fn walk(
         // once only groups were. No test holds those figures — unlike
         // `publish_checksummed`, whose claim its own crash test pins — so treat
         // them as a record of one measurement rather than as a bound.
-        let outcome = scan_object(src, addr, widths, relocations, &mut plan)?;
+        let outcome = scan_object(src, id, widths, relocations, &mut plan)?;
         saw_reference |= outcome.holds_a_reference;
         if !outcome.descend {
             complete &= outcome.fully_read;
@@ -314,7 +346,7 @@ fn walk(
         let header = match ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(src),
             AccessMode::ReadWrite,
-            addr,
+            id.header_address().get(),
             widths,
             base.effective_base(),
         ) {
@@ -482,24 +514,20 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
     else {
         return Ok(holds);
     };
-    let (Ok(at), Ok(want)) = (
-        base.resolve(a).map(PhysicalAddress::get),
-        usize::try_from(size),
-    ) else {
+    let (Ok(at), Ok(want)) = (base.resolve(a), usize::try_from(size)) else {
         return Ok(holds);
     };
-    let Ok(raw) = src.read_exact_at(at, want) else {
+    let Ok(raw) = src.read_exact_at(at.get(), want) else {
         return Ok(holds);
     };
     collect_slots(
         &dt,
         &slots,
-        &raw,
-        at,
+        FileRegion::new(FileRange::new(at, raw.len().to_u64())?, &raw)?,
         base,
         relocations,
         &mut plan.data_writes,
-    );
+    )?;
     Ok(holds)
 }
 
@@ -535,7 +563,7 @@ struct Scanned {
 /// Propagates record errors and narrow header, datatype, attribute, resolver, and source errors.
 fn scan_object<S: OriginalSource + ?Sized>(
     src: &S,
-    addr: u64,
+    addr: ObjectId,
     widths: FormatWidths,
     relocations: &BTreeMap<ObjectId, ObjectId>,
     plan: &mut Plan,
@@ -545,27 +573,27 @@ fn scan_object<S: OriginalSource + ?Sized>(
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
     let base = src.addresses();
-    let chunks =
-        match edit::object_header::read_oh_chunks(src, PhysicalAddress::new(addr), base, widths) {
-            Ok(chunks) => chunks,
-            Err(Error::EditUnsupported(edit::object_header::VERSION_TWO_REQUIRED)) => {
-                return Ok(Scanned {
-                    descend: true,
-                    holds_a_reference: false,
-                    fully_read: false,
-                    header_located: false,
-                });
-            }
-            Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error),
-            Err(_) => {
-                return Ok(Scanned {
-                    descend: true,
-                    holds_a_reference: false,
-                    fully_read: false,
-                    header_located: false,
-                });
-            }
-        };
+    let chunks = match edit::object_header::read_oh_chunks(src, addr.header_address(), base, widths)
+    {
+        Ok(chunks) => chunks,
+        Err(Error::EditUnsupported(edit::object_header::VERSION_TWO_REQUIRED)) => {
+            return Ok(Scanned {
+                descend: true,
+                holds_a_reference: false,
+                fully_read: false,
+                header_located: false,
+            });
+        }
+        Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error),
+        Err(_) => {
+            return Ok(Scanned {
+                descend: true,
+                holds_a_reference: false,
+                fully_read: false,
+                header_located: false,
+            });
+        }
+    };
     // Resolve committed datatype addresses through the opened source's effective base.
     let resolver = crate::shared_message::SourceResolver::new(
         src,
@@ -580,7 +608,7 @@ fn scan_object<S: OriginalSource + ?Sized>(
     // The data-layout message's body and its absolute offset, kept unparsed:
     // where it points only matters once the datatype says the elements could
     // hold an address, and most datasets say they could not.
-    let mut layout_msg: Option<(&[u8], u64)> = None;
+    let mut layout_msg: Option<(&[u8], PhysicalAddress)> = None;
     let mut out = Scanned {
         descend: false,
         holds_a_reference: false,
@@ -592,7 +620,7 @@ fn scan_object<S: OriginalSource + ?Sized>(
     // walk takes of them. One per header; a dataset has at most one datatype.
     let mut committed: Option<Vec<u8>> = None;
     // Reused across messages: one attribute's edits at a time.
-    let mut edits: Vec<(u64, StoredAddress)> = Vec::new();
+    let mut edits: Vec<(PhysicalAddress, StoredAddress)> = Vec::new();
     for chunk in &chunks {
         let layout = chunk.layout();
         let (region, mut p) = chunk.message_region();
@@ -600,7 +628,7 @@ fn scan_object<S: OriginalSource + ?Sized>(
             crate::edit::object_header::next_record(layout, region, p)?
         {
             // Absolute file offset of this message's body.
-            let body_at = chunk.span.start().get() + body as u64;
+            let body_at = chunk.span.start().checked_add(body.to_u64())?;
             // The flags byte is the 4th of the record header (type, size, flags).
             let shared = MessageFlags::new(region[p + 3]).is_shared();
             match msg_type {
@@ -715,12 +743,17 @@ fn scan_object<S: OriginalSource + ?Sized>(
                         collect_slots(
                             &attr.datatype,
                             &slots,
-                            &attr.raw_data,
-                            body_at + data_off as u64,
+                            FileRegion::new(
+                                FileRange::new(
+                                    body_at.checked_add(data_off.to_u64())?,
+                                    attr.raw_data.len().to_u64(),
+                                )?,
+                                &attr.raw_data,
+                            )?,
                             base,
                             relocations,
                             &mut edits,
-                        );
+                        )?;
                         // An attribute's value lives inside the header, so it is
                         // edited as part of the chunk rather than on its own.
                         record_header_edits(plan, chunk.span, &edits);
@@ -751,42 +784,47 @@ fn scan_object<S: OriginalSource + ?Sized>(
         } => {
             // A contiguous data block sits outside the header and carries no
             // checksum, so its elements are patched with nothing else to fix.
-            let Ok(at) = base.resolve(a).map(PhysicalAddress::get) else {
+            let Ok(at) = base.resolve(a) else {
                 return Ok(out);
             };
             let Ok(want) = usize::try_from(size) else {
                 return Ok(out);
             };
-            let Ok(raw) = src.read_exact_at(at, want) else {
+            let Ok(raw) = src.read_exact_at(at.get(), want) else {
                 return Ok(out);
             };
             collect_slots(
                 &dt,
                 &slots,
-                &raw,
-                at,
+                FileRegion::new(FileRange::new(at, raw.len().to_u64())?, &raw)?,
                 base,
                 relocations,
                 &mut plan.data_writes,
-            );
+            )?;
         }
         DataLayout::Compact { data } => {
             edits.clear();
             collect_slots(
                 &dt,
                 &slots,
-                &data,
-                layout_at + COMPACT_DATA_OFFSET as u64,
+                FileRegion::new(
+                    FileRange::new(
+                        layout_at.checked_add(COMPACT_DATA_OFFSET.to_u64())?,
+                        data.len().to_u64(),
+                    )?,
+                    &data,
+                )?,
                 base,
                 relocations,
                 &mut edits,
-            );
+            )?;
             // Compact elements are inline in the layout message, so they are
             // edited as part of the header chunk that message sits in.
-            if let Some(span) = chunks.iter().map(|c| c.span).find(|range| {
-                range.start() <= PhysicalAddress::new(layout_at)
-                    && PhysicalAddress::new(layout_at) < range.end()
-            }) {
+            if let Some(span) = chunks
+                .iter()
+                .map(|c| c.span)
+                .find(|range| range.start() <= layout_at && layout_at < range.end())
+            {
                 record_header_edits(plan, span, &edits);
             }
         }
@@ -833,13 +871,15 @@ fn require_dense_reference_widths(
 /// Records physical edit positions as byte offsets within their header chunk.
 ///
 /// Skips edits below the chunk's start or whose displacement exceeds [`usize::MAX`].
-/// [`Plan::apply`] checks each recorded header edit against its message region.
-fn record_header_edits(plan: &mut Plan, span: FileRange, edits: &[(u64, StoredAddress)]) {
+/// [`Plan::apply`] checks that each complete reference ends at or before the trailing checksum's
+/// start.
+fn record_header_edits(
+    plan: &mut Plan,
+    span: FileRange,
+    edits: &[(PhysicalAddress, StoredAddress)],
+) {
     for &(at, value) in edits {
-        let Some(offset) = PhysicalAddress::new(at)
-            .checked_distance_from(span.start())
-            .and_then(|o| usize::try_from(o).ok())
-        else {
+        let Some(offset) = HeaderOffset::new(span, at) else {
             continue;
         };
         plan.header_writes
@@ -885,30 +925,28 @@ pub(crate) fn attribute_references_are_repointable(dt: &Datatype) -> bool {
     element_slots(dt).is_some()
 }
 
-/// Record a write for every 8-byte object reference in `raw` that names a
-/// relocated header.
+/// Appends physical patch positions and stored replacements for relocated object references.
 ///
-/// `raw_at` is the absolute file offset `raw` was read from, and `slots` is
-/// [`element_slots`] for `dt`. Addresses are stored relative to the superblock
-/// base, so each is shifted by `base` before being looked up and the replacement
-/// is shifted back. Each edit is appended to `out` as
-/// `(absolute file offset, value)`; where those bytes live is the caller's to
-/// know, and decides whether they are written directly or resealed inside a
-/// header chunk.
+/// `raw` contains the reference bytes and their physical range, and `slots` is [`element_slots`]
+/// for `dt`. The reader resolves each stored reference through `base` before looking up its
+/// object identity in `relocations`. The writer converts the replacement to a stored address.
+/// The caller groups inline edits with their header chunks for checksum updates.
 ///
-/// Finding the addresses is [`datatype::stored_object_references`], shared with
-/// `edit::screen_resolved_references`: the two do different things with an
-/// address and must not come to differ about where one is.
+/// Reads reference positions through [`datatype::stored_object_references`].
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if a physical patch position exceeds [`u64::MAX`].
 fn collect_slots(
     dt: &Datatype,
     slots: &[usize],
-    raw: &[u8],
-    raw_at: u64,
+    raw: FileRegion<'_>,
     base: AddressContext,
     relocations: &BTreeMap<ObjectId, ObjectId>,
-    out: &mut Vec<(u64, StoredAddress)>,
-) {
-    for (offset, stored) in datatype::stored_object_references(raw, dt.type_size() as usize, slots)
+    out: &mut Vec<(PhysicalAddress, StoredAddress)>,
+) -> Result<(), FormatError> {
+    for (offset, stored) in
+        datatype::stored_object_references(raw.bytes(), dt.type_size() as usize, slots)
     {
         // The two sentinels name no object and are never relocated; skipping
         // them keeps a zero-based file from matching a relocation whose old
@@ -925,8 +963,9 @@ fn collect_slots(
         let Ok(value) = base.relative(new.header_address()) else {
             continue;
         };
-        out.push((raw_at + offset as u64, value));
+        out.push((raw.range().start().checked_add(offset.to_u64())?, value));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -998,12 +1037,12 @@ mod tests {
     /// Apply a plan to an in-memory image, so a test can read back what it wrote.
     struct Bytes(Vec<u8>);
     impl PatchTarget for Bytes {
-        fn read(&self, at: u64, len: usize) -> Result<Vec<u8>, Error> {
-            let at = at as usize;
+        fn read(&self, at: PhysicalAddress, len: usize) -> Result<Vec<u8>, Error> {
+            let at = at.get().to_usize()?;
             Ok(self.0[at..at + len].to_vec())
         }
-        fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
-            let at = at as usize;
+        fn write(&mut self, at: PhysicalAddress, bytes: &[u8]) -> Result<(), Error> {
+            let at = at.get().to_usize()?;
             self.0[at..at + bytes.len()].copy_from_slice(bytes);
             Ok(())
         }
@@ -1022,13 +1061,13 @@ mod tests {
     /// was, for the tests that are about the write *shape* rather than the bytes.
     struct Recording {
         bytes: Bytes,
-        writes: Vec<(u64, usize)>,
+        writes: Vec<(PhysicalAddress, usize)>,
     }
     impl PatchTarget for Recording {
-        fn read(&self, at: u64, len: usize) -> Result<Vec<u8>, Error> {
+        fn read(&self, at: PhysicalAddress, len: usize) -> Result<Vec<u8>, Error> {
             self.bytes.read(at, len)
         }
-        fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
+        fn write(&mut self, at: PhysicalAddress, bytes: &[u8]) -> Result<(), Error> {
             self.writes.push((at, bytes.len()));
             self.bytes.write(at, bytes)
         }
@@ -1047,13 +1086,71 @@ mod tests {
             .collect();
         let scanned = scan_object(
             &OpenedSource::for_test(src, AddressContext::from_effective_base(BaseAddress::ZERO)),
-            HEADER_AT,
+            ObjectId::new(PhysicalAddress::new(HEADER_AT)),
             crate::file_writer::WIDTHS,
             &map,
             &mut plan,
         )
         .unwrap();
         (plan, scanned)
+    }
+
+    #[rstest]
+    #[case::zero(0, 8)]
+    #[case::address_limit(u64::MAX - 16, u64::MAX - 8)]
+    fn reference_regions_keep_physical_patch_positions(#[case] start: u64, #[case] expected: u64) {
+        let raw = [0_u64.to_le_bytes(), 300_u64.to_le_bytes()].concat();
+        let region = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(start), 16).unwrap(),
+            &raw,
+        )
+        .unwrap();
+        let relocations = BTreeMap::from([(
+            ObjectId::new(PhysicalAddress::new(300)),
+            ObjectId::new(PhysicalAddress::new(900)),
+        )]);
+        let mut edits = Vec::new();
+        collect_slots(
+            &type_builders::make_object_reference_type(),
+            &[0],
+            region,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            &relocations,
+            &mut edits,
+        )
+        .unwrap();
+        assert_eq!(
+            edits,
+            [(PhysicalAddress::new(expected), StoredAddress::new(900))]
+        );
+        assert_eq!(raw, [0_u64.to_le_bytes(), 300_u64.to_le_bytes()].concat());
+    }
+
+    #[rstest]
+    #[case::checksum_start(12)]
+    #[case::after_chunk(16)]
+    #[case::overflowing_displacement(usize::MAX)]
+    fn header_patches_outside_message_bytes_leave_the_target_unchanged(#[case] offset: usize) {
+        let original = vec![0; 48];
+        let mut target = Recording {
+            bytes: Bytes(original.clone()),
+            writes: Vec::new(),
+        };
+        let mut plan = Plan::default();
+        plan.header_writes.insert(
+            FileRange::new(PhysicalAddress::new(32), 16).unwrap(),
+            vec![(HeaderOffset(offset), StoredAddress::new(900))],
+        );
+        let error = plan.apply(&mut target).unwrap_err();
+        let Error::EditUnsupported(reason) = error else {
+            panic!("expected EditUnsupported, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "a stored reference sits outside the object header chunk holding it"
+        );
+        assert!(target.writes.is_empty());
+        assert_eq!(target.bytes.0, original);
     }
 
     #[rstest]
@@ -1106,7 +1203,7 @@ mod tests {
         let mut plan = Plan::default();
         let scanned = scan_object(
             &OpenedSource::for_test(&source, addresses),
-            HEADER_AT,
+            ObjectId::new(PhysicalAddress::new(HEADER_AT)),
             widths,
             &BTreeMap::from([(
                 ObjectId::new(PhysicalAddress::new(HEADER_AT)),
@@ -1166,7 +1263,14 @@ mod tests {
         let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
         let opened = OpenedSource::for_test(&source, addresses);
         let mut plan = Plan::default();
-        let fallback = scan_object(&opened, 0, widths, &BTreeMap::new(), &mut plan).unwrap();
+        let fallback = scan_object(
+            &opened,
+            ObjectId::new(PhysicalAddress::new(0)),
+            widths,
+            &BTreeMap::new(),
+            &mut plan,
+        )
+        .unwrap();
         assert!(fallback.descend);
         assert!(!fallback.header_located);
         let parsed =
@@ -1211,7 +1315,7 @@ mod tests {
         // ones that hold the old address today. An offset taken from the wrong
         // origin — the message body, the chunk, the region — lands somewhere
         // that does not.
-        let site = plan.sites()[0] as usize;
+        let site = plan.sites()[0].get().to_usize().unwrap();
         assert_eq!(
             u64::from_le_bytes(bytes[site..site + 8].try_into().unwrap()),
             300,
@@ -1470,7 +1574,7 @@ mod tests {
             )]);
             let scanned = scan_object(
                 &OpenedSource::for_test(&BytesSource::new(bytes), base),
-                HEADER_AT,
+                ObjectId::new(PhysicalAddress::new(HEADER_AT)),
                 crate::file_writer::WIDTHS,
                 &map,
                 &mut plan,

@@ -195,9 +195,7 @@ fn completion_failure_preserves_root_confirmation_and_earlier_journal_entries() 
         .resolve(engine.superblock().root_group_address)
         .unwrap();
     let original = engine.image().read_exact_at(root.get(), 1).unwrap();
-    engine
-        .write_inplace_journaled(root.get(), &original)
-        .unwrap();
+    engine.write_inplace_journaled(root, &original).unwrap();
     let journal_pointer = engine.inplace_undo[0].1.as_ptr();
     let error = engine
         .publish_tree_with_completion(tree(root), |published| {
@@ -212,7 +210,7 @@ fn completion_failure_preserves_root_confirmation_and_earlier_journal_entries() 
     assert_eq!(engine.publication, PublicationState::Published);
     assert_eq!(engine.inplace_undo.len(), 1);
     assert_eq!(engine.inplace_undo[0].1.as_ptr(), journal_pointer);
-    assert_eq!(engine.inplace_undo[0], (root.get(), original));
+    assert_eq!(engine.inplace_undo[0], (root, original));
     drop(engine);
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
