@@ -19,12 +19,14 @@ use crate::File;
 use crate::FileAccessProperties;
 use crate::FileSpacePageSize;
 use crate::MemoryStrategy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::edit::WriteEngine;
 use crate::edit::dataset::tests::Creation;
 use crate::edit::dataset::tests::CreationAccess;
 use crate::edit::test_util;
+use crate::object_graph::ObjectId;
 
 mod fragmented;
 mod short_pages;
@@ -101,7 +103,9 @@ fn immediate_first_writes_keep_native_array_blocks_in_metadata_pages(
     let engine = test_util::open_engine(&path);
     assert_eq!(
         engine
-            .chunked_index_spans(u64::try_from(header).unwrap())
+            .chunked_index_spans(ObjectId::new(PhysicalAddress::new(
+                u64::try_from(header).unwrap()
+            )))
             .unwrap()
             .len(),
         2
@@ -178,7 +182,10 @@ fn immediate_growth_keeps_complete_native_index_blocks_in_metadata_pages(
     let mut data_blocks = 0;
     let mut super_blocks = 0;
     let mut largest = 0;
-    for range in engine.chunked_index_spans(header).unwrap() {
+    for range in engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
+        .unwrap()
+    {
         match engine
             .image()
             .read_exact_at(range.start().get(), extensible_array::SIGNATURE.len())
@@ -433,7 +440,7 @@ fn staged_creations_keep_native_array_blocks_in_metadata_pages(
     if matches!(creation, Creation::Fixed(1_025) | Creation::Rotated(20_000)) {
         assert!(
             engine
-                .chunked_index_spans(header)
+                .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
                 .unwrap()
                 .iter()
                 .any(|range| range.length() > 512)
@@ -641,7 +648,7 @@ fn copied_and_replaced_native_arrays_use_complete_metadata_blocks(
     ) {
         assert!(
             engine
-                .chunked_index_spans(header)
+                .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
                 .unwrap()
                 .iter()
                 .any(|range| range.length() > 512)
@@ -814,8 +821,12 @@ impl ProviderRun {
 
 impl WriteEngine {
     pub(super) fn assert_array_metadata_pages(&self, dataset: u64) {
-        let index = self.chunked_index_spans(dataset).unwrap();
-        let spans = self.chunked_storage_spans(dataset).unwrap();
+        let index = self
+            .chunked_index_spans(ObjectId::new(PhysicalAddress::new(dataset)))
+            .unwrap();
+        let spans = self
+            .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(dataset)))
+            .unwrap();
         let page = self.space.page_size().unwrap().get();
         let addresses = self.context.addresses();
         assert!(index.len() >= 2);

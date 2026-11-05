@@ -56,7 +56,7 @@ impl PublicationCost {
         let source = BytesSource::new(before);
         let mut chunks = object_header::read_oh_chunks(
             &source,
-            header,
+            PhysicalAddress::new(header),
             AddressContext::from_effective_base(located.superblock.base_address),
             located.widths,
         )

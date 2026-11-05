@@ -186,7 +186,7 @@ impl DatasetGeometry {
         let mut parsed = None;
         for chunk in object_header::read_oh_chunks(
             &source,
-            u64::try_from(header).unwrap(),
+            PhysicalAddress::new(u64::try_from(header).unwrap()),
             addresses,
             crate::file_writer::WIDTHS,
         )
@@ -436,7 +436,7 @@ impl Ownership {
         ownership.initialized.extend(
             object_header::read_oh_chunks(
                 &source,
-                extension,
+                PhysicalAddress::new(extension),
                 addresses,
                 crate::file_writer::WIDTHS,
             )

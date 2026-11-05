@@ -2,6 +2,7 @@ use hdf5_pure_format::__private::DenseAttrPlan;
 use rstest::rstest;
 use test_util::allocation;
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddressExt};
 use crate::attribute::AttributeMessage;
@@ -11,6 +12,7 @@ use crate::edit::dataset::ChunkGeometry;
 use crate::error::{Error, FormatError};
 use crate::group::v2 as group_v2;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::OpenedSource;
@@ -55,9 +57,14 @@ fn chunked_copy_bounds_header_allocations(
         &ObjectPathBuf::parse("values").as_path(),
     )
     .unwrap();
-    let tree =
-        WriteEngine::read_copy_subtree(&opened, AccessMode::ReadOnly, address, false, widths)
-            .unwrap();
+    let tree = WriteEngine::read_copy_subtree(
+        &opened,
+        AccessMode::ReadOnly,
+        ObjectId::new(PhysicalAddress::new(address)),
+        false,
+        widths,
+    )
+    .unwrap();
     let CopyNode::DatasetChunked {
         geometry,
         flags,

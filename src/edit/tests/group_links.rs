@@ -16,6 +16,7 @@ use test_util::widths::Widths;
 
 use crate::AddressRange;
 use crate::File;
+use crate::PhysicalAddress;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -735,7 +736,9 @@ fn replaced_dense_metadata_is_reclaimed_after_publication(
         .unwrap()
         .get();
     let old = engine.inspect_group(old_root).unwrap();
-    let header = engine.oh_chunk_spans(old_root).unwrap();
+    let header = engine
+        .oh_chunk_spans(PhysicalAddress::new(old_root))
+        .unwrap();
     let storage = engine
         .dense_group_storage_spans(&header, None, &old.links.info())
         .unwrap();

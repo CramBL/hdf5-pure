@@ -184,8 +184,13 @@ fn data_block(engine: &WriteEngine) -> FileRange {
     let header = *engine.located.keys().next().unwrap();
     let widths = engine.context.widths();
     let addresses = engine.context.addresses();
-    let region =
-        WriteEngine::gather_oh_messages(&engine.image(), header, addresses, widths).unwrap();
+    let region = WriteEngine::gather_oh_messages(
+        &engine.image(),
+        header.header_address(),
+        addresses,
+        widths,
+    )
+    .unwrap();
     let mut position = 0;
     let layout = loop {
         let record = region

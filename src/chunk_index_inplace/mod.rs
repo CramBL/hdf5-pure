@@ -68,6 +68,7 @@ use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::reader::OpenedSource;
@@ -142,7 +143,7 @@ pub(crate) trait Store: Source {
     ///
     /// Returns [`Error::AppendUnsupported`] if ownership analysis is incomplete or `header` is
     /// unreachable. Propagates storage-analysis errors, including invalid overlapping extents.
-    fn require_exclusive_chunk_storage(&self, header: u64) -> Result<(), Error>;
+    fn require_exclusive_chunk_storage(&self, header: ObjectId) -> Result<(), Error>;
 
     /// Consumes a confirmed predecessor retirement under the session's allocation policy.
     ///
@@ -731,13 +732,13 @@ impl Located {
     /// unsupported storage or metadata.
     pub(crate) fn locate_at<F: Store>(
         file: &F,
-        oh_addr: u64,
+        oh_addr: ObjectId,
         unsupported: fn(&'static str) -> Error,
     ) -> Result<LocateResult, Error> {
         let widths = file.widths();
         let os = widths.offsets.get();
 
-        let walk = walk_v2_object_header(file, oh_addr, widths)?;
+        let walk = walk_v2_object_header(file, oh_addr.header_address(), widths)?;
 
         let dataspace_msg = walk
             .messages
@@ -2391,7 +2392,7 @@ pub(crate) fn plan_initial_ea_append(
 /// allocation, encoding, ownership, reference-publication, synchronization, and locate errors.
 pub(crate) fn initialize_ea_index(
     file: &mut impl Store,
-    oh_addr: u64,
+    oh_addr: ObjectId,
     index: &UnallocatedIndex,
     initialization: &ExtensibleArrayInitialization,
 ) -> Result<Located, Error> {
@@ -2933,9 +2934,10 @@ struct Walk {
 /// undefined address, or if the header has more than 255 continuation blocks.
 fn walk_v2_object_header<S: Source + ?Sized>(
     source: &S,
-    offset: u64,
+    offset: PhysicalAddress,
     widths: FormatWidths,
 ) -> Result<Walk, Error> {
+    let offset = offset.get();
     let head_len = source
         .len()
         .saturating_sub(offset)
@@ -3117,7 +3119,12 @@ mod tests {
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4]);
         let mut store = WindowProbeStore::open(builder.finish().unwrap());
-        let walk = walk_v2_object_header(&store, dataset_address(&store), store.widths).unwrap();
+        let walk = walk_v2_object_header(
+            &store,
+            dataset_address(&store).header_address(),
+            store.widths,
+        )
+        .unwrap();
         let mut header = v2_bytes::Header::new();
         for message in walk.messages {
             let body = if message.msg_type == MessageType::DATASPACE {
@@ -3134,8 +3141,11 @@ mod tests {
         }
         let address = store.append_bytes(&header.build()).unwrap();
         store.patch_superblock_eof().unwrap();
-        let mut state = edit::locate_dataset_state(&store, address).unwrap();
-        let walk = walk_v2_object_header(&store, address, store.widths).unwrap();
+        let mut state =
+            edit::locate_dataset_state(&store, ObjectId::new(PhysicalAddress::new(address)))
+                .unwrap();
+        let walk =
+            walk_v2_object_header(&store, PhysicalAddress::new(address), store.widths).unwrap();
         let dataspace = walk
             .messages
             .iter()
@@ -3445,7 +3455,7 @@ mod tests {
     ) {
         let mut store = unallocated_index_store(0, filtered);
         let address = dataset_address(&store);
-        let walk = walk_v2_object_header(&store, address, store.widths).unwrap();
+        let walk = walk_v2_object_header(&store, address.header_address(), store.widths).unwrap();
         let layout = walk
             .messages
             .iter()
@@ -3521,7 +3531,9 @@ mod tests {
     }
 
     fn clear_layout_index(store: &mut WindowProbeStore) {
-        let walk = walk_v2_object_header(store, dataset_address(store), store.widths).unwrap();
+        let walk =
+            walk_v2_object_header(store, dataset_address(store).header_address(), store.widths)
+                .unwrap();
         let layout = walk
             .messages
             .into_iter()
@@ -4193,7 +4205,7 @@ mod tests {
         fn logical_end(&self) -> u64 {
             self.superblock.eof_address
         }
-        fn require_exclusive_chunk_storage(&self, _header: u64) -> Result<(), Error> {
+        fn require_exclusive_chunk_storage(&self, _header: ObjectId) -> Result<(), Error> {
             Ok(())
         }
         fn retire(&mut self, retirement: RetiredChunk) {
@@ -4343,7 +4355,7 @@ mod tests {
         (result.located.into_allocated().unwrap(), result.datatype)
     }
 
-    fn dataset_address(store: &WindowProbeStore) -> u64 {
+    fn dataset_address(store: &WindowProbeStore) -> ObjectId {
         group_v2::resolve_path_any(
             PhysicalBytes::for_test(
                 &store.data,
@@ -4354,6 +4366,8 @@ mod tests {
             store.widths,
             &ObjectPath::parse("d"),
         )
+        .map(PhysicalAddress::new)
+        .map(ObjectId::new)
         .unwrap()
     }
 
@@ -4440,7 +4454,8 @@ mod tests {
         .unwrap();
         store.reset_counters();
 
-        let walk = walk_v2_object_header(&store, oh_addr, store.widths).unwrap();
+        let walk =
+            walk_v2_object_header(&store, PhysicalAddress::new(oh_addr), store.widths).unwrap();
 
         let reads = store.reads.borrow().clone();
         let [(head_at, head_len), (messages_at, messages_len)] = reads[..] else {
@@ -4474,9 +4489,11 @@ mod tests {
     #[case::a_short_continuation_block(continuation_block_shorter_than_its_signature_and_checksum())]
     #[case::a_continuation_block_without_its_signature(continuation_block_without_its_signature())]
     fn a_damaged_header_fails_the_walk(#[case] (bytes, expected): (Vec<u8>, FormatError)) {
-        let Err(err) =
-            walk_v2_object_header(&BytesSource::new(&bytes), 0, crate::file_writer::WIDTHS)
-        else {
+        let Err(err) = walk_v2_object_header(
+            &BytesSource::new(&bytes),
+            PhysicalAddress::new(0),
+            crate::file_writer::WIDTHS,
+        ) else {
             panic!("expected the walk to fail with {expected:?}");
         };
         let Error::Format(format_error) = err else {
@@ -4623,7 +4640,11 @@ mod tests {
         )
         .unwrap();
 
-        let Err(err) = Located::locate_at(&store, oh_addr, Error::AppendUnsupported) else {
+        let Err(err) = Located::locate_at(
+            &store,
+            ObjectId::new(PhysicalAddress::new(oh_addr)),
+            Error::AppendUnsupported,
+        ) else {
             panic!("expected an unsupported element width");
         };
         let Error::AppendUnsupported(reason) = err else {
@@ -4711,7 +4732,12 @@ mod tests {
         #[case] expected: &str,
     ) {
         let mut store = WindowProbeStore::open(build_unlimited(6, 4));
-        let walk = walk_v2_object_header(&store, dataset_address(&store), store.widths).unwrap();
+        let walk = walk_v2_object_header(
+            &store,
+            dataset_address(&store).header_address(),
+            store.widths,
+        )
+        .unwrap();
         let mut header = v2_bytes::Header::new();
         for msg_type in [
             MessageType::DATASPACE,
@@ -4742,7 +4768,9 @@ mod tests {
         store.data.extend(header.build());
         store.patch_superblock_eof().unwrap();
         let original = store.data.clone();
-        let Err(error) = edit::locate_dataset_state(&store, at) else {
+        let Err(error) =
+            edit::locate_dataset_state(&store, ObjectId::new(PhysicalAddress::new(at)))
+        else {
             panic!("expected invalid chunk geometry");
         };
         let Error::Format(FormatError::InvalidChunkGeometry(reason)) = error else {
@@ -4762,7 +4790,7 @@ mod tests {
             WindowProbeStore::open(build_unlimited(6, 4))
         };
         let at = dataset_address(&store);
-        let walk = walk_v2_object_header(&store, at, store.widths).unwrap();
+        let walk = walk_v2_object_header(&store, at.header_address(), store.widths).unwrap();
         let datatype = walk
             .messages
             .iter()
@@ -4791,7 +4819,8 @@ mod tests {
             .unwrap()
             .header_address()
             .unwrap();
-        let walk = walk_v2_object_header(&store, oh_addr, store.widths).unwrap();
+        let walk =
+            walk_v2_object_header(&store, PhysicalAddress::new(oh_addr), store.widths).unwrap();
         let datatype = walk
             .messages
             .iter()
@@ -5414,7 +5443,11 @@ mod tests {
                     &ObjectPath::parse("e"),
                 )
                 .unwrap();
-                let mut other = edit::locate_dataset_state(&store, address).unwrap();
+                let mut other = edit::locate_dataset_state(
+                    &store,
+                    ObjectId::new(PhysicalAddress::new(address)),
+                )
+                .unwrap();
                 confirmed = Vec::new();
                 apply_ea_append(&mut store, other.index.allocated_mut().unwrap(), plan, 4)
                     .unwrap_err()
@@ -5823,8 +5856,12 @@ mod tests {
     fn edge_store(filter: EdgeFilter, raw_edges: bool) -> WindowProbeStore {
         let mut store = filter.store();
         if raw_edges {
-            let walk =
-                walk_v2_object_header(&store, dataset_address(&store), store.widths).unwrap();
+            let walk = walk_v2_object_header(
+                &store,
+                dataset_address(&store).header_address(),
+                store.widths,
+            )
+            .unwrap();
             let layout = walk
                 .messages
                 .iter()

@@ -26,7 +26,7 @@ fn deleting_a_generic_large_continuation_keeps_its_partial_tail_out_of_small_fre
     std::fs::write(&path, test_util::generic_large::generic_large()).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
-        engine.oh_chunk_spans(512).unwrap(),
+        engine.oh_chunk_spans(PhysicalAddress::new(512)).unwrap(),
         [range(512, 268), range(1_536, 4_158)]
     );
     assert_eq!(
@@ -125,7 +125,9 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
     let address = file.dataset("victim").unwrap().header_address().unwrap();
     drop(file);
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    let spans = engine.oh_chunk_spans(address).unwrap();
+    let spans = engine
+        .oh_chunk_spans(PhysicalAddress::new(address))
+        .unwrap();
     assert_eq!(spans.len(), 1);
     assert!(spans[0].length() < page);
     engine.delete(&ObjectPathBuf::parse("/victim")).unwrap();

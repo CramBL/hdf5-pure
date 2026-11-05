@@ -70,6 +70,7 @@ use crate::file_writer::OFFSET_WIDTH;
 use crate::link_message::LinkMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_graph::TraversalBudget;
 use crate::object_graph::TraversalLimit;
 use crate::object_header::HeaderMessage;
@@ -93,7 +94,7 @@ fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
 
     let Err(err) = edit::object_header::read_oh_chunks(
         &BytesSource::new(header.as_slice()),
-        0,
+        PhysicalAddress::new(0),
         AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
     ) else {
@@ -521,7 +522,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                 let object = WriteEngine::read_object(
                     &engine.opened_source(),
                     AccessMode::ReadWrite,
-                    addr,
+                    ObjectId::new(PhysicalAddress::new(addr)),
                     engine.context.widths(),
                 )
                 .unwrap();
@@ -546,7 +547,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
             let leaf = WriteEngine::read_object(
                 &engine.opened_source(),
                 AccessMode::ReadWrite,
-                addr,
+                ObjectId::new(PhysicalAddress::new(addr)),
                 engine.context.widths(),
             )
             .unwrap();
@@ -577,7 +578,9 @@ fn a_copy_past_its_traversal_budget_is_rejected(
 ) {
     // Each case allows one fewer of one of the two counts.
     let (bytes, addr) = group_of_three_datasets();
-    let Err(err) = copy_reader(&BytesSource::new(bytes.as_slice())).read(budget, addr) else {
+    let Err(err) = copy_reader(&BytesSource::new(bytes.as_slice()))
+        .read(budget, ObjectId::new(PhysicalAddress::new(addr)))
+    else {
         panic!("expected the copy to be rejected");
     };
     let Error::TraversalLimitExceeded { limit, maximum } = err else {
@@ -590,7 +593,10 @@ fn a_copy_past_its_traversal_budget_is_rejected(
 fn a_copy_within_its_traversal_budget_is_read_in_full() {
     let (bytes, addr) = group_of_three_datasets();
     let tree = copy_reader(&BytesSource::new(bytes.as_slice()))
-        .read(TraversalBudget::new(4, 3), addr)
+        .read(
+            TraversalBudget::new(4, 3),
+            ObjectId::new(PhysicalAddress::new(addr)),
+        )
         .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -601,7 +607,7 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
     let ObjModel::Group { region, links, .. } = WriteEngine::read_object(
         &engine.opened_source(),
         AccessMode::ReadWrite,
-        addr,
+        ObjectId::new(PhysicalAddress::new(addr)),
         engine.context.widths(),
     )
     .unwrap() else {
@@ -686,7 +692,7 @@ fn read_object_with_messages(
             AddressContext::from_effective_base(BaseAddress::ZERO),
         ),
         AccessMode::ReadWrite,
-        0,
+        ObjectId::new(PhysicalAddress::new(0)),
         crate::file_writer::WIDTHS,
     )
 }
@@ -1077,9 +1083,12 @@ fn a_rebuilt_header_declares_the_record_layout_it_used() {
     for layout in [MessageRecordLayout::PLAIN, TRACKED] {
         let region = attr_region(layout, &[("alpha", 3)], 4);
         let header = edit::object_header::build_v2_object_header(&region).unwrap();
-        let (start, end, read_back) =
-            edit::object_header::oh_region_at(&header, 0, header.len() as u64)
-                .expect("the header parses");
+        let (range, read_back) = edit::object_header::oh_region_at(
+            &header,
+            PhysicalAddress::new(0),
+            PhysicalAddress::new(header.len() as u64),
+        )
+        .expect("the header parses");
         assert_eq!(
             read_back,
             ObjectHeaderPrefix::with_layout(layout),
@@ -1087,7 +1096,7 @@ fn a_rebuilt_header_declares_the_record_layout_it_used() {
         );
         let round_tripped = OhRegion::new(
             crate::file_writer::WIDTHS,
-            header[start as usize..end as usize].to_vec(),
+            header[range.start().get() as usize..range.end().get() as usize].to_vec(),
             read_back,
         );
         assert_eq!(
@@ -1111,13 +1120,16 @@ fn a_headers_optional_prefix_blocks_survive_a_rebuild() {
                 let region = attr_region_in(props, &[("alpha", 3), ("beta", 5)], 6);
                 let header = v2_header_bytes(props, &region);
 
-                let (start, end, read_back) =
-                    edit::object_header::oh_region_at(&header, 0, header.len() as u64)
-                        .expect("the hand-built header parses");
+                let (range, read_back) = edit::object_header::oh_region_at(
+                    &header,
+                    PhysicalAddress::new(0),
+                    PhysicalAddress::new(header.len() as u64),
+                )
+                .expect("the hand-built header parses");
                 assert_eq!(read_back, props, "the prefix lost a block");
                 let parsed = OhRegion::new(
                     crate::file_writer::WIDTHS,
-                    header[start as usize..end as usize].to_vec(),
+                    header[range.start().get() as usize..range.end().get() as usize].to_vec(),
                     read_back,
                 );
                 assert_eq!(
@@ -1127,9 +1139,12 @@ fn a_headers_optional_prefix_blocks_survive_a_rebuild() {
                 );
 
                 let rebuilt = edit::object_header::build_v2_object_header(&parsed).unwrap();
-                let (_, _, again) =
-                    edit::object_header::oh_region_at(&rebuilt, 0, rebuilt.len() as u64)
-                        .expect("the rebuilt header parses");
+                let (_, again) = edit::object_header::oh_region_at(
+                    &rebuilt,
+                    PhysicalAddress::new(0),
+                    PhysicalAddress::new(rebuilt.len() as u64),
+                )
+                .expect("the rebuilt header parses");
                 assert_eq!(
                     again.attribute_phase_change, attribute_phase_change,
                     "the rebuild lost the attribute phase-change thresholds",
@@ -1158,8 +1173,12 @@ fn a_rebuild_stamps_the_modification_and_change_times() {
     let header = edit::object_header::build_v2_object_header(&region).unwrap();
     let after = edit::object_header::unix_time_now().expect("a std test build reads the clock");
 
-    let (_, _, read_back) =
-        edit::object_header::oh_region_at(&header, 0, header.len() as u64).unwrap();
+    let (_, read_back) = edit::object_header::oh_region_at(
+        &header,
+        PhysicalAddress::new(0),
+        PhysicalAddress::new(header.len() as u64),
+    )
+    .unwrap();
     let times = read_back.times.expect("the header still stores times");
     assert_eq!(
         (times.access, times.birth),
@@ -1209,7 +1228,12 @@ fn a_truncated_prefix_with_optional_blocks_is_rejected(#[case] cut: usize) {
     let region = attr_region_in(props, &[("alpha", 0)], 1);
     let header = v2_header_bytes(props, &region);
     common::assert_unsupported(
-        edit::object_header::oh_region_at(&header[..cut], 0, header.len() as u64).unwrap_err(),
+        edit::object_header::oh_region_at(
+            &header[..cut],
+            PhysicalAddress::new(0),
+            PhysicalAddress::new(header.len() as u64),
+        )
+        .unwrap_err(),
         "truncated object header",
     );
 }
@@ -1834,7 +1858,13 @@ fn copied_subtrees_use_the_opened_signature(#[case] encoded_base: usize, #[case]
     let addr = source.group("source").unwrap().header_address().unwrap();
     let tree = source
         .with_opened_source(|src| {
-            WriteEngine::read_copy_subtree(src, AccessMode::ReadOnly, addr, false, source.widths())
+            WriteEngine::read_copy_subtree(
+                src,
+                AccessMode::ReadOnly,
+                ObjectId::new(PhysicalAddress::new(addr)),
+                false,
+                source.widths(),
+            )
         })
         .unwrap();
     source.close().unwrap();
@@ -1920,7 +1950,7 @@ fn chunked_copies_reject_invalid_payload_extents(
     let Err(error) = WriteEngine::read_copy_subtree(
         &source,
         AccessMode::ReadWrite,
-        base,
+        ObjectId::new(PhysicalAddress::new(base)),
         false,
         file_writer::WIDTHS,
     ) else {

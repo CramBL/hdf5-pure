@@ -8,6 +8,7 @@ use test_util::superblock::v2 as superblock_bytes;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::temp;
 
+use crate::PhysicalAddress;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::access_mode::AccessMode;
 use crate::address::DecodedStoredAddress;
@@ -63,7 +64,9 @@ fn continuation_reconstruction_retains_both_widths(
     bytes[2_048..].copy_from_slice(&continuation);
     let source = CountedSource::new(&bytes);
     let addresses = AddressContext::from_effective_base(BaseAddress::new(512));
-    let prepared = ExtensionReconstruction::read(&source, 1_024, addresses, widths).unwrap();
+    let prepared =
+        ExtensionReconstruction::read(&source, PhysicalAddress::new(1_024), addresses, widths)
+            .unwrap();
     assert_eq!(prepared.region.widths(), widths);
     assert_eq!(
         &prepared.region[..],
@@ -86,7 +89,7 @@ fn continuation_reconstruction_retains_both_widths(
     assert_eq!(decoded, placeholder);
     let header = PreparedHeader::new(&replacement).unwrap();
     assert_eq!(header.geometry().unwrap().widths(), widths);
-    let chunks = read_oh_chunks(&source, 1_024, addresses, widths).unwrap();
+    let chunks = read_oh_chunks(&source, PhysicalAddress::new(1_024), addresses, widths).unwrap();
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[1].span.start().get(), 2_048);
     assert_eq!(
@@ -115,7 +118,7 @@ fn gathering_honors_checksum_verification_for_each_chunk(
     let source = CountedSource::new(&fixture.bytes);
     let result = WriteEngine::gather_oh_messages(
         &source,
-        fixture.root,
+        PhysicalAddress::new(fixture.root),
         fixture.addresses,
         crate::file_writer::WIDTHS,
     );
@@ -154,7 +157,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     let source = CountedSource::new(&fixture.bytes);
     let prepared = ExtensionReconstruction::read(
         &source,
-        fixture.root,
+        PhysicalAddress::new(fixture.root),
         fixture.addresses,
         crate::file_writer::WIDTHS,
     )
@@ -212,7 +215,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     assert_eq!((source.calls.get(), source.bytes.get()), reads);
     let raw = WriteEngine::gather_oh_messages(
         &source,
-        fixture.root,
+        PhysicalAddress::new(fixture.root),
         fixture.addresses,
         crate::file_writer::WIDTHS,
     )
@@ -221,7 +224,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     assert_eq!(&raw.without_nil().unwrap()[..], &fixture.records);
     let collected = read_oh_chunks(
         &source,
-        fixture.root,
+        PhysicalAddress::new(fixture.root),
         fixture.addresses,
         crate::file_writer::WIDTHS,
     )
@@ -245,7 +248,7 @@ fn compact_reconstruction_checks_records_after_nil_and_file_space_info(#[case] f
     let source = BytesSource::new(&fixture.bytes);
     let err = ExtensionReconstruction::read(
         &source,
-        fixture.root,
+        PhysicalAddress::new(fixture.root),
         fixture.addresses,
         crate::file_writer::WIDTHS,
     )
@@ -268,7 +271,7 @@ fn compact_reconstruction_bounds_retained_and_peak_bytes(#[case] chunks: usize) 
     let (prepared, compact) = allocation::measure(&name, || {
         ExtensionReconstruction::read(
             &source,
-            fixture.root,
+            PhysicalAddress::new(fixture.root),
             fixture.addresses,
             crate::file_writer::WIDTHS,
         )
@@ -279,7 +282,7 @@ fn compact_reconstruction_bounds_retained_and_peak_bytes(#[case] chunks: usize) 
     let (raw, control) = allocation::measure(&name, || {
         WriteEngine::gather_oh_messages(
             &source,
-            fixture.root,
+            PhysicalAddress::new(fixture.root),
             fixture.addresses,
             crate::file_writer::WIDTHS,
         )
@@ -597,8 +600,13 @@ fn previous_opening_extension(source: &impl Source, context: &FileContext) -> Op
         });
     drop(header);
     let allocations = if info.as_ref().is_some_and(|info| info.persist) {
-        read_oh_chunks(source, address, context.addresses(), context.widths())
-            .map(|chunks| chunks.into_iter().map(|chunk| chunk.span).collect())
+        read_oh_chunks(
+            source,
+            PhysicalAddress::new(address),
+            context.addresses(),
+            context.widths(),
+        )
+        .map(|chunks| chunks.into_iter().map(|chunk| chunk.span).collect())
     } else {
         Ok(Vec::new())
     };

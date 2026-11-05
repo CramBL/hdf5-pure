@@ -818,7 +818,7 @@ fn a_link_target_that_overflows_the_base_address_is_refused() {
     // Repair the checksum so parsing reaches the overflowing link target.
     let chunk = crate::edit::object_header::read_oh_chunks(
         &crate::source::BytesSource::new(&bytes[..]),
-        root_oh as u64,
+        PhysicalAddress::new(root_oh as u64),
         AddressContext::from_effective_base(BaseAddress::new(0)),
         crate::file_writer::WIDTHS,
     )

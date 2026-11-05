@@ -10,6 +10,7 @@ use test_util::superblock::v2 as superblock_bytes;
 
 use crate::File;
 use crate::Layout;
+use crate::PhysicalAddress;
 use crate::edit::LocatedState;
 
 use super::*;
@@ -401,7 +402,8 @@ fn hidden_fixed_array_records_require_exclusive_ownership(#[case] overlap: Hidde
     let root = store.superblock.root_group_address.get();
     let (address, previous_end) = match overlap {
         HiddenOverlap::Root => {
-            let walk = walk_v2_object_header(&store, root, store.widths()).unwrap();
+            let walk =
+                walk_v2_object_header(&store, PhysicalAddress::new(root), store.widths()).unwrap();
             (root + 1, walk.messages[0].chunk_msg_end + EA_CHECKSUM_SIZE)
         }
         HiddenOverlap::SharedChunk => (original.address.get(), original.address.get() + 16),
@@ -474,7 +476,12 @@ fn hidden_fixed_array_records_require_exclusive_ownership(#[case] overlap: Hidde
 }
 
 fn header(store: &WindowProbeStore) -> FixedArrayHeader {
-    let walk = walk_v2_object_header(store, dataset_address(store), store.widths()).unwrap();
+    let walk = walk_v2_object_header(
+        store,
+        dataset_address(store).header_address(),
+        store.widths(),
+    )
+    .unwrap();
     let message = walk
         .messages
         .iter()
@@ -552,7 +559,8 @@ fn fixed_array_plans_reject_changed_source_fields(#[case] stale: Stale) {
             "append field widths changed after planning"
         }
         Stale::Dimension => {
-            let walk = walk_v2_object_header(&store, address, store.widths()).unwrap();
+            let walk =
+                walk_v2_object_header(&store, address.header_address(), store.widths()).unwrap();
             let message = walk
                 .messages
                 .iter()
@@ -897,7 +905,8 @@ fn fixture_with_geometry(
         Some(&[maximum]),
         fixture_widths,
     );
-    let walk = walk_v2_object_header(&store, dataset_address(&store), widths).unwrap();
+    let walk =
+        walk_v2_object_header(&store, dataset_address(&store).header_address(), widths).unwrap();
     let messages = walk.messages.into_iter().map(|message| {
         let body = match message.msg_type {
             MessageType::DATA_LAYOUT => layout.clone(),
@@ -907,8 +916,12 @@ fn fixture_with_geometry(
         Message::new(RecordType(message.msg_type.to_u16()), &body)
     });
     let dataset = image.append(&v2_bytes::Header::new().messages(messages).build());
-    let root_walk =
-        walk_v2_object_header(&store, store.superblock.root_group_address.get(), widths).unwrap();
+    let root_walk = walk_v2_object_header(
+        &store,
+        PhysicalAddress::new(store.superblock.root_group_address.get()),
+        widths,
+    )
+    .unwrap();
     let root_messages = root_walk
         .messages
         .into_iter()

@@ -9,6 +9,7 @@ use test_util_hdf5::numeric::ByteOrder;
 
 use crate::FileLocking;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
 use crate::edit;
 use crate::edit::WriteEngine;
 use crate::object_path::ObjectPathBuf;
@@ -35,7 +36,9 @@ fn native_generic_large_reclamation_keeps_partial_tails_unavailable() {
     drop(file);
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let page = engine.space.page_size().unwrap().get();
-    let spans = engine.oh_chunk_spans(address).unwrap();
+    let spans = engine
+        .oh_chunk_spans(PhysicalAddress::new(address))
+        .unwrap();
     let large = spans
         .iter()
         .filter(|range| range.length() > page)

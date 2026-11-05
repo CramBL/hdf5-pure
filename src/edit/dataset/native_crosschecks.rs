@@ -123,8 +123,7 @@ fn append_native_dataset(widths: FormatWidths, index_case: IndexCase, filtered: 
         &BytesSource::new(bytes.as_slice()),
         addresses
             .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+            .unwrap(),
         addresses,
         widths,
     )
@@ -146,8 +145,13 @@ fn append_native_dataset(widths: FormatWidths, index_case: IndexCase, filtered: 
         let source = BytesSource::new(bytes.as_slice());
         let opened = OpenedSource::for_test(&source, addresses);
         let dataset_addr = addresses.resolve(object_header_address).unwrap().get();
-        let region =
-            WriteEngine::gather_oh_messages(&source, dataset_addr, addresses, widths).unwrap();
+        let region = WriteEngine::gather_oh_messages(
+            &source,
+            PhysicalAddress::new(dataset_addr),
+            addresses,
+            widths,
+        )
+        .unwrap();
         let (dataspace, layout) = dataset_layout(&region);
         let DataLayout::Chunked { index, .. } = layout else {
             panic!("the native dataset must use chunks");
@@ -383,8 +387,7 @@ fn finite_append_rejects_growth_beyond_native_maximum(
         &source,
         addresses
             .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+            .unwrap(),
         addresses,
         widths,
     )
@@ -450,8 +453,7 @@ fn staged_variable_length_storage_is_native_readable_at_independent_widths(
         &BytesSource::new(bytes.as_slice()),
         addresses
             .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+            .unwrap(),
         addresses,
         widths,
     )
@@ -622,8 +624,7 @@ fn stored_index(path: &Path) -> ChunkIndexLayout {
         &source,
         addresses
             .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+            .unwrap(),
         addresses,
         located.widths,
     )
@@ -636,7 +637,7 @@ fn stored_index(path: &Path) -> ChunkIndexLayout {
     };
     let region = WriteEngine::gather_oh_messages(
         &source,
-        addresses.resolve(object_header_address).unwrap().get(),
+        addresses.resolve(object_header_address).unwrap(),
         addresses,
         located.widths,
     )

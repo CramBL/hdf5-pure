@@ -21,6 +21,7 @@ use crate::file_emission::EmissionError;
 use crate::file_writer;
 use crate::group::v2 as group_v2;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::OpenedSource;
 use crate::reference_patch;
@@ -74,8 +75,13 @@ fn copied_headers_and_payloads_preserve_independent_widths(
         &ObjectPathBuf::parse("tree").as_path(),
     )
     .unwrap();
-    let tree =
-        WriteEngine::read_copy_subtree(&opened, AccessMode::ReadOnly, address, cross_file, widths);
+    let tree = WriteEngine::read_copy_subtree(
+        &opened,
+        AccessMode::ReadOnly,
+        ObjectId::new(PhysicalAddress::new(address)),
+        cross_file,
+        widths,
+    );
     if cross_file && matches!(fixture, Fixture::DenseVariableLength) {
         let Err(error) = tree else {
             panic!("a foreign heap reference must be rejected");
@@ -114,8 +120,7 @@ fn copied_headers_and_payloads_preserve_independent_widths(
         &BytesSource::new(bytes.as_slice()),
         addresses
             .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+            .unwrap(),
         addresses,
         widths,
     )
@@ -533,8 +538,7 @@ fn screen_native_legacy_reference(widths: FormatWidths, site: ReferenceSite) {
         &source,
         addresses
             .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+            .unwrap(),
         addresses,
         widths,
     )
@@ -559,10 +563,11 @@ fn screen_native_legacy_reference(widths: FormatWidths, site: ReferenceSite) {
         let tree = WriteEngine::read_copy_subtree(
             &opened,
             AccessMode::ReadOnly,
-            addresses
-                .resolve(located.superblock.root_group_address)
-                .unwrap()
-                .get(),
+            ObjectId::new(
+                addresses
+                    .resolve(located.superblock.root_group_address)
+                    .unwrap(),
+            ),
             false,
             widths,
         )
@@ -580,10 +585,11 @@ fn screen_native_legacy_reference(widths: FormatWidths, site: ReferenceSite) {
         let tree = WriteEngine::read_copy_subtree(
             &opened,
             AccessMode::ReadOnly,
-            addresses
-                .resolve(located.superblock.root_group_address)
-                .unwrap()
-                .get(),
+            ObjectId::new(
+                addresses
+                    .resolve(located.superblock.root_group_address)
+                    .unwrap(),
+            ),
             false,
             widths,
         );
@@ -743,7 +749,13 @@ fn reference_inspection_skips_dataset_values(
         data_addr,
         data_size,
         ..
-    } = WriteEngine::read_object(&opened, AccessMode::ReadOnly, dataset, widths).unwrap()
+    } = WriteEngine::read_object(
+        &opened,
+        AccessMode::ReadOnly,
+        ObjectId::new(PhysicalAddress::new(dataset)),
+        widths,
+    )
+    .unwrap()
     else {
         panic!("the source must have contiguous values");
     };

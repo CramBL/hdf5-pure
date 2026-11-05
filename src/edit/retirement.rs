@@ -170,6 +170,7 @@ mod tests {
     use crate::error::{Error, FormatError};
     use crate::group::v2 as group_v2;
     use crate::image::WriteBuffering;
+    use crate::object_graph::ObjectId;
     use crate::object_path::{ObjectPath, ObjectPathBuf};
     use crate::superblock;
     use crate::{
@@ -427,20 +428,23 @@ mod tests {
         let mut protected = vec![predecessor];
         protected.extend(
             engine
-                .chunked_storage_spans(published_dataset)
+                .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(published_dataset)))
                 .unwrap()
                 .into_iter()
                 .map(|(range, _)| range),
         );
-        protected.extend(engine.oh_chunk_spans(published_dataset).unwrap());
+        protected.extend(
+            engine
+                .oh_chunk_spans(PhysicalAddress::new(published_dataset))
+                .unwrap(),
+        );
         protected.extend(
             engine
                 .oh_chunk_spans(
                     engine
                         .addresses()
                         .resolve(published.superblock.root_group_address)
-                        .unwrap()
-                        .get(),
+                        .unwrap(),
                 )
                 .unwrap(),
         );

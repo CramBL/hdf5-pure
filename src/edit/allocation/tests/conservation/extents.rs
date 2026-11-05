@@ -771,7 +771,7 @@ pub(super) fn replace_space_info(
 ) {
     let chunks = crate::edit::object_header::read_oh_chunks(
         &BytesSource::new(&*bytes),
-        extension,
+        PhysicalAddress::new(extension),
         context.addresses(),
         context.widths(),
     )

@@ -83,6 +83,7 @@ use crate::layout_info::{Chunk, ChunkIndex, Filter, FilterId, Layout};
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_header::HeaderMessage;
 use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
@@ -6353,7 +6354,9 @@ impl Dataset {
     fn append_target(&self) -> Result<AppendTarget<'_>, Error> {
         Ok(match &self.path {
             Some(path) => AppendTarget::Path(path),
-            None => AppendTarget::Header(self.resolved()?.at.address),
+            None => AppendTarget::Header(ObjectId::new(PhysicalAddress::new(
+                self.resolved()?.at.address,
+            ))),
         })
     }
 

@@ -21,6 +21,7 @@ use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::address::AddressContext;
@@ -29,6 +30,7 @@ use crate::data_layout::DataLayout;
 use crate::edit::WriteEngine;
 use crate::edit::test_util as edit_test_util;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::source::BytesSource;
 use crate::type_builders;
 use crate::width::FormatWidths;
@@ -234,7 +236,13 @@ fn deferred_fixed_arrays_preserve_complete_page_metadata_allocations(
         file.close().unwrap();
         let engine = edit_test_util::open_engine(&path);
         engine.assert_array_metadata_pages(address);
-        assert_eq!(engine.chunked_index_spans(address).unwrap().len(), 2);
+        assert_eq!(
+            engine
+                .chunked_index_spans(ObjectId::new(PhysicalAddress::new(address)))
+                .unwrap()
+                .len(),
+            2
+        );
         drop(engine);
         let native = file::libhdf5_open(&path);
         assert_eq!(
@@ -267,7 +275,9 @@ fn assert_index(path: &Path, index: FiniteChunkIndex, allocated: bool) {
         offsets: file.superblock().offset_size,
         lengths: file.superblock().length_size,
     };
-    let region = WriteEngine::gather_oh_messages(&source, address, addresses, widths).unwrap();
+    let region =
+        WriteEngine::gather_oh_messages(&source, PhysicalAddress::new(address), addresses, widths)
+            .unwrap();
     let mut position = 0;
     let message = loop {
         let record = region

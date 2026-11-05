@@ -5,6 +5,7 @@ use test_util::temp;
 use test_util_hdf5::native_fixtures::Fixture;
 use test_util_hdf5::numeric::ByteOrder;
 
+use crate::PhysicalAddress;
 use crate::edit;
 use crate::edit::OpeningExtension;
 use crate::edit::context::FileContext;
@@ -54,9 +55,13 @@ fn native_extension_opening_facts_retain_complete_allocations(#[case] fixture: F
             _ => panic!("fixture has no recorded page size: {fixture:?}"),
         }
     );
-    let expected =
-        object_header::read_oh_chunks(&source, address, context.addresses(), context.widths())
-            .unwrap();
+    let expected = object_header::read_oh_chunks(
+        &source,
+        PhysicalAddress::new(address),
+        context.addresses(),
+        context.widths(),
+    )
+    .unwrap();
     let allocations = facts.allocations.unwrap();
     assert_eq!(
         allocations,

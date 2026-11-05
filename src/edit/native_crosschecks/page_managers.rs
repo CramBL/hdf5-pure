@@ -86,7 +86,7 @@ pub(super) fn inspect(engine: &WriteEngine, page: u64) -> (u64, Vec<(u64, u64)>)
         .unwrap();
     let chunks = object_header::read_oh_chunks(
         engine.image(),
-        engine.context.addresses().resolve(stored).unwrap().get(),
+        engine.context.addresses().resolve(stored).unwrap(),
         engine.context.addresses(),
         engine.context.widths(),
     )

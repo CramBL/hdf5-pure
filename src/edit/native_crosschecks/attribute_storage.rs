@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use test_util_hdf5::creation_order;
 use test_util_hdf5::file;
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::attribute;
 use crate::attribute::AttributeMessage;
@@ -57,7 +58,7 @@ fn dense_reversion_preserves_encoded_records_and_prefix() {
     .unwrap();
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        address,
+        PhysicalAddress::new(address),
         engine.context.addresses(),
         engine.context.widths(),
     )

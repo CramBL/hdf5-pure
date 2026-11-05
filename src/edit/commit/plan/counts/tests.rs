@@ -594,7 +594,7 @@ fn one_index_projects_reversed_headers_without_copying_record_buffers(#[case] co
 fn gather(engine: &WriteEngine, target: u64) -> OhRegion {
     WriteEngine::gather_oh_messages(
         &engine.image(),
-        target,
+        PhysicalAddress::new(target),
         engine.context.addresses(),
         engine.widths(),
     )

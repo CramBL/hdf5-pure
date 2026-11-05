@@ -447,7 +447,7 @@ impl WriteEngine {
             StoredAddress::ZERO,
         );
         let ext_len = object_header::build_v2_object_header(
-            &self.rewrite_extension_region(old_ext_addr, &placeholder)?,
+            &self.rewrite_extension_region(PhysicalAddress::new(old_ext_addr), &placeholder)?,
         )?
         .len() as u64;
 
@@ -534,7 +534,7 @@ impl WriteEngine {
                 eoa_pre_fsm,
             );
             object_header::build_v2_object_header(
-                &self.rewrite_extension_region(old_ext_addr, &info)?,
+                &self.rewrite_extension_region(PhysicalAddress::new(old_ext_addr), &info)?,
             )?
         } else {
             // With no managers to allocate, libhdf5 records the final end of allocation
@@ -547,7 +547,7 @@ impl WriteEngine {
                 final_eoa,
             );
             object_header::build_v2_object_header(
-                &self.rewrite_extension_region(old_ext_addr, &info)?,
+                &self.rewrite_extension_region(PhysicalAddress::new(old_ext_addr), &info)?,
             )?
         };
         // The reservation uses the same fixed message size as the real extension.
@@ -816,7 +816,7 @@ impl WriteEngine {
         let source = self.image();
         let predecessor = object_header::ExtensionReconstruction::read(
             source,
-            old_ext_addr,
+            PhysicalAddress::new(old_ext_addr),
             base,
             self.context.widths(),
         )?;

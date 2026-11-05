@@ -7,6 +7,7 @@ use test_util::widths::Widths;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::error::{Error, FormatError};
+use crate::object_graph::ObjectId;
 use crate::reader::OpenedSource;
 use crate::source::BytesSource;
 use crate::superblock;
@@ -48,10 +49,11 @@ fn dense_copy_inspects_datatypes_before_short_values(
     let object = WriteEngine::read_object(
         &OpenedSource::for_test(&source, addresses),
         AccessMode::ReadOnly,
-        addresses
-            .resolve(located.superblock.root_group_address)
-            .unwrap()
-            .get(),
+        ObjectId::new(
+            addresses
+                .resolve(located.superblock.root_group_address)
+                .unwrap(),
+        ),
         located.widths,
     );
     let Err(error) = object else {

@@ -34,6 +34,7 @@ use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
+use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::access_mode::AccessMode;
 use crate::address::DecodedStoredAddress;
@@ -822,7 +823,7 @@ impl Observation {
         live.extend(
             object_header::read_oh_chunks(
                 &source,
-                extension,
+                PhysicalAddress::new(extension),
                 addresses,
                 crate::file_writer::WIDTHS,
             )
@@ -883,7 +884,7 @@ impl Observation {
             live.extend(
                 object_header::read_oh_chunks(
                     &source,
-                    header,
+                    PhysicalAddress::new(header),
                     addresses,
                     crate::file_writer::WIDTHS,
                 )

@@ -25,6 +25,7 @@ use crate::edit::retirement::RootRetirement;
 use crate::edit::staging::StagedApply;
 use crate::edit::{self, WriteEngine};
 use crate::error::{Error, FormatError};
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::source::Source;
 use crate::type_builders;
@@ -301,7 +302,7 @@ impl WriteEngine {
             let Some(replaced) = &node.prepared.replaces else {
                 continue;
             };
-            let a = replaced.address();
+            let a = replaced.source().object().header_address();
             if let Ok(spans) = self.oh_chunk_spans(a) {
                 if let Ok(region) =
                     Self::gather_oh_messages(&self.image(), a, base, self.context.widths())
@@ -330,14 +331,16 @@ impl WriteEngine {
                 write: mw,
             } in &node.prepared.writes
             {
-                let old_oh = source.object().header_address().get();
+                let old_oh = source.object().header_address();
                 match mw {
                     MovingWrite::Contiguous {
                         old_extent: Some(extent),
                         ..
                     } => to_free.push((*extent, FreeClass::Page(PageType::Raw))),
                     MovingWrite::Chunked { old_addr, .. } => {
-                        if let Some(spans) = self.chunked_storage_spans(*old_addr) {
+                        if let Some(spans) = self
+                            .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(*old_addr)))
+                        {
                             to_free.extend(spans);
                         }
                     }
@@ -347,7 +350,9 @@ impl WriteEngine {
                         kept_chunks,
                         ..
                     } => {
-                        if let Some(spans) = self.chunked_index_spans(*old_addr) {
+                        if let Some(spans) =
+                            self.chunked_index_spans(ObjectId::new(PhysicalAddress::new(*old_addr)))
+                        {
                             let data: Vec<FileRange> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {

@@ -486,7 +486,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         .unwrap();
     let initial_region = WriteEngine::gather_oh_messages(
         &engine.image(),
-        initial_extension.get(),
+        initial_extension,
         engine.context.addresses(),
         engine.context.widths(),
     )
@@ -521,7 +521,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
             .unwrap();
         let chunks = edit_header::read_oh_chunks(
             &engine.image(),
-            address.get(),
+            address,
             engine.context.addresses(),
             engine.context.widths(),
         )
@@ -536,7 +536,7 @@ fn extension_capacity_is_recovered_and_reclaimed_across_repeated_commits(
         );
         let region = WriteEngine::gather_oh_messages(
             &engine.image(),
-            address.get(),
+            address,
             engine.context.addresses(),
             engine.context.widths(),
         )
@@ -687,7 +687,7 @@ fn a_page_publication_reads_each_protected_extension_chunk_once(#[case] memory: 
         .unwrap();
     let chunks = edit_header::read_oh_chunks(
         engine.image(),
-        extension.get(),
+        extension,
         engine.context.addresses(),
         engine.context.widths(),
     )
@@ -949,7 +949,7 @@ fn persistence_allocations(engine: &WriteEngine) -> (Vec<Extent>, Vec<Extent>) {
         .unwrap();
     let chunks = edit_header::read_oh_chunks(
         engine.image(),
-        address.get(),
+        address,
         engine.context.addresses(),
         engine.context.widths(),
     )

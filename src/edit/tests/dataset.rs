@@ -13,6 +13,7 @@ use crate::DatatypeByteOrder;
 use crate::DeflateLevel;
 use crate::FixedPointType;
 use crate::FloatingPointType;
+use crate::PhysicalAddress;
 use crate::VariableLengthStringType;
 use crate::VariableLengthType;
 #[cfg(feature = "zfp")]
@@ -39,6 +40,7 @@ use crate::filter_pipeline::FilterDescription;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters;
 use crate::filters::ChunkContext;
+use crate::object_graph::ObjectId;
 use crate::object_path::{LinkName, ObjectPathBuf};
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
@@ -689,7 +691,11 @@ fn bounded_multi_batch_append_commits_every_batch() {
         let mut b = AppendBuilder::new();
         b.append_i32(&(5..total).collect::<Vec<_>>());
         engine
-            .append_inplace_gathered(AppendTarget::Header(addr), &b, 4)
+            .append_inplace_gathered(
+                AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
+                &b,
+                4,
+            )
             .unwrap();
     }
     let got = crate::File::open(&p)

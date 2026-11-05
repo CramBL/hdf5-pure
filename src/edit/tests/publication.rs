@@ -36,6 +36,7 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::image::HandleImage;
 use crate::image::WriteBuffering;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
 use crate::source::MetadataCacheConfig;
@@ -1041,7 +1042,11 @@ fn bounded_append_crash_consistency_partial_tail_prefix() {
                 let mut b = AppendBuilder::new();
                 b.append_i32(&(n..n + add).collect::<Vec<_>>());
                 engine
-                    .append_inplace_gathered(AppendTarget::Header(addr), &b, max_phase)
+                    .append_inplace_gathered(
+                        AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
+                        &b,
+                        max_phase,
+                    )
                     .unwrap();
             }
             let expected_len = if max_phase == 4 { n + add } else { n };
@@ -1081,7 +1086,11 @@ fn bounded_persist_append_without_finalize_is_readable() {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&(6..20).collect::<Vec<_>>());
         engine
-            .append_inplace_gathered(AppendTarget::Header(addr), &ab, 4)
+            .append_inplace_gathered(
+                AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
+                &ab,
+                4,
+            )
             .unwrap();
     }
     let got = crate::File::open(&p)
@@ -1116,7 +1125,11 @@ fn bounded_paged_reopen_after_publication_stays_aligned_and_readable() {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&(64..2000).collect::<Vec<_>>());
         engine
-            .append_inplace_gathered(AppendTarget::Header(addr), &ab, 4)
+            .append_inplace_gathered(
+                AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
+                &ab,
+                4,
+            )
             .unwrap();
     }
     assert_eq!(
@@ -1130,7 +1143,11 @@ fn bounded_paged_reopen_after_publication_stays_aligned_and_readable() {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&(2000..2500).collect::<Vec<_>>());
         engine
-            .append_inplace_gathered(AppendTarget::Header(addr), &ab, 4)
+            .append_inplace_gathered(
+                AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
+                &ab,
+                4,
+            )
             .unwrap();
         engine.finalize_persist().unwrap();
         engine.barrier().unwrap();

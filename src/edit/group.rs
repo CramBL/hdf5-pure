@@ -15,6 +15,7 @@ use hdf5_pure_format::__private::OwnedLink;
 
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 #[cfg(test)]
 use crate::address::StoredAddress;
@@ -176,7 +177,7 @@ impl WriteEngine {
         }
         let mut region = Self::gather_oh_messages(
             &self.image(),
-            addr,
+            PhysicalAddress::new(addr),
             self.context.addresses(),
             self.context.widths(),
         )?;

@@ -13,6 +13,7 @@ use crate::FileBuilder;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
+use crate::PhysicalAddress;
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::dataspace::MaxExtent;
 use crate::edit::SpaceOwnership;
@@ -21,6 +22,7 @@ use crate::edit::reservation::ReservationChoice;
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::type_builders::DatasetBuilder;
 
@@ -102,7 +104,9 @@ fn fragmented_creation_uses_original_holes_and_accounts_for_metadata_growth(
         .unwrap();
     reopened.close().unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let index = engine.chunked_index_spans(header).unwrap();
+    let index = engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
+        .unwrap();
     assert!(index.len() >= 2);
     for span in &index {
         assert!(chunks.iter().all(|chunk| chunk.address + chunk.storage_size

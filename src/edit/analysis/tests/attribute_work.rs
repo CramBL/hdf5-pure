@@ -85,7 +85,7 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
         .unwrap();
     let region = WriteEngine::gather_oh_messages(
         engine.image(),
-        owner,
+        PhysicalAddress::new(owner),
         engine.context.addresses(),
         engine.context.widths(),
     )

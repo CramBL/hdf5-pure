@@ -33,6 +33,7 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
+use crate::object_graph::ObjectId;
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::source::PhysicalSource;
@@ -74,7 +75,7 @@ impl FixedIndex {
     /// ownership. Propagates header, range, encoding, and storage-analysis errors.
     pub(super) fn new(
         file: &impl Store,
-        owner: u64,
+        owner: ObjectId,
         geometry: FiniteGeometry,
         message: &WalkedMessage,
         field: IndexAddressField,

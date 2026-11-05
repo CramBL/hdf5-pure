@@ -278,8 +278,12 @@ pub(in crate::edit) fn retire_and_reuse(path: &Path, name: &str, expected: &[i32
     drop(dataset);
     file.close().unwrap();
     let engine = test_util::open_engine(path);
-    let storage = engine.chunked_storage_spans(header).unwrap();
-    let index = engine.chunked_index_spans(header).unwrap();
+    let storage = engine
+        .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(header)))
+        .unwrap();
+    let index = engine
+        .chunked_index_spans(ObjectId::new(PhysicalAddress::new(header)))
+        .unwrap();
     assert!(index.len() >= 2);
     assert_eq!(storage.len(), payload.len() + index.len());
     for (allocation, class) in &storage {
