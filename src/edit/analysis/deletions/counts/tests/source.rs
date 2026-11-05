@@ -27,13 +27,13 @@ use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 
-use super::AnalysisPhase;
-use super::CountEvidenceError;
-use super::FormatError;
-use super::ObjectId;
-use super::PlannedDeletion;
-use super::SourceCountState;
-use super::SourceRemovalPlan;
+use super::super::AnalysisPhase;
+use super::super::CountEvidenceError;
+use super::super::FormatError;
+use super::super::ObjectId;
+use super::super::PlannedDeletion;
+use super::super::SourceCountState;
+use super::super::SourceRemovalPlan;
 
 #[rstest]
 #[case::one(&["first"], 1)]
@@ -305,7 +305,9 @@ fn source_count_transitions_keep_positive_cycles_and_exclude_root_candidates(#[c
 #[case::incomplete(Applicability::Incomplete)]
 #[case::unresolved(Applicability::Unresolved)]
 #[case::outside(Applicability::Outside)]
-fn inapplicable_edges_produce_no_source_zero_candidates(#[case] mode: Applicability) {
+fn source_count_queries_require_complete_topology_and_identified_edges(
+    #[case] mode: Applicability,
+) {
     let path = test_util::temp::temp_path("unresolved-source-counts.h5");
     let mut fixture = Fixture::new();
     let target = dataset(&mut fixture, 1);
