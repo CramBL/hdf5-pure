@@ -16,6 +16,8 @@ pub mod c_object;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod creation_holes;
 #[cfg(feature = "__hdf5-1.10")]
+pub mod heap_members;
+#[cfg(feature = "__hdf5-1.10")]
 pub mod ownership_append;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod unallocated_append;

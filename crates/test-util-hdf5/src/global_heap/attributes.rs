@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5::Attribute;
 use hdf5::Location;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::file::LibraryVersion;
@@ -13,6 +14,36 @@ use crate::absence;
 use crate::file;
 #[cfg(feature = "__hdf5-1.10")]
 use crate::file_space::persisted::PersistedStrategy;
+
+/// Reads variable-length ASCII attribute elements into owned strings.
+///
+/// # Panics
+///
+/// Panics if `attribute` cannot be read as variable-length ASCII strings.
+pub fn ascii_values(attribute: &Attribute) -> Vec<String> {
+    attribute
+        .read_raw::<VarLenAscii>()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().to_owned())
+        .collect()
+}
+
+/// Writes `value` to a new scalar variable-length ASCII attribute at `location`.
+///
+/// # Panics
+///
+/// Panics if `value` is not ASCII, contains a NUL byte, or the attribute cannot be created or
+/// written.
+pub fn write_ascii(location: &Location, attr_name: &str, value: &str) {
+    location
+        .new_attr::<VarLenAscii>()
+        .shape(())
+        .create(attr_name)
+        .unwrap()
+        .write_scalar(&VarLenAscii::from_ascii(value.as_bytes()).unwrap())
+        .unwrap();
+}
 
 /// Creates a file containing a variable-length `label` attribute and a guard dataset.
 ///
@@ -221,13 +252,7 @@ fn write_contents(native: hdf5::File, owner: Owner, storage: Storage) {
         Owner::Root => {}
     }
     let location = owner.location(&native);
-    location
-        .new_attr::<VarLenAscii>()
-        .shape(())
-        .create("label")
-        .unwrap()
-        .write_scalar(&VarLenAscii::from_ascii(b"before").unwrap())
-        .unwrap();
+    write_ascii(&location, "label", "before");
     for index in 0..storage.extras() {
         location
             .new_attr::<i64>()

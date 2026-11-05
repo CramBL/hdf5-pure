@@ -1,4 +1,7 @@
-//! The global heap collections that the objects reachable from the root group refer to.
+//! Global heap references in object contents.
+//!
+//! Collectors pass decoded [`GlobalHeapId`](crate::global_heap::GlobalHeapId) values to a
+//! [`HeapReferenceSink`], which retains collection addresses or complete member identities.
 
 use alloc::collections::BTreeSet;
 use core::num::NonZeroU32;
@@ -32,6 +35,8 @@ use crate::width::OffsetWidth;
 
 use super::WriteEngine;
 use super::analysis::AnalysisPhase;
+use super::analysis::heap::HeapReferenceError;
+use super::analysis::heap::HeapReferenceSink;
 
 /// The global heap collections that the objects reachable from a set of object headers, such as
 /// the root group's, refer to.
@@ -51,7 +56,8 @@ pub(crate) struct GlobalHeapLiveness {
     /// Whether the editor read every reachable structure that can refer to a collection.
     ///
     /// A collection outside [`referenced_collections`](Self::referenced_collections) can still be
-    /// live when this is `false`.
+    /// live when this is `false`. Completeness covers the supplied root set. Logical ownership
+    /// outside that set and retirement permission require separate evidence.
     pub(crate) analysis_complete: bool,
 }
 
@@ -86,19 +92,21 @@ impl WriteEngine {
         AnalysisPhase::new(self).collections_reachable_from(roots)
     }
 
-    /// Adds the collections an object refers to.
+    /// Collects global heap references from an object's content.
     ///
     /// Returns `false` if the object has a shared message, a message of a type the analysis does
     /// not recognize, or an attribute or a dataset that the analysis does not read in full.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`global_heap_liveness`](Self::global_heap_liveness).
+    /// Returns [`HeapReferenceError::Format`] for malformed metadata, invalid descriptors, or
+    /// source failures, and [`HeapReferenceError::MissingMessage`] if a dataset lacks its datatype
+    /// or dataspace message.
     pub(super) fn collect_object_collections(
         &self,
         header: &ObjectHeader,
-        referenced: &mut BTreeSet<u64>,
-    ) -> Result<bool, Error> {
+        referenced: &mut impl HeapReferenceSink,
+    ) -> Result<bool, HeapReferenceError> {
         let mut complete = true;
         for HeaderMessage {
             msg_type,
@@ -139,7 +147,7 @@ impl WriteEngine {
         Ok(complete)
     }
 
-    /// Adds physical collection addresses from an attribute's variable-length descriptors.
+    /// Collects global heap references from an attribute's variable-length descriptors.
     ///
     /// Reads descriptor bytes at the file's address width and resolves stored addresses with
     /// the file's address context. Returns `false` for a datatype whose file addresses the
@@ -149,11 +157,11 @@ impl WriteEngine {
     ///
     /// Returns the errors of [`HeapReferences::of`] and
     /// [`collect_element_collections`](Self::collect_element_collections). Previously collected
-    /// addresses remain in `referenced` on error.
+    /// references remain in `referenced` on error.
     pub(super) fn collect_parsed_attribute_collections(
         &self,
         attribute: &AttributeMessage,
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, FormatError> {
         Ok(
             match HeapReferences::of(&attribute.datatype, self.widths().offsets)? {
@@ -172,7 +180,7 @@ impl WriteEngine {
         )
     }
 
-    /// Adds the collections that a dataset's elements and fill value refer to.
+    /// Collects global heap references from a dataset's elements and fill value.
     ///
     /// Returns `true` for an object without a data layout message, and `false` if the layout,
     /// datatype, dataspace, or filter pipeline message is shared or the layout is virtual. For a
@@ -182,22 +190,22 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MissingMessage`] if the object has a data layout message and lacks its
-    /// datatype or dataspace message, and [`Error::Format`] if a message, the chunk index, or an
-    /// element is malformed.
+    /// Returns [`HeapReferenceError::MissingMessage`] if the object has a data layout message and
+    /// lacks its datatype or dataspace message, and [`HeapReferenceError::Format`] if a message,
+    /// the chunk index, or an element is malformed, or a source read fails.
     fn collect_dataset_collections(
         &self,
         messages: &[HeaderMessage],
-        referenced: &mut BTreeSet<u64>,
-    ) -> Result<bool, Error> {
+        referenced: &mut impl HeapReferenceSink,
+    ) -> Result<bool, HeapReferenceError> {
         let find = |msg_type| messages.iter().find(|m| m.msg_type == msg_type);
         let Some(layout) = find(MessageType::DATA_LAYOUT) else {
             return Ok(true);
         };
-        let datatype =
-            find(MessageType::DATATYPE).ok_or(Error::MissingMessage(MessageType::DATATYPE))?;
-        let dataspace =
-            find(MessageType::DATASPACE).ok_or(Error::MissingMessage(MessageType::DATASPACE))?;
+        let datatype = find(MessageType::DATATYPE)
+            .ok_or(HeapReferenceError::MissingMessage(MessageType::DATATYPE))?;
+        let dataspace = find(MessageType::DATASPACE)
+            .ok_or(HeapReferenceError::MissingMessage(MessageType::DATASPACE))?;
         if [layout, datatype, dataspace]
             .iter()
             .any(|m| m.flags.is_shared())
@@ -262,7 +270,7 @@ impl WriteEngine {
         &self,
         messages: &[HeaderMessage],
         slots: &ReferenceSlots,
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<(), FormatError> {
         for HeaderMessage {
             msg_type,
@@ -291,7 +299,7 @@ impl WriteEngine {
         address: StoredAddress,
         len: u64,
         slots: &ReferenceSlots,
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<(), FormatError> {
         let start = self.context.addresses().resolve(address)?.get();
         let element_size = NonZeroU64::from(slots.element_size);
@@ -315,7 +323,7 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Adds the collections that the elements of a chunked dataset refer to.
+    /// Collects global heap references from the elements of a chunked dataset.
     ///
     /// The analysis reads every element of each allocated chunk, including the elements of an
     /// edge chunk past the dataset's extent. Returns `false` if a chunk cannot be read, or cannot
@@ -328,7 +336,7 @@ impl WriteEngine {
         &self,
         spec: RawReadSpec<'_>,
         slots: &ReferenceSlots,
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, FormatError> {
         let element_size = u64::from(slots.element_size.get());
         let mut complete = true;
@@ -352,7 +360,7 @@ impl WriteEngine {
         Ok(complete)
     }
 
-    /// Adds the collections that the attributes in an object's dense attribute storage refer to.
+    /// Collects global heap references from an object's dense attributes.
     ///
     /// Returns `false` if a record in the storage is shared, or if
     /// [`collect_attribute_collections`](Self::collect_attribute_collections) returns `false` for
@@ -365,7 +373,7 @@ impl WriteEngine {
     fn collect_dense_attribute_collections(
         &self,
         data: &[u8],
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, FormatError> {
         let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
         let Some(heap) = info.fractal_heap_address else {
@@ -394,7 +402,7 @@ impl WriteEngine {
         Ok(complete && !shared_records)
     }
 
-    /// Adds the collections that an attribute's elements refer to.
+    /// Collects global heap references from an attribute's elements.
     ///
     /// Returns `false` if the attribute has a shared datatype or dataspace, or if
     /// [`HeapReferences::of`] returns [`HeapReferences::Unsupported`] for its datatype.
@@ -406,7 +414,7 @@ impl WriteEngine {
     fn collect_attribute_collections(
         &self,
         data: &[u8],
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, FormatError> {
         let attribute = match AttributeMessage::parse_with_widths(data, self.widths()) {
             Ok(attribute) => attribute,
@@ -416,8 +424,9 @@ impl WriteEngine {
         self.collect_parsed_attribute_collections(&attribute, referenced)
     }
 
-    /// Adds the collections that the variable-length references at `slots` in the first `count`
-    /// elements of `raw` refer to.
+    /// Decodes variable-length references at `slots` in the first `count` elements of `raw`.
+    ///
+    /// Passes each non-null checked identity to `referenced`.
     ///
     /// # Errors
     ///
@@ -433,7 +442,7 @@ impl WriteEngine {
             element_size,
             vlen_slots,
         }: &ReferenceSlots,
-        referenced: &mut BTreeSet<u64>,
+        referenced: &mut impl HeapReferenceSink,
     ) -> Result<(), FormatError> {
         let element_size = NonZeroU64::from(*element_size);
         let stride = element_size.get().to_usize()?;
@@ -460,7 +469,7 @@ impl WriteEngine {
                 if let Some(id) = VlElement::parse(reference, self.widths().offsets)?
                     .heap_id(self.widths().offsets, self.context.addresses())?
                 {
-                    referenced.insert(id.collection.get());
+                    referenced.record(id);
                 }
             }
         }
