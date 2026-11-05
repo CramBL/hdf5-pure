@@ -2,8 +2,8 @@
 //!
 //! The non-exhaustive types of this crate cannot be built with a struct literal outside it, so the
 //! other workspace crates build them through the functions and the field structs here. The module
-//! also exports [`StoredAddressExt`], the [`BaseAddressExt`] conversions of a [`BaseAddress`], and the
-//! display helpers.
+//! also exports [`StoredAddressExt`], the [`BaseAddressExt`] conversions of a [`BaseAddress`], display
+//! helpers, and quantities such as [`ByteLength`], [`ElementCount`], and [`ChunkSlot`].
 //!
 //! This module serves the workspace crates only. It is outside the crate's compatibility
 //! guarantee and may change in any release.
@@ -39,6 +39,13 @@ pub use crate::filter_mask::FILTER_COUNT_MAX;
 pub use crate::filter_mask::PipelineFilterMask;
 pub use crate::metadata_bytes::MetadataBytes;
 pub use crate::metadata_bytes::MetadataFrame;
+pub use crate::quantity::ByteLength;
+pub use crate::quantity::ChunkSlot;
+pub use crate::quantity::ElementCount;
+pub use crate::quantity::ElementSize;
+pub use crate::quantity::NonZeroByteLength;
+pub use crate::quantity::NonZeroElementCount;
+pub use crate::quantity::SlotCount;
 pub use crate::region::FileRange;
 pub use crate::region::FileRegion;
 
