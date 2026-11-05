@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
@@ -158,5 +159,5 @@ fn retained_view_follows_promotion_and_complete_allocator_restoration() {
 }
 
 fn extent(start: u64, length: u64) -> Extent {
-    Extent::new(StoredAddress::new(start), length).unwrap()
+    Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap()
 }

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private as format;
@@ -220,7 +221,7 @@ fn reusable_space_stats_check_aggregate_byte_sums() {
     );
     session.space.seed_persisted(
         None,
-        FreeExtent::new(StoredAddress::new(0), u64::MAX).unwrap(),
+        FreeExtent::new(StoredAddress::new(0), ByteLength::new(u64::MAX)).unwrap(),
     );
     let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap());
     aggregation
@@ -285,7 +286,7 @@ fn array_store_allocations_reuse_partial_pages_of_the_requested_class(
             if candidate == extent {
                 FreeExtent::new(
                     candidate.start().checked_add(8).unwrap(),
-                    candidate.len() - 8,
+                    ByteLength::new(candidate.len() - 8),
                 )
             } else {
                 Some(*candidate)
@@ -1324,13 +1325,13 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
         if let Some((addr, len)) = meta {
             s.space.seed_persisted(
                 Some(ManagerKind::PagedSmallMetadata),
-                FreeExtent::new(StoredAddress::new(addr), len).unwrap(),
+                FreeExtent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
             );
         }
         if let Some((addr, len)) = raw {
             s.space.seed_persisted(
                 Some(ManagerKind::PagedSmallRaw),
-                FreeExtent::new(StoredAddress::new(addr), len).unwrap(),
+                FreeExtent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
             );
         }
         s
@@ -1384,7 +1385,11 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
     let sections = s.space.paged_sections().expect("still paged");
     assert_eq!(
         sections.raw(),
-        [FreeExtent::new(StoredAddress::new(PAGE + 1024), PAGE - 1024).unwrap()],
+        [FreeExtent::new(
+            StoredAddress::new(PAGE + 1024),
+            ByteLength::new(PAGE - 1024)
+        )
+        .unwrap()],
         "the rest of the claimed page is free space of the claiming type"
     );
     assert!(
@@ -1408,14 +1413,18 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
     assert_eq!(
         sections.raw(),
         [
-            FreeExtent::new(StoredAddress::new(PAGE + 512), PAGE - 512).unwrap(),
-            FreeExtent::new(StoredAddress::new(3 * PAGE), PAGE).unwrap(),
+            FreeExtent::new(StoredAddress::new(PAGE + 512), ByteLength::new(PAGE - 512)).unwrap(),
+            FreeExtent::new(StoredAddress::new(3 * PAGE), ByteLength::new(PAGE)).unwrap(),
         ],
         "the fragment below the claimed page and the page above it both stay free"
     );
     assert_eq!(
         sections.metadata(),
-        [FreeExtent::new(StoredAddress::new(2 * PAGE + 1024), PAGE - 1024).unwrap()],
+        [FreeExtent::new(
+            StoredAddress::new(2 * PAGE + 1024),
+            ByteLength::new(PAGE - 1024)
+        )
+        .unwrap()],
         "the rest of the claimed page is free space of the claiming type"
     );
 }
@@ -1508,7 +1517,7 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         );
         s.space.seed_persisted(
             Some(ManagerKind::Flat),
-            FreeExtent::new(StoredAddress::new(HOLE_AT), hole).unwrap(),
+            FreeExtent::new(StoredAddress::new(HOLE_AT), ByteLength::new(hole)).unwrap(),
         );
         let free_before = free_total(&s);
         let eoa = s.end_of_allocation().unwrap().get();
@@ -2171,7 +2180,7 @@ fn chunk_index_classes_use_independent_snapshot_and_payload_facts(
         seeds.iter().map(|&(kind, start, length)| {
             (
                 kind,
-                FreeExtent::new(StoredAddress::new(start), length).unwrap(),
+                FreeExtent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap(),
             )
         }),
     )
@@ -2224,7 +2233,8 @@ fn canonical_index_classes_borrow_state_for_page_aligned_chunk_data(#[case] coun
         (0..count).map(|page| {
             (
                 Some(ManagerKind::PagedSmallMetadata),
-                FreeExtent::new(StoredAddress::new(1_400 + page * 512), 16).unwrap(),
+                FreeExtent::new(StoredAddress::new(1_400 + page * 512), ByteLength::new(16))
+                    .unwrap(),
             )
         }),
     )
@@ -2274,7 +2284,7 @@ fn chunk_index_classes_follow_current_admitted_fragments() {
     builder.create_dataset("d").with_i32_data(&[1; 100]);
     builder.write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    let fragment = FreeExtent::new(StoredAddress::new(1_400), 16).unwrap();
+    let fragment = FreeExtent::new(StoredAddress::new(1_400), ByteLength::new(16)).unwrap();
     engine.space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::Page),
         1,

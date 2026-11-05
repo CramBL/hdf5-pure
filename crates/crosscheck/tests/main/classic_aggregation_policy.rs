@@ -3,6 +3,7 @@
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::NonZeroByteLength;
@@ -67,7 +68,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                     Extent::new(
                         base.relative(PhysicalAddress::new(dataset.offset().unwrap()))
                             .unwrap(),
-                        dataset.storage_size(),
+                        ByteLength::new(dataset.storage_size()),
                     )
                     .unwrap(),
                 )
@@ -86,7 +87,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                     Extent::new(
                         base.relative(PhysicalAddress::new(dataset.offset().unwrap()))
                             .unwrap(),
-                        dataset.storage_size(),
+                        ByteLength::new(dataset.storage_size()),
                     )
                     .unwrap(),
                 )

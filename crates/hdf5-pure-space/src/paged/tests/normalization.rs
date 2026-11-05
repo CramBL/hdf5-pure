@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 
+use hdf5_pure_core::__private::ByteLength;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
@@ -356,7 +357,7 @@ pub(super) fn release_reference(
             })
             .flat_map(|extent| [extent.start().get(), extent.end().get() - 1])
             .map(|addr| StoredAddress::new(addr / page_size * page_size))
-            .filter_map(|page| Extent::new(page, page_size))
+            .filter_map(|page| Extent::new(page, ByteLength::new(page_size)))
             .filter(|&page| {
                 [&post.meta, &post.raw, &post.dead]
                     .into_iter()

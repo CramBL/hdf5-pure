@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
@@ -615,7 +616,7 @@ impl WriteEngine {
             "extension length must be stable across the placeholder and real messages"
         );
 
-        let region = FreeExtent::new(ext_addr, tail_len).ok_or(Error::Format(
+        let region = FreeExtent::new(ext_addr, ByteLength::new(tail_len)).ok_or(Error::Format(
             FormatError::OffsetOverflow {
                 offset: ext_addr.get(),
                 length: tail_len,
@@ -1236,6 +1237,7 @@ fn flat_tail_capacity(
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_space::__private::Extent;
     use hdf5_pure_space::__private::ManagerSections;
     use hdf5_pure_space::__private::{AdmittedFreeSnapshot, FreeList};
@@ -1263,11 +1265,13 @@ mod tests {
     ) {
         let widths = FormatWidths::from_sizes(8, lengths).unwrap();
         let managers = ManagerSections::flat(
-            (0..sections).map(|i| Extent::new(StoredAddress::new(i * 2), 1).unwrap()),
+            (0..sections)
+                .map(|i| Extent::new(StoredAddress::new(i * 2), ByteLength::new(1)).unwrap()),
         );
         let minimum = ext_len + free_space_manager::manager_blocks_len(&managers, widths).unwrap();
         let free = FreeList::from_sorted(
-            (0..sections).map(|i| Extent::new(StoredAddress::new(i * 2), 1).unwrap()),
+            (0..sections)
+                .map(|i| Extent::new(StoredAddress::new(i * 2), ByteLength::new(1)).unwrap()),
         )
         .unwrap();
         let projection = ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths).unwrap();

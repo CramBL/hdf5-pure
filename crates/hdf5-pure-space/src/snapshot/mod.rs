@@ -89,20 +89,20 @@ impl<'a> AdmittedFreeSnapshot<'a> {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
     /// use hdf5_pure_space::__private::{
     ///     Extent, ManagerKind, PageClassEvidence, PageType, SessionSpace,
     /// };
     ///
-    /// let fragment = Extent::new(StoredAddress::new(400), 16).unwrap();
+    /// let fragment = Extent::new(StoredAddress::new(400), ByteLength::new(16)).unwrap();
     /// let space = SessionSpace::from_persisted(
     ///     Some(FileSpaceStrategy::Page),
     ///     1,
     ///     FileSpacePageSize::MIN,
     ///     [(Some(ManagerKind::PagedSmallMetadata), fragment)],
     /// )?;
-    /// let allocation = Extent::new(StoredAddress::new(100), 20).unwrap();
+    /// let allocation = Extent::new(StoredAddress::new(100), ByteLength::new(20)).unwrap();
     /// assert_eq!(
     ///     space.admitted_snapshot().partial_page_class(allocation),
     ///     PageClassEvidence::Known(PageType::Meta),

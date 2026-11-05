@@ -16,6 +16,7 @@ use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::MetadataFrame;
 use hdf5_pure_core::MetadataBytes;
@@ -257,10 +258,11 @@ fn extent_in_source(
     length: u64,
 ) -> Result<Extent, FormatError> {
     debug_assert!(length > 0, "storage extents are non-empty");
-    let extent = Extent::new(address, length).ok_or(FormatError::OffsetOverflow {
-        offset: address.get(),
-        length,
-    })?;
+    let extent =
+        Extent::new(address, ByteLength::new(length)).ok_or(FormatError::OffsetOverflow {
+            offset: address.get(),
+            length,
+        })?;
     if extent.end() > StoredAddress::new(source.len()) {
         return Err(FormatError::UnexpectedSourceEof {
             expected: extent.end().get(),
@@ -358,6 +360,7 @@ mod tests {
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private::BTreeV2Plan;
     use hdf5_pure_format::__private::{BTREE_V2_LINK_NAME, BTREE_V2_NODE_SIZE};
     use test_util::btree::v2 as btree_v2;
@@ -647,12 +650,16 @@ mod tests {
         let extents =
             collect_btree_v2_storage_extents(&stored, StoredAddress::ZERO, FORMAT_WIDTHS).unwrap();
         assert_eq!(source.reads.get(), tree.nodes + 1);
-        let mut expected_extents =
-            vec![Extent::new(StoredAddress::ZERO, HEADER_LENGTH.to_u64()).unwrap()];
-        expected_extents.extend(
-            (1..=tree.nodes)
-                .map(|index| Extent::new(StoredAddress::new((index * 64).to_u64()), 64).unwrap()),
-        );
+        let mut expected_extents = vec![
+            Extent::new(StoredAddress::ZERO, ByteLength::new(HEADER_LENGTH.to_u64())).unwrap(),
+        ];
+        expected_extents.extend((1..=tree.nodes).map(|index| {
+            Extent::new(
+                StoredAddress::new((index * 64).to_u64()),
+                ByteLength::new(64),
+            )
+            .unwrap()
+        }));
         assert_eq!(extents, expected_extents);
     }
 
@@ -885,10 +892,15 @@ mod tests {
             .nodes
             .iter()
             .map(|address| {
-                Extent::new(StoredAddress::new(*address), u64::from(BTREE_V2_NODE_SIZE)).unwrap()
+                Extent::new(
+                    StoredAddress::new(*address),
+                    ByteLength::new(u64::from(BTREE_V2_NODE_SIZE)),
+                )
+                .unwrap()
             })
             .collect::<Vec<_>>();
-        expected.push(Extent::new(StoredAddress::ZERO, header_len.to_u64()).unwrap());
+        expected
+            .push(Extent::new(StoredAddress::ZERO, ByteLength::new(header_len.to_u64())).unwrap());
         expected.sort_unstable();
         assert_eq!(
             collect_btree_v2_storage_extents(reader, StoredAddress::ZERO, FORMAT_WIDTHS).unwrap(),
@@ -1245,8 +1257,12 @@ mod tests {
         assert_eq!(
             extents,
             vec![
-                Extent::new(StoredAddress::new(0), header_len).unwrap(),
-                Extent::new(StoredAddress::new(root), u64::from(BTREE_V2_NODE_SIZE)).unwrap(),
+                Extent::new(StoredAddress::new(0), ByteLength::new(header_len)).unwrap(),
+                Extent::new(
+                    StoredAddress::new(root),
+                    ByteLength::new(u64::from(BTREE_V2_NODE_SIZE))
+                )
+                .unwrap(),
             ]
         );
     }
@@ -1300,7 +1316,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             extents,
-            [Extent::new(StoredAddress::new(0), header.len().to_u64()).unwrap()]
+            [Extent::new(
+                StoredAddress::new(0),
+                ByteLength::new(header.len().to_u64())
+            )
+            .unwrap()]
         );
     }
 
@@ -1677,14 +1697,20 @@ mod tests {
                 [
                     Extent::new(
                         StoredAddress::new(0),
-                        hdf5_pure_format::__private::btree_v2_header_size(
-                            offset_width,
-                            length_width,
-                        )
-                        .to_u64(),
+                        ByteLength::new(
+                            hdf5_pure_format::__private::btree_v2_header_size(
+                                offset_width,
+                                length_width,
+                            )
+                            .to_u64()
+                        ),
                     )
                     .unwrap(),
-                    Extent::new(StoredAddress::new(root), u64::from(BTREE_V2_NODE_SIZE)).unwrap(),
+                    Extent::new(
+                        StoredAddress::new(root),
+                        ByteLength::new(u64::from(BTREE_V2_NODE_SIZE))
+                    )
+                    .unwrap(),
                 ]
             );
         }

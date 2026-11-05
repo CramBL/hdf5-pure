@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
 use hdf5_pure_space::__private::PageClassEvidence;
@@ -153,7 +154,7 @@ fn admitted_snapshot_keeps_long_page_runs_compact() {
 }
 
 fn extent(start: u64, length: u64) -> Extent {
-    Extent::new(StoredAddress::new(start), length).unwrap()
+    Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap()
 }
 
 #[rstest]

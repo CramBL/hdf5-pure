@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::{Extent, PageTransition, PageType, SessionSpace};
 use rstest::rstest;
 use test_util::disk_log;
@@ -43,7 +44,7 @@ fn page_padding_preserves_addresses_and_records_only_complete_gaps(
     );
     assert_eq!(
         engine.space.pending_padding(PageType::Meta).unwrap(),
-        [Extent::new(StoredAddress::new(start + 19 - base), gap).unwrap()]
+        [Extent::new(StoredAddress::new(start + 19 - base), ByteLength::new(gap)).unwrap()]
     );
     assert_eq!(engine.space.pending_padding(PageType::Raw).unwrap(), []);
     assert_eq!(

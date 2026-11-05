@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::SessionSpace;
@@ -124,7 +125,7 @@ fn abandoned_spare_uses_the_session_threshold(
         let reservation = engine.reserve(bytes.len() as u64, class).unwrap();
         engine.place(reservation, &bytes).unwrap();
     }
-    let expected = Extent::new(StoredAddress::new(start + 2000), 48).unwrap();
+    let expected = Extent::new(StoredAddress::new(start + 2000), ByteLength::new(48)).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         if tracked { vec![expected] } else { vec![] }
@@ -162,14 +163,14 @@ fn subthreshold_spare_merges_into_an_adjacent_tracked_section() {
     let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
     engine.place(reservation, &[23; 64]).unwrap();
     engine.space.return_allocation(
-        Extent::new(StoredAddress::new(start + 1900), 100).unwrap(),
+        Extent::new(StoredAddress::new(start + 1900), ByteLength::new(100)).unwrap(),
         AllocationClass::Metadata,
     );
     let reservation = engine.reserve(149, AllocationClass::Metadata).unwrap();
     engine.place(reservation, &[29; 149]).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
-        [Extent::new(StoredAddress::new(start + 1900), 148).unwrap()]
+        [Extent::new(StoredAddress::new(start + 1900), ByteLength::new(148)).unwrap()]
     );
     let state = engine.aggregation;
     let reservation = engine.reserve(148, AllocationClass::Raw).unwrap();
@@ -201,7 +202,7 @@ fn accounting_coalesces_spare_with_adjacent_reusable_bytes() {
     let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
     let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
     let address = engine.place(reservation, &[19; 64]).unwrap();
-    let extent = Extent::new(StoredAddress::new(address), 64).unwrap();
+    let extent = Extent::new(StoredAddress::new(address), ByteLength::new(64)).unwrap();
     engine.space.return_allocation(extent, AllocationClass::Raw);
     test_util_hdf5::assert_free_sections!(
         &engine.reusable_free_sections().unwrap(),

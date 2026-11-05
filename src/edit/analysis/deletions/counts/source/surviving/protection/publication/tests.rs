@@ -2,6 +2,7 @@ use std::sync::Arc;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::atomic::Ordering;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
@@ -122,7 +123,7 @@ fn publication_excludes_complete_retirement_allocations(
             expected_retirement.map(|(range, class)| (
                 Extent::new(
                     StoredAddress::new(range.start().get() - base),
-                    range.length()
+                    ByteLength::new(range.length())
                 )
                 .unwrap(),
                 class,
@@ -248,7 +249,7 @@ fn publication_checks_eoa_against_the_complete_last_allocation(
         fixture.retired.map(|(range, class)| (
             Extent::new(
                 StoredAddress::new(range.start().get() - base),
-                range.length()
+                ByteLength::new(range.length())
             )
             .unwrap(),
             class,
@@ -273,7 +274,11 @@ fn publication_rechecks_mutable_allocator_and_session_facts(#[case] mutation: Mu
     let protected = counts.protect(&engine, []).unwrap();
     let allocation = protected.updates()[0].allocation().range();
     let object = protected.updates()[0].object();
-    let extent = Extent::new(engine.addresses().relative(allocation.start()).unwrap(), 1).unwrap();
+    let extent = Extent::new(
+        engine.addresses().relative(allocation.start()).unwrap(),
+        ByteLength::new(1),
+    )
+    .unwrap();
     let pending = RootRetirement::new(PhysicalAddress::new(engine.image.len()), vec![])
         .into_pending_frees(vec![], engine.image.len());
     let prior = engine.snapshot_free();
@@ -415,7 +420,12 @@ fn publication_bounds_reuse_one_phase_with_zero_allocations_and_source_reads() {
         Some(FileSpaceStrategy::FsmAggr),
         1,
         FileSpacePageSize::MIN,
-        (0..256).map(|at| (None, Extent::new(StoredAddress::new(at * 2), 1).unwrap())),
+        (0..256).map(|at| {
+            (
+                None,
+                Extent::new(StoredAddress::new(at * 2), ByteLength::new(1)).unwrap(),
+            )
+        }),
     )
     .unwrap();
     let (counts, origins) = protection_tests::counts(&engine, &["a", "c"]);

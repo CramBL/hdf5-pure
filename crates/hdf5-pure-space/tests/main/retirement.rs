@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, StoredAddress};
 use hdf5_pure_space::__private::{Extent, FreeClass, ReturnedExtents, SessionSpace};
@@ -5,7 +6,7 @@ use rstest::rstest;
 
 #[rstest]
 #[case::seedless(false, Vec::new())]
-#[case::with_seed(true, vec![Extent::new(StoredAddress::new(100), 128).unwrap()])]
+#[case::with_seed(true, vec![Extent::new(StoredAddress::new(100), ByteLength::new(128)).unwrap()])]
 fn returned_allocations_reach_admission_with_their_original_boundaries(
     #[case] seed: bool,
     #[case] expected: Vec<Extent>,
@@ -16,15 +17,18 @@ fn returned_allocations_reach_admission_with_their_original_boundaries(
         FileSpacePageSize::DEFAULT,
     );
     if seed {
-        space.seed_persisted(None, Extent::new(StoredAddress::new(100), 64).unwrap());
+        space.seed_persisted(
+            None,
+            Extent::new(StoredAddress::new(100), ByteLength::new(64)).unwrap(),
+        );
     }
     let returned = ReturnedExtents::from_sorted(vec![
         (
-            Extent::new(StoredAddress::new(164), 32).unwrap(),
+            Extent::new(StoredAddress::new(164), ByteLength::new(32)).unwrap(),
             FreeClass::Dead,
         ),
         (
-            Extent::new(StoredAddress::new(196), 32).unwrap(),
+            Extent::new(StoredAddress::new(196), ByteLength::new(32)).unwrap(),
             FreeClass::Dead,
         ),
     ])

@@ -1,7 +1,9 @@
 use core::mem;
 use core::num::NonZeroU64;
 
-use hdf5_pure_core::__private::{NonEmptyRange, StoredAddressExt};
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::NonEmptyRange;
+use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{AddressRange, FileSpacePageSize, StoredAddress};
 
 /// A nonempty interval of stored HDF5 addresses.
@@ -20,36 +22,37 @@ impl Extent {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::__private::{ByteLength, StoredAddressExt};
     /// use hdf5_pure_core::StoredAddress;
     /// use hdf5_pure_space::__private::Extent;
     ///
     /// let start = StoredAddress::new(512);
-    /// let extent = Extent::new(start, 32).unwrap();
+    /// let extent = Extent::new(start, ByteLength::new(32)).unwrap();
     /// assert_eq!(extent.start(), start);
     /// assert_eq!(extent.end(), start.checked_add(32).unwrap());
     /// assert_eq!(extent.len(), 32);
-    /// assert_eq!(Extent::new(start, 0), None);
+    /// assert_eq!(Extent::new(start, ByteLength::new(0)), None);
     /// ```
     ///
     /// A physical position cannot be used as a stored address:
     ///
     /// ```compile_fail,E0308
+    /// use hdf5_pure_core::__private::ByteLength;
     /// use hdf5_pure_core::PhysicalAddress;
     /// use hdf5_pure_space::__private::Extent;
     ///
-    /// let _ = Extent::new(PhysicalAddress::new(512), 32);
+    /// let _ = Extent::new(PhysicalAddress::new(512), ByteLength::new(32));
     /// ```
-    pub fn new(start: StoredAddress, len: u64) -> Option<Self> {
+    pub fn new(start: StoredAddress, len: ByteLength) -> Option<Self> {
         Some(Self {
-            range: NonEmptyRange::new(start, NonZeroU64::new(len)?).ok()?,
+            range: NonEmptyRange::new(start, NonZeroU64::new(len.get())?).ok()?,
         })
     }
 
     /// Returns the nonempty interval from `start` to `end`, or `None` if `end` is at or before
     /// `start`.
     pub fn between(start: StoredAddress, end: StoredAddress) -> Option<Self> {
-        Self::new(start, end.checked_distance_from(start)?)
+        Self::new(start, ByteLength::new(end.checked_distance_from(start)?))
     }
 
     /// Returns the first byte of the extent.
@@ -97,7 +100,7 @@ impl Extent {
     /// Returns the overlap of this extent and `other`, or `None` when they are disjoint.
     pub(super) fn intersection(self, other: Self) -> Option<Self> {
         let common = self.range().intersection(other.range())?;
-        Self::new(common.start(), common.length())
+        Self::new(common.start(), ByteLength::new(common.length()))
     }
 
     /// Returns the checked interval with the same stored endpoints and positive length.
@@ -145,6 +148,7 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_core::__private::StoredAddressExt;
     use hdf5_pure_core::{AddressRange, StoredAddress};
     use rstest::rstest;
@@ -153,12 +157,18 @@ mod tests {
 
     #[test]
     fn extent_rejects_zero_length() {
-        assert_eq!(Extent::new(StoredAddress::new(100), 0), None);
+        assert_eq!(
+            Extent::new(StoredAddress::new(100), ByteLength::new(0)),
+            None
+        );
     }
 
     #[test]
     fn extent_rejects_a_range_crossing_u64_max() {
-        assert_eq!(Extent::new(StoredAddress::new(u64::MAX - 4), 5), None);
+        assert_eq!(
+            Extent::new(StoredAddress::new(u64::MAX - 4), ByteLength::new(5)),
+            None
+        );
     }
 
     #[rstest]
@@ -172,7 +182,7 @@ mod tests {
     ) {
         let start = StoredAddress::new(start);
         let end = StoredAddress::new(end);
-        let extent = Extent::new(start, length).unwrap();
+        let extent = Extent::new(start, ByteLength::new(length)).unwrap();
         let range: AddressRange<StoredAddress> = extent.range();
         assert_eq!(extent.start(), start);
         assert_eq!(extent.end(), end);
@@ -197,18 +207,18 @@ mod tests {
     #[test]
     fn extents_adjoin_at_an_exact_boundary() {
         assert!(
-            Extent::new(StoredAddress::new(100), 50)
+            Extent::new(StoredAddress::new(100), ByteLength::new(50))
                 .unwrap()
-                .adjoins(Extent::new(StoredAddress::new(150), 25).unwrap())
+                .adjoins(Extent::new(StoredAddress::new(150), ByteLength::new(25)).unwrap())
         );
     }
 
     #[test]
     fn extents_with_a_one_byte_gap_do_not_adjoin() {
         assert!(
-            !Extent::new(StoredAddress::new(100), 50)
+            !Extent::new(StoredAddress::new(100), ByteLength::new(50))
                 .unwrap()
-                .adjoins(Extent::new(StoredAddress::new(151), 25).unwrap())
+                .adjoins(Extent::new(StoredAddress::new(151), ByteLength::new(25)).unwrap())
         );
     }
 }

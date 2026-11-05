@@ -17,6 +17,8 @@ use alloc::sync::Arc;
 use core::mem::MaybeUninit;
 use core::num::{NonZeroU64, NonZeroUsize};
 
+#[cfg(feature = "std")]
+use hdf5_pure_core::__private::ByteLength;
 #[cfg(test)]
 use hdf5_pure_core::__private::FileRange;
 #[cfg(test)]
@@ -2040,11 +2042,12 @@ pub(crate) fn collect_chunked_storage_spans(
         if ci.chunk_size.is_zero() {
             continue;
         }
-        let extent =
-            Extent::new(ci.address, ci.chunk_size.get()).ok_or(FormatError::OffsetOverflow {
+        let extent = Extent::new(ci.address, ByteLength::new(ci.chunk_size.get())).ok_or(
+            FormatError::OffsetOverflow {
                 offset: ci.address.get(),
                 length: ci.chunk_size.get(),
-            })?;
+            },
+        )?;
         data.push(extent.range());
     }
 

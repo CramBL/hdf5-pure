@@ -1,5 +1,6 @@
 //! Huge-object ownership and read crosschecks against libhdf5.
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::{FormatWidths, FractalHeapHeader, FractalHeapIdLayout};
 use hdf5_pure_space::__private::Extent;
 use test_util_hdf5::heap_allocations::{AllocationKind, Heap};
@@ -50,7 +51,10 @@ fn c_written_filtered_huge_objects_have_exact_storage_and_contents(
                 AllocationKind::HugeObject => FractalHeapAllocation::HugeObject,
                 kind => panic!("unexpected heap allocation: {kind:?}"),
             };
-            (Extent::new(StoredAddress::new(at), length).unwrap(), kind)
+            (
+                Extent::new(StoredAddress::new(at), ByteLength::new(length)).unwrap(),
+                kind,
+            )
         })
         .collect();
     let expected_allocations = expected;

@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
@@ -205,17 +206,26 @@ fn engine(
             engine
                 .append(&vec![17; usize::try_from(capacity).unwrap()])
                 .unwrap();
-            let raw = Extent::new(StoredAddress::new(start + page + 16), page - 32).unwrap();
+            let raw = Extent::new(
+                StoredAddress::new(start + page + 16),
+                ByteLength::new(page - 32),
+            )
+            .unwrap();
             (
                 vec![
                     (
                         Some(ManagerKind::PagedSmallMetadata),
-                        Extent::new(StoredAddress::new(start + 16), header).unwrap(),
+                        Extent::new(StoredAddress::new(start + 16), ByteLength::new(header))
+                            .unwrap(),
                     ),
                     (Some(ManagerKind::PagedSmallRaw), raw),
                     (
                         Some(ManagerKind::PagedSmallMetadata),
-                        Extent::new(StoredAddress::new(start + 3 * page), index_capacity).unwrap(),
+                        Extent::new(
+                            StoredAddress::new(start + 3 * page),
+                            ByteLength::new(index_capacity),
+                        )
+                        .unwrap(),
                     ),
                 ],
                 Some(raw),

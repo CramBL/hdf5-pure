@@ -513,6 +513,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
 mod tests {
     use core::cell::RefCell;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private::AttributeRecord;
     use hdf5_pure_format::__private::ObjectHeaderPrefix;
     use rstest::rstest;
@@ -883,12 +884,12 @@ mod tests {
         vec![
             Extent::new(
                 StoredAddress::new(u64::try_from(header_at).unwrap()),
-                u64::try_from(header.len()).unwrap(),
+                ByteLength::new(u64::try_from(header.len()).unwrap()),
             )
             .unwrap(),
             Extent::new(
                 StoredAddress::new(u64::try_from(root_at).unwrap()),
-                NODE_SIZE,
+                ByteLength::new(NODE_SIZE),
             )
             .unwrap(),
         ]

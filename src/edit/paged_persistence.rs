@@ -537,7 +537,7 @@ fn contiguous_extension(
     let extension = ranges
         .into_iter()
         .map(|range| {
-            Extent::new(range.start(), range.length())
+            Extent::new(range.start(), ByteLength::new(range.length()))
                 .ok_or_else(|| FormatError::Internal("a PAGE extension chunk is empty".into()))
         })
         .collect::<Result<Vec<_>, _>>()?;

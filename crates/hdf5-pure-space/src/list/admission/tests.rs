@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
 use proptest::prelude::*;
@@ -310,5 +311,5 @@ fn returns(regions: &[(u64, u64)]) -> Vec<(Extent, ())> {
 }
 
 fn extent(start: u64, len: u64) -> Extent {
-    Extent::new(StoredAddress::new(start), len).unwrap()
+    Extent::new(StoredAddress::new(start), ByteLength::new(len)).unwrap()
 }

@@ -1,6 +1,7 @@
 use core::num::NonZeroUsize;
 use std::cell::Cell;
 
+use hdf5_pure_core::__private::ByteLength;
 use test_util::checksum;
 use test_util::object_header::v2::{self, Header, HeaderFlags, Timestamps};
 use test_util::object_header::{Message, MessageFlags as WireFlags, MessageType as WireType};
@@ -209,7 +210,7 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     let replacement = prepared.rewrite(&final_info).unwrap();
     assert_eq!(&replacement[..], &expected_records(&final_body));
     assert_eq!(replacement.props(), fixture.props);
-    let allocation = Extent::new(StoredAddress::new(1_024), 262_144).unwrap();
+    let allocation = Extent::new(StoredAddress::new(1_024), ByteLength::new(262_144)).unwrap();
     let encoded = build_v2_object_header_allocation(&replacement, allocation).unwrap();
     assert_eq!(u64::try_from(encoded.len()).unwrap(), allocation.len());
     assert_eq!((source.calls.get(), source.bytes.get()), reads);

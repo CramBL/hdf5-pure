@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{
@@ -357,7 +358,7 @@ fn aggregate_zero_observations_include_complete_scratch_capacity() {
 }
 
 fn extent(start: u64, length: u64) -> Extent {
-    Extent::new(StoredAddress::new(start), length).unwrap()
+    Extent::new(StoredAddress::new(start), ByteLength::new(length)).unwrap()
 }
 
 fn request(allocation: u64, encoding: u64, page_type: PageType) -> BlockRequest {

@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeList;
 use rstest::rstest;
@@ -104,7 +105,7 @@ pub(super) fn inspect(engine: &WriteEngine, page: u64) -> (u64, Vec<(u64, u64)>)
         .map(|range| {
             Extent::new(
                 engine.context.addresses().relative(range.start()).unwrap(),
-                range.length(),
+                ByteLength::new(range.length()),
             )
             .unwrap()
         })
@@ -134,7 +135,7 @@ pub(super) fn inspect(engine: &WriteEngine, page: u64) -> (u64, Vec<(u64, u64)>)
     let published = FreeList::from_sorted({
         let mut sections = sections
             .into_iter()
-            .map(|section| Extent::new(section.addr, section.size).unwrap())
+            .map(|section| Extent::new(section.addr, ByteLength::new(section.size)).unwrap())
             .collect::<Vec<_>>();
         sections.sort_unstable();
         sections

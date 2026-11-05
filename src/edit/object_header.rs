@@ -1064,6 +1064,7 @@ pub(crate) const VERSION_TWO_REQUIRED: &str = "an object does not use a version 
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private::AttributePhaseChange;
     use hdf5_pure_format::__private::ObjectTimes;
     use rstest::rstest;
@@ -1158,7 +1159,7 @@ mod tests {
         assert_eq!(rewritten.props(), props);
         assert_eq!(&rewritten[..], &region_bytes(&body));
 
-        let allocation = Extent::new(StoredAddress::new(1_024), 131_123).unwrap();
+        let allocation = Extent::new(StoredAddress::new(1_024), ByteLength::new(131_123)).unwrap();
         let encoded = build_v2_object_header_allocation(&rewritten, allocation).unwrap();
         let addresses = AddressContext::from_effective_base(BaseAddress::new(4_096));
         let physical = addresses.resolve(allocation.start()).unwrap();
@@ -1225,7 +1226,7 @@ mod tests {
         .unwrap();
         let bytes = build_v2_object_header_allocation(
             &region,
-            Extent::new(StoredAddress::ZERO, 8_192).unwrap(),
+            Extent::new(StoredAddress::ZERO, ByteLength::new(8_192)).unwrap(),
         )
         .unwrap();
         let actual = WriteEngine::gather_oh_messages(
