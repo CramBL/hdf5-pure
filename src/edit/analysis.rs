@@ -15,6 +15,7 @@ use hdf5_pure_space::__private::FreeClass;
 
 use crate::access_mode::AccessMode;
 use crate::error::{Error, FormatError};
+use crate::global_heap::GlobalHeapId;
 use crate::group::v1 as group_v1;
 use crate::group::v2 as group_v2;
 use crate::object_graph::{
@@ -28,6 +29,8 @@ use crate::source::SourceMetadata;
 use self::counts::CountObservation;
 use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
+use self::heap::CollectionContents;
+use self::heap::HeapReferenceError;
 use self::ownership::ObjectOwnership;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
@@ -56,6 +59,11 @@ pub(super) mod counts;
 mod deletions;
 #[cfg_attr(
     not(test),
+    expect(dead_code, reason = "heap member facts do not authorize retirement")
+)]
+pub(in crate::edit) mod heap;
+#[cfg_attr(
+    not(test),
     expect(
         dead_code,
         reason = "local ownership facts do not authorize collection retirement"
@@ -68,8 +76,8 @@ pub(in crate::edit) mod ownership;
 /// Queries borrow the engine for the phase. The caller establishes source consistency and starts
 /// a new phase after relevant source writes. Owned count metadata can be retained after the phase
 /// is dropped, with source freshness and write permissions established separately. Adjacency,
-/// parsed count observations, reference summaries, collection geometry, and local allocation facts
-/// are retained separately. Reference and local ownership completeness are independent.
+/// parsed count observations, reference identities, collection member framing, and local allocation
+/// facts are retained separately. Reference and local ownership completeness are independent.
 pub(super) struct AnalysisPhase<'a> {
     engine: &'a WriteEngine,
     /// Shared phase identity for reconstruction origins and any discovered topology.
@@ -80,9 +88,11 @@ pub(super) struct AnalysisPhase<'a> {
     /// Additional physical object-header addresses for the collection-reference scan.
     reference_roots: Vec<u64>,
     links: BTreeMap<ObjectId, ObjectLinks>,
+    /// Decoded collection and member identities, interpretation outcomes, and cached failures.
     references: BTreeMap<ObjectId, ObjectReferences>,
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
-    allocations: BTreeMap<PhysicalAddress, Result<FileRange, FormatError>>,
+    /// Complete collection ranges, allocated-member framing, and cached parsing failures.
+    allocations: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
     /// Count observations, optional header allocation facts, and cached parse failures.
     counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     /// Local allocation ranges and collection outcomes, including cached failures.
@@ -319,45 +329,22 @@ impl<'a> AnalysisPhase<'a> {
         Ok(candidates)
     }
 
-    /// Parses complete collection geometry on its first query in this phase.
+    /// Parses complete parent and member framing on its first query in this phase.
     ///
-    /// Retains successful ranges and parsing failures for subsequent queries at `address`.
+    /// Reuses the retained framing or parsing failure for subsequent queries at `address`.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`WriteEngine::collection_span`].
+    /// Returns the errors of [`Self::collection_contents`].
     pub(super) fn collection_allocation(
         &mut self,
         address: PhysicalAddress,
     ) -> Result<CollectionAllocation, FormatError> {
-        let Self {
-            engine,
-            identity: _,
-            allocations,
-            counts: _,
-            ownership: _,
-            topology: _,
-            budget: _,
-            root: _,
-            reference_roots: _,
-            links: _,
-            references: _,
-            liveness: _,
-            #[cfg(test)]
-                candidate_lookups: _,
-        } = self;
-        let range = allocations.entry(address).or_insert_with(|| {
-            #[cfg(test)]
-            COLLECTION_ALLOCATIONS.with(|count| count.set(count.get() + 1));
-            engine.collection_span(address.get())
-        });
-        range
-            .as_ref()
-            .map(|&range| CollectionAllocation {
-                session: engine.context.allocations.session(),
-                range,
-            })
-            .map_err(Clone::clone)
+        let range = self.collection_contents(address)?.range();
+        Ok(CollectionAllocation {
+            session: self.engine.context.allocations.session(),
+            range,
+        })
     }
 
     /// Returns allocations absent from the complete reference set for this phase's root union.
@@ -514,13 +501,37 @@ impl<'a> AnalysisPhase<'a> {
         Ok(complete && traversal.complete())
     }
 
-    /// Parses an object's reference-bearing content on its first query in this phase.
+    /// Returns cached reference facts and parses any required group adjacency.
     ///
     /// # Errors
     ///
     /// Returns parsing and source-read errors from the object header, its group links, or its
     /// reference-bearing content.
     fn read_references(&mut self, object: ObjectId) -> Result<&ObjectReferences, Error> {
+        let references = self.read_reference_facts(object, true)?;
+        if let Some(error) = &references.error {
+            return Err(error.clone().into());
+        }
+        Ok(references)
+    }
+
+    /// Collects descriptor identities once, with optional group-adjacency discovery.
+    ///
+    /// Caches reference results and initial header parsing failures. A local query can precede
+    /// adjacency discovery without repeating descriptor decoding. Reference interpretation and
+    /// adjacency completeness remain separate.
+    ///
+    /// # Errors
+    ///
+    /// Returns group-link parsing errors when discovery is requested, a header parsing or source
+    /// error when enriching existing facts with adjacency, or [`FormatError::Internal`] if the
+    /// facts cannot be retrieved. Other header and content failures are recorded in
+    /// [`ObjectReferences::error`].
+    fn read_reference_facts(
+        &mut self,
+        object: ObjectId,
+        discover_links: bool,
+    ) -> Result<&ObjectReferences, Error> {
         let Self {
             engine,
             identity: _,
@@ -537,36 +548,56 @@ impl<'a> AnalysisPhase<'a> {
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
-        match references.entry(object) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let header = ObjectHeader::parse_from_source_with_widths(
-                    &SourceMetadata(&engine.image()),
-                    AccessMode::ReadWrite,
-                    object.header_address().get(),
-                    engine.widths(),
-                    engine.addresses().effective_base(),
-                )?;
-                let has_topology = topology
-                    .as_ref()
-                    .and_then(Option::as_ref)
-                    .is_some_and(|topology| topology.indices.contains_key(&object));
-                if !has_topology && !links.contains_key(&object) {
-                    links.insert(object, ObjectLinks::read(engine, &header)?);
+        let has_topology = topology
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some_and(|topology| topology.indices.contains_key(&object));
+        let need_links = discover_links && !has_topology && !links.contains_key(&object);
+        let failed = references
+            .get(&object)
+            .is_some_and(|facts| facts.error.is_some());
+        if !failed && (need_links || !references.contains_key(&object)) {
+            match ObjectHeader::parse_from_source_with_widths(
+                &SourceMetadata(&engine.image()),
+                AccessMode::ReadWrite,
+                object.header_address().get(),
+                engine.widths(),
+                engine.addresses().effective_base(),
+            ) {
+                Ok(header) => {
+                    if need_links {
+                        links.insert(object, ObjectLinks::read(engine, &header)?);
+                    }
+                    if let Entry::Vacant(entry) = references.entry(object) {
+                        #[cfg(test)]
+                        COLLECTION_WORK.with(|work| {
+                            let (links, references) = work.get();
+                            work.set((links, references + 1));
+                        });
+                        let mut facts = ObjectReferences::default();
+                        let outcome = engine.collect_object_collections(&header, &mut facts);
+                        facts.complete = matches!(outcome, Ok(true));
+                        facts.error = outcome.err();
+                        entry.insert(facts);
+                    }
                 }
-                #[cfg(test)]
-                COLLECTION_WORK.with(|work| {
-                    let (links, references) = work.get();
-                    work.set((links, references + 1));
-                });
-                let mut collections = BTreeSet::new();
-                let complete = engine.collect_object_collections(&header, &mut collections)?;
-                Ok(entry.insert(ObjectReferences {
-                    collections,
-                    complete,
-                }))
+                Err(error) => {
+                    if references.contains_key(&object) {
+                        return Err(error.into());
+                    }
+                    references.insert(
+                        object,
+                        ObjectReferences {
+                            error: Some(error.into()),
+                            ..ObjectReferences::default()
+                        },
+                    );
+                }
             }
         }
+        references.get(&object).ok_or_else(|| {
+            FormatError::Internal("object reference facts were not recorded".into()).into()
+        })
     }
     /// Returns retained summary sizes and candidate-membership query counts.
     #[cfg(test)]
@@ -886,10 +917,21 @@ impl ObjectLinks {
     }
 }
 
-/// Physical collection addresses referenced by one object's content, with its completeness result.
-struct ObjectReferences {
+/// Decoded global heap references from one object's supported content.
+///
+/// Retains checked identities even when other content is unsupported or malformed. Completeness
+/// covers reference interpretation independently of adjacency and collection framing. Logical
+/// ownership, external references, and retirement permission require separate evidence.
+#[derive(Default)]
+pub(in crate::edit) struct ObjectReferences {
+    /// Distinct physical collection addresses.
     collections: BTreeSet<u64>,
+    /// Distinct checked collection and member identities.
+    objects: BTreeSet<GlobalHeapId>,
+    /// Whether reference-bearing content was fully interpreted without an error.
     complete: bool,
+    /// A header, descriptor, or source failure, with partial identities retained separately.
+    error: Option<HeapReferenceError>,
 }
 
 /// Global heap allocations, keyed by physical address, and their object or attribute origins.
