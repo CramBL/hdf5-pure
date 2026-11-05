@@ -1143,14 +1143,12 @@ fn put_placed_array_block<S: ByteSink>(
     address: StoredAddress,
     bytes: &[u8],
 ) -> Result<(), EmissionError<S::Error>> {
-    let start = Reservation::new(base, address, bytes.len().to_u64(), ())?
-        .start()
-        .get();
+    let start = Reservation::new(base, address, ByteLength::new(bytes.len().to_u64()), ())?.start();
     if sink.position() > start {
         return Err(FormatError::Internal("array blocks overlap earlier output".into()).into());
     }
-    while sink.position() < start {
-        sink.put_zeros((start - sink.position()).min(65_536).to_usize()?)
+    while let Some(length) = sink.remaining_to(start)?.nonzero() {
+        sink.put_zeros(length.length().min(ByteLength::new(65_536)).to_usize()?)
             .map_err(EmissionError::Sink)?;
     }
     put_array_block(sink, base, address, bytes)
@@ -1169,8 +1167,8 @@ fn put_array_block<S: ByteSink>(
     address: StoredAddress,
     bytes: &[u8],
 ) -> Result<(), EmissionError<S::Error>> {
-    let reservation = Reservation::new(base, address, bytes.len().to_u64(), ())?;
-    if sink.position() != reservation.start().get() {
+    let reservation = Reservation::new(base, address, ByteLength::new(bytes.len().to_u64()), ())?;
+    if sink.position() != reservation.start() {
         return Err(
             FormatError::Internal("array output differs from its stored address".into()).into(),
         );
@@ -1399,6 +1397,7 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use hdf5_pure_core::__private::ByteLength;
+    use hdf5_pure_core::PhysicalAddress;
     use hdf5_pure_format::__private as format;
     use hdf5_pure_format::__private::ChunkIndexLayout;
     use hdf5_pure_format::__private::ChunkRecord;
@@ -2185,8 +2184,8 @@ mod tests {
             self.put(&vec![0; length])
         }
 
-        fn position(&self) -> u64 {
-            self.position
+        fn position(&self) -> PhysicalAddress {
+            PhysicalAddress::new(self.position)
         }
     }
 

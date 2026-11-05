@@ -16,6 +16,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileSpaceSettingsExt;
 use hdf5_pure_core::__private::SuperblockFields;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::DenseAttrCreationOrder;
 use hdf5_pure_format::__private::DenseAttrFixup;
 use hdf5_pure_format::__private::DenseLinkPlan;
@@ -806,6 +807,7 @@ impl<S: ObjectSource> Plan<S> {
             end,
         } = &self;
         let mut sink = WriteSink::new(BufWriter::new(writer));
+        let eof = BaseAddress::ZERO.resolve(*end)?;
         let superblock = SuperblockFields {
             status: SuperblockStatus::new(
                 super::superblock_version(*libver),
@@ -814,7 +816,7 @@ impl<S: ObjectSource> Plan<S> {
             offset_size: super::OFFSET_WIDTH,
             length_size: super::LENGTH_WIDTH,
             base_address: BaseAddress::ZERO,
-            eof_address: end.get(),
+            eof_address: eof.get(),
             root_group_address: records
                 .last()
                 .ok_or_else(inconsistent)?
@@ -871,7 +873,7 @@ impl<S: ObjectSource> Plan<S> {
             spans.push(Reservation::new(
                 BaseAddress::ZERO,
                 span.address,
-                span.length.get(),
+                span.length,
                 Part::Extension,
             )?);
         }
@@ -879,13 +881,13 @@ impl<S: ObjectSource> Plan<S> {
             spans.push(Reservation::new(
                 BaseAddress::ZERO,
                 manager.header_address,
-                manager.header.len() as u64,
+                ByteLength::new(manager.header.len() as u64),
                 Part::ManagerHeader(index),
             )?);
             spans.push(Reservation::new(
                 BaseAddress::ZERO,
                 manager.section_list_address,
-                manager.section_list.len() as u64,
+                ByteLength::new(manager.section_list.len() as u64),
                 Part::ManagerSections(index),
             )?);
         }
@@ -893,8 +895,8 @@ impl<S: ObjectSource> Plan<S> {
         let mut working = None;
         for span in spans {
             let (range, part) = span.into_parts();
-            let start = range.start().get();
-            let end = range.end().get();
+            let start = range.start();
+            let end = range.end();
             pad(&mut sink, start)?;
             if let Some(index) = part.object() {
                 if !working
@@ -912,13 +914,13 @@ impl<S: ObjectSource> Plan<S> {
                     &mut sink,
                     BaseAddress::ZERO,
                     index,
-                    StoredAddress::new(start),
+                    BaseAddress::ZERO.relative(start)?,
                 )
                 .map_err(emission_error)?,
                 Part::Links(index) => sink.put(&self.links(
                     index,
                     Allocation {
-                        address: StoredAddress::new(start),
+                        address: BaseAddress::ZERO.relative(start)?,
                         length: ByteLength::new(range.length()),
                     },
                 )?)?,
@@ -937,7 +939,7 @@ impl<S: ObjectSource> Plan<S> {
                         Part::Attributes(_) => sink.put(&self.attributes(
                             object,
                             Allocation {
-                                address: StoredAddress::new(start),
+                                address: BaseAddress::ZERO.relative(start)?,
                                 length: ByteLength::new(range.length()),
                             },
                         )?)?,
@@ -958,7 +960,7 @@ impl<S: ObjectSource> Plan<S> {
                 return Err(inconsistent().into());
             }
         }
-        pad(&mut sink, end.get())?;
+        pad(&mut sink, eof)?;
         sink.into_inner().flush()?;
         Ok(())
     }
@@ -1797,12 +1799,15 @@ fn group_header(
 /// # Errors
 ///
 /// Returns [`FormatError::Internal`] if output is already past `end`. Propagates sink errors.
-fn pad(sink: &mut impl ByteSink<Error = std::io::Error>, end: u64) -> Result<(), Error> {
+fn pad(
+    sink: &mut impl ByteSink<Error = std::io::Error>,
+    end: PhysicalAddress,
+) -> Result<(), Error> {
     if end < sink.position() {
         return Err(inconsistent().into());
     }
-    while sink.position() < end {
-        sink.put_zeros((end - sink.position()).min(65_536).to_usize()?)?;
+    while let Some(length) = sink.remaining_to(end)?.nonzero() {
+        sink.put_zeros(length.length().min(ByteLength::new(65_536)).to_usize()?)?;
     }
     Ok(())
 }

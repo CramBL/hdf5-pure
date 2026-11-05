@@ -2,6 +2,8 @@
 
 use std::io::Write;
 
+use hdf5_pure_core::PhysicalAddress;
+
 #[cfg(test)]
 use crate::DeflateLevel;
 #[cfg(test)]
@@ -521,8 +523,8 @@ impl<W: Write> ByteSink for WriteSink<W> {
         Ok(())
     }
 
-    fn position(&self) -> u64 {
-        self.written
+    fn position(&self) -> PhysicalAddress {
+        PhysicalAddress::new(self.written)
     }
 }
 
