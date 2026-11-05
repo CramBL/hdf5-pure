@@ -4,7 +4,7 @@
 #
 # "Underscore" names the character in identifier grammars.
 extends: existence
-message: "Overused in generated prose: '%s'. Is it earning its place?"
+message: "Replace '%s' with the specific capability, condition, or measured result. Remove it only if no information is lost."
 link: https://github.com/Syntaf/vale-llm-slop#slopoverused
 level: error
 ignorecase: true

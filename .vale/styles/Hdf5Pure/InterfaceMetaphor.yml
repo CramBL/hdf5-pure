@@ -1,0 +1,12 @@
+extends: existence
+message: "For '%s', name the type, field, or method and state the values it contains, accepts, or returns, or the guarantee it provides."
+level: error
+scope: text
+ignorecase: true
+nonword: true
+tokens:
+  - '\bprovider\s+seam\b'
+  - '\b(?:public\s+)?surface\s+is\s+(?:not\s+)?welded\b'
+  - '\btype\s+channel\b'
+  - '\bvalue\s+channel\b'
+  - '\bcontract\s+travels\b'

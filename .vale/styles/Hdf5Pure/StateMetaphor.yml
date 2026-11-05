@@ -1,0 +1,15 @@
+extends: existence
+message: "Replace '%s' with the exact condition or state change. Name the field, bit, address, or ordering constraint."
+level: error
+scope: text
+ignorecase: true
+nonword: true
+tokens:
+  - '\bshape(?:-|\s+)wise\b'
+  - '\bbelt(?:-|\s+)and(?:-|\s+)braces\b'
+  - '\bhalf\s+a\s+pair\b'
+  - '\bland(?:s|ed|ing)?\s+(?:on\s+top\s+of|either\s+side)\b'
+  - '\bany\s+address\s+beats\s+naming\s+nothing\b'
+  - '\bdoor\s+they\s+came\s+through\b'
+  - '\bfront\s+door\b'
+  - '\b(?:whole\s+)?free(?:-|\s+)space\s+story\b'

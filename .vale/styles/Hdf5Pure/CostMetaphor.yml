@@ -1,0 +1,10 @@
+extends: existence
+message: "For '%s', name the resource and its use: allocated bytes, cache hits, writes, or the condition that causes buffered data to be written."
+level: error
+scope: text
+ignorecase: true
+nonword: true
+tokens:
+  - '\bwhat\s+it\s+bought\b'
+  - '\bsame\s+bargain\b'
+  - '\bcosts?\s+about\s+what\s+its\s+result\s+costs?\b'

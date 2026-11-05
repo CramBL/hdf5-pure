@@ -1,0 +1,13 @@
+extends: existence
+message: "For '%s', name the input, output, and operation. When describing failure, state the condition and resulting error."
+level: error
+scope: text
+ignorecase: true
+nonword: true
+tokens:
+  - '\bhand\s+on\s+something\s+else\b'
+  - '\bsit\s+on\s+top\s+of\b'
+  - '\bnothing\s+left\s+to\s+work\s+with\b'
+  - '\bchange\s+shape\s+by\s+moving\b'
+  - '\bholds\s+nothing\s+at\b'
+  - '\bfile\s+that\s+lands\b'
