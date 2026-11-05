@@ -36,6 +36,7 @@ use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
+use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 use super::super::super::ReplacedHeader;
 use super::super::CountDisposition;
@@ -43,15 +44,19 @@ use super::super::PreparedCounts;
 use super::super::PreparedGroup;
 
 #[rstest]
-#[case::version_1(true)]
-#[case::version_2(false)]
-fn native_group_counts_project_after_link_and_attribute_transformations(#[case] earliest: bool) {
+#[case::version_1(None)]
+#[case::two_eight(Some(FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Eight }))]
+#[case::four_two(Some(FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Two }))]
+#[case::eight_four(Some(FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Four }))]
+#[case::eight_eight(Some(FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight }))]
+fn native_group_counts_project_after_link_and_attribute_transformations(
+    #[case] widths: Option<FormatWidths>,
+) {
     let path = test_util::temp::temp_path("native-prepared-counts.h5");
-    let native = if earliest {
-        file::libhdf5_create_earliest(&path)
-    } else {
-        file::libhdf5_create_v110(&path)
-    };
+    let native = widths.map_or_else(
+        || file::libhdf5_create_earliest(&path),
+        |widths| file::libhdf5_create_v110_with_widths(&path, widths.offsets, widths.lengths, 512),
+    );
     let native_group = native.create_group("g").unwrap();
     drop(native_group.create_group("remove").unwrap());
     drop(native_group.create_group("retain").unwrap());
@@ -184,11 +189,17 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
 }
 
 #[rstest]
-#[case::named(true)]
-#[case::unnamed(false)]
-fn native_copy_users_project_combined_counts_without_source_writes(#[case] named: bool) {
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn native_copy_users_project_combined_counts_without_source_writes(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(false, true)] named: bool,
+) {
     let path = test_util::temp::temp_path("native-combined-counts.h5");
-    let native = file::libhdf5_create_v18(&path);
+    let native = file::libhdf5_create_with_widths(&path, offsets, lengths, 512);
     let datatype = ByteOrder::LittleEndian.i32_datatype();
     native.commit_datatype("type", &datatype).unwrap();
     let dataset = native
