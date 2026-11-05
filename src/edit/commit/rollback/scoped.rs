@@ -50,7 +50,7 @@ impl<'engine> JournalScope<'engine> {
         at: PhysicalAddress,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        self.engine.write_inplace_journaled(at.get(), bytes)
+        self.engine.write_inplace_journaled(at, bytes)
     }
 
     /// Orders successful writes or restores failed writes after the saved checkpoint.

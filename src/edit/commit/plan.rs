@@ -359,11 +359,12 @@ pub(super) struct PreparedReference {
     pub(super) target: ReferenceTarget,
 }
 
-/// Distinguishes a stored address from a path assigned an address during this commit.
-pub(super) enum ReferenceTarget {
+/// A stored reference value or a path scheduled before the referring dataset.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::edit) enum ReferenceTarget {
     /// An address retained from the current file, including null or undefined values.
     Existing(StoredAddress),
-    /// An object placed before the referring dataset in the commit's write order.
+    /// A path scheduled before the referring dataset in the commit's write order.
     Placed(ObjectPathBuf),
 }
 
@@ -1204,11 +1205,12 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Resolves a staged object reference against the commit's placement order and current file.
+    /// Resolves a staged object reference against planned write order and the current file.
     ///
-    /// Paths in `path_addr` resolve to objects placed earlier in the commit. Untouched paths
-    /// resolve against the current file, with unresolved paths encoded as undefined references.
-    /// Raw addresses are screened against storage reclaimed or relocated by the commit.
+    /// Returns [`ReferenceTarget::Placed`] for a path in `prior_paths`. The caller supplies paths
+    /// scheduled before the referring dataset. Resolves untouched paths against the current file,
+    /// returning an undefined stored reference if lookup fails. Screens raw addresses against
+    /// storage reclaimed or relocated by the commit.
     ///
     /// # Errors
     ///
@@ -1218,7 +1220,7 @@ impl WriteEngine {
     /// [`FormatError::Internal`] if a source-index target is passed to the editor.
     pub(in crate::edit) fn resolve_reference_target(
         target: &ObjectRefTarget,
-        path_addr: &BTreeMap<ObjectPathBuf, u64>,
+        prior_paths: &BTreeSet<ObjectPathBuf>,
         nodes: &BTreeMap<ObjectPathBuf, Node>,
         add_targets: &[ObjectPathBuf],
         write_targets: &[ObjectPathBuf],
@@ -1226,13 +1228,13 @@ impl WriteEngine {
         invalidated: &InvalidatedAddresses,
         src: &(impl OriginalSource + ?Sized),
         context: &FileContext,
-    ) -> Result<StoredAddress, Error> {
+    ) -> Result<ReferenceTarget, Error> {
         let path = match target {
             ObjectRefTarget::Raw(addr) => {
                 if let Some(refusal) = invalidated.refusal(*addr) {
                     return Err(Error::EditUnsupported(refusal));
                 }
-                return Ok(*addr);
+                return Ok(ReferenceTarget::Existing(*addr));
             }
             ObjectRefTarget::Path(path) => path,
             ObjectRefTarget::SourceIndex(_) => {
@@ -1243,8 +1245,8 @@ impl WriteEngine {
             }
         };
         let base = src.addresses();
-        if let Some(&addr) = path_addr.get(path) {
-            return Ok(base.relative(PhysicalAddress::new(addr))?);
+        if prior_paths.contains(path) {
+            return Ok(ReferenceTarget::Placed(path.clone()));
         }
         if nodes.contains_key(path)
             || add_targets.iter().any(|t| path.starts_with(t))
@@ -1264,7 +1266,7 @@ impl WriteEngine {
                  reclaim",
             ));
         }
-        Ok(
+        Ok(ReferenceTarget::Existing(
             match crate::group::v2::resolve_path_any_from_source(
                 src,
                 AccessMode::ReadWrite,
@@ -1275,7 +1277,7 @@ impl WriteEngine {
                 Ok(addr) => base.relative(PhysicalAddress::new(addr))?,
                 Err(_) => StoredAddress::new(UNDEF),
             },
-        )
+        ))
     }
 
     fn prepare_reference_targets(
@@ -1293,7 +1295,7 @@ impl WriteEngine {
         let mut by_depth = keys.to_vec();
         // Preserve path order among groups at the same depth, matching application.
         by_depth.sort_by_key(|k| std::cmp::Reverse(k.len()));
-        let mut sim_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
+        let mut prior_paths = BTreeSet::new();
         for key in &by_depth {
             if let Some(datasets) = flat.get(key) {
                 // Match the dataset order used during application.
@@ -1306,9 +1308,9 @@ impl WriteEngine {
                     {
                         let mut references = Vec::with_capacity(patches.len());
                         for patch in patches {
-                            let address = Self::resolve_reference_target(
+                            let target = Self::resolve_reference_target(
                                 &patch.target,
-                                &sim_addr,
+                                &prior_paths,
                                 nodes,
                                 add_targets,
                                 write_targets,
@@ -1317,12 +1319,6 @@ impl WriteEngine {
                                 src,
                                 context,
                             )?;
-                            let target = match &patch.target {
-                                ObjectRefTarget::Path(path) if sim_addr.contains_key(path) => {
-                                    ReferenceTarget::Placed(path.clone())
-                                }
-                                _ => ReferenceTarget::Existing(address),
-                            };
                             references.push(PreparedReference {
                                 byte_offset: patch.byte_offset,
                                 target,
@@ -1330,10 +1326,10 @@ impl WriteEngine {
                         }
                         prepared.insert(dataset_path.clone(), references);
                     }
-                    sim_addr.insert(dataset_path, context.addresses().effective_base().get());
+                    prior_paths.insert(dataset_path);
                 }
             }
-            sim_addr.insert(key.clone(), context.addresses().effective_base().get());
+            prior_paths.insert(key.clone());
         }
         Ok(prepared)
     }
@@ -1394,14 +1390,14 @@ impl OverwritePayloads {
 pub(super) enum InPlaceWrite {
     /// Encoded chunk and index writes prepared before application.
     Encoded {
-        writes: Vec<(u64, Vec<u8>)>,
+        writes: Vec<(PhysicalAddress, Vec<u8>)>,
         /// The original input's identifier, cleared when its buffer is released after preflight.
         source: Option<OverwriteId>,
     },
     /// A contiguous range written from its original staged buffer.
     Replacement {
         /// The physical address of the existing data range.
-        address: u64,
+        address: PhysicalAddress,
         source: OverwriteId,
     },
 }

@@ -1,6 +1,7 @@
 //! Object header rebuilding, attributes, links, and reference screening.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::thread;
 
 use hdf5_pure_core::__private::FileRange;
@@ -50,6 +51,7 @@ use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
 use crate::edit::attributes::DenseAttrSet;
+use crate::edit::commit::plan::ReferenceTarget;
 use crate::edit::copy;
 use crate::edit::copy::CopyLink;
 use crate::edit::copy::CopyNode;
@@ -346,11 +348,11 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
     let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
     let nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
-    let path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
+    let prior_paths = BTreeSet::new();
     let resolve = |address: u64, removed: Vec<(u64, u64)>, moved: Vec<u64>| {
         WriteEngine::resolve_reference_target(
             &ObjectRefTarget::Raw(StoredAddress::new(address)),
-            &path_addr,
+            &prior_paths,
             &nodes,
             &[],
             &[],
@@ -375,21 +377,21 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
     );
     assert_eq!(
         resolve(300, vec![(400, 71)], vec![299, 301]).unwrap(),
-        StoredAddress::new(300),
+        ReferenceTarget::Existing(StoredAddress::new(300)),
         "an address outside every reclaimed span and every moved header is carried through"
     );
     assert_eq!(
         resolve(300, Vec::new(), Vec::new()).unwrap(),
-        StoredAddress::new(300),
+        ReferenceTarget::Existing(StoredAddress::new(300)),
         "a commit that reclaims nothing screens nothing"
     );
     assert_eq!(
         resolve(0, vec![(0, 4096)], vec![0]).unwrap(),
-        StoredAddress::new(0)
+        ReferenceTarget::Existing(StoredAddress::new(0))
     );
     assert_eq!(
         resolve(UNDEF, vec![(0, u64::MAX)], vec![UNDEF]).unwrap(),
-        StoredAddress::new(UNDEF)
+        ReferenceTarget::Existing(StoredAddress::new(UNDEF))
     );
 }
 
@@ -407,10 +409,10 @@ fn reference_targets_resolve_equivalent_path_spellings(#[case] spelling: &str) {
     let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
     let nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
-    let resolve = |path_addr: &BTreeMap<ObjectPathBuf, u64>, add_targets: &[ObjectPathBuf]| {
+    let resolve = |prior_paths: &BTreeSet<ObjectPathBuf>, add_targets: &[ObjectPathBuf]| {
         WriteEngine::resolve_reference_target(
             &ObjectRefTarget::Path(ObjectPathBuf::parse(spelling)),
-            path_addr,
+            prior_paths,
             &nodes,
             add_targets,
             &[],
@@ -425,11 +427,21 @@ fn reference_targets_resolve_equivalent_path_spellings(#[case] spelling: &str) {
         )
     };
 
-    let placed: BTreeMap<ObjectPathBuf, u64> =
-        std::iter::once((ObjectPathBuf::parse("a/b"), 4096)).collect();
-    assert_eq!(resolve(&placed, &[]).unwrap(), StoredAddress::new(4096));
+    let prior_paths = BTreeSet::from([ObjectPathBuf::parse("a/b")]);
+    assert_eq!(
+        resolve(&prior_paths, &[]).unwrap(),
+        ReferenceTarget::Placed(ObjectPathBuf::parse("a/b"))
+    );
+    assert_eq!(
+        resolve(&prior_paths, &[ObjectPathBuf::parse("a/b")]).unwrap(),
+        ReferenceTarget::Placed(ObjectPathBuf::parse("a/b"))
+    );
+    assert_eq!(
+        resolve(&BTreeSet::new(), &[]).unwrap(),
+        ReferenceTarget::Existing(StoredAddress::new(UNDEF))
+    );
 
-    let err = resolve(&BTreeMap::new(), &[ObjectPathBuf::parse("a/b")]).unwrap_err();
+    let err = resolve(&BTreeSet::new(), &[ObjectPathBuf::parse("a/b")]).unwrap_err();
     let Error::EditUnsupported(reason) = &err else {
         panic!("expected EditUnsupported, got {err:?}");
     };

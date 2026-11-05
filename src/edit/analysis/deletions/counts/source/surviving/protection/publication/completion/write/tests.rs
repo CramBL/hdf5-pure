@@ -25,6 +25,7 @@ use super::super::super::test_util::Form;
 use super::super::tests as completion_tests;
 use super::CountPreparationError;
 use super::CountWriteFailure;
+use crate::PhysicalAddress;
 use crate::UserblockSize;
 use crate::edit::SyncPolicy;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -59,7 +60,7 @@ fn count_writes_preserve_current_content_and_prior_journal_entries(
     bounds
         .phase
         .engine
-        .write_inplace_journaled(fixture.allocation.start().get(), &current)
+        .write_inplace_journaled(fixture.allocation.start(), &current)
         .unwrap();
     let pointer = bounds.phase.engine.inplace_undo[0].1.as_ptr();
     let field = bounds.updates()[0].field();
@@ -86,7 +87,7 @@ fn count_writes_preserve_current_content_and_prior_journal_entries(
     assert_eq!(engine.inplace_undo.len(), 1);
     assert_eq!(
         engine.inplace_undo[0],
-        (fixture.allocation.start().get(), form.chunk(count, c"old"))
+        (fixture.allocation.start(), form.chunk(count, c"old"))
     );
     assert_eq!(engine.inplace_undo[0].1.as_ptr(), pointer);
     assert_eq!(engine.publication, PublicationState::Published);
@@ -171,7 +172,7 @@ fn failed_count_writes_retain_retry_or_seal_uncertain_storage(
     bounds
         .phase
         .engine
-        .write_inplace_journaled(fixture.allocation.start().get(), &current)
+        .write_inplace_journaled(fixture.allocation.start(), &current)
         .unwrap();
     let pointer = bounds.phase.engine.inplace_undo[0].1.as_ptr();
     let restored = !matches!(outcome, Outcome::RestoreWrite | Outcome::RestoreBarrier);
@@ -377,10 +378,7 @@ fn preparation_failure_preserves_the_confirmed_scope_and_original_count() {
     bounds
         .phase
         .engine
-        .write_inplace_journaled(
-            fixture.allocation.start().get(),
-            &Form::Version2.chunk(3, c"new"),
-        )
+        .write_inplace_journaled(fixture.allocation.start(), &Form::Version2.chunk(3, c"new"))
         .unwrap();
     let pointer = bounds.phase.engine.inplace_undo[0].1.as_ptr();
     bounds
@@ -470,7 +468,8 @@ fn count_writes_skip_empty_work_and_release_metadata_buffers(
         assert!(
             measured.live_bytes
                 <= u64::try_from(
-                    engine.inplace_undo.capacity() * core::mem::size_of::<(u64, Vec<u8>)>()
+                    engine.inplace_undo.capacity()
+                        * core::mem::size_of::<(PhysicalAddress, Vec<u8>)>()
                 )
                 .unwrap()
                     + engine.image.buffering_work().write_calls
@@ -497,7 +496,7 @@ fn a_later_batch_failure_does_not_leave_an_earlier_count_changed(#[case] failure
         let address = u64::try_from(fixture.image.append(&chunk)).unwrap();
         fixture.link(removed, address);
         fixture.link(kept, address);
-        addresses.push(address);
+        addresses.push(PhysicalAddress::new(address));
     }
     fixture.write(&path);
     let mut engine = edit_test_util::open_engine(&path);
@@ -549,7 +548,7 @@ fn a_later_batch_failure_does_not_leave_an_earlier_count_changed(#[case] failure
                         scope
                             .engine
                             .image()
-                            .read_exact_at(addresses[0], chunk.len())
+                            .read_exact_at(addresses[0].get(), chunk.len())
                             .unwrap(),
                         Form::Version2.chunk(2, c"new")
                     );
@@ -565,7 +564,7 @@ fn a_later_batch_failure_does_not_leave_an_earlier_count_changed(#[case] failure
                             .scope
                             .engine
                             .image()
-                            .read_exact_at(addresses[0], chunk.len())
+                            .read_exact_at(addresses[0].get(), chunk.len())
                             .unwrap(),
                         Form::Version2.chunk(2, c"new")
                     );
@@ -574,7 +573,7 @@ fn a_later_batch_failure_does_not_leave_an_earlier_count_changed(#[case] failure
                             .scope
                             .engine
                             .image()
-                            .read_exact_at(addresses[1], chunk.len())
+                            .read_exact_at(addresses[1].get(), chunk.len())
                             .unwrap(),
                         chunk
                     );
@@ -610,7 +609,7 @@ fn a_later_batch_failure_does_not_leave_an_earlier_count_changed(#[case] failure
     assert_eq!(
         engine
             .image()
-            .read_exact_at(addresses[0], chunk.len())
+            .read_exact_at(addresses[0].get(), chunk.len())
             .unwrap(),
         Form::Version2.chunk(
             if matches!(failure, BatchFailure::Write) {
@@ -626,7 +625,7 @@ fn a_later_batch_failure_does_not_leave_an_earlier_count_changed(#[case] failure
         assert_eq!(
             engine
                 .image()
-                .read_exact_at(addresses[1], chunk.len())
+                .read_exact_at(addresses[1].get(), chunk.len())
                 .unwrap(),
             Form::Version2.chunk(1, c"old")
         );

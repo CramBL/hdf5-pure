@@ -2144,7 +2144,8 @@ fn a_commit_does_not_replay_a_journal_it_did_not_write() {
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let stale: Vec<u8> = [7i32, 7, 7].iter().flat_map(|v| v.to_le_bytes()).collect();
-    s.inplace_undo.push((nums_block, stale));
+    s.inplace_undo
+        .push((PhysicalAddress::new(nums_block), stale));
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
     let proposed = s.context.propose(superblock).unwrap();

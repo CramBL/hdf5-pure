@@ -43,7 +43,7 @@ fn journal_scope_preserves_prior_entries_and_restores_its_overlapping_writes(
     let first = if prefix { 11 } else { 1 };
     if prefix {
         engine
-            .write_inplace_journaled(address.get(), &11_i32.to_le_bytes())
+            .write_inplace_journaled(address, &11_i32.to_le_bytes())
             .unwrap();
     }
     let prefix_pointer = engine.inplace_undo.first().map(|(_, bytes)| bytes.as_ptr());
@@ -109,7 +109,7 @@ fn journal_scope_preserves_prior_entries_and_restores_its_overlapping_writes(
     if prefix {
         assert_eq!(
             engine.inplace_undo[0],
-            (address.get(), 1_i32.to_le_bytes().to_vec())
+            (address, 1_i32.to_le_bytes().to_vec())
         );
     }
     let writes = recording
@@ -179,7 +179,7 @@ fn empty_journal_scopes_skip_allocations_and_barriers(
     let (_path, mut engine, address) = fixture(syncs.clone(), policy);
     if prefix {
         engine
-            .write_inplace_journaled(address.get(), &11_i32.to_le_bytes())
+            .write_inplace_journaled(address, &11_i32.to_le_bytes())
             .unwrap();
     }
     syncs.store(0, Ordering::Relaxed);
@@ -222,7 +222,7 @@ fn empty_journal_scopes_skip_allocations_and_barriers(
 fn an_invalid_undo_checkpoint_preserves_the_existing_journal() {
     let (_path, mut engine, address) = fixture(Arc::default(), SyncPolicy::Always);
     engine
-        .write_inplace_journaled(address.get(), &11_i32.to_le_bytes())
+        .write_inplace_journaled(address, &11_i32.to_le_bytes())
         .unwrap();
     let pointer = engine.inplace_undo[0].1.as_ptr();
     let error = engine.undo_inplace_since(2).unwrap_err();
@@ -235,7 +235,7 @@ fn an_invalid_undo_checkpoint_preserves_the_existing_journal() {
     );
     assert_eq!(
         engine.inplace_undo,
-        [(address.get(), 1_i32.to_le_bytes().to_vec())]
+        [(address, 1_i32.to_le_bytes().to_vec())]
     );
     assert_eq!(engine.inplace_undo[0].1.as_ptr(), pointer);
     assert_eq!(

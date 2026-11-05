@@ -362,9 +362,12 @@ impl WriteEngine {
                     && data_size == fd.raw().len() as u64
                 {
                     if let Some(data_addr) = data_addr
-                        && let Ok(start) = base.resolve(data_addr).map(PhysicalAddress::get)
+                        && let Ok(start) = base.resolve(data_addr)
                     {
-                        if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
+                        if start
+                            .checked_add(data_size)
+                            .is_ok_and(|end| end.get() <= src.len())
+                        {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
                                 source,
@@ -452,7 +455,7 @@ impl WriteEngine {
                 {
                     let writes = writes
                         .into_iter()
-                        .map(|(off, b)| Ok((base.resolve(StoredAddress::new(off))?.get(), b)))
+                        .map(|(off, b)| Ok((base.resolve(off)?, b)))
                         .collect::<Result<Vec<_>, FormatError>>()?;
                     return Ok(WritePlan::InPlaceChunks { writes, source });
                 }
@@ -1871,10 +1874,13 @@ struct VlenOverwrite {
 )]
 pub(super) enum WritePlan {
     /// A contiguous range written from the identified staged replacement.
-    InPlace { data_addr: u64, source: OverwriteId },
+    InPlace {
+        data_addr: PhysicalAddress,
+        source: OverwriteId,
+    },
     /// Chunk-data writes and any index rewrite that fit their existing allocations.
     InPlaceChunks {
-        writes: Vec<(u64, Vec<u8>)>,
+        writes: Vec<(PhysicalAddress, Vec<u8>)>,
         source: OverwriteId,
     },
     /// An edit published by relocating the object header and updating its parent link.
@@ -2500,7 +2506,7 @@ fn try_inplace_chunk_writes(
     ds: &Dataspace,
     geometry: &ChunkGeometry,
     new_chunks: &[PreparedChunk],
-) -> Option<Vec<(u64, Vec<u8>)>> {
+) -> Option<Vec<(StoredAddress, Vec<u8>)>> {
     let infos = chunked_read::enumerate_chunks_from_source(src, layout, ds, widths).ok()?;
     let grid = chunked_read::plan_dense_grid(infos, &geometry.shape, &geometry.spatial)?;
     if grid.grid_order.len() != new_chunks.len() {
@@ -2525,7 +2531,7 @@ fn try_inplace_chunk_writes(
         if range.end().get() > src.len() {
             return None;
         }
-        writes.push((ci.address.get(), chunk.bytes().to_vec()));
+        writes.push((ci.address, chunk.bytes().to_vec()));
         spans.push(range);
     }
 
@@ -2540,7 +2546,7 @@ fn try_inplace_chunk_writes(
             new_chunks,
         )?;
         spans.push(AddressRange::new(index_addr, index_bytes.len() as u64).ok()?);
-        writes.push((index_addr.get(), index_bytes));
+        writes.push((index_addr, index_bytes));
     }
 
     spans.sort_unstable_by_key(|range| range.start());

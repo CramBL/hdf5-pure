@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::SessionSpaceSnapshot;
 
 use crate::edit::WriteEngine;
@@ -82,12 +83,12 @@ impl WriteEngine {
     /// cannot be written. The journal entry is retained after a write error.
     pub(in crate::edit) fn write_inplace_journaled(
         &mut self,
-        at: u64,
+        at: PhysicalAddress,
         raw: &[u8],
     ) -> Result<(), Error> {
-        let prior = self.image().read_exact_at(at, raw.len())?;
+        let prior = self.image().read_exact_at(at.get(), raw.len())?;
         self.inplace_undo.push((at, prior));
-        self.write_at(at, raw)
+        self.write_at(at.get(), raw)
     }
 
     /// Restores values recorded in the undo journal in reverse write order and clears the journal.
@@ -124,7 +125,7 @@ impl WriteEngine {
         // Different hard-link paths can overwrite the same value range. Restore the most
         // recent entry first so the original bytes are written last.
         for (at, prior) in journal.drain(checkpoint..).rev() {
-            if let Err(e) = self.write_at(at, &prior) {
+            if let Err(e) = self.write_at(at.get(), &prior) {
                 failed.get_or_insert(e);
             }
         }
