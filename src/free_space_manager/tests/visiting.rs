@@ -1,5 +1,7 @@
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 use core::mem;
 
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 use test_util::allocation;
 
 use super::*;
@@ -50,6 +52,7 @@ fn allocation_only_recovery_retains_the_full_allocation_source_policy() {
     assert_eq!(*source.reads.borrow(), vec![(619, 82)]);
 }
 
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[rstest]
 #[case::one(1)]
 #[case::wide_count(4_096)]
@@ -132,6 +135,7 @@ fn semantic_visiting_avoids_owned_records_and_preserves_sparse_addresses(#[case]
     );
 }
 
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn absent_manager_allocations_need_no_source_reads_or_record_storage() {
     let source = manager_source(0, 35, 736);
@@ -214,12 +218,14 @@ fn visiting_preserves_native_field_geometry(
     );
 }
 
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[derive(Clone, Copy, Debug)]
 enum SectionFailure {
     Class,
     Prefix,
 }
 
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[rstest]
 #[case::prefix(SectionFailure::Prefix)]
 #[case::late_class(SectionFailure::Class)]
