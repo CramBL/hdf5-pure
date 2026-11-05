@@ -262,6 +262,7 @@ pub use crate::free_space_manager::section_info_capacity;
 pub use crate::free_space_manager::section_info_len;
 pub use crate::free_space_manager::serialize_free_space_manager;
 pub use crate::free_space_manager::serialize_free_space_manager_with_allocation;
+pub use crate::free_space_manager::visit_section_info;
 pub use crate::global_heap::GLOBAL_HEAP_MAX_OBJECTS;
 pub use crate::global_heap::GlobalHeapCollection;
 pub use crate::global_heap::GlobalHeapCollectionError;
