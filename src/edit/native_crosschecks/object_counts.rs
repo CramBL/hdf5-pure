@@ -20,7 +20,14 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
         Usage::HardLinks => (Fixture::HardLinkUndo, "aa", 2, 2),
     };
     fixture.write(&path);
-    fixture.assert_native(&path, ByteOrder::LittleEndian);
+    fixture.assert_native(
+        &path,
+        if cfg!(target_endian = "big") {
+            ByteOrder::BigEndian
+        } else {
+            ByteOrder::LittleEndian
+        },
+    );
     let native = file::libhdf5_open(&path);
     let reported = native.loc_info_by_name(name).unwrap().num_links;
     assert_eq!(reported, expected);
