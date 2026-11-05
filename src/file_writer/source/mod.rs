@@ -332,7 +332,7 @@ impl Object {
                     measured.header_len as u64,
                     Some(Allocation {
                         address: StoredAddress::ZERO,
-                        length: ByteLength::new(measured.data.length()?),
+                        length: measured.data.length()?,
                     }),
                     measured.data,
                     array_payload,
@@ -378,7 +378,7 @@ impl Object {
                 (
                     header.len() as u64,
                     None,
-                    layout::DataMeasure::new(0, layout::DataKind::Contiguous),
+                    layout::DataMeasure::new(ByteLength::new(0), layout::DataKind::Contiguous),
                     None,
                     plan.as_ref().map(|plan| Allocation {
                         address: StoredAddress::ZERO,
@@ -393,7 +393,7 @@ impl Object {
             Kind::Committed(_) => (
                 0,
                 None,
-                layout::DataMeasure::new(0, layout::DataKind::Contiguous),
+                layout::DataMeasure::new(ByteLength::new(0), layout::DataKind::Contiguous),
                 None,
                 None,
                 None,
@@ -712,7 +712,7 @@ impl<S: ObjectSource> Plan<S> {
             let heaps = object
                 .collections()
                 .map(|bytes| match &mut collections {
-                    Some(collections) => collections.reserve(bytes.len() as u64),
+                    Some(collections) => collections.reserve(ByteLength::new(bytes.len().to_u64())),
                     None => Ok(Allocation {
                         address: allocation
                             .reserve(ByteLength::new(bytes.len().to_u64()), AllocationClass::Raw)?,
@@ -1001,9 +1001,9 @@ impl<S: ObjectSource> Plan<S> {
                 let expected = if record.array.is_some() {
                     record.data_measure.payload_length()
                 } else {
-                    length
+                    ByteLength::new(length)
                 };
-                if ByteLength::new(expected) != span.length {
+                if expected != span.length {
                     return Err(inconsistent().into());
                 }
             }
@@ -1143,7 +1143,7 @@ impl<S: ObjectSource> Plan<S> {
                     })
                     .transpose()?;
                 if let Some(measured) = &measured {
-                    if measured.data_len != record.data_measure.length()? {
+                    if ByteLength::new(measured.data_len) != record.data_measure.length()? {
                         return Err(inconsistent().into());
                     }
                 }
@@ -1350,7 +1350,7 @@ impl Record {
     fn assign_data(&mut self, data: Option<Allocation>) -> Result<(), FormatError> {
         if let Some(payload) = &mut self.array_payload {
             payload.assign_data_address(data.ok_or_else(inconsistent)?.address)?;
-            if payload.len() != self.data_measure.payload_length() {
+            if ByteLength::new(payload.len()) != self.data_measure.payload_length() {
                 return Err(inconsistent());
             }
         }
@@ -1626,7 +1626,9 @@ impl FileLayout {
                 settings.page_size(),
                 settings.persist(),
                 allocation.end(),
-                extension.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                extension.as_ref().map_or(ByteLength::new(0), |bytes| {
+                    ByteLength::new(bytes.len().to_u64())
+                }),
                 records.iter().map(|record| &record.data_measure),
                 collections.ok_or_else(inconsistent)?.sections,
                 |_, placed, _| Ok(placed),
@@ -1664,7 +1666,9 @@ impl FileLayout {
                 manager,
             } = layout::ClassicLayout::finish(
                 allocation,
-                extension.as_ref().map(|bytes| bytes.len() as u64),
+                extension
+                    .as_ref()
+                    .map(|bytes| ByteLength::new(bytes.len().to_u64())),
                 settings.is_some_and(|settings| settings.persist()),
             )?;
             let info =
@@ -2130,7 +2134,7 @@ mod tests {
                     None
                 } else {
                     let allocation = record.data.unwrap();
-                    assert!(record.data_measure.length().unwrap() > 0);
+                    assert!(!record.data_measure.length().unwrap().is_zero());
                     assert_eq!(allocation.length.is_zero(), record.array.is_some());
                     record.array_address().unwrap()
                 }
@@ -2227,7 +2231,7 @@ mod tests {
         assert!(measured.peak_bytes <= retained + 262_144, "{measured}");
         for record in &plan.records[..count] {
             assert!(record.data_measure.empty_index().is_some());
-            assert_eq!(record.data_measure.length().unwrap(), 370);
+            assert_eq!(record.data_measure.length().unwrap(), ByteLength::new(370));
             assert_eq!(
                 record.data.unwrap().length,
                 ByteLength::new(if paged { 0 } else { 370 })

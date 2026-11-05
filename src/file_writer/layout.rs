@@ -115,7 +115,7 @@ pub(super) struct ObjectAllocation {
 /// The writer retains array block lengths separately from the chunk payload length.
 pub(super) struct DataMeasure {
     /// The payload length, excluding the index when `array` is present.
-    raw_length: u64,
+    raw_length: ByteLength,
     kind: DataKind,
     /// Address-independent geometry for an allocated chunk array.
     pub(super) array: Option<ArrayMeasure>,
@@ -123,7 +123,7 @@ pub(super) struct DataMeasure {
 
 impl DataMeasure {
     /// Records a complete data-region length.
-    pub(super) fn new(raw_length: u64, kind: DataKind) -> Self {
+    pub(super) fn new(raw_length: ByteLength, kind: DataKind) -> Self {
         Self {
             raw_length,
             kind,
@@ -138,7 +138,7 @@ impl DataMeasure {
     /// Returns [`FormatError::OffsetOverflow`] if the combined payload and index length exceeds
     /// [`u64::MAX`]. Propagates array planning and length errors.
     pub(super) fn chunked(
-        raw_length: u64,
+        raw_length: ByteLength,
         geometry: Option<ChunkArrayGeometry<'_>>,
     ) -> Result<Self, FormatError> {
         let measure = Self {
@@ -169,15 +169,17 @@ impl DataMeasure {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the combined length exceeds [`u64::MAX`].
     /// Propagates errors from [`EmptyChunkIndex::length`].
-    pub(super) fn length(&self) -> Result<u64, FormatError> {
+    pub(super) fn length(&self) -> Result<ByteLength, FormatError> {
         let Self {
             raw_length,
             kind: _,
             array,
         } = self;
-        checked_end(
+        checked_length(
             *raw_length,
-            array.as_ref().map_or(Ok(0), ArrayMeasure::length)?,
+            array.as_ref().map_or(Ok(ByteLength::new(0)), |array| {
+                array.length().map(ByteLength::new)
+            })?,
         )
     }
 
@@ -197,12 +199,12 @@ impl DataMeasure {
         } = self;
         array
             .as_ref()
-            .map(|_| payload.checked_add(*raw_length))
+            .map(|_| payload.checked_add(raw_length.get()))
             .transpose()
     }
 
     /// Returns the recorded payload length, excluding separately measured array metadata.
-    pub(super) fn payload_length(&self) -> u64 {
+    pub(super) fn payload_length(&self) -> ByteLength {
         self.raw_length
     }
 
@@ -220,12 +222,7 @@ impl DataMeasure {
         if self.empty_contiguous() {
             Ok(None)
         } else {
-            Allocation::reserve(
-                allocation,
-                ByteLength::new(self.length()?),
-                AllocationClass::Raw,
-            )
-            .map(Some)
+            Allocation::reserve(allocation, self.length()?, AllocationClass::Raw).map(Some)
         }
     }
 
@@ -235,7 +232,7 @@ impl DataMeasure {
             kind,
             array: _,
         } = self;
-        *raw_length == 0 && matches!(kind, DataKind::Contiguous)
+        raw_length.is_zero() && matches!(kind, DataKind::Contiguous)
     }
 }
 
@@ -264,17 +261,11 @@ impl ClassicLayout {
     /// [`FileAllocation::finish`], and [`FileAllocation::finish_persisted`].
     pub(super) fn finish(
         mut allocation: FileAllocation,
-        extension_len: Option<u64>,
+        extension_len: Option<ByteLength>,
         persist: bool,
     ) -> Result<Self, FormatError> {
         let extension = extension_len
-            .map(|length| {
-                Allocation::reserve(
-                    &mut allocation,
-                    ByteLength::new(length),
-                    AllocationClass::Metadata,
-                )
-            })
+            .map(|length| Allocation::reserve(&mut allocation, length, AllocationClass::Metadata))
             .transpose()?;
         let (end, manager) = if persist {
             allocation.finish_persisted()?
@@ -325,7 +316,7 @@ impl PagedCollections {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the region or page padding exceeds [`u64::MAX`].
-    pub(super) fn reserve(&mut self, length: u64) -> Result<Allocation, FormatError> {
+    pub(super) fn reserve(&mut self, length: ByteLength) -> Result<Allocation, FormatError> {
         let Self {
             page,
             end: cursor,
@@ -344,7 +335,7 @@ impl PagedCollections {
                 size: start.checked_distance_from(*cursor).unwrap(),
             });
         }
-        let end = start.checked_add(length)?;
+        let end = start.checked_add(length.get())?;
         *cursor = align(end, *page)?;
         if *cursor > end {
             // Alignment advances the end, so the padding length is positive.
@@ -352,7 +343,7 @@ impl PagedCollections {
                 addr: end,
                 size: cursor.checked_distance_from(end).unwrap(),
             };
-            if length >= page.get() {
+            if length >= ByteLength::new(page.get()) {
                 large.push(section);
             } else {
                 raw.push(section);
@@ -360,7 +351,7 @@ impl PagedCollections {
         }
         Ok(Allocation {
             address: start,
-            length: ByteLength::new(length),
+            length,
         })
     }
 }
@@ -426,7 +417,7 @@ impl<T> PagedLayout<T> {
         page: FileSpacePageSize,
         persist: bool,
         metadata_end: StoredAddress,
-        extension_length: u64,
+        extension_length: ByteLength,
         measurements: impl ExactSizeIterator<Item = &'a DataMeasure> + Clone,
         sections: CollectionSections,
         mut bind: impl FnMut(
@@ -464,34 +455,37 @@ impl<T> PagedLayout<T> {
         large_sections.extend(padding);
         let mut small = Vec::new();
         let mut large = Vec::new();
-        let mut small_total = 0;
+        let mut small_total = ByteLength::new(0);
         let mut large_sizes = Vec::new();
         for (index, measure) in measurements.clone().enumerate() {
             if measure.empty_contiguous() {
                 continue;
             }
             let length = measure.payload_length();
-            if length < page.get() {
+            if length < ByteLength::new(page.get()) {
                 small.push(index);
-                small_total = checked_end(small_total, length)?;
+                small_total = checked_length(small_total, length)?;
             } else {
                 large.push(index);
-                let padding = (page.get() - length % page.get()) % page.get();
-                length
-                    .checked_add(padding)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: length,
-                        length: padding,
-                    })?;
-                if padding > 0 {
+                let padding =
+                    ByteLength::new((page.get() - length.get() % page.get()) % page.get());
+                checked_length(length, padding)?;
+                if !padding.is_zero() {
                     large_sizes.push(padding);
                 }
             }
         }
-        large_sizes.extend(large_sections.iter().map(|section| section.size));
-        let mut raw_sizes: Vec<_> = raw_sections.iter().map(|section| section.size).collect();
-        let raw_tail = (page.get() - small_total % page.get()) % page.get();
-        if raw_tail > 0 {
+        large_sizes.extend(
+            large_sections
+                .iter()
+                .map(|section| ByteLength::new(section.size)),
+        );
+        let mut raw_sizes: Vec<_> = raw_sections
+            .iter()
+            .map(|section| ByteLength::new(section.size))
+            .collect();
+        let raw_tail = ByteLength::new((page.get() - small_total.get() % page.get()) % page.get());
+        if !raw_tail.is_zero() {
             raw_sizes.push(raw_tail);
         }
         let TailLayout {
@@ -522,10 +516,10 @@ impl<T> PagedLayout<T> {
             let (slot, _) = free_space_manager::manager_wire(location.kind);
             slots[slot] = DecodedStoredAddress::Defined(location.header);
         }
-        let small_end = raw_start.checked_add(small_total)?;
+        let small_end = raw_start.checked_add(small_total.get())?;
         let mut small_cursor = raw_start;
         let mut cursor = align(small_end, page)?;
-        if small_total > 0 && cursor > small_end {
+        if !small_total.is_zero() && cursor > small_end {
             // Alignment advances the nonempty raw region past its end.
             raw_sections.push(FreeSection {
                 addr: small_end,
@@ -538,16 +532,13 @@ impl<T> PagedLayout<T> {
             let length = measure.payload_length();
             let placed = if measure.empty_contiguous() {
                 None
-            } else if length < page.get() {
+            } else if length < ByteLength::new(page.get()) {
                 let address = small_cursor;
-                small_cursor = small_cursor.checked_add(length)?;
-                Some(Allocation {
-                    address,
-                    length: ByteLength::new(length),
-                })
+                small_cursor = small_cursor.checked_add(length.get())?;
+                Some(Allocation { address, length })
             } else {
                 let start = align(cursor, page)?;
-                let end = start.checked_add(length)?;
+                let end = start.checked_add(length.get())?;
                 cursor = align(end, page)?;
                 if cursor > end {
                     // The aligned cursor follows this large allocation.
@@ -558,7 +549,7 @@ impl<T> PagedLayout<T> {
                 }
                 Some(Allocation {
                     address: start,
-                    length: ByteLength::new(length),
+                    length,
                 })
             };
             let array = array_placements
@@ -622,7 +613,7 @@ impl ArrayAllocation {
                     values: addresses.len() + 1,
                     source,
                 })?;
-            let allocation = arena.reserve(length)?;
+            let allocation = arena.reserve(ByteLength::new(length))?;
             addresses.push(allocation.address);
             end = allocation.address.checked_add(allocation.length.get())?;
             Ok(())
@@ -693,10 +684,10 @@ impl TailLayout {
         page: FileSpacePageSize,
         persist: bool,
         start: StoredAddress,
-        extension_length: u64,
+        extension_length: ByteLength,
         metadata: &[FreeSection],
-        raw_sizes: &[u64],
-        large_sizes: &[u64],
+        raw_sizes: &[ByteLength],
+        large_sizes: &[ByteLength],
     ) -> Result<Self, FormatError> {
         let mut arena = MetadataArena::new(page, start);
         let extension = arena.reserve(extension_length)?;
@@ -708,16 +699,24 @@ impl TailLayout {
                 arena,
             });
         }
-        let metadata_measure = SectionMeasure::new(metadata.iter().map(|section| section.size))?;
+        let metadata_measure =
+            SectionMeasure::new(metadata.iter().map(|section| ByteLength::new(section.size)))?;
         let large_measure = SectionMeasure::new(large_sizes.iter().copied())?;
         let mut metadata_active = !metadata.is_empty() || !arena.metadata.is_empty();
         let raw_length = (!raw_sizes.is_empty())
-            .then(|| hdf5_pure_format::__private::section_info_len(widths, raw_sizes));
-        let mut metadata_capacity = metadata_measure.encoded_len(widths, core::iter::once(0))?;
+            .then(|| SectionMeasure::measure(widths, raw_sizes))
+            .transpose()?;
+        let mut metadata_capacity =
+            metadata_measure.encoded_len(widths, core::iter::once(ByteLength::new(0)))?;
         let mut large_capacity = large_measure.encoded_len(widths, core::iter::empty())?;
-        let metadata_limit = checked_end(metadata_measure.capacity(widths, TAIL_GAP_LIMIT)?, 1)?;
+        let metadata_limit = checked_length(
+            metadata_measure.capacity(widths, TAIL_GAP_LIMIT)?,
+            ByteLength::new(1),
+        )?;
         let large_limit = large_measure.capacity(widths, TAIL_BLOCK_LIMIT)?;
-        let header_length = hdf5_pure_format::__private::free_space_manager_header_len(widths);
+        let header_length = ByteLength::new(
+            hdf5_pure_format::__private::free_space_manager_header_len(widths),
+        );
         let after_extension = arena;
         loop {
             let large_active = !large_sizes.is_empty()
@@ -726,7 +725,9 @@ impl TailLayout {
                     .into_iter()
                     .flatten()
                     .chain(metadata_active.then_some(header_length))
-                    .any(|length| length >= page.get() && length % page.get() != 0);
+                    .any(|length| {
+                        length >= ByteLength::new(page.get()) && length.get() % page.get() != 0
+                    });
             let mut arena = after_extension.clone();
             let locations = arena.managers(
                 widths,
@@ -737,8 +738,13 @@ impl TailLayout {
                 ],
             )?;
             arena.finish()?;
-            let large_length = large_measure
-                .encoded_len(widths, arena.large.iter().map(|section| section.size))?;
+            let large_length = large_measure.encoded_len(
+                widths,
+                arena
+                    .large
+                    .iter()
+                    .map(|section| ByteLength::new(section.size)),
+            )?;
             if large_length > large_limit {
                 return Err(FormatError::Internal(
                     "PAGE large manager length exceeds its section bound".into(),
@@ -758,7 +764,7 @@ impl TailLayout {
                 continue;
             }
             if metadata_active && metadata.is_empty() && arena.metadata.is_empty() {
-                metadata_capacity = checked_end(metadata_capacity, 1)?;
+                metadata_capacity = checked_length(metadata_capacity, ByteLength::new(1))?;
                 if metadata_capacity > metadata_limit {
                     return Err(FormatError::Internal(
                         "PAGE metadata capacity exceeds its section bound".into(),
@@ -766,8 +772,13 @@ impl TailLayout {
                 }
                 continue;
             }
-            let metadata_length = metadata_measure
-                .encoded_len(widths, arena.metadata.iter().map(|section| section.size))?;
+            let metadata_length = metadata_measure.encoded_len(
+                widths,
+                arena
+                    .metadata
+                    .iter()
+                    .map(|section| ByteLength::new(section.size)),
+            )?;
             if metadata_length > metadata_limit {
                 return Err(FormatError::Internal(
                     "PAGE metadata manager length exceeds its section bound".into(),
@@ -819,16 +830,16 @@ impl MetadataArena {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the allocation or its page padding overflows.
     /// Returns [`FormatError::Internal`] if a padding endpoint precedes its cursor.
-    fn reserve(&mut self, length: u64) -> Result<Allocation, FormatError> {
+    fn reserve(&mut self, length: ByteLength) -> Result<Allocation, FormatError> {
         let remaining = self.page.get() - self.cursor.get() % self.page.get();
-        if length >= self.page.get() || length > remaining {
+        if length >= ByteLength::new(self.page.get()) || length > ByteLength::new(remaining) {
             self.gap_to(align(self.cursor, self.page)?)?;
         }
         let address = self.cursor;
-        let end = address.checked_add(length)?;
+        let end = address.checked_add(length.get())?;
         self.occupied_end = end;
         self.cursor = end;
-        if length >= self.page.get() {
+        if length >= ByteLength::new(self.page.get()) {
             self.cursor = align(end, self.page)?;
             if self.cursor > end {
                 self.large.push(FreeSection {
@@ -839,10 +850,7 @@ impl MetadataArena {
                 });
             }
         }
-        Ok(Allocation {
-            address,
-            length: ByteLength::new(length),
-        })
+        Ok(Allocation { address, length })
     }
 
     /// Reserves each active manager's header and allocated section list separately.
@@ -856,7 +864,7 @@ impl MetadataArena {
     fn managers(
         &mut self,
         widths: FormatWidths,
-        lengths: [Option<u64>; 3],
+        lengths: [Option<ByteLength>; 3],
     ) -> Result<[Option<ManagerLocation>; 3], FormatError> {
         let mut locations = [None, None, None];
         for ((target, length), kind) in lengths.into_iter().enumerate().zip([
@@ -865,9 +873,9 @@ impl MetadataArena {
             ManagerKind::PagedLargeGeneric,
         ]) {
             if let Some(length) = length {
-                let header = self.reserve(
+                let header = self.reserve(ByteLength::new(
                     hdf5_pure_format::__private::free_space_manager_header_len(widths),
-                )?;
+                ))?;
                 let list = self.reserve(length)?;
                 locations[target] = Some(ManagerLocation {
                     header: header.address,
@@ -915,22 +923,36 @@ impl MetadataArena {
 /// A retained section count and the distinct sizes needed to measure a section list.
 struct SectionMeasure {
     count: u64,
-    sizes: BTreeSet<u64>,
+    sizes: BTreeSet<ByteLength>,
 }
 
 impl SectionMeasure {
+    /// Measures the encoded section list from its section sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`SectionInfoCounts::new`] and [`SectionInfoCounts::encoded_len`].
+    fn measure(widths: FormatWidths, sizes: &[ByteLength]) -> Result<ByteLength, FormatError> {
+        SectionInfoCounts::new(
+            sizes.len().to_u64(),
+            sizes.iter().collect::<BTreeSet<_>>().len().to_u64(),
+        )?
+        .encoded_len(widths)
+        .map(ByteLength::new)
+    }
+
     /// Counts the supplied sections and retains their distinct sizes.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the section count overflows.
-    fn new(sizes: impl Iterator<Item = u64>) -> Result<Self, FormatError> {
+    fn new(sizes: impl Iterator<Item = ByteLength>) -> Result<Self, FormatError> {
         let mut result = Self {
             count: 0,
             sizes: BTreeSet::new(),
         };
         for size in sizes {
-            result.count = checked_end(result.count, 1)?;
+            result.count = checked_count(result.count, 1)?;
             result.sizes.insert(size);
         }
         Ok(result)
@@ -948,22 +970,23 @@ impl SectionMeasure {
     fn encoded_len(
         &self,
         widths: FormatWidths,
-        additional: impl Iterator<Item = u64>,
-    ) -> Result<u64, FormatError> {
+        additional: impl Iterator<Item = ByteLength>,
+    ) -> Result<ByteLength, FormatError> {
         let Self { count, sizes } = self;
         let mut count = *count;
         let mut extra = BTreeSet::new();
         for size in additional {
-            count = checked_end(count, 1)?;
+            count = checked_count(count, 1)?;
             if !sizes.contains(&size) {
                 extra.insert(size);
             }
         }
         SectionInfoCounts::new(
             count,
-            checked_end(sizes.len().to_u64(), extra.len().to_u64())?,
+            checked_count(sizes.len().to_u64(), extra.len().to_u64())?,
         )?
         .encoded_len(widths)
+        .map(ByteLength::new)
     }
 
     /// Bounds encoded capacity when every additional section has a distinct size.
@@ -972,13 +995,14 @@ impl SectionMeasure {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if a count or encoded length overflows.
     /// Propagates inconsistent-count errors from [`SectionInfoCounts::new`].
-    fn capacity(&self, widths: FormatWidths, additional: u64) -> Result<u64, FormatError> {
+    fn capacity(&self, widths: FormatWidths, additional: u64) -> Result<ByteLength, FormatError> {
         let Self { count, sizes } = self;
         SectionInfoCounts::new(
-            checked_end(*count, additional)?,
-            checked_end(sizes.len().to_u64(), additional)?,
+            checked_count(*count, additional)?,
+            checked_count(sizes.len().to_u64(), additional)?,
         )?
         .encoded_len(widths)
+        .map(ByteLength::new)
     }
 }
 
@@ -991,7 +1015,7 @@ const TAIL_GAP_LIMIT: u64 = TAIL_BLOCK_LIMIT + 1;
 struct ManagerLocation {
     header: StoredAddress,
     section_list: StoredAddress,
-    length: u64,
+    length: ByteLength,
     kind: ManagerKind,
 }
 
@@ -1021,11 +1045,11 @@ impl ManagerLocation {
                 header,
                 section_list,
                 class,
-                Some(length),
+                Some(length.get()),
             )?;
         if header_bytes.len() as u64
             != hdf5_pure_format::__private::free_space_manager_header_len(widths)
-            || section_bytes.len() as u64 != length
+            || ByteLength::new(section_bytes.len().to_u64()) != length
         {
             return Err(FormatError::Internal(
                 "free-space manager bytes differ from their allocation".into(),
@@ -1040,10 +1064,22 @@ impl ManagerLocation {
     }
 }
 
-fn checked_end(offset: u64, length: u64) -> Result<u64, FormatError> {
-    offset
-        .checked_add(length)
-        .ok_or(FormatError::OffsetOverflow { offset, length })
+fn checked_length(length: ByteLength, additional: ByteLength) -> Result<ByteLength, FormatError> {
+    length
+        .checked_add(additional)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: length.get(),
+            length: additional.get(),
+        })
+}
+
+fn checked_count(count: u64, additional: u64) -> Result<u64, FormatError> {
+    count
+        .checked_add(additional)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: count,
+            length: additional,
+        })
 }
 
 fn align(offset: StoredAddress, page: FileSpacePageSize) -> Result<StoredAddress, FormatError> {
@@ -1088,7 +1124,7 @@ mod tests {
         #[case] expected: &[u64],
     ) {
         let measurement = DataMeasure::chunked(
-            16,
+            ByteLength::new(16),
             Some(ChunkArrayGeometry {
                 widths: WIDTHS,
                 kind,
@@ -1105,10 +1141,10 @@ mod tests {
             ArrayMeasure::Empty(_) => panic!("expected occupied array blocks"),
         };
         assert_eq!(lengths, expected);
-        assert_eq!(measurement.raw_length, 16);
+        assert_eq!(measurement.raw_length, ByteLength::new(16));
         assert_eq!(
             measurement.length().unwrap(),
-            16 + expected.iter().sum::<u64>()
+            ByteLength::new(16 + expected.iter().sum::<u64>())
         );
         assert!(measurement.is_chunked());
         assert!(measurement.empty_index().is_none());
@@ -1142,7 +1178,7 @@ mod tests {
         #[case] expected: FormatError,
     ) {
         let error = DataMeasure::chunked(
-            raw_length,
+            ByteLength::new(raw_length),
             Some(ChunkArrayGeometry {
                 widths: WIDTHS,
                 kind,
@@ -1168,7 +1204,7 @@ mod tests {
         #[case] length: u64,
     ) {
         let measured = DataMeasure::chunked(
-            0,
+            ByteLength::new(0),
             Some(ChunkArrayGeometry {
                 widths: WIDTHS,
                 kind: ChunkArrayKind::FixedArray,
@@ -1185,7 +1221,7 @@ mod tests {
             FileSpacePageSize::try_from(512).unwrap(),
             true,
             StoredAddress::new(start),
-            20,
+            ByteLength::new(20),
             core::iter::once(&measured),
             CollectionSections::default(),
             |_, _, _| {
@@ -1233,7 +1269,7 @@ mod tests {
         #[case] end: u64,
     ) {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), false, None);
-        let placed = DataMeasure::new(length, kind)
+        let placed = DataMeasure::new(ByteLength::new(length), kind)
             .reserve(&mut allocation)
             .unwrap();
         assert_eq!(
@@ -1249,17 +1285,17 @@ mod tests {
     #[case::above_four_gibibytes(512, 5_120_000_000)]
     fn paged_layout_records_small_large_and_empty_data(#[case] page: u64, #[case] offset: u64) {
         let measurements = [
-            DataMeasure::new(0, DataKind::Contiguous),
-            DataMeasure::new(7, DataKind::Contiguous),
-            DataMeasure::new(0, DataKind::Chunked),
-            DataMeasure::new(page + 188, DataKind::Contiguous),
+            DataMeasure::new(ByteLength::new(0), DataKind::Contiguous),
+            DataMeasure::new(ByteLength::new(7), DataKind::Contiguous),
+            DataMeasure::new(ByteLength::new(0), DataKind::Chunked),
+            DataMeasure::new(ByteLength::new(page + 188), DataKind::Contiguous),
         ];
         let plan = PagedLayout::new(
             WIDTHS,
             FileSpacePageSize::try_from(page).unwrap(),
             false,
             StoredAddress::new(offset + 200),
-            20,
+            ByteLength::new(20),
             measurements.iter(),
             CollectionSections::default(),
             |_, allocation, _| Ok(allocation),
@@ -1316,10 +1352,10 @@ mod tests {
             page,
             true,
             StoredAddress::new(200),
-            20,
+            ByteLength::new(20),
             [
-                DataMeasure::new(7, DataKind::Contiguous),
-                DataMeasure::new(700, DataKind::Chunked),
+                DataMeasure::new(ByteLength::new(7), DataKind::Contiguous),
+                DataMeasure::new(ByteLength::new(700), DataKind::Chunked),
             ]
             .iter(),
             CollectionSections::default(),
@@ -1390,9 +1426,18 @@ mod tests {
             FileSpacePageSize::try_from(512).unwrap(),
         );
         assert_eq!(collections.end, StoredAddress::new(48));
-        assert_eq!(collections.reserve(3).unwrap(), span(512, 3));
-        assert_eq!(collections.reserve(700).unwrap(), span(1024, 700));
-        assert_eq!(collections.reserve(512).unwrap(), span(2048, 512));
+        assert_eq!(
+            collections.reserve(ByteLength::new(3)).unwrap(),
+            span(512, 3)
+        );
+        assert_eq!(
+            collections.reserve(ByteLength::new(700)).unwrap(),
+            span(1024, 700)
+        );
+        assert_eq!(
+            collections.reserve(ByteLength::new(512)).unwrap(),
+            span(2048, 512)
+        );
         let PagedCollections {
             end,
             sections:
@@ -1464,7 +1509,7 @@ mod tests {
         let measurements: Vec<_> = array
             .map(|(kind, slots, occupied)| {
                 DataMeasure::chunked(
-                    0,
+                    ByteLength::new(0),
                     Some(ChunkArrayGeometry {
                         widths: WIDTHS,
                         kind,
@@ -1483,7 +1528,7 @@ mod tests {
             FileSpacePageSize::try_from(512).unwrap(),
             true,
             StoredAddress::new(start),
-            extension,
+            ByteLength::new(extension),
             measurements.iter(),
             CollectionSections {
                 metadata: metadata.clone(),
@@ -1628,14 +1673,14 @@ mod tests {
         let (raw_start, end) = boundaries;
         let measurements: Vec<_> = data_lengths
             .iter()
-            .map(|&length| DataMeasure::new(length, DataKind::Contiguous))
+            .map(|&length| DataMeasure::new(ByteLength::new(length), DataKind::Contiguous))
             .collect();
         let plan = PagedLayout::new(
             WIDTHS,
             page,
             true,
             StoredAddress::new(start),
-            length,
+            ByteLength::new(length),
             measurements.iter(),
             CollectionSections::default(),
             |_, placed, _| Ok(placed),
@@ -1700,8 +1745,8 @@ mod tests {
             FileSpacePageSize::try_from(512).unwrap(),
             true,
             StoredAddress::new(start),
-            extension,
-            core::iter::once(&DataMeasure::new(7, DataKind::Contiguous)),
+            ByteLength::new(extension),
+            core::iter::once(&DataMeasure::new(ByteLength::new(7), DataKind::Contiguous)),
             CollectionSections::default(),
             |_, placed, _| Ok(placed),
         )
@@ -1723,14 +1768,14 @@ mod tests {
     ) {
         let measurements: Vec<_> = data_length
             .into_iter()
-            .map(|length| DataMeasure::new(length, DataKind::Chunked))
+            .map(|length| DataMeasure::new(ByteLength::new(length), DataKind::Chunked))
             .collect();
         let error = PagedLayout::new(
             WIDTHS,
             FileSpacePageSize::try_from(512).unwrap(),
             false,
             StoredAddress::new(metadata_end),
-            extension,
+            ByteLength::new(extension),
             measurements.iter(),
             CollectionSections::default(),
             |_, allocation, _| Ok(allocation),
@@ -1758,7 +1803,7 @@ mod tests {
         use test_util::allocation;
 
         let measurement = DataMeasure::chunked(
-            16,
+            ByteLength::new(16),
             Some(ChunkArrayGeometry {
                 widths: WIDTHS,
                 kind: ChunkArrayKind::ExtensibleArray,
@@ -1795,7 +1840,7 @@ mod tests {
                 FileSpacePageSize::try_from(512).unwrap(),
                 true,
                 StoredAddress::new(500),
-                20,
+                ByteLength::new(20),
                 core::iter::once(&measurement),
                 CollectionSections::default(),
                 |_, allocation, _| Ok(allocation),
@@ -1890,7 +1935,7 @@ mod tests {
         assert!(positive.peak_bytes >= 1024, "{positive}");
         drop(control);
         let measurements: Vec<_> = (0..count)
-            .map(|_| DataMeasure::new(16, DataKind::Contiguous))
+            .map(|_| DataMeasure::new(ByteLength::new(16), DataKind::Contiguous))
             .collect();
         let mut calls = 0;
         let (plan, measured) = allocation::measure(region, || {
@@ -1899,7 +1944,7 @@ mod tests {
                 FileSpacePageSize::try_from(page).unwrap(),
                 persistent,
                 StoredAddress::new(200),
-                20,
+                ByteLength::new(20),
                 measurements.iter(),
                 CollectionSections::default(),
                 |index, allocation, _| {

@@ -4,6 +4,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::IndexSlots;
 
 use crate::FillTime;
@@ -292,7 +293,7 @@ impl PreparedDataset {
                     self.storage.allocation(),
                 )?;
                 (
-                    DataMeasure::new(0, DataKind::Chunked),
+                    DataMeasure::new(ByteLength::new(0), DataKind::Chunked),
                     Some((header.layout_message, header.pipeline_message)),
                 )
             } else {
@@ -304,7 +305,7 @@ impl PreparedDataset {
             }
         } else {
             (
-                DataMeasure::new(self.contiguous_len(), DataKind::Contiguous),
+                DataMeasure::new(ByteLength::new(self.contiguous_len()), DataKind::Contiguous),
                 None,
             )
         };
@@ -516,7 +517,7 @@ impl PreparedDataset {
                 array_address.unwrap_or(data_address.checked_add(prepared.payload_len())?),
             )?;
             let payload = prepared.into_payload();
-            if payload.len() != measure.payload_length() {
+            if ByteLength::new(payload.len()) != measure.payload_length() {
                 return Err(inconsistent_chunk_measurement());
             }
             Ok(ChunkedBuilt {
@@ -525,7 +526,7 @@ impl PreparedDataset {
                 data: DsData::Streamed {
                     payload,
                     array,
-                    len: measure.length()?,
+                    len: measure.length()?.get(),
                 },
             })
         } else {
@@ -534,7 +535,11 @@ impl PreparedDataset {
             })?;
             let array = ArrayEmission::new(measure, chunks.array_kind(), array_address)?;
             let payload_end = chunks.payload_end_at(data_address)?;
-            if payload_end.checked_distance_from(data_address) != Some(measure.payload_length()) {
+            if payload_end
+                .checked_distance_from(data_address)
+                .map(ByteLength::new)
+                != Some(measure.payload_length())
+            {
                 return Err(inconsistent_chunk_measurement());
             }
             let ChunkedHeader {
@@ -548,7 +553,7 @@ impl PreparedDataset {
                     chunks,
                     data_address,
                     array,
-                    len: measure.length()?,
+                    len: measure.length()?.get(),
                 },
             })
         }
@@ -681,13 +686,17 @@ impl PreparedChunks<'_> {
         Ok(match storage {
             PreparedChunkStorage::Encoded(chunks) => {
                 let (raw_length, header) = chunks.measure_payload_at(*data_address)?;
-                let data = DataMeasure::chunked(raw_length, chunks.array_geometry())?;
-                data_address.checked_add(data.length()?)?;
+                let data =
+                    DataMeasure::chunked(ByteLength::new(raw_length), chunks.array_geometry())?;
+                data_address.checked_add(data.length()?.get())?;
                 (header, data)
             }
             PreparedChunkStorage::Verbatim { chunks, pipeline } => {
-                let data = DataMeasure::chunked(chunks.payload_len(), chunks.array_geometry())?;
-                data_address.checked_add(data.length()?)?;
+                let data = DataMeasure::chunked(
+                    ByteLength::new(chunks.payload_len()),
+                    chunks.array_geometry(),
+                )?;
+                data_address.checked_add(data.length()?.get())?;
                 (
                     ChunkedHeader {
                         layout_message: chunks
@@ -1389,6 +1398,7 @@ mod tests {
     use core::num::NonZeroUsize;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private as format;
     use hdf5_pure_format::__private::ChunkIndexLayout;
     use hdf5_pure_format::__private::ChunkRecord;
@@ -1408,6 +1418,7 @@ mod tests {
     use crate::chunked_write;
     use crate::chunked_write::ByteSink;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
+    use crate::convert::Narrow;
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::dataspace::Dataspace;
     use crate::dataspace::DataspaceType;
@@ -1523,7 +1534,10 @@ mod tests {
         let mut bytes = Vec::new();
         data.emit(&mut bytes, crate::BaseAddress::ZERO, &dataset.storage)
             .unwrap();
-        assert_eq!(bytes.len() as u64, measured.data.length().unwrap());
+        assert_eq!(
+            ByteLength::new(bytes.len().to_u64()),
+            measured.data.length().unwrap()
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         let expected: Vec<_> = [1_i32, 2, 3, 4]
             .into_iter()
@@ -1567,7 +1581,7 @@ mod tests {
         assert_eq!(lengths, expected);
         assert_eq!(
             data.length().unwrap(),
-            values.len() as u64 * 4 + expected.iter().sum::<u64>()
+            ByteLength::new(values.len() as u64 * 4 + expected.iter().sum::<u64>())
         );
         let built = dataset
             .build_chunked(
@@ -1577,7 +1591,7 @@ mod tests {
                 data.array_address(StoredAddress::new(4096)).unwrap(),
             )
             .unwrap();
-        assert_eq!(built.data.len(), data.length().unwrap());
+        assert_eq!(ByteLength::new(built.data.len()), data.length().unwrap());
     }
 
     #[test]
@@ -1619,8 +1633,10 @@ mod tests {
         let mut builder = DatasetBuilder::new("values");
         builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
         let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
-        let empty =
-            super::super::layout::DataMeasure::new(0, super::super::layout::DataKind::Chunked);
+        let empty = super::super::layout::DataMeasure::new(
+            ByteLength::new(0),
+            super::super::layout::DataKind::Chunked,
+        );
         let result = if build {
             dataset
                 .build_chunked(StoredAddress::ZERO, None, &empty, None)
