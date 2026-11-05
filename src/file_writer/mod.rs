@@ -1592,7 +1592,8 @@ impl FileWriter {
                 collections.iter().try_fold(
                     Vec::with_capacity(collections.len()),
                     |mut addrs, collection| {
-                        let placed = placements.reserve(collection.len() as u64)?;
+                        let placed =
+                            placements.reserve(ByteLength::new(collection.len().to_u64()))?;
                         paged_collection_addresses.push(placed.address.get());
                         addrs.push(placed.address.get());
                         Ok(addrs)
@@ -1916,7 +1917,7 @@ impl FileWriter {
                 HeaderOptions::PLAIN.with_widths(widths),
             )?;
             if is_chunked[i] {
-                dummy_cursor = dummy_cursor.checked_add(measured.data.length()?)?;
+                dummy_cursor = dummy_cursor.checked_add(measured.data.length()?.get())?;
             }
             ds_data_measures.push(measured.data);
             actual_ds_oh_sizes.push(measured.header_len);
@@ -2282,7 +2283,9 @@ impl FileWriter {
                 page_size,
                 persist_paged,
                 allocation.end(),
-                ext_oh.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                ext_oh.as_ref().map_or(ByteLength::new(0), |bytes| {
+                    ByteLength::new(bytes.len().to_u64())
+                }),
                 ds_data_measures.iter(),
                 collection_sections,
                 |i, placed: Option<layout::Allocation>, array: Option<&layout::ArrayAllocation>| {
@@ -2298,7 +2301,7 @@ impl FileWriter {
                             &ds_data_measures[i],
                             array.map(layout::ArrayAllocation::address).transpose()?,
                         )?;
-                        if built.data.len() != ds_data_measures[i].length()? {
+                        if ByteLength::new(built.data.len()) != ds_data_measures[i].length()? {
                             return Err(FormatError::Internal(
                                 "chunk data differs from its allocation".into(),
                             ));
@@ -2560,7 +2563,7 @@ impl FileWriter {
                     &ds_data_measures[i],
                     ds_data_measures[i].array_address(data_address)?,
                 )?;
-                if built.data.len() != ds_data_measures[i].length()? {
+                if ByteLength::new(built.data.len()) != ds_data_measures[i].length()? {
                     return Err(FormatError::Internal(
                         "chunk data differs from its allocation".into(),
                     )
@@ -2573,9 +2576,12 @@ impl FileWriter {
                 });
             } else {
                 let data = d.contiguous_data();
-                let addr = layout::DataMeasure::new(data.len(), layout::DataKind::Contiguous)
-                    .reserve(&mut allocation)?
-                    .map_or(UNDEF_ADDRESS, |span| span.address);
+                let addr = layout::DataMeasure::new(
+                    ByteLength::new(data.len()),
+                    layout::DataKind::Contiguous,
+                )
+                .reserve(&mut allocation)?
+                .map_or(UNDEF_ADDRESS, |span| span.address);
                 ds_layouts.push(DsLayout {
                     data,
                     data_addr: addr,
@@ -2697,16 +2703,14 @@ impl FileWriter {
 
         // Reserve the superblock extension as metadata after reserving the global heaps.
         // Its stored address can lie in an earlier aggregate window.
-        let ext_len = ext_oh.as_ref().map_or(0, |bytes| bytes.len());
+        let ext_len = ext_oh
+            .as_ref()
+            .map(|bytes| ByteLength::new(bytes.len().to_u64()));
         let layout::ClassicLayout {
             extension,
             end: cursor2,
             manager,
-        } = layout::ClassicLayout::finish(
-            allocation,
-            ext_oh.as_ref().map(|bytes| bytes.len() as u64),
-            nonpaged_persist.is_some(),
-        )?;
+        } = layout::ClassicLayout::finish(allocation, ext_len, nonpaged_persist.is_some())?;
         let ext_addr = extension.map(|layout::Allocation { address, length: _ }| address);
 
         // eof_address is absolute file size (includes userblock + GCOLs + ext)
@@ -2969,7 +2973,9 @@ impl FileWriter {
             (other, _) => other.clone(),
         };
         debug_assert_eq!(
-            real_ext_oh.as_ref().map_or(0, |b| b.len()),
+            real_ext_oh
+                .as_ref()
+                .map(|bytes| ByteLength::new(bytes.len().to_u64())),
             ext_len,
             "rebuilt extension header length must match the reserved length"
         );
