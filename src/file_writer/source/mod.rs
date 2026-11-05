@@ -332,7 +332,7 @@ impl Object {
                     measured.header_len as u64,
                     Some(Allocation {
                         address: StoredAddress::ZERO,
-                        length: measured.data.length()?,
+                        length: ByteLength::new(measured.data.length()?),
                     }),
                     measured.data,
                     array_payload,
@@ -382,7 +382,7 @@ impl Object {
                     None,
                     plan.as_ref().map(|plan| Allocation {
                         address: StoredAddress::ZERO,
-                        length: plan.serialized_len(),
+                        length: ByteLength::new(plan.serialized_len()),
                     }),
                     link_info
                         .as_ref()
@@ -407,11 +407,11 @@ impl Object {
             metadata: ObjectAllocation {
                 header: Allocation {
                     address: StoredAddress::ZERO,
-                    length: header,
+                    length: ByteLength::new(header),
                 },
                 attributes: dense.map(|dense| Allocation {
                     address: StoredAddress::ZERO,
-                    length: dense.blob_len(),
+                    length: ByteLength::new(dense.blob_len()),
                 }),
                 links,
             },
@@ -557,7 +557,7 @@ impl Object {
             || self
                 .collections()
                 .zip(spans)
-                .any(|(bytes, span)| bytes.len() as u64 != span.length)
+                .any(|(bytes, span)| ByteLength::new(bytes.len().to_u64()) != span.length)
         {
             return Err(inconsistent());
         }
@@ -714,8 +714,9 @@ impl<S: ObjectSource> Plan<S> {
                 .map(|bytes| match &mut collections {
                     Some(collections) => collections.reserve(bytes.len() as u64),
                     None => Ok(Allocation {
-                        address: allocation.reserve(bytes.len() as u64, AllocationClass::Raw)?,
-                        length: bytes.len() as u64,
+                        address: allocation
+                            .reserve(ByteLength::new(bytes.len().to_u64()), AllocationClass::Raw)?,
+                        length: ByteLength::new(bytes.len().to_u64()),
                     }),
                 })
                 .collect::<Result<Vec<_>, FormatError>>()?;
@@ -849,7 +850,7 @@ impl<S: ObjectSource> Plan<S> {
             for (collection, &span) in record.heaps.iter().enumerate() {
                 spans.push(span.reservation(BaseAddress::ZERO, Part::Heap(index, collection))?);
             }
-            if let Some(span) = record.data.filter(|span| span.length != 0) {
+            if let Some(span) = record.data.filter(|span| !span.length.is_zero()) {
                 spans.push(
                     span.reservation(
                         BaseAddress::ZERO,
@@ -870,7 +871,7 @@ impl<S: ObjectSource> Plan<S> {
             spans.push(Reservation::new(
                 BaseAddress::ZERO,
                 span.address,
-                span.length,
+                span.length.get(),
                 Part::Extension,
             )?);
         }
@@ -918,7 +919,7 @@ impl<S: ObjectSource> Plan<S> {
                     index,
                     Allocation {
                         address: StoredAddress::new(start),
-                        length: range.length(),
+                        length: ByteLength::new(range.length()),
                     },
                 )?)?,
                 Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
@@ -937,7 +938,7 @@ impl<S: ObjectSource> Plan<S> {
                             object,
                             Allocation {
                                 address: StoredAddress::new(start),
-                                length: range.length(),
+                                length: ByteLength::new(range.length()),
                             },
                         )?)?,
                         Part::Heap(_, collection) => {
@@ -1002,7 +1003,7 @@ impl<S: ObjectSource> Plan<S> {
                 } else {
                     length
                 };
-                if expected != span.length {
+                if ByteLength::new(expected) != span.length {
                     return Err(inconsistent().into());
                 }
             }
@@ -1223,7 +1224,7 @@ impl<S: ObjectSource> Plan<S> {
         let image = plan
             .serialize(span.address)
             .map_err(super::dense_link_error)?;
-        if image.bytes.len().to_u64() != span.length {
+        if ByteLength::new(image.bytes.len().to_u64()) != span.length {
             return Err(inconsistent().into());
         }
         Ok(image.bytes)
@@ -1296,9 +1297,9 @@ impl DenseLinks {
                 offset_size: super::OFFSET_WIDTH.get(),
             });
         }
-        address.checked_add(length)?;
-        if name_index_offset.get() >= length
-            || creation_index_offset.is_some_and(|offset| offset.get() >= length)
+        address.checked_add(length.get())?;
+        if name_index_offset.get() >= length.get()
+            || creation_index_offset.is_some_and(|offset| offset.get() >= length.get())
         {
             return Err(inconsistent());
         }
@@ -1540,7 +1541,7 @@ fn reserve_metadata(
             0
         } else if record.data.is_some() {
             3
-        } else if record.metadata.header.length == 0 {
+        } else if record.metadata.header.length.is_zero() {
             2
         } else {
             1
@@ -1549,13 +1550,15 @@ fn reserve_metadata(
     for index in order {
         let record = &mut records[index];
         record.references = references[index];
-        if record.metadata.header.length == 0 {
+        if record.metadata.header.length.is_zero() {
             let Kind::Committed(datatype) = source.load(index)?.kind else {
                 return Err(inconsistent().into());
             };
-            record.metadata.header.length =
+            record.metadata.header.length = ByteLength::new(
                 super::build_committed_datatype_oh(super::WIDTHS, &datatype, record.references)?
-                    .len() as u64;
+                    .len()
+                    .to_u64(),
+            );
         }
         let ObjectAllocation {
             header,
@@ -1692,7 +1695,9 @@ impl FileLayout {
             .transpose()?
             .or(extension);
         let extension = match (extension_span, extension) {
-            (Some(span), Some(bytes)) if span.length == bytes.len() as u64 => Some((span, bytes)),
+            (Some(span), Some(bytes)) if span.length == ByteLength::new(bytes.len().to_u64()) => {
+                Some((span, bytes))
+            }
             (None, None) => None,
             _ => return Err(inconsistent().into()),
         };
@@ -1804,7 +1809,7 @@ fn pad(sink: &mut impl ByteSink<Error = std::io::Error>, end: u64) -> Result<(),
 ///
 /// Returns [`FormatError::Internal`] if the lengths differ.
 fn check_length(bytes: &[u8], span: Allocation) -> Result<(), FormatError> {
-    if bytes.len() as u64 != span.length {
+    if ByteLength::new(bytes.len().to_u64()) != span.length {
         return Err(inconsistent());
     }
     Ok(())
@@ -1832,6 +1837,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private as format;
     use hdf5_pure_format::__private::ChunkRecord;
     use hdf5_pure_format::__private::DenseLinkPlan;
@@ -1907,7 +1913,7 @@ mod tests {
         .unwrap();
         let span = Allocation {
             address: StoredAddress::new(address.unwrap_or(u64::MAX - plan.serialized_len())),
-            length: plan.serialized_len(),
+            length: ByteLength::new(plan.serialized_len()),
         };
         assert_eq!(
             geometry.link_info(span).unwrap(),
@@ -1933,7 +1939,7 @@ mod tests {
         .unwrap();
         let span = Allocation {
             address: StoredAddress::new(address),
-            length: plan.serialized_len(),
+            length: ByteLength::new(plan.serialized_len()),
         };
         assert_eq!(
             geometry.link_info(span).unwrap(),
@@ -2021,7 +2027,7 @@ mod tests {
             geometry
                 .link_info(Allocation {
                     address: StoredAddress::new(4096),
-                    length,
+                    length: ByteLength::new(length),
                 })
                 .unwrap_err(),
             FormatError::Internal(
@@ -2068,7 +2074,7 @@ mod tests {
         let error = geometry
             .link_info(Allocation {
                 address: StoredAddress::new(address),
-                length,
+                length: ByteLength::new(length),
             })
             .unwrap_err();
         if undefined {
@@ -2120,12 +2126,12 @@ mod tests {
             .map(|record| {
                 assert_eq!(record.data_measure.empty_index().is_none(), unallocated);
                 if unallocated {
-                    assert_eq!(record.data.unwrap().length, 0);
+                    assert_eq!(record.data.unwrap().length, ByteLength::new(0));
                     None
                 } else {
                     let allocation = record.data.unwrap();
                     assert!(record.data_measure.length().unwrap() > 0);
-                    assert_eq!(allocation.length == 0, record.array.is_some());
+                    assert_eq!(allocation.length.is_zero(), record.array.is_some());
                     record.array_address().unwrap()
                 }
             })
@@ -2222,7 +2228,10 @@ mod tests {
         for record in &plan.records[..count] {
             assert!(record.data_measure.empty_index().is_some());
             assert_eq!(record.data_measure.length().unwrap(), 370);
-            assert_eq!(record.data.unwrap().length, if paged { 0 } else { 370 });
+            assert_eq!(
+                record.data.unwrap().length,
+                ByteLength::new(if paged { 0 } else { 370 })
+            );
         }
         assert_eq!(
             loads

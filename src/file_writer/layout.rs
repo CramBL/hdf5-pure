@@ -3,6 +3,7 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::SectionInfoCounts;
 use hdf5_pure_space::__private::AllocationClass;
@@ -30,7 +31,7 @@ use crate::width::FormatWidths;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Allocation {
     pub(super) address: StoredAddress,
-    pub(super) length: u64,
+    pub(super) length: ByteLength,
 }
 
 impl Allocation {
@@ -41,7 +42,7 @@ impl Allocation {
     /// Propagates errors from [`FileAllocation::reserve`].
     fn reserve(
         allocation: &mut FileAllocation,
-        length: u64,
+        length: ByteLength,
         class: AllocationClass,
     ) -> Result<Self, FormatError> {
         let address = allocation.reserve(length, class)?;
@@ -59,7 +60,7 @@ impl Allocation {
         value: T,
     ) -> Result<Reservation<T>, FormatError> {
         let Self { address, length } = self;
-        Reservation::new(base, *address, *length, value)
+        Reservation::new(base, *address, length.get(), value)
     }
 }
 
@@ -67,9 +68,9 @@ impl Allocation {
 ///
 /// Dense attribute and link storage include their heaps and indexes.
 pub(super) struct ObjectMeasure {
-    pub(super) header: u64,
-    pub(super) attributes: Option<u64>,
-    pub(super) links: Option<u64>,
+    pub(super) header: ByteLength,
+    pub(super) attributes: Option<ByteLength>,
+    pub(super) links: Option<ByteLength>,
 }
 
 impl ObjectMeasure {
@@ -219,7 +220,12 @@ impl DataMeasure {
         if self.empty_contiguous() {
             Ok(None)
         } else {
-            Allocation::reserve(allocation, self.length()?, AllocationClass::Raw).map(Some)
+            Allocation::reserve(
+                allocation,
+                ByteLength::new(self.length()?),
+                AllocationClass::Raw,
+            )
+            .map(Some)
         }
     }
 
@@ -262,7 +268,13 @@ impl ClassicLayout {
         persist: bool,
     ) -> Result<Self, FormatError> {
         let extension = extension_len
-            .map(|length| Allocation::reserve(&mut allocation, length, AllocationClass::Metadata))
+            .map(|length| {
+                Allocation::reserve(
+                    &mut allocation,
+                    ByteLength::new(length),
+                    AllocationClass::Metadata,
+                )
+            })
             .transpose()?;
         let (end, manager) = if persist {
             allocation.finish_persisted()?
@@ -348,7 +360,7 @@ impl PagedCollections {
         }
         Ok(Allocation {
             address: start,
-            length,
+            length: ByteLength::new(length),
         })
     }
 }
@@ -529,7 +541,10 @@ impl<T> PagedLayout<T> {
             } else if length < page.get() {
                 let address = small_cursor;
                 small_cursor = small_cursor.checked_add(length)?;
-                Some(Allocation { address, length })
+                Some(Allocation {
+                    address,
+                    length: ByteLength::new(length),
+                })
             } else {
                 let start = align(cursor, page)?;
                 let end = start.checked_add(length)?;
@@ -543,7 +558,7 @@ impl<T> PagedLayout<T> {
                 }
                 Some(Allocation {
                     address: start,
-                    length,
+                    length: ByteLength::new(length),
                 })
             };
             let array = array_placements
@@ -609,7 +624,7 @@ impl ArrayAllocation {
                 })?;
             let allocation = arena.reserve(length)?;
             addresses.push(allocation.address);
-            end = allocation.address.checked_add(allocation.length)?;
+            end = allocation.address.checked_add(allocation.length.get())?;
             Ok(())
         })?;
         let allocation = Self { addresses, end };
@@ -824,7 +839,10 @@ impl MetadataArena {
                 });
             }
         }
-        Ok(Allocation { address, length })
+        Ok(Allocation {
+            address,
+            length: ByteLength::new(length),
+        })
     }
 
     /// Reserves each active manager's header and allocated section list separately.
@@ -1036,6 +1054,7 @@ fn align(offset: StoredAddress, page: FileSpacePageSize) -> Result<StoredAddress
 mod tests {
     use alloc::borrow::Cow;
 
+    use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private as format;
     use hdf5_pure_format::__private::FreeSection;
     use hdf5_pure_format::__private::FreeSpaceManagerHeader;
@@ -1186,9 +1205,9 @@ mod tests {
     fn object_metadata_reservations_keep_header_attribute_and_link_order(#[case] aggregated: bool) {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), aggregated, None);
         let placed = ObjectMeasure {
-            header: 80,
-            attributes: Some(24),
-            links: Some(64),
+            header: ByteLength::new(80),
+            attributes: Some(ByteLength::new(24)),
+            links: Some(ByteLength::new(64)),
         }
         .reserve(&mut allocation)
         .unwrap();
@@ -1484,7 +1503,7 @@ mod tests {
                 .visit_blocks(|length| {
                     occupied.push(Allocation {
                         address: *addresses.next().unwrap(),
-                        length,
+                        length: ByteLength::new(length),
                     });
                     Ok(())
                 })
@@ -1555,16 +1574,16 @@ mod tests {
                     size: block.address.checked_distance_from(cursor).unwrap(),
                 });
             }
-            if block.length >= 512 {
+            if block.length >= ByteLength::new(512) {
                 assert_eq!(block.address.get() % 512, 0);
-            } else if block.length > 0 {
+            } else if !block.length.is_zero() {
                 assert_eq!(
                     block.address.get() / 512,
-                    (block.address.get() + block.length - 1) / 512
+                    (block.address.get() + block.length.get() - 1) / 512
                 );
             }
-            cursor = block.address.checked_add(block.length).unwrap();
-            previous_large = block.length >= 512;
+            cursor = block.address.checked_add(block.length.get()).unwrap();
+            previous_large = block.length >= ByteLength::new(512);
         }
         for (actual, expected) in actual.iter_mut().zip(&mut expected) {
             actual.sort_by_key(|section| section.addr);
@@ -1814,7 +1833,7 @@ mod tests {
             data,
             [Some(Allocation {
                 address: raw_start,
-                length: 16
+                length: ByteLength::new(16)
             })]
         );
         assert_eq!(end.checked_distance_from(raw_start), Some(512));
@@ -1920,7 +1939,7 @@ mod tests {
                 *allocation,
                 Some(Allocation {
                     address: raw_start.checked_add(index as u64 * 16).unwrap(),
-                    length: 16
+                    length: ByteLength::new(16)
                 })
             );
             assert_eq!(*bytes, [0xa5; 256]);
@@ -1939,7 +1958,7 @@ mod tests {
     fn span(address: u64, length: u64) -> Allocation {
         Allocation {
             address: StoredAddress::new(address),
-            length,
+            length: ByteLength::new(length),
         }
     }
 }

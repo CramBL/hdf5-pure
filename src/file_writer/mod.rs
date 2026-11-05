@@ -386,13 +386,13 @@ fn group_header(
 fn dense_links_image(
     widths: FormatWidths,
     links: &[LinkMessage],
-    (address, reserved): (StoredAddress, usize),
+    (address, reserved): (StoredAddress, ByteLength),
     phase_change: GroupPhaseChange,
 ) -> Result<DenseLinkImage, FormatError> {
     let plan = dense_links_plan(widths, links, phase_change)?
         .ok_or_else(|| FormatError::Internal("a reserved dense group has compact links".into()))?;
     let image = plan.serialize(address).map_err(dense_link_error)?;
-    if image.bytes.len() != reserved {
+    if ByteLength::new(image.bytes.len().to_u64()) != reserved {
         return Err(FormatError::Internal(
             "dense group link emission differs from its reserved length".into(),
         ));
@@ -1273,7 +1273,10 @@ impl FileWriter {
         ) -> Result<Vec<u64>, FormatError> {
             let mut addresses = Vec::with_capacity(collections.len());
             for collection in collections {
-                let address = allocation.reserve(collection.len() as u64, AllocationClass::Raw)?;
+                let address = allocation.reserve(
+                    ByteLength::new(collection.len().to_u64()),
+                    AllocationClass::Raw,
+                )?;
                 if retain {
                     retained.push(address);
                 }
@@ -1940,9 +1943,9 @@ impl FileWriter {
             )?;
         }
         let reserve = |allocation: &mut FileAllocation,
-                       header: u64,
+                       header: ByteLength,
                        dense: Option<PreparedDenseAttrs>,
-                       links: Option<usize>|
+                       links: Option<ByteLength>|
          -> Result<_, FormatError> {
             let layout::ObjectAllocation {
                 header,
@@ -1950,8 +1953,8 @@ impl FileWriter {
                 links: placed_links,
             } = layout::ObjectMeasure {
                 header,
-                attributes: dense.as_ref().map(PreparedDenseAttrs::blob_len),
-                links: links.map(|len| len as u64),
+                attributes: dense.as_ref().map(|plan| ByteLength::new(plan.blob_len())),
+                links,
             }
             .reserve(allocation)?;
             let attributes = match (attributes, dense) {
@@ -1963,18 +1966,15 @@ impl FileWriter {
                     ));
                 }
             };
-            let links = placed_links
-                .map(|layout::Allocation { address, length }| {
-                    length.to_usize().map(|length| (address, length))
-                })
-                .transpose()?;
+            let links =
+                placed_links.map(|layout::Allocation { address, length }| (address, length));
             Ok((header.address, attributes, links))
         };
         let (root_group_addr, root_dense_span, root_link_span) = reserve(
             &mut allocation,
-            root_oh_size as u64,
+            ByteLength::new(root_oh_size.to_u64()),
             root_dense_plan,
-            root_link_len,
+            root_link_len.map(|length| ByteLength::new(length.to_u64())),
         )?;
         let mut group_link_spans = Vec::with_capacity(groups.len());
         let mut group_dense_spans = Vec::with_capacity(groups.len());
@@ -1985,8 +1985,12 @@ impl FileWriter {
             .try_fold(
                 Vec::with_capacity(group_oh_sizes.len()),
                 |mut addrs, (gi, (&size, dense))| {
-                    let (address, attributes, links) =
-                        reserve(&mut allocation, size as u64, dense, group_link_lens[gi])?;
+                    let (address, attributes, links) = reserve(
+                        &mut allocation,
+                        ByteLength::new(size.to_u64()),
+                        dense,
+                        group_link_lens[gi].map(|length| ByteLength::new(length.to_u64())),
+                    )?;
                     group_dense_spans.push(attributes);
                     group_link_spans.push(links);
                     addrs.push(address);
@@ -1997,7 +2001,7 @@ impl FileWriter {
             Vec::with_capacity(committed_oh.len()),
             |mut addrs, header| {
                 let placed = layout::ObjectMeasure {
-                    header: header.len() as u64,
+                    header: ByteLength::new(header.len().to_u64()),
                     attributes: None,
                     links: None,
                 }
@@ -2012,7 +2016,7 @@ impl FileWriter {
                 Vec::with_capacity(actual_ds_oh_sizes.len()),
                 |mut addrs, (&size, dense)| {
                     let (address, attributes, _) =
-                        reserve(&mut allocation, size as u64, dense, None)?;
+                        reserve(&mut allocation, ByteLength::new(size.to_u64()), dense, None)?;
                     ds_dense_spans.push(attributes);
                     addrs.push(address);
                     Ok::<_, FormatError>(addrs)
@@ -2352,7 +2356,7 @@ impl FileWriter {
                     .clone()
                     .expect("a paged file always emits a File Space Info message")
             };
-            debug_assert_eq!(real_ext_oh.len() as u64, ext_len);
+            debug_assert_eq!(ByteLength::new(real_ext_oh.len().to_u64()), ext_len);
 
             sink.reserve(eof_addr2)?;
             Self::put_userblock(sink, ub, &self.userblock_content)?;
