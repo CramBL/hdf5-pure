@@ -17,6 +17,11 @@ use crate::source::RangeReader;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
+#[cfg(all(test, feature = "std"))]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
+
 pub use hdf5_pure_core::Superblock;
 
 /// A superblock with the address of its signature and its validated widths.
@@ -48,6 +53,20 @@ pub(crate) struct LocatedSuperblock {
 pub(crate) fn read(
     file: &(impl SuperblockSource + ?Sized),
 ) -> Result<LocatedSuperblock, FormatError> {
+    read_with_range(file).map(|(located, _range)| located)
+}
+
+/// Locates and parses the superblock, retaining the physical range of the full read.
+///
+/// Uses the candidate search and metadata read of [`read`]. The range is in physical source
+/// coordinates. The caller establishes allocation ownership and source freshness separately.
+///
+/// # Errors
+///
+/// Returns the search, read, and parsing errors described by [`read`].
+pub(crate) fn read_with_range(
+    file: &(impl SuperblockSource + ?Sized),
+) -> Result<(LocatedSuperblock, FileRange), FormatError> {
     let mut candidate = [0; SuperblockLocator::CANDIDATE_LEN];
     let (signature, held) = search(file, &mut candidate)?.ok_or(FormatError::SignatureNotFound)?;
     let candidate_range = signature.parse_range()?;
@@ -61,11 +80,14 @@ pub(crate) fn read(
     let range = superblock.parse_range();
     let bytes = file.read_range(range)?;
     let (superblock, widths) = superblock.parse(FileRegion::new(range, &bytes)?)?;
-    Ok(LocatedSuperblock {
-        address: signature.address(),
-        superblock,
-        widths,
-    })
+    Ok((
+        LocatedSuperblock {
+            address: signature.address(),
+            superblock,
+            widths,
+        },
+        range,
+    ))
 }
 
 /// Returns the address of the first candidate that starts with the signature, or `None` if the
@@ -227,6 +249,154 @@ mod tests {
     }
 
     #[rstest]
+    #[case::zero_two(SuperblockVersion::Zero, Widths::new(2, 2))]
+    #[case::zero_four(SuperblockVersion::Zero, Widths::FOUR)]
+    #[case::zero_eight(SuperblockVersion::Zero, Widths::EIGHT)]
+    #[case::one_two(SuperblockVersion::One, Widths::new(2, 2))]
+    #[case::one_four(SuperblockVersion::One, Widths::FOUR)]
+    #[case::one_eight(SuperblockVersion::One, Widths::EIGHT)]
+    #[case::two_two(SuperblockVersion::Two, Widths::new(2, 2))]
+    #[case::two_four(SuperblockVersion::Two, Widths::FOUR)]
+    #[case::two_eight(SuperblockVersion::Two, Widths::EIGHT)]
+    #[case::two_long_offsets(SuperblockVersion::Two, Widths::new(8, 2))]
+    #[case::two_long_lengths(SuperblockVersion::Two, Widths::new(2, 8))]
+    #[case::three_two(SuperblockVersion::Three, Widths::new(2, 2))]
+    #[case::three_four(SuperblockVersion::Three, Widths::FOUR)]
+    #[case::three_eight(SuperblockVersion::Three, Widths::EIGHT)]
+    #[case::three_long_offsets(SuperblockVersion::Three, Widths::new(8, 2))]
+    #[case::three_long_lengths(SuperblockVersion::Three, Widths::new(2, 8))]
+    fn parsed_ranges_preserve_versions_widths_and_candidate_reads(
+        #[case] version: SuperblockVersion,
+        #[case] widths: Widths,
+        #[values(0, 512)] base: u64,
+    ) {
+        let encoded = superblock_bytes_for(version, widths, base);
+        let source = SparseSource::new(base + 4_096, base, encoded.clone());
+        let (located, range) = read_with_range(&source).unwrap();
+        assert_eq!(
+            range,
+            FileRange::new(
+                PhysicalAddress::new(base),
+                u64::try_from(encoded.len()).unwrap()
+            )
+            .unwrap()
+        );
+        assert_eq!(located.address, range.start());
+        assert_eq!(located.superblock.version(), version);
+        assert_eq!(located.superblock.base_address, BaseAddress::new(base));
+        assert_eq!(located.superblock.eof_address, 4_096);
+        assert_eq!(located.superblock.root_group_address.get(), 48);
+        assert_eq!(
+            located.widths,
+            FormatWidths::from_sizes(
+                u8::try_from(widths.offset).unwrap(),
+                u8::try_from(widths.length).unwrap()
+            )
+            .unwrap()
+        );
+        let mut expected = vec![(0, SuperblockLocator::CANDIDATE_LEN)];
+        if base > 0 {
+            expected.push((base, SuperblockLocator::CANDIDATE_LEN));
+        }
+        expected.push((base, encoded.len()));
+        assert_eq!(*source.reads.borrow(), expected);
+        let image = image_at(usize::try_from(base).unwrap(), &encoded);
+        assert_eq!(read_with_range(image.as_slice()).unwrap(), (located, range));
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[rstest]
+    #[case::legacy(SuperblockVersion::One)]
+    #[case::modern(SuperblockVersion::Three)]
+    fn retaining_the_parsed_range_preserves_allocation_and_read_profiles(
+        #[case] version: SuperblockVersion,
+    ) {
+        use test_util::allocation;
+
+        let encoded = superblock_bytes_for(version, Widths::EIGHT, 512);
+        let original = SparseSource::new(4_608, 512, encoded.clone());
+        let ranged = SparseSource::new(4_608, 512, encoded.clone());
+        original.reads.borrow_mut().reserve_exact(3);
+        ranged.reads.borrow_mut().reserve_exact(3);
+        let (located, before) =
+            allocation::measure(&format!("superblock_original_{version:?}"), || {
+                read(&original).unwrap()
+            });
+        let ((retained, range), after) =
+            allocation::measure(&format!("superblock_retained_{version:?}"), || {
+                read_with_range(&ranged).unwrap()
+            });
+        assert_eq!(retained, located);
+        assert_eq!(
+            range,
+            FileRange::new(
+                PhysicalAddress::new(512),
+                u64::try_from(encoded.len()).unwrap()
+            )
+            .unwrap()
+        );
+        assert_eq!(*ranged.reads.borrow(), *original.reads.borrow());
+        assert_eq!(
+            (
+                after.blocks,
+                after.bytes,
+                after.peak_bytes,
+                after.live_bytes
+            ),
+            (
+                before.blocks,
+                before.bytes,
+                before.peak_bytes,
+                before.live_bytes
+            )
+        );
+        assert!(
+            before.blocks > 0 && before.bytes >= u64::try_from(encoded.len()).unwrap(),
+            "{before}"
+        );
+        let acquisition = SparseSource::new(4_608, 512, encoded.clone());
+        acquisition.reads.borrow_mut().reserve_exact(1);
+        let expected_range = FileRange::new(
+            PhysicalAddress::new(512),
+            u64::try_from(encoded.len()).unwrap(),
+        )
+        .unwrap();
+        let ((), control) = allocation::measure(
+            &format!("superblock_metadata_acquisition_{version:?}"),
+            || {
+                let bytes = acquisition.read_range(expected_range).unwrap();
+                assert_eq!(bytes.as_ref(), encoded.as_slice());
+            },
+        );
+        assert_eq!(*acquisition.reads.borrow(), [(512, encoded.len())]);
+        let metadata_bytes = u64::try_from(encoded.len()).unwrap();
+        let metadata_budget = metadata_bytes + 64;
+        assert!(
+            control.blocks > 0
+                && control.blocks <= 2
+                && control.bytes >= metadata_bytes
+                && control.bytes <= metadata_budget
+                && control.peak_bytes <= metadata_budget,
+            "{control}"
+        );
+        assert_eq!(control.live_bytes, 0, "{control}");
+        assert!(
+            after.blocks <= control.blocks
+                && after.bytes <= control.bytes
+                && after.peak_bytes <= control.peak_bytes,
+            "{after} exceeds {control}"
+        );
+        assert_eq!(after.live_bytes, 0, "{after}");
+        let image = image_at(512, &encoded);
+        let ((borrowed, borrowed_range), slice) =
+            allocation::measure(&format!("superblock_borrowed_{version:?}"), || {
+                read_with_range(image.as_slice()).unwrap()
+            });
+        assert_eq!((borrowed, borrowed_range), (retained, range));
+        assert_eq!((slice.blocks, slice.bytes), (0, 0), "{slice}");
+    }
+
+    #[rstest]
     fn every_reader_reads_a_userblock_file_libhdf5_wrote(
         #[values(Reader::Slice, Reader::Bytes, Reader::ReadSeek)] reader: Reader,
     ) {
@@ -325,6 +495,7 @@ mod tests {
         let source = SparseSource::new(4096, 2048, superblock_bytes(false, 2048)).failing_at(512);
         let failure = Some(FormatError::Source("candidate read failed".into()));
         assert_eq!(read(&source).err(), failure);
+        assert_eq!(read_with_range(&source).err(), failure);
         assert_eq!(find_signature(&source).err(), failure);
     }
 
@@ -440,18 +611,40 @@ mod tests {
     }
 
     fn superblock_bytes(version_0: bool, base_address: u64) -> Vec<u8> {
-        if version_0 {
-            v0::Superblock::new(Widths::EIGHT)
+        superblock_bytes_for(
+            if version_0 {
+                SuperblockVersion::Zero
+            } else {
+                SuperblockVersion::Two
+            },
+            Widths::EIGHT,
+            base_address,
+        )
+    }
+
+    fn superblock_bytes_for(
+        version: SuperblockVersion,
+        widths: Widths,
+        base_address: u64,
+    ) -> Vec<u8> {
+        match version {
+            SuperblockVersion::Zero | SuperblockVersion::One => {
+                let builder = v0::Superblock::new(widths)
+                    .base_address(base_address)
+                    .eof_address(4_096)
+                    .root_group(0, 48);
+                if version == SuperblockVersion::One {
+                    builder.version_1().build()
+                } else {
+                    builder.build()
+                }
+            }
+            SuperblockVersion::Two | SuperblockVersion::Three => v2::Superblock::new(widths)
+                .version(version.get())
                 .base_address(base_address)
-                .eof_address(4096)
-                .root_group(0, 48)
-                .build()
-        } else {
-            v2::Superblock::new(Widths::EIGHT)
-                .base_address(base_address)
-                .eof_address(4096)
+                .eof_address(4_096)
                 .root_header_address(48)
-                .build()
+                .build(),
         }
     }
 }
