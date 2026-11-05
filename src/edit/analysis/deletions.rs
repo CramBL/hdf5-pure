@@ -202,6 +202,7 @@ impl<'source> AnalysisPhase<'source> {
             identity: _,
             topology,
             counts,
+            ownership: _,
             budget: _,
             root: _,
             links: _,

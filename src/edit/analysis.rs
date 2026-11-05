@@ -28,6 +28,7 @@ use crate::source::SourceMetadata;
 use self::counts::CountObservation;
 use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
+use self::ownership::ObjectOwnership;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::GlobalHeapLiveness;
@@ -51,14 +52,22 @@ pub(super) use deletions::SourceRemovalPlan;
 )]
 pub(super) mod counts;
 mod deletions;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "local ownership facts do not authorize collection retirement"
+    )
+)]
+pub(in crate::edit) mod ownership;
 
 /// Lazy topology, object-count, reference, and allocation queries for unchanged source contents.
 ///
 /// Queries borrow the engine for the phase. The caller establishes source consistency and starts
 /// a new phase after relevant source writes. Owned count metadata can be retained after the phase
 /// is dropped, with source freshness and write permissions established separately. Adjacency,
-/// parsed count observations, reference summaries, and collection geometry are retained separately,
-/// with a completeness result for each required reference scan.
+/// parsed count observations, reference summaries, collection geometry, and local allocation facts
+/// are retained separately. Reference and local ownership completeness are independent.
 pub(super) struct AnalysisPhase<'a> {
     engine: &'a WriteEngine,
     /// Shared phase identity for reconstruction origins and any discovered topology.
@@ -72,6 +81,8 @@ pub(super) struct AnalysisPhase<'a> {
     allocations: BTreeMap<PhysicalAddress, Result<FileRange, FormatError>>,
     /// Count observations, optional header allocation facts, and cached parse failures.
     counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
+    /// Local allocation ranges and collection outcomes, including cached failures.
+    ownership: BTreeMap<ObjectId, ObjectOwnership>,
     #[cfg(test)]
     candidate_lookups: u64,
 }
@@ -89,6 +100,7 @@ impl<'a> AnalysisPhase<'a> {
             liveness: None,
             allocations: BTreeMap::new(),
             counts: BTreeMap::new(),
+            ownership: BTreeMap::new(),
             #[cfg(test)]
             candidate_lookups: 0,
         }
@@ -147,6 +159,7 @@ impl<'a> AnalysisPhase<'a> {
             liveness: _,
             allocations: _,
             counts: _,
+            ownership: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -309,6 +322,7 @@ impl<'a> AnalysisPhase<'a> {
             identity: _,
             allocations,
             counts: _,
+            ownership: _,
             topology: _,
             budget: _,
             root: _,
@@ -450,6 +464,7 @@ impl<'a> AnalysisPhase<'a> {
             liveness: _,
             allocations: _,
             counts: _,
+            ownership: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -498,6 +513,7 @@ impl<'a> AnalysisPhase<'a> {
             liveness,
             allocations,
             counts: _,
+            ownership: _,
             candidate_lookups,
         } = self;
         let topology = topology.as_ref().and_then(Option::as_ref);
