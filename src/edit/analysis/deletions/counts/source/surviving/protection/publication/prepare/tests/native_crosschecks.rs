@@ -1,12 +1,16 @@
+use std::collections::BTreeMap;
+
 use rstest::rstest;
 use test_util_hdf5::attr;
 use test_util_hdf5::file;
 use test_util_hdf5::native_fixtures::Fixture;
 use test_util_hdf5::numeric::ByteOrder;
 
+use crate::PhysicalAddress;
 use crate::convert;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::test_util as edit_test_util;
+use crate::object_path::ObjectPathBuf;
 use crate::width::{LengthWidth, OffsetWidth};
 
 #[rstest]
@@ -95,7 +99,53 @@ fn preparation_preserves_native_allocations_and_heap_references_at_independent_w
     let references = phase.collections_reachable_from([root]).unwrap();
     assert!(references.analysis_complete);
     assert_eq!(references.referenced_collections.len(), 1);
+    let added = phase.added_copy_users([]).unwrap().unwrap();
+    let deletions = ["a", "b"].map(|name| {
+        phase
+            .topology()
+            .unwrap()
+            .deletion(&ObjectPathBuf::parse(name))
+            .unwrap()
+    });
+    let plan = phase.net_count_plan(&deletions, &added).unwrap().unwrap();
+    let mut storage = plan.collect_storage();
+    assert!(storage.reference_roots().is_empty());
+    let allocations = storage.allocations().to_vec();
+    assert!(!allocations.is_empty());
+    drop(plan);
+    let candidates = storage.take_collections(&mut phase).unwrap();
+    assert_eq!(candidates.collections.len(), 1);
+    assert_eq!(
+        candidates
+            .collections
+            .keys()
+            .map(|address| address.get())
+            .collect::<Vec<_>>(),
+        references
+            .referenced_collections
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+    );
     drop(phase);
+    let mut prospective = storage
+        .reference_phase(&engine, PhysicalAddress::new(root), &BTreeMap::new())
+        .unwrap();
+    assert!(
+        prospective
+            .unreferenced_collection_spans(candidates)
+            .is_empty()
+    );
+    let Some(Ok(liveness)) = &prospective.liveness else {
+        panic!("expected prospective collection references")
+    };
+    assert!(liveness.analysis_complete);
+    assert_eq!(
+        liveness.referenced_collections,
+        references.referenced_collections
+    );
+    drop(prospective);
+    assert_eq!(storage.allocations(), allocations);
     let mut bounds = super::publication_bounds(&mut engine, &[], &["a"]);
     let prepared = bounds.prepare_counts().unwrap();
     let (original, update) = prepared.updates().next().unwrap();

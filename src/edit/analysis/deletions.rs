@@ -207,6 +207,7 @@ impl<'source> AnalysisPhase<'source> {
             counts,
             budget: _,
             root: _,
+            reference_roots: _,
             links: _,
             references: _,
             liveness: _,

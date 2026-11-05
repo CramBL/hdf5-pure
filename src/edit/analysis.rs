@@ -68,6 +68,8 @@ pub(super) struct AnalysisPhase<'a> {
     topology: Option<Option<CompleteTopology<'a>>>,
     budget: TraversalBudget,
     root: Option<ObjectId>,
+    /// Additional physical object-header addresses for the collection-reference scan.
+    reference_roots: Vec<u64>,
     links: BTreeMap<ObjectId, ObjectLinks>,
     references: BTreeMap<ObjectId, ObjectReferences>,
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
@@ -86,6 +88,7 @@ impl<'a> AnalysisPhase<'a> {
             topology: None,
             budget: TraversalBudget::new(MAX_LINK_GRAPH_NODES as usize, usize::MAX),
             root: None,
+            reference_roots: Vec::new(),
             links: BTreeMap::new(),
             references: BTreeMap::new(),
             liveness: None,
@@ -101,6 +104,20 @@ impl<'a> AnalysisPhase<'a> {
         Self {
             root: Some(ObjectId::new(root)),
             ..Self::new(engine)
+        }
+    }
+
+    /// Creates a fresh phase with fixed retained roots for collection-reference analysis.
+    ///
+    /// The caller supplies physical header addresses in the current source contents.
+    fn prospective_retaining(
+        engine: &'a WriteEngine,
+        root: PhysicalAddress,
+        retained: impl IntoIterator<Item = u64>,
+    ) -> Self {
+        Self {
+            reference_roots: retained.into_iter().collect(),
+            ..Self::prospective(engine, root)
         }
     }
 
@@ -144,6 +161,7 @@ impl<'a> AnalysisPhase<'a> {
             topology,
             budget,
             root,
+            reference_roots: _,
             links,
             references: _,
             liveness: _,
@@ -246,15 +264,7 @@ impl<'a> AnalysisPhase<'a> {
         }) else {
             return CollectionCandidates::default();
         };
-        let mut candidates = CollectionCandidates::default();
-        for (address, origins) in origins {
-            if let Ok(allocation) = self.collection_allocation(address) {
-                let Ok(()) = candidates.insert(allocation, origins) else {
-                    return CollectionCandidates::default();
-                };
-            }
-        }
-        candidates
+        self.collection_candidates(origins)
     }
 
     /// Returns collection candidates referenced by replaced or removed attributes of `object`.
@@ -314,6 +324,7 @@ impl<'a> AnalysisPhase<'a> {
             topology: _,
             budget: _,
             root: _,
+            reference_roots: _,
             links: _,
             references: _,
             liveness: _,
@@ -334,11 +345,12 @@ impl<'a> AnalysisPhase<'a> {
             .map_err(Clone::clone)
     }
 
-    /// Returns allocations absent from the complete reference set for this phase's root.
+    /// Returns allocations absent from the complete reference set for this phase's root union.
     ///
     /// Returns an empty result for an empty union, a different candidate session, or failed or
-    /// incomplete reference analysis. Reuses the root's reference result across calls in the same
-    /// phase. The editor classifies each returned range with [`reclaim::collection_free_class`].
+    /// incomplete reference analysis. Scans the phase root and any retained roots once, then reuses
+    /// that result across calls in the same phase. The editor classifies each returned range with
+    /// [`reclaim::collection_free_class`].
     pub(super) fn unreferenced_collection_spans(
         &mut self,
         candidates: CollectionCandidates,
@@ -364,10 +376,12 @@ impl<'a> AnalysisPhase<'a> {
                 },
                 Ok,
             );
-            self.liveness =
-                Some(root.map_err(Error::from).and_then(|root| {
-                    self.collections_reachable_from([root.header_address().get()])
-                }));
+            self.liveness = Some(root.map_err(Error::from).and_then(|root| {
+                let retained = core::mem::take(&mut self.reference_roots);
+                self.collections_reachable_from(
+                    core::iter::once(root.header_address().get()).chain(retained),
+                )
+            }));
         }
         let Some(Ok(GlobalHeapLiveness {
             referenced_collections,
@@ -398,6 +412,51 @@ impl<'a> AnalysisPhase<'a> {
                 ))
             })
             .collect()
+    }
+
+    /// Collects candidate allocations and origins from the supplied objects' references.
+    ///
+    /// Reuses per-object summaries. Returns an empty union if reference interpretation fails or
+    /// is incomplete, and excludes collections whose allocation geometry cannot be parsed.
+    fn object_collections(
+        &mut self,
+        objects: impl IntoIterator<Item = ObjectId>,
+    ) -> CollectionCandidates {
+        let mut origins: BTreeMap<PhysicalAddress, BTreeSet<CollectionProvenance>> =
+            BTreeMap::new();
+        for object in objects {
+            let Ok(references) = self.read_references(object) else {
+                return CollectionCandidates::default();
+            };
+            if !references.complete {
+                return CollectionCandidates::default();
+            }
+            for &address in &references.collections {
+                origins
+                    .entry(PhysicalAddress::new(address))
+                    .or_default()
+                    .insert(CollectionProvenance {
+                        object,
+                        attribute: None,
+                    });
+            }
+        }
+        self.collection_candidates(origins)
+    }
+
+    fn collection_candidates(
+        &mut self,
+        origins: BTreeMap<PhysicalAddress, BTreeSet<CollectionProvenance>>,
+    ) -> CollectionCandidates {
+        let mut candidates = CollectionCandidates::default();
+        for (address, origins) in origins {
+            if let Ok(allocation) = self.collection_allocation(address) {
+                let Ok(()) = candidates.insert(allocation, origins) else {
+                    return CollectionCandidates::default();
+                };
+            }
+        }
+        candidates
     }
 
     /// Visits reference summaries for each distinct object reachable from `roots`.
@@ -453,6 +512,7 @@ impl<'a> AnalysisPhase<'a> {
             topology,
             budget: _,
             root: _,
+            reference_roots: _,
             links,
             references,
             liveness: _,
@@ -501,6 +561,7 @@ impl<'a> AnalysisPhase<'a> {
             topology,
             budget: _,
             root: _,
+            reference_roots: _,
             links,
             references,
             liveness,
@@ -829,7 +890,7 @@ struct ObjectReferences {
 /// Global heap allocations, keyed by physical address, and their object or attribute origins.
 ///
 /// The editor retains a complete allocation range from one editing session for each candidate.
-/// Reference absence is established separately against the prospective root.
+/// Reference absence is established separately against the prospective root union.
 #[derive(Default)]
 pub(super) struct CollectionCandidates {
     session: Option<AllocationSession>,
@@ -950,7 +1011,7 @@ struct AnalysisWork {
     collection_references: u64,
     /// Cached collection-allocation results, including errors.
     allocation_results: u64,
-    /// Cached root reference results, either zero or one.
+    /// Cached root-union reference results, either zero or one.
     liveness_results: u64,
     /// Candidate-membership queries against a complete reference set.
     candidate_lookups: u64,

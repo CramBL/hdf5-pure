@@ -23,6 +23,7 @@ mod collections;
 mod counts;
 mod foundations;
 mod reconstruction;
+mod retained;
 
 #[rstest]
 #[case::compact(4, false)]

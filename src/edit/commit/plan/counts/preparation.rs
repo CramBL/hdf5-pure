@@ -9,6 +9,7 @@ use super::PreparedCounts;
 use crate::ObjectReferenceCountUpdateIssue;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::CollectionCandidates;
 use crate::edit::analysis::CountPreflight;
 use crate::edit::analysis::CountStorage;
 use crate::edit::analysis::NetCountError;
@@ -34,14 +35,17 @@ pub(in crate::edit::commit) struct PreparedTreeCounts {
     pub(in crate::edit::commit) projection: CountProjectionProof,
     /// Supported original allocations and retained roots from the same count plan.
     pub(in crate::edit::commit) storage: CountStorage,
+    /// Collection allocations and origins from eligible objects in the original source phase.
+    pub(in crate::edit::commit) collections: CollectionCandidates,
 }
 
 impl PreparedTreeCounts {
     /// Prepares declared counts for the tree's same-file copies and deletion records.
     ///
     /// Uses the supplied analysis phase, preserves original count facts, and applies checked
-    /// changes to owned replacement records. Returns `None` when planning supplies no count
-    /// changes. Boxes nonempty work with its source protection and matching completion proof.
+    /// changes to owned replacement records. Retains collection candidates from eligible objects.
+    /// Returns `None` when planning supplies no count changes. Boxes nonempty work with its source
+    /// protection and matching completion proof.
     /// Source writes, reference completeness, admission, and retirement require separate evidence.
     ///
     /// # Errors
@@ -83,10 +87,12 @@ impl PreparedTreeCounts {
         if plan.evidence_changes().next().is_none() {
             return Ok(None);
         }
-        let storage = plan.collect_storage();
+        let mut storage = plan.collect_storage();
         let inventory = plan.owned_counts(engine).map_err(|error| {
             FormatError::Internal(format!("commit count handoff is inconsistent: {error:?}"))
         })?;
+        drop(plan);
+        let collections = storage.take_collections(analysis)?;
         let preflight = inventory.preflight(
             engine,
             nodes.values().flat_map(|node| {
@@ -108,6 +114,7 @@ impl PreparedTreeCounts {
             preflight,
             projection,
             storage,
+            collections,
         })))
     }
 }

@@ -1,5 +1,4 @@
 use core::num::NonZeroU32;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::collections::BTreeMap;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::sync::atomic::Ordering;
@@ -13,9 +12,11 @@ use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::allocation;
 use test_util::datatype;
+use test_util::global_heap::Object;
 use test_util::object_header::Message;
 use test_util::object_header::MessageFlags;
 use test_util::object_header::MessageType;
+use test_util_hdf5::global_heap_fixture;
 use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
 
@@ -29,7 +30,6 @@ use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::edit::WriteEngine;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::commit::plan::CommitPlan;
 use crate::edit::commit::plan::CommitPreparation;
@@ -98,6 +98,11 @@ fn commit_preparation_retains_exact_count_storage_and_source_protection(
             .matches(&counts.preflight.projection_identity())
     );
     assert!(counts.storage.same_session(&engine));
+    assert!(
+        AnalysisPhase::new(&engine)
+            .unreferenced_collection_spans(counts.collections)
+            .is_empty()
+    );
     assert_eq!(counts.storage.root(), Some(id(Fixture::ROOT)));
     if remaining == 0 {
         let mut allocations = counts.storage.allocations().to_vec();
@@ -125,6 +130,48 @@ fn commit_preparation_retains_exact_count_storage_and_source_protection(
             (id(target), remaining, header)
         );
     }
+    assert_eq!(engine.disk_bytes().unwrap(), before);
+}
+
+#[test]
+fn commit_preparation_retains_collections_from_count_eligible_objects() {
+    let path = test_util::temp::temp_path("prepared-count-collections.h5");
+    let mut fixture = Fixture::new();
+    let collection = fixture.collection(&[Object::new(1, b"value")]);
+    let mut messages = Form::CompactDataset.messages(
+        &mut fixture,
+        &global_heap_fixture::vlen_string(),
+        &global_heap_fixture::reference(5, collection, 1),
+    );
+    messages.push(Message::reference_count(2));
+    let owner = fixture.append_header(messages);
+    fixture.link("a", owner);
+    fixture.link("b", owner);
+    let replacement = fixture.append_header(vec![]);
+    fixture.write(&path);
+    let mut engine = edit_test_util::open_engine(&path);
+    let before = engine.disk_bytes().unwrap();
+    let allocation = engine.collection_span(collection).unwrap();
+    engine.delete(&ObjectPathBuf::parse("a")).unwrap();
+    engine.delete(&ObjectPathBuf::parse("b")).unwrap();
+    let staged = std::mem::take(&mut engine.staged);
+    engine.begin_commit(&staged);
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(&mut engine, staged) else {
+        panic!("expected count preparation");
+    };
+    let CommitPlan::Tree(tree) = prepared.plan else {
+        panic!("expected tree preparation")
+    };
+    let counts = tree.counts.unwrap();
+    assert_eq!(counts.storage.allocations().len(), 1);
+    assert_eq!(
+        counts
+            .storage
+            .reference_phase(&engine, PhysicalAddress::new(replacement), &BTreeMap::new())
+            .unwrap()
+            .unreferenced_collection_spans(counts.collections),
+        [(allocation, FreeClass::Page(PageType::Raw))]
+    );
     assert_eq!(engine.disk_bytes().unwrap(), before);
 }
 
