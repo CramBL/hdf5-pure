@@ -1,6 +1,8 @@
 //! Complete allocations, encoded ranges, and address dependencies for planned blocks.
 
-use hdf5_pure_core::__private::{FileRange, FileRegion};
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_space::__private::{Extent, ReservationPlacement, ReservationRequest};
 
@@ -23,12 +25,12 @@ impl PlannedBlock {
     ///
     /// Returns [`FormatError::Internal`] if the allocation length differs from the request.
     fn new(allocation: FileRange, request: BlockRequest) -> Result<Self, FormatError> {
-        if allocation.length() != request.reservation().size().get() {
+        if ByteLength::new(allocation.length()) != request.reservation().size().length() {
             return Err(FormatError::Internal(
                 "planned block allocation length differs from its request".into(),
             ));
         }
-        let encoding = FileRange::new(allocation.start(), request.encoded_length())?;
+        let encoding = FileRange::new(allocation.start(), request.encoded_length().get())?;
         Ok(Self {
             allocation,
             encoding,
@@ -78,13 +80,13 @@ impl PlannedBlock {
         address: StoredAddress,
         request: BlockRequest,
     ) -> Result<Self, FormatError> {
-        let encoding = AddressRange::new(address, request.encoded_length())?;
+        let encoding = AddressRange::new(address, request.encoded_length().get())?;
         if !allocation.range().contains(encoding) {
             return Err(FormatError::SerializationError(format!(
                 "a commit's tail reserved [{}, {}) but placed {} bytes at {}",
                 allocation.start().get(),
                 allocation.end().get(),
-                request.encoded_length(),
+                request.encoded_length().get(),
                 address.get(),
             )));
         }
@@ -95,7 +97,8 @@ impl PlannedBlock {
             )?,
             request,
         )?;
-        block.encoding = FileRange::new(addresses.resolve(address)?, request.encoded_length())?;
+        block.encoding =
+            FileRange::new(addresses.resolve(address)?, request.encoded_length().get())?;
         Ok(block)
     }
 
@@ -121,7 +124,7 @@ impl PlannedBlock {
     /// Returns [`FormatError::SerializationError`] if the byte length differs from the planned
     /// encoding length.
     pub(super) fn region<'a>(&self, bytes: &'a [u8]) -> Result<FileRegion<'a>, FormatError> {
-        if bytes.len() as u64 != self.encoding.length() {
+        if ByteLength::new(bytes.len() as u64) != self.request.encoded_length() {
             return Err(FormatError::SerializationError(format!(
                 "a placement reserved {} bytes but built {}",
                 self.encoding.length(),
@@ -138,7 +141,7 @@ impl PlannedBlock {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct BlockRequest {
     reservation: ReservationRequest,
-    encoded_length: u64,
+    encoded_length: ByteLength,
     dependency: EncodingDependency,
 }
 
@@ -150,13 +153,14 @@ impl BlockRequest {
     /// Returns [`FormatError::SerializationError`] if `encoded_length` exceeds the reservation size.
     pub(super) fn new(
         reservation: ReservationRequest,
-        encoded_length: u64,
+        encoded_length: ByteLength,
         dependency: EncodingDependency,
     ) -> Result<Self, FormatError> {
-        if encoded_length > reservation.size().get() {
+        if encoded_length > reservation.size().length() {
             return Err(FormatError::SerializationError(format!(
                 "a block reserves {} bytes but encodes {encoded_length}",
                 reservation.size().get(),
+                encoded_length = encoded_length.get(),
             )));
         }
         Ok(Self {
@@ -173,7 +177,7 @@ impl BlockRequest {
     ) -> Self {
         Self {
             reservation,
-            encoded_length: reservation.size().get(),
+            encoded_length: reservation.size().length(),
             dependency,
         }
     }
@@ -184,7 +188,7 @@ impl BlockRequest {
     }
 
     /// Returns the encoded byte length, which may be smaller than the allocation.
-    pub(super) fn encoded_length(self) -> u64 {
+    pub(super) fn encoded_length(self) -> ByteLength {
         self.encoded_length
     }
 

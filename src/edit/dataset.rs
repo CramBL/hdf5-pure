@@ -1324,7 +1324,8 @@ impl WriteEngine {
         })?;
         let metadata = index.requests()?;
         let paged = self.space.is_paged();
-        let (choice, mut reservations) = self.plan_created_array_storage(set, length, &metadata)?;
+        let (choice, mut reservations) =
+            self.plan_created_array_storage(set, ByteLength::new(length), &metadata)?;
         if !paged && choice == ReservationChoice::Preferred {
             let address = reservations
                 .addresses()
@@ -1405,7 +1406,7 @@ impl WriteEngine {
     fn plan_created_array_storage(
         &mut self,
         set: &CompressedChunkSet,
-        length: u64,
+        length: ByteLength,
         metadata: &[BlockRequest],
     ) -> Result<(ReservationChoice, ReservationPlan<'_>), Error> {
         let paged = self.space.is_paged();
@@ -1429,12 +1430,12 @@ impl WriteEngine {
                 offset
                     .checked_add(request.encoded_length())
                     .ok_or(FormatError::OffsetOverflow {
-                        offset,
-                        length: request.encoded_length(),
+                        offset: offset.get(),
+                        length: request.encoded_length().get(),
                     })
             })?
         };
-        if let Some(size) = NonZeroByteLength::new(preferred)
+        if let Some(size) = preferred.nonzero()
             && reuse
         {
             self.plan_blocks_with_fallback(
@@ -1469,7 +1470,7 @@ impl WriteEngine {
             )
         } else {
             let mut requests = Vec::new();
-            if let Some(size) = NonZeroByteLength::new(preferred) {
+            if let Some(size) = preferred.nonzero() {
                 requests.push(BlockRequest::complete(
                     ReservationRequest::new(size, AllocationClass::Raw),
                     dependency,

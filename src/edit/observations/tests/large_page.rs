@@ -197,7 +197,7 @@ fn request(allocation: u64, encoding: u64, page_type: PageType) -> BlockRequest 
             class,
             page_type,
         ),
-        encoding,
+        ByteLength::new(encoding),
         EncodingDependency::Independent,
     )
     .unwrap()

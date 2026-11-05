@@ -361,13 +361,21 @@ fn metadata_only_page_space_keeps_one_compound_payload_request() {
     )
     .unwrap();
     let set = super::contiguous::prepared(super::Creation::Fixed(40), true);
-    let length = set.chunks().iter().map(|chunk| chunk.stored_size()).sum();
+    let length = ByteLength::new(
+        set.chunks()
+            .iter()
+            .map(|chunk| chunk.stored_size())
+            .sum::<u64>(),
+    );
     let (choice, plan) = engine
         .plan_created_array_storage(&set, length, &[])
         .unwrap();
     assert_eq!(choice, ReservationChoice::Preferred);
     assert_eq!(plan.reservations().len(), 1);
-    assert_eq!(plan.reservations()[0].range().length(), length);
+    assert_eq!(
+        ByteLength::new(plan.reservations()[0].range().length()),
+        length
+    );
     assert_eq!(
         plan.reservations()[0].encoding_dependency(),
         EncodingDependency::Independent

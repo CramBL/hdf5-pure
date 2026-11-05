@@ -27,7 +27,7 @@ fn block_ranges_preserve_complete_owner_and_encoded_subrange(
             NonZeroByteLength::new(64).unwrap(),
             AllocationClass::Metadata,
         ),
-        encoded,
+        ByteLength::new(encoded),
         EncodingDependency::Allocation,
     )
     .unwrap();
@@ -67,7 +67,7 @@ fn block_encoding_outside_owned_allocation_is_rejected(#[case] address: u64, #[c
             NonZeroByteLength::new(64).unwrap(),
             AllocationClass::Metadata,
         ),
-        encoded,
+        ByteLength::new(encoded),
         EncodingDependency::Allocation,
     )
     .unwrap();
@@ -92,7 +92,7 @@ fn block_request_rejects_encoding_larger_than_allocation() {
     assert_eq!(
         BlockRequest::new(
             ReservationRequest::new(NonZeroByteLength::new(16).unwrap(), AllocationClass::Raw),
-            17,
+            ByteLength::new(17),
             EncodingDependency::Independent,
         )
         .unwrap_err(),

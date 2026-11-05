@@ -59,11 +59,11 @@ fn narrow_block_reservations_check_page_capacity_beyond_encoded_bytes(
     };
     let block = BlockRequest::new(
         request(2 * page_size.get(), PageType::Meta).for_block(),
-        page_size.get() + 1,
+        ByteLength::new(page_size.get() + 1),
         EncodingDependency::Allocation,
     )
     .unwrap();
-    assert!(base + start + block.encoded_length() < undefined);
+    assert!(base + start + block.encoded_length().get() < undefined);
     let error = cursor.reserve(block.reservation()).unwrap_err();
     assert_eq!(
         error,
@@ -491,7 +491,7 @@ fn streamed_reservations_keep_complete_capacity_and_following_blocks(
     let requests = [
         BlockRequest::new(
             request(64, PageType::Raw),
-            u64::try_from(encoded).unwrap(),
+            ByteLength::new(u64::try_from(encoded).unwrap()),
             EncodingDependency::Independent,
         )
         .unwrap(),
@@ -851,7 +851,7 @@ fn block_reservations_keep_capacity_separate_from_encoding(#[case] reused: bool)
     let requests = [
         BlockRequest::new(
             request(64, PageType::Raw),
-            16,
+            ByteLength::new(16),
             EncodingDependency::Independent,
         )
         .unwrap(),
@@ -961,7 +961,7 @@ fn large_appended_capacity_remains_owned_after_bounded_zero_emission() {
     let capacity = 196_624;
     let requests = [BlockRequest::new(
         request(capacity, PageType::Raw),
-        16,
+        ByteLength::new(16),
         EncodingDependency::Independent,
     )
     .unwrap()];
@@ -1023,7 +1023,7 @@ fn partial_zero_emission_blocks_later_reservations_and_retains_owned_capacity(
                     PageType::Meta
                 },
             ),
-            32,
+            ByteLength::new(32),
             EncodingDependency::Independent,
         )
         .unwrap(),
@@ -1113,7 +1113,7 @@ fn single_block_plans_preserve_complete_geometry_and_ordered_gaps(
     let requests = [
         BlockRequest::new(
             request(capacity, PageType::Meta).for_block(),
-            16,
+            ByteLength::new(16),
             EncodingDependency::Allocation,
         )
         .unwrap(),
