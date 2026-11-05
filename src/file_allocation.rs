@@ -3,7 +3,6 @@
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::ByteLength;
-use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
 use hdf5_pure_format::__private::FreeSection;
@@ -117,10 +116,10 @@ impl FileAllocation {
     /// window exceeds the selected address width in stored or physical coordinates.
     pub(crate) fn reserve(
         &mut self,
-        length: u64,
+        length: ByteLength,
         class: AllocationClass,
     ) -> Result<StoredAddress, FormatError> {
-        let Some(length) = NonZeroByteLength::new(length) else {
+        let Some(length) = length.nonzero() else {
             return Ok(self.end);
         };
         if let Some(extent) = self.space.allocate(length.length(), class) {
@@ -294,8 +293,12 @@ mod tests {
             Some(ByteLength::new(threshold)),
         )
         .unwrap();
-        allocation.reserve(64, AllocationClass::Metadata).unwrap();
-        allocation.reserve(32, AllocationClass::Raw).unwrap();
+        allocation
+            .reserve(ByteLength::new(64), AllocationClass::Metadata)
+            .unwrap();
+        allocation
+            .reserve(ByteLength::new(32), AllocationClass::Raw)
+            .unwrap();
         assert_eq!(allocation.space.reusable_sections().count(), 0);
         let (end, manager) = allocation.finish_persisted().unwrap();
         assert_eq!(manager.is_some(), has_manager);
@@ -341,13 +344,20 @@ mod tests {
     fn persistence_keeps_abandoned_and_settled_spare() {
         let mut allocation =
             FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
-        allocation.reserve(64, AllocationClass::Metadata).unwrap();
-        allocation.reserve(64, AllocationClass::Raw).unwrap();
         allocation
-            .reserve(2_000, AllocationClass::Metadata)
+            .reserve(ByteLength::new(64), AllocationClass::Metadata)
+            .unwrap();
+        allocation
+            .reserve(ByteLength::new(64), AllocationClass::Raw)
+            .unwrap();
+        allocation
+            .reserve(ByteLength::new(2_000), AllocationClass::Metadata)
             .unwrap();
         assert_eq!(
-            allocation.reserve(32, AllocationClass::Raw).unwrap().get(),
+            allocation
+                .reserve(ByteLength::new(32), AllocationClass::Raw)
+                .unwrap()
+                .get(),
             112
         );
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
@@ -381,7 +391,9 @@ mod tests {
     fn an_empty_free_list_emits_no_manager() {
         let mut allocation =
             FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
-        allocation.reserve(64, AllocationClass::Metadata).unwrap();
+        allocation
+            .reserve(ByteLength::new(64), AllocationClass::Metadata)
+            .unwrap();
         let (end, manager) = allocation.finish_persisted().unwrap();
         assert_eq!(end, StoredAddress::new(112));
         assert!(manager.is_none());
@@ -393,8 +405,12 @@ mod tests {
     fn persistent_manager_placement_checks_its_end(#[case] offset: u64, #[case] header: bool) {
         let mut allocation =
             FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
-        allocation.reserve(64, AllocationClass::Metadata).unwrap();
-        allocation.reserve(32, AllocationClass::Raw).unwrap();
+        allocation
+            .reserve(ByteLength::new(64), AllocationClass::Metadata)
+            .unwrap();
+        allocation
+            .reserve(ByteLength::new(32), AllocationClass::Raw)
+            .unwrap();
         allocation.end = StoredAddress::new(offset);
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let error = allocation.finish_persisted().unwrap_err();
@@ -433,10 +449,34 @@ mod tests {
             true,
             Some(ByteLength::new(threshold)),
         );
-        assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
-        assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
-        assert_eq!(allocation.reserve(2_000, class).unwrap().get(), 4_144);
-        assert_eq!(allocation.reserve(32, class).unwrap().get(), expected);
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(64), class)
+                .unwrap()
+                .get(),
+            48
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(64), other)
+                .unwrap()
+                .get(),
+            2_096
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(2_000), class)
+                .unwrap()
+                .get(),
+            4_144
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(32), class)
+                .unwrap()
+                .get(),
+            expected
+        );
         assert_eq!(allocation.end(), StoredAddress::new(6_192));
         assert_eq!(
             allocation.finish().unwrap(),
@@ -453,14 +493,56 @@ mod tests {
     ) {
         let mut allocation =
             FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
-        assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
-        assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(64), class)
+                .unwrap()
+                .get(),
+            48
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(64), other)
+                .unwrap()
+                .get(),
+            2_096
+        );
         assert_eq!(allocation.space.reusable_sections().count(), 0);
-        assert_eq!(allocation.reserve(2_000, class).unwrap().get(), 4_144);
-        assert_eq!(allocation.reserve(1_984, other).unwrap().get(), 112);
-        assert_eq!(allocation.reserve(1_984, other).unwrap().get(), 2_160);
-        assert_eq!(allocation.reserve(4_096, other).unwrap().get(), 6_192);
-        assert_eq!(allocation.reserve(32, class).unwrap().get(), 6_144);
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(2_000), class)
+                .unwrap()
+                .get(),
+            4_144
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(1_984), other)
+                .unwrap()
+                .get(),
+            112
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(1_984), other)
+                .unwrap()
+                .get(),
+            2_160
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(4_096), other)
+                .unwrap()
+                .get(),
+            6_192
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(32), class)
+                .unwrap()
+                .get(),
+            6_144
+        );
         assert_eq!(allocation.end(), StoredAddress::new(10_288));
         assert_eq!(allocation.finish().unwrap(), StoredAddress::new(10_288));
     }
@@ -474,10 +556,34 @@ mod tests {
         #[values(None, Some(ByteLength::new(1)))] threshold: Option<ByteLength>,
     ) {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), true, threshold);
-        assert_eq!(allocation.reserve(64, class).unwrap().get(), 48);
-        assert_eq!(allocation.reserve(64, other).unwrap().get(), 2_096);
-        assert_eq!(allocation.reserve(4_096, class).unwrap().get(), 4_144);
-        assert_eq!(allocation.reserve(32, class).unwrap().get(), 112);
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(64), class)
+                .unwrap()
+                .get(),
+            48
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(64), other)
+                .unwrap()
+                .get(),
+            2_096
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(4_096), class)
+                .unwrap()
+                .get(),
+            4_144
+        );
+        assert_eq!(
+            allocation
+                .reserve(ByteLength::new(32), class)
+                .unwrap()
+                .get(),
+            112
+        );
         assert_eq!(allocation.end(), StoredAddress::new(8_240));
         assert_eq!(allocation.finish().unwrap(), StoredAddress::new(8_240));
     }
@@ -495,13 +601,16 @@ mod tests {
         let mut allocation = FileAllocation::new(StoredAddress::new(48), aggregated, threshold);
         assert_eq!(
             allocation
-                .reserve(64, AllocationClass::Metadata)
+                .reserve(ByteLength::new(64), AllocationClass::Metadata)
                 .unwrap()
                 .get(),
             48
         );
         assert_eq!(
-            allocation.reserve(32, AllocationClass::Raw).unwrap().get(),
+            allocation
+                .reserve(ByteLength::new(32), AllocationClass::Raw)
+                .unwrap()
+                .get(),
             expected_end
         );
         assert_eq!(
@@ -526,11 +635,16 @@ mod tests {
         let mut allocation =
             FileAllocation::new(StoredAddress::new(u64::MAX), aggregated, threshold);
         assert_eq!(
-            allocation.reserve(0, AllocationClass::Raw).unwrap().get(),
+            allocation
+                .reserve(ByteLength::new(0), AllocationClass::Raw)
+                .unwrap()
+                .get(),
             u64::MAX
         );
         assert_eq!(
-            allocation.reserve(1, AllocationClass::Raw).unwrap_err(),
+            allocation
+                .reserve(ByteLength::new(1), AllocationClass::Raw)
+                .unwrap_err(),
             FormatError::OffsetOverflow {
                 offset: u64::MAX,
                 length
@@ -556,7 +670,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            exact.reserve(127, AllocationClass::Raw).unwrap(),
+            exact
+                .reserve(ByteLength::new(127), AllocationClass::Raw)
+                .unwrap(),
             StoredAddress::new(start)
         );
         assert_eq!(exact.end().get(), undefined - 1);
@@ -569,7 +685,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            sentinel.reserve(128, AllocationClass::Raw),
+            sentinel.reserve(ByteLength::new(128), AllocationClass::Raw),
             Err(FormatError::DefinedAddressIsUndefined {
                 address: undefined,
                 offset_size: width
@@ -595,7 +711,10 @@ mod tests {
                 offset_size: width,
             }
         };
-        assert_eq!(beyond.reserve(129, AllocationClass::Raw), Err(expected));
+        assert_eq!(
+            beyond.reserve(ByteLength::new(129), AllocationClass::Raw),
+            Err(expected)
+        );
         assert_eq!(beyond.end().get(), start);
     }
 
@@ -613,7 +732,7 @@ mod tests {
         .unwrap();
         let before = allocation.aggregates;
         assert_eq!(
-            allocation.reserve(1, AllocationClass::Metadata),
+            allocation.reserve(ByteLength::new(1), AllocationClass::Metadata),
             Err(FormatError::AddressTooLarge {
                 address: start + 2_048,
                 offset_size: 2
