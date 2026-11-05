@@ -21,6 +21,8 @@ use crate::object_path::ObjectPathBuf;
 
 use super::LinkRemovalPlan;
 
+mod source;
+
 #[rstest]
 #[case::one_alias(&["first"], 1)]
 #[case::final_aliases(&["first", "second"], 0)]
