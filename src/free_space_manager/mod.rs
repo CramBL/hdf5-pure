@@ -32,6 +32,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
+use crate::source::Source;
 use crate::width::FormatWidths;
 
 /// Reads the free sections of the managers at `manager_addrs` from the file `data`.
@@ -106,7 +107,7 @@ fn read_persisted_sections(
 pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<FileRange>);
 
 /// Recovers free sections and complete manager allocations through a random-access
-/// [`Source`](crate::Source).
+/// [`Source`].
 ///
 /// Adds `base` to stored addresses and skips undefined manager or section list addresses.
 /// Reads each section list's used bytes and records its allocated length for reclamation.
@@ -118,13 +119,88 @@ pub(crate) type PersistedSections = (Vec<FreeSection>, Vec<FileRange>);
 /// length, and [`FormatError::ValueTooLargeForPlatform`] if a required read length exceeds
 /// [`usize::MAX`]. Returns source read errors and the errors of [`FreeSpaceManagerHeader::parse`]
 /// and [`parse_section_info`](hdf5_pure_format::__private::parse_section_info) for each block.
-pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
+pub(crate) fn read_persisted_sections_source<S: Source>(
     src: &S,
     widths: FormatWidths,
     base: BaseAddress,
     manager_addrs: &[DecodedStoredAddress],
 ) -> Result<PersistedSections, FormatError> {
     let mut sections = Vec::new();
+    let blocks = read_persisted_with_sections(
+        src,
+        widths,
+        base,
+        manager_addrs,
+        |address, header, bytes| {
+            sections.extend(hdf5_pure_format::__private::parse_section_info(
+                widths, bytes, address, header,
+            )?);
+            Ok(())
+        },
+    )?;
+    Ok((sections, blocks))
+}
+
+/// Recovers complete physical manager allocations without retaining free-section records.
+///
+/// Skips undefined manager addresses. Includes each manager header even when its section-list
+/// address is undefined. Checks each section list's complete allocation against the source length,
+/// reads its used bytes, and checks its free-section records.
+///
+/// # Errors
+///
+/// Returns the address-conversion, source-read, and parsing errors of
+/// [`read_persisted_sections_source`].
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "allocation-only recovery has no production consumer"
+    )
+)]
+pub(crate) fn read_persisted_allocations_source(
+    src: &impl Source,
+    widths: FormatWidths,
+    base: BaseAddress,
+    manager_addrs: &[DecodedStoredAddress],
+) -> Result<Vec<FileRange>, FormatError> {
+    read_persisted_with_sections(
+        src,
+        widths,
+        base,
+        manager_addrs,
+        |address, header, bytes| {
+            hdf5_pure_format::__private::visit_section_info(
+                widths,
+                bytes,
+                address,
+                header,
+                |_section| {},
+            )
+        },
+    )
+}
+
+/// Reads manager headers and used section-list bytes while recording complete physical ranges.
+///
+/// Calls `read_sections` with each defined section list's stored header address, parsed header,
+/// and used bytes. Checks the full allocation against the source length before reading the list.
+///
+/// # Errors
+///
+/// Returns the callback's error or the address-conversion, source-read, and header-parsing errors
+/// of [`read_persisted_sections_source`].
+fn read_persisted_with_sections(
+    src: &impl Source,
+    widths: FormatWidths,
+    base: BaseAddress,
+    manager_addrs: &[DecodedStoredAddress],
+    mut read_sections: impl FnMut(
+        StoredAddress,
+        &FreeSpaceManagerHeader,
+        &[u8],
+    ) -> Result<(), FormatError>,
+) -> Result<Vec<FileRange>, FormatError> {
     let mut blocks = Vec::new();
     let hdr_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
     for &addr in manager_addrs {
@@ -151,12 +227,10 @@ pub(crate) fn read_persisted_sections_source<S: crate::source::Source>(
             )));
         }
         let block = src.read_exact_at(fa.get(), used.to_usize()?)?;
-        sections.extend(hdf5_pure_format::__private::parse_section_info(
-            widths, &block, addr, &header,
-        )?);
+        read_sections(addr, &header, &block)?;
         blocks.push(range);
     }
-    Ok((sections, blocks))
+    Ok(blocks)
 }
 
 /// Returns the semantic kind represented by File Space Info manager `slot` for `strategy`.
@@ -809,12 +883,12 @@ mod tests {
 
     use crate::address::StoredAddressExt;
     use crate::file_space_info::FileSpacePageSize;
-    use crate::source::Source;
     use crate::width::OffsetWidth;
 
     use super::*;
 
     mod placement;
+    mod visiting;
 
     /// A free section at `addr` spanning `size` bytes.
     fn section(addr: u64, size: u64) -> FreeSection {
