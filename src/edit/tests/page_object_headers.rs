@@ -55,16 +55,19 @@ fn complete_object_headers_use_checked_block_placement(
         .build();
     assert_eq!(header.len(), length);
     let address = engine.place_object_header(&header).unwrap();
-    assert_eq!(address, physical + PAGE);
     assert_eq!(
-        engine
-            .oh_chunk_spans(PhysicalAddress::new(address))
-            .unwrap()[0]
-            .length(),
+        address.header_address(),
+        PhysicalAddress::new(physical + PAGE)
+    );
+    assert_eq!(
+        engine.oh_chunk_spans(address.header_address()).unwrap()[0].length(),
         length as u64
     );
     assert_eq!(
-        engine.image().read_exact_at(address, length).unwrap(),
+        engine
+            .image()
+            .read_exact_at(address.header_address().get(), length)
+            .unwrap(),
         header
     );
     if reused {
@@ -74,7 +77,10 @@ fn complete_object_headers_use_checked_block_placement(
             [13; 4_096]
         );
     } else {
-        assert_eq!(engine.image.len(), address + length as u64);
+        assert_eq!(
+            engine.image.len(),
+            address.header_address().get() + length as u64
+        );
         assert_eq!(
             engine.image().read_exact_at(physical + 4_000, 96).unwrap(),
             [0; 96]
@@ -83,13 +89,13 @@ fn complete_object_headers_use_checked_block_placement(
     let next = Header::new().build();
     let next_address = engine.place_object_header(&next).unwrap();
     assert_eq!(
-        next_address,
+        next_address.header_address().get(),
         if reused {
             physical + 4_000
         } else if length == 4_095 {
-            address + PAGE
+            address.header_address().get() + PAGE
         } else {
-            address + length as u64
+            address.header_address().get() + length as u64
         }
     );
 }
@@ -105,7 +111,13 @@ fn flat_object_header_placement_keeps_the_current_tail() {
     engine.append(&[13; 7]).unwrap();
     let address = engine.image.len();
     let header = Header::new().build();
-    assert_eq!(engine.place_object_header(&header).unwrap(), address);
+    assert_eq!(
+        engine
+            .place_object_header(&header)
+            .unwrap()
+            .header_address(),
+        PhysicalAddress::new(address)
+    );
     assert_eq!(engine.image.len(), address + header.len() as u64);
 }
 

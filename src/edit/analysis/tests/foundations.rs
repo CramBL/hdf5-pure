@@ -86,7 +86,13 @@ fn foundation_analysis_preserves_candidate_origins_and_completeness(
     assert_eq!(captured.allocation_results, 2);
     COLLECTION_WORK.with(|work| work.set((0, 0)));
     let mut prospective = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
-    assert_eq!(prospective.topology().unwrap().incoming(dataset), Some(2));
+    assert_eq!(
+        prospective
+            .topology()
+            .unwrap()
+            .incoming(super::object(dataset)),
+        Some(2)
+    );
     let topology = prospective.work();
     assert_eq!(topology.topology_objects, if partial { 3 } else { 2 });
     assert_eq!(topology.topology_edges, if partial { 3 } else { 2 });

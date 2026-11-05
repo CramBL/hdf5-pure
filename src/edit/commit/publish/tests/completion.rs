@@ -21,6 +21,8 @@ use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::Layout;
 use crate::UserblockSize;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::convert;
 use crate::edit::SyncPolicy;
 use crate::edit::WriteEngine;
@@ -29,6 +31,7 @@ use crate::edit::retirement::RootRetirement;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::image::WriteBuffering;
+use crate::object_graph::ObjectId;
 use crate::writer::FileBuilder;
 
 #[rstest]
@@ -254,7 +257,10 @@ fn completion_runs_after_stored_references_are_updated(#[case] failure: Option<R
         .resolve(engine.superblock().root_group_address)
         .unwrap();
     let mut tree = tree(root);
-    tree.relocations.insert(original, root.get());
+    tree.relocations.insert(
+        ObjectId::resolve(engine.addresses(), StoredAddress::new(original)).unwrap(),
+        ObjectId::new(root),
+    );
     let called = Cell::new(false);
     disk_log::start();
     match failure {
@@ -445,7 +451,10 @@ impl Strategy {
             .image()
             .read_exact_at(root.get(), usize::try_from(predecessor.length()).unwrap())
             .unwrap();
-        let requested = PhysicalAddress::new(engine.place_object_header(&current).unwrap());
+        let requested = engine
+            .place_object_header(&current)
+            .unwrap()
+            .header_address();
         assert!(requested > root);
         assert_eq!(
             engine.oh_chunk_spans(requested).unwrap(),

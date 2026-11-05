@@ -522,7 +522,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                 let object = WriteEngine::read_object(
                     &engine.opened_source(),
                     AccessMode::ReadWrite,
-                    ObjectId::new(PhysicalAddress::new(addr)),
+                    addr,
                     engine.context.widths(),
                 )
                 .unwrap();
@@ -532,22 +532,22 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                     dense_attrs,
                 } = object
                 else {
-                    panic!("expected a group at {addr}");
+                    panic!("expected a group at {addr:?}");
                 };
                 assert!(dense_attrs.is_empty());
                 let [link] = links.as_slice() else {
-                    panic!("expected one hard link at {addr}, got {}", links.len());
+                    panic!("expected one hard link at {addr:?}, got {}", links.len());
                 };
                 assert_eq!(
                     link_messages(&region),
                     [file_writer::make_link("g", link.target)]
                 );
-                addr = base.resolve(link.target).unwrap().get();
+                addr = ObjectId::resolve(base, link.target).unwrap();
             }
             let leaf = WriteEngine::read_object(
                 &engine.opened_source(),
                 AccessMode::ReadWrite,
-                ObjectId::new(PhysicalAddress::new(addr)),
+                addr,
                 engine.context.widths(),
             )
             .unwrap();
@@ -557,7 +557,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                 dense_attrs,
             } = leaf
             else {
-                panic!("expected a group at {addr}");
+                panic!("expected a group at {addr:?}");
             };
             assert!(links.is_empty());
             assert_eq!(link_messages(&region), []);
@@ -607,11 +607,11 @@ fn a_copy_within_its_traversal_budget_is_read_in_full() {
     let ObjModel::Group { region, links, .. } = WriteEngine::read_object(
         &engine.opened_source(),
         AccessMode::ReadWrite,
-        ObjectId::new(PhysicalAddress::new(addr)),
+        addr,
         engine.context.widths(),
     )
     .unwrap() else {
-        panic!("expected a group at {addr}");
+        panic!("expected a group at {addr:?}");
     };
     assert_eq!(
         link_messages(&region),

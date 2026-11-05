@@ -1,3 +1,4 @@
+use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType as WireType;
@@ -9,6 +10,7 @@ use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
 use crate::file_writer;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_header::ObjectHeader;
 use crate::width::OffsetWidth;
 
@@ -58,7 +60,9 @@ fn modern_link_storage_keeps_the_version_1_prefix_count() {
     fixture.link("g", address);
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);
-    let group::GroupInfo { mut region, links } = engine.reconstruct_v1_group(address).unwrap();
+    let group::GroupInfo { mut region, links } = engine
+        .reconstruct_v1_group(ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap();
     assert!(links.links().is_empty());
     assert_eq!(region.reference_count_mut().unwrap().count(), 3);
 }

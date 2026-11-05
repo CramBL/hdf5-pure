@@ -47,10 +47,7 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
         .find_link(&ObjectPathBuf::parse("g"))
         .unwrap();
     let source = phase.reconstruction_source(&engine, object).unwrap();
-    let mut region = engine
-        .inspect_group(object.header_address().get())
-        .unwrap()
-        .region;
+    let mut region = engine.inspect_group(object).unwrap().region;
     let original = region.reference_count_mut().unwrap().count();
     assert_eq!(original, 2);
     region =

@@ -13,6 +13,7 @@ use super::ProtectedCounts;
 use crate::edit::WriteEngine;
 use crate::edit::commit::PublishedTree;
 use crate::error::Error;
+use crate::object_graph::ObjectId;
 
 mod write;
 
@@ -33,7 +34,7 @@ impl CountPublicationBounds<'_> {
     /// post-publication checks fail. Returns the error from `complete` if completion fails.
     pub(in crate::edit) fn with_publication<T>(
         self,
-        relocations: BTreeMap<u64, u64>,
+        relocations: BTreeMap<ObjectId, ObjectId>,
         complete: impl for<'engine, 'counts> FnOnce(
             Result<CountWriteScope<'engine, 'counts>, CountCompletionError>,
         ) -> Result<T, Error>,

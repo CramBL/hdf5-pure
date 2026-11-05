@@ -133,7 +133,7 @@ impl RemovedLinks<'_, '_> {
     pub(in crate::edit) fn collect_free_spans(
         self,
         out: &mut Vec<(FileRange, FreeClass)>,
-    ) -> Vec<u64> {
+    ) -> Vec<ObjectId> {
         let Self {
             topology,
             edges,
@@ -143,7 +143,6 @@ impl RemovedLinks<'_, '_> {
             .into_iter()
             .map(|(_, object)| object)
             .chain(unresolved)
-            .map(|object| object.header_address().get())
             .collect::<Vec<_>>();
         targets.sort_unstable();
         targets.dedup();

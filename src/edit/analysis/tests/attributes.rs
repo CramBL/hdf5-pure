@@ -88,7 +88,7 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
         .unwrap();
     candidates.extend(CollectionCandidates::default()).unwrap();
     candidates
-        .extend(phase.deleted_collections(&[deleted]))
+        .extend(phase.deleted_collections(&[super::object(deleted)]))
         .unwrap();
     assert_eq!(COLLECTION_ALLOCATIONS.with(Cell::get), 1);
     assert_eq!(candidates.collections.len(), 1);
@@ -154,7 +154,7 @@ fn allocator_restoration_does_not_restore_attribute_reference_facts() {
     let range = candidates.collections[&PhysicalAddress::new(first)].range;
     assert_eq!(
         predecessor
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([super::object(Fixture::ROOT)])
             .unwrap()
             .referenced_collections,
         BTreeSet::from([first])
@@ -176,7 +176,7 @@ fn allocator_restoration_does_not_restore_attribute_reference_facts() {
     engine.image.write_at(owner, &original).unwrap();
     assert_eq!(
         AnalysisPhase::new(&engine)
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([super::object(Fixture::ROOT)])
             .unwrap()
             .referenced_collections,
         BTreeSet::from([first])

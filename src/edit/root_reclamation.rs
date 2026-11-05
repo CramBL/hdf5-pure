@@ -6,6 +6,7 @@ use hdf5_pure_space::__private::ReturnedExtents;
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
+use crate::object_graph::ObjectId;
 
 use super::FreeClass;
 use super::FreeExtent;
@@ -76,7 +77,7 @@ impl WriteEngine {
         let Some(incoming) = self.count_incoming_hard_links() else {
             return Ok(None);
         };
-        if incoming.incoming(old_root.get()).is_some() {
+        if incoming.incoming(ObjectId::new(old_root)).is_some() {
             return Ok(None);
         }
         let Some(target) = self.stored_extent(*target_range) else {

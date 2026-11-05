@@ -64,7 +64,7 @@ fn removed_alias_counts_use_distinct_physical_edges(
             Vec::new()
         }
     );
-    assert_eq!(plan.topology.incoming(value), Some(2));
+    assert_eq!(plan.topology.incoming(id(value)), Some(2));
 }
 
 #[test]
@@ -367,9 +367,9 @@ fn inconsistent_original_counts_return_an_internal_error(
         .unwrap();
     let topology = phase.topology.as_mut().unwrap().as_mut().unwrap();
     if let Some(count) = count {
-        topology.incoming.insert(value, count);
+        topology.incoming.insert(id(value), count);
     } else {
-        topology.incoming.remove(&value);
+        topology.incoming.remove(&id(value));
     }
     let Err(error) = phase.count_evidence(id(value)) else {
         panic!("expected an inconsistent topology count error");
@@ -431,7 +431,7 @@ fn decrement_criteria_control_outgoing_propagation_before_queueing(#[case] relea
             initializations.set(initializations.get() + 1);
             let object = topology.graph.object(index).value.id;
             Ok::<_, FormatError>((
-                topology.incoming(object.header_address().get()).unwrap(),
+                topology.incoming(object).unwrap(),
                 release || object != id(owner),
             ))
         },
@@ -523,8 +523,8 @@ fn criterion_failures_are_returned_without_visiting_outgoing_edges(#[case] stage
         decrements.get(),
         usize::from(stage == CriterionStage::Decrement)
     );
-    assert_eq!(topology.incoming(child), Some(1));
-    assert_eq!(topology.incoming(owner), Some(1));
+    assert_eq!(topology.incoming(id(child)), Some(1));
+    assert_eq!(topology.incoming(id(owner)), Some(1));
 }
 
 #[derive(Debug, Eq, PartialEq)]

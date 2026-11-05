@@ -77,11 +77,9 @@ impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
             edges,
             |index| {
                 let object = topology.graph.object(index).value.id;
-                topology
-                    .incoming(object.header_address().get())
-                    .ok_or_else(|| {
-                        FormatError::Internal("a removed link target has no incoming count".into())
-                    })
+                topology.incoming(object).ok_or_else(|| {
+                    FormatError::Internal("a removed link target has no incoming count".into())
+                })
             },
             |count| {
                 *count = count.checked_sub(1).ok_or_else(|| {
@@ -107,11 +105,12 @@ impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
                 work: _,
         } = self;
         let &index = topology.indices.get(&object)?;
-        Some(remaining.get(&index).copied().unwrap_or_else(|| {
-            topology
-                .incoming(object.header_address().get())
-                .unwrap_or(0)
-        }))
+        Some(
+            remaining
+                .get(&index)
+                .copied()
+                .unwrap_or_else(|| topology.incoming(object).unwrap_or(0)),
+        )
     }
 
     /// Returns non-root objects that reached zero, once each, in transition order.

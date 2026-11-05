@@ -194,7 +194,7 @@ impl<'a> AnalysisPhase<'a> {
         CountQueries::new(self.engine, &mut self.counts, None).observation(object)
     }
 
-    /// Returns collection references reachable from physical object-header addresses in `roots`.
+    /// Returns collection references reachable from the objects identified by `roots`.
     ///
     /// Reuses per-object adjacency and reference summaries. The completeness flag covers the
     /// supplied root set.
@@ -205,7 +205,7 @@ impl<'a> AnalysisPhase<'a> {
     /// content.
     pub(super) fn collections_reachable_from(
         &mut self,
-        roots: impl IntoIterator<Item = u64>,
+        roots: impl IntoIterator<Item = ObjectId>,
     ) -> Result<GlobalHeapLiveness, Error> {
         let mut referenced_collections = BTreeSet::new();
         let analysis_complete = self.scan_collections(roots, |_, references| {
@@ -219,9 +219,9 @@ impl<'a> AnalysisPhase<'a> {
 
     /// Returns collection candidates referenced by deleted objects and their descendants.
     ///
-    /// `deleted` contains physical object-header addresses. Returns an empty union if reference
+    /// `deleted` identifies the deleted objects. Returns an empty union if reference
     /// discovery fails or is incomplete. Collections that cannot be parsed are excluded.
-    pub(super) fn deleted_collections(&mut self, deleted: &[u64]) -> CollectionCandidates {
+    pub(super) fn deleted_collections(&mut self, deleted: &[ObjectId]) -> CollectionCandidates {
         if deleted.is_empty() {
             return CollectionCandidates::default();
         }
@@ -358,10 +358,10 @@ impl<'a> AnalysisPhase<'a> {
                 },
                 Ok,
             );
-            self.liveness =
-                Some(root.map_err(Error::from).and_then(|root| {
-                    self.collections_reachable_from([root.header_address().get()])
-                }));
+            self.liveness = Some(
+                root.map_err(Error::from)
+                    .and_then(|root| self.collections_reachable_from([root])),
+            );
         }
         let Some(Ok(GlobalHeapLiveness {
             referenced_collections,
@@ -404,16 +404,10 @@ impl<'a> AnalysisPhase<'a> {
     /// content.
     fn scan_collections(
         &mut self,
-        roots: impl IntoIterator<Item = u64>,
+        roots: impl IntoIterator<Item = ObjectId>,
         mut visit: impl FnMut(ObjectId, &ObjectReferences),
     ) -> Result<bool, Error> {
-        let mut traversal = ObjectTraversal::new(
-            roots
-                .into_iter()
-                .map(|address| ObjectId::new(PhysicalAddress::new(address))),
-            self.budget,
-            MAX_LINK_WALK_DEPTH,
-        );
+        let mut traversal = ObjectTraversal::new(roots, self.budget, MAX_LINK_WALK_DEPTH);
         let mut complete = true;
         while let Some((object, depth)) = traversal.next() {
             let references = self.read_references(object)?;
@@ -422,8 +416,8 @@ impl<'a> AnalysisPhase<'a> {
             if let Some(Some(topology)) = &self.topology
                 && topology.indices.contains_key(&object)
             {
-                for child in topology.children(object.header_address().get()) {
-                    traversal.push_child(ObjectId::new(PhysicalAddress::new(child)), depth);
+                for child in topology.children(object) {
+                    traversal.push_child(child, depth);
                 }
             } else if let Some(links) = self.links.get(&object) {
                 for link in &links.links {
@@ -584,7 +578,7 @@ pub(super) struct CompleteTopology<'a> {
     engine: &'a WriteEngine,
     graph: ObjectGraph<TopologyObject, ()>,
     indices: BTreeMap<ObjectId, ObjectIndex>,
-    incoming: HashMap<u64, u32>,
+    incoming: HashMap<ObjectId, u32>,
 }
 
 impl<'a> CompleteTopology<'a> {
@@ -663,9 +657,7 @@ impl<'a> CompleteTopology<'a> {
                 return Err(error.into());
             }
             for link in &links {
-                let count = incoming
-                    .entry(link.target.header_address().get())
-                    .or_insert(0_u32);
+                let count = incoming.entry(link.target).or_insert(0_u32);
                 *count = count.checked_add(1).ok_or(Error::TraversalLimitExceeded {
                     limit: TraversalLimit::Links,
                     maximum: u32::MAX as usize,
@@ -706,36 +698,29 @@ impl<'a> CompleteTopology<'a> {
     /// Uses the reclamation policy of [`WriteEngine::collect_free_spans`], starting at `depth`.
     pub(super) fn collect_free_spans(
         &self,
-        address: u64,
+        address: ObjectId,
         depth: u32,
         out: &mut Vec<(FileRange, FreeClass)>,
     ) {
         self.engine.collect_free_spans(address, depth, self, out);
     }
 
-    /// Returns the number of hard links targeting a physical object-header address.
+    /// Returns the number of hard links targeting an object.
     ///
     /// Returns `None` if the topology contains no link to `address`.
-    pub(super) fn incoming(&self, address: u64) -> Option<u32> {
+    pub(super) fn incoming(&self, address: ObjectId) -> Option<u32> {
         self.incoming.get(&address).copied()
     }
 
-    /// Returns physical child-header addresses in the owner's link order.
+    /// Returns child identities in the owner's link order.
     ///
     /// Includes repeated targets. Returns an empty iterator if `address` is absent.
-    pub(super) fn children(&self, address: u64) -> impl Iterator<Item = u64> + '_ {
+    pub(super) fn children(&self, address: ObjectId) -> impl Iterator<Item = ObjectId> + '_ {
         self.indices
-            .get(&ObjectId::new(PhysicalAddress::new(address)))
+            .get(&address)
             .into_iter()
             .flat_map(|&index| &self.graph.object(index).links)
-            .map(|link| {
-                self.graph
-                    .object(link.target)
-                    .value
-                    .id
-                    .header_address()
-                    .get()
-            })
+            .map(|link| self.graph.object(link.target).value.id)
     }
 
     /// Follows indexed link names from the root, returning the final edge and target identity.

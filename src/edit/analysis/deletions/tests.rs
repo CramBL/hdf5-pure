@@ -11,6 +11,7 @@ use crate::edit::analysis::DISCOVERY_WORK;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::object_graph::ObjectId;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
@@ -35,8 +36,14 @@ fn removed_edge_multiplicity_is_separate_from_distinct_targets(
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     let topology = phase.topology().unwrap();
-    assert_eq!(topology.incoming(owner), Some(2));
-    assert_eq!(topology.incoming(value), Some(2));
+    assert_eq!(
+        topology.incoming(ObjectId::new(PhysicalAddress::new(owner))),
+        Some(2)
+    );
+    assert_eq!(
+        topology.incoming(ObjectId::new(PhysicalAddress::new(value))),
+        Some(2)
+    );
     let deletions = paths
         .iter()
         .map(|path| topology.deletion(&ObjectPathBuf::parse(path)).unwrap())
@@ -57,7 +64,11 @@ fn removed_edge_multiplicity_is_separate_from_distinct_targets(
     let mut spans = Vec::new();
     assert_eq!(
         removed.collect_free_spans(&mut spans),
-        [if leaf { value } else { owner }]
+        [ObjectId::new(PhysicalAddress::new(if leaf {
+            value
+        } else {
+            owner
+        }))]
     );
     assert!(spans.is_empty());
 }
@@ -92,7 +103,7 @@ fn removed_edges_reject_another_topology_from_the_same_source() {
             .removed_links([&deletion])
             .unwrap()
             .collect_free_spans(&mut Vec::new()),
-        [value]
+        [ObjectId::new(PhysicalAddress::new(value))]
     );
 }
 
@@ -114,7 +125,10 @@ fn incomplete_topology_preserves_deletion_targets_without_allocation_retirement(
     let removed = phase.removed_links([&deletion]).unwrap();
     assert!(removed.topology.is_none());
     assert!(removed.edges.is_empty());
-    assert_eq!(removed.collect_free_spans(&mut spans), [value]);
+    assert_eq!(
+        removed.collect_free_spans(&mut spans),
+        [ObjectId::new(PhysicalAddress::new(value))]
+    );
     assert!(spans.is_empty());
 }
 

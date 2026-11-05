@@ -511,18 +511,14 @@ impl WriteEngine {
     /// [`AnalysisPhase::unreferenced_collection_spans`].
     pub(super) fn collect_free_spans(
         &self,
-        addr: u64,
+        addr: ObjectId,
         depth: u32,
         incoming: &CompleteTopology<'_>,
         out: &mut Vec<(FileRange, FreeClass)>,
     ) {
-        // `addr` is an absolute file offset (the caller resolves it from the live
-        // file, and the topology retains each child's physical address). `incoming`
-        // is keyed by absolute offset, and `oh_chunk_spans`/`chunked_storage_spans`
-        // both take an absolute address and return absolute spans, so the whole
-        // walk works in absolute file offsets. The stored address `read_object`
-        // returns for a contiguous data block is converted to an absolute offset
-        // before it is bounds-checked or recorded.
+        // `addr` and the topology keys retain object identities throughout the walk.
+        // `collect_object_storage` resolves stored contiguous-data addresses before bounds
+        // checks and records physical allocation ranges.
         if depth >= MAX_LINK_WALK_DEPTH {
             return;
         }
@@ -533,9 +529,7 @@ impl WriteEngine {
         if incoming.incoming(addr) != Some(1) {
             return;
         }
-        if self.collect_object_storage(ObjectId::new(PhysicalAddress::new(addr)), out)
-            == Some(ObjectStorageKind::Group)
-        {
+        if self.collect_object_storage(addr, out) == Some(ObjectStorageKind::Group) {
             for child in incoming.children(addr) {
                 self.collect_free_spans(child, depth + 1, incoming, out);
             }

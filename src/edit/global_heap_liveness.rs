@@ -17,6 +17,7 @@ use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::fill_value::FillValueView;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::read_spec::RawReadSpec;
@@ -62,17 +63,15 @@ impl WriteEngine {
     /// variable-length elements is malformed, and [`Error::MissingMessage`] if a dataset lacks its
     /// datatype or dataspace message.
     pub(crate) fn global_heap_liveness(&self) -> Result<GlobalHeapLiveness, Error> {
-        self.collections_reachable_from([self
-            .context
-            .addresses()
-            .resolve(self.context.superblock().root_group_address)?
-            .get()])
+        self.collections_reachable_from([ObjectId::resolve(
+            self.context.addresses(),
+            self.context.superblock().root_group_address,
+        )?])
     }
 
     /// Returns the global heap collections that the objects reachable from the object headers in
     /// `roots` refer to.
     ///
-    /// `roots` holds absolute addresses, and
     /// [`global_heap_liveness`](Self::global_heap_liveness) passes the root group alone.
     ///
     /// # Errors
@@ -80,7 +79,7 @@ impl WriteEngine {
     /// Returns the errors of [`global_heap_liveness`](Self::global_heap_liveness).
     pub(super) fn collections_reachable_from(
         &self,
-        roots: impl IntoIterator<Item = u64>,
+        roots: impl IntoIterator<Item = ObjectId>,
     ) -> Result<GlobalHeapLiveness, Error> {
         AnalysisPhase::new(self).collections_reachable_from(roots)
     }

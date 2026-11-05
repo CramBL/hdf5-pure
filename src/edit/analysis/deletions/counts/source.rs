@@ -106,11 +106,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
         } = &self.plan;
         let &index = topology.indices.get(&object)?;
         Some(remaining.get(&index).map_or_else(
-            || {
-                topology
-                    .incoming(object.header_address().get())
-                    .unwrap_or(0)
-            },
+            || topology.incoming(object).unwrap_or(0),
             |state| state.graph,
         ))
     }
@@ -247,11 +243,9 @@ impl<'source> SourceCountState<'source> {
         query: &mut impl FnMut(ObjectId) -> Result<Option<CountEvidence<'source>>, CountEvidenceError>,
     ) -> Result<Self, CountEvidenceError> {
         let object = topology.graph.object(index).value.id;
-        let graph = topology
-            .incoming(object.header_address().get())
-            .ok_or_else(|| {
-                FormatError::Internal("a removed link target has no incoming count".into())
-            })?;
+        let graph = topology.incoming(object).ok_or_else(|| {
+            FormatError::Internal("a removed link target has no incoming count".into())
+        })?;
         let evidence = query(object)?;
         if evidence.as_ref().is_some_and(|evidence| {
             let bound = evidence.bound();

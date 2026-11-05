@@ -19,6 +19,7 @@ use crate::error::Error;
 use crate::file_writer;
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::LinkNameBuf;
 use crate::reader::OpenedSource;
 use crate::shared_message::DatatypeLocation;
@@ -144,10 +145,10 @@ fn append_native_dataset(widths: FormatWidths, index_case: IndexCase, filtered: 
     let plan = {
         let source = BytesSource::new(bytes.as_slice());
         let opened = OpenedSource::for_test(&source, addresses);
-        let dataset_addr = addresses.resolve(object_header_address).unwrap().get();
+        let dataset_addr = ObjectId::resolve(addresses, object_header_address).unwrap();
         let region = WriteEngine::gather_oh_messages(
             &source,
-            PhysicalAddress::new(dataset_addr),
+            dataset_addr.header_address(),
             addresses,
             widths,
         )
@@ -402,7 +403,7 @@ fn finite_append_rejects_growth_beyond_native_maximum(
     builder.append(&[4_u32, 5]);
     let error = WriteEngine::prepare_append(
         &OpenedSource::for_test(&source, addresses),
-        addresses.resolve(object_header_address).unwrap().get(),
+        ObjectId::resolve(addresses, object_header_address).unwrap(),
         &builder,
         widths,
     )

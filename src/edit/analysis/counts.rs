@@ -147,11 +147,7 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
         if index == ObjectIndex::ROOT {
             return Ok(None);
         }
-        let Some(incoming) = incoming
-            .get(&object.header_address().get())
-            .copied()
-            .and_then(NonZeroU32::new)
-        else {
+        let Some(incoming) = incoming.get(&object).copied().and_then(NonZeroU32::new) else {
             return Err(CountEvidenceError::Topology(FormatError::Internal(
                 "a discovered non-root object has no positive incoming count".into(),
             )));
