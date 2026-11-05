@@ -28,3 +28,4 @@ mod page_manager_accounting;
 mod page_managers;
 mod page_object_headers;
 mod paged_index;
+mod physical_storage;
