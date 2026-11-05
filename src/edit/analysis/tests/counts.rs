@@ -75,8 +75,10 @@ fn count_queries_are_lazy_cached_and_bound_to_source_contents(
     assert_eq!(calls.load(Ordering::Relaxed), read_calls);
     assert_eq!(bytes.load(Ordering::Relaxed), read_bytes);
     assert!(phase.topology.is_none() && phase.links.is_empty() && phase.references.is_empty());
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(2));
-    let references = phase.collections_reachable_from([Fixture::ROOT]).unwrap();
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(2));
+    let references = phase
+        .collections_reachable_from([ObjectId::new(PhysicalAddress::new(Fixture::ROOT))])
+        .unwrap();
     assert!(references.analysis_complete && references.referenced_collections.is_empty());
     assert_eq!(phase.counts.len(), 1);
     let after_enrichment = calls.load(Ordering::Relaxed);
@@ -122,8 +124,11 @@ fn count_completeness_does_not_replace_other_phase_facts(#[case] form: CountForm
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
     DISCOVERY_WORK.with(|work| work.set((0, 0)));
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(1));
-    let references = phase.collections_reachable_from([Fixture::ROOT]).unwrap();
+    let object = ObjectId::new(PhysicalAddress::new(address));
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(1));
+    let references = phase
+        .collections_reachable_from([ObjectId::new(PhysicalAddress::new(Fixture::ROOT))])
+        .unwrap();
     assert!(references.analysis_complete && references.referenced_collections.is_empty());
     let allocation = phase
         .collection_allocation(PhysicalAddress::new(collection))
@@ -136,16 +141,11 @@ fn count_completeness_does_not_replace_other_phase_facts(#[case] form: CountForm
             ObjectReferenceCount::Unsupported(ObjectReferenceCountIssue::MessageVersion(1))
         }
     };
+    assert_eq!(phase.object_reference_count(object).unwrap(), expected);
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(1));
     assert_eq!(
         phase
-            .object_reference_count(ObjectId::new(PhysicalAddress::new(address)))
-            .unwrap(),
-        expected
-    );
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(1));
-    assert_eq!(
-        phase
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([ObjectId::new(PhysicalAddress::new(Fixture::ROOT))])
             .unwrap()
             .analysis_complete,
         references.analysis_complete

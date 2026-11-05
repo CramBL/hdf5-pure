@@ -53,13 +53,7 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
         .unwrap()
         .find_link(&ObjectPathBuf::parse(name))
         .unwrap();
-    assert_eq!(
-        phase
-            .topology()
-            .unwrap()
-            .incoming(object.header_address().get()),
-        Some(incoming)
-    );
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(incoming));
     let observed = phase.object_reference_count(object).unwrap();
     let field = match (usage, observed) {
         (Usage::CommittedType, ObjectReferenceCount::Version1(field))
@@ -89,13 +83,7 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
         _ => panic!("unexpected count subject"),
     }
     assert_eq!(phase.object_reference_count(object).unwrap(), observed);
-    assert_eq!(
-        phase
-            .topology()
-            .unwrap()
-            .incoming(object.header_address().get()),
-        Some(incoming)
-    );
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(incoming));
     let deletion = phase
         .topology()
         .unwrap()
@@ -169,13 +157,7 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
         );
     }
     assert_eq!(phase.object_reference_count(object).unwrap(), observed);
-    assert_eq!(
-        phase
-            .topology()
-            .unwrap()
-            .incoming(object.header_address().get()),
-        Some(incoming)
-    );
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(incoming));
 }
 
 #[test]
@@ -278,7 +260,9 @@ fn version_1_group_conversion_preserves_native_prefix_counts(
     } else {
         edit_test_util::open_engine(&path)
     };
-    let GroupInfo { region, links } = engine.reconstruct_v1_group(address).unwrap();
+    let GroupInfo { region, links } = engine
+        .reconstruct_v1_group(ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap();
     assert_eq!(links.links().len(), 1);
     let prepared = PreparedHeader::new(&region).unwrap();
     let geometry = prepared.geometry().unwrap();

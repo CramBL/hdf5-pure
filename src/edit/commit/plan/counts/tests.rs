@@ -108,7 +108,7 @@ fn count_projection_reaches_each_prepared_header_form(#[case] replacement: Repla
                 append.append_i32(&[19]);
                 WriteEngine::prepare_append(
                     &engine.opened_source(),
-                    target,
+                    id(target),
                     &append,
                     engine.context.widths(),
                 )
@@ -127,7 +127,7 @@ fn count_projection_reaches_each_prepared_header_form(#[case] replacement: Repla
                     .into_overwrite()
                     .unwrap();
                 let WritePlan::Moving(write) = engine
-                    .prepare_write(target, &value, OverwriteId { index: 0 })
+                    .prepare_write(id(target), &value, OverwriteId { index: 0 })
                     .unwrap()
                 else {
                     panic!("expected an unallocated or compact replacement")

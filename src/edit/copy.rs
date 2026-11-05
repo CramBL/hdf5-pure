@@ -347,7 +347,7 @@ impl WriteEngine {
         .read(COPY_BUDGET, addr)
     }
 
-    /// Writes an owned copy subtree and returns its root object-header address.
+    /// Writes an owned copy subtree and returns its root object identity.
     ///
     /// Writes the descendants in the order the tree stores them and the root last, so each group
     /// is written after the objects its links target. Encodes addresses relative to the
@@ -359,9 +359,9 @@ impl WriteEngine {
     /// if header encoding, attribute encoding, or allocation geometry is invalid, and [`Error::Io`]
     /// if writing the copy fails. Propagates errors from [`Self::write_chunked_relocatable`] for
     /// chunked copies.
-    pub(super) fn write_copy_subtree(&mut self, tree: &CopyTree) -> Result<u64, Error> {
+    pub(super) fn write_copy_subtree(&mut self, tree: &CopyTree) -> Result<ObjectId, Error> {
         let root = tree.emit(self)?;
-        Ok(self.context.addresses().resolve(root)?.get())
+        Ok(ObjectId::resolve(self.context.addresses(), root)?)
     }
 }
 
@@ -438,7 +438,7 @@ impl CopyOutput for WriteEngine {
         Ok(self
             .context
             .addresses()
-            .relative(PhysicalAddress::new(address))?)
+            .relative(address.header_address())?)
     }
 }
 

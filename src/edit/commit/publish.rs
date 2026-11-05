@@ -35,6 +35,7 @@ use crate::error::{Error, FormatError};
 use crate::file_space_info::{self, NUM_FILE_FSM_MANAGERS};
 use crate::free_space_manager::EncodedManager;
 use crate::free_space_manager::ManagerProjection;
+use crate::object_graph::ObjectId;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
@@ -53,8 +54,8 @@ pub(super) struct AppliedTree {
     pub(super) retirement: RootRetirement,
     /// Physical spans eligible for release when the root is published.
     pub(super) freed: Vec<(FileRange, FreeClass)>,
-    /// Absolute old and replacement header addresses for stored-reference updates.
-    pub(super) relocations: BTreeMap<u64, u64>,
+    /// Superseded and replacement object identities for stored-reference updates.
+    pub(super) relocations: BTreeMap<ObjectId, ObjectId>,
 }
 
 impl WriteEngine {
@@ -115,7 +116,7 @@ impl WriteEngine {
     pub(in crate::edit) fn publish_pending_tree_with_completion<T>(
         &mut self,
         pending: PendingRootFrees,
-        relocations: BTreeMap<u64, u64>,
+        relocations: BTreeMap<ObjectId, ObjectId>,
         complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let PendingRootFrees {
@@ -381,7 +382,10 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the reference-planning, write, or barrier error.
-    fn repoint_stored_references(&mut self, relocations: &BTreeMap<u64, u64>) -> Result<(), Error> {
+    fn repoint_stored_references(
+        &mut self,
+        relocations: &BTreeMap<ObjectId, ObjectId>,
+    ) -> Result<(), Error> {
         if self.proved_free_of_references {
             return Ok(());
         }

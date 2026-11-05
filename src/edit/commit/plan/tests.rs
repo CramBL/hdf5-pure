@@ -331,8 +331,8 @@ fn prepared_applications_retain_their_own_staged_inputs(#[case] create: bool) {
                 .replaces
                 .as_ref()
                 .unwrap()
-                .address(),
-            first_source.object().header_address().get()
+                .object(),
+            first_source.object()
         );
     }
     second.apply_commit(second_prepared).unwrap();

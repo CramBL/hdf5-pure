@@ -15,7 +15,6 @@ use hdf5_pure_format::__private::OwnedLink;
 
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
-use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 #[cfg(test)]
 use crate::address::StoredAddress;
@@ -29,6 +28,7 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_header::HeaderMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::LinkNameBuf;
@@ -73,12 +73,12 @@ impl WriteEngine {
     /// [`FormatError::PathNotFound`] if the object is not a group. Returns
     /// parsing and source-read errors as reported by the group, object-header, heap, and index
     /// readers.
-    pub(super) fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
+    pub(super) fn reconstruct_v1_group(&self, addr: ObjectId) -> Result<GroupInfo, Error> {
         let base = self.context.addresses();
         let oh = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
-            addr,
+            addr.header_address().get(),
             self.context.widths(),
             base.effective_base(),
         )?;
@@ -170,14 +170,16 @@ impl WriteEngine {
     /// Link Info message. Dense storage is limited to unfiltered managed objects with seven-byte
     /// heap IDs and encoded links of at most 4096 bytes. Returns parsing and source-read errors
     /// from the object header, heap, and index readers.
-    pub(super) fn inspect_group(&self, addr: u64) -> Result<GroupInfo, Error> {
-        let sig = self.image().read_metadata_at(addr, 4);
+    pub(super) fn inspect_group(&self, addr: ObjectId) -> Result<GroupInfo, Error> {
+        let sig = self
+            .image()
+            .read_metadata_at(addr.header_address().get(), 4);
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
             return self.reconstruct_v1_group(addr);
         }
         let mut region = Self::gather_oh_messages(
             &self.image(),
-            PhysicalAddress::new(addr),
+            addr.header_address(),
             self.context.addresses(),
             self.context.widths(),
         )?;

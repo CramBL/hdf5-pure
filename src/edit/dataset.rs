@@ -54,6 +54,7 @@ use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
@@ -188,7 +189,7 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Writes a prepared dataset and returns its object-header address.
+    /// Writes a prepared dataset and returns its object identity.
     ///
     /// The caller resolves object references and attribute collections before this call.
     /// Variable-length
@@ -198,7 +199,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::Format`] if chunk encoding, dataset-header encoding, or allocation geometry
     /// is invalid. Returns [`Error::Io`] if writing the dataset or allocation padding fails.
-    pub(super) fn write_dataset(&mut self, fd: &mut FlatDataset) -> Result<u64, Error> {
+    pub(super) fn write_dataset(&mut self, fd: &mut FlatDataset) -> Result<ObjectId, Error> {
         let base = self.context.addresses();
         let oh = if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
             self.build_chunked_dataset(fd)?
@@ -252,14 +253,14 @@ impl WriteEngine {
     /// metadata read, parse, and chunk-encoding errors.
     pub(super) fn prepare_write(
         &self,
-        addr: u64,
+        addr: ObjectId,
         fd: &ValueOverwrite,
         source: OverwriteId,
     ) -> Result<WritePlan, Error> {
         let src = &self.image();
         let base = self.context.addresses();
         let widths = self.context.widths();
-        let region = Self::gather_oh_messages(src, PhysicalAddress::new(addr), base, widths)?;
+        let region = Self::gather_oh_messages(src, addr.header_address(), base, widths)?;
 
         let mut datatype: Option<(usize, usize)> = None;
         let mut dataspace: Option<(usize, usize)> = None;
@@ -489,7 +490,7 @@ impl WriteEngine {
     /// permits re-encoding it. Propagates metadata, chunk-decoding, and encoding errors.
     pub(super) fn prepare_append(
         src: &OpenedSource<'_>,
-        addr: u64,
+        addr: ObjectId,
         ab: &AppendBuilder,
         widths: FormatWidths,
     ) -> Result<MovingWrite, Error> {
@@ -501,7 +502,7 @@ impl WriteEngine {
             ));
         }
 
-        let region = Self::gather_oh_messages(src, PhysicalAddress::new(addr), base, widths)?;
+        let region = Self::gather_oh_messages(src, addr.header_address(), base, widths)?;
 
         let mut datatype: Option<(usize, usize)> = None;
         let mut dataspace: Option<(usize, usize)> = None;
@@ -777,7 +778,7 @@ impl WriteEngine {
         })
     }
 
-    /// Writes a relocating edit and returns its new object-header address.
+    /// Writes a relocating edit and returns its replacement object identity.
     ///
     /// Replacement buffers are consumed through their prepared identifiers. The caller publishes
     /// the parent link and reclaims superseded storage after commit publication.
@@ -791,7 +792,7 @@ impl WriteEngine {
         &mut self,
         overwrites: &mut OverwritePayloads,
         mw: MovingWrite,
-    ) -> Result<u64, Error> {
+    ) -> Result<ObjectId, Error> {
         let base = self.context.addresses();
         match mw {
             MovingWrite::Contiguous {
@@ -914,7 +915,7 @@ impl WriteEngine {
         index: &AppendIndex,
         kept_chunks: &[ChunkRecord],
         new_chunks: &[PreparedChunk],
-    ) -> Result<u64, Error> {
+    ) -> Result<ObjectId, Error> {
         let widths = self.context.widths();
         let base = self.context.addresses();
         let (combined, index_stored) = if self.space.is_paged() && index.kind.array_kind().is_some()
@@ -1524,7 +1525,7 @@ impl WriteEngine {
         meta: &[ChunkMeta],
         chunks: &dyn ChunkProvider,
         dense_attrs: DenseAttrSet,
-    ) -> Result<u64, Error> {
+    ) -> Result<ObjectId, Error> {
         let layout_message =
             self.place_verbatim_chunks(geometry, flags, pipeline_message, meta, chunks)?;
         let mut new_region = replace_layout_message(region, &layout_message)?;
@@ -1902,8 +1903,8 @@ pub(super) enum MovingWrite {
         kept_chunks: Vec<ChunkRecord>,
         /// Rewritten trailing and appended chunks, encoded for the grown extent.
         new_chunks: Vec<PreparedChunk>,
-        /// The superseded header address used for storage reclamation.
-        old_addr: u64,
+        /// The superseded object identity used for storage reclamation.
+        old_addr: ObjectId,
         /// Ownership of the complete trailing allocation, retained until root publication.
         old_tail_allocation: Option<ChunkAllocation>,
     },
@@ -1921,7 +1922,7 @@ pub(super) enum MovingWrite {
         overwrite: ChunkedOverwrite,
         pipeline_message: Option<Vec<u8>>,
         payload: ChunkPayload,
-        old_addr: u64,
+        old_addr: ObjectId,
     },
     /// Inline values stored in a replacement object header.
     Compact {

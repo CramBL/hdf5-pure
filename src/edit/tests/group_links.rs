@@ -33,6 +33,7 @@ use crate::error::FormatError;
 use crate::file_lock::FileLocking;
 use crate::link_message::LinkMessage;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::OpenedSource;
 use crate::source::BytesSource;
@@ -448,7 +449,9 @@ fn bounded_dense_mutation_preserves_existing_children() {
         .resolve(engine.superblock().root_group_address)
         .unwrap()
         .get();
-    let info = engine.inspect_group(address).unwrap();
+    let info = engine
+        .inspect_group(ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap();
     assert_eq!(info.links.links().len(), 12);
     engine.create_group(&ObjectPathBuf::parse("added")).unwrap();
     engine.commit().unwrap();
@@ -457,7 +460,9 @@ fn bounded_dense_mutation_preserves_existing_children() {
         .resolve(engine.superblock().root_group_address)
         .unwrap()
         .get();
-    let info = engine.inspect_group(address).unwrap();
+    let info = engine
+        .inspect_group(ObjectId::new(PhysicalAddress::new(address)))
+        .unwrap();
     assert!(info.links.info().fractal_heap_address.is_some());
     let mut names = info
         .links
@@ -735,7 +740,9 @@ fn replaced_dense_metadata_is_reclaimed_after_publication(
         .resolve(engine.superblock().root_group_address)
         .unwrap()
         .get();
-    let old = engine.inspect_group(old_root).unwrap();
+    let old = engine
+        .inspect_group(ObjectId::new(PhysicalAddress::new(old_root)))
+        .unwrap();
     let header = engine
         .oh_chunk_spans(PhysicalAddress::new(old_root))
         .unwrap();
@@ -838,7 +845,9 @@ fn track_dense_root(path: &Path, indexed: bool) {
         .resolve(superblock.root_group_address)
         .unwrap()
         .get();
-    let inspected = engine.inspect_group(root).unwrap();
+    let inspected = engine
+        .inspect_group(ObjectId::new(PhysicalAddress::new(root)))
+        .unwrap();
     drop(engine);
     let links = inspected
         .links

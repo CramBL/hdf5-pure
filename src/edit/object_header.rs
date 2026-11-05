@@ -27,6 +27,7 @@ use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_space_info::FileSpaceInfo;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
@@ -37,7 +38,7 @@ pub(super) mod reference_count;
 impl WriteEngine {
     /// Writes an encoded object header as one metadata block.
     ///
-    /// Returns its physical address. In PAGE files, a header smaller than a page stays within
+    /// Returns its object identity. In PAGE files, a header smaller than a page stays within
     /// one page, and a header at least one page long starts on a page boundary. Page boundaries
     /// are relative to the file's base address. The caller supplies one complete header,
     /// including its prefix and checksum.
@@ -46,12 +47,14 @@ impl WriteEngine {
     ///
     /// Returns [`FormatError::Internal`] if `bytes` is empty. Propagates reservation and write
     /// errors from [`reserve_request`](Self::reserve_request) and [`place`](Self::place).
-    pub(super) fn place_object_header(&mut self, bytes: &[u8]) -> Result<u64, Error> {
+    pub(super) fn place_object_header(&mut self, bytes: &[u8]) -> Result<ObjectId, Error> {
         let size = NonZeroU64::new(bytes.len() as u64)
             .ok_or_else(|| FormatError::Internal("an object header is empty".into()))?;
         let request = ReservationRequest::new(size, AllocationClass::Metadata).for_block();
         let placement = self.reserve_request(request)?;
         self.place(placement, bytes)
+            .map(PhysicalAddress::new)
+            .map(ObjectId::new)
     }
 
     /// Reads the extension header and replaces its File Space Info message bodies.

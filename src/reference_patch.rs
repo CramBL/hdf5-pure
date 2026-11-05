@@ -191,25 +191,20 @@ pub(crate) fn walks() -> usize {
     WALKS.with(|count| count.get())
 }
 
-/// Plan the repointing for `relocations` against the file `src` currently holds.
+/// Plans stored-reference updates for relocated objects.
 ///
-/// `relocations` maps each vacated object-header address to the address the same
-/// commit rewrote it to, both absolute. `superblock` is the *committed* one, so
-/// its root is the tree to walk.
+/// `relocations` maps superseded object identities to their replacements. The writer walks the
+/// root of the committed `superblock`, skipping superseded objects. The plan records whether
+/// inspection proved the reachable tree free of object-reference datatypes.
 ///
-/// The walk is bounded by `budget` objects and terminates on cycles (hard links
-/// can form them). Running out of budget is not an error: the plan keeps and
-/// applies what it reached, and only the *proof* of a reference-free file is
-/// withheld. That is the opposite of what `WriteEngine::count_incoming_hard_links`
-/// does with a graph too large to walk — it discards the whole walk and reclaims
-/// nothing — and the two differ because their partial results do. Half a link
-/// count would over-reclaim and corrupt a survivor; half a repointing is half
-/// the references corrected and the rest exactly as they were.
+/// # Errors
+///
+/// Returns the errors of [`walk`].
 pub(crate) fn plan<S: OriginalSource + ?Sized>(
     src: &S,
     superblock: &Superblock,
     widths: FormatWidths,
-    relocations: &BTreeMap<u64, u64>,
+    relocations: &BTreeMap<ObjectId, ObjectId>,
     budget: u32,
 ) -> Result<Plan, Error> {
     if relocations.is_empty() {
@@ -280,7 +275,7 @@ fn walk(
     src: &(impl OriginalSource + ?Sized),
     superblock: &Superblock,
     widths: FormatWidths,
-    relocations: &BTreeMap<u64, u64>,
+    relocations: &BTreeMap<ObjectId, ObjectId>,
     budget: u32,
 ) -> Result<Plan, Error> {
     let mut plan = Plan::default();
@@ -295,9 +290,7 @@ fn walk(
     );
     let mut saw_reference = false;
     let mut complete = true;
-    while let Some((id, depth)) =
-        traversal.next_matching(|id| !relocations.contains_key(&id.header_address().get()))
-    {
+    while let Some((id, depth)) = traversal.next_matching(|id| !relocations.contains_key(&id)) {
         let addr = id.header_address().get();
         // One pass over the header serves both needs: it collects the byte edits
         // this object owes, and it reports whether the object is a group. Only a
@@ -397,7 +390,7 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
     src: &S,
     header: &ObjectHeader,
     widths: FormatWidths,
-    relocations: &BTreeMap<u64, u64>,
+    relocations: &BTreeMap<ObjectId, ObjectId>,
     plan: &mut Plan,
 ) -> Result<bool, Error> {
     let base = src.addresses();
@@ -544,7 +537,7 @@ fn scan_object<S: OriginalSource + ?Sized>(
     src: &S,
     addr: u64,
     widths: FormatWidths,
-    relocations: &BTreeMap<u64, u64>,
+    relocations: &BTreeMap<ObjectId, ObjectId>,
     plan: &mut Plan,
 ) -> Result<Scanned, Error> {
     // A header this cannot read — a version 1 one — contributes no edits, and
@@ -912,7 +905,7 @@ fn collect_slots(
     raw: &[u8],
     raw_at: u64,
     base: AddressContext,
-    relocations: &BTreeMap<u64, u64>,
+    relocations: &BTreeMap<ObjectId, ObjectId>,
     out: &mut Vec<(u64, StoredAddress)>,
 ) {
     for (offset, stored) in datatype::stored_object_references(raw, dt.type_size() as usize, slots)
@@ -923,16 +916,13 @@ fn collect_slots(
         if stored == 0 || stored == u64::MAX {
             continue;
         }
-        let Ok(abs) = base
-            .resolve(StoredAddress::new(stored))
-            .map(PhysicalAddress::get)
-        else {
+        let Ok(abs) = ObjectId::resolve(base, StoredAddress::new(stored)) else {
             continue;
         };
         let Some(&new) = relocations.get(&abs) else {
             continue;
         };
-        let Ok(value) = base.relative(PhysicalAddress::new(new)) else {
+        let Ok(value) = base.relative(new.header_address()) else {
             continue;
         };
         out.push((raw_at + offset as u64, value));
@@ -1046,7 +1036,15 @@ mod tests {
 
     fn scan(src: &BytesSource<Vec<u8>>, relocations: &[(u64, u64)]) -> (Plan, Scanned) {
         let mut plan = Plan::default();
-        let map: BTreeMap<u64, u64> = relocations.iter().copied().collect();
+        let map: BTreeMap<ObjectId, ObjectId> = relocations
+            .iter()
+            .map(|&(old, new)| {
+                (
+                    ObjectId::new(PhysicalAddress::new(old)),
+                    ObjectId::new(PhysicalAddress::new(new)),
+                )
+            })
+            .collect();
         let scanned = scan_object(
             &OpenedSource::for_test(src, AddressContext::from_effective_base(BaseAddress::ZERO)),
             HEADER_AT,
@@ -1110,7 +1108,10 @@ mod tests {
             &OpenedSource::for_test(&source, addresses),
             HEADER_AT,
             widths,
-            &BTreeMap::from([(HEADER_AT, 16_384)]),
+            &BTreeMap::from([(
+                ObjectId::new(PhysicalAddress::new(HEADER_AT)),
+                ObjectId::new(PhysicalAddress::new(16_384)),
+            )]),
             &mut plan,
         )
         .unwrap();
@@ -1464,8 +1465,8 @@ mod tests {
 
             let mut plan = Plan::default();
             let map = BTreeMap::from([(
-                300 + base.effective_base().get(),
-                900 + base.effective_base().get(),
+                ObjectId::new(PhysicalAddress::new(300 + base.effective_base().get())),
+                ObjectId::new(PhysicalAddress::new(900 + base.effective_base().get())),
             )]);
             let scanned = scan_object(
                 &OpenedSource::for_test(&BytesSource::new(bytes), base),
@@ -1524,7 +1525,10 @@ mod tests {
 
         // The control: `d` has moved, the root has not, so the walk descends
         // through the root and repoints the one element in `refs`.
-        let moved = BTreeMap::from([(stored, stored + 4096)]);
+        let moved = BTreeMap::from([(
+            ObjectId::new(PhysicalAddress::new(stored)),
+            ObjectId::new(PhysicalAddress::new(stored + 4096)),
+        )]);
         let opened = OpenedSource::for_test(
             &source,
             AddressContext::from_effective_base(superblock.base_address),
@@ -1547,7 +1551,10 @@ mod tests {
         // unreachable — and the edit the control found must not be made, because
         // reaching it meant walking a header that is no longer part of any tree.
         let mut vacated = moved.clone();
-        vacated.insert(root, root + 8192);
+        vacated.insert(
+            ObjectId::new(PhysicalAddress::new(root)),
+            ObjectId::new(PhysicalAddress::new(root + 8192)),
+        );
         let skipped = super::plan(
             &opened,
             &superblock,

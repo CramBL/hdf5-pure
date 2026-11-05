@@ -553,7 +553,7 @@ fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association
                 usize::try_from(range.length()).unwrap(),
             )
             .unwrap();
-        let root = PhysicalAddress::new(engine.place_object_header(&bytes).unwrap());
+        let root = engine.place_object_header(&bytes).unwrap().header_address();
         assert_ne!(root, original_root.header_address());
         engine.publish_nonpersisting(root, None).unwrap();
     }

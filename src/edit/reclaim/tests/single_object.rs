@@ -89,8 +89,8 @@ fn group_storage_excludes_children_and_aliases_prevent_retirement() {
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);
     let topology = engine.count_incoming_hard_links().unwrap();
-    assert_eq!(topology.incoming(owner), Some(2));
-    assert_eq!(topology.incoming(value), Some(1));
+    assert_eq!(topology.incoming(id(owner)), Some(2));
+    assert_eq!(topology.incoming(id(value)), Some(1));
     let mut own_storage = Vec::new();
     assert_eq!(
         engine.collect_object_storage(id(owner), &mut own_storage),
@@ -113,7 +113,7 @@ fn group_storage_excludes_children_and_aliases_prevent_retirement() {
         ]
     );
     let mut retirement = Vec::new();
-    topology.collect_free_spans(owner, 0, &mut retirement);
+    topology.collect_free_spans(id(owner), 0, &mut retirement);
     assert!(retirement.is_empty());
 }
 

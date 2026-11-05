@@ -188,8 +188,8 @@ struct DirtyGroups {
 pub(super) struct GroupHeaders {
     /// Group paths, sorted deepest-first before application.
     pub(super) keys: Vec<ObjectPathBuf>,
-    /// Group paths and absolute header addresses, in path order.
-    pub(super) superseded_addrs: Vec<(ObjectPathBuf, u64)>,
+    /// Group paths and superseded object identities, in path order.
+    pub(super) superseded_addrs: Vec<(ObjectPathBuf, ObjectId)>,
     pub(super) children: BTreeMap<ObjectPathBuf, Vec<ChildLink>>,
 }
 
@@ -305,9 +305,9 @@ pub(super) enum ReplacedHeader {
 }
 
 impl ReplacedHeader {
-    /// Returns the absolute address of the superseded header.
-    pub(super) fn address(&self) -> u64 {
-        self.source().object().header_address().get()
+    /// Returns the identity of the superseded group.
+    pub(super) fn object(&self) -> ObjectId {
+        self.source().object()
     }
 
     /// Borrows the source-phase association and physical identity of the superseded header.
@@ -429,7 +429,7 @@ impl WriteEngine {
             headers
                 .superseded_addrs
                 .iter()
-                .map(|&(_, address)| PhysicalAddress::new(address)),
+                .map(|&(_, address)| address.header_address()),
         );
         let TreeReferences {
             deleted_free,
@@ -481,7 +481,9 @@ impl WriteEngine {
                 self.context.superblock(),
                 self.context.widths(),
                 &full.as_path(),
-            )?;
+            )
+            .map(PhysicalAddress::new)
+            .map(ObjectId::new)?;
             match self.prepare_write(addr, fd, OverwriteId { index })? {
                 WritePlan::InPlace { data_addr, source } => {
                     edits.inplace_writes.push(InPlaceWrite::Replacement {
@@ -515,10 +517,7 @@ impl WriteEngine {
                         parent,
                         edit: RelocatedDataset {
                             link: leaf,
-                            source: analysis.reconstruction_source(
-                                self,
-                                ObjectId::new(PhysicalAddress::new(addr)),
-                            )?,
+                            source: analysis.reconstruction_source(self, addr)?,
                             write: mw,
                         },
                     });
@@ -553,7 +552,9 @@ impl WriteEngine {
                 self.context.superblock(),
                 self.context.widths(),
                 &full.as_path(),
-            )?;
+            )
+            .map(PhysicalAddress::new)
+            .map(ObjectId::new)?;
             let mw = Self::prepare_append(&self.opened_source(), addr, ab, self.context.widths())?;
             match analysis
                 .topology()
@@ -571,8 +572,7 @@ impl WriteEngine {
                 parent,
                 edit: RelocatedDataset {
                     link: leaf,
-                    source: analysis
-                        .reconstruction_source(self, ObjectId::new(PhysicalAddress::new(addr)))?,
+                    source: analysis.reconstruction_source(self, addr)?,
                     write: mw,
                 },
             });
@@ -617,7 +617,9 @@ impl WriteEngine {
                     self.context.superblock(),
                     self.context.widths(),
                     &full.as_path(),
-                )?;
+                )
+                .map(PhysicalAddress::new)
+                .map(ObjectId::new)?;
                 match analysis
                     .topology()
                     .and_then(|topology| topology.incoming(addr))
@@ -632,24 +634,20 @@ impl WriteEngine {
                 }
                 let region = Self::gather_oh_messages(
                     &self.image(),
-                    PhysicalAddress::new(addr),
+                    addr.header_address(),
                     base,
                     self.context.widths(),
                 )?;
                 let attributes = attributes::plan_attr_ops(&self.opened_source(), &region, &ops)?;
-                edits.collections.extend(analysis.attribute_collections(
-                    ObjectId::new(PhysicalAddress::new(addr)),
-                    attributes.predecessors,
-                )?)?;
+                edits
+                    .collections
+                    .extend(analysis.attribute_collections(addr, attributes.predecessors)?)?;
 
                 edits.moving_writes.push(DatasetRelocation {
                     parent,
                     edit: RelocatedDataset {
                         link: leaf,
-                        source: analysis.reconstruction_source(
-                            self,
-                            ObjectId::new(PhysicalAddress::new(addr)),
-                        )?,
+                        source: analysis.reconstruction_source(self, addr)?,
                         write: MovingWrite::AttrEdit {
                             region: attributes.region,
                             attrs: attributes.attrs,
@@ -853,7 +851,7 @@ impl WriteEngine {
         collections: &mut CollectionCandidates,
     ) -> Result<GroupHeaders, Error> {
         let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
-        let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
+        let mut superseded_addrs: Vec<(ObjectPathBuf, ObjectId)> = Vec::new();
         for (key, node) in nodes.iter_mut() {
             if node.is_new {
                 node.prepared.region = group::fresh_group_region(self.context.widths())?;
@@ -864,7 +862,9 @@ impl WriteEngine {
                     self.context.superblock(),
                     self.context.widths(),
                     &key.as_path(),
-                )?;
+                )
+                .map(PhysicalAddress::new)
+                .map(ObjectId::new)?;
                 if !key.is_empty() {
                     match analysis
                         .topology()
@@ -892,8 +892,7 @@ impl WriteEngine {
                 superseded_addrs.push((key.clone(), addr));
                 node.prepared.region = region;
                 node.prepared.replaces = Some(ReplacedHeader::Header(
-                    analysis
-                        .reconstruction_source(self, ObjectId::new(PhysicalAddress::new(addr)))?,
+                    analysis.reconstruction_source(self, addr)?,
                 ));
                 node.existing_links = link_names;
             }
@@ -905,10 +904,9 @@ impl WriteEngine {
                 let region = std::mem::take(&mut node.prepared.region);
                 let edits = attributes::plan_attr_ops(&self.opened_source(), &region, ops)?;
                 if let Some(replaced) = &node.prepared.replaces {
-                    collections.extend(analysis.attribute_collections(
-                        ObjectId::new(PhysicalAddress::new(replaced.address())),
-                        edits.predecessors,
-                    )?)?;
+                    collections.extend(
+                        analysis.attribute_collections(replaced.object(), edits.predecessors)?,
+                    )?;
                 }
                 node.prepared.region = edits.region;
                 node.prepared.attrs = edits.attrs;

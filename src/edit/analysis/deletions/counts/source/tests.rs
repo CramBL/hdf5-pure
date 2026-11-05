@@ -554,7 +554,7 @@ fn source_plans_require_matching_count_evidence(#[case] mode: Identity) {
             .as_mut()
             .unwrap()
             .incoming
-            .insert(target, 2);
+            .insert(id(target), 2);
     }
     let removed = phase.removed_links([&deletion]).unwrap();
     let mut evidence = evidence;

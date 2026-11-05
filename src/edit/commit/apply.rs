@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{FreeClass, PageType};
 
 use super::plan::{
@@ -129,8 +128,8 @@ impl WriteEngine {
         let mut to_free = self.prepare_reclamation(&groups, deleted_free)?;
         let mut tail_allocations = Vec::new();
         let base = self.context.addresses();
-        let mut path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
-        let mut relocations: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut path_addr: BTreeMap<ObjectPathBuf, ObjectId> = BTreeMap::new();
+        let mut relocations: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
         for key in &order {
             let PreparedGroup {
                 mut region,
@@ -157,7 +156,7 @@ impl WriteEngine {
             for (leaf, tree) in copies {
                 let mut record = additions.take(&leaf)?;
                 let root = self.write_copy_subtree(&tree)?;
-                record.patch_target(base.relative(PhysicalAddress::new(root))?)?;
+                record.patch_target(base.relative(root.header_address())?)?;
                 region.push_bytes(record.as_bytes());
             }
 
@@ -179,11 +178,15 @@ impl WriteEngine {
                         let address = match target {
                             ReferenceTarget::Existing(address) => address,
                             ReferenceTarget::Placed(path) => base.relative(
-                                PhysicalAddress::new(*path_addr.get(&path).ok_or_else(|| {
-                                    FormatError::Internal(
-                                        "a prepared reference target has not been placed".into(),
-                                    )
-                                })?),
+                                path_addr
+                                    .get(&path)
+                                    .ok_or_else(|| {
+                                        FormatError::Internal(
+                                            "a prepared reference target has not been placed"
+                                                .into(),
+                                        )
+                                    })?
+                                    .header_address(),
                             )?,
                         };
                         type_builders::write_reference_address(
@@ -194,7 +197,7 @@ impl WriteEngine {
                     }
                 }
                 let oh_addr = self.write_dataset(&mut fd)?;
-                record.patch_target(base.relative(PhysicalAddress::new(oh_addr))?)?;
+                record.patch_target(base.relative(oh_addr.header_address())?)?;
                 region.push_bytes(record.as_bytes());
                 path_addr.insert(dataset_path, oh_addr);
             }
@@ -216,7 +219,7 @@ impl WriteEngine {
                 mut write,
             } in writes
             {
-                let old_header = source.object().header_address().get();
+                let old_header = source.object();
                 let tail_allocation = if let MovingWrite::AppendedChunks {
                     old_tail_allocation,
                     ..
@@ -228,7 +231,7 @@ impl WriteEngine {
                 };
                 let new_header = self.write_moving(overwrites, write)?;
                 tail_allocations.extend(tail_allocation);
-                patches.patch_next(base.relative(PhysicalAddress::new(new_header))?)?;
+                patches.patch_next(base.relative(new_header.header_address())?)?;
                 relocations.insert(old_header, new_header);
             }
 
@@ -236,13 +239,11 @@ impl WriteEngine {
                 match child {
                     ChildLink::Insert { path, leaf } => {
                         let mut record = additions.take(&leaf)?;
-                        record
-                            .patch_target(base.relative(PhysicalAddress::new(path_addr[&path]))?)?;
+                        record.patch_target(base.relative(path_addr[&path].header_address())?)?;
                         patches.push_bytes(record.as_bytes());
                     }
                     ChildLink::Replace { path, leaf: _ } => {
-                        patches
-                            .patch_next(base.relative(PhysicalAddress::new(path_addr[&path]))?)?;
+                        patches.patch_next(base.relative(path_addr[&path].header_address())?)?;
                     }
                 }
             }
@@ -266,7 +267,7 @@ impl WriteEngine {
         }
         let new_root = path_addr[&ObjectPathBuf::root()];
         to_free.extend(
-            AnalysisPhase::prospective(self, PhysicalAddress::new(new_root))
+            AnalysisPhase::prospective(self, new_root.header_address())
                 .unreferenced_collection_spans(collection_candidates),
         );
         to_free.extend(
@@ -276,7 +277,7 @@ impl WriteEngine {
         );
         edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
-            retirement: RootRetirement::new(PhysicalAddress::new(new_root), tail_allocations),
+            retirement: RootRetirement::new(new_root.header_address(), tail_allocations),
             freed: to_free,
             relocations,
         })
@@ -338,9 +339,7 @@ impl WriteEngine {
                         ..
                     } => to_free.push((*extent, FreeClass::Page(PageType::Raw))),
                     MovingWrite::Chunked { old_addr, .. } => {
-                        if let Some(spans) = self
-                            .chunked_storage_spans(ObjectId::new(PhysicalAddress::new(*old_addr)))
-                        {
+                        if let Some(spans) = self.chunked_storage_spans(*old_addr) {
                             to_free.extend(spans);
                         }
                     }
@@ -350,9 +349,7 @@ impl WriteEngine {
                         kept_chunks,
                         ..
                     } => {
-                        if let Some(spans) =
-                            self.chunked_index_spans(ObjectId::new(PhysicalAddress::new(*old_addr)))
-                        {
+                        if let Some(spans) = self.chunked_index_spans(*old_addr) {
                             let data: Vec<FileRange> = kept_chunks
                                 .iter()
                                 .filter_map(|c| {

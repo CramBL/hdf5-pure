@@ -44,16 +44,24 @@ fn phase_reuses_adjacency_and_reference_summaries(#[case] topology_first: bool) 
     COLLECTION_WORK.with(|work| work.set((0, 0)));
     let mut phase = AnalysisPhase::new(&engine);
     if topology_first {
-        assert_eq!(phase.topology().unwrap().incoming(dataset), Some(2));
+        assert_eq!(
+            phase.topology().unwrap().incoming(super::object(dataset)),
+            Some(2)
+        );
     }
-    let references = phase.collections_reachable_from([Fixture::ROOT]).unwrap();
+    let references = phase
+        .collections_reachable_from([super::object(Fixture::ROOT)])
+        .unwrap();
     assert_eq!(
         references.referenced_collections,
         BTreeSet::from([collection])
     );
     assert!(references.analysis_complete);
-    assert_eq!(phase.topology().unwrap().incoming(dataset), Some(2));
-    let candidates = phase.deleted_collections(&[group, dataset]);
+    assert_eq!(
+        phase.topology().unwrap().incoming(super::object(dataset)),
+        Some(2)
+    );
+    let candidates = phase.deleted_collections(&[super::object(group), super::object(dataset)]);
     assert_eq!(candidates.collections.len(), 1);
     let candidate = &candidates.collections[&PhysicalAddress::new(collection)];
     assert_eq!(
@@ -150,14 +158,20 @@ fn incomplete_references_do_not_retire_absent_collections_or_invalidate_topology
         .unwrap();
     COLLECTION_WORK.with(|work| work.set((0, 0)));
     let mut phase = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
-    assert_eq!(phase.topology().unwrap().incoming(unknown), Some(1));
+    assert_eq!(
+        phase.topology().unwrap().incoming(super::object(unknown)),
+        Some(1)
+    );
     assert!(phase.unreferenced_collection_spans(candidates).is_empty());
     let Some(Ok(references)) = &phase.liveness else {
         panic!("expected partial reference facts");
     };
     assert!(!references.analysis_complete);
     assert_eq!(references.referenced_collections, BTreeSet::new());
-    assert_eq!(phase.topology().unwrap().incoming(unknown), Some(1));
+    assert_eq!(
+        phase.topology().unwrap().incoming(super::object(unknown)),
+        Some(1)
+    );
     assert_eq!(COLLECTION_WORK.with(Cell::get), (2, 2));
 }
 
@@ -210,7 +224,7 @@ fn new_source_phase_reexamines_values_at_the_same_root_after_write_and_restore()
     let mut before = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
     assert_eq!(
         before
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([super::object(Fixture::ROOT)])
             .unwrap()
             .referenced_collections,
         BTreeSet::from([first])
@@ -225,7 +239,7 @@ fn new_source_phase_reexamines_values_at_the_same_root_after_write_and_restore()
     let mut after = AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT));
     assert_eq!(
         after
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([super::object(Fixture::ROOT)])
             .unwrap()
             .referenced_collections,
         BTreeSet::from([second])
@@ -237,7 +251,7 @@ fn new_source_phase_reexamines_values_at_the_same_root_after_write_and_restore()
         .unwrap();
     assert_eq!(
         AnalysisPhase::prospective(&engine, PhysicalAddress::new(Fixture::ROOT))
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([super::object(Fixture::ROOT)])
             .unwrap()
             .referenced_collections,
         BTreeSet::from([first])
@@ -266,7 +280,7 @@ fn failed_topology_keeps_previously_discovered_reference_adjacency(
     let mut phase = AnalysisPhase::new(&engine);
     assert!(
         phase
-            .collections_reachable_from([Fixture::ROOT])
+            .collections_reachable_from([super::object(Fixture::ROOT)])
             .unwrap()
             .analysis_complete
     );
@@ -274,7 +288,9 @@ fn failed_topology_keeps_previously_discovered_reference_adjacency(
     phase.budget = budget;
     assert!(phase.topology().is_none());
     phase.budget = original;
-    let references = phase.collections_reachable_from([Fixture::ROOT]).unwrap();
+    let references = phase
+        .collections_reachable_from([super::object(Fixture::ROOT)])
+        .unwrap();
     assert_eq!(
         references.referenced_collections,
         BTreeSet::from([collection])
@@ -365,7 +381,9 @@ fn numeric_payloads_do_not_need_source_bytes_for_collection_liveness() {
     let engine = edit_test_util::open_engine(&path);
     assert!(engine.image.len() < 65_536);
     let mut phase = AnalysisPhase::new(&engine);
-    let references = phase.collections_reachable_from([Fixture::ROOT]).unwrap();
+    let references = phase
+        .collections_reachable_from([super::object(Fixture::ROOT)])
+        .unwrap();
     assert!(references.analysis_complete);
     assert_eq!(references.referenced_collections, BTreeSet::new());
 }
@@ -378,7 +396,9 @@ fn undefined_hard_link_addresses_do_not_become_physical_references() {
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
-    let references = phase.collections_reachable_from([Fixture::ROOT]).unwrap();
+    let references = phase
+        .collections_reachable_from([super::object(Fixture::ROOT)])
+        .unwrap();
     assert!(references.analysis_complete);
     assert_eq!(references.referenced_collections, BTreeSet::new());
     assert!(phase.topology().is_none());

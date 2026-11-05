@@ -107,7 +107,7 @@ fn an_observed_undercount_returns_a_structured_contradiction(
             incoming
         })
     );
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(incoming));
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(incoming));
     assert_eq!(engine.disk_bytes().unwrap(), before);
 }
 
@@ -130,13 +130,9 @@ fn untrusted_count_forms_preserve_topology_without_bound_evidence(#[case] ambigu
     fixture.write(&path);
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
-    assert!(
-        phase
-            .count_evidence(ObjectId::new(PhysicalAddress::new(address)))
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(1));
+    let object = ObjectId::new(PhysicalAddress::new(address));
+    assert!(phase.count_evidence(object).unwrap().is_none());
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(1));
     assert_eq!(phase.counts.len(), 1);
 }
 
@@ -194,8 +190,8 @@ fn a_cached_source_failure_supplies_no_count_bound() {
     let address = write_fixture(&path, Subject::Dataset, Some(1), 1);
     let engine = edit_test_util::open_engine(&path);
     let mut phase = AnalysisPhase::new(&engine);
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(1));
     let object = ObjectId::new(PhysicalAddress::new(address));
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(1));
     let failure = FormatError::UnexpectedSourceEof {
         expected: address + 1,
         available: address,
@@ -206,7 +202,7 @@ fn a_cached_source_failure_supplies_no_count_bound() {
     };
     assert_eq!(error, CountEvidenceError::Source(failure.clone()));
     assert_eq!(phase.counts[&object], Err(failure.clone()));
-    assert_eq!(phase.topology().unwrap().incoming(address), Some(1));
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(1));
     let deletion = phase
         .topology()
         .unwrap()
@@ -577,13 +573,7 @@ fn overlapping_chunk_allocations_preserve_counts_and_topology_without_ownership(
     let evidence = phase.count_evidence(object).unwrap().unwrap();
     assert_eq!(evidence.bound().header_allocation(), None);
     assert_eq!(evidence.bound().original(), 2);
-    assert_eq!(
-        phase
-            .topology()
-            .unwrap()
-            .incoming(u64::try_from(address).unwrap()),
-        Some(2)
-    );
+    assert_eq!(phase.topology().unwrap().incoming(object), Some(2));
     let deletion = phase
         .topology()
         .unwrap()

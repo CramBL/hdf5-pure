@@ -14,6 +14,7 @@ use crate::error::FormatError;
 use crate::file_lock::FileLocking;
 use crate::group::v2 as group_v2;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPath;
 
 /// A group's stored address, link metadata, and Group Info message body.
@@ -54,15 +55,15 @@ pub(super) fn inspect_group_links(
         engine.superblock(),
         engine.widths(),
         &ObjectPath::parse(group_path),
-    )?;
+    )
+    .map(PhysicalAddress::new)
+    .map(ObjectId::new)?;
     let info = engine.inspect_group(address)?;
     let mut pos = 0;
     while let Some(record) = info.region.layout().next_message(&info.region, pos)? {
         if record.msg_type == MessageType::GROUP_INFO {
             return Ok(GroupLinkInspection {
-                object_header_address: engine
-                    .addresses()
-                    .relative(PhysicalAddress::new(address))?,
+                object_header_address: engine.addresses().relative(address.header_address())?,
                 links: info.links,
                 group_info: record.body.to_vec(),
             });

@@ -6,11 +6,13 @@ use test_util::object_header::{Message, MessageType as RecordType};
 use test_util_hdf5::global_heap_fixture::{self, Fixture};
 
 use super::{AnalysisPhase, DISCOVERY_WORK};
+use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::edit::test_util as edit_test_util;
 use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 use crate::object_graph::TraversalBudget;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
@@ -37,15 +39,12 @@ fn phase_reuses_topology_and_indexes_named_edges(#[case] children: usize, #[case
     }
     builder.write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let root = engine
-        .addresses()
-        .resolve(engine.superblock().root_group_address)
-        .unwrap()
-        .get();
+    let root =
+        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
     let header = ObjectHeader::parse_from_source_with_widths(
         &SourceMetadata(&engine.image()),
         AccessMode::ReadWrite,
-        root,
+        root.header_address().get(),
         engine.widths(),
         engine.addresses().effective_base(),
     )
@@ -75,6 +74,8 @@ fn phase_reuses_topology_and_indexes_named_edges(#[case] children: usize, #[case
                 engine.widths(),
                 &path.as_path(),
             )
+            .map(PhysicalAddress::new)
+            .map(ObjectId::new)
             .unwrap()
         })
         .collect();
@@ -87,10 +88,7 @@ fn phase_reuses_topology_and_indexes_named_edges(#[case] children: usize, #[case
         .map(|path| topology.find_link(path).unwrap())
         .collect();
     assert_eq!(
-        edges
-            .iter()
-            .map(|(_, id)| id.header_address().get())
-            .collect::<Vec<_>>(),
+        edges.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
         expected
     );
     assert_eq!(
@@ -141,7 +139,11 @@ fn topology_accounts_for_aliases_and_cycles_despite_unsupported_content() {
     let topology = phase.topology().unwrap();
     assert_eq!(
         topology.incoming,
-        HashMap::from([(leaf, 2), (group, 1), (Fixture::ROOT, 1)])
+        HashMap::from([
+            (object(leaf), 2),
+            (object(group), 1),
+            (object(Fixture::ROOT), 1)
+        ])
     );
     assert_eq!(
         topology
@@ -153,12 +155,12 @@ fn topology_accounts_for_aliases_and_cycles_despite_unsupported_content() {
         leaf
     );
     assert_eq!(
-        topology.children(group).collect::<Vec<_>>(),
-        [Fixture::ROOT]
+        topology.children(object(group)).collect::<Vec<_>>(),
+        [object(Fixture::ROOT)]
     );
     assert_eq!(DISCOVERY_WORK.with(Cell::get), (1, 3));
     assert!(!engine.global_heap_liveness().unwrap().analysis_complete);
-    assert_eq!(phase.topology().unwrap().incoming(leaf), Some(2));
+    assert_eq!(phase.topology().unwrap().incoming(object(leaf)), Some(2));
     assert_eq!(DISCOVERY_WORK.with(Cell::get), (1, 3));
 }
 
@@ -242,4 +244,8 @@ fn unreadable_topology_is_cached_as_incomplete() {
     assert!(phase.topology().is_none());
     assert!(phase.topology().is_none());
     assert_eq!(DISCOVERY_WORK.with(Cell::get), (1, 2));
+}
+
+fn object(address: u64) -> ObjectId {
+    ObjectId::new(PhysicalAddress::new(address))
 }

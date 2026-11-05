@@ -45,6 +45,7 @@ use crate::error::FormatError;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::image::WriteBuffering;
+use crate::object_graph::ObjectId;
 use crate::object_path::LinkNameBuf;
 
 #[rstest]
@@ -179,7 +180,10 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
             let persist = engine.persist.as_ref().unwrap();
             assert_eq!(persist.strategy, FileSpaceStrategy::FsmAggr);
             assert!(predecessor.length() < persist.threshold);
-            let region = engine.inspect_group(original_root.get()).unwrap().region;
+            let region = engine
+                .inspect_group(ObjectId::new(original_root))
+                .unwrap()
+                .region;
             let region =
                 group::remove_links_from_region(&region, &[LinkNameBuf::new(removed).unwrap()])
                     .unwrap();
@@ -195,7 +199,10 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
                 .unwrap(),
             )
             .unwrap();
-            let requested = PhysicalAddress::new(engine.place_object_header(&encoded).unwrap());
+            let requested = engine
+                .place_object_header(&encoded)
+                .unwrap()
+                .header_address();
             assert!(requested > original_root);
             assert_eq!(
                 engine.oh_chunk_spans(requested).unwrap(),
@@ -266,7 +273,7 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
                     assert_eq!(
                         scope
                             .engine
-                            .inspect_group(scope.root.get())
+                            .inspect_group(ObjectId::new(scope.root))
                             .unwrap()
                             .links
                             .links()
@@ -586,12 +593,15 @@ fn replacement_root(engine: &mut WriteEngine, names: &[&str]) -> PhysicalAddress
         .addresses()
         .resolve(engine.superblock().root_group_address)
         .unwrap();
-    let region = engine.inspect_group(root.get()).unwrap().region;
+    let region = engine.inspect_group(ObjectId::new(root)).unwrap().region;
     let names = names
         .iter()
         .map(|name| LinkNameBuf::new(name).unwrap())
         .collect::<Vec<_>>();
     let region = group::remove_links_from_region(&region, &names).unwrap();
     let encoded = object_header::build_v2_object_header(&region).unwrap();
-    PhysicalAddress::new(engine.place_object_header(&encoded).unwrap())
+    engine
+        .place_object_header(&encoded)
+        .unwrap()
+        .header_address()
 }
