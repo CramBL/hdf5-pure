@@ -32,6 +32,31 @@ use rstest::rstest;
 use test_util_hdf5::object_copy;
 
 #[derive(Clone, Copy, Debug)]
+enum SupportedStorage {
+    Bounded {
+        lengths: LengthWidth,
+        layout: BoundedLayout,
+    },
+    Extensible(ExtensibleLayout),
+}
+
+impl SupportedStorage {
+    fn lengths(self) -> LengthWidth {
+        match self {
+            Self::Bounded { lengths, .. } => lengths,
+            Self::Extensible(_) => LengthWidth::Eight,
+        }
+    }
+
+    fn layout(self) -> Layout {
+        match self {
+            Self::Bounded { layout, .. } => layout.into(),
+            Self::Extensible(layout) => layout.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Layout {
     Contiguous,
     Extensible,
@@ -42,34 +67,47 @@ enum Layout {
     Single,
 }
 
+impl From<BoundedLayout> for Layout {
+    fn from(layout: BoundedLayout) -> Self {
+        match layout {
+            BoundedLayout::Contiguous => Self::Contiguous,
+            BoundedLayout::FilteredFixed => Self::FilteredFixed,
+            BoundedLayout::FilteredSingle => Self::FilteredSingle,
+            BoundedLayout::Fixed => Self::Fixed,
+            BoundedLayout::Single => Self::Single,
+        }
+    }
+}
+
+impl From<ExtensibleLayout> for Layout {
+    fn from(layout: ExtensibleLayout) -> Self {
+        match layout {
+            ExtensibleLayout::Extensible => Self::Extensible,
+            ExtensibleLayout::FilteredExtensible => Self::FilteredExtensible,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BoundedLayout {
+    Contiguous,
+    FilteredFixed,
+    FilteredSingle,
+    Fixed,
+    Single,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExtensibleLayout {
+    Extensible,
+    FilteredExtensible,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Space {
     Default,
     FsmAggr,
     Page,
-}
-
-fn configure_dataset(builder: &mut DatasetBuilder, layout: Layout, elements: u64) {
-    match layout {
-        Layout::Contiguous => {}
-        Layout::Single | Layout::FilteredSingle => {
-            builder.with_chunks(&[elements]);
-        }
-        Layout::Fixed | Layout::FilteredFixed => {
-            builder.with_chunks(&[1]);
-        }
-        Layout::Extensible | Layout::FilteredExtensible => {
-            builder
-                .with_chunks(&[1])
-                .with_maxshape(&[MaxExtent::Unlimited]);
-        }
-    }
-    if matches!(
-        layout,
-        Layout::FilteredExtensible | Layout::FilteredFixed | Layout::FilteredSingle
-    ) {
-        builder.with_deflate(DeflateLevel::Six);
-    }
 }
 
 #[rstest]
@@ -88,85 +126,96 @@ fn creates_files_with_independent_widths(
     #[case] sizeof_addr: Sizeof,
     #[case] sizeof_size: Sizeof,
     #[values(
-        Layout::Contiguous,
-        Layout::Extensible,
-        Layout::FilteredExtensible,
-        Layout::FilteredFixed,
-        Layout::FilteredSingle,
-        Layout::Fixed,
-        Layout::Single
+        BoundedLayout::Contiguous,
+        BoundedLayout::FilteredFixed,
+        BoundedLayout::FilteredSingle,
+        BoundedLayout::Fixed,
+        BoundedLayout::Single
     )]
-    layout: Layout,
+    layout: BoundedLayout,
     #[values(Space::Default, Space::FsmAggr, Space::Page)] space: Space,
     #[values(false, true)] dense: bool,
     #[values(false, true)] streamed: bool,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("created.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_create_properties(
-        FileCreateProperties::new()
-            .with_offset_width(offsets)
-            .with_length_width(lengths),
+    assert_creates_file(
+        offsets,
+        SupportedStorage::Bounded { lengths, layout },
+        space,
+        dense,
+        streamed,
+        SizeofInfo {
+            sizeof_addr,
+            sizeof_size,
+        },
     );
-    match space {
-        Space::Default => {}
-        Space::FsmAggr => {
-            builder.with_file_space_settings(
-                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-            );
-        }
-        Space::Page => {
-            builder.with_file_space_settings(
-                FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
-            );
-        }
-    }
-    builder.commit_datatype("integer_type", hdf5_pure::make_i32_type());
-    let numbers = builder.create_dataset("numbers");
-    numbers
-        .with_i32_data(&[3, 5, 7])
-        .with_committed_datatype("integer_type");
-    configure_dataset(numbers, layout, 3);
-    if dense {
-        for index in 0..9 {
-            numbers.set_attr(&format!("field_{index}"), AttrValue::I64(index));
-        }
-    }
-    let strings = builder.create_dataset("strings");
-    strings.with_vlen_strings(&["first", "second"]);
-    configure_dataset(strings, layout, 2);
-    builder
-        .create_dataset("scalar")
-        .with_i32_data(&[11])
-        .with_shape(&[]);
-    builder
-        .create_dataset("empty")
-        .with_i32_data(&[])
-        .with_shape(&[0]);
-    if dense {
-        for index in 0..9 {
-            builder.set_attr(&format!("field_{index}"), AttrValue::I64(index));
-            let group = builder.create_group(&format!("group_{index}"));
-            builder.add_group(group.finish());
-        }
-    }
-    builder.set_attr("title", AttrValue::VarLenStringArray(vec!["label".into()]));
-    if matches!(layout, Layout::Extensible | Layout::FilteredExtensible)
-        && lengths != LengthWidth::Eight
-    {
-        let error = builder.finish().unwrap_err();
-        let Error::Format(FormatError::LengthTooLarge {
-            length,
-            length_size,
-        }) = error
-        else {
-            panic!("expected LengthTooLarge, got {error:?}");
-        };
-        assert_eq!(length, u64::MAX);
-        assert_eq!(length_size, lengths.get());
-        return;
-    }
+}
+
+#[rstest]
+#[case::two_eight(OffsetWidth::Two, Sizeof::Bytes2)]
+#[case::four_eight(OffsetWidth::Four, Sizeof::Bytes4)]
+#[case::eight_eight(OffsetWidth::Eight, Sizeof::Bytes8)]
+fn creates_extensible_datasets_with_eight_byte_lengths(
+    #[case] offsets: OffsetWidth,
+    #[case] sizeof_addr: Sizeof,
+    #[values(ExtensibleLayout::Extensible, ExtensibleLayout::FilteredExtensible)]
+    layout: ExtensibleLayout,
+    #[values(Space::Default, Space::FsmAggr, Space::Page)] space: Space,
+    #[values(false, true)] dense: bool,
+    #[values(false, true)] streamed: bool,
+) {
+    assert_creates_file(
+        offsets,
+        SupportedStorage::Extensible(layout),
+        space,
+        dense,
+        streamed,
+        SizeofInfo {
+            sizeof_addr,
+            sizeof_size: Sizeof::Bytes8,
+        },
+    );
+}
+
+#[rstest]
+#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
+#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
+#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
+#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
+fn rejects_extensible_datasets_with_narrow_lengths(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(ExtensibleLayout::Extensible, ExtensibleLayout::FilteredExtensible)]
+    layout: ExtensibleLayout,
+    #[values(Space::Default, Space::FsmAggr, Space::Page)] space: Space,
+    #[values(false, true)] dense: bool,
+) {
+    let error = file_builder(offsets, lengths, space, layout.into(), dense)
+        .finish()
+        .unwrap_err();
+    let Error::Format(FormatError::LengthTooLarge {
+        length,
+        length_size,
+    }) = error
+    else {
+        panic!("expected LengthTooLarge, got {error:?}");
+    };
+    assert_eq!(length, u64::MAX);
+    assert_eq!(length_size, lengths.get());
+}
+
+fn assert_creates_file(
+    offsets: OffsetWidth,
+    storage: SupportedStorage,
+    space: Space,
+    dense: bool,
+    streamed: bool,
+    native_sizes: SizeofInfo,
+) {
+    let lengths = storage.lengths();
+    let layout = storage.layout();
+    let builder = file_builder(offsets, lengths, space, layout, dense);
     let bytes = if streamed {
         let mut bytes = Vec::new();
         builder.finish_to(&mut bytes).unwrap();
@@ -174,6 +223,8 @@ fn creates_files_with_independent_widths(
     } else {
         builder.finish().unwrap()
     };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("created.h5");
     std::fs::write(&path, &bytes).unwrap();
     assert_eq!(&bytes[9..11], &[offsets.get(), lengths.get()]);
     let file = File::open(&path).unwrap();
@@ -241,10 +292,7 @@ fn creates_files_with_independent_widths(
     let native = hdf5::File::open(&path).unwrap();
     assert_eq!(
         native.create_plist().unwrap().get_sizes().unwrap(),
-        SizeofInfo {
-            sizeof_addr,
-            sizeof_size
-        }
+        native_sizes
     );
     assert_eq!(
         native
@@ -305,6 +353,88 @@ fn creates_files_with_independent_widths(
     );
     assert_eq!(native.free_space(), free);
     native.close().unwrap();
+}
+
+fn file_builder(
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    space: Space,
+    layout: Layout,
+    dense: bool,
+) -> FileBuilder {
+    let mut builder = FileBuilder::new();
+    builder.with_create_properties(
+        FileCreateProperties::new()
+            .with_offset_width(offsets)
+            .with_length_width(lengths),
+    );
+    match space {
+        Space::Default => {}
+        Space::FsmAggr => {
+            builder.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+            );
+        }
+        Space::Page => {
+            builder.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+            );
+        }
+    }
+    builder.commit_datatype("integer_type", hdf5_pure::make_i32_type());
+    let numbers = builder.create_dataset("numbers");
+    numbers
+        .with_i32_data(&[3, 5, 7])
+        .with_committed_datatype("integer_type");
+    configure_dataset(numbers, layout, 3);
+    if dense {
+        for index in 0..9 {
+            numbers.set_attr(&format!("field_{index}"), AttrValue::I64(index));
+        }
+    }
+    let strings = builder.create_dataset("strings");
+    strings.with_vlen_strings(&["first", "second"]);
+    configure_dataset(strings, layout, 2);
+    builder
+        .create_dataset("scalar")
+        .with_i32_data(&[11])
+        .with_shape(&[]);
+    builder
+        .create_dataset("empty")
+        .with_i32_data(&[])
+        .with_shape(&[0]);
+    if dense {
+        for index in 0..9 {
+            builder.set_attr(&format!("field_{index}"), AttrValue::I64(index));
+            let group = builder.create_group(&format!("group_{index}"));
+            builder.add_group(group.finish());
+        }
+    }
+    builder.set_attr("title", AttrValue::VarLenStringArray(vec!["label".into()]));
+    builder
+}
+
+fn configure_dataset(builder: &mut DatasetBuilder, layout: Layout, elements: u64) {
+    match layout {
+        Layout::Contiguous => {}
+        Layout::Single | Layout::FilteredSingle => {
+            builder.with_chunks(&[elements]);
+        }
+        Layout::Fixed | Layout::FilteredFixed => {
+            builder.with_chunks(&[1]);
+        }
+        Layout::Extensible | Layout::FilteredExtensible => {
+            builder
+                .with_chunks(&[1])
+                .with_maxshape(&[MaxExtent::Unlimited]);
+        }
+    }
+    if matches!(
+        layout,
+        Layout::FilteredExtensible | Layout::FilteredFixed | Layout::FilteredSingle
+    ) {
+        builder.with_deflate(DeflateLevel::Six);
+    }
 }
 
 #[rstest]
