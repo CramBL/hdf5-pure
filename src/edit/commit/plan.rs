@@ -413,6 +413,7 @@ impl WriteEngine {
     /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
     /// passes false. Count and ownership outcomes are retained in [`inventory::OriginalEdits`],
     /// and predecessor outcomes in [`inventory::dispositions::ReconstructionDispositions`].
+    /// Captures original storage exclusions and reclamation spans with the same tree inputs.
     ///
     /// # Errors
     ///
@@ -478,7 +479,7 @@ impl WriteEngine {
         headers
             .keys
             .sort_by_key(|path| std::cmp::Reverse(path.len()));
-        let tree = PreparedTree {
+        let mut tree = PreparedTree {
             groups: nodes,
             headers,
             cross_copies,
@@ -487,8 +488,9 @@ impl WriteEngine {
             collection_candidates: collections,
             references,
         };
-        let inventory = capture
-            .then(|| inventory::OriginalPreparation::collect(self, &mut analysis, &tree, staged));
+        let inventory = capture.then(|| {
+            inventory::OriginalPreparation::collect(self, &mut analysis, &mut tree, staged)
+        });
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
         }

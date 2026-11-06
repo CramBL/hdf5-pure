@@ -25,6 +25,80 @@ use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
 impl AnalysisPhase<'_> {
+    /// Collects owned parent framing and candidate-allocation outcomes for storage exclusion.
+    ///
+    /// Includes candidate parents and parents in predecessor observations. Reads framing through
+    /// the phase cache independently of member associations and whole-parent qualification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] for a phase or session mismatch.
+    /// Retains framing failures separately for each parent.
+    pub(in crate::edit) fn collection_storage(
+        &mut self,
+        source: &ReconstructionSource,
+        candidates: &CollectionCandidates,
+    ) -> Result<BTreeMap<PhysicalAddress, ParentStorage>, Error> {
+        self.require_heap_phase(source)?;
+        if let Some(observations) = &candidates.observations {
+            if !observations
+                .session
+                .same(&self.engine.context.allocations.session())
+                || observations
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| !Arc::ptr_eq(identity, &source.identity))
+            {
+                return Err(FormatError::Internal(
+                    "collection storage belongs to another source phase or session".into(),
+                )
+                .into());
+            }
+        }
+        let mut addresses: BTreeSet<_> = candidates.collections.keys().copied().collect();
+        if let Some(observations) = &candidates.observations {
+            for references in observations.predecessors.values() {
+                addresses.extend(
+                    references
+                        .collections
+                        .iter()
+                        .copied()
+                        .map(PhysicalAddress::new),
+                );
+                addresses.extend(references.objects.iter().map(|id| id.collection));
+            }
+        }
+        Ok(addresses
+            .into_iter()
+            .map(|address| {
+                let framing = self
+                    .collection_contents(address)
+                    .map(|contents| contents.range());
+                let original = candidates
+                    .collections
+                    .get(&address)
+                    .map(|allocation| (allocation.range, allocation.class));
+                let allocation = match (&framing, original) {
+                    (Err(_), _) => Err(ParentUnavailable::Framing),
+                    (_, None) => Err(ParentUnavailable::Allocation),
+                    (Ok(range), Some((original, _))) if *range != original => {
+                        Err(ParentUnavailable::Range)
+                    }
+                    (_, Some((_, None))) => Err(ParentUnavailable::Class),
+                    _ => Ok(()),
+                };
+                (
+                    address,
+                    ParentStorage {
+                        framing,
+                        original,
+                        allocation,
+                    },
+                )
+            })
+            .collect())
+    }
+
     /// Compares original candidate observations with cached framing and root references.
     ///
     /// Checks the source phase and allocation session before discovery. Reuses phase caches,
@@ -156,6 +230,19 @@ impl AnalysisPhase<'_> {
             parents: qualified,
         })
     }
+}
+
+/// Owned framing and candidate-allocation observations for one global heap collection.
+///
+/// Qualification requires matching candidate and framing ranges and a known allocation class.
+/// References to members and permission to reuse the collection require separate evidence.
+pub(in crate::edit) struct ParentStorage {
+    /// The parsed full collection range, or its framing error.
+    pub(in crate::edit) framing: Result<FileRange, FormatError>,
+    /// The candidate range and its allocation class, if recorded.
+    pub(in crate::edit) original: Option<(FileRange, Option<FreeClass>)>,
+    /// The local framing, candidate-range, and allocation-class outcome.
+    pub(in crate::edit) allocation: Result<(), ParentUnavailable>,
 }
 
 /// Owned predecessor observations and member and parent outcomes for one source phase.
