@@ -136,7 +136,9 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
     if matches!(outcome, Outcome::PublicationFailure) {
         disk_log::fail_write_after(0, 0);
     }
-    let result = pending.publish_with_completion(|published, _, _, _, collections| {
+    let result = pending.publish_with_completion(|published, _, _, _, collections, prospective| {
+        assert!(prospective.is_complete());
+        assert!(prospective.references().unwrap().objects().is_empty());
         assert_eq!(check(collections, owner, id), members);
         let engine = published.into_engine();
         assert_eq!(
@@ -174,12 +176,17 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
         }
         Outcome::PublicationFailure | Outcome::CompletionFailure => {
             let StoragePublicationFailure::Publication {
-                collections, error, ..
+                collections,
+                prospective,
+                error,
+                ..
             } = *result.err().unwrap()
             else {
                 panic!("expected publication or completion failure");
             };
             assert_eq!(check(&collections, owner, id), members);
+            assert!(prospective.is_complete());
+            assert!(prospective.references().unwrap().objects().is_empty());
             match error {
                 PublicationError::Write(Error::Io(error))
                     if matches!(outcome, Outcome::PublicationFailure) =>

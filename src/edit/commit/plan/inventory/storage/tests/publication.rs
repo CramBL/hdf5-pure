@@ -54,7 +54,7 @@ fn owned_publication_preserves_original_storage_until_actual_completion(
     let maximum = pending.maximum_end();
     disk_log::start();
     let result =
-        pending.publish_with_completion(|published, original, dispositions, storage, _| {
+        pending.publish_with_completion(|published, original, dispositions, storage, _, _| {
             assert!(original.facts().unwrap().counts().changes().is_empty());
             assert_eq!(
                 dispositions.replacements().unwrap(),
@@ -129,7 +129,7 @@ fn publication_rechecks_current_claims_and_retains_the_authentic_pending_batch()
     let bytes = pending.engine.disk_bytes().unwrap();
     disk_log::start();
     let failure = pending
-        .publish_with_completion(|_, _, _, _, _| -> Result<(), Error> {
+        .publish_with_completion(|_, _, _, _, _, _| -> Result<(), Error> {
             panic!("a conflicting allocator cannot complete")
         })
         .err()
@@ -170,7 +170,7 @@ fn publication_retains_pending_inputs_when_placement_reconciliation_is_incomplet
     let bytes = pending.engine.disk_bytes().unwrap();
     disk_log::start();
     let failure = pending
-        .publish_with_completion(|_, _, _, _, _| -> Result<(), Error> {
+        .publish_with_completion(|_, _, _, _, _, _| -> Result<(), Error> {
             panic!("an incomplete placement cannot complete")
         })
         .err()
@@ -344,7 +344,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
         .map(|address| engine.addresses().resolve(address).unwrap());
     let pending = apply(&mut engine);
     disk_log::start();
-    if let Err(error) = pending.publish_with_completion(|_, _, _, _, _| Ok(())) {
+    if let Err(error) = pending.publish_with_completion(|_, _, _, _, _, _| Ok(())) {
         panic_failure(*error);
     }
     let recording = disk_log::finish();
@@ -388,7 +388,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
     } else {
         disk_log::fail_resize_after(0, FailurePoint::Before);
     }
-    let result = pending.publish_with_completion(|_, _, _, _, _| {
+    let result = pending.publish_with_completion(|_, _, _, _, _, _| {
         called.set(true);
         Ok(())
     });
@@ -398,6 +398,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
         dispositions,
         storage,
         collections: _,
+        prospective: _,
         error,
     } = *result.err().unwrap()
     else {
