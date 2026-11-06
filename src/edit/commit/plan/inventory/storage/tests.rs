@@ -29,6 +29,7 @@ use crate::{AttrValue, FileBuilder, FileSpacePageSize, FileSpaceStrategy, Physic
 
 mod acceptance;
 mod collections;
+mod members;
 mod prospective;
 mod publication;
 
