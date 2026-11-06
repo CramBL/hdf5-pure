@@ -46,6 +46,7 @@ use crate::object_graph::TraversalBudget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::{Datatype, DatatypeByteOrder, FloatingPointType, PhysicalAddress};
 
+mod original;
 mod storage;
 
 #[rstest]
