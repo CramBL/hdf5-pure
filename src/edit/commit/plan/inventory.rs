@@ -11,6 +11,7 @@ use super::{CommitPlan, OverwritePayloads, PreparedCommit, PreparedTree};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::counts::{CopyUsersError, CopyUsersUnion};
+use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{
     AnalysisPhase, CountHandoffError, NetCountError, OriginalOwnerError, OriginalOwnerFacts,
@@ -24,17 +25,19 @@ use crate::object_graph::ObjectId;
 pub(in crate::edit::commit) mod dispositions;
 pub(in crate::edit::commit) mod storage;
 
-/// Owns tree edits and the original observations derived from their deletion and copy inputs.
+/// Owns tree edits and their original count, ownership, and collection observations.
 ///
 /// The editor collects the observations in the same source phase as the tree plan. The caller
 /// preserves source freshness until application. The allocation session is checked separately.
-/// Original storage exclusions and captured reclamation spans stay paired with these inputs.
+/// Original storage exclusions, captured reclamation spans, and owned collection qualification
+/// and framing stay paired with these inputs.
 pub(in crate::edit::commit) struct PreparedEditInventory {
     prepared: PreparedCommit,
     original: OriginalEdits,
     session: AllocationSession,
     dispositions: ReconstructionDispositions,
     storage: storage::OriginalStorage,
+    collections: OriginalCollections,
     reclamation: Result<Vec<(FileRange, FreeClass)>, Error>,
 }
 
@@ -63,12 +66,14 @@ impl PreparedEditInventory {
                         original,
                         dispositions,
                         storage,
+                        collections,
                         reclamation,
                     }) => InventoryPreparation::Tree(Self {
                         prepared,
                         original,
                         dispositions,
                         storage,
+                        collections,
                         reclamation,
                         session: engine.context.allocations.session(),
                     }),
@@ -100,6 +105,7 @@ impl PreparedEditInventory {
             session,
             mut dispositions,
             storage,
+            collections,
             reclamation,
         } = self;
         if !session.same(&engine.context.allocations.session()) {
@@ -131,12 +137,18 @@ impl PreparedEditInventory {
             original,
             dispositions,
             storage,
+            collections,
         })
     }
 
     /// Borrows every original predecessor's classification before placement.
     pub(in crate::edit::commit) fn dispositions(&self) -> &ReconstructionDispositions {
         &self.dispositions
+    }
+
+    /// Borrows original candidates, qualification, and framing collected before placement.
+    pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
+        &self.collections
     }
 
     /// Borrows the original observations collected from these prepared inputs.
@@ -169,9 +181,15 @@ pub(in crate::edit::commit) struct AppliedEditInventory {
     original: OriginalEdits,
     dispositions: AppliedDispositions,
     storage: storage::OriginalStorage,
+    collections: OriginalCollections,
 }
 
 impl AppliedEditInventory {
+    /// Borrows original candidates, qualification, and framing retained through application.
+    pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
+        &self.collections
+    }
+
     /// Borrows original predecessor classifications and the placement reconciliation outcome.
     pub(in crate::edit::commit) fn dispositions(&self) -> &AppliedDispositions {
         &self.dispositions
@@ -198,6 +216,7 @@ pub(super) struct OriginalPreparation {
     original: OriginalEdits,
     dispositions: ReconstructionDispositions,
     storage: storage::OriginalStorage,
+    collections: OriginalCollections,
     reclamation: Result<Vec<(FileRange, FreeClass)>, Error>,
 }
 
@@ -205,7 +224,8 @@ impl OriginalPreparation {
     /// Collects original observations and reclamation spans for the prepared tree.
     ///
     /// Moves deletion spans out of the tree into the captured reclamation input. Storage
-    /// exclusions are derived from these same observations and reclamation spans.
+    /// exclusions are derived from these same observations and reclamation spans. Moves collection
+    /// candidates and cached framing into the inventory after storage collection.
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
@@ -224,10 +244,15 @@ impl OriginalPreparation {
             &dispositions,
             &reclamation,
         );
+        let collections = phase.capture_collections(
+            dispositions.source().as_ref().ok(),
+            std::mem::take(&mut tree.collection_candidates),
+        );
         Self {
             original,
             dispositions,
             storage,
+            collections,
             reclamation,
         }
     }

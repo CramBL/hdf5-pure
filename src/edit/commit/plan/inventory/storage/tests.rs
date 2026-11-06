@@ -28,6 +28,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::{AttrValue, FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress};
 
 mod acceptance;
+mod collections;
 mod publication;
 
 #[rstest]
@@ -287,8 +288,16 @@ fn candidate_parent_capacity_is_checked_against_actual_retirement(
             .push(range(parent.get(), parent_end - parent.get()));
     }
     let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
-    if matches!(retire, ParentRetirement::Retain) {
+    if !matches!(retire, ParentRetirement::Superseded) {
         pending.exclusion().unwrap();
+        assert!(
+            !pending
+                .pending
+                .batch
+                .entries()
+                .iter()
+                .any(|(range, _)| *range == parent_range)
+        );
         return;
     }
     assert!(matches!(pending.exclusion(), Err(StorageConflict::Overlap {
