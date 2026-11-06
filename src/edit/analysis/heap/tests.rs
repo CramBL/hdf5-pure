@@ -19,6 +19,7 @@ use super::HeapReferenceError;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::COLLECTION_ALLOCATIONS;
 use crate::edit::analysis::COLLECTION_WORK;
+use crate::edit::analysis::CollectionProvenance;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
 use crate::global_heap::GlobalHeapId;
@@ -274,6 +275,23 @@ fn reference_completeness_and_failures_remain_cached(#[case] input: ReferenceInp
         };
         assert_eq!(error, FormatError::InvalidLinkVersion(0xff));
         assert!(phase.heap_reference_facts(&source).unwrap().is_complete());
+        let decoded = COLLECTION_WORK.with(|work| work.get().1);
+        let candidates = phase.deleted_collections(&[source.object()]);
+        assert!(candidates.collections.is_empty());
+        let observations = candidates.observations.as_ref().unwrap();
+        assert_eq!(
+            observations.incomplete_deletions,
+            BTreeSet::from([source.object()])
+        );
+        assert_eq!(observations.predecessors.len(), 1);
+        let facts = &observations.predecessors[&CollectionProvenance {
+            object: source.object(),
+            attribute: None,
+        }];
+        assert_eq!(facts.objects(), &expected);
+        assert!(facts.is_complete());
+        assert!(facts.error().is_none());
+        assert_eq!(COLLECTION_WORK.with(|work| work.get().1), decoded);
     }
 }
 

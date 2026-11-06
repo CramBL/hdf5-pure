@@ -29,6 +29,7 @@ use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
+use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
 #[test]
@@ -90,6 +91,9 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
     candidates
         .extend(phase.deleted_collections(&[super::object(deleted)]))
         .unwrap();
+    candidates
+        .extend(phase.deleted_collections(&[super::object(deleted)]))
+        .unwrap();
     assert_eq!(COLLECTION_ALLOCATIONS.with(Cell::get), 1);
     assert_eq!(candidates.collections.len(), 1);
     let range = candidates.collections[&PhysicalAddress::new(collection)].range;
@@ -104,6 +108,33 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
             origin(owner, Some("two")),
             origin(deleted, None),
         ])
+    );
+    let observations = candidates.observations.as_ref().unwrap();
+    assert_eq!(observations.predecessors.len(), 3);
+    assert!(observations.incomplete_deletions.is_empty());
+    assert!(
+        observations
+            .predecessors
+            .values()
+            .all(|facts| facts.complete)
+    );
+    assert_eq!(
+        observations
+            .predecessors
+            .values()
+            .map(|facts| facts.objects.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            BTreeSet::from([GlobalHeapId {
+                collection: PhysicalAddress::new(collection),
+                index: core::num::NonZeroU16::new(1).unwrap(),
+            }]);
+            3
+        ]
+    );
+    assert_eq!(
+        candidates.collections[&range.start()].class,
+        Some(FreeClass::Page(PageType::Raw))
     );
     drop(phase);
     let mut prospective = AnalysisPhase::prospective(&engine, PhysicalAddress::new(root));
@@ -232,6 +263,36 @@ fn unknown_attribute_evidence_does_not_reject_preparation(#[case] evidence: Unkn
         )
         .unwrap();
     assert!(candidates.collections.is_empty());
+    let observations = candidates.observations.as_ref().unwrap();
+    assert_eq!(observations.predecessors.len(), 1);
+    let facts = &observations.predecessors[&origin(owner, Some("one"))];
+    assert_eq!(
+        facts.complete,
+        matches!(evidence, UnknownEvidence::Collection)
+    );
+    assert_eq!(
+        facts.objects,
+        if matches!(evidence, UnknownEvidence::Collection) {
+            BTreeSet::from([GlobalHeapId {
+                collection: PhysicalAddress::new(Fixture::ROOT),
+                index: core::num::NonZeroU16::new(1).unwrap(),
+            }])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    if matches!(evidence, UnknownEvidence::Element) {
+        let Some(super::super::HeapReferenceError::Format(error)) = &facts.error else {
+            panic!("expected a descriptor error, got {:?}", facts.error);
+        };
+        assert_eq!(
+            error,
+            &FormatError::VlDataError("non-empty VL element has an undefined heap address".into())
+        );
+    } else {
+        assert!(facts.error.is_none());
+    }
+    assert!(observations.incomplete_deletions.is_empty());
     assert_eq!(
         phase.work().allocation_results,
         u64::from(matches!(evidence, UnknownEvidence::Collection))
@@ -241,6 +302,7 @@ fn unknown_attribute_evidence_does_not_reject_preparation(#[case] evidence: Unkn
 #[rstest]
 #[case::different_session(Conflict::Session)]
 #[case::different_length(Conflict::Length)]
+#[case::different_class(Conflict::Class)]
 fn candidate_merging_preserves_session_and_geometry_checks(#[case] conflict: Conflict) {
     let path = test_util::temp::temp_path("merge-candidates.h5");
     let other_path = test_util::temp::temp_path("merge-other-session.h5");
@@ -260,9 +322,15 @@ fn candidate_merging_preserves_session_and_geometry_checks(#[case] conflict: Con
         .insert(allocation, [origin(Fixture::ROOT, Some("one"))])
         .unwrap();
     let allocation = match conflict {
+        Conflict::Class => CollectionAllocation {
+            session: engine.context.allocations.session(),
+            range,
+            class: Some(FreeClass::Dead),
+        },
         Conflict::Length => CollectionAllocation {
             session: engine.context.allocations.session(),
             range: FileRange::new(range.start(), range.length() + 1).unwrap(),
+            class: Some(FreeClass::Page(PageType::Raw)),
         },
         Conflict::Session => AnalysisPhase::new(&other)
             .collection_allocation(PhysicalAddress::new(collection))
@@ -275,6 +343,7 @@ fn candidate_merging_preserves_session_and_geometry_checks(#[case] conflict: Con
     let expected = match conflict {
         Conflict::Length => "collection candidates have conflicting allocation lengths",
         Conflict::Session => "collection candidates belong to different sessions",
+        Conflict::Class => "collection candidates have conflicting allocation classes",
     };
     assert_eq!(
         first.extend(second).unwrap_err(),
@@ -290,6 +359,7 @@ fn candidate_merging_preserves_session_and_geometry_checks(#[case] conflict: Con
 
 #[derive(Clone, Copy, Debug)]
 enum Conflict {
+    Class,
     Length,
     Session,
 }

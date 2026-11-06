@@ -1,6 +1,8 @@
 use core::cell::Cell;
+use core::num::NonZeroU16;
 use std::collections::BTreeSet;
 use std::fs;
+use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
@@ -18,6 +20,7 @@ use crate::data_layout::DataLayout;
 use crate::edit::WriteEngine;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
+use crate::global_heap::GlobalHeapId;
 use crate::object_graph::{ObjectId, TraversalBudget};
 
 #[rstest]
@@ -317,6 +320,7 @@ fn candidate_union_rejects_conflicting_complete_allocation_lengths() {
             CollectionAllocation {
                 session: engine.context.allocations.session(),
                 range: FileRange::new(range.start(), range.length() + 1).unwrap(),
+                class: Some(FreeClass::Page(PageType::Raw)),
             },
             [origin(Fixture::ROOT)],
         )
@@ -386,6 +390,71 @@ fn numeric_payloads_do_not_need_source_bytes_for_collection_liveness() {
         .unwrap();
     assert!(references.analysis_complete);
     assert_eq!(references.referenced_collections, BTreeSet::new());
+    let candidates = phase.deleted_collections(&[super::object(Fixture::ROOT)]);
+    assert!(candidates.collections.is_empty());
+    assert!(candidates.observations.is_none());
+}
+
+#[rstest]
+#[case::unsupported_message(false)]
+#[case::malformed_descriptor(true)]
+fn incomplete_deletions_retain_decoded_member_identities(#[case] malformed: bool) {
+    let path = test_util::temp::temp_path("partial-deleted-members.h5");
+    let mut fixture = Fixture::new();
+    let collection = fixture.collection(&[Object::new(7, b"value")]);
+    let mut raw = global_heap_fixture::reference(5, collection, 7);
+    if malformed {
+        raw.extend(global_heap_fixture::reference(5, collection, 0));
+    }
+    let mut messages =
+        Form::CompactDataset.messages(&mut fixture, &global_heap_fixture::vlen_string(), &raw);
+    if !malformed {
+        messages.push(Message::new(MessageType(0x7f), &[]));
+    }
+    let object = fixture.append_header(messages);
+    fixture.link("deleted", object);
+    fixture.write(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let mut candidates = phase.deleted_collections(&[super::object(object)]);
+    let reads = calls.load(Ordering::Relaxed);
+    assert!(reads > 0);
+    candidates
+        .extend(phase.deleted_collections(&[super::object(object)]))
+        .unwrap();
+    let observations = candidates.observations.as_ref().unwrap();
+    assert_eq!(observations.predecessors.len(), 1);
+    assert_eq!(
+        observations.incomplete_deletions,
+        BTreeSet::from([super::object(object)])
+    );
+    let facts = &observations.predecessors[&origin(object)];
+    assert!(!facts.complete);
+    assert_eq!(
+        facts.objects,
+        BTreeSet::from([GlobalHeapId {
+            collection: PhysicalAddress::new(collection),
+            index: NonZeroU16::new(7).unwrap(),
+        }])
+    );
+    if malformed {
+        let Some(super::super::HeapReferenceError::Format(error)) = &facts.error else {
+            panic!("expected a descriptor error, got {:?}", facts.error);
+        };
+        assert_eq!(
+            error,
+            &FormatError::GlobalHeapObjectNotFound {
+                collection_address: collection,
+                index: 0,
+            }
+        );
+    } else {
+        assert!(facts.error.is_none());
+    }
+    assert!(candidates.collections.is_empty());
+    assert!(phase.unreferenced_collection_spans(candidates).is_empty());
+    assert!(phase.liveness.is_none());
+    assert_eq!(calls.load(Ordering::Relaxed), reads);
 }
 
 #[test]
@@ -430,7 +499,7 @@ fn candidate_union_rejects_allocations_without_provenance() {
         FormatError::Internal("collection candidate has no provenance".into())
     );
     assert!(candidates.collections.is_empty());
-    assert!(candidates.session.is_none());
+    assert!(candidates.observations.is_none());
 }
 
 fn allocation(

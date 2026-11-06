@@ -270,43 +270,62 @@ impl<'a> AnalysisPhase<'a> {
 
     /// Returns collection candidates referenced by deleted objects and their descendants.
     ///
-    /// `deleted` identifies the deleted objects. Returns an empty union if reference
-    /// discovery fails or is incomplete. Collections that cannot be parsed are excluded.
+    /// Retains decoded member identities and interpretation outcomes by original object. If
+    /// discovery fails or is incomplete, records the supplied deletion roots and excludes all
+    /// allocations. Otherwise, includes each collection whose complete allocation can be parsed.
     pub(super) fn deleted_collections(&mut self, deleted: &[ObjectId]) -> CollectionCandidates {
         if deleted.is_empty() {
             return CollectionCandidates::default();
         }
-        let mut origins: BTreeMap<PhysicalAddress, BTreeSet<CollectionProvenance>> =
-            BTreeMap::new();
-        let Ok(true) = self.scan_collections(deleted.iter().copied(), |object, references| {
-            for &address in &references.collections {
-                origins
-                    .entry(PhysicalAddress::new(address))
-                    .or_default()
-                    .insert(CollectionProvenance {
-                        object,
-                        attribute: None,
-                    });
+        let mut predecessors = BTreeMap::new();
+        let complete = self.scan_collections(deleted.iter().copied(), |object, references| {
+            if references.complete && references.objects.is_empty() {
+                return;
             }
-        }) else {
+            predecessors.insert(
+                CollectionProvenance {
+                    object,
+                    attribute: None,
+                },
+                references.clone(),
+            );
+        });
+        let mut candidates = CollectionCandidates::default();
+        if predecessors.is_empty() && matches!(complete, Ok(true)) {
+            return candidates;
+        }
+        if matches!(complete, Ok(true)) {
+            for (origin, references) in &predecessors {
+                for &address in &references.collections {
+                    if let Ok(allocation) =
+                        self.collection_allocation(PhysicalAddress::new(address))
+                    {
+                        let Ok(()) = candidates.insert(allocation, [origin.clone()]) else {
+                            return CollectionCandidates::default();
+                        };
+                    }
+                }
+            }
+        }
+        let Ok(observations) =
+            candidates.require_session(self.engine.context.allocations.session())
+        else {
             return CollectionCandidates::default();
         };
-        let mut candidates = CollectionCandidates::default();
-        for (address, origins) in origins {
-            if let Ok(allocation) = self.collection_allocation(address) {
-                let Ok(()) = candidates.insert(allocation, origins) else {
-                    return CollectionCandidates::default();
-                };
-            }
+        observations.predecessors = predecessors;
+        if !matches!(complete, Ok(true)) {
+            observations
+                .incomplete_deletions
+                .extend(deleted.iter().copied());
         }
         candidates
     }
 
     /// Returns collection candidates referenced by replaced or removed attributes of `object`.
     ///
-    /// Records `object` and each original attribute name as candidate origins. Skips attributes
-    /// with incomplete descriptor interpretation and collections whose complete allocations
-    /// cannot be parsed in this phase.
+    /// Retains decoded member identities and interpretation outcomes by `object` and original
+    /// attribute name. Includes allocations only for completely interpreted attributes and
+    /// collections whose complete allocations can be parsed in this phase.
     ///
     /// # Errors
     ///
@@ -318,24 +337,30 @@ impl<'a> AnalysisPhase<'a> {
     ) -> Result<CollectionCandidates, FormatError> {
         let mut candidates = CollectionCandidates::default();
         for attribute in predecessors {
-            let mut collections = BTreeSet::new();
-            let Ok(true) = self
+            let mut references = ObjectReferences::default();
+            let outcome = self
                 .engine
-                .collect_parsed_attribute_collections(&attribute, &mut collections)
-            else {
-                continue;
+                .collect_parsed_attribute_collections(&attribute, &mut references);
+            references.complete = matches!(outcome, Ok(true));
+            references.error = outcome.err().map(HeapReferenceError::from);
+            let origin = CollectionProvenance {
+                object,
+                attribute: Some(attribute.name),
             };
-            for address in collections {
-                if let Ok(allocation) = self.collection_allocation(PhysicalAddress::new(address)) {
-                    candidates.insert(
-                        allocation,
-                        [CollectionProvenance {
-                            object,
-                            attribute: Some(attribute.name.clone()),
-                        }],
-                    )?;
+            if references.complete {
+                for &address in &references.collections {
+                    if let Ok(allocation) =
+                        self.collection_allocation(PhysicalAddress::new(address))
+                    {
+                        candidates.insert(allocation, [origin.clone()])?;
+                    }
                 }
             }
+            candidates.observe(
+                self.engine.context.allocations.session(),
+                origin,
+                references,
+            )?;
         }
         Ok(candidates)
     }
@@ -343,6 +368,8 @@ impl<'a> AnalysisPhase<'a> {
     /// Parses complete parent and member framing on its first query in this phase.
     ///
     /// Reuses the retained framing or parsing failure for subsequent queries at `address`.
+    /// Captures the allocation class when its physical address can be converted to a stored
+    /// address.
     ///
     /// # Errors
     ///
@@ -355,26 +382,40 @@ impl<'a> AnalysisPhase<'a> {
         Ok(CollectionAllocation {
             session: self.engine.context.allocations.session(),
             range,
+            class: self
+                .engine
+                .addresses()
+                .relative(range.start())
+                .ok()
+                .map(|stored| {
+                    reclaim::collection_free_class(
+                        self.engine.space.page_size(),
+                        stored,
+                        range.length(),
+                    )
+                }),
         })
     }
 
     /// Returns allocations absent from the complete reference set for this phase's root.
     ///
-    /// Returns an empty result for an empty union, a different candidate session, or failed or
-    /// incomplete reference analysis. Reuses the root's reference result across calls in the same
-    /// phase. The editor classifies each returned range with [`reclaim::collection_free_class`].
+    /// Returns an empty result if the union contains no allocations, the candidate session
+    /// differs, or reference analysis fails or is incomplete. Reuses the root's reference result
+    /// across calls in the same phase. Returns each range with its recorded allocation class,
+    /// excluding allocations whose class is unknown.
     pub(super) fn unreferenced_collection_spans(
         &mut self,
         candidates: CollectionCandidates,
     ) -> Vec<(FileRange, FreeClass)> {
         let CollectionCandidates {
-            session,
+            observations,
             collections,
         } = candidates;
-        if session
-            .as_ref()
-            .is_some_and(|session| !session.same(&self.engine.context.allocations.session()))
-            || collections.is_empty()
+        if observations.as_ref().is_some_and(|facts| {
+            !facts
+                .session
+                .same(&self.engine.context.allocations.session())
+        }) || collections.is_empty()
         {
             return Vec::new();
         }
@@ -403,7 +444,11 @@ impl<'a> AnalysisPhase<'a> {
         collections
             .into_values()
             .filter_map(|candidate| {
-                let CollectionCandidate { range, origins: _ } = candidate;
+                let CollectionCandidate {
+                    range,
+                    class,
+                    origins: _,
+                } = candidate;
                 #[cfg(test)]
                 {
                     self.candidate_lookups = self.candidate_lookups.saturating_add(1);
@@ -411,22 +456,17 @@ impl<'a> AnalysisPhase<'a> {
                 if referenced_collections.contains(&range.start().get()) {
                     return None;
                 }
-                let stored = self.engine.addresses().relative(range.start()).ok()?;
-                Some((
-                    range,
-                    reclaim::collection_free_class(
-                        self.engine.space.page_size(),
-                        stored,
-                        range.length(),
-                    ),
-                ))
+                Some((range, class?))
             })
             .collect()
     }
 
     /// Visits reference summaries for each distinct object reachable from `roots`.
     ///
-    /// Returns whether reference-bearing content and bounded traversal were complete.
+    /// Returns whether reference-bearing content and bounded traversal were complete. Calls
+    /// `visit` with an available reference summary before returning its recorded error or an
+    /// adjacency discovery error. Reference interpretation completeness is independent of
+    /// traversal completeness.
     ///
     /// # Errors
     ///
@@ -440,9 +480,20 @@ impl<'a> AnalysisPhase<'a> {
         let mut traversal = ObjectTraversal::new(roots, self.budget, MAX_LINK_WALK_DEPTH);
         let mut complete = true;
         while let Some((object, depth)) = traversal.next() {
-            let references = self.read_references(object)?;
+            let references = match self.read_reference_facts(object, true) {
+                Ok(references) => references,
+                Err(error) => {
+                    if let Some(references) = self.references.get(&object) {
+                        visit(object, references);
+                    }
+                    return Err(error);
+                }
+            };
             complete &= references.complete;
             visit(object, references);
+            if let Some(error) = &references.error {
+                return Err(error.clone().into());
+            }
             if let Some(Some(topology)) = &self.topology
                 && topology.indices.contains_key(&object)
             {
@@ -456,20 +507,6 @@ impl<'a> AnalysisPhase<'a> {
             }
         }
         Ok(complete && traversal.complete())
-    }
-
-    /// Returns cached reference facts and parses any required group adjacency.
-    ///
-    /// # Errors
-    ///
-    /// Returns parsing and source-read errors from the object header, its group links, or its
-    /// reference-bearing content.
-    fn read_references(&mut self, object: ObjectId) -> Result<&ObjectReferences, Error> {
-        let references = self.read_reference_facts(object, true)?;
-        if let Some(error) = &references.error {
-            return Err(error.clone().into());
-        }
-        Ok(references)
     }
 
     /// Collects descriptor identities once, with optional group-adjacency discovery.
@@ -886,7 +923,7 @@ impl ObjectLinks {
 /// Retains checked identities even when other content is unsupported or malformed. Completeness
 /// covers reference interpretation independently of adjacency and collection framing. Logical
 /// ownership, external references, and retirement permission require separate evidence.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::edit) struct ObjectReferences {
     /// Distinct physical collection addresses.
     collections: BTreeSet<u64>,
@@ -898,49 +935,78 @@ pub(in crate::edit) struct ObjectReferences {
     error: Option<HeapReferenceError>,
 }
 
-/// Global heap allocations, keyed by physical address, and their object or attribute origins.
+/// Global heap allocation candidates and predecessor reference observations from one editing session.
 ///
-/// The editor retains a complete allocation range from one editing session for each candidate.
-/// Reference absence is established separately against the prospective root.
+/// The editor retains complete allocation ranges and their original classes separately from
+/// descriptor identities, interpretation outcomes, and incomplete deletion roots. The caller
+/// establishes source freshness, member presence, allocation ownership, and retirement permission
+/// separately. An absent observation is not evidence of reference absence.
 #[derive(Default)]
 pub(super) struct CollectionCandidates {
-    session: Option<AllocationSession>,
+    /// Lazily allocated session identity and reference observations.
+    observations: Option<Box<CandidateObservations>>,
+    /// Complete allocation candidates, keyed by physical collection address.
     collections: BTreeMap<PhysicalAddress, CollectionCandidate>,
 }
 
 impl CollectionCandidates {
-    /// Merges candidates and their recorded origins from `other`.
+    /// Merges allocation candidates, reference observations, and incomplete deletion roots.
+    ///
+    /// Preserves each allocation's range and class. Adopts `other` directly if `self` is empty.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Self::insert`]. Entries merged before an error remain in `self`.
     pub(super) fn extend(&mut self, other: Self) -> Result<(), FormatError> {
+        if self.observations.is_none() {
+            debug_assert!(self.collections.is_empty());
+            *self = other;
+            return Ok(());
+        }
         let Self {
-            session,
+            observations,
             collections,
         } = other;
-        let Some(session) = session else {
+        let Some(observations) = observations else {
             debug_assert!(collections.is_empty());
             return Ok(());
         };
-        for CollectionCandidate { range, origins } in collections.into_values() {
+        let CandidateObservations {
+            session,
+            predecessors,
+            incomplete_deletions,
+        } = *observations;
+        self.require_session(session.clone())?;
+        for CollectionCandidate {
+            range,
+            class,
+            origins,
+        } in collections.into_values()
+        {
             self.insert(
                 CollectionAllocation {
                     session: session.clone(),
                     range,
+                    class,
                 },
                 origins,
             )?;
         }
+        for (origin, references) in predecessors {
+            self.observe(session.clone(), origin, references)?;
+        }
+        self.require_session(session)?
+            .incomplete_deletions
+            .extend(incomplete_deletions);
         Ok(())
     }
 
-    /// Merges origins for one complete allocation, preserving its original range.
+    /// Merges origins for one complete allocation, preserving its original range and class.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if `origins` is empty, the allocation belongs to another
-    /// session, or an existing candidate at the same address has a different length.
+    /// session, or an existing candidate at the same address has a different length or class.
     pub(super) fn insert(
         &mut self,
         allocation: CollectionAllocation,
@@ -950,57 +1016,130 @@ impl CollectionCandidates {
         let first = origins.next().ok_or_else(|| {
             FormatError::Internal("collection candidate has no provenance".into())
         })?;
-        let Self {
-            session: prior_session,
-            collections,
-        } = self;
-        let CollectionAllocation { session, range } = allocation;
-        if let Some(prior) = prior_session {
-            if !prior.same(&session) {
-                return Err(FormatError::Internal(
-                    "collection candidates belong to different sessions".into(),
-                ));
-            }
-        } else {
-            *prior_session = Some(session);
-        }
-        let candidate = collections
-            .entry(range.start())
-            .or_insert_with(|| CollectionCandidate {
-                range,
-                origins: BTreeSet::new(),
-            });
+        let CollectionAllocation {
+            session,
+            range,
+            class,
+        } = allocation;
+        self.require_session(session)?;
+        let candidate =
+            self.collections
+                .entry(range.start())
+                .or_insert_with(|| CollectionCandidate {
+                    range,
+                    class,
+                    origins: BTreeSet::new(),
+                });
         if candidate.range != range {
             return Err(FormatError::Internal(
                 "collection candidates have conflicting allocation lengths".into(),
+            ));
+        }
+        if candidate.class != class {
+            return Err(FormatError::Internal(
+                "collection candidates have conflicting allocation classes".into(),
             ));
         }
         candidate.origins.insert(first);
         candidate.origins.extend(origins);
         Ok(())
     }
+
+    /// Merges decoded identities and interpretation outcomes for one original object or attribute.
+    ///
+    /// Skips complete, reference-free summaries. For repeated observations, retains all decoded
+    /// identities and the first error. Records completeness only if every interpretation is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a retained observation belongs to another session.
+    fn observe(
+        &mut self,
+        session: AllocationSession,
+        origin: CollectionProvenance,
+        references: ObjectReferences,
+    ) -> Result<(), FormatError> {
+        if references.complete && references.objects.is_empty() {
+            return Ok(());
+        }
+        match self.require_session(session)?.predecessors.entry(origin) {
+            Entry::Vacant(entry) => {
+                entry.insert(references);
+            }
+            Entry::Occupied(mut entry) => {
+                let prior = entry.get_mut();
+                prior.collections.extend(references.collections);
+                prior.objects.extend(references.objects);
+                prior.complete &= references.complete;
+                if prior.error.is_none() {
+                    prior.error = references.error;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Allocates observation storage on its first use in `session`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the recorded session differs from `session`.
+    fn require_session(
+        &mut self,
+        session: AllocationSession,
+    ) -> Result<&mut CandidateObservations, FormatError> {
+        if let Some(prior) = &self.observations {
+            if !prior.session.same(&session) {
+                return Err(FormatError::Internal(
+                    "collection candidates belong to different sessions".into(),
+                ));
+            }
+        }
+        Ok(self.observations.get_or_insert_with(|| {
+            Box::new(CandidateObservations {
+                session,
+                predecessors: BTreeMap::new(),
+                incomplete_deletions: BTreeSet::new(),
+            })
+        }))
+    }
+}
+
+/// Descriptor observations and incomplete deletion scopes, bound to one editing session.
+struct CandidateObservations {
+    session: AllocationSession,
+    /// Decoded identities and interpretation outcomes, keyed by original object and attribute.
+    predecessors: BTreeMap<CollectionProvenance, ObjectReferences>,
+    /// Supplied deletion roots whose descendant traversal failed or was incomplete.
+    incomplete_deletions: BTreeSet<ObjectId>,
 }
 
 /// The complete physical range of a parsed collection, bound to its editing session.
 ///
-/// The caller preserves the allocation while using its evidence across source-content phases.
+/// Retains the original allocation class when its physical address can be converted to a stored
+/// address. The caller preserves the allocation while using its evidence across source-content
+/// phases.
 pub(super) struct CollectionAllocation {
     session: AllocationSession,
     range: FileRange,
+    /// The original allocation class, or [`None`] if stored-address conversion failed.
+    class: Option<FreeClass>,
 }
 
-/// One complete collection allocation and its recorded origins.
+/// One complete collection allocation with its original class and recorded origins.
 struct CollectionCandidate {
     range: FileRange,
+    /// The original allocation class, or [`None`] if stored-address conversion failed.
+    class: Option<FreeClass>,
     origins: BTreeSet<CollectionProvenance>,
 }
 
-/// The object and optional attribute associated with a retirement candidate.
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// The original object and optional attribute associated with an allocation or observation.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct CollectionProvenance {
-    /// The object from which the candidate was collected.
+    /// The object from which the allocation or reference summary was collected.
     pub(super) object: ObjectId,
-    /// The attribute name, or [`None`] for an object-wide candidate.
+    /// The original attribute name, or [`None`] for an object-wide observation or allocation.
     pub(super) attribute: Option<String>,
 }
 
