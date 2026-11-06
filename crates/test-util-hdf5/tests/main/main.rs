@@ -1,6 +1,8 @@
 use hdf5_pure::SuperblockStatusFlags;
 use test_util_hdf5::assertion::StatusOpen;
 
+mod reader;
+
 #[test]
 fn a_source_read_message_reports_the_complete_snapshot_recovery() {
     assert_eq!(
