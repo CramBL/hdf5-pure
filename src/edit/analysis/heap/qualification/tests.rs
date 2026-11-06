@@ -425,6 +425,111 @@ fn empty_qualification_avoids_domain_and_numeric_payload_reads() {
     assert_eq!(calls.load(Ordering::Relaxed), before);
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn nonempty_qualification_reuses_metadata_without_reading_or_retaining_payloads() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use test_util::allocation;
+
+    let path = test_util::temp::temp_path("collection-qualification-cost.h5");
+    let mut fixture = Fixture::new();
+    let payload = vec![0x5a; 1_048_576];
+    let collection = fixture.collection(&[Object::new(7, &payload)]);
+    let owner = object(&mut fixture, "variable", collection, 7);
+    let numeric_start = u64::try_from(fixture.image.as_bytes().len()).unwrap();
+    let messages =
+        Form::ContiguousDataset.messages(&mut fixture, &crate::make_i32_type(), &payload);
+    fixture.object("numeric", messages);
+    fixture.write(&path);
+    let numeric = FileRange::new(
+        PhysicalAddress::new(numeric_start),
+        u64::try_from(payload.len()).unwrap(),
+    )
+    .unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let engine = edit_test_util::open_observed_engine(&path, Arc::clone(&reads));
+    reads.lock().unwrap().clear();
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase.reconstruction_source(&engine, owner).unwrap();
+    let candidates = phase.deleted_collections(&[owner]);
+    let (facts, first) = allocation::measure("collection_qualification_first", || {
+        phase.qualify_collections(&source, candidates).unwrap()
+    });
+    assert!(
+        first.blocks > 0
+            && first.bytes > 0
+            && first.bytes < 65_536
+            && first.peak_bytes < 65_536
+            && first.live_bytes > 0
+            && first.live_bytes < 32_768,
+        "{first}"
+    );
+    let collection = PhysicalAddress::new(collection);
+    assert_eq!(facts.whole_parent(collection), Ok(()));
+    assert!(facts.predecessors_complete());
+    let origin = CollectionProvenance {
+        object: owner,
+        content: CollectionContent::Object,
+    };
+    let id = GlobalHeapId {
+        collection,
+        index: index(7),
+    };
+    assert_eq!(facts.member(&origin, id), Ok(()));
+    let contents = facts.contents(&mut phase, collection).unwrap();
+    assert_eq!(contents.members().len(), 1);
+    let heap_payload = contents.members()[0].payload().range();
+    assert_eq!(heap_payload.length(), numeric.length());
+    let before = reads.lock().unwrap().len();
+    assert!(before > 0);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|range| !range.overlaps(numeric) && !range.overlaps(heap_payload))
+    );
+    let framing = core::ptr::from_ref(contents);
+    let associations = core::ptr::from_ref(facts.associations(&mut phase).unwrap());
+    let repeated = phase.deleted_collections(&[owner]);
+    let (cached, measured) = allocation::measure("collection_qualification_cached", || {
+        phase.qualify_collections(&source, repeated).unwrap()
+    });
+    assert!(
+        measured.blocks > 0
+            && measured.bytes > 0
+            && measured.bytes < 8_192
+            && measured.peak_bytes < 8_192
+            && measured.live_bytes > 0
+            && measured.live_bytes < 8_192,
+        "{measured}"
+    );
+    assert_eq!(cached.member(&origin, id), Ok(()));
+    assert_eq!(cached.whole_parent(collection), Ok(()));
+    let ((), access) = allocation::measure("collection_qualification_cache_access", || {
+        assert_eq!(
+            core::ptr::from_ref(cached.contents(&mut phase, collection).unwrap()),
+            framing
+        );
+        assert_eq!(
+            core::ptr::from_ref(cached.associations(&mut phase).unwrap()),
+            associations
+        );
+    });
+    let (control, floor) = allocation::measure("collection_qualification_control", || {
+        vec![0_u8; payload.len()]
+    });
+    assert_eq!(control.len(), payload.len());
+    assert!(
+        floor.bytes >= u64::try_from(control.len()).unwrap(),
+        "{floor}"
+    );
+    assert_eq!((access.blocks, access.bytes), (0, 0));
+    assert_eq!(reads.lock().unwrap().len(), before);
+}
+
 fn object(fixture: &mut Fixture, name: &str, collection: u64, member: u32) -> ObjectId {
     let messages = Form::CompactDataset.messages(
         fixture,
