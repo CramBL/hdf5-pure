@@ -1,5 +1,7 @@
 use core::cell::Cell;
 use core::num::NonZeroU16;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::__private::FileRange;
@@ -9,6 +11,7 @@ use test_util::global_heap::Object;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::{MemberUnavailable, ParentUnavailable};
+use crate::edit::analysis::deletions::TopologyIdentity;
 use crate::edit::analysis::heap::HeapReferenceError;
 use crate::edit::analysis::heap::associations::MemberPresence;
 use crate::edit::analysis::physical::claims::domain::{DomainUnavailable, OwnerDomain};
@@ -624,6 +627,194 @@ enum StorageRestriction {
     Range,
 }
 
+#[rstest]
+#[case::complete(Capture::Complete)]
+#[case::framing_failure(Capture::Framing)]
+#[case::incomplete_discovery(Capture::Incomplete)]
+#[case::phase_mismatch(Capture::Phase)]
+#[case::session_mismatch(Capture::Session)]
+#[case::missing_source(Capture::Source)]
+fn capture_preserves_candidates_qualification_and_owned_framing(#[case] mode: Capture) {
+    use super::{OriginalCollectionError, OriginalQualification};
+    use crate::edit::allocation::AllocationPublication;
+
+    let path = test_util::temp::temp_path("captured-collections.h5");
+    let mut fixture = Fixture::new();
+    let address = fixture.collection(&[Object::new(7, b"before"), Object::new(91, b"other")]);
+    let owner = object(&mut fixture, "owner", address, 7);
+    fixture.write(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase.reconstruction_source(&engine, owner).unwrap();
+    let mut candidates = phase.deleted_collections(&[owner]);
+    let address = PhysicalAddress::new(address);
+    let allocation = candidates.collections[&address].range;
+    let origin = CollectionProvenance {
+        object: owner,
+        content: CollectionContent::Object,
+    };
+    let id = GlobalHeapId {
+        collection: address,
+        index: index(7),
+    };
+    let descriptor = candidates.observations.as_ref().unwrap().predecessors[&origin]
+        .objects()
+        .clone();
+    if matches!(mode, Capture::Incomplete) {
+        let observations = candidates.observations.as_mut().unwrap();
+        observations.incomplete_deletions.insert(owner);
+        let references = observations.predecessors.get_mut(&origin).unwrap();
+        references.complete = false;
+        references.error = Some(HeapReferenceError::Format(FormatError::Source(
+            "descriptor failure".into(),
+        )));
+    }
+    if matches!(mode, Capture::Framing) {
+        phase
+            .allocations
+            .insert(address, Err(FormatError::Source("framing failure".into())));
+    }
+    if matches!(mode, Capture::Session) {
+        candidates.observations.as_mut().unwrap().session = AllocationPublication::new().session();
+    }
+    if matches!(mode, Capture::Phase) {
+        candidates.observations.as_mut().unwrap().identity = Some(Arc::new(TopologyIdentity));
+    }
+    if matches!(mode, Capture::Complete) {
+        phase.supported_owner_domain(&source).unwrap();
+        phase.member_associations(&source).unwrap();
+    }
+    let before = (
+        calls.load(Ordering::Relaxed),
+        COLLECTION_ALLOCATIONS.with(Cell::get),
+        COLLECTION_WORK.with(Cell::get),
+    );
+    assert!(before.0 > 0 && before.1 > 0);
+    let captured = phase.capture_collections(
+        (!matches!(mode, Capture::Source)).then_some(&source),
+        candidates,
+    );
+    if matches!(mode, Capture::Complete) {
+        assert_eq!(
+            (
+                calls.load(Ordering::Relaxed),
+                COLLECTION_ALLOCATIONS.with(Cell::get),
+                COLLECTION_WORK.with(Cell::get)
+            ),
+            before
+        );
+    }
+    drop(phase);
+    match captured.qualification() {
+        OriginalQualification::Qualified(qualification)
+            if matches!(
+                mode,
+                Capture::Complete | Capture::Framing | Capture::Incomplete
+            ) =>
+        {
+            assert_eq!(
+                qualification.original_allocation(address).unwrap().0,
+                allocation
+            );
+            assert_eq!(
+                qualification.predecessors().unwrap()[&origin].objects(),
+                &descriptor
+            );
+            assert_eq!(
+                qualification.member(&origin, id),
+                match mode {
+                    Capture::Framing => Err(MemberUnavailable::Unknown),
+                    Capture::Incomplete => Err(MemberUnavailable::Interpretation),
+                    _ => Ok(()),
+                }
+            );
+            if matches!(mode, Capture::Incomplete) {
+                assert!(!qualification.predecessors_complete());
+                assert_eq!(
+                    qualification.incomplete_deletions().unwrap(),
+                    &BTreeSet::from([owner])
+                );
+                let Some(HeapReferenceError::Format(error)) =
+                    qualification.predecessors().unwrap()[&origin].error()
+                else {
+                    panic!("expected retained descriptor failure");
+                };
+                assert_eq!(error, &FormatError::Source("descriptor failure".into()));
+            }
+        }
+        OriginalQualification::Unavailable { candidates, error }
+            if matches!(mode, Capture::Phase | Capture::Session | Capture::Source) =>
+        {
+            assert_eq!(candidates.collections[&address].range, allocation);
+            assert_eq!(
+                candidates.observations.as_ref().unwrap().predecessors[&origin].objects(),
+                &descriptor
+            );
+            match error {
+                OriginalCollectionError::Source => assert!(matches!(mode, Capture::Source)),
+                OriginalCollectionError::Qualification(Error::Format(error))
+                    if matches!(mode, Capture::Phase | Capture::Session) =>
+                {
+                    assert_eq!(
+                        error,
+                        &FormatError::Internal(
+                            if matches!(mode, Capture::Session) {
+                                "collection qualification belongs to another allocation session"
+                            } else {
+                                "collection qualification belongs to another source phase"
+                            }
+                            .into()
+                        )
+                    );
+                }
+                OriginalCollectionError::Qualification(error) => {
+                    panic!("unexpected qualification failure: {error:?}")
+                }
+            }
+        }
+        _ => panic!("unexpected original qualification outcome"),
+    }
+    if matches!(mode, Capture::Source) {
+        assert!(captured.contents().is_empty());
+    } else if matches!(mode, Capture::Framing) {
+        assert_eq!(
+            captured.contents()[&address].as_ref().err().unwrap(),
+            &FormatError::Source("framing failure".into())
+        );
+    } else {
+        let contents = captured.contents()[&address].as_ref().unwrap();
+        assert_eq!(contents.range(), allocation);
+        assert_eq!(
+            contents
+                .members()
+                .iter()
+                .map(|member| member.index())
+                .collect::<Vec<_>>(),
+            [index(7), index(91)]
+        );
+    }
+}
+
+#[test]
+fn empty_capture_skips_source_discovery_and_reads() {
+    use super::OriginalQualification;
+
+    let path = test_util::temp::temp_path("captured-empty.h5");
+    Fixture::new().write(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let before = calls.load(Ordering::Relaxed);
+    let captured = phase.capture_collections(None, CollectionCandidates::default());
+    assert!(matches!(
+        captured.qualification(),
+        OriginalQualification::Empty
+    ));
+    assert!(captured.contents().is_empty());
+    assert!(phase.claims.is_none());
+    assert!(phase.associations.is_none());
+    assert_eq!(calls.load(Ordering::Relaxed), before);
+}
+
 fn object(fixture: &mut Fixture, name: &str, collection: u64, member: u32) -> ObjectId {
     let messages = Form::CompactDataset.messages(
         fixture,
@@ -664,4 +855,14 @@ enum Association {
     Phase,
     SameRoot,
     Session,
+}
+
+#[derive(Clone, Copy)]
+enum Capture {
+    Complete,
+    Framing,
+    Incomplete,
+    Phase,
+    Session,
+    Source,
 }

@@ -53,28 +53,29 @@ fn owned_publication_preserves_original_storage_until_actual_completion(
     let protected = preserved(pending.engine, &pending.storage);
     let maximum = pending.maximum_end();
     disk_log::start();
-    let result = pending.publish_with_completion(|published, original, dispositions, storage| {
-        assert!(original.facts().unwrap().counts().changes().is_empty());
-        assert_eq!(
-            dispositions.replacements().unwrap(),
-            &BTreeMap::from([(ObjectId::new(old_root), ObjectId::new(requested))])
-        );
-        assert_eq!(published.requested_root(), requested);
-        if matches!(strategy, Strategy::Reclaim) {
-            assert_eq!(published.root(), old_root);
-            assert_ne!(published.root(), requested);
-        }
-        let end = published.end();
-        let engine = published.into_engine();
-        assert_eq!(end.get(), engine.image.len());
-        assert!(end >= maximum);
-        assert_eq!(engine.publication, PublicationState::Published);
-        storage
-            .exclude_publication(engine, &ReturnedExtents::default(), TailPlacement::Anywhere)
-            .unwrap();
-        assert_eq!(preserved(engine, storage), protected);
-        Ok(())
-    });
+    let result =
+        pending.publish_with_completion(|published, original, dispositions, storage, _| {
+            assert!(original.facts().unwrap().counts().changes().is_empty());
+            assert_eq!(
+                dispositions.replacements().unwrap(),
+                &BTreeMap::from([(ObjectId::new(old_root), ObjectId::new(requested))])
+            );
+            assert_eq!(published.requested_root(), requested);
+            if matches!(strategy, Strategy::Reclaim) {
+                assert_eq!(published.root(), old_root);
+                assert_ne!(published.root(), requested);
+            }
+            let end = published.end();
+            let engine = published.into_engine();
+            assert_eq!(end.get(), engine.image.len());
+            assert!(end >= maximum);
+            assert_eq!(engine.publication, PublicationState::Published);
+            storage
+                .exclude_publication(engine, &ReturnedExtents::default(), TailPlacement::Anywhere)
+                .unwrap();
+            assert_eq!(preserved(engine, storage), protected);
+            Ok(())
+        });
     if let Err(error) = result {
         panic_failure(*error);
     }
@@ -128,7 +129,7 @@ fn publication_rechecks_current_claims_and_retains_the_authentic_pending_batch()
     let bytes = pending.engine.disk_bytes().unwrap();
     disk_log::start();
     let failure = pending
-        .publish_with_completion(|_, _, _, _| -> Result<(), Error> {
+        .publish_with_completion(|_, _, _, _, _| -> Result<(), Error> {
             panic!("a conflicting allocator cannot complete")
         })
         .err()
@@ -169,7 +170,7 @@ fn publication_retains_pending_inputs_when_placement_reconciliation_is_incomplet
     let bytes = pending.engine.disk_bytes().unwrap();
     disk_log::start();
     let failure = pending
-        .publish_with_completion(|_, _, _, _| -> Result<(), Error> {
+        .publish_with_completion(|_, _, _, _, _| -> Result<(), Error> {
             panic!("an incomplete placement cannot complete")
         })
         .err()
@@ -343,7 +344,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
         .map(|address| engine.addresses().resolve(address).unwrap());
     let pending = apply(&mut engine);
     disk_log::start();
-    if let Err(error) = pending.publish_with_completion(|_, _, _, _| Ok(())) {
+    if let Err(error) = pending.publish_with_completion(|_, _, _, _, _| Ok(())) {
         panic_failure(*error);
     }
     let recording = disk_log::finish();
@@ -387,7 +388,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
     } else {
         disk_log::fail_resize_after(0, FailurePoint::Before);
     }
-    let result = pending.publish_with_completion(|_, _, _, _| {
+    let result = pending.publish_with_completion(|_, _, _, _, _| {
         called.set(true);
         Ok(())
     });
@@ -396,6 +397,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
         original,
         dispositions,
         storage,
+        collections: _,
         error,
     } = *result.err().unwrap()
     else {

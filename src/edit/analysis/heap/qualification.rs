@@ -113,6 +113,82 @@ impl AnalysisPhase<'_> {
         source: &ReconstructionSource,
         candidates: CollectionCandidates,
     ) -> Result<CollectionQualification, Error> {
+        let checks = self.inspect_collections(source, &candidates)?;
+        Ok(CollectionQualification {
+            source: source.clone(),
+            candidates,
+            domain: checks.domain,
+            parents: checks.parents,
+        })
+    }
+
+    /// Collects owned original qualification and full framing for use outside this phase.
+    ///
+    /// Retains the candidates when the source is absent or qualification fails. Moves cached
+    /// framing and framing errors for candidate and observed parents out of this phase when
+    /// the source matches. Empty default input skips source and domain discovery.
+    pub(in crate::edit) fn capture_collections(
+        &mut self,
+        source: Option<&ReconstructionSource>,
+        candidates: CollectionCandidates,
+    ) -> OriginalCollections {
+        if candidates.collections.is_empty() && candidates.observations.is_none() {
+            return OriginalCollections {
+                qualification: OriginalQualification::Empty,
+                contents: BTreeMap::new(),
+            };
+        }
+        let mut addresses: BTreeSet<_> = candidates.collections.keys().copied().collect();
+        if let Some(observations) = &candidates.observations {
+            for references in observations.predecessors.values() {
+                addresses.extend(
+                    references
+                        .collections
+                        .iter()
+                        .copied()
+                        .map(PhysicalAddress::new),
+                );
+                addresses.extend(references.objects.iter().map(|id| id.collection));
+            }
+        }
+        let checks = match source {
+            Some(source) => self
+                .inspect_collections(source, &candidates)
+                .map(|checks| (source.clone(), checks))
+                .map_err(OriginalCollectionError::Qualification),
+            None => Err(OriginalCollectionError::Source),
+        };
+        let mut contents = BTreeMap::new();
+        if let Some(source) = source
+            && self.require_heap_phase(source).is_ok()
+        {
+            for address in addresses {
+                self.collection_contents(address).ok();
+                if let Some(framing) = self.allocations.remove(&address) {
+                    contents.insert(address, framing);
+                }
+            }
+        }
+        let qualification = match checks {
+            Ok((source, checks)) => OriginalQualification::Qualified(CollectionQualification {
+                source,
+                candidates,
+                domain: checks.domain,
+                parents: checks.parents,
+            }),
+            Err(error) => OriginalQualification::Unavailable { candidates, error },
+        };
+        OriginalCollections {
+            qualification,
+            contents,
+        }
+    }
+
+    fn inspect_collections(
+        &mut self,
+        source: &ReconstructionSource,
+        candidates: &CollectionCandidates,
+    ) -> Result<CollectionChecks, Error> {
         self.require_heap_phase(source)?;
         if let Some(observations) = &candidates.observations {
             if !observations
@@ -220,16 +296,60 @@ impl AnalysisPhase<'_> {
                 },
             );
         }
-        Ok(CollectionQualification {
-            source: ReconstructionSource {
-                identity: Arc::clone(&source.identity),
-                object: source.object(),
-            },
-            candidates,
+        Ok(CollectionChecks {
             domain,
             parents: qualified,
         })
     }
+}
+
+/// Original candidate qualification and full parent framing retained outside the source phase.
+///
+/// Qualification and framing failures are recorded independently. Source freshness,
+/// prospective ownership, and permission to mutate or reuse storage require separate evidence.
+pub(in crate::edit) struct OriginalCollections {
+    qualification: OriginalQualification,
+    contents: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
+}
+
+impl OriginalCollections {
+    /// Borrows original qualification or the candidates retained after qualification failed.
+    pub(in crate::edit) fn qualification(&self) -> &OriginalQualification {
+        &self.qualification
+    }
+
+    /// Borrows captured full framing and framing failures by physical collection address.
+    pub(in crate::edit) fn contents(
+        &self,
+    ) -> &BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>> {
+        &self.contents
+    }
+}
+
+/// Original collection observations or the inputs retained after qualification failed.
+pub(in crate::edit) enum OriginalQualification {
+    /// Empty default candidates without predecessor observations.
+    Empty,
+    /// Original observations with independent source-domain and parent outcomes.
+    Qualified(CollectionQualification),
+    /// The original candidates and the failure that prevented qualification.
+    Unavailable {
+        candidates: CollectionCandidates,
+        error: OriginalCollectionError,
+    },
+}
+
+/// An unavailable source association or an error from original collection qualification.
+pub(in crate::edit) enum OriginalCollectionError {
+    /// Source-phase, session, or discovery checks failed.
+    Qualification(Error),
+    /// The original source association was unavailable.
+    Source,
+}
+
+struct CollectionChecks {
+    domain: Option<OwnerDomain>,
+    parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
 
 /// Owned framing and candidate-allocation observations for one global heap collection.

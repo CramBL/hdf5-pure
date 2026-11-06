@@ -12,7 +12,9 @@ use hdf5_pure_space::__private::{Extent, FreeClass, RetainedKind};
 use super::dispositions::{AppliedDispositions, Disposition, ReconstructionDispositions};
 use super::{AppliedEditInventory, OriginalEdits, PreparedEditInventory};
 use crate::edit::WriteEngine;
-use crate::edit::analysis::heap::qualification::{ParentStorage, ParentUnavailable};
+use crate::edit::analysis::heap::qualification::{
+    OriginalCollections, ParentStorage, ParentUnavailable,
+};
 use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::physical::claims::{ClaimOrigin, ClaimProblem};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
@@ -366,6 +368,7 @@ pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     original: OriginalEdits,
     dispositions: AppliedDispositions,
     storage: OriginalStorage,
+    collections: OriginalCollections,
     pending: PendingRootFrees,
     relocations: BTreeMap<ObjectId, ObjectId>,
     exclusion: Result<(), StorageConflict>,
@@ -378,6 +381,7 @@ impl<'a> PendingEditInventory<'a> {
             original,
             dispositions,
             storage,
+            collections,
         } = applied;
         let AppliedTree {
             retirement,
@@ -396,6 +400,7 @@ impl<'a> PendingEditInventory<'a> {
             original,
             dispositions,
             storage,
+            collections,
             pending,
             relocations,
             exclusion,
@@ -407,7 +412,8 @@ impl<'a> PendingEditInventory<'a> {
     /// Checks placement reconciliation and current allocator claims before consuming the pending
     /// batch. Calls `complete` after publication, reference updates, root reclamation, truncation,
     /// and final storage checks succeed. The callback receives the original observations, applied
-    /// dispositions, and storage exclusions associated with these inputs.
+    /// dispositions, storage exclusions, and original collection qualification and framing
+    /// associated with these inputs.
     ///
     /// # Errors
     ///
@@ -422,6 +428,7 @@ impl<'a> PendingEditInventory<'a> {
             &OriginalEdits,
             &AppliedDispositions,
             &OriginalStorage,
+            &OriginalCollections,
         ) -> Result<T, Error>,
     ) -> Result<T, Box<StoragePublicationFailure<'a>>> {
         let reason = if self.dispositions.replacements().is_err() {
@@ -445,13 +452,14 @@ impl<'a> PendingEditInventory<'a> {
             original,
             dispositions,
             storage,
+            collections,
             pending,
             relocations,
             exclusion: _,
         } = self;
         engine
             .publish_pending_tree_excluding(pending, relocations, Some(&storage), |published| {
-                complete(published, &original, &dispositions, &storage)
+                complete(published, &original, &dispositions, &storage, &collections)
                     .map_err(PublicationError::from)
             })
             .map_err(|error| {
@@ -459,9 +467,15 @@ impl<'a> PendingEditInventory<'a> {
                     original,
                     dispositions,
                     storage,
+                    collections,
                     error,
                 })
             })
+    }
+
+    /// Borrows original candidates, qualification, and framing retained until completion.
+    pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
+        &self.collections
     }
 
     /// Returns the recorded allocator and pending-retirement exclusion outcome.
@@ -503,6 +517,7 @@ pub(in crate::edit::commit) enum StoragePublicationFailure<'a> {
         original: OriginalEdits,
         dispositions: AppliedDispositions,
         storage: OriginalStorage,
+        collections: OriginalCollections,
         error: PublicationError,
     },
 }
