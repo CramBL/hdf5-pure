@@ -4,6 +4,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::fmt;
 use std::collections::BTreeMap;
 
@@ -24,6 +25,8 @@ use crate::convert::Narrow;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::CountObservation;
 use crate::edit::commit::JournalScope;
+use crate::edit::commit::OriginalStorage;
+use crate::edit::commit::PublicationError;
 use crate::edit::commit::PublishedTree;
 use crate::edit::retirement::PendingRootFrees;
 use crate::error::Error;
@@ -129,7 +132,8 @@ impl<'a> CountPublicationPhase<'a> {
 ///
 /// The engine borrow and original retirement batch are retained through [`CountPublicationPhase`].
 /// The predecessor source root and prospective publication root remain distinct.
-/// [`Self::with_publication`] consumes the original retirement batch and calls the publisher.
+/// The editor consumes the original retirement batch in [`Self::with_publication`] or
+/// [`Self::with_ordered_counts`].
 pub(in crate::edit) struct CountPublicationBounds<'a> {
     phase: CountPublicationPhase<'a>,
     end: PhysicalAddress,
@@ -190,6 +194,82 @@ impl<'a> CountPublicationBounds<'a> {
         engine.publish_pending_tree_with_completion(retirement, relocations, |published| {
             complete(request.into_write_scope(published))
         })
+    }
+
+    /// Publishes the tree between source reference count increases and decreases.
+    ///
+    /// Writes increases through the commit journal before publication. Protects every original
+    /// header allocation containing an updated count during publication, then reads current headers
+    /// and journals decreases before calling `complete`. An empty count batch uses
+    /// [`WriteEngine::publish_pending_tree_with_completion`]. The caller handles whole-commit
+    /// rollback according to publication state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for changed count fields or conflicting original
+    /// allocations. Returns [`Error::CommitPartiallyApplied`] if restoring count writes fails.
+    /// Other count-preparation, publication, protection, journal, and completion errors propagate.
+    pub(in crate::edit) fn with_ordered_counts<T>(
+        self,
+        relocations: BTreeMap<ObjectId, ObjectId>,
+        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let Self { phase, end } = self;
+        let CountPublicationPhase {
+            engine,
+            counts,
+            retirement,
+        } = phase;
+        if counts.updates().is_empty() {
+            return engine.publish_pending_tree_with_completion(retirement, relocations, complete);
+        }
+        let storage = OriginalStorage::from_counts(&counts);
+        let increases = CurrentCountUpdates::select(engine, &counts, Some(Ordering::Greater))?;
+        for update in &increases {
+            for (range, bytes) in update.writes() {
+                engine.write_inplace_journaled(range.start(), bytes)?;
+            }
+        }
+        let request = CountCompletion {
+            counts: &counts,
+            root: retirement.root,
+            proposed_end: end,
+        };
+        engine
+            .publish_pending_tree_excluding(retirement, relocations, Some(&storage), |published| {
+                let requested = published.requested_root();
+                let scope = request
+                    .into_write_scope(published)
+                    .map_err(|error| match error {
+                        CountCompletionError::Protection(error) => Error::from(error),
+                        CountCompletionError::Root { .. } => FormatError::Internal(
+                            "count updates belong to another published tree".into(),
+                        )
+                        .into(),
+                    })?;
+                let decreases =
+                    CurrentCountUpdates::select(scope.engine, scope.counts, Some(Ordering::Less))
+                        .map_err(Error::from)?;
+                let result = JournalScope::run(scope.engine, |journal| {
+                    for update in &decreases {
+                        for (range, bytes) in update.writes() {
+                            journal.write(range.start(), bytes)?;
+                        }
+                    }
+                    Ok(())
+                });
+                if matches!(&result, Err(Error::CommitPartiallyApplied { .. })) {
+                    scope.engine.make_allocation_uncertain();
+                }
+                result?;
+                complete(PublishedTree::new(scope.engine, requested)?).map_err(Into::into)
+            })
+            .map_err(|error| match error {
+                PublicationError::Write(error) => error,
+                PublicationError::Storage(_) => Error::EditUnsupported(
+                    "publication conflicts with an original count allocation",
+                ),
+            })
     }
 
     /// Recovers the checked phase for another EOA proposal.
@@ -280,6 +360,16 @@ pub(in crate::edit) enum CountPublicationError {
     },
 }
 
+impl From<CountPublicationError> for Error {
+    fn from(error: CountPublicationError) -> Self {
+        match error {
+            CountPublicationError::Protection(CountProtectionError::Source(error)) => error.into(),
+            CountPublicationError::Protection(CountProtectionError::Publication(error)) => error,
+            _ => Self::EditUnsupported("publication conflicts with an original count allocation"),
+        }
+    }
+}
+
 /// Count and checksum writes paired with their original protected fields.
 ///
 /// Borrows the engine exclusively and the original [`ProtectedCounts`] for the same lifetime.
@@ -324,6 +414,28 @@ impl<'source> CurrentCountUpdates<'source> {
         engine: &'source mut WriteEngine,
         counts: &'source ProtectedCounts,
     ) -> Result<Self, CountPreparationError> {
+        let updates = Self::select(engine, counts, None)?;
+        Ok(Self {
+            engine,
+            counts,
+            updates,
+        })
+    }
+
+    /// Prepares writes from current headers selected by the planned count's ordering.
+    ///
+    /// Compares each planned remainder with its original scalar. [`None`] selects every update.
+    /// Reads selected headers and returns encoded writes in ascending allocation address order.
+    /// Uses the source and framing checks of [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors described by [`Self::new`] for the selected updates.
+    fn select(
+        engine: &WriteEngine,
+        counts: &ProtectedCounts,
+        order: Option<Ordering>,
+    ) -> Result<Vec<ObjectReferenceCountUpdate>, CountPreparationError> {
         if counts
             .source
             .as_ref()
@@ -332,18 +444,16 @@ impl<'source> CurrentCountUpdates<'source> {
             return Err(CountPreparationError::Session);
         }
         let mut updates = Vec::with_capacity(counts.updates().len());
-        for original in counts.updates() {
+        for original in counts.updates().iter().filter(|update| {
+            order.is_none_or(|order| update.count().get().cmp(&update.field().value()) == order)
+        }) {
             updates.push(original.prepare_source(
                 engine.image(),
                 engine.widths(),
                 engine.addresses().effective_base(),
             )?);
         }
-        Ok(Self {
-            engine,
-            counts,
-            updates,
-        })
+        Ok(updates)
     }
 
     /// Borrows each original field with its prepared writes, in allocation-address order.
@@ -470,6 +580,16 @@ pub(in crate::edit) enum CountPreparationError {
         /// The count or checksum preparation error.
         error: ObjectReferenceCountUpdateError,
     },
+}
+
+impl From<CountPreparationError> for Error {
+    fn from(error: CountPreparationError) -> Self {
+        match error {
+            CountPreparationError::Parse { error, .. }
+            | CountPreparationError::Read { error, .. } => error.into(),
+            _ => Self::EditUnsupported("an original count field changed during commit"),
+        }
+    }
 }
 
 /// Borrowed count facts and the root and EOA proposed before publication.

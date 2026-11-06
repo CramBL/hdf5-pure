@@ -2,6 +2,7 @@
 //!
 //! Content is written before the publication barrier. The superblock write and its barrier
 //! precede truncation and stored-reference updates. Durability follows [`SyncPolicy`].
+//! The editor writes original count increases before publication and decreases after it.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +27,7 @@ use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
 use crate::edit::SyncPolicy;
+use crate::edit::analysis::ProtectedCounts;
 use crate::edit::context::SuperblockPublication;
 use crate::edit::free_snapshot::{FlatProjection, FlatTailLayout};
 use crate::edit::object_header;
@@ -42,18 +44,13 @@ use crate::object_graph::ObjectId;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "completion loans are exercised by private owner tests"
-    )
-)]
 mod completion;
 mod storage;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
+    /// Checked updates to original count fields outside reconstructed objects.
+    pub(super) counts: Option<ProtectedCounts>,
     /// Replacement root and captured chunk allocations awaiting its publication.
     pub(super) retirement: RootRetirement,
     /// Physical spans eligible for release when the root is published.
@@ -67,14 +64,16 @@ impl WriteEngine {
     ///
     /// Stored-reference updates run after root publication. Non-persistent PAGE commits require
     /// a tree proved free of object references and retain superseded storage.
+    /// For checked count updates, the editor journals increases before publication and decreases
+    /// after it, preserving complete original header allocations that contain updated counts.
     /// For non-persistent commits without paging, the publisher restores allocation state saved
     /// after replacement placement if root publication is uncertain, keeping predecessor and
     /// replacement storage unavailable for reuse.
     ///
     /// # Errors
     ///
-    /// Returns the publication, reference-update, or root-reclamation error. Errors after
-    /// publication leave rollback disabled.
+    /// Returns the count-preparation, count-write, publication, reference-update, or
+    /// root-reclamation error. Errors after publication leave rollback disabled.
     pub(super) fn publish_tree(&mut self, tree: AppliedTree) -> Result<(), Error> {
         self.publish_tree_with_completion(tree, |_| Ok(()))
     }
@@ -82,14 +81,15 @@ impl WriteEngine {
     /// Publishes a written tree and calls `complete` after all publication work succeeds.
     ///
     /// Uses the publication path of [`Self::publish_tree`]. Calls `complete` after any
-    /// stored-reference updates, root reclamation, and requested truncation succeed. The
-    /// completion callback borrows the engine through [`PublishedTree`] and returns an owned
-    /// result.
+    /// stored-reference updates, root reclamation, requested truncation, and source reference count
+    /// decreases succeed. The completion callback borrows the engine through [`PublishedTree`] and
+    /// returns an owned result.
     ///
     /// # Errors
     ///
-    /// Returns the publication, reference-update, root-reclamation, or address-resolution error
-    /// before calling `complete`. Returns the error from `complete` if completion fails.
+    /// Returns the count-preparation, count-write, publication, reference-update, root-reclamation,
+    /// or address-resolution error before calling `complete`. Returns the error from `complete`
+    /// if completion fails.
     /// Errors after publication leave rollback disabled.
     pub(super) fn publish_tree_with_completion<T>(
         &mut self,
@@ -97,12 +97,24 @@ impl WriteEngine {
         complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let AppliedTree {
+            counts,
             retirement,
             freed,
             relocations,
         } = tree;
         let pending = retirement.into_pending_frees(freed, self.image.len());
-        self.publish_pending_tree_with_completion(pending, relocations, complete)
+        match counts {
+            Some(counts) => {
+                let end = PhysicalAddress::new(self.image.len());
+                counts
+                    .before_publication(self, pending)
+                    .map_err(Error::from)?
+                    .at_end(end)
+                    .map_err(|failure| Error::from(failure.error))?
+                    .with_ordered_counts(relocations, complete)
+            }
+            None => self.publish_pending_tree_with_completion(pending, relocations, complete),
+        }
     }
 
     /// Publishes a written tree using the supplied retirement batch before calling `complete`.
@@ -142,7 +154,7 @@ impl WriteEngine {
     /// Returns [`PublicationError::Storage`] if an exclusion check fails. Returns
     /// [`PublicationError::Write`] for address-conversion, publication, reference-update, or
     /// root-reclamation errors. Returns the error from `complete` if completion fails.
-    pub(in crate::edit::commit) fn publish_pending_tree_excluding<T>(
+    pub(in crate::edit) fn publish_pending_tree_excluding<T>(
         &mut self,
         pending: PendingRootFrees,
         relocations: BTreeMap<ObjectId, ObjectId>,

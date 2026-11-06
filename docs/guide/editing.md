@@ -801,7 +801,10 @@ The editor rejects anything it cannot reproduce faithfully, with [`Error::EditUn
 
 Non-persistent PAGE commits require a tree proved free of object references. The reference updates described below apply to other editing sessions.
 
-An object reference is an object-header address stored as data, in a dataset's elements or in an attribute's value. A commit rebuilds every dirty object's header at a fresh address and repoints the *link* that resolves to it, which leaves those stored addresses pointing at a header the same commit frees. So a commit's last act, after the superblock repoint that publishes it, is to walk the tree it just published and rewrite every stored address that points at something it moved. Nothing about this is opt-in and no API reports it, and the point is that a reference keeps reaching its object.
+An object reference is an object-header address stored in a dataset element or an attribute value.
+A commit rebuilds dirty object headers at fresh addresses and updates their hard links.
+After publishing the new root, the editor walks the committed tree and updates supported stored
+references to the relocated objects.
 
 Two things decide what it reaches. **Where the bytes are**: a contiguous or compact dataset's elements, and an attribute held in the object header, and none of a chunked dataset's chunks, a dense (fractal-heap) attribute, or one held as a shared (SOHM) record. A version 1 object header is read by a different parser that reaches element data and stops short of an attribute's value. Version 1 is the format libhdf5 and h5py write by default, so this is the common case, and not a legacy corner. And **what the datatype is**: an 8-byte object reference, an array of them, a compound holding one, and any nesting of those two, and none of an object reference wider than 8 bytes, a dataset-region reference, a variable-length reference (how the dimension-scale attribute `DIMENSION_LIST` is encoded), or an enumeration over one.
 

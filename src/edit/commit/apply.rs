@@ -13,7 +13,7 @@ use super::plan::inventory::dispositions::ReconstructionDispositions;
 use super::plan::{
     self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, InPlaceWrite, Node,
     OverwritePayloads, PreparedCommit, PreparedGroup, PreparedReference, PreparedTree,
-    ReferenceTarget, RelocatedDataset, ReplacedHeader,
+    PreparedTreeCounts, ReferenceTarget, RelocatedDataset, ReplacedHeader,
 };
 use super::publish::AppliedTree;
 use crate::edit::analysis::AnalysisPhase;
@@ -121,7 +121,7 @@ impl WriteEngine {
         reclamation: Option<Vec<(FileRange, FreeClass)>>,
     ) -> Result<AppliedTree, Error> {
         let PreparedTree {
-            counts: _,
+            counts,
             mut groups,
             headers,
             cross_copies,
@@ -312,10 +312,25 @@ impl WriteEngine {
             relocations.insert(old, new);
         }
         let new_root = path_addr[&ObjectPathBuf::root()];
-        to_free.extend(
-            AnalysisPhase::prospective(self, new_root.header_address())
-                .unreferenced_collection_spans(collection_candidates),
-        );
+        let (counts, retained_roots) = match counts {
+            Some(PreparedTreeCounts::Complete {
+                protected,
+                retained_roots,
+                ..
+            }) => (Some(protected), retained_roots),
+            Some(PreparedTreeCounts::Unavailable) | None => (None, Vec::new()),
+        };
+        let mut prospective = AnalysisPhase::prospective(self, new_root.header_address());
+        to_free.extend(if retained_roots.is_empty() {
+            prospective.unreferenced_collection_spans(collection_candidates)
+        } else {
+            prospective.unreferenced_collection_spans_with_roots(
+                collection_candidates,
+                retained_roots
+                    .into_iter()
+                    .map(|object| relocations.get(&object).copied().unwrap_or(object)),
+            )
+        });
         to_free.extend(
             self.superseded_heaps
                 .drain(..)
@@ -323,6 +338,7 @@ impl WriteEngine {
         );
         edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
+            counts,
             retirement: RootRetirement::new(new_root.header_address(), tail_allocations),
             freed: to_free,
             relocations,
