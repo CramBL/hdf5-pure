@@ -90,12 +90,8 @@ mod tests {
 
     use super::*;
 
-    #[rstest]
-    fn parses_every_byte(
-        #[values(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)] high: u8,
-        #[values(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)] low: u8,
-    ) {
-        let raw = high * 16 + low;
+    #[test]
+    fn parses_every_byte() {
         let levels = [
             DeflateLevel::Zero,
             DeflateLevel::One,
@@ -108,17 +104,24 @@ mod tests {
             DeflateLevel::Eight,
             DeflateLevel::Nine,
         ];
-        if let Some(&level) = levels.get(usize::from(raw)) {
-            assert_eq!(DeflateLevel::try_from(raw).unwrap(), level);
-            assert_eq!(DeflateLevel::try_from(u32::from(raw)).unwrap(), level);
-            assert_eq!(level.get(), raw);
-        } else {
-            assert_eq!(
-                DeflateLevel::try_from(raw).unwrap_err(),
-                FormatError::InvalidDeflateLevel {
-                    level: u32::from(raw)
-                }
-            );
+        for raw in 0..=u8::MAX {
+            if let Some(&level) = levels.get(usize::from(raw)) {
+                assert_eq!(DeflateLevel::try_from(raw), Ok(level), "byte {raw}");
+                assert_eq!(
+                    DeflateLevel::try_from(u32::from(raw)),
+                    Ok(level),
+                    "byte {raw}"
+                );
+                assert_eq!(level.get(), raw, "byte {raw}");
+            } else {
+                assert_eq!(
+                    DeflateLevel::try_from(raw),
+                    Err(FormatError::InvalidDeflateLevel {
+                        level: u32::from(raw)
+                    }),
+                    "byte {raw}"
+                );
+            }
         }
     }
 
