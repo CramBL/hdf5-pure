@@ -144,6 +144,17 @@ fn native_file_storage_matches_framing_and_owned_manager_capacity(#[case] paged:
             .collect::<Vec<_>>(),
         expected_capacity
     );
+    let coverage = phase.physical_coverage(&source).unwrap();
+    assert_eq!(coverage.conflict(), None);
+    assert!(coverage.beyond_source().is_empty());
+    assert!(coverage.beyond_eoa().is_empty());
+    assert_eq!(coverage.covered().first().unwrap().start().get(), 0);
+    assert!(
+        coverage
+            .residuals()
+            .iter()
+            .all(|range| range.end().get() <= original.len() as u64)
+    );
     drop(phase);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), original);

@@ -109,6 +109,16 @@ fn native_heap_members_are_distinct_from_root_reference_completeness(#[case] ext
             .collect::<Vec<_>>(),
         [(collection, expected_length)]
     );
+    let coverage = phase.physical_coverage(&source).unwrap();
+    assert_eq!(coverage.conflict(), None);
+    assert!(coverage.beyond_source().is_empty());
+    assert!(
+        coverage
+            .covered()
+            .iter()
+            .any(|range| range.start() <= collection
+                && range.end().get() >= collection.get() + expected_length)
+    );
     drop(phase);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), original);
