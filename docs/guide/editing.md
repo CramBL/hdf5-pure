@@ -27,7 +27,8 @@ using memory proportional to file size. File size alone does not affect the sele
 The editor preserves independent address and length widths of 2, 4, or 8 bytes with either backing.
 Select widths for a new file through [`FileCreateProperties`](crate::FileCreateProperties).
 The writer checks addresses and complete allocations against the offset width and encoded lengths
-against the length width. Unlimited maximum extents require eight-byte lengths.
+against the length width. At 2- and 4-byte lengths, it stores an unlimited maximum extent as the
+largest length the width holds.
 
 Both backings allocate according to the file-space strategy and publish rebuilt trees through the
 superblock. Tail truncation and hole reuse depend on the allocation strategy: under persistent

@@ -568,7 +568,7 @@ fn overwrites_prepare_variable_length_bytes_once_before_application(
     let mut builder = DatasetBuilder::new("values");
     builder.with_vlen_strings(&["first", "second"]);
     let pointer = builder.data.as_ref().unwrap().as_ref().unwrap().as_ptr();
-    let mut prepared = PreparedDataset::parse(builder)
+    let mut prepared = PreparedDataset::parse(LengthWidth::Two, builder)
         .unwrap()
         .into_overwrite()
         .unwrap()
@@ -586,7 +586,7 @@ fn overwrites_prepare_variable_length_bytes_once_before_application(
 #[rstest]
 #[case::dimension(65_536, None, 65_536)]
 #[case::maximum(1, Some(MaxExtent::Fixed(65_536)), 65_536)]
-#[case::unlimited(1, Some(MaxExtent::Unlimited), u64::MAX)]
+#[case::dimension_unlimited(65_536, Some(MaxExtent::Unlimited), 65_536)]
 fn staged_declarations_reject_unrepresentable_length_fields(
     #[case] dimension: u64,
     #[case] maximum: Option<MaxExtent>,
@@ -612,6 +612,36 @@ fn staged_declarations_reject_unrepresentable_length_fields(
         matches!(error, Error::Format(FormatError::LengthTooLarge { length: actual, length_size: 2 }) if actual == length),
         "{error:?}"
     );
+}
+
+#[rstest]
+#[case::two(LengthWidth::Two, MaxExtent::Fixed(0xffff))]
+#[case::four(LengthWidth::Four, MaxExtent::Fixed(0xffff_ffff))]
+#[case::eight(LengthWidth::Eight, MaxExtent::Unlimited)]
+fn staged_declarations_store_an_unlimited_maximum_as_the_length_width_maximum(
+    #[case] lengths: LengthWidth,
+    #[case] stored: MaxExtent,
+) {
+    let mut builder = DatasetBuilder::new("values");
+    builder
+        .with_unallocated_storage(type_builders::make_u8_type(), &[3, 4])
+        .with_chunks(&[1024, 4])
+        .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)]);
+    let staged = super::flatten_dataset(
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths,
+        },
+        builder,
+        LinkNameBuf::new("values").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(staged.ds.dimensions, [3, 4]);
+    assert_eq!(
+        staged.ds.max_dimensions,
+        Some(vec![stored, MaxExtent::Fixed(4)])
+    );
+    assert_eq!(staged.maxshape, staged.ds.max_dimensions);
 }
 
 #[rstest]
@@ -662,7 +692,7 @@ fn dataset_preparation_rejects_narrow_legacy_references(
 
 fn preparation_error(widths: FormatWidths, builder: DatasetBuilder, overwrite: bool) -> Error {
     let result = if overwrite {
-        PreparedDataset::parse(builder)
+        PreparedDataset::parse(widths.lengths, builder)
             .unwrap()
             .into_overwrite()
             .unwrap()

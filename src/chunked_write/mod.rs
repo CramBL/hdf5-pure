@@ -1597,15 +1597,50 @@ pub(crate) fn plan_index_slots(
         .saturating_sub(num_chunks as u64)
         .saturating_mul(encoding.elem_size as u64);
     if unused_bytes > MAX_UNUSED_INDEX_BYTES {
-        return Err(FormatError::ChunkedReadError(format!(
-            "this shape and maximum shape need a chunk index holding {allocated} elements for \
-             {num_chunks} chunk(s), so {unused_bytes} bytes of it describe no chunk, past the \
-             {MAX_UNUSED_INDEX_BYTES} this writer will emit. The unused elements come from the \
-             maximum shape exceeding the shape in a dimension other than the one the dataset \
-             grows along — chunk those dimensions more coarsely, or declare no maximum for them"
-        )));
+        return Err(unused_index_error(
+            widths,
+            maxshape,
+            allocated,
+            num_chunks,
+            unused_bytes,
+        ));
     }
     Ok((kind, slot_of_chunk, index_slots))
+}
+
+/// Returns the error for a chunk index whose unused bytes exceed [`MAX_UNUSED_INDEX_BYTES`].
+///
+/// Where `maxshape` holds the largest length of a 2- or 4-byte length width, the maximum an
+/// unlimited dimension is stored as, the message includes that maximum and the option of
+/// eight-byte lengths.
+fn unused_index_error(
+    widths: FormatWidths,
+    maxshape: Option<&[MaxExtent]>,
+    allocated: u64,
+    num_chunks: usize,
+    unused_bytes: u64,
+) -> FormatError {
+    if let MaxExtent::Fixed(width_maximum) =
+        hdf5_pure_format::__private::stored_max_extent(widths.lengths, MaxExtent::Unlimited)
+        && maxshape.is_some_and(|maxshape| maxshape.contains(&MaxExtent::Fixed(width_maximum)))
+    {
+        return FormatError::ChunkedReadError(format!(
+            "at {}-byte lengths a maximum of {width_maximum}, the largest length the file \
+             holds and the one an unlimited dimension is stored as, needs a chunk index holding \
+             {allocated} elements for {num_chunks} chunk(s) at this chunk shape, so \
+             {unused_bytes} bytes of it describe no chunk, past the {MAX_UNUSED_INDEX_BYTES} \
+             this writer will emit. Chunk the dimensions with that maximum more coarsely, or \
+             select eight-byte lengths for a dimension declared unlimited",
+            widths.lengths.get(),
+        ));
+    }
+    FormatError::ChunkedReadError(format!(
+        "this shape and maximum shape need a chunk index holding {allocated} elements for \
+         {num_chunks} chunk(s), so {unused_bytes} bytes of it describe no chunk, past the \
+         {MAX_UNUSED_INDEX_BYTES} this writer will emit. The unused elements come from the \
+         maximum shape exceeding the shape in a dimension other than the one the dataset \
+         grows along — chunk those dimensions more coarsely, or declare no maximum for them"
+    ))
 }
 
 /// The chunk grid a written dataset's index numbers its slots over.

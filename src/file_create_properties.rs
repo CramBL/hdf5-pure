@@ -253,8 +253,10 @@ impl FileCreateProperties {
 
     /// Selects the superblock's "Size of Lengths" value independently of addresses.
     ///
-    /// The default is [`LengthWidth::Eight`]. Unlimited dataspace maxima require eight-byte
-    /// lengths. libhdf5 configures this property with `H5Pset_sizes`.
+    /// The default is [`LengthWidth::Eight`]. At 2 and 4 bytes, the writer stores an unlimited
+    /// maximum as the largest length the width holds. See
+    /// [`DatasetBuilder::with_maxshape`](crate::DatasetBuilder::with_maxshape). libhdf5
+    /// configures this property with `H5Pset_sizes`.
     #[doc(alias = "H5Pset_sizes")]
     pub const fn with_length_width(mut self, width: LengthWidth) -> Self {
         self.widths.lengths = width;

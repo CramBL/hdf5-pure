@@ -124,7 +124,7 @@ fn count_projection_reaches_each_prepared_header_form(#[case] replacement: Repla
             _ => {
                 let mut builder = DatasetBuilder::new("");
                 builder.with_i32_data(&[19]);
-                let value = PreparedDataset::parse(builder)
+                let value = PreparedDataset::parse(LENGTH_WIDTH, builder)
                     .unwrap()
                     .into_overwrite()
                     .unwrap();

@@ -74,25 +74,53 @@ fn dataspace_fields_outside_the_length_width_are_rejected(
     );
 }
 
-#[test]
-fn unlimited_maxima_remain_unlimited_at_eight_bytes() {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![0],
-        max_dimensions: Some(vec![MaxExtent::Unlimited]),
-    };
-    let mut expected = dataspace::v2(
+#[rstest]
+#[case::two(LengthWidth::Two, MaxExtent::Fixed(0xffff))]
+#[case::four(LengthWidth::Four, MaxExtent::Fixed(0xffff_ffff))]
+#[case::eight(LengthWidth::Eight, MaxExtent::Unlimited)]
+fn unlimited_maxima_are_stored_as_the_value_an_all_ones_field_reads(
+    #[case] width: LengthWidth,
+    #[case] stored: MaxExtent,
+) {
+    assert_eq!(
+        format::stored_max_extent(width, MaxExtent::Unlimited),
+        stored
+    );
+    let mut all_ones = dataspace::v2(
         1,
         dataspace::Flags::MAX_DIMS,
         dataspace::Kind::SIMPLE,
         &[],
         None,
     );
-    expected.extend_from_slice(&[0; 8]);
-    expected.extend_from_slice(&[0xff; 8]);
-    assert_eq!(dataspace.serialize(8).unwrap(), expected);
-    assert_eq!(Dataspace::parse(&expected, 8).unwrap(), dataspace);
+    all_ones.extend_from_slice(&vec![0; usize::from(width.get())]);
+    all_ones.extend_from_slice(&vec![0xff; usize::from(width.get())]);
+    assert_eq!(
+        Dataspace::parse(&all_ones, width.get()).unwrap(),
+        Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![0],
+            max_dimensions: Some(vec![stored]),
+        }
+    );
+}
+
+#[rstest]
+#[case::two(LengthWidth::Two, 0x1_0000)]
+#[case::four(LengthWidth::Four, 0x1_0000_0000)]
+fn stored_maxima_reject_a_dimension_outside_the_length_width(
+    #[case] width: LengthWidth,
+    #[case] dimension: u64,
+) {
+    assert_eq!(
+        format::stored_max_dimensions(width, &[1, dimension], vec![MaxExtent::Unlimited; 2])
+            .unwrap_err(),
+        FormatError::LengthTooLarge {
+            length: dimension,
+            length_size: width.get()
+        },
+    );
 }
 
 #[rstest]

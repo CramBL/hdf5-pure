@@ -12,6 +12,7 @@ use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileCreateProperties;
 use hdf5_pure::FileSpaceSettings;
@@ -176,33 +177,106 @@ fn creates_extensible_datasets_with_eight_byte_lengths(
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Creation {
+    Edit,
+    Finish,
+    FinishTo,
+}
+
 #[rstest]
-#[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
-#[case::two_four(OffsetWidth::Two, LengthWidth::Four)]
-#[case::four_two(OffsetWidth::Four, LengthWidth::Two)]
-#[case::four_four(OffsetWidth::Four, LengthWidth::Four)]
-#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
-#[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
-fn rejects_extensible_datasets_with_narrow_lengths(
+#[case::two_two_one(OffsetWidth::Two, LengthWidth::Two, &[3], &[1024])]
+#[case::four_two_one(OffsetWidth::Four, LengthWidth::Two, &[3], &[1024])]
+#[case::eight_two_one(OffsetWidth::Eight, LengthWidth::Two, &[3], &[1024])]
+#[case::four_four_one(OffsetWidth::Four, LengthWidth::Four, &[3], &[1 << 20])]
+#[case::eight_four_one(OffsetWidth::Eight, LengthWidth::Four, &[3], &[1 << 20])]
+#[case::four_two_two(OffsetWidth::Four, LengthWidth::Two, &[3, 4], &[512, 512])]
+#[case::eight_two_two(OffsetWidth::Eight, LengthWidth::Two, &[3, 4], &[512, 512])]
+fn unlimited_maxima_at_narrow_lengths_reopen_with_the_length_width_maximum(
     #[case] offsets: OffsetWidth,
     #[case] lengths: LengthWidth,
-    #[values(ExtensibleLayout::Extensible, ExtensibleLayout::FilteredExtensible)]
-    layout: ExtensibleLayout,
-    #[values(Space::Default, Space::FsmAggr, Space::Page)] space: Space,
-    #[values(false, true)] dense: bool,
+    #[case] shape: &[u64],
+    #[case] chunks: &[u64],
+    #[values(Creation::Edit, Creation::Finish, Creation::FinishTo)] creation: Creation,
 ) {
-    let error = file_builder(offsets, lengths, space, layout.into(), dense)
-        .finish()
-        .unwrap_err();
-    let Error::Format(FormatError::LengthTooLarge {
-        length,
-        length_size,
-    }) = error
-    else {
-        panic!("expected LengthTooLarge, got {error:?}");
+    let maximum = u64::MAX >> (64 - 8 * lengths.get());
+    let stored = vec![MaxExtent::Fixed(maximum); shape.len()];
+    let declared = vec![MaxExtent::Unlimited; shape.len()];
+    let values: Vec<i32> = (0..i32::try_from(shape.iter().product::<u64>()).unwrap()).collect();
+    let configure = |dataset: &mut DatasetBuilder| {
+        dataset
+            .with_i32_data(&values)
+            .with_shape(shape)
+            .with_chunks(chunks)
+            .with_maxshape(&declared);
     };
-    assert_eq!(length, u64::MAX);
-    assert_eq!(length_size, lengths.get());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unlimited.h5");
+    match creation {
+        Creation::Edit => {
+            let file = File::create_with_options(
+                &path,
+                FileCreateProperties::new()
+                    .with_offset_width(offsets)
+                    .with_length_width(lengths),
+                FileAccessProperties::new(),
+            )
+            .unwrap();
+            file.root().create_dataset("d", configure).unwrap();
+            assert_eq!(
+                file.dataset("d").unwrap().maxshape().unwrap(),
+                Some(stored.clone())
+            );
+            file.commit().unwrap();
+            file.close().unwrap();
+        }
+        Creation::Finish | Creation::FinishTo => {
+            let mut builder = FileBuilder::new();
+            builder
+                .with_offset_width(offsets)
+                .with_length_width(lengths);
+            configure(builder.create_dataset("d"));
+            let bytes = if matches!(creation, Creation::FinishTo) {
+                let mut bytes = Vec::new();
+                builder.finish_to(&mut bytes).unwrap();
+                bytes
+            } else {
+                builder.finish().unwrap()
+            };
+            std::fs::write(&path, bytes).unwrap();
+        }
+    }
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.maxshape().unwrap(), Some(stored));
+    assert!(matches!(
+        dataset.layout().unwrap(),
+        DiskLayout::Chunked {
+            index: ChunkIndex::FixedArray,
+            ..
+        }
+    ));
+    assert_eq!(dataset.read_i32().unwrap(), values);
+    drop(dataset);
+    file.close().unwrap();
+    let native = hdf5::File::open(&path).unwrap();
+    let dataset = native.dataset("d").unwrap();
+    assert_eq!(
+        dataset.space().unwrap().maxdims(),
+        vec![Some(usize::try_from(maximum).unwrap()); shape.len()]
+    );
+    assert_eq!(
+        dataset.chunk(),
+        Some(
+            chunks
+                .iter()
+                .map(|&chunk| usize::try_from(chunk).unwrap())
+                .collect()
+        )
+    );
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), values);
+    drop(dataset);
+    native.close().unwrap();
 }
 
 fn assert_creates_file(

@@ -84,6 +84,8 @@ pub use crate::data_layout::SingleChunkField;
 pub use crate::dataspace::Dataspace;
 pub use crate::dataspace::DataspaceType;
 pub use crate::dataspace::Extent;
+pub use crate::dataspace::stored_max_dimensions;
+pub use crate::dataspace::stored_max_extent;
 pub use crate::datatype::byte_order::FixedWidthByteOrder;
 pub use crate::datatype::class_may_hold_object_address;
 pub use crate::datatype::datatype_holds_file_address;

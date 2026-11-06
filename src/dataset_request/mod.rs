@@ -23,6 +23,7 @@ use crate::type_builders::{
 };
 #[cfg(feature = "std")]
 use crate::width::FormatWidths;
+use crate::width::LengthWidth;
 
 mod fill;
 
@@ -41,6 +42,9 @@ pub(crate) struct PreparedDataset {
 impl PreparedDataset {
     /// Parses the common dataset invariants without resolving file addresses.
     ///
+    /// At 2- and 4-byte `length_width`, each unlimited maximum becomes a fixed maximum at the
+    /// largest length the width holds.
+    ///
     /// # Errors
     ///
     /// Propagates an element-encoding error staged in the builder before parsing metadata.
@@ -48,7 +52,8 @@ impl PreparedDataset {
     /// Returns [`FormatError::DatasetMissingDatatype`] or [`FormatError::DatasetMissingShape`]
     /// if required metadata is absent, [`FormatError::DatasetRankUnsupported`] if the rank exceeds
     /// [`MAX_DATASET_RANK`], or [`FormatError::DatasetDimensionUnlimited`] if a current dimension
-    /// is unlimited.
+    /// is unlimited. Returns [`FormatError::LengthTooLarge`] if the request has a maximum shape and
+    /// a dimension exceeds `length_width`.
     ///
     /// Returns [`FormatError::DatasetSizeOverflow`] if the byte extent overflows,
     /// [`FormatError::LogicalShapeDataMismatch`] if an allocated element buffer's length or a
@@ -61,7 +66,10 @@ impl PreparedDataset {
     /// With the `provenance` feature, returns [`FormatError::DatasetProvenanceRequiresData`] for a
     /// nonempty unallocated declaration with requested checksums. Propagates datatype, storage,
     /// and attribute preparation errors.
-    pub(crate) fn parse(builder: DatasetBuilder) -> Result<Self, FormatError> {
+    pub(crate) fn parse(
+        length_width: LengthWidth,
+        builder: DatasetBuilder,
+    ) -> Result<Self, FormatError> {
         let DatasetBuilder {
             name: _,
             datatype,
@@ -128,6 +136,11 @@ impl PreparedDataset {
                 element_size: width.into(),
             });
         }
+        let maxshape = maxshape
+            .map(|maxshape| {
+                hdf5_pure_format::__private::stored_max_dimensions(length_width, &shape, maxshape)
+            })
+            .transpose()?;
         if chunk_options.is_chunked() || maxshape.is_some() {
             Extent::new(&shape, maxshape.as_deref())
                 .and_then(|geometry| chunk_options.validate_geometry(geometry))
@@ -734,6 +747,8 @@ mod tests {
     use crate::type_builders::DatasetBuilder;
     use crate::type_builders::{ProducedPayload, RawChunkPayload, VlStringStaging};
     #[cfg(feature = "std")]
+    use crate::width::LengthWidth;
+    #[cfg(feature = "std")]
     use crate::{Error, FillTime};
 
     #[cfg(feature = "std")]
@@ -828,7 +843,9 @@ mod tests {
     fn overwrites_reject_explicit_fill_time(#[case] fill_time: FillTime) {
         let mut builder = DatasetBuilder::new("values");
         builder.with_i32_data(&[1]).with_fill_time(fill_time);
-        let result = PreparedDataset::parse(builder).unwrap().into_overwrite();
+        let result = PreparedDataset::parse(LengthWidth::Eight, builder)
+            .unwrap()
+            .into_overwrite();
         let Err(Error::EditUnsupported(reason)) = result else {
             panic!("expected an unsupported overwrite option");
         };
@@ -858,7 +875,7 @@ mod tests {
         if !declaration_first {
             builder.with_unallocated_storage_for::<u8>(&[0]);
         }
-        let Err(error) = PreparedDataset::parse(builder) else {
+        let Err(error) = PreparedDataset::parse(LengthWidth::Eight, builder) else {
             panic!("expected conflicting storage sources");
         };
         assert_eq!(error, FormatError::ConflictingDatasetStorage);
@@ -879,7 +896,7 @@ mod tests {
             produced.total_bytes = 4;
             builder.produced = Some(produced);
         }
-        let Err(error) = PreparedDataset::parse(builder) else {
+        let Err(error) = PreparedDataset::parse(LengthWidth::Eight, builder) else {
             panic!("expected an incompatible fill");
         };
         assert_eq!(error, FormatError::FillValueDatatypeMismatch);
