@@ -553,6 +553,22 @@ fn appends_reach_the_length_width_maximum_of_an_unlimited_dimension(
         file.commit().unwrap();
     }
     let mut dataset = file.dataset("d").unwrap();
+    if !committed && maximum > u64::try_from(isize::MAX).unwrap() {
+        let error = dataset
+            .append_staged(|append| {
+                append.append(&[1_u8, 2]);
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Format(FormatError::ValueTooLargeForPlatform { value, target: "staged dataset buffer" }) if value == maximum),
+            "{error:?}"
+        );
+        assert_eq!(dataset.shape().unwrap(), [maximum - 2]);
+        drop(dataset);
+        file.root().delete("d").unwrap();
+        file.close().unwrap();
+        return;
+    }
     let error = if committed {
         dataset.append(&[1_u8, 2]).unwrap();
         assert_eq!(dataset.shape().unwrap(), [maximum]);
@@ -594,6 +610,38 @@ fn appends_reach_the_length_width_maximum_of_an_unlimited_dimension(
     assert_eq!(dataset.maxshape().unwrap(), None);
     drop(dataset);
     reopened.close().unwrap();
+}
+
+#[rstest]
+#[case::existing_limit(0)]
+#[case::growth_crosses_limit(1)]
+fn staged_creation_appends_reject_buffers_above_the_host_allocation_limit(#[case] below: u64) {
+    let initial = u64::try_from(isize::MAX).unwrap() - below;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("staged-capacity.h5");
+    let file = File::create(&path).unwrap();
+    file.root()
+        .create_dataset("d", |dataset| {
+            dataset
+                .with_unallocated_storage(hdf5_pure::make_u8_type(), &[initial])
+                .with_chunks(&[1024])
+                .with_maxshape(&[MaxExtent::Unlimited]);
+        })
+        .unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let error = dataset
+        .append_staged(|append| {
+            append.append(&[1_u8, 2]);
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::ValueTooLargeForPlatform { value, target: "staged dataset buffer" }) if value == initial + 2),
+        "{error:?}"
+    );
+    assert_eq!(dataset.shape().unwrap(), [initial]);
+    drop(dataset);
+    file.root().delete("d").unwrap();
+    file.close().unwrap();
 }
 
 #[derive(Clone, Copy, Debug)]

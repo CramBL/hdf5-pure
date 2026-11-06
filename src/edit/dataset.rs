@@ -1667,7 +1667,8 @@ impl WriteEngine {
     /// Returns [`Error::AppendUnsupported`] for mixed or mismatched element types, unresolved
     /// per-element references, a scalar or zero-byte row, an incomplete row, arithmetic
     /// overflow, or a leading dimension beyond its declared maximum. Returns [`Error::Format`]
-    /// if the existing logical byte length exceeds [`usize::MAX`] when materializing fill values.
+    /// with [`FormatError::ValueTooLargeForPlatform`] if a nonempty append would require an
+    /// element buffer larger than [`isize::MAX`] bytes.
     ///
     /// # Panics
     ///
@@ -1752,6 +1753,13 @@ impl WriteEngine {
             .ok_or(Error::AppendUnsupported(
                 "staged dataset byte size overflows",
             ))?;
+        if !bytes.is_empty() && extent > isize::MAX as u64 {
+            return Err(FormatError::ValueTooLargeForPlatform {
+                value: extent,
+                target: "staged dataset buffer",
+            }
+            .into());
+        }
         if fd.storage.allocation() == StorageAllocation::Unallocated && !bytes.is_empty() {
             let elem_size = hdf5_pure_format::__private::stored_element_size_usize(
                 &fd.dt,
