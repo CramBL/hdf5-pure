@@ -26,7 +26,11 @@ use super::CompleteTopology;
 use super::PlannedDeletion;
 use super::RemovedLinks;
 
-pub(in crate::edit) use net::NetCountPlan;
+pub(in crate::edit) use net::original::{
+    OriginalOwnerError, OriginalOwnerFacts, OriginalOwnerInventory,
+};
+pub(in crate::edit) use net::{NetCountError, NetCountPlan};
+pub(in crate::edit) use ownership::CountHandoffError;
 pub(in crate::edit) use ownership::inventory::CountPreflight;
 pub(in crate::edit) use ownership::inventory::CountProjectionIdentity;
 

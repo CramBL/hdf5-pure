@@ -31,6 +31,8 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::deletions::TopologyIdentity;
 
+pub(in crate::edit) use added_users::{CopyUsersError, CopyUsersUnion};
+
 pub(super) mod added_users;
 pub(super) mod balance;
 pub(in crate::edit) mod changes;

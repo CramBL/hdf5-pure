@@ -24,8 +24,11 @@ pub(in crate::edit) use counts::CountPreflight;
 pub(in crate::edit) use counts::CountProjectionIdentity;
 
 pub(in crate::edit) use counts::DeclaredCountChange;
-pub(in crate::edit) use counts::NetCountPlan;
 pub(in crate::edit) use counts::SourceRemovalPlan;
+pub(in crate::edit) use counts::{
+    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
+    OriginalOwnerInventory,
+};
 
 #[cfg_attr(
     not(test),

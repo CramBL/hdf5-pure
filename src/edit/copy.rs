@@ -509,13 +509,6 @@ impl CopyTree {
     /// Returns [`Error::EditUnsupported`] if a retained record is shared, a datatype contains
     /// variable-length values or references, or the committed-datatype inventory is incomplete
     /// or nonempty. Propagates header-record, datatype, attribute, and inventory errors.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "foreign copy qualification has no inventory consumer"
-        )
-    )]
     pub(in crate::edit) fn require_foreign_datatype_users_absent(&self) -> Result<(), Error> {
         let Self { descendants, root } = self;
         for node in core::iter::once(root).chain(descendants) {

@@ -89,7 +89,7 @@ impl WriteEngine {
     /// Returns [`FormatError::Internal`] before placement if the staged cross-file copy count
     /// or a destination differs from the prepared tree.
     /// Returns the reclamation, placement, serialization, or write error.
-    fn apply_tree(
+    pub(super) fn apply_tree(
         &mut self,
         overwrites: &mut OverwritePayloads,
         tree: PreparedTree,
