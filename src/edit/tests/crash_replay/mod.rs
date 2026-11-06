@@ -383,7 +383,11 @@ fn deferred_initialization_survives_every_completed_write(
             if values.is_empty() && states.get() & 2 != 0 {
                 states.set(states.get() | 4);
             }
-            let resumed = crate::File::open_rw(path).and_then(|file| {
+            let resumed = crate::File::open_rw_with_options(
+                path,
+                crate::FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+            )
+            .and_then(|file| {
                 file.dataset("d")?
                     .append(&(i32::try_from(values.len()).unwrap()..13).collect::<Vec<_>>())?;
                 file.close()
@@ -457,7 +461,11 @@ fn deferred_base_with_creation(
     };
     if staged_creation {
         builder.write(path).unwrap();
-        let file = crate::File::open_rw(path).unwrap();
+        let file = crate::File::open_rw_with_options(
+            path,
+            crate::FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap();
         file.root().create_dataset("d", configure).unwrap();
         file.commit().unwrap();
         file.close().unwrap();
