@@ -500,6 +500,41 @@ pub(super) struct CopyTree {
 }
 
 impl CopyTree {
+    /// Screens retained headers and dense attributes at the copy's source widths.
+    ///
+    /// Counts committed-datatype uses with the root header's retained source widths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a retained record is shared, a datatype contains
+    /// variable-length values or references, or the committed-datatype inventory is incomplete
+    /// or nonempty. Propagates header-record, datatype, attribute, and inventory errors.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "foreign copy qualification has no inventory consumer"
+        )
+    )]
+    pub(in crate::edit) fn require_foreign_datatype_users_absent(&self) -> Result<(), Error> {
+        let Self { descendants, root } = self;
+        for node in core::iter::once(root).chain(descendants) {
+            reject_foreign_addresses(node.region())?;
+            reject_foreign_dense_attrs(node.dense_attrs().attrs())?;
+        }
+        let Some(users) = self.datatype_users(root.region().widths())? else {
+            return Err(Error::EditUnsupported(
+                "a foreign copy has an incomplete datatype inventory",
+            ));
+        };
+        if users.users().next().is_some() {
+            return Err(Error::EditUnsupported(
+                "a foreign copy retains a committed datatype",
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns whether any object of the copy has dense attribute storage.
     pub(super) fn has_dense_attributes(&self) -> bool {
         core::iter::once(&self.root)
