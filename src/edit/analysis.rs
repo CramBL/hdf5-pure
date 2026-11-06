@@ -45,6 +45,9 @@ use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
 pub(super) use deletions::CountPreflight;
 pub(super) use deletions::CountProjectionIdentity;
+pub(super) use deletions::{
+    CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
+};
 
 pub(super) use deletions::DeclaredCountChange;
 pub(super) use deletions::PlannedDeletion;

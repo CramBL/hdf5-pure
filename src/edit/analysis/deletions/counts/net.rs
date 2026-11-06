@@ -390,6 +390,17 @@ pub(in crate::edit) struct CountStorage {
 }
 
 impl CountStorage {
+    /// Separates original allocations and retained reference roots without reanalysis.
+    pub(in crate::edit) fn into_parts(self) -> (Vec<(FileRange, FreeClass)>, Vec<ObjectId>) {
+        let Self {
+            session: _,
+            origin: _,
+            allocations,
+            reference_roots,
+        } = self;
+        (allocations, reference_roots)
+    }
+
     /// Returns whether the recorded allocation session matches `engine`, even for empty input.
     ///
     /// Session equality is independent of source freshness.

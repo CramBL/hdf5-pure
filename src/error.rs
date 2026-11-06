@@ -150,6 +150,15 @@ pub enum Error {
     /// [`crate::Group`] handles, or a clone of the [`crate::File`], are still
     /// alive. Drop them and retry.
     HandlesOutstanding,
+    /// An object's declared reference count is below its known minimum.
+    InconsistentReferenceCount {
+        /// The absolute file offset of the object's header.
+        address: u64,
+        /// The original declared reference count, including an implicit count of one.
+        observed: u32,
+        /// The minimum count established from known original users.
+        minimum: u64,
+    },
     /// The allocation geometry of a reachable fractal heap is inconsistent.
     InvalidFractalHeapStorage {
         /// The stored address of the fractal-heap header.
@@ -321,6 +330,14 @@ impl fmt::Display for Error {
             ),
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Format(e) => write!(f, "HDF5 format error: {e}"),
+            Error::InconsistentReferenceCount {
+                address,
+                observed,
+                minimum,
+            } => write!(
+                f,
+                "object at {address} has reference count {observed}, below the known minimum {minimum}"
+            ),
             Error::InvalidFractalHeapStorage { address } => {
                 write!(f, "invalid fractal heap storage at {address}")
             }

@@ -17,6 +17,10 @@ use crate::object_graph::ObjectId;
 use super::PreparedGroup;
 use super::RelocatedDataset;
 
+pub(in crate::edit::commit) use preparation::PreparedTreeCounts;
+
+mod preparation;
+
 /// Exclusive checked count views with planned values and retained change dispositions.
 ///
 /// Construction leaves owned records unchanged. Application updates or inserts selected local

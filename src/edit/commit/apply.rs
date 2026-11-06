@@ -121,6 +121,7 @@ impl WriteEngine {
         reclamation: Option<Vec<(FileRange, FreeClass)>>,
     ) -> Result<AppliedTree, Error> {
         let PreparedTree {
+            counts: _,
             mut groups,
             headers,
             cross_copies,

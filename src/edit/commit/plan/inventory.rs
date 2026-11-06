@@ -3,11 +3,13 @@
 //! The editor derives observations from the owned application inputs and retains them with the
 //! placed tree only after every placement and value write succeeds.
 
+use std::collections::BTreeMap;
+
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
 
 use self::dispositions::{AppliedDispositions, ReconstructionDispositions};
-use super::{CommitPlan, OverwritePayloads, PreparedCommit, PreparedTree};
+use super::{CommitPlan, Node, OverwritePayloads, PreparedCommit, PreparedTree};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::counts::{CopyUsersError, CopyUsersUnion};
@@ -21,6 +23,7 @@ use crate::edit::commit::publish::AppliedTree;
 use crate::edit::staging::StagedEdits;
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
+use crate::object_path::ObjectPathBuf;
 
 pub(in crate::edit::commit) mod dispositions;
 pub(in crate::edit::commit) mod members;
@@ -298,7 +301,7 @@ impl OriginalEdits {
         tree: &PreparedTree,
         staged: &StagedEdits,
     ) -> Self {
-        let counts = Self::count_inputs(engine, phase, tree, staged);
+        let counts = Self::count_inputs(engine, phase, &tree.groups, staged);
         let source = ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address)
             .map_err(Error::from)
             .and_then(|root| {
@@ -342,10 +345,10 @@ impl OriginalEdits {
     ///
     /// Returns [`EditInputError`] for failed copy qualification, incomplete inventories, or
     /// errors in count aggregation, planning, or ownership-fact collection.
-    fn count_inputs(
+    pub(super) fn count_inputs(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
-        tree: &PreparedTree,
+        groups: &BTreeMap<ObjectPathBuf, Node>,
         staged: &StagedEdits,
     ) -> Result<OriginalOwnerFacts, EditInputError> {
         for (_, copy) in staged.cross_copies() {
@@ -353,7 +356,7 @@ impl OriginalEdits {
                 .map_err(EditInputError::Copy)?;
         }
         let mut added = CopyUsersUnion::new();
-        for (_, copy) in tree.groups.values().flat_map(|node| &node.prepared.copies) {
+        for (_, copy) in groups.values().flat_map(|node| &node.prepared.copies) {
             let users = phase.copy_users(copy).map_err(EditInputError::Copy)?;
             added = added
                 .add(phase, users.as_ref())
@@ -362,7 +365,7 @@ impl OriginalEdits {
         }
         phase
             .net_count_plan(
-                tree.groups.values().flat_map(|node| &node.prepared.deletes),
+                groups.values().flat_map(|node| &node.prepared.deletes),
                 &added.finish(),
             )
             .map_err(EditInputError::Counts)?
