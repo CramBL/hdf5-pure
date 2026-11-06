@@ -6,6 +6,8 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_space::__private::{FreeClass, PageType};
 use rstest::rstest;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use test_util::allocation;
 use test_util::attribute::Attribute;
 use test_util::dataspace;
 use test_util::global_heap;
@@ -398,13 +400,27 @@ fn overwrite_candidates_skip_reference_free_inputs(#[case] numeric: bool) {
     assert_eq!(&positive, b"\x89HDF\r\n\x1a\n");
     assert!(calls.load(Ordering::Relaxed) > 0);
     calls.store(0, Ordering::Relaxed);
-    let (candidates, measured) =
-        ::test_util::allocation::measure("overwrite_reference_free", || {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let candidates = {
+        let region = if numeric {
+            "numeric_overwrite_reference_free"
+        } else {
+            "empty_overwrite_reference_free"
+        };
+        let (control, positive) =
+            allocation::measure(&format!("{region}_control"), || vec![0_u8; 64]);
+        assert_eq!(control, [0; 64]);
+        assert!(positive.blocks > 0 && positive.bytes >= 64, "{positive}");
+        let (candidates, measured) = allocation::measure(region, || {
             phase.overwrite_collections(&engine.staged).unwrap()
         });
+        assert_eq!(measured.blocks, 0);
+        assert_eq!(measured.bytes, 0);
+        candidates
+    };
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let candidates = phase.overwrite_collections(&engine.staged).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 0);
-    assert_eq!(measured.blocks, 0);
-    assert_eq!(measured.bytes, 0);
     assert!(candidates.observations.is_none());
     assert!(candidates.collections.is_empty());
     assert!(phase.value_references.is_empty());
