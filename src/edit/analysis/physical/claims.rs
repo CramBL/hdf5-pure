@@ -14,6 +14,9 @@ use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
+use coverage::PhysicalCoverage;
+
+pub(in crate::edit) mod coverage;
 
 impl AnalysisPhase<'_> {
     /// Collects physical storage claims for this phase's hard-link root.
@@ -70,6 +73,8 @@ pub(in crate::edit) struct PhysicalClaims {
     logical_eoa: u64,
     claims: Vec<PhysicalClaim>,
     problems: Vec<ClaimProblem>,
+    /// Coverage derived lazily from the original claims and recorded bounds.
+    coverage: Option<PhysicalCoverage>,
 }
 
 impl PhysicalClaims {
@@ -100,6 +105,7 @@ impl PhysicalClaims {
             logical_eoa: physical.logical_eoa(),
             claims: Vec::new(),
             problems: Vec::new(),
+            coverage: None,
         };
         let physical = phase.physical_storage(source)?;
         claims

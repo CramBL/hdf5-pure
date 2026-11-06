@@ -215,6 +215,12 @@ fn partial_claim_collection_preserves_independent_ranges(#[case] input: Input) {
             assert!(claims.claims().iter().any(|claim| matches!(claim.origin(), ClaimOrigin::Object { object, .. } if object == id(owner))));
         }
     }
+    let problems = claims.problems().len();
+    let before = phase.claims.as_ref().unwrap().claims().as_ptr();
+    phase.physical_coverage(&source).unwrap();
+    let claims = phase.physical_claims(&source).unwrap();
+    assert_eq!(claims.problems().len(), problems);
+    assert_eq!(claims.claims().as_ptr(), before);
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -277,6 +283,10 @@ fn numeric_claim_queries_bound_source_reads_and_allocations() {
             && measured.live_bytes < 65_536,
         "{measured}"
     );
+    let coverage = phase.physical_coverage(&source).unwrap();
+    assert_eq!(coverage.conflict(), None);
+    assert!(coverage.beyond_source().is_empty());
+    assert!(coverage.beyond_eoa().is_empty());
     let before = (
         calls.load(Ordering::Relaxed),
         read_bytes.load(Ordering::Relaxed),
@@ -286,13 +296,7 @@ fn numeric_claim_queries_bound_source_reads_and_allocations() {
         "{before:?}"
     );
     let ((), cached) = allocation::measure("physical_claims_cached", || {
-        assert!(
-            phase
-                .physical_claims(&source)
-                .unwrap()
-                .problems()
-                .is_empty()
-        );
+        assert_eq!(phase.physical_coverage(&source).unwrap().conflict(), None);
     });
     assert_eq!((cached.blocks, cached.bytes), (0, 0));
     assert_eq!(
