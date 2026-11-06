@@ -1,5 +1,6 @@
 use rstest::rstest;
 use test_util::global_heap;
+use test_util::snapshot::text::{Report, Value};
 use test_util::widths::Widths;
 use test_util_hdf5::global_heap::attributes as fixture;
 use test_util_hdf5::global_heap::attributes::Edit;
@@ -12,6 +13,7 @@ use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::heap::associations::MemberPresence;
+use crate::edit::analysis::physical::claims::coverage::content::ResidualOutcome;
 use crate::edit::attributes;
 use crate::edit::test_util as edit_test_util;
 use crate::group::v2 as group_v2;
@@ -83,6 +85,54 @@ fn native_attribute_edits_retire_complete_original_collections(
     assert!(coverage.beyond_source().is_empty());
     assert!(coverage.beyond_eoa().is_empty());
     assert!(!coverage.residuals().is_empty());
+    let expected_residuals = coverage.residuals().to_vec();
+    let content = phase.residual_content(&source).unwrap();
+    assert_eq!(
+        content
+            .intervals()
+            .iter()
+            .map(|entry| entry.range())
+            .collect::<Vec<_>>(),
+        expected_residuals
+    );
+    let mut report = Report::new();
+    report.table(
+        "Residual content",
+        [
+            "Start",
+            "Length",
+            "Zero prefix",
+            "Unexamined",
+            "Outcome",
+            "Read calls",
+            "Requested bytes",
+        ],
+        content.intervals().iter().map(|entry| {
+            let outcome = match entry.outcome() {
+                ResidualOutcome::AllZero => "all zero",
+                ResidualOutcome::NonZero { .. } => "nonzero",
+                ResidualOutcome::ReadFailed(error) => {
+                    panic!("native residual read failed: {error:?}")
+                }
+            };
+            assert_eq!(
+                entry.zero_prefix().length()
+                    + entry.unexamined().length()
+                    + u64::from(matches!(entry.outcome(), ResidualOutcome::NonZero { .. })),
+                entry.range().length()
+            );
+            [
+                Value::Number(entry.range().start().get()),
+                Value::Number(entry.range().length()),
+                Value::Number(entry.zero_prefix().length()),
+                Value::Number(entry.unexamined().length()),
+                Value::text(outcome),
+                Value::Number(entry.read_calls()),
+                Value::Number(entry.requested_bytes()),
+            ]
+        }),
+    );
+    eprintln!("{owner:?}/{storage:?}/{edit:?}\n{}", report.finish());
     drop(phase);
     let value = match edit {
         Edit::Numeric => Some(AttrValue::I64(19)),

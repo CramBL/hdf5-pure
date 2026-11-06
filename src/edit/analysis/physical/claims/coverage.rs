@@ -12,6 +12,10 @@ use super::{ClaimOrigin, FileStorageKind, PhysicalClaim};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::{Error, FormatError};
 
+use self::content::ResidualContents;
+
+pub(in crate::edit) mod content;
+
 impl AnalysisPhase<'_> {
     /// Returns cached coverage and overlap observations for this phase's claims.
     ///
@@ -61,6 +65,8 @@ pub(in crate::edit) struct PhysicalCoverage {
     beyond_source: Vec<usize>,
     /// Original claim indices whose ends exceed the recorded end of allocation.
     beyond_eoa: Vec<usize>,
+    /// Byte observations collected lazily over the residual intervals.
+    content: Option<ResidualContents>,
 }
 
 impl PhysicalCoverage {
@@ -84,6 +90,7 @@ impl PhysicalCoverage {
             conflict: None,
             beyond_source: Vec::new(),
             beyond_eoa: Vec::new(),
+            content: None,
         };
         let mut ordered = (0..claims.len()).collect::<Vec<_>>();
         ordered.sort_unstable_by_key(|&index| {

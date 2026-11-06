@@ -218,6 +218,7 @@ fn partial_claim_collection_preserves_independent_ranges(#[case] input: Input) {
     let problems = claims.problems().len();
     let before = phase.claims.as_ref().unwrap().claims().as_ptr();
     phase.physical_coverage(&source).unwrap();
+    phase.residual_content(&source).unwrap();
     let claims = phase.physical_claims(&source).unwrap();
     assert_eq!(claims.problems().len(), problems);
     assert_eq!(claims.claims().as_ptr(), before);
