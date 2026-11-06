@@ -67,6 +67,7 @@ impl<'source> AnalysisPhase<'source> {
             ownership: _,
             physical: _,
             claims: _,
+            associations: _,
             budget: _,
             root: _,
             links: _,

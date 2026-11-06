@@ -10,9 +10,12 @@ use crate::AttrValue;
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::heap::associations::MemberPresence;
 use crate::edit::attributes;
 use crate::edit::test_util as edit_test_util;
 use crate::group::v2 as group_v2;
+use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 
 #[rstest]
@@ -55,6 +58,32 @@ fn native_attribute_edits_retire_complete_original_collections(
             .is_some(),
         matches!(storage, Storage::Dense)
     );
+    let mut phase = AnalysisPhase::new(&engine);
+    let root =
+        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
+    let source = phase.reconstruction_source(&engine, root).unwrap();
+    let associations = phase.member_associations(&source).unwrap();
+    assert!(associations.topology_available());
+    assert!(associations.incomplete_references().is_empty());
+    assert_eq!(associations.collections().len(), 1);
+    let association = &associations.collections()[&PhysicalAddress::new(collection.start)];
+    assert!(association.error().is_none());
+    assert!(association.unmatched().is_empty());
+    assert_eq!(association.observed().len(), 1);
+    let observed = association.observed().values().next().unwrap();
+    assert_eq!(observed.presence(), MemberPresence::Allocated);
+    assert_eq!(
+        observed.referrers(),
+        [ObjectId::new(PhysicalAddress::new(address))]
+    );
+    let claims = phase.physical_claims(&source).unwrap();
+    assert!(claims.problems().is_empty(), "{:?}", claims.problems());
+    let coverage = phase.physical_coverage(&source).unwrap();
+    assert_eq!(coverage.conflict(), None);
+    assert!(coverage.beyond_source().is_empty());
+    assert!(coverage.beyond_eoa().is_empty());
+    assert!(!coverage.residuals().is_empty());
+    drop(phase);
     let value = match edit {
         Edit::Numeric => Some(AttrValue::I64(19)),
         Edit::Remove => None,

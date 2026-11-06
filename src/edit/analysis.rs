@@ -31,6 +31,7 @@ use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
 use self::heap::CollectionContents;
 use self::heap::HeapReferenceError;
+use self::heap::associations::MemberAssociations;
 use self::ownership::ObjectOwnership;
 use self::physical::PhysicalStorage;
 use self::physical::claims::PhysicalClaims;
@@ -108,6 +109,8 @@ pub(super) struct AnalysisPhase<'a> {
     physical: Option<PhysicalStorage>,
     /// Physical range claims with their origins and independent support outcomes.
     claims: Option<PhysicalClaims>,
+    /// Root-scoped member associations and independent reference and framing outcomes.
+    associations: Option<MemberAssociations>,
     #[cfg(test)]
     candidate_lookups: u64,
 }
@@ -128,6 +131,7 @@ impl<'a> AnalysisPhase<'a> {
             ownership: BTreeMap::new(),
             physical: None,
             claims: None,
+            associations: None,
             #[cfg(test)]
             candidate_lookups: 0,
         }
@@ -189,6 +193,7 @@ impl<'a> AnalysisPhase<'a> {
             ownership: _,
             physical: _,
             claims: _,
+            associations: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -498,6 +503,7 @@ impl<'a> AnalysisPhase<'a> {
             ownership: _,
             physical: _,
             claims: _,
+            associations: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -569,6 +575,7 @@ impl<'a> AnalysisPhase<'a> {
             ownership: _,
             physical: _,
             claims: _,
+            associations: _,
             candidate_lookups,
         } = self;
         let topology = topology.as_ref().and_then(Option::as_ref);

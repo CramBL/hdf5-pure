@@ -17,6 +17,8 @@ use crate::global_heap;
 use crate::global_heap::GlobalHeapId;
 use crate::message_type::MessageType;
 
+pub(in crate::edit) mod associations;
+
 impl AnalysisPhase<'_> {
     /// Returns cached references from the object associated with `source`.
     ///
