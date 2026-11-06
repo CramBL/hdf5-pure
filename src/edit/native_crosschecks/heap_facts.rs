@@ -11,6 +11,7 @@ use crate::PhysicalAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::heap::associations::MemberPresence;
 use crate::edit::analysis::physical::claims::ClaimOrigin;
 use crate::edit::test_util as edit_test_util;
 use crate::global_heap::GlobalHeapId;
@@ -119,6 +120,20 @@ fn native_heap_members_are_distinct_from_root_reference_completeness(#[case] ext
             .any(|range| range.start() <= collection
                 && range.end().get() >= collection.get() + expected_length)
     );
+    let associations = phase.member_associations(&source).unwrap();
+    assert!(associations.topology_available());
+    assert!(associations.incomplete_references().is_empty());
+    let association = &associations.collections()[&collection];
+    assert!(association.error().is_none());
+    assert_eq!(
+        association.unmatched(),
+        missing.iter().map(|id| id.index).collect::<Vec<_>>()
+    );
+    assert_eq!(association.observed().len(), 2);
+    for observed in association.observed().values() {
+        assert_eq!(observed.presence(), MemberPresence::Allocated);
+        assert_eq!(observed.referrers(), [root]);
+    }
     drop(phase);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), original);
