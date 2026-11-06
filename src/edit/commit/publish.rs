@@ -20,6 +20,8 @@ use hdf5_pure_space::__private::{
 };
 
 pub(in crate::edit) use self::completion::PublishedTree;
+pub(in crate::edit::commit) use self::storage::PublicationError;
+use super::plan::inventory::storage::{OriginalStorage, SpaceClaim};
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
@@ -48,6 +50,7 @@ use crate::width::FormatWidths;
     )
 )]
 mod completion;
+mod storage;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
@@ -304,8 +307,32 @@ impl WriteEngine {
         new_root: PhysicalAddress,
         trunc_to: Option<PhysicalAddress>,
     ) -> Result<(), Error> {
+        self.publish_nonpersisting_excluding(new_root, trunc_to, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Publishes a non-persistent root after checking optional original storage exclusions.
+    ///
+    /// With `storage`, checks allocator ranges and the proposed physical end before the content
+    /// barrier. Uses the publication and truncation order of [`Self::publish_nonpersisting`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] if an allocator range overlaps protected storage
+    /// or the proposed end is below a protected range end, or if range resolution fails.
+    /// Returns [`PublicationError::Write`] for errors from [`Self::publish_nonpersisting`].
+    pub(in crate::edit::commit) fn publish_nonpersisting_excluding(
+        &mut self,
+        new_root: PhysicalAddress,
+        trunc_to: Option<PhysicalAddress>,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
         let base = self.context.addresses();
         let new_eof = trunc_to.unwrap_or_else(|| PhysicalAddress::new(self.image.len()));
+        if let Some(storage) = storage {
+            storage.exclude_space(self)?;
+            storage.check_end(new_eof)?;
+        }
         self.barrier()?;
         if matches!(
             self.context.superblock().version(),
@@ -459,9 +486,53 @@ impl WriteEngine {
         placement: TailPlacement,
         purpose: PublicationPurpose,
     ) -> Result<(), Error> {
+        self.publish_persisting_excluding(new_root, to_free, placement, purpose, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Publishes persistent managers after checking optional original storage exclusions.
+    ///
+    /// With `storage`, checks allocator ranges, pending frees, old managers, and any recycled
+    /// tail target before planning. Checks the complete metadata reservation and proposed end
+    /// before writing the metadata. The caller restores its allocation snapshot after failure
+    /// before publication. For PAGE sessions, calls [`Self::commit_persisting_paged_excluding`].
+    ///
+    /// With [`None`], uses the publication policy of [`Self::publish_persisting`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] for a storage overlap, an end below protected
+    /// storage, or a range-resolution error. Returns [`PublicationError::Write`] for errors
+    /// from [`Self::publish_persisting`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
+    pub(in crate::edit::commit) fn publish_persisting_excluding(
+        &mut self,
+        new_root: PhysicalAddress,
+        to_free: ReturnedExtents,
+        placement: TailPlacement,
+        purpose: PublicationPurpose,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
         // PAGE uses separate managers for each page type.
         if self.space.is_paged() {
-            return self.commit_persisting_paged(new_root, to_free, placement, purpose);
+            return match storage {
+                Some(storage) => self.commit_persisting_paged_excluding(
+                    new_root,
+                    to_free,
+                    placement,
+                    purpose,
+                    Some(storage),
+                ),
+                None => self
+                    .commit_persisting_paged(new_root, to_free, placement, purpose)
+                    .map_err(PublicationError::from),
+            };
+        }
+        if let Some(storage) = storage {
+            storage.exclude_publication(self, &to_free, placement)?;
         }
         let widths = self.context.widths();
         let offset_width = widths.offsets;
@@ -569,12 +640,14 @@ impl WriteEngine {
                 return Err(Error::Format(FormatError::Internal(format!(
                     "flat free-space plan produced a {:?} manager",
                     block.kind()
-                ))));
+                )))
+                .into());
             }
             _ => {
                 return Err(Error::Format(FormatError::Internal(
                     "flat free-space plan produced more than one manager".into(),
-                )));
+                ))
+                .into());
             }
         };
 
@@ -622,6 +695,10 @@ impl WriteEngine {
                 length: tail_len,
             },
         ))?;
+        if let Some(storage) = storage {
+            storage.exclude_extent(self, region, SpaceClaim::Metadata)?;
+            storage.check_end(final_eof)?;
+        }
         let new_old_blocks = vec![region];
 
         #[cfg(test)]
@@ -832,6 +909,42 @@ impl WriteEngine {
         placement: TailPlacement,
         purpose: PublicationPurpose,
     ) -> Result<(), Error> {
+        self.commit_persisting_paged_excluding(new_root, to_free, placement, purpose, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Publishes persistent PAGE managers with optional original storage exclusions.
+    ///
+    /// With `storage`, checks publication inputs and existing-page padding before padding the
+    /// file. Checks the complete planned metadata reservation, appended page suffix, and proposed
+    /// end before consuming the reservation or writing its content. Uses the publication and
+    /// adoption order of [`Self::commit_persisting_paged`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] for a storage overlap, an end below protected
+    /// storage, or a range-resolution error. Returns [`PublicationError::Write`] for errors
+    /// from [`Self::commit_persisting_paged`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
+    pub(in crate::edit::commit) fn commit_persisting_paged_excluding(
+        &mut self,
+        new_root: PhysicalAddress,
+        to_free: ReturnedExtents,
+        placement: TailPlacement,
+        purpose: PublicationPurpose,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
+        if let Some(storage) = storage {
+            storage.exclude_publication(self, &to_free, placement)?;
+            if let Some(free_space::PageTransition::Pad { extent, .. }) =
+                self.space.page_padding(self.end_of_allocation()?)?
+            {
+                storage.exclude_extent(self, extent, SpaceClaim::Metadata)?;
+            }
+        }
         let widths = self.context.widths();
         let offset_width = widths.offsets;
         let (strategy, threshold, page_size, old_blocks) = {
@@ -933,6 +1046,13 @@ impl WriteEngine {
             .into_placed_allocation(extension.iter().map(|allocation| allocation.range()))?;
         let physical_region = FileRange::new(base.resolve(region.start())?, region.len().get())?;
         let final_eof = base.resolve(final_eoa)?;
+        if let Some(storage) = storage {
+            storage.exclude_extent(self, region, SpaceClaim::Metadata)?;
+            if !reused && let Some(padding) = FreeExtent::between(region.end(), final_eoa) {
+                storage.exclude_extent(self, padding, SpaceClaim::Metadata)?;
+            }
+            storage.check_end(final_eof)?;
+        }
 
         if reused {
             #[cfg(test)]
@@ -1251,6 +1371,7 @@ mod tests {
     use crate::width::FormatWidths;
 
     mod completion;
+    mod storage;
 
     #[rstest]
     #[case::empty(1000, 0, 8, PublicationPurpose::Allocation, None)]
