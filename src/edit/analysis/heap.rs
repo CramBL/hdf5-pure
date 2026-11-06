@@ -99,6 +99,12 @@ impl AnalysisPhase<'_> {
 }
 
 impl ObjectReferences {
+    /// Records interpretation completeness and failure, preserving collected identities.
+    pub(in crate::edit) fn record_outcome(&mut self, outcome: Result<bool, HeapReferenceError>) {
+        self.complete = matches!(outcome, Ok(true));
+        self.error = outcome.err();
+    }
+
     /// Borrows the physical collection addresses found in the object's content.
     pub(in crate::edit) fn collections(&self) -> &BTreeSet<u64> {
         &self.collections

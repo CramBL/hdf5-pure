@@ -25,6 +25,7 @@ use super::super::CollectionCandidates;
 use super::super::CollectionProvenance;
 use crate::AttrValue;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::CollectionContent;
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
 use crate::edit::test_util as edit_test_util;
@@ -388,6 +389,8 @@ pub(super) fn attribute(name: &str, collection: u64) -> Message {
 fn origin(object: u64, attribute: Option<&str>) -> CollectionProvenance {
     CollectionProvenance {
         object: ObjectId::new(PhysicalAddress::new(object)),
-        attribute: attribute.map(String::from),
+        content: attribute.map_or(CollectionContent::Object, |name| {
+            CollectionContent::Attribute(name.into())
+        }),
     }
 }

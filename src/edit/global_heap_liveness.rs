@@ -35,6 +35,7 @@ use crate::width::OffsetWidth;
 
 use super::WriteEngine;
 use super::analysis::AnalysisPhase;
+use super::analysis::ObjectReferences;
 use super::analysis::heap::HeapReferenceError;
 use super::analysis::heap::HeapReferenceSink;
 
@@ -107,6 +108,24 @@ impl WriteEngine {
         header: &ObjectHeader,
         referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, HeapReferenceError> {
+        self.collect_cached_object_collections(header, referenced, None)
+    }
+
+    /// Collects object references, reusing dataset-value facts from the same source phase.
+    ///
+    /// Reads attributes and fill values separately. If `values` is present, fills an empty slot
+    /// when collecting dataset elements, or reuses its identities, completeness, and failure.
+    /// The caller supplies cached facts for this object from the same unchanged source phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::collect_object_collections`].
+    pub(super) fn collect_cached_object_collections(
+        &self,
+        header: &ObjectHeader,
+        referenced: &mut impl HeapReferenceSink,
+        values: Option<&mut Option<ObjectReferences>>,
+    ) -> Result<bool, HeapReferenceError> {
         let mut complete = true;
         for HeaderMessage {
             msg_type,
@@ -143,7 +162,12 @@ impl WriteEngine {
                 _ => complete = false,
             }
         }
-        complete &= self.collect_dataset_collections(&header.messages, referenced)?;
+        complete &= self.collect_dataset_collections(
+            &header.messages,
+            DatasetReferenceScope::ValuesAndFill,
+            referenced,
+            values,
+        )?;
         Ok(complete)
     }
 
@@ -180,7 +204,10 @@ impl WriteEngine {
         )
     }
 
-    /// Collects global heap references from a dataset's elements and fill value.
+    /// Collects global heap references from dataset elements and the fill value selected by `scope`.
+    ///
+    /// Uses the dataset-value cache in `values` as described by
+    /// [`Self::collect_cached_object_collections`].
     ///
     /// Returns `true` for an object without a data layout message, and `false` if the layout,
     /// datatype, dataspace, or filter pipeline message is shared or the layout is virtual. For a
@@ -193,10 +220,12 @@ impl WriteEngine {
     /// Returns [`HeapReferenceError::MissingMessage`] if the object has a data layout message and
     /// lacks its datatype or dataspace message, and [`HeapReferenceError::Format`] if a message,
     /// the chunk index, or an element is malformed, or a source read fails.
-    fn collect_dataset_collections(
+    pub(super) fn collect_dataset_collections(
         &self,
         messages: &[HeaderMessage],
+        scope: DatasetReferenceScope,
         referenced: &mut impl HeapReferenceSink,
+        values: Option<&mut Option<ObjectReferences>>,
     ) -> Result<bool, HeapReferenceError> {
         let find = |msg_type| messages.iter().find(|m| m.msg_type == msg_type);
         let Some(layout) = find(MessageType::DATA_LAYOUT) else {
@@ -226,7 +255,9 @@ impl WriteEngine {
             HeapReferences::Located(slots) => slots,
             HeapReferences::Unsupported => return Ok(false),
         };
-        self.collect_fill_value_collections(messages, &slots, referenced)?;
+        if matches!(scope, DatasetReferenceScope::ValuesAndFill) {
+            self.collect_fill_value_collections(messages, &slots, referenced)?;
+        }
         let dataspace = Dataspace::parse_with_length_width(&dataspace.data, self.widths().lengths)?;
         let pipeline = pipeline
             .map(|m| crate::filter_pipeline::parse_filter_pipeline(&m.data))
@@ -239,12 +270,46 @@ impl WriteEngine {
             FillPattern::ZERO,
             self.widths().offsets,
         )?;
+        if let Some(values) = values {
+            if values.is_none() {
+                let mut facts = ObjectReferences::default();
+                let outcome = self.collect_dataset_elements(spec, &slots, &mut facts);
+                facts.record_outcome(outcome);
+                *values = Some(facts);
+            }
+            let facts = values.as_ref().ok_or_else(|| {
+                FormatError::Internal("dataset value references were not recorded".into())
+            })?;
+            for &id in facts.objects() {
+                referenced.record(id);
+            }
+            return facts.error().cloned().map_or(Ok(facts.is_complete()), Err);
+        }
+        self.collect_dataset_elements(spec, &slots, referenced)
+    }
+
+    /// Collects global heap references from allocated dataset elements.
+    ///
+    /// Returns `false` for virtual storage or an unreadable or undecodable chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HeapReferenceError::Format`] for malformed elements or chunk indexes, or a
+    /// contiguous source-read failure. Retains references collected before an error.
+    fn collect_dataset_elements(
+        &self,
+        spec: RawReadSpec<'_>,
+        slots: &ReferenceSlots,
+        referenced: &mut impl HeapReferenceSink,
+    ) -> Result<bool, HeapReferenceError> {
+        #[cfg(test)]
+        DATASET_VALUE_WORK.with(|work| work.set(work.get() + 1));
         Ok(match spec.storage() {
             RawReadStorage::Compact { data } => {
                 self.collect_element_collections(
                     data,
-                    dataspace.num_elements(),
-                    &slots,
+                    spec.dataspace().num_elements(),
+                    slots,
                     referenced,
                 )?;
                 true
@@ -253,14 +318,14 @@ impl WriteEngine {
                 self.collect_contiguous_collections(
                     address,
                     spec.byte_len_u64(),
-                    &slots,
+                    slots,
                     referenced,
                 )?;
                 true
             }
             RawReadStorage::ContiguousUnallocated => true,
             RawReadStorage::Chunked { .. } => {
-                self.collect_chunked_collections(spec, &slots, referenced)?
+                self.collect_chunked_collections(spec, slots, referenced)?
             }
             RawReadStorage::Virtual => false,
         })
@@ -518,6 +583,14 @@ impl HeapReferences {
     }
 }
 
+/// The dataset content selected for global heap reference collection.
+pub(super) enum DatasetReferenceScope {
+    /// Stored elements, excluding the fill value.
+    Values,
+    /// Stored elements and the fill value.
+    ValuesAndFill,
+}
+
 /// The positions of the variable-length references in an element of a datatype.
 struct ReferenceSlots {
     /// The size in bytes of an element.
@@ -545,6 +618,11 @@ fn holds_unlocated_address(datatype: &Datatype) -> bool {
 /// The number of elements the analysis reads from a contiguous dataset at a time.
 // The literal is non-zero, and the `unwrap` in a constant is evaluated at compile time.
 const ELEMENT_BATCH: NonZeroU64 = NonZeroU64::new(4096).unwrap();
+
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::edit) static DATASET_VALUE_WORK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 mod tests;

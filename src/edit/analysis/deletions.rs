@@ -210,6 +210,7 @@ impl<'source> AnalysisPhase<'source> {
             root: _,
             links: _,
             references: _,
+            value_references: _,
             liveness: _,
             allocations: _,
             #[cfg(test)]

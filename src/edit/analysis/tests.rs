@@ -24,6 +24,7 @@ mod attributes;
 mod collections;
 mod counts;
 mod foundations;
+mod overwrites;
 mod reconstruction;
 
 #[rstest]

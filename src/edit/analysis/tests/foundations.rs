@@ -13,6 +13,7 @@ use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 use super::super::{
     AnalysisPhase, AnalysisWork, COLLECTION_WORK, CollectionCandidates, CollectionProvenance,
 };
+use crate::edit::analysis::CollectionContent;
 use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
 
@@ -55,7 +56,9 @@ fn foundation_analysis_preserves_candidate_origins_and_completeness(
     let mut candidates = CollectionCandidates::default();
     let origin = |attribute: Option<&str>| CollectionProvenance {
         object: ObjectId::new(PhysicalAddress::new(dataset)),
-        attribute: attribute.map(String::from),
+        content: attribute.map_or(CollectionContent::Object, |name| {
+            CollectionContent::Attribute(name.into())
+        }),
     };
     candidates.insert(dead_allocation, [origin(None)]).unwrap();
     candidates

@@ -37,8 +37,10 @@ use self::physical::PhysicalStorage;
 use self::physical::claims::PhysicalClaims;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
+use super::global_heap_liveness::DatasetReferenceScope;
 use super::global_heap_liveness::GlobalHeapLiveness;
 use super::reclaim::{self, MAX_LINK_WALK_DEPTH};
+use super::staging::StagedEdits;
 use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
 pub(super) use deletions::CountPreflight;
@@ -98,6 +100,8 @@ pub(super) struct AnalysisPhase<'a> {
     links: BTreeMap<ObjectId, ObjectLinks>,
     /// Decoded collection and member identities, interpretation outcomes, and cached failures.
     references: BTreeMap<ObjectId, ObjectReferences>,
+    /// Dataset-value references and outcomes, excluding attributes and fill values.
+    value_references: BTreeMap<ObjectId, ObjectReferences>,
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     /// Complete collection ranges, allocated-member framing, and cached parsing failures.
     allocations: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
@@ -125,6 +129,7 @@ impl<'a> AnalysisPhase<'a> {
             root: None,
             links: BTreeMap::new(),
             references: BTreeMap::new(),
+            value_references: BTreeMap::new(),
             liveness: None,
             allocations: BTreeMap::new(),
             counts: BTreeMap::new(),
@@ -187,6 +192,7 @@ impl<'a> AnalysisPhase<'a> {
             root,
             links,
             references: _,
+            value_references: _,
             liveness: _,
             allocations: _,
             counts: _,
@@ -285,7 +291,7 @@ impl<'a> AnalysisPhase<'a> {
             predecessors.insert(
                 CollectionProvenance {
                     object,
-                    attribute: None,
+                    content: CollectionContent::Object,
                 },
                 references.clone(),
             );
@@ -345,7 +351,90 @@ impl<'a> AnalysisPhase<'a> {
             references.error = outcome.err().map(HeapReferenceError::from);
             let origin = CollectionProvenance {
                 object,
-                attribute: Some(attribute.name),
+                content: CollectionContent::Attribute(attribute.name),
+            };
+            if references.complete {
+                for &address in &references.collections {
+                    if let Ok(allocation) =
+                        self.collection_allocation(PhysicalAddress::new(address))
+                    {
+                        candidates.insert(allocation, [origin.clone()])?;
+                    }
+                }
+            }
+            candidates.observe(
+                self.engine.context.allocations.session(),
+                origin,
+                references,
+            )?;
+        }
+        Ok(candidates)
+    }
+
+    /// Returns collection candidates referenced by the original values of staged overwrites.
+    ///
+    /// Examines writes whose replacement datatype holds file addresses. Caches original
+    /// dataset-value identities and interpretation outcomes, separately from attributes and fill
+    /// values. Reuses these facts for object-wide reference queries in either query order.
+    /// Includes allocations only for completely interpreted values and collections whose complete
+    /// allocations can be parsed. The caller queries the unchanged source before overwrite writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns path-resolution errors or [`Error::Format`] for inconsistent candidate evidence.
+    /// Header, descriptor, and source failures encountered during value collection are recorded in
+    /// the observations.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "overwrite candidates do not authorize retirement")
+    )]
+    pub(super) fn overwrite_collections(
+        &mut self,
+        staged: &StagedEdits,
+    ) -> Result<CollectionCandidates, Error> {
+        let mut candidates = CollectionCandidates::default();
+        for (path, values) in staged.writes() {
+            if !crate::datatype::datatype_holds_file_address(&values.dt) {
+                continue;
+            }
+            let object = group_v2::resolve_path_any_from_source(
+                &self.engine.opened_source(),
+                AccessMode::ReadWrite,
+                self.engine.superblock(),
+                self.engine.widths(),
+                &path.as_path(),
+            )
+            .map(PhysicalAddress::new)
+            .map(ObjectId::new)?;
+            let references = self
+                .value_references
+                .entry(object)
+                .or_insert_with(|| {
+                    let mut references = ObjectReferences::default();
+                    let outcome = ObjectHeader::parse_from_source_with_widths(
+                        &SourceMetadata(&self.engine.image()),
+                        AccessMode::ReadWrite,
+                        object.header_address().get(),
+                        self.engine.widths(),
+                        self.engine.addresses().effective_base(),
+                    )
+                    .map_err(HeapReferenceError::from)
+                    .and_then(|header| {
+                        self.engine.collect_dataset_collections(
+                            &header.messages,
+                            DatasetReferenceScope::Values,
+                            &mut references,
+                            None,
+                        )
+                    });
+                    references.complete = matches!(outcome, Ok(true));
+                    references.error = outcome.err();
+                    references
+                })
+                .clone();
+            let origin = CollectionProvenance {
+                object,
+                content: CollectionContent::DatasetValues,
             };
             if references.complete {
                 for &address in &references.collections {
@@ -534,6 +623,7 @@ impl<'a> AnalysisPhase<'a> {
             root: _,
             links,
             references,
+            value_references,
             liveness: _,
             allocations: _,
             counts: _,
@@ -571,7 +661,15 @@ impl<'a> AnalysisPhase<'a> {
                             work.set((links, references + 1));
                         });
                         let mut facts = ObjectReferences::default();
-                        let outcome = engine.collect_object_collections(&header, &mut facts);
+                        let mut values = value_references.remove(&object);
+                        let outcome = engine.collect_cached_object_collections(
+                            &header,
+                            &mut facts,
+                            Some(&mut values),
+                        );
+                        if let Some(values) = values {
+                            value_references.insert(object, values);
+                        }
                         facts.complete = matches!(outcome, Ok(true));
                         facts.error = outcome.err();
                         entry.insert(facts);
@@ -606,6 +704,7 @@ impl<'a> AnalysisPhase<'a> {
             root: _,
             links,
             references,
+            value_references: _,
             liveness,
             allocations,
             counts: _,
@@ -918,7 +1017,7 @@ impl ObjectLinks {
     }
 }
 
-/// Decoded global heap references from one object's supported content.
+/// Decoded global heap references from an object's content or its dataset values alone.
 ///
 /// Retains checked identities even when other content is unsupported or malformed. Completeness
 /// covers reference interpretation independently of adjacency and collection framing. Logical
@@ -1045,7 +1144,7 @@ impl CollectionCandidates {
         Ok(())
     }
 
-    /// Merges decoded identities and interpretation outcomes for one original object or attribute.
+    /// Merges decoded identities and interpretation outcomes for one original content scope.
     ///
     /// Skips complete, reference-free summaries. For repeated observations, retains all decoded
     /// identities and the first error. Records completeness only if every interpretation is complete.
@@ -1108,7 +1207,7 @@ impl CollectionCandidates {
 /// Descriptor observations and incomplete deletion scopes, bound to one editing session.
 struct CandidateObservations {
     session: AllocationSession,
-    /// Decoded identities and interpretation outcomes, keyed by original object and attribute.
+    /// Decoded identities and interpretation outcomes, keyed by original object and content scope.
     predecessors: BTreeMap<CollectionProvenance, ObjectReferences>,
     /// Supplied deletion roots whose descendant traversal failed or was incomplete.
     incomplete_deletions: BTreeSet<ObjectId>,
@@ -1134,13 +1233,24 @@ struct CollectionCandidate {
     origins: BTreeSet<CollectionProvenance>,
 }
 
-/// The original object and optional attribute associated with an allocation or observation.
+/// The original object and content scope associated with an allocation or observation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct CollectionProvenance {
     /// The object from which the allocation or reference summary was collected.
     pub(super) object: ObjectId,
-    /// The original attribute name, or [`None`] for an object-wide observation or allocation.
-    pub(super) attribute: Option<String>,
+    /// The part of the original object examined for references.
+    pub(super) content: CollectionContent,
+}
+
+/// The part of an object examined for predecessor references.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum CollectionContent {
+    /// One attribute, identified by its original name.
+    Attribute(String),
+    /// Stored dataset values, excluding attributes and fill values.
+    DatasetValues,
+    /// All supported object content, including attributes and fill values.
+    Object,
 }
 
 /// Retained phase summaries and candidate-membership query counts.
