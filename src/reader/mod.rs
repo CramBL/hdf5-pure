@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
+use hdf5_pure_core::__private::ElementCount;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
@@ -7507,11 +7508,11 @@ the same commit to replace it",
         }
         let dataspace = self.dataspace()?;
         if let Some(limit) = options.max_elements()
-            && dataspace.num_elements() > limit as u64
+            && dataspace.num_elements() > ElementCount::new(limit as u64)
         {
             return Err(FormatError::VariableLengthElementLimitExceeded {
                 limit,
-                actual: dataspace.num_elements(),
+                actual: dataspace.num_elements().get(),
             }
             .into());
         }
@@ -7550,11 +7551,11 @@ the same commit to replace it",
         }
         let dataspace = self.dataspace()?;
         if let Some(limit) = options.max_elements()
-            && dataspace.num_elements() > limit as u64
+            && dataspace.num_elements() > ElementCount::new(limit as u64)
         {
             return Err(FormatError::VariableLengthElementLimitExceeded {
                 limit,
-                actual: dataspace.num_elements(),
+                actual: dataspace.num_elements().get(),
             }
             .into());
         }
@@ -7612,11 +7613,11 @@ the same commit to replace it",
         }
         let dataspace = self.dataspace()?;
         if let Some(limit) = options.max_elements()
-            && dataspace.num_elements() > limit as u64
+            && dataspace.num_elements() > ElementCount::new(limit as u64)
         {
             return Err(FormatError::VariableLengthElementLimitExceeded {
                 limit,
-                actual: dataspace.num_elements(),
+                actual: dataspace.num_elements().get(),
             }
             .into());
         }
@@ -7656,22 +7657,28 @@ the same commit to replace it",
         let dataspace = self.dataspace()?;
         let n = dataspace.num_elements();
         if let Some(limit) = options.max_elements()
-            && n > limit as u64
+            && n > ElementCount::new(limit as u64)
         {
-            return Err(
-                FormatError::VariableLengthElementLimitExceeded { limit, actual: n }.into(),
-            );
+            return Err(FormatError::VariableLengthElementLimitExceeded {
+                limit,
+                actual: n.get(),
+            }
+            .into());
         }
 
         // A zero-element dataset owns no element bytes, so there is no storage
         // to visit: skip the read rather than open a dataset the C library
         // left unallocated only to receive the same empty buffer back.
-        let raw = if n == 0 { Vec::new() } else { self.read_raw()? };
+        let raw = if n.is_zero() {
+            Vec::new()
+        } else {
+            self.read_raw()?
+        };
         let n_usize = n.to_usize()?;
         let needed = n_usize
             .checked_mul(stride)
             .ok_or(FormatError::OffsetOverflow {
-                offset: n,
+                offset: n.get(),
                 length: stride as u64,
             })?;
         if raw.len() < needed {
@@ -8469,7 +8476,7 @@ the same commit to replace it",
             return Ok(data_read::read_as_strings(raw, datatype)?);
         }
         let reference_size = VlElement::serialized_size(self.file.widths.offsets);
-        let elements = (raw.len() / reference_size) as u64;
+        let elements = ElementCount::new((raw.len() / reference_size) as u64);
         let mut strings = Vec::new();
         self.file.with_source(|source| -> Result<(), Error> {
             Ok(vl_data::visit_vl_strings_from_source(

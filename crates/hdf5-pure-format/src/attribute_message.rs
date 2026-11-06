@@ -8,6 +8,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::ElementSize;
+
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::dataspace::Dataspace;
@@ -865,13 +867,16 @@ fn compute_raw_data(
 ) -> Result<Vec<u8>, FormatError> {
     let num_elements = dataspace.num_elements();
     let elem_size = u64::from(datatype::stored_type_size(datatype, offsets)?);
-    let expected_size = num_elements
-        .checked_mul(elem_size)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: num_elements,
-            length: elem_size,
-        })?
-        .to_usize()?;
+    let expected_size = match ElementSize::new(elem_size) {
+        Some(size) => size
+            .byte_length(num_elements)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: num_elements.get(),
+                length: elem_size,
+            })?
+            .to_usize()?,
+        None => 0,
+    };
     bytes::ensure_len(data, pos, expected_size)?;
     Ok(if expected_size > 0 {
         data.get(pos..pos + expected_size)

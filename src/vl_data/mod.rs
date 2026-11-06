@@ -9,6 +9,9 @@ use alloc::{format, string::String, vec::Vec};
 
 use core::num::NonZeroU16;
 
+use hdf5_pure_core::__private::ElementCount;
+use hdf5_pure_core::__private::ElementSize;
+
 #[cfg(test)]
 use crate::FixedPointType;
 use crate::VariableLengthType;
@@ -185,15 +188,16 @@ impl VlElement {
 /// or [`FormatError::UnexpectedEof`] if `raw_data` is shorter than the required extent.
 pub fn parse_vl_references(
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     offset_width: OffsetWidth,
 ) -> Result<Vec<VlElement>, FormatError> {
-    let elem_size = VlElement::serialized_size(offset_width) as u64;
-    let total = num_elements
-        .checked_mul(elem_size)
+    let elem_size = ElementSize::new(VlElement::serialized_size(offset_width) as u64)
+        .ok_or_else(|| FormatError::Internal("VL reference element size is zero".into()))?;
+    let total = elem_size
+        .byte_length(num_elements)
         .ok_or(FormatError::OffsetOverflow {
-            offset: num_elements,
-            length: elem_size,
+            offset: num_elements.get(),
+            length: elem_size.get(),
         })?
         .to_usize()?;
     if raw_data.len() < total {
@@ -204,7 +208,7 @@ pub fn parse_vl_references(
     }
 
     let mut elements = Vec::with_capacity(num_elements.to_usize()?);
-    for raw in raw_data[..total].chunks_exact(elem_size.to_usize()?) {
+    for raw in raw_data[..total].chunks_exact(elem_size.get().to_usize()?) {
         elements.push(VlElement::parse(raw, offset_width)?);
     }
     Ok(elements)
@@ -407,15 +411,15 @@ fn collect_vlen_slots(
 }
 
 fn check_element_limit(
-    num_elements: u64,
+    num_elements: ElementCount,
     options: VlenStringReadOptions,
 ) -> Result<(), FormatError> {
     if let Some(limit) = options.max_elements
-        && num_elements > limit as u64
+        && num_elements > ElementCount::new(limit as u64)
     {
         return Err(FormatError::VariableLengthElementLimitExceeded {
             limit,
-            actual: num_elements,
+            actual: num_elements.get(),
         });
     }
     Ok(())
@@ -448,7 +452,7 @@ fn payload_size(refs: &[VlElement], options: VlenStringReadOptions) -> Result<u6
 /// [`FormatError::OffsetOverflow`] if the summed payload length exceeds [`u64::MAX`].
 pub fn vlen_string_payload_size(
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     offset_width: OffsetWidth,
 ) -> Result<u64, FormatError> {
     check_element_limit(num_elements, VlenStringReadOptions::default())?;
@@ -469,7 +473,7 @@ pub fn vlen_string_payload_size(
 pub fn visit_vl_strings_from_source<S, F>(
     source: &S,
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     widths: FormatWidths,
     addresses: AddressContext,
     options: VlenStringReadOptions,
@@ -496,7 +500,7 @@ where
 pub fn read_vl_strings_from_source<S: Source + ?Sized>(
     source: &S,
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     widths: FormatWidths,
     addresses: AddressContext,
     options: VlenStringReadOptions,
@@ -539,7 +543,7 @@ pub(crate) enum VlByteObject {
 pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
     source: &S,
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     widths: FormatWidths,
     addresses: AddressContext,
     element_size: usize,
@@ -563,7 +567,7 @@ pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
 /// add up past the byte limit, and the errors [`parse_vl_references`] returns.
 fn checked_references(
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     offset_width: OffsetWidth,
     options: VlenStringReadOptions,
 ) -> Result<Vec<VlElement>, FormatError> {
@@ -618,7 +622,7 @@ fn visit_vl_objects(
 pub fn read_vl_strings(
     file_data: &[u8],
     raw_data: &[u8],
-    num_elements: u64,
+    num_elements: ElementCount,
     widths: FormatWidths,
 ) -> Result<Vec<String>, FormatError> {
     read_vl_strings_from_source(

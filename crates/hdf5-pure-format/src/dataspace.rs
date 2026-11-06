@@ -3,6 +3,8 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use hdf5_pure_core::__private::ElementCount;
+
 use crate::bytes;
 use crate::error::FormatError;
 use crate::width::LengthWidth;
@@ -206,14 +208,12 @@ impl Dataspace {
         Ok(buf)
     }
 
-    /// Total number of elements. Scalar = 1, Null = 0.
+    /// Returns the element count, saturating dimension products at [`u64::MAX`].
     ///
-    /// The count saturates at `u64::MAX` when a malformed
-    /// dataspace declares dimensions whose product overflows `u64`. Every caller
-    /// treats the saturated value as an impossibly large element count, so the
-    /// downstream size and limit checks reject it as an error instead.
-    pub fn num_elements(&self) -> u64 {
-        match self.space_type {
+    /// Returns zero for a null dataspace or a simple dataspace with no dimensions or a zero
+    /// dimension. Returns one for a scalar dataspace.
+    pub fn num_elements(&self) -> ElementCount {
+        ElementCount::new(match self.space_type {
             DataspaceType::Null => 0,
             DataspaceType::Scalar => 1,
             DataspaceType::Simple => {
@@ -225,7 +225,7 @@ impl Dataspace {
                         .fold(1u64, |acc, &dim| acc.saturating_mul(dim))
                 }
             }
-        }
+        })
     }
 
     /// Returns the maximum dimensions, when some maximum exceeds its current dimension.
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(ds.rank, 0);
         assert!(ds.dimensions.is_empty());
         assert!(ds.max_dimensions.is_none());
-        assert_eq!(ds.num_elements(), 1);
+        assert_eq!(ds.num_elements(), ElementCount::new(1));
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
         let data = build_v2_dataspace(0, 0, 2, &[], None);
         let ds = Dataspace::parse(&data, 8).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Null);
-        assert_eq!(ds.num_elements(), 0);
+        assert_eq!(ds.num_elements(), ElementCount::new(0));
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(ds.rank, 1);
         assert_eq!(ds.dimensions, vec![5]);
         assert!(ds.max_dimensions.is_none());
-        assert_eq!(ds.num_elements(), 5);
+        assert_eq!(ds.num_elements(), ElementCount::new(5));
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
         let ds = Dataspace::parse(&data, 8).unwrap();
         assert_eq!(ds.rank, 2);
         assert_eq!(ds.dimensions, vec![3, 4]);
-        assert_eq!(ds.num_elements(), 12);
+        assert_eq!(ds.num_elements(), ElementCount::new(12));
     }
 
     #[test]
@@ -466,7 +466,31 @@ mod tests {
                 MaxExtent::Fixed(100)
             ]
         );
-        assert_eq!(ds.num_elements(), 24);
+        assert_eq!(ds.num_elements(), ElementCount::new(24));
+    }
+
+    #[rstest::rstest]
+    #[case::empty_simple(&[], 0)]
+    #[case::zero(&[0], 0)]
+    #[case::finite(&[3, 5], 15)]
+    #[case::exact_limit(&[u64::MAX, 1], u64::MAX)]
+    #[case::overflow(&[u64::MAX, 2], u64::MAX)]
+    #[case::zero_after_overflow(&[u64::MAX, 2, 0], 0)]
+    #[case::zero_before_overflow(&[0, u64::MAX, 2], 0)]
+    fn cardinality_preserves_empty_and_saturated_products(
+        #[case] dimensions: &[u64],
+        #[case] expected: u64,
+    ) {
+        let data = dataspace::v2(
+            u8::try_from(dimensions.len()).unwrap(),
+            dataspace::Flags::NONE,
+            dataspace::Kind::SIMPLE,
+            dimensions,
+            None,
+        );
+        let dataspace = Dataspace::parse(&data, 8).unwrap();
+        assert_eq!(dataspace.space_type, DataspaceType::Simple);
+        assert_eq!(dataspace.num_elements(), ElementCount::new(expected));
     }
 
     #[test]
@@ -476,7 +500,7 @@ mod tests {
         // callers can reject the impossibly large count as an error.
         let data = build_v1_dataspace(3, 0, &[1 << 40, 1 << 40, 1 << 40], None);
         let ds = Dataspace::parse(&data, 8).unwrap();
-        assert_eq!(ds.num_elements(), u64::MAX);
+        assert_eq!(ds.num_elements(), ElementCount::new(u64::MAX));
     }
 
     #[test]
@@ -492,7 +516,7 @@ mod tests {
         let data = build_v2_dataspace(0, 0, 0, &[], None);
         let ds = Dataspace::parse(&data, 8).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Scalar);
-        assert_eq!(ds.num_elements(), 1);
+        assert_eq!(ds.num_elements(), ElementCount::new(1));
     }
 
     #[test]

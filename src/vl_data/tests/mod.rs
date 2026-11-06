@@ -72,7 +72,7 @@ fn build_vl_refs(
 #[test]
 fn parse_vl_references_two_elements() {
     let raw = build_vl_refs(&["hello", "world"], 0x1000, 1, WIDTHS);
-    let refs = parse_vl_references(&raw, 2, OffsetWidth::Eight).unwrap();
+    let refs = parse_vl_references(&raw, ElementCount::new(2), OffsetWidth::Eight).unwrap();
     assert_eq!(refs.len(), 2);
     assert_eq!(refs[0].length, 5);
     assert_eq!(refs[0].collection_address, StoredAddress::new(0x1000));
@@ -88,7 +88,7 @@ fn read_vl_strings_from_heap() {
     build_gcol_at(&mut file_data, gcol_offset, &[(1, b"Alice"), (2, b"Bob")]);
 
     let raw = build_vl_refs(&["Alice", "Bob"], gcol_offset as u64, 1, WIDTHS);
-    let strings = read_vl_strings(&file_data, &raw, 2, FORMAT_WIDTHS).unwrap();
+    let strings = read_vl_strings(&file_data, &raw, ElementCount::new(2), FORMAT_WIDTHS).unwrap();
     assert_eq!(strings, vec!["Alice", "Bob"]);
 }
 
@@ -104,7 +104,7 @@ fn read_vl_strings_from_seekable_source() {
     let strings = read_vl_strings_from_source(
         &source,
         &raw,
-        2,
+        ElementCount::new(2),
         FORMAT_WIDTHS,
         AddressContext::from_effective_base(BaseAddress::ZERO),
         VlenStringReadOptions::default(),
@@ -122,7 +122,7 @@ fn null_vl_element_empty_string() {
     raw.extend_from_slice(&0u32.to_le_bytes()); // index
 
     let file_data = vec![0u8; 16];
-    let strings = read_vl_strings(&file_data, &raw, 1, FORMAT_WIDTHS).unwrap();
+    let strings = read_vl_strings(&file_data, &raw, ElementCount::new(1), FORMAT_WIDTHS).unwrap();
     assert_eq!(strings, vec![""]);
 }
 
@@ -134,14 +134,14 @@ fn null_vl_element_zero_address() {
     raw.extend_from_slice(&0u32.to_le_bytes());
 
     let file_data = vec![0u8; 16];
-    let strings = read_vl_strings(&file_data, &raw, 1, FORMAT_WIDTHS).unwrap();
+    let strings = read_vl_strings(&file_data, &raw, ElementCount::new(1), FORMAT_WIDTHS).unwrap();
     assert_eq!(strings, vec![""]);
 }
 
 #[test]
 fn parse_vl_references_truncated_error() {
     let raw = vec![0u8; 10]; // too short for 1 element with offset_size=8
-    let err = parse_vl_references(&raw, 1, OffsetWidth::Eight).unwrap_err();
+    let err = parse_vl_references(&raw, ElementCount::new(1), OffsetWidth::Eight).unwrap_err();
     assert_eq!(
         err,
         FormatError::UnexpectedEof {
@@ -337,7 +337,7 @@ fn a_short_source_read_is_a_source_error() {
         read_vl_byte_objects_from_source(
             &ValidatedSource::new(ShortMetadata(file)),
             &refs,
-            1,
+            ElementCount::new(1),
             FORMAT_WIDTHS,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             1,
@@ -411,7 +411,7 @@ fn a_collection_above_four_gib_is_read_at_its_u64_position() {
         read_vl_byte_objects_from_source(
             &source,
             &refs,
-            2,
+            ElementCount::new(2),
             FORMAT_WIDTHS,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             1,
@@ -476,7 +476,7 @@ fn assert_every_reader_returns(
     base: BaseAddress,
     expected: Result<Vec<VlByteObject>, FormatError>,
 ) {
-    let count = (refs.len() / VL_REF_BYTES) as u64;
+    let count = ElementCount::new((refs.len() / VL_REF_BYTES) as u64);
     let widths = format_widths(lengths);
     let addresses = AddressContext::from_effective_base(base);
     let options = VlenStringReadOptions::default();
