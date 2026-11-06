@@ -17,11 +17,34 @@ use crate::error::FormatError;
 use crate::global_heap;
 use crate::global_heap::GlobalHeapId;
 use crate::message_type::MessageType;
+use crate::object_graph::ObjectId;
 
 pub(in crate::edit) mod associations;
 pub(in crate::edit) mod qualification;
 
 impl AnalysisPhase<'_> {
+    /// Collects physical collection addresses and member identities reachable from `roots`.
+    ///
+    /// Reuses this phase's object and reference summaries. Retains decoded identities when
+    /// traversal or interpretation is incomplete or fails. The caller establishes source
+    /// freshness and applicability of the supplied roots separately.
+    pub(in crate::edit) fn heap_references_reachable_from(
+        &mut self,
+        roots: impl IntoIterator<Item = ObjectId>,
+    ) -> ReachableHeapReferences {
+        let mut collections = BTreeSet::new();
+        let mut objects = BTreeSet::new();
+        let outcome = self.scan_collections(roots, |_, references| {
+            collections.extend(references.collections.iter().copied());
+            objects.extend(references.objects.iter().copied());
+        });
+        ReachableHeapReferences {
+            collections,
+            objects,
+            outcome,
+        }
+    }
+
     /// Returns cached references from the object associated with `source`.
     ///
     /// Collects descriptor identities on the first query without discovering group children.
@@ -96,6 +119,41 @@ impl AnalysisPhase<'_> {
             ));
         }
         Ok(())
+    }
+}
+
+/// Decoded global heap references and the outcome of traversal from a supplied root set.
+///
+/// The caller checks [`Self::is_complete`] before using absent identities. Collection framing,
+/// allocation ownership, and retirement permission require separate evidence.
+pub(in crate::edit) struct ReachableHeapReferences {
+    collections: BTreeSet<u64>,
+    objects: BTreeSet<GlobalHeapId>,
+    outcome: Result<bool, Error>,
+}
+
+impl ReachableHeapReferences {
+    /// Borrows the physical addresses from decoded collection references.
+    pub(in crate::edit) fn collections(&self) -> &BTreeSet<u64> {
+        &self.collections
+    }
+
+    /// Borrows checked collection addresses paired with nonzero member indices.
+    pub(in crate::edit) fn objects(&self) -> &BTreeSet<GlobalHeapId> {
+        &self.objects
+    }
+
+    /// Returns `true` if bounded traversal and reference interpretation completed without an error.
+    pub(in crate::edit) fn is_complete(&self) -> bool {
+        matches!(self.outcome, Ok(true))
+    }
+
+    /// Borrows the parsing or source-read failure, if any.
+    ///
+    /// Unsupported content and traversal limits can make the result incomplete without a
+    /// recorded error.
+    pub(in crate::edit) fn error(&self) -> Option<&Error> {
+        self.outcome.as_ref().err()
     }
 }
 
