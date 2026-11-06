@@ -1,5 +1,5 @@
 extends: existence
-message: "For '%s', name the resource and its use: allocated bytes, cache hits, writes, or the condition that causes buffered data to be written."
+message: "For '%s', name the resource and the work performed or avoided. State the size, condition, or measured cost that supports the claim."
 level: error
 scope: text
 ignorecase: true
@@ -8,3 +8,9 @@ tokens:
   - '\bwhat\s+it\s+bought\b'
   - '\bsame\s+bargain\b'
   - '\bcosts?\s+about\s+what\s+its\s+result\s+costs?\b'
+  - '\boverhead\s+is\s+negligible\b'
+  - '\bunremarkable\s+allocation\b'
+  - '\bcosts?\s+nothing\s+to\s+(?:generate|produce|keep)\b'
+  - '\b(?:buy|buys|bought)\s+(?:the\s+same\s+)?nothing\b'
+  - '\bgains?\s+nothing\b'
+  - '\bnothing\s+to\s+gain\b'
