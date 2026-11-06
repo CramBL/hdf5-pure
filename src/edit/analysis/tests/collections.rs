@@ -2,6 +2,7 @@ use core::cell::Cell;
 use core::num::NonZeroU16;
 use std::collections::BTreeSet;
 use std::fs;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::__private::FileRange;
@@ -195,6 +196,7 @@ fn empty_candidates_skip_source_and_liveness_work() {
             .is_empty()
     );
     assert!(phase.deleted_collections(&[]).collections.is_empty());
+    assert!(phase.identity.is_none());
     assert!(phase.liveness.is_none());
     assert_eq!(COLLECTION_WORK.with(Cell::get), (0, 0));
 }
@@ -426,6 +428,10 @@ fn incomplete_deletions_retain_decoded_member_identities(#[case] malformed: bool
         .extend(phase.deleted_collections(&[super::object(object)]))
         .unwrap();
     let observations = candidates.observations.as_ref().unwrap();
+    assert!(Arc::ptr_eq(
+        observations.identity.as_ref().unwrap(),
+        phase.identity.as_ref().unwrap(),
+    ));
     assert_eq!(observations.predecessors.len(), 1);
     assert_eq!(
         observations.incomplete_deletions,

@@ -92,7 +92,7 @@ pub(in crate::edit) mod physical;
 /// facts are retained separately. Reference and local ownership completeness are independent.
 pub(super) struct AnalysisPhase<'a> {
     engine: &'a WriteEngine,
-    /// Shared phase identity for reconstruction origins and any discovered topology.
+    /// Shared phase identity for reconstruction origins, predecessor observations, and topology.
     identity: Option<Arc<deletions::TopologyIdentity>>,
     topology: Option<Option<CompleteTopology<'a>>>,
     budget: TraversalBudget,
@@ -276,9 +276,10 @@ impl<'a> AnalysisPhase<'a> {
 
     /// Returns collection candidates referenced by deleted objects and their descendants.
     ///
-    /// Retains decoded member identities and interpretation outcomes by original object. If
-    /// discovery fails or is incomplete, records the supplied deletion roots and excludes all
-    /// allocations. Otherwise, includes each collection whose complete allocation can be parsed.
+    /// Associates retained observations with this phase's shared identity. Retains decoded member
+    /// identities and interpretation outcomes by original object. If discovery fails or is
+    /// incomplete, records the supplied deletion roots and excludes all allocations. Otherwise,
+    /// includes each collection whose complete allocation can be parsed.
     pub(super) fn deleted_collections(&mut self, deleted: &[ObjectId]) -> CollectionCandidates {
         if deleted.is_empty() {
             return CollectionCandidates::default();
@@ -313,9 +314,7 @@ impl<'a> AnalysisPhase<'a> {
                 }
             }
         }
-        let Ok(observations) =
-            candidates.require_session(self.engine.context.allocations.session())
-        else {
+        let Ok(observations) = candidates.require_phase(self) else {
             return CollectionCandidates::default();
         };
         observations.predecessors = predecessors;
@@ -329,9 +328,10 @@ impl<'a> AnalysisPhase<'a> {
 
     /// Returns collection candidates referenced by replaced or removed attributes of `object`.
     ///
-    /// Retains decoded member identities and interpretation outcomes by `object` and original
-    /// attribute name. Includes allocations only for completely interpreted attributes and
-    /// collections whose complete allocations can be parsed in this phase.
+    /// Associates retained observations with this phase's shared identity. Retains decoded member
+    /// identities and interpretation outcomes by `object` and original attribute name. Includes
+    /// allocations only for completely interpreted attributes and collections whose complete
+    /// allocations can be parsed in this phase.
     ///
     /// # Errors
     ///
@@ -362,19 +362,16 @@ impl<'a> AnalysisPhase<'a> {
                     }
                 }
             }
-            candidates.observe(
-                self.engine.context.allocations.session(),
-                origin,
-                references,
-            )?;
+            candidates.observe(self, origin, references)?;
         }
         Ok(candidates)
     }
 
     /// Returns collection candidates referenced by the original values of staged overwrites.
     ///
-    /// Examines writes whose replacement datatype holds file addresses. Caches original
-    /// dataset-value identities and interpretation outcomes, separately from attributes and fill
+    /// Associates retained observations with this phase's shared identity. Examines writes whose
+    /// replacement datatype holds file addresses. Caches original dataset-value identities and
+    /// interpretation outcomes, separately from attributes and fill
     /// values. Reuses these facts for object-wide reference queries in either query order.
     /// Includes allocations only for completely interpreted values and collections whose complete
     /// allocations can be parsed. The caller queries the unchanged source before overwrite writes.
@@ -445,11 +442,7 @@ impl<'a> AnalysisPhase<'a> {
                     }
                 }
             }
-            candidates.observe(
-                self.engine.context.allocations.session(),
-                origin,
-                references,
-            )?;
+            candidates.observe(self, origin, references)?;
         }
         Ok(candidates)
     }
@@ -1034,7 +1027,11 @@ pub(in crate::edit) struct ObjectReferences {
     error: Option<HeapReferenceError>,
 }
 
-/// Global heap allocation candidates and predecessor reference observations from one editing session.
+/// Global heap allocation candidates and predecessor observations from one editing session.
+///
+/// The editor associates predecessor observations with their original [`AnalysisPhase`] and
+/// checks that association when merging candidates. For allocation-only insertions, the editor
+/// records the session without a phase identity or predecessor observations.
 ///
 /// The editor retains complete allocation ranges and their original classes separately from
 /// descriptor identities, interpretation outcomes, and incomplete deletion roots. The caller
@@ -1042,7 +1039,7 @@ pub(in crate::edit) struct ObjectReferences {
 /// separately. An absent observation is not evidence of reference absence.
 #[derive(Default)]
 pub(super) struct CollectionCandidates {
-    /// Lazily allocated session identity and reference observations.
+    /// Lazily allocated session, optional source-phase identity, and reference observations.
     observations: Option<Box<CandidateObservations>>,
     /// Complete allocation candidates, keyed by physical collection address.
     collections: BTreeMap<PhysicalAddress, CollectionCandidate>,
@@ -1055,7 +1052,9 @@ impl CollectionCandidates {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::insert`]. Entries merged before an error remain in `self`.
+    /// Returns [`FormatError::Internal`] if the sessions or recorded source phases differ, before
+    /// merging allocations or observations. Also returns the errors of [`Self::insert`]. Entries
+    /// merged before an allocation error remain in `self`.
     pub(super) fn extend(&mut self, other: Self) -> Result<(), FormatError> {
         if self.observations.is_none() {
             debug_assert!(self.collections.is_empty());
@@ -1072,10 +1071,11 @@ impl CollectionCandidates {
         };
         let CandidateObservations {
             session,
+            identity,
             predecessors,
             incomplete_deletions,
         } = *observations;
-        self.require_session(session.clone())?;
+        self.require_identity(session.clone(), identity.as_ref())?;
         for CollectionCandidate {
             range,
             class,
@@ -1091,10 +1091,11 @@ impl CollectionCandidates {
                 origins,
             )?;
         }
+        let observations = self.require_session(session)?;
         for (origin, references) in predecessors {
-            self.observe(session.clone(), origin, references)?;
+            observations.observe(origin, references);
         }
-        self.require_session(session)?
+        observations
             .incomplete_deletions
             .extend(incomplete_deletions);
         Ok(())
@@ -1146,22 +1147,121 @@ impl CollectionCandidates {
 
     /// Merges decoded identities and interpretation outcomes for one original content scope.
     ///
-    /// Skips complete, reference-free summaries. For repeated observations, retains all decoded
-    /// identities and the first error. Records completeness only if every interpretation is complete.
+    /// Skips complete, reference-free summaries. Associates other observations with `phase`.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if a retained observation belongs to another session.
+    /// Returns [`FormatError::Internal`] if the recorded session or source phase differs from
+    /// `phase`.
     fn observe(
         &mut self,
-        session: AllocationSession,
+        phase: &mut AnalysisPhase<'_>,
         origin: CollectionProvenance,
         references: ObjectReferences,
     ) -> Result<(), FormatError> {
         if references.complete && references.objects.is_empty() {
             return Ok(());
         }
-        match self.require_session(session)?.predecessors.entry(origin) {
+        self.require_phase(phase)?.observe(origin, references);
+        Ok(())
+    }
+
+    /// Allocates observation storage on demand and shares `phase`'s identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the recorded session or source phase differs from
+    /// `phase`.
+    fn require_phase(
+        &mut self,
+        phase: &mut AnalysisPhase<'_>,
+    ) -> Result<&mut CandidateObservations, FormatError> {
+        self.require_identity(
+            phase.engine.context.allocations.session(),
+            Some(
+                phase
+                    .identity
+                    .get_or_insert_with(|| Arc::new(deletions::TopologyIdentity)),
+            ),
+        )
+    }
+
+    /// Allocates observation storage on its first use in `session`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the recorded session differs from `session`.
+    fn require_session(
+        &mut self,
+        session: AllocationSession,
+    ) -> Result<&mut CandidateObservations, FormatError> {
+        self.require_identity(session, None)
+    }
+
+    /// Allocates observation storage on demand and retains a supplied phase identity.
+    ///
+    /// Compares supplied and recorded phase identities by shared allocation. Preserves a recorded
+    /// identity when `identity` is [`None`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the recorded session differs from `session`, or both
+    /// phase identities are present and differ.
+    fn require_identity(
+        &mut self,
+        session: AllocationSession,
+        identity: Option<&Arc<deletions::TopologyIdentity>>,
+    ) -> Result<&mut CandidateObservations, FormatError> {
+        if let Some(prior) = &self.observations {
+            if !prior.session.same(&session) {
+                return Err(FormatError::Internal(
+                    "collection candidates belong to different sessions".into(),
+                ));
+            }
+            if let (Some(prior), Some(identity)) = (&prior.identity, identity) {
+                if !Arc::ptr_eq(prior, identity) {
+                    return Err(FormatError::Internal(
+                        "collection candidates belong to different source phases".into(),
+                    ));
+                }
+            }
+        }
+        let observations = self.observations.get_or_insert_with(|| {
+            Box::new(CandidateObservations {
+                session,
+                identity: None,
+                predecessors: BTreeMap::new(),
+                incomplete_deletions: BTreeSet::new(),
+            })
+        });
+        if observations.identity.is_none() {
+            observations.identity = identity.cloned();
+        }
+        Ok(observations)
+    }
+}
+
+/// Descriptor observations and incomplete deletion scopes, bound to their original source phase.
+///
+/// For allocation-only candidates, the editor records a session without a phase identity or
+/// observations.
+struct CandidateObservations {
+    session: AllocationSession,
+    /// The original phase's shared identity, absent for allocation-only candidates.
+    identity: Option<Arc<deletions::TopologyIdentity>>,
+    /// Decoded identities and interpretation outcomes, keyed by original object and content scope.
+    predecessors: BTreeMap<CollectionProvenance, ObjectReferences>,
+    /// Supplied deletion roots whose descendant traversal failed or was incomplete.
+    incomplete_deletions: BTreeSet<ObjectId>,
+}
+
+impl CandidateObservations {
+    /// Merges decoded identities and interpretation outcomes for one original content scope.
+    ///
+    /// Retains all decoded identities and the first error. Records completeness only if every
+    /// interpretation is complete.
+    fn observe(&mut self, origin: CollectionProvenance, references: ObjectReferences) {
+        match self.predecessors.entry(origin) {
             Entry::Vacant(entry) => {
                 entry.insert(references);
             }
@@ -1175,42 +1275,7 @@ impl CollectionCandidates {
                 }
             }
         }
-        Ok(())
     }
-
-    /// Allocates observation storage on its first use in `session`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if the recorded session differs from `session`.
-    fn require_session(
-        &mut self,
-        session: AllocationSession,
-    ) -> Result<&mut CandidateObservations, FormatError> {
-        if let Some(prior) = &self.observations {
-            if !prior.session.same(&session) {
-                return Err(FormatError::Internal(
-                    "collection candidates belong to different sessions".into(),
-                ));
-            }
-        }
-        Ok(self.observations.get_or_insert_with(|| {
-            Box::new(CandidateObservations {
-                session,
-                predecessors: BTreeMap::new(),
-                incomplete_deletions: BTreeSet::new(),
-            })
-        }))
-    }
-}
-
-/// Descriptor observations and incomplete deletion scopes, bound to one editing session.
-struct CandidateObservations {
-    session: AllocationSession,
-    /// Decoded identities and interpretation outcomes, keyed by original object and content scope.
-    predecessors: BTreeMap<CollectionProvenance, ObjectReferences>,
-    /// Supplied deletion roots whose descendant traversal failed or was incomplete.
-    incomplete_deletions: BTreeSet<ObjectId>,
 }
 
 /// The complete physical range of a parsed collection, bound to its editing session.

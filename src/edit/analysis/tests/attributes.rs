@@ -1,5 +1,6 @@
 use core::cell::Cell;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
@@ -88,6 +89,16 @@ fn attribute_and_deletion_origins_share_one_allocation_and_liveness_result() {
             edited.predecessors,
         )
         .unwrap();
+    assert!(Arc::ptr_eq(
+        candidates
+            .observations
+            .as_ref()
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap(),
+        phase.identity.as_ref().unwrap(),
+    ));
     candidates.extend(CollectionCandidates::default()).unwrap();
     candidates
         .extend(phase.deleted_collections(&[super::object(deleted)]))
@@ -265,6 +276,10 @@ fn unknown_attribute_evidence_does_not_reject_preparation(#[case] evidence: Unkn
         .unwrap();
     assert!(candidates.collections.is_empty());
     let observations = candidates.observations.as_ref().unwrap();
+    assert!(Arc::ptr_eq(
+        observations.identity.as_ref().unwrap(),
+        phase.identity.as_ref().unwrap()
+    ));
     assert_eq!(observations.predecessors.len(), 1);
     let facts = &observations.predecessors[&origin(owner, Some("one"))];
     assert_eq!(
