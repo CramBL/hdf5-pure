@@ -4,6 +4,7 @@ use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ReturnedExtents;
 
+use crate::edit::commit::{OriginalStorage, PublicationError, SpaceClaim};
 use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
 use crate::object_graph::ObjectId;
@@ -123,17 +124,42 @@ impl WriteEngine {
         &mut self,
         reclamation: RootReclamation,
     ) -> Result<(), Error> {
+        self.reclaim_root_metadata_excluding(reclamation, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Copies and publishes a committed root with optional original storage exclusions.
+    ///
+    /// The caller first publishes the replacement root, as in [`Self::reclaim_root_metadata`].
+    /// With `storage`, checks the complete copy target and returned source before reading or
+    /// writing the copy, and passes the same exclusions through subsequent persistent publications.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] if an exclusion check fails. Returns
+    /// [`PublicationError::Write`] for read, write, address-resolution, metadata, publication,
+    /// or truncation errors.
+    pub(in crate::edit) fn reclaim_root_metadata_excluding(
+        &mut self,
+        reclamation: RootReclamation,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
         let RootReclamation { target, source } = reclamation;
+        if let Some(storage) = storage {
+            storage.exclude_extent(self, target, SpaceClaim::RootCopy)?;
+            storage.exclude_extent(self, source, SpaceClaim::Retirement(FreeClass::Dead))?;
+        }
         let source_addr = self.context.addresses().resolve(source.start())?.get();
         let target_addr = self.context.addresses().resolve(target.start())?;
         let bytes = self
             .image
             .read_exact_at(source_addr, source.len().to_usize()?)?;
         self.write_at(target_addr.get(), &bytes)?;
-        self.commit_persisting_releasing_reserve(
+        self.commit_persisting_releasing_reserve_excluding(
             target_addr,
             ReturnedExtents::from_sorted(vec![(source, FreeClass::Dead)])
                 .map_err(|error| FormatError::Internal(error.to_string()))?,
+            storage,
         )
     }
 }

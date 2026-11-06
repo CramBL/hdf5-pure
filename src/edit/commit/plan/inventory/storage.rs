@@ -17,7 +17,7 @@ use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::physical::claims::{ClaimOrigin, ClaimProblem};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::edit::commit::plan::PreparedTree;
-use crate::edit::commit::publish::AppliedTree;
+use crate::edit::commit::publish::{AppliedTree, PublicationError, PublishedTree};
 use crate::edit::dataset::MovingWrite;
 use crate::edit::retirement::PendingRootFrees;
 use crate::error::Error;
@@ -27,7 +27,7 @@ use crate::object_graph::ObjectId;
 ///
 /// Records owner storage outside eligible deletions and superseded reclamation, and full
 /// candidate-parent framing. Independent ranges remain available when qualification fails.
-pub(in crate::edit::commit) struct OriginalStorage {
+pub(in crate::edit) struct OriginalStorage {
     source: Option<ReconstructionSource>,
     allocations: Vec<StorageAllocation>,
     parents: Result<BTreeMap<PhysicalAddress, ParentStorage>, Error>,
@@ -360,7 +360,7 @@ impl PreparedEditInventory {
 ///
 /// Pending frees include deferred chunk retirement at the engine's current length. The editor
 /// checks allocator and retirement ranges against original storage and retains the outcome.
-/// Publication and mutation permission require separate evidence.
+/// The caller establishes mutation permission separately.
 pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     engine: &'a mut WriteEngine,
     original: OriginalEdits,
@@ -402,6 +402,68 @@ impl<'a> PendingEditInventory<'a> {
         }
     }
 
+    /// Publishes the pending tree and borrows its retained observations for completion.
+    ///
+    /// Checks placement reconciliation and current allocator claims before consuming the pending
+    /// batch. Calls `complete` after publication, reference updates, root reclamation, truncation,
+    /// and final storage checks succeed. The callback receives the original observations, applied
+    /// dispositions, and storage exclusions associated with these inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoragePublicationFailure::BeforePublication`] with these pending inputs if
+    /// placement reconciliation or exclusion checks fail. Returns
+    /// [`StoragePublicationFailure::Publication`] with the retained observations and error if
+    /// publication or completion fails. The caller handles rollback according to publication state.
+    pub(in crate::edit::commit) fn publish_with_completion<T>(
+        mut self,
+        complete: impl FnOnce(
+            PublishedTree<'_>,
+            &OriginalEdits,
+            &AppliedDispositions,
+            &OriginalStorage,
+        ) -> Result<T, Error>,
+    ) -> Result<T, Box<StoragePublicationFailure<'a>>> {
+        let reason = if self.dispositions.replacements().is_err() {
+            Some(StoragePublicationRejection::Placement)
+        } else {
+            if self.exclusion.is_ok() {
+                self.exclusion = self.storage.exclude_space(self.engine);
+            }
+            self.exclusion
+                .is_err()
+                .then_some(StoragePublicationRejection::Exclusion)
+        };
+        if let Some(reason) = reason {
+            return Err(Box::new(StoragePublicationFailure::BeforePublication {
+                pending: self,
+                reason,
+            }));
+        }
+        let Self {
+            engine,
+            original,
+            dispositions,
+            storage,
+            pending,
+            relocations,
+            exclusion: _,
+        } = self;
+        engine
+            .publish_pending_tree_excluding(pending, relocations, Some(&storage), |published| {
+                complete(published, &original, &dispositions, &storage)
+                    .map_err(PublicationError::from)
+            })
+            .map_err(|error| {
+                Box::new(StoragePublicationFailure::Publication {
+                    original,
+                    dispositions,
+                    storage,
+                    error,
+                })
+            })
+    }
+
     /// Returns the recorded allocator and pending-retirement exclusion outcome.
     ///
     /// # Errors
@@ -429,9 +491,34 @@ impl<'a> PendingEditInventory<'a> {
     }
 }
 
+/// The inputs or observations retained after a failed constrained tree publication.
+pub(in crate::edit::commit) enum StoragePublicationFailure<'a> {
+    /// Publication was rejected with the pending inventory and engine loan intact.
+    BeforePublication {
+        pending: PendingEditInventory<'a>,
+        reason: StoragePublicationRejection,
+    },
+    /// The publisher consumed the pending inventory before publication or completion failed.
+    Publication {
+        original: OriginalEdits,
+        dispositions: AppliedDispositions,
+        storage: OriginalStorage,
+        error: PublicationError,
+    },
+}
+
+/// A failed prerequisite for handing a pending inventory to the publisher.
+#[derive(Debug)]
+pub(in crate::edit::commit) enum StoragePublicationRejection {
+    /// Allocator or pending-retirement ranges overlap protected storage or cannot be resolved.
+    Exclusion,
+    /// Applied replacement placements could not be reconciled with the prepared dispositions.
+    Placement,
+}
+
 /// A protected physical range with its original owner or parent collection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) struct StorageAllocation {
+pub(in crate::edit) struct StorageAllocation {
     pub(in crate::edit::commit) range: FileRange,
     pub(in crate::edit::commit) origin: StorageOrigin,
 }
@@ -477,7 +564,7 @@ pub(in crate::edit::commit) enum StorageUnavailable {
 
 /// A protected allocation overlaps a space claim or extends past a proposed end.
 #[derive(Debug)]
-pub(in crate::edit::commit) enum StorageConflict {
+pub(in crate::edit) enum StorageConflict {
     /// The proposed end is below the greatest protected range end.
     End {
         proposed: PhysicalAddress,
@@ -495,7 +582,7 @@ pub(in crate::edit::commit) enum StorageConflict {
 
 /// The allocator or retirement role of a range checked against original storage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) enum SpaceClaim {
+pub(in crate::edit) enum SpaceClaim {
     /// Unused aggregate capacity.
     Aggregate,
     /// A complete metadata reservation or publication padding range.
@@ -510,6 +597,8 @@ pub(in crate::edit::commit) enum SpaceClaim {
     Retirement(FreeClass),
     /// A reusable free-space section.
     Reusable,
+    /// A complete reserved root-header allocation proposed as the copy target.
+    RootCopy,
 }
 
 /// The error and any prepared inputs retained after failed storage application.

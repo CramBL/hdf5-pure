@@ -9,7 +9,7 @@ use crate::error::{Error, FormatError};
 
 /// A storage exclusion conflict or an error from the publication operation.
 #[derive(Debug)]
-pub(in crate::edit::commit) enum PublicationError {
+pub(in crate::edit) enum PublicationError {
     /// An allocator, retirement, metadata-placement, or end conflict.
     Storage(StorageConflict),
     /// A planning, serialization, I/O, or publication error.
@@ -20,7 +20,7 @@ impl PublicationError {
     /// Converts an unexpected storage conflict into an internal format error.
     ///
     /// The caller uses this conversion only for publication without storage exclusions.
-    pub(super) fn without_storage(self) -> Error {
+    pub(in crate::edit) fn without_storage(self) -> Error {
         match self {
             Self::Storage(conflict) => FormatError::Internal(format!(
                 "an unconstrained publication reports a storage conflict: {conflict:?}"
@@ -58,7 +58,7 @@ impl OriginalStorage {
     ///
     /// Returns [`StorageConflict::Overlap`] if a checked range overlaps protected storage.
     /// Returns [`StorageConflict::Source`] if an address or range cannot be resolved.
-    pub(super) fn exclude_publication(
+    pub(in crate::edit) fn exclude_publication(
         &self,
         engine: &WriteEngine,
         returned: &ReturnedExtents,
@@ -85,7 +85,7 @@ impl OriginalStorage {
     ///
     /// Returns [`StorageConflict::Overlap`] with `claim` if the extent overlaps protected storage.
     /// Returns [`StorageConflict::Source`] if the address or range cannot be resolved.
-    pub(super) fn exclude_extent(
+    pub(in crate::edit) fn exclude_extent(
         &self,
         engine: &WriteEngine,
         extent: Extent,

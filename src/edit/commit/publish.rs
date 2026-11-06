@@ -20,7 +20,7 @@ use hdf5_pure_space::__private::{
 };
 
 pub(in crate::edit) use self::completion::PublishedTree;
-pub(in crate::edit::commit) use self::storage::PublicationError;
+pub(in crate::edit) use self::storage::PublicationError;
 use super::plan::inventory::storage::{OriginalStorage, SpaceClaim};
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
@@ -123,27 +123,73 @@ impl WriteEngine {
         relocations: BTreeMap<ObjectId, ObjectId>,
         complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.publish_pending_tree_excluding(pending, relocations, None, |published| {
+            complete(published).map_err(PublicationError::from)
+        })
+        .map_err(PublicationError::without_storage)
+    }
+
+    /// Publishes a pending tree with optional storage exclusions through completion.
+    ///
+    /// Preserves the retirement batch and publication order of
+    /// [`Self::publish_pending_tree_with_completion`]. With `storage`, checks publication inputs
+    /// and passes the same exclusions through aggregate release, tail recycling, and root
+    /// reclamation. Checks final allocator ranges, adopted EOA, and physical file length before
+    /// calling `complete`. The caller establishes source qualification separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] if an exclusion check fails. Returns
+    /// [`PublicationError::Write`] for address-conversion, publication, reference-update, or
+    /// root-reclamation errors. Returns the error from `complete` if completion fails.
+    pub(in crate::edit::commit) fn publish_pending_tree_excluding<T>(
+        &mut self,
+        pending: PendingRootFrees,
+        relocations: BTreeMap<ObjectId, ObjectId>,
+        storage: Option<&OriginalStorage>,
+        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, PublicationError>,
+    ) -> Result<T, PublicationError> {
+        let complete = |published: PublishedTree<'_>| {
+            if let Some(storage) = storage {
+                published.check_storage(storage)?;
+            }
+            complete(published)
+        };
         let PendingRootFrees {
             root: new_root,
             batch,
         } = pending;
         let mut to_free = batch.into_stored(self.context.addresses())?;
+        if let Some(storage) = storage {
+            storage.exclude_publication(self, &to_free, TailPlacement::Anywhere)?;
+        }
         if self.persist.is_some() {
             let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
-            self.commit_persisting_releasing_reserve(new_root, to_free)?;
+            self.commit_persisting_releasing_reserve_excluding(new_root, to_free, storage)?;
             if root_reclamation.is_some() {
                 self.proved_free_of_references = true;
             }
             self.repoint_stored_references(&relocations)?;
             if let Some(reclamation) = root_reclamation {
-                self.reclaim_root_metadata(reclamation)?;
+                match storage {
+                    Some(storage) => {
+                        self.reclaim_root_metadata_excluding(reclamation, Some(storage))?
+                    }
+                    None => self.reclaim_root_metadata(reclamation)?,
+                }
             }
             return complete(PublishedTree::new(self, new_root)?);
         }
 
         if self.fresh_page_boundary.is_some() {
+            if let Some(storage) = storage
+                && let Some(free_space::PageTransition::Pad { extent, .. }) =
+                    self.space.page_padding(self.end_of_allocation()?)?
+            {
+                storage.exclude_extent(self, extent, SpaceClaim::Metadata)?;
+            }
             self.pad_to_page()?;
-            self.publish_nonpersisting(new_root, None)?;
+            self.publish_nonpersisting_excluding(new_root, None, storage)?;
             return complete(PublishedTree::new(self, new_root)?);
         }
 
@@ -157,7 +203,7 @@ impl WriteEngine {
                 trunc_to = Some(end);
             }
         }
-        let publication = self.publish_nonpersisting(new_root, trunc_to);
+        let publication = self.publish_nonpersisting_excluding(new_root, trunc_to, storage);
         if publication.is_err() && self.publication != PublicationState::Published {
             self.restore_free(snapshot);
         }
@@ -180,20 +226,68 @@ impl WriteEngine {
     pub(in crate::edit) fn commit_persisting_releasing_reserve(
         &mut self,
         new_root: PhysicalAddress,
-        mut to_free: ReturnedExtents,
+        to_free: ReturnedExtents,
     ) -> Result<(), Error> {
+        self.commit_persisting_releasing_reserve_excluding(new_root, to_free, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Publishes a persistent commit with optional exclusions through aggregate and tail release.
+    ///
+    /// With `storage`, checks publication inputs before surrendering aggregate capacity and
+    /// passes the same exclusions to each preserved, recycled, ordinary, or shrink publication.
+    /// Uses the sequence of [`Self::commit_persisting_releasing_reserve`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] if an exclusion check fails. Returns
+    /// [`PublicationError::Write`] for aggregate planning, address-resolution, metadata,
+    /// publication, or truncation errors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
+    pub(in crate::edit) fn commit_persisting_releasing_reserve_excluding(
+        &mut self,
+        new_root: PhysicalAddress,
+        mut to_free: ReturnedExtents,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
+        if let Some(storage) = storage {
+            storage.exclude_publication(self, &to_free, TailPlacement::Anywhere)?;
+        }
         self.release_aggregates_for_tail(&mut to_free)?;
         if let Some(target) = self.recyclable_flat_tail() {
-            self.commit_persisting(
+            self.publish_persisting_excluding(
                 new_root,
                 ReturnedExtents::default(),
                 TailPlacement::Preserve,
+                PublicationPurpose::Commit,
+                storage,
             )?;
-            self.recycle_flat_tail(new_root, to_free, target)?;
+            match storage {
+                Some(storage) => {
+                    self.recycle_flat_tail_excluding(new_root, to_free, target, Some(storage))?
+                }
+                None => self.recycle_flat_tail(new_root, to_free, target)?,
+            }
         } else {
-            self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
+            self.publish_persisting_excluding(
+                new_root,
+                to_free,
+                TailPlacement::Anywhere,
+                PublicationPurpose::Commit,
+                storage,
+            )?;
         }
-        self.shrink_to_the_trailing_free_run(new_root)
+        match storage {
+            Some(storage) => {
+                self.shrink_to_the_trailing_free_run_excluding(new_root, Some(storage))
+            }
+            None => self
+                .shrink_to_the_trailing_free_run(new_root)
+                .map_err(PublicationError::from),
+        }
     }
 
     /// Relocates persistent manager blocks into earlier free space before truncating.
@@ -214,6 +308,25 @@ impl WriteEngine {
         &mut self,
         new_root: PhysicalAddress,
     ) -> Result<(), Error> {
+        self.shrink_to_the_trailing_free_run_excluding(new_root, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Relocates a trailing manager allocation with optional original storage exclusions.
+    ///
+    /// Uses the eligibility and retention threshold of [`Self::shrink_to_the_trailing_free_run`].
+    /// With `storage`, passes the exclusions to the [`TailPlacement::ReuseOnly`] publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] if an exclusion check fails. Returns
+    /// [`PublicationError::Write`] for address-resolution, metadata, publication, or truncation
+    /// errors.
+    pub(in crate::edit::commit) fn shrink_to_the_trailing_free_run_excluding(
+        &mut self,
+        new_root: PhysicalAddress,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
         let Some(persist) = self.persist.as_ref() else {
             return Ok(());
         };
@@ -243,11 +356,22 @@ impl WriteEngine {
         {
             return Ok(());
         }
-        self.commit_persisting(
-            new_root,
-            ReturnedExtents::default(),
-            TailPlacement::ReuseOnly,
-        )
+        match storage {
+            Some(storage) => self.publish_persisting_excluding(
+                new_root,
+                ReturnedExtents::default(),
+                TailPlacement::ReuseOnly,
+                PublicationPurpose::Commit,
+                Some(storage),
+            ),
+            None => self
+                .commit_persisting(
+                    new_root,
+                    ReturnedExtents::default(),
+                    TailPlacement::ReuseOnly,
+                )
+                .map_err(PublicationError::from),
+        }
     }
 
     /// Verifies pending PAGE publication and clears its recovery state on success.
@@ -508,7 +632,7 @@ impl WriteEngine {
     /// # Panics
     ///
     /// Panics if persistence is disabled.
-    pub(in crate::edit::commit) fn publish_persisting_excluding(
+    pub(in crate::edit) fn publish_persisting_excluding(
         &mut self,
         new_root: PhysicalAddress,
         to_free: ReturnedExtents,

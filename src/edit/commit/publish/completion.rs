@@ -3,6 +3,7 @@
 use hdf5_pure_core::PhysicalAddress;
 
 use crate::edit::WriteEngine;
+use crate::edit::commit::{OriginalStorage, StorageConflict};
 use crate::error::FormatError;
 
 /// A mutable loan of the engine after a successful tree publication.
@@ -68,5 +69,19 @@ impl<'engine> PublishedTree<'engine> {
     /// Returns the physical EOA adopted before the completion callback.
     pub(in crate::edit) fn end(&self) -> PhysicalAddress {
         self.end
+    }
+    /// Checks final allocator ranges and both file ends against protected storage.
+    ///
+    /// Checks the adopted EOA and physical file length separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageConflict::Overlap`] or [`StorageConflict::Source`] for allocator conflicts
+    /// or range-resolution errors. Returns [`StorageConflict::End`] if either end is below the
+    /// greatest protected range end.
+    pub(super) fn check_storage(&self, storage: &OriginalStorage) -> Result<(), StorageConflict> {
+        storage.exclude_space(self.engine)?;
+        storage.check_end(self.end)?;
+        storage.check_end(PhysicalAddress::new(self.engine.image.len()))
     }
 }

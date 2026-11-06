@@ -28,6 +28,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::{AttrValue, FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress};
 
 mod acceptance;
+mod publication;
 
 #[rstest]
 #[case::root_only(false)]
