@@ -384,7 +384,7 @@ pub(in crate::edit::commit) enum Withheld {
 }
 
 /// The reason a complete original-to-placed identity map is unavailable.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::edit::commit) enum TransitionWithheld {
     /// Recorded placements disagree with the prepared inputs or applied tree.
     Placement(PlacementError),

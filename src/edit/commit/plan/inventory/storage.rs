@@ -10,6 +10,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, FreeClass, RetainedKind};
 
 use super::dispositions::{AppliedDispositions, Disposition, ReconstructionDispositions};
+use super::prospective::ProspectiveCollections;
 use super::{AppliedEditInventory, OriginalEdits, PreparedEditInventory};
 use crate::edit::WriteEngine;
 use crate::edit::analysis::heap::qualification::{
@@ -362,6 +363,8 @@ impl PreparedEditInventory {
 ///
 /// Pending frees include deferred chunk retirement at the engine's current length. The editor
 /// checks allocator and retirement ranges against original storage and retains the outcome.
+/// With original candidates, the editor decodes heap references in a new phase after application
+/// and retains root-applicability failures independently of reference interpretation.
 /// The caller establishes mutation permission separately.
 pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     engine: &'a mut WriteEngine,
@@ -369,6 +372,7 @@ pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     dispositions: AppliedDispositions,
     storage: OriginalStorage,
     collections: OriginalCollections,
+    prospective: ProspectiveCollections,
     pending: PendingRootFrees,
     relocations: BTreeMap<ObjectId, ObjectId>,
     exclusion: Result<(), StorageConflict>,
@@ -395,12 +399,20 @@ impl<'a> PendingEditInventory<'a> {
             }
             Ok(())
         });
+        let prospective = ProspectiveCollections::collect(
+            engine,
+            &original,
+            &dispositions,
+            &collections,
+            pending.root,
+        );
         Self {
             engine,
             original,
             dispositions,
             storage,
             collections,
+            prospective,
             pending,
             relocations,
             exclusion,
@@ -413,7 +425,8 @@ impl<'a> PendingEditInventory<'a> {
     /// batch. Calls `complete` after publication, reference updates, root reclamation, truncation,
     /// and final storage checks succeed. The callback receives the original observations, applied
     /// dispositions, storage exclusions, and original collection qualification and framing
-    /// associated with these inputs.
+    /// associated with these inputs, together with prospective observations collected after
+    /// application.
     ///
     /// # Errors
     ///
@@ -429,6 +442,7 @@ impl<'a> PendingEditInventory<'a> {
             &AppliedDispositions,
             &OriginalStorage,
             &OriginalCollections,
+            &ProspectiveCollections,
         ) -> Result<T, Error>,
     ) -> Result<T, Box<StoragePublicationFailure<'a>>> {
         let reason = if self.dispositions.replacements().is_err() {
@@ -453,14 +467,22 @@ impl<'a> PendingEditInventory<'a> {
             dispositions,
             storage,
             collections,
+            prospective,
             pending,
             relocations,
             exclusion: _,
         } = self;
         engine
             .publish_pending_tree_excluding(pending, relocations, Some(&storage), |published| {
-                complete(published, &original, &dispositions, &storage, &collections)
-                    .map_err(PublicationError::from)
+                complete(
+                    published,
+                    &original,
+                    &dispositions,
+                    &storage,
+                    &collections,
+                    &prospective,
+                )
+                .map_err(PublicationError::from)
             })
             .map_err(|error| {
                 Box::new(StoragePublicationFailure::Publication {
@@ -468,9 +490,15 @@ impl<'a> PendingEditInventory<'a> {
                     dispositions,
                     storage,
                     collections,
+                    prospective,
                     error,
                 })
             })
+    }
+
+    /// Borrows heap references and root-applicability outcomes collected after application.
+    pub(in crate::edit::commit) fn prospective(&self) -> &ProspectiveCollections {
+        &self.prospective
     }
 
     /// Borrows original candidates, qualification, and framing retained until completion.
@@ -518,6 +546,7 @@ pub(in crate::edit::commit) enum StoragePublicationFailure<'a> {
         dispositions: AppliedDispositions,
         storage: OriginalStorage,
         collections: OriginalCollections,
+        prospective: ProspectiveCollections,
         error: PublicationError,
     },
 }
