@@ -72,6 +72,11 @@ impl RootRetirement {
         Self { root, chunks }
     }
 
+    /// Returns the replacement root associated with these predecessor allocations.
+    pub(super) fn root(&self) -> PhysicalAddress {
+        self.root
+    }
+
     /// Consumes predecessor ownership into the associated root's pending free spans.
     ///
     /// Combines the chunk allocations with `spans`, excluding empty or overlapping ranges and

@@ -3,6 +3,7 @@
 //! The editor derives observations from the owned application inputs and retains them with the
 //! placed tree only after every placement and value write succeeds.
 
+use self::dispositions::{AppliedDispositions, ReconstructionDispositions};
 use super::{CommitPlan, OverwritePayloads, PreparedCommit, PreparedTree};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
@@ -17,6 +18,8 @@ use crate::edit::staging::StagedEdits;
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 
+pub(in crate::edit::commit) mod dispositions;
+
 /// Owns tree edits and the original observations derived from their deletion and copy inputs.
 ///
 /// The editor collects the observations in the same source phase as the tree plan. The caller
@@ -25,6 +28,7 @@ pub(in crate::edit::commit) struct PreparedEditInventory {
     prepared: PreparedCommit,
     original: OriginalEdits,
     session: AllocationSession,
+    dispositions: ReconstructionDispositions,
 }
 
 impl PreparedEditInventory {
@@ -48,9 +52,13 @@ impl PreparedEditInventory {
                     overwrites,
                 };
                 match original {
-                    Some(original) => InventoryPreparation::Tree(Self {
+                    Some(OriginalPreparation {
+                        original,
+                        dispositions,
+                    }) => InventoryPreparation::Tree(Self {
                         prepared,
                         original,
+                        dispositions,
                         session: engine.context.allocations.session(),
                     }),
                     None => InventoryPreparation::InPlace(prepared),
@@ -63,7 +71,8 @@ impl PreparedEditInventory {
     /// Places the owned edits and pairs the result with their original observations.
     ///
     /// Consumes the application inputs on success or failure. The caller handles rollback
-    /// after a failure and publication after success.
+    /// after a failure and publication after success. Predecessor classifications and placement
+    /// reconciliation outcomes are retained independently of count and ownership qualification.
     ///
     /// # Errors
     ///
@@ -77,6 +86,7 @@ impl PreparedEditInventory {
             prepared,
             original,
             session,
+            mut dispositions,
         } = self;
         if !session.same(&engine.context.allocations.session()) {
             return Err(FormatError::Internal(
@@ -94,8 +104,19 @@ impl PreparedEditInventory {
                 FormatError::Internal("a prepared edit inventory has no tree".into()).into(),
             );
         };
-        let tree = engine.apply_tree(&mut overwrites, tree, staged)?;
-        Ok(AppliedEditInventory { tree, original })
+        let tree =
+            engine.apply_tree_recording(&mut overwrites, tree, staged, Some(&mut dispositions))?;
+        let dispositions = dispositions.finish(&tree);
+        Ok(AppliedEditInventory {
+            tree,
+            original,
+            dispositions,
+        })
+    }
+
+    /// Borrows every original predecessor's classification before placement.
+    pub(in crate::edit::commit) fn dispositions(&self) -> &ReconstructionDispositions {
+        &self.dispositions
     }
 
     /// Borrows the original observations collected from these prepared inputs.
@@ -125,9 +146,15 @@ pub(in crate::edit::commit) enum InventoryPreparation {
 pub(in crate::edit::commit) struct AppliedEditInventory {
     tree: AppliedTree,
     original: OriginalEdits,
+    dispositions: AppliedDispositions,
 }
 
 impl AppliedEditInventory {
+    /// Borrows original predecessor classifications and the placement reconciliation outcome.
+    pub(in crate::edit::commit) fn dispositions(&self) -> &AppliedDispositions {
+        &self.dispositions
+    }
+
     /// Borrows the placed root, relocations, and retirement inputs before publication.
     pub(in crate::edit::commit) fn tree(&self) -> &AppliedTree {
         &self.tree
@@ -138,9 +165,30 @@ impl AppliedEditInventory {
         &self.original
     }
 
-    /// Returns the placed tree, dropping its paired original observations.
+    /// Returns the placed tree, dropping its paired observations and dispositions.
     pub(in crate::edit::commit) fn into_tree(self) -> AppliedTree {
         self.tree
+    }
+}
+
+/// Count, ownership, and predecessor observations from the tree plan's source phase.
+pub(super) struct OriginalPreparation {
+    original: OriginalEdits,
+    dispositions: ReconstructionDispositions,
+}
+
+impl OriginalPreparation {
+    /// Collects count inputs and predecessor dispositions independently for the prepared tree.
+    pub(super) fn collect(
+        engine: &WriteEngine,
+        phase: &mut AnalysisPhase<'_>,
+        tree: &PreparedTree,
+        staged: &StagedEdits,
+    ) -> Self {
+        Self {
+            original: OriginalEdits::collect(engine, phase, tree, staged),
+            dispositions: ReconstructionDispositions::collect(engine, phase, tree),
+        }
     }
 }
 

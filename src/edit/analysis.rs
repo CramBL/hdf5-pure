@@ -757,7 +757,7 @@ impl<'a> AnalysisPhase<'a> {
 /// Equality requires the same shared phase identity and the same [`ObjectId`]. The identity is
 /// shared with any complete topology discovered in that phase. Source freshness, topology
 /// completeness, allocation ownership, and permission to write require separate evidence.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::edit) struct ReconstructionSource {
     identity: Arc<deletions::TopologyIdentity>,
     object: ObjectId,

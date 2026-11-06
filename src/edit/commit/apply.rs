@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::{FreeClass, PageType};
 
+use super::plan::inventory::dispositions::ReconstructionDispositions;
 use super::plan::{
     self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, InPlaceWrite, Node,
     OverwritePayloads, PreparedCommit, PreparedGroup, PreparedReference, PreparedTree,
@@ -87,13 +88,33 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] before placement if the staged cross-file copy count
-    /// or a destination differs from the prepared tree.
+    /// or a destination differs from the prepared tree. Returns [`FormatError::Internal`] if a
+    /// superseded group has no successful placement.
     /// Returns the reclamation, placement, serialization, or write error.
     pub(super) fn apply_tree(
         &mut self,
         overwrites: &mut OverwritePayloads,
         tree: PreparedTree,
         staged: StagedApply,
+    ) -> Result<AppliedTree, Error> {
+        self.apply_tree_recording(overwrites, tree, staged, None)
+    }
+
+    /// Places prepared objects and optionally records group and relocated-dataset placements.
+    ///
+    /// Records each event after successful placement. The caller reconciles the events against
+    /// the returned tree after all placements and value writes succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::apply_tree`], including [`FormatError::Internal`] if a
+    /// superseded group has no successful placement.
+    pub(super) fn apply_tree_recording(
+        &mut self,
+        overwrites: &mut OverwritePayloads,
+        tree: PreparedTree,
+        staged: StagedApply,
+        mut dispositions: Option<&mut ReconstructionDispositions>,
     ) -> Result<AppliedTree, Error> {
         let PreparedTree {
             mut groups,
@@ -144,7 +165,7 @@ impl WriteEngine {
             let PreparedGroup {
                 mut region,
                 dense_links,
-                replaces: _,
+                replaces,
                 deletes,
                 copies,
                 writes,
@@ -224,7 +245,7 @@ impl WriteEngine {
             );
 
             for RelocatedDataset {
-                link: _,
+                link,
                 source,
                 mut write,
             } in writes
@@ -242,6 +263,9 @@ impl WriteEngine {
                 let new_header = self.write_moving(overwrites, write)?;
                 tail_allocations.extend(tail_allocation);
                 patches.patch_next(base.relative(new_header.header_address())?)?;
+                if let Some(dispositions) = dispositions.as_mut() {
+                    dispositions.record(&key.join(&link), Some(old_header), new_header);
+                }
                 relocations.insert(old_header, new_header);
             }
 
@@ -265,15 +289,19 @@ impl WriteEngine {
 
             let oh = object_header::build_v2_object_header(&region)?;
             let addr = self.place_object_header(&oh)?;
+            if let Some(dispositions) = dispositions.as_mut() {
+                dispositions.record(key, replaces.as_ref().map(ReplacedHeader::object), addr);
+            }
             path_addr.insert(key.clone(), addr);
         }
 
         self.apply_inplace_writes(overwrites, inplace_writes)?;
 
         for (path, old) in superseded_addrs {
-            if let Some(&new) = path_addr.get(&path) {
-                relocations.insert(old, new);
-            }
+            let &new = path_addr.get(&path).ok_or_else(|| {
+                FormatError::Internal("a superseded group has no successful placement".into())
+            })?;
+            relocations.insert(old, new);
         }
         let new_root = path_addr[&ObjectPathBuf::root()];
         to_free.extend(
