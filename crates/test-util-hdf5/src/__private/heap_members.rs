@@ -3,11 +3,17 @@
 use std::path::Path;
 
 use hdf5::Dataspace;
+use hdf5::File;
+use hdf5::file::LibraryVersion;
+use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5::types::VarLenArray;
+use hdf5_pure::File as PureFile;
+use hdf5_pure_core::__private::FileRange;
 use hdf5_sys::h5r;
 
 use crate::file;
 use crate::global_heap::attributes;
+use crate::storage;
 
 /// The opaque dataset-region token returned by the fixture's native reference creation.
 pub struct RegionToken(h5r::hdset_reg_ref_t);
@@ -218,23 +224,46 @@ pub fn assert_lifetime_replacement(path: &Path, retained: &RegionToken) {
 ///
 /// Panics if a file, dataset, attribute, or reference operation fails.
 pub fn write(path: &Path, external_token: bool) -> Option<RegionToken> {
-    let native = file::libhdf5_create_v110(path);
-    let dataset = native
-        .new_dataset::<i32>()
-        .shape([4])
-        .create("data")
+    write_members(file::libhdf5_create_v110(path), external_token)
+}
+
+/// Creates the two-attribute fixture with persistent classic free-space managers.
+///
+/// Sets the threshold to 1 and the lower format bound to [`LibraryVersion::V110`]. Writes the
+/// values described by [`write()`] and closes all native handles before returning.
+///
+/// # Panics
+///
+/// Panics if a native file, dataset, or attribute operation fails.
+pub fn write_persisted(path: &Path) {
+    let native = File::with_options()
+        .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
+        .with_fcpl(|p| {
+            p.file_space_strategy(NativeStrategy::FreeSpaceManager {
+                paged: false,
+                persist: true,
+                threshold: 1,
+            })
+        })
+        .create(path)
         .unwrap();
-    dataset.write(&[7, 11, 13, 17]).unwrap();
-    attributes::write_ascii(&native, "first", "left");
-    attributes::write_ascii(&native, "second", "right");
-    let token = external_token.then(|| {
-        let selection = dataset.space().unwrap().select(1..3).unwrap();
-        RegionToken::create(&native, &selection)
-    });
-    drop(dataset);
-    native.flush().unwrap();
-    native.close().unwrap();
-    token
+    assert!(write_members(native, false).is_none());
+}
+
+/// Returns physical ranges for manager storage and superblock-extension chunks.
+///
+/// Includes complete section-list capacity. A present extension must use version 2 headers.
+///
+/// # Panics
+///
+/// Panics if a file operation, metadata parse, or checked range conversion fails.
+pub fn persistence_allocations(path: &Path) -> Vec<FileRange> {
+    let bytes = std::fs::read(path).unwrap();
+    let file = PureFile::open(path).unwrap();
+    storage::manager_and_extension_extents(&file, &bytes)
+        .into_iter()
+        .map(|range| FileRange::new(range.start(), range.length()).unwrap())
+        .collect()
 }
 
 /// Checks the contents written by [`write()`] and the optional token's dataspace.
@@ -263,6 +292,28 @@ pub fn assert_values(path: &Path, token: Option<&RegionToken>) {
         token.assert_region(&native);
     }
     native.close().unwrap();
+}
+
+/// Writes the shared fixture values and closes the native file.
+///
+/// Returns a caller-held region token when `external_token` is true.
+fn write_members(native: File, external_token: bool) -> Option<RegionToken> {
+    let dataset = native
+        .new_dataset::<i32>()
+        .shape([4])
+        .create("data")
+        .unwrap();
+    dataset.write(&[7, 11, 13, 17]).unwrap();
+    attributes::write_ascii(&native, "first", "left");
+    attributes::write_ascii(&native, "second", "right");
+    let token = external_token.then(|| {
+        let selection = dataset.space().unwrap().select(1..3).unwrap();
+        RegionToken::create(&native, &selection)
+    });
+    drop(dataset);
+    native.flush().unwrap();
+    native.close().unwrap();
+    token
 }
 
 fn assert_lifetime_values(native: &hdf5::File) {
