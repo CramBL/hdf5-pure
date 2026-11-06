@@ -26,6 +26,8 @@ use crate::error::FormatError;
 use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
+mod reachable;
+
 #[rstest]
 #[case::attribute(Form::CompactAttribute)]
 #[case::compact(Form::CompactDataset)]
