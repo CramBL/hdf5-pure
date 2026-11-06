@@ -1,3 +1,4 @@
+use core::cell::Cell;
 use core::num::NonZeroU16;
 use std::sync::atomic::Ordering;
 
@@ -12,7 +13,8 @@ use crate::edit::analysis::heap::HeapReferenceError;
 use crate::edit::analysis::heap::associations::MemberPresence;
 use crate::edit::analysis::physical::claims::domain::{DomainUnavailable, OwnerDomain};
 use crate::edit::analysis::{
-    AnalysisPhase, CollectionCandidates, CollectionContent, CollectionProvenance,
+    AnalysisPhase, COLLECTION_ALLOCATIONS, COLLECTION_WORK, CollectionCandidates,
+    CollectionContent, CollectionProvenance,
 };
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
@@ -528,6 +530,98 @@ fn nonempty_qualification_reuses_metadata_without_reading_or_retaining_payloads(
     );
     assert_eq!((access.blocks, access.bytes), (0, 0));
     assert_eq!(reads.lock().unwrap().len(), before);
+}
+
+#[rstest]
+#[case::complete(StorageRestriction::None)]
+#[case::unknown_class(StorageRestriction::Class)]
+#[case::different_range(StorageRestriction::Range)]
+#[case::framing_failure(StorageRestriction::Framing)]
+#[case::absent_allocation(StorageRestriction::Absent)]
+#[case::unavailable_domain(StorageRestriction::Domain)]
+fn collection_storage_retains_independent_framing_and_allocation_outcomes(
+    #[case] restriction: StorageRestriction,
+) {
+    let path = test_util::temp::temp_path("parent-storage-outcomes.h5");
+    let mut fixture = Fixture::new();
+    let address = fixture.collection(&[Object::new(7, b"before")]);
+    let owner = object(&mut fixture, "owner", address, 7);
+    fixture.write(&path);
+    let (engine, calls) = edit_test_util::open_counted_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase.reconstruction_source(&engine, owner).unwrap();
+    let mut candidates = phase.deleted_collections(&[owner]);
+    let address = PhysicalAddress::new(address);
+    let original = candidates.collections[&address].range;
+    match restriction {
+        StorageRestriction::Class => candidates.collections.get_mut(&address).unwrap().class = None,
+        StorageRestriction::Range => {
+            candidates.collections.get_mut(&address).unwrap().range =
+                FileRange::new(address, original.length() + 8).unwrap()
+        }
+        StorageRestriction::Framing => {
+            phase.allocations.insert(
+                address,
+                Err(FormatError::Source("unavailable collection framing".into())),
+            );
+        }
+        StorageRestriction::Absent => {
+            candidates.collections.remove(&address);
+        }
+        StorageRestriction::Domain => phase.topology = Some(None),
+        StorageRestriction::None => {}
+    }
+    let before = (
+        calls.load(Ordering::Relaxed),
+        COLLECTION_ALLOCATIONS.with(Cell::get),
+        COLLECTION_WORK.with(Cell::get),
+    );
+    let parents = phase.collection_storage(&source, &candidates).unwrap();
+    assert_eq!(parents.len(), 1);
+    let parent = &parents[&address];
+    assert_eq!(
+        parent.allocation,
+        match restriction {
+            StorageRestriction::Class => Err(ParentUnavailable::Class),
+            StorageRestriction::Range => Err(ParentUnavailable::Range),
+            StorageRestriction::Framing => Err(ParentUnavailable::Framing),
+            StorageRestriction::Absent => Err(ParentUnavailable::Allocation),
+            StorageRestriction::None | StorageRestriction::Domain => Ok(()),
+        }
+    );
+    if matches!(restriction, StorageRestriction::Framing) {
+        assert_eq!(
+            parent.framing,
+            Err(FormatError::Source("unavailable collection framing".into()))
+        );
+    } else {
+        assert_eq!(parent.framing, Ok(original));
+    }
+    assert_eq!(
+        parent.original,
+        candidates
+            .collections
+            .get(&address)
+            .map(|allocation| (allocation.range, allocation.class))
+    );
+    assert_eq!(
+        (
+            calls.load(Ordering::Relaxed),
+            COLLECTION_ALLOCATIONS.with(Cell::get),
+            COLLECTION_WORK.with(Cell::get)
+        ),
+        before
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StorageRestriction {
+    Absent,
+    Class,
+    Domain,
+    Framing,
+    None,
+    Range,
 }
 
 fn object(fixture: &mut Fixture, name: &str, collection: u64, member: u32) -> ObjectId {

@@ -15,6 +15,7 @@ use super::{
 };
 use crate::chunked_read::{ChunkInfo, StoredChunkSize};
 use crate::edit::WriteEngine;
+use crate::edit::allocation::AllocationPublication;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
@@ -25,6 +26,8 @@ use crate::image::WriteBuffering;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::{AttrValue, FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress};
+
+mod acceptance;
 
 #[rstest]
 #[case::root_only(false)]
@@ -230,9 +233,12 @@ fn actual_pending_retirement_checks_complete_boundaries_and_classes(#[case] defe
 }
 
 #[rstest]
-#[case::surviving_member(false)]
-#[case::superseded_heap(true)]
-fn candidate_parent_capacity_remains_protected_with_a_surviving_member(#[case] retire: bool) {
+#[case::surviving_member(ParentRetirement::Retain)]
+#[case::superseded_heap(ParentRetirement::Superseded)]
+#[case::candidate_free(ParentRetirement::Candidate)]
+fn candidate_parent_capacity_is_checked_against_actual_retirement(
+    #[case] retire: ParentRetirement,
+) {
     let path = test_util::temp::temp_path("retained-parent.h5");
     let mut fixture = Fixture::new();
     let parent = fixture.collection(&[GlobalHeapObject::new(7, b"before")]);
@@ -246,8 +252,10 @@ fn candidate_parent_capacity_remains_protected_with_a_surviving_member(#[case] r
     );
     records.extend(Form::CompactAttribute.messages(&mut fixture, &datatype, &descriptor));
     fixture.object("owner", records);
-    let records = Form::CompactAttribute.messages(&mut fixture, &datatype, &descriptor);
-    fixture.object("survivor", records);
+    if !matches!(retire, ParentRetirement::Candidate) {
+        let records = Form::CompactAttribute.messages(&mut fixture, &datatype, &descriptor);
+        fixture.object("survivor", records);
+    }
     fixture.write(&path);
     let mut engine = edit_test_util::open_engine(&path);
     engine
@@ -262,23 +270,36 @@ fn candidate_parent_capacity_remains_protected_with_a_surviving_member(#[case] r
         range(parent.get(), parent_end - parent.get())
     );
     assert_eq!(storage.allocation, Ok(()));
+    let parent_range = range(parent.get(), parent_end - parent.get());
+    assert_eq!(
+        storage.original,
+        Some((parent_range, Some(FreeClass::Page(PageType::Raw))))
+    );
+    assert!(parent_range.length() > u64::try_from(descriptor.len() + 6).unwrap());
     assert!(prepared.storage().allocations().iter().any(|allocation| {
         allocation.range == range(parent.get(), parent_end-parent.get())
             && matches!(allocation.origin, StorageOrigin::Parent { address, .. } if address == parent)
     }));
-    if retire {
+    if matches!(retire, ParentRetirement::Superseded) {
         engine
             .superseded_heaps
             .push(range(parent.get(), parent_end - parent.get()));
     }
     let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
-    if !retire {
+    if matches!(retire, ParentRetirement::Retain) {
         pending.exclusion().unwrap();
         return;
     }
     assert!(matches!(pending.exclusion(), Err(StorageConflict::Overlap {
-        claim: SpaceClaim::Retirement(_), allocation, ..
-    }) if matches!(allocation.origin, StorageOrigin::Parent { address, .. } if address == parent)));
+        claim: SpaceClaim::Retirement(FreeClass::Page(PageType::Raw)), allocation, range,
+    }) if *range == parent_range && matches!(allocation.origin, StorageOrigin::Parent { address, .. } if address == parent)));
+    assert!(
+        pending
+            .pending
+            .batch
+            .entries()
+            .contains(&(parent_range, FreeClass::Page(PageType::Raw)))
+    );
 }
 
 #[test]
@@ -322,6 +343,8 @@ fn failure_after_placement_preserves_application_error_ownership() {
 
 #[rstest]
 #[case::different_phase(Restriction::Phase)]
+#[case::different_session(Restriction::Session)]
+#[case::different_root(Restriction::Root)]
 #[case::incomplete_geometry(Restriction::Geometry)]
 #[case::excess_root_count(Restriction::Excess)]
 fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: Restriction) {
@@ -349,6 +372,25 @@ fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: 
             .unwrap();
         prepared.storage = prepare(&mut engine).storage;
     }
+    match mode {
+        Restriction::Session => engine.context.allocations = AllocationPublication::new(),
+        Restriction::Root => {
+            let StorageOrigin::Owner { object, .. } = prepared.storage().allocations()[0].origin
+            else {
+                panic!("expected retained owner storage");
+            };
+            let mut root = engine.superblock().clone();
+            root.root_group_address = engine
+                .addresses()
+                .relative(object.header_address())
+                .unwrap();
+            engine
+                .context
+                .adopt(engine.context.propose(root).unwrap())
+                .unwrap();
+        }
+        _ => {}
+    }
     let before = engine.disk_bytes().unwrap();
     let StorageApplyFailure::BeforePlacement { prepared, error } =
         prepared.apply_excluding(&mut engine).err().unwrap()
@@ -357,6 +399,8 @@ fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: 
     };
     match mode {
         Restriction::Phase => assert!(matches!(error, StorageApplyError::Phase), "{:?}", error),
+        Restriction::Session => assert!(matches!(error, StorageApplyError::Session), "{error:?}"),
+        Restriction::Root => assert!(matches!(error, StorageApplyError::Root), "{error:?}"),
         Restriction::Geometry | Restriction::Excess => {
             assert!(
                 matches!(error, StorageApplyError::Unavailable),
@@ -381,10 +425,19 @@ fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: 
 }
 
 #[derive(Clone, Copy, Debug)]
+enum ParentRetirement {
+    Candidate,
+    Retain,
+    Superseded,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Restriction {
     Excess,
     Geometry,
     Phase,
+    Root,
+    Session,
 }
 
 fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
