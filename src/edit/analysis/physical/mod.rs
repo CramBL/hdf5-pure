@@ -25,6 +25,8 @@ use crate::object_header::ObjectHeader;
 use crate::source::SourceMetadata;
 use crate::superblock;
 
+pub(in crate::edit) mod claims;
+
 impl AnalysisPhase<'_> {
     /// Collects local file framing and recorded capacity once in this source phase.
     ///
