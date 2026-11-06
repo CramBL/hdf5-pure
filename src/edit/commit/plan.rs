@@ -411,7 +411,8 @@ impl WriteEngine {
     /// Prepares edits with optional original observations from the same source phase.
     ///
     /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
-    /// passes false. Observation failures are retained in [`inventory::OriginalEdits`].
+    /// passes false. Count and ownership outcomes are retained in [`inventory::OriginalEdits`],
+    /// and predecessor outcomes in [`inventory::dispositions::ReconstructionDispositions`].
     ///
     /// # Errors
     ///
@@ -420,7 +421,7 @@ impl WriteEngine {
         &mut self,
         staged: &StagedEdits,
         capture: bool,
-    ) -> Result<(CommitPlan, Option<inventory::OriginalEdits>), Error> {
+    ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
         self.preflight_narrow_references()?;
         let mut analysis = AnalysisPhase::new(self);
         let mut edits = DatasetEdits {
@@ -486,8 +487,8 @@ impl WriteEngine {
             collection_candidates: collections,
             references,
         };
-        let inventory =
-            capture.then(|| inventory::OriginalEdits::collect(self, &mut analysis, &tree, staged));
+        let inventory = capture
+            .then(|| inventory::OriginalPreparation::collect(self, &mut analysis, &tree, staged));
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
         }

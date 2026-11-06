@@ -228,12 +228,20 @@ fn repack_link_image(
     (image.build(), info, bodies)
 }
 
-fn header(messages: &[Message], version: HeaderVersion, child: Option<u64>) -> Vec<u8> {
+/// Returns a compact group's Link Info message followed by `messages`.
+///
+/// The heap and name-index addresses are undefined and eight bytes wide.
+pub fn compact_messages(messages: &[Message]) -> Vec<Message> {
     let mut link_info = vec![LINK_INFO_VERSION, NO_FLAGS];
     bytes::push_undefined_address(&mut link_info, Widths::EIGHT.offset);
     bytes::push_undefined_address(&mut link_info, Widths::EIGHT.offset);
     let mut records = vec![Message::new(MessageType::LINK_INFO, &link_info)];
     records.extend_from_slice(messages);
+    records
+}
+
+fn header(messages: &[Message], version: HeaderVersion, child: Option<u64>) -> Vec<u8> {
+    let mut records = compact_messages(messages);
     if let Some(child) = child {
         records.push(Message::new(
             MessageType::LINK,
