@@ -47,9 +47,12 @@ pub(super) use deletions::CountPreflight;
 pub(super) use deletions::CountProjectionIdentity;
 
 pub(super) use deletions::DeclaredCountChange;
-pub(super) use deletions::NetCountPlan;
 pub(super) use deletions::PlannedDeletion;
 pub(super) use deletions::SourceRemovalPlan;
+pub(super) use deletions::{
+    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
+    OriginalOwnerInventory,
+};
 
 #[cfg_attr(
     not(test),

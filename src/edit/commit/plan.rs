@@ -49,6 +49,12 @@ pub(in crate::edit) use counts::CountProjectionProof;
 )]
 mod counts;
 
+#[expect(
+    dead_code,
+    reason = "prepared edit inventories have no retirement consumer"
+)]
+pub(super) mod inventory;
+
 #[cfg(test)]
 mod tests;
 
@@ -398,6 +404,23 @@ impl WriteEngine {
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
     fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
+        self.plan_commit_with_inventory(staged, false)
+            .map(|(plan, _)| plan)
+    }
+
+    /// Prepares edits with optional original observations from the same source phase.
+    ///
+    /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
+    /// passes false. Observation failures are retained in [`inventory::OriginalEdits`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the planning errors described by [`Self::plan_commit`].
+    fn plan_commit_with_inventory(
+        &mut self,
+        staged: &StagedEdits,
+        capture: bool,
+    ) -> Result<(CommitPlan, Option<inventory::OriginalEdits>), Error> {
         self.preflight_narrow_references()?;
         let mut analysis = AnalysisPhase::new(self);
         let mut edits = DatasetEdits {
@@ -416,7 +439,7 @@ impl WriteEngine {
             mut collections,
         } = edits;
         if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
-            return Ok(CommitPlan::InPlace(inplace_writes));
+            return Ok((CommitPlan::InPlace(inplace_writes), None));
         }
         let mut moved_headers = moving_writes
             .iter()
@@ -450,14 +473,11 @@ impl WriteEngine {
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
-        if invalidates_reference_proof {
-            self.proved_free_of_references = false;
-        }
         let mut headers = headers;
         headers
             .keys
             .sort_by_key(|path| std::cmp::Reverse(path.len()));
-        Ok(CommitPlan::Tree(PreparedTree {
+        let tree = PreparedTree {
             groups: nodes,
             headers,
             cross_copies,
@@ -465,7 +485,13 @@ impl WriteEngine {
             deleted_free,
             collection_candidates: collections,
             references,
-        }))
+        };
+        let inventory =
+            capture.then(|| inventory::OriginalEdits::collect(self, &mut analysis, &tree, staged));
+        if invalidates_reference_proof {
+            self.proved_free_of_references = false;
+        }
+        Ok((CommitPlan::Tree(tree), inventory))
     }
     fn prepare_value_writes(
         &self,

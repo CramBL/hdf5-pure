@@ -1,0 +1,296 @@
+//! Original count and ownership observations paired with their prepared tree edits.
+//!
+//! The editor derives observations from the owned application inputs and retains them with the
+//! placed tree only after every placement and value write succeeds.
+
+use super::{CommitPlan, OverwritePayloads, PreparedCommit, PreparedTree};
+use crate::edit::WriteEngine;
+use crate::edit::allocation::AllocationSession;
+use crate::edit::analysis::counts::{CopyUsersError, CopyUsersUnion};
+use crate::edit::analysis::physical::claims::domain::OwnerDomain;
+use crate::edit::analysis::{
+    AnalysisPhase, CountHandoffError, NetCountError, OriginalOwnerError, OriginalOwnerFacts,
+    OriginalOwnerInventory, ReconstructionSource,
+};
+use crate::edit::commit::publish::AppliedTree;
+use crate::edit::staging::StagedEdits;
+use crate::error::{Error, FormatError};
+use crate::object_graph::ObjectId;
+
+/// Owns tree edits and the original observations derived from their deletion and copy inputs.
+///
+/// The editor collects the observations in the same source phase as the tree plan. The caller
+/// preserves source freshness until application. The allocation session is checked separately.
+pub(in crate::edit::commit) struct PreparedEditInventory {
+    prepared: PreparedCommit,
+    original: OriginalEdits,
+    session: AllocationSession,
+}
+
+impl PreparedEditInventory {
+    /// Prepares staged edits and collects their original observations before placement.
+    ///
+    /// Returns the original staged set on planning failure. In-place-only plans are returned
+    /// without an inventory. Count or ownership qualification failures are retained in
+    /// [`OriginalEdits`] independently of successful tree preparation.
+    pub(in crate::edit::commit) fn prepare(
+        engine: &mut WriteEngine,
+        staged: StagedEdits,
+    ) -> InventoryPreparation {
+        match engine.plan_commit_with_inventory(&staged, true) {
+            Ok((mut plan, original)) => {
+                let (staged, writes) = staged.into_apply();
+                let mut overwrites = OverwritePayloads { writes };
+                plan.release_chunk_inputs(&mut overwrites);
+                let prepared = PreparedCommit {
+                    plan,
+                    staged,
+                    overwrites,
+                };
+                match original {
+                    Some(original) => InventoryPreparation::Tree(Self {
+                        prepared,
+                        original,
+                        session: engine.context.allocations.session(),
+                    }),
+                    None => InventoryPreparation::InPlace(prepared),
+                }
+            }
+            Err(error) => InventoryPreparation::Rejected { staged, error },
+        }
+    }
+
+    /// Places the owned edits and pairs the result with their original observations.
+    ///
+    /// Consumes the application inputs on success or failure. The caller handles rollback
+    /// after a failure and publication after success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] before placement if the allocation session differs
+    /// or the prepared plan is not a tree. Returns the errors of [`WriteEngine::apply_tree`].
+    pub(in crate::edit::commit) fn apply(
+        self,
+        engine: &mut WriteEngine,
+    ) -> Result<AppliedEditInventory, Error> {
+        let Self {
+            prepared,
+            original,
+            session,
+        } = self;
+        if !session.same(&engine.context.allocations.session()) {
+            return Err(FormatError::Internal(
+                "a prepared edit inventory belongs to another allocation session".into(),
+            )
+            .into());
+        }
+        let PreparedCommit {
+            plan,
+            staged,
+            mut overwrites,
+        } = prepared;
+        let CommitPlan::Tree(tree) = plan else {
+            return Err(
+                FormatError::Internal("a prepared edit inventory has no tree".into()).into(),
+            );
+        };
+        let tree = engine.apply_tree(&mut overwrites, tree, staged)?;
+        Ok(AppliedEditInventory { tree, original })
+    }
+
+    /// Borrows the original observations collected from these prepared inputs.
+    pub(in crate::edit::commit) fn original(&self) -> &OriginalEdits {
+        &self.original
+    }
+}
+
+/// The planning outcome, with owned application inputs or rejected staging.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "preparation returns its owned inputs without an additional allocation"
+)]
+pub(in crate::edit::commit) enum InventoryPreparation {
+    /// Prepared value writes without a replacement root or original-owner inventory.
+    InPlace(PreparedCommit),
+    /// The original staged set and the planning error.
+    Rejected { staged: StagedEdits, error: Error },
+    /// Prepared tree edits paired with their original observations.
+    Tree(PreparedEditInventory),
+}
+
+/// A successfully placed tree paired with its prepared inputs' original observations.
+///
+/// The editor constructs this pair after [`WriteEngine::apply_tree`] succeeds. Count writes,
+/// storage reuse, and publication require separate permission.
+pub(in crate::edit::commit) struct AppliedEditInventory {
+    tree: AppliedTree,
+    original: OriginalEdits,
+}
+
+impl AppliedEditInventory {
+    /// Borrows the placed root, relocations, and retirement inputs before publication.
+    pub(in crate::edit::commit) fn tree(&self) -> &AppliedTree {
+        &self.tree
+    }
+
+    /// Borrows the original observations retained through successful application.
+    pub(in crate::edit::commit) fn original(&self) -> &OriginalEdits {
+        &self.original
+    }
+
+    /// Returns the placed tree, dropping its paired original observations.
+    pub(in crate::edit::commit) fn into_tree(self) -> AppliedTree {
+        self.tree
+    }
+}
+
+/// Original count facts and their source and ownership qualification outcomes.
+///
+/// Complete qualification checks the allocation session, source phase, root, and supported
+/// object-header domain. Count facts remain available when domain qualification is unavailable.
+/// The caller establishes source freshness and retirement or write permission separately.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "unavailable evidence preserves independent count and source observations"
+)]
+pub(in crate::edit::commit) enum OriginalEdits {
+    /// An incompatible association encountered while qualifying the count facts.
+    Association(OriginalOwnerError),
+    /// Count and storage facts associated with a supported source object-header domain.
+    Complete(OriginalOwnerInventory),
+    /// Independent observations retained when complete qualification is unavailable.
+    Unavailable {
+        /// Count, storage, and eligible-owner facts, or their derivation error.
+        counts: Result<OriginalOwnerFacts, EditInputError>,
+        /// The original physical root and source-phase identity, or their resolution error.
+        source: Result<ReconstructionSource, Error>,
+        /// The domain outcome, absent when source resolution failed.
+        ///
+        /// A physical-claims error is recorded here if domain inspection succeeded.
+        domain: Option<Result<OwnerDomain, Error>>,
+    },
+}
+
+impl OriginalEdits {
+    /// Collects original observations using the tree plan's source phase.
+    ///
+    /// Qualifies successful count facts against the original root and physical claims when
+    /// the owner domain is supported. Retains independent outcomes on incomplete qualification.
+    pub(super) fn collect(
+        engine: &WriteEngine,
+        phase: &mut AnalysisPhase<'_>,
+        tree: &PreparedTree,
+        staged: &StagedEdits,
+    ) -> Self {
+        let counts = Self::count_inputs(engine, phase, tree, staged);
+        let source = ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address)
+            .map_err(Error::from)
+            .and_then(|root| {
+                phase
+                    .reconstruction_source(engine, root)
+                    .map_err(Error::from)
+            });
+        let domain = source
+            .as_ref()
+            .ok()
+            .map(|source| phase.supported_owner_domain(source));
+        match (counts, source, domain) {
+            (Ok(counts), Ok(source), Some(Ok(OwnerDomain::Available(domain)))) => {
+                match phase.physical_claims(&source) {
+                    Ok(claims) => match counts.qualify(engine, &source, claims, domain) {
+                        Ok(inventory) => Self::Complete(inventory),
+                        Err(error) => Self::Association(error),
+                    },
+                    Err(error) => Self::Unavailable {
+                        counts: Ok(counts),
+                        source: Ok(source),
+                        domain: Some(Err(error)),
+                    },
+                }
+            }
+            (counts, source, domain) => Self::Unavailable {
+                counts,
+                source,
+                domain,
+            },
+        }
+    }
+
+    /// Derives one net count plan from prepared deletions and each same-file copy emission.
+    ///
+    /// Counts each physical deletion edge once and preserves each copy emission's multiplicity.
+    /// Checks staged foreign copies for an empty committed-datatype inventory at their retained
+    /// source widths. Created datasets contribute no original committed-datatype users.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditInputError`] for failed copy qualification, incomplete inventories, or
+    /// errors in count aggregation, planning, or ownership-fact collection.
+    fn count_inputs(
+        engine: &WriteEngine,
+        phase: &mut AnalysisPhase<'_>,
+        tree: &PreparedTree,
+        staged: &StagedEdits,
+    ) -> Result<OriginalOwnerFacts, EditInputError> {
+        for (_, copy) in staged.cross_copies() {
+            copy.require_foreign_datatype_users_absent()
+                .map_err(EditInputError::Copy)?;
+        }
+        let mut added = CopyUsersUnion::new();
+        for (_, copy) in tree.groups.values().flat_map(|node| &node.prepared.copies) {
+            let users = phase.copy_users(copy).map_err(EditInputError::Copy)?;
+            added = added
+                .add(phase, users.as_ref())
+                .map_err(EditInputError::Users)?
+                .ok_or(EditInputError::IncompleteCopy)?;
+        }
+        phase
+            .net_count_plan(
+                tree.groups.values().flat_map(|node| &node.prepared.deletes),
+                &added.finish(),
+            )
+            .map_err(EditInputError::Counts)?
+            .ok_or(EditInputError::IncompleteCounts)?
+            .original_owners(engine)
+            .map_err(EditInputError::Handoff)
+    }
+
+    /// Borrows fully qualified facts, or returns [`None`] when qualification failed.
+    pub(in crate::edit::commit) fn owners(&self) -> Option<&OriginalOwnerInventory> {
+        match self {
+            Self::Complete(owners) => Some(owners),
+            Self::Association(_) | Self::Unavailable { .. } => None,
+        }
+    }
+
+    /// Borrows derived count facts independently of domain availability.
+    ///
+    /// Returns [`None`] for a count-input error or an incompatible qualification association.
+    pub(in crate::edit::commit) fn facts(&self) -> Option<&OriginalOwnerFacts> {
+        match self {
+            Self::Complete(owners) => Some(owners.facts()),
+            Self::Unavailable { counts, .. } => counts.as_ref().ok(),
+            Self::Association(_) => None,
+        }
+    }
+}
+
+/// A copy-input, count-plan, or owned-fact derivation failure.
+#[derive(Debug)]
+pub(in crate::edit::commit) enum EditInputError {
+    /// A copy could not be inspected or qualified.
+    Copy(Error),
+    /// Net-count planning failed.
+    Counts(NetCountError),
+    /// Owned count-fact collection failed.
+    Handoff(CountHandoffError),
+    /// A same-file copy's committed-datatype inventory is incomplete.
+    IncompleteCopy,
+    /// Complete count planning is unavailable for the prepared inputs.
+    IncompleteCounts,
+    /// Copy-user aggregation failed.
+    Users(CopyUsersError),
+}
+
+#[cfg(test)]
+mod tests;

@@ -152,13 +152,6 @@ pub(crate) fn read_persisted_sections_source<S: Source>(
 ///
 /// Returns the address-conversion, source-read, and parsing errors of
 /// [`read_persisted_sections_source`].
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "allocation-only recovery has no production consumer"
-    )
-)]
 pub(crate) fn read_persisted_allocations_source(
     src: &impl Source,
     widths: FormatWidths,

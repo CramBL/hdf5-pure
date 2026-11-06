@@ -23,6 +23,7 @@ use crate::edit::analysis::counts::changes::owned::{
 };
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
+use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
 use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
@@ -483,4 +484,66 @@ fn project_owned(
     drop(projected);
     assert!(checked.into_parts(proof).unwrap().1.updates().is_empty());
     mem::replace(&mut prepared.region, original)
+}
+
+#[test]
+fn native_committed_type_edits_retain_actual_copy_and_removal_inputs() {
+    let path = test_util::temp::temp_path("native-edit-inventory.h5");
+    let native = file::libhdf5_create_v18(&path);
+    let datatype = ByteOrder::LittleEndian.i32_datatype();
+    native.commit_datatype("mytype", &datatype).unwrap();
+    let dataset = native
+        .new_dataset_builder()
+        .empty_as(&datatype)
+        .shape([2])
+        .create("first")
+        .unwrap();
+    dataset.write(&[1_i32, 2]).unwrap();
+    drop(dataset);
+    drop(datatype);
+    assert_eq!(native.loc_info_by_name("mytype").unwrap().num_links, 2);
+    let dataset = native.dataset("first").unwrap();
+    assert!(dataset.dtype().unwrap().is_committed());
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [1, 2]);
+    drop(dataset);
+    native.close().unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine.delete(&ObjectPathBuf::parse("mytype")).unwrap();
+    engine
+        .copy(
+            &ObjectPathBuf::parse("first"),
+            &ObjectPathBuf::parse("copy"),
+        )
+        .unwrap();
+    let staged = mem::take(&mut engine.staged);
+    engine.begin_commit(&staged);
+    let prepared = match PreparedEditInventory::prepare(&mut engine, staged) {
+        InventoryPreparation::Tree(prepared) => prepared,
+        InventoryPreparation::Rejected { error, .. } => panic!("preparation failed: {error:?}"),
+        InventoryPreparation::InPlace(_) => panic!("expected native tree preparation"),
+    };
+    let facts = prepared.original().facts().unwrap();
+    assert_eq!(facts.counts().changes().len(), 1);
+    let change = &facts.counts().changes()[0];
+    assert_eq!((change.original().value(), change.remaining()), (2, 2));
+    assert_eq!(change.field().unwrap().value(), 2);
+    let original_target = change.object();
+    assert_eq!(facts.storage().reference_roots(), [original_target]);
+    assert!(facts.eligible_owners().is_empty());
+    let applied = prepared.apply(&mut engine).unwrap();
+    assert_eq!(
+        applied.original().facts().unwrap().counts().changes()[0].object(),
+        original_target
+    );
+    engine.publish_tree(applied.into_tree()).unwrap();
+    drop(engine);
+    let native = file::libhdf5_open(&path);
+    let mut names = native.member_names().unwrap();
+    names.sort();
+    assert_eq!(names, ["copy", "first"]);
+    let copied = native.dataset("copy").unwrap();
+    assert!(copied.dtype().unwrap().is_committed());
+    assert_eq!(copied.read_raw::<i32>().unwrap(), [1, 2]);
+    drop(copied);
+    native.close().unwrap();
 }
