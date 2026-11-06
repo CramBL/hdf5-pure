@@ -1,7 +1,9 @@
 use core::num::NonZeroU32;
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 
 use rstest::rstest;
+use test_util::disk_log;
 use test_util::object_header::Message;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
@@ -16,6 +18,7 @@ use crate::edit::commit::plan::{CommitPlan, ReplacedHeader};
 use crate::edit::retirement::RootRetirement;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
+use crate::image::WriteBuffering;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 use crate::{AttrValue, Datatype, File, FileBuilder, FixedPointType, PhysicalAddress};
@@ -401,6 +404,50 @@ fn unavailable_original_observations_have_explicit_dispositions(
     assert_eq!(
         applied.dispositions().replacements(),
         Err(&TransitionWithheld::Predecessors)
+    );
+}
+
+#[test]
+fn a_failure_after_a_group_placement_returns_no_applied_inventory() {
+    let path = test_util::temp::temp_path("failed-reconstruction.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_group_with("g", |_| Ok(())).unwrap();
+    builder.write(&path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .set_group_attr(&ObjectPathBuf::parse("g"), "a", AttrValue::I64(1))
+        .unwrap();
+    let prepared = prepare(&mut engine);
+    let source = prepared.dispositions().source().as_ref().unwrap().object();
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    disk_log::start();
+    disk_log::fail_write_after(1, 0);
+    let error = prepared.apply(&mut engine).err().unwrap();
+    let recording = disk_log::finish();
+    let Error::Io(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert_eq!(
+        recording
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                disk_log::IoEvent::Write {
+                    outcome: disk_log::IoOutcome::Succeeded,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap(),
+        source
     );
 }
 

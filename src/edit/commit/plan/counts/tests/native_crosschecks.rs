@@ -530,7 +530,29 @@ fn native_committed_type_edits_retain_actual_copy_and_removal_inputs() {
     let original_target = change.object();
     assert_eq!(facts.storage().reference_roots(), [original_target]);
     assert!(facts.eligible_owners().is_empty());
+    let predecessors = prepared.dispositions().predecessors();
+    assert_eq!(predecessors.len(), 1);
+    let root = &predecessors[&ObjectPathBuf::root()];
+    let root_counts = root.counts.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!((root_counts.original, root_counts.incoming), (1, 0));
+    let original_root = root.source.object();
     let applied = prepared.apply(&mut engine).unwrap();
+    assert_eq!(
+        applied.dispositions().replacements().unwrap(),
+        &applied.tree().relocations
+    );
+    assert_eq!(
+        applied.dispositions().translate(original_target).unwrap(),
+        original_target
+    );
+    assert_eq!(
+        applied
+            .dispositions()
+            .translate(original_root)
+            .unwrap()
+            .header_address(),
+        applied.tree().retirement.root()
+    );
     assert_eq!(
         applied.original().facts().unwrap().counts().changes()[0].object(),
         original_target
