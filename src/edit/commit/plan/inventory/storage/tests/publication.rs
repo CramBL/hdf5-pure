@@ -583,6 +583,7 @@ fn constrained_reference_update_failure_prevents_completion_after_root_publicati
         Some(StorageUnavailable::Owners)
     ));
     let AppliedTree {
+        counts: _,
         retirement,
         freed,
         relocations,

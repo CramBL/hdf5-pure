@@ -141,6 +141,8 @@ impl WriteEngine {
     /// superblock. Dataset value writes may update existing storage directly. On success,
     /// the staged set is cleared.
     /// With no staged edits, finalizes pending manager changes from immediate tail retirement.
+    /// Hard-link deletions and same-file copies use checked count planning. The editor writes
+    /// source reference count increases before publication and decreases after publication.
     ///
     /// Rejection during preflight preserves the staged set for retry. Once application
     /// consumes the staged set, a failed attempt discards that work. Writes into reusable
@@ -151,7 +153,8 @@ impl WriteEngine {
     /// publication is attempted because a failed publication write may already have changed
     /// the file.
     ///
-    /// After publication, reference patching or optional root-header reclamation can fail.
+    /// After publication, reference patching, source reference count decreases, or optional
+    /// root-header reclamation can fail.
     /// The committed tree retains the batch's values, including its in-place overwrites.
     /// Outside recoverable nonpersistent PAGE publication, the editor discards queued writes and
     /// marks the session uncertain if an operation fails after attempted publication.
@@ -159,8 +162,10 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if an edit or an encountered file structure cannot
-    /// be reproduced. Other preparation and I/O errors propagate from planning, writing,
-    /// or synchronizing the file. Returns [`Error::CommitPartiallyApplied`] if restoring prior
+    /// be reproduced. Returns [`Error::InconsistentReferenceCount`] before applying staged edits if
+    /// an original declared count is below its known reference minimum. Other preparation and I/O
+    /// errors propagate from planning, writing, or synchronizing the file.
+    /// Returns [`Error::CommitPartiallyApplied`] if restoring prior
     /// values from the undo journal fails, with both the original failure and the restore error.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
     /// is uncertain.
@@ -243,7 +248,12 @@ impl WriteEngine {
             });
         }
         self.begin_commit(&staged);
-        match PreparedCommit::prepare(self, staged) {
+        let prepared = if staged.deletes().is_empty() && staged.copies().is_empty() {
+            PreparedCommit::prepare(self, staged)
+        } else {
+            PreparedCommit::prepare_counted(self, staged)
+        };
+        match prepared {
             CommitPreparation::Prepared(prepared) => {
                 CommitOutcome::Applied(self.apply_commit(prepared))
             }
@@ -264,3 +274,6 @@ impl WriteEngine {
         self.committed = true;
     }
 }
+
+#[cfg(test)]
+mod tests;

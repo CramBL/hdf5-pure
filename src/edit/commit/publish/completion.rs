@@ -22,13 +22,14 @@ pub(in crate::edit) struct PublishedTree<'engine> {
 impl<'engine> PublishedTree<'engine> {
     /// Borrows the engine and records its adopted root and EOA alongside `requested_root`.
     ///
-    /// The caller passes the physical root requested at the start of the completed publication.
+    /// The caller completes publication before constructing this loan and passes its requested
+    /// physical root.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the stored root address plus the effective
     /// base exceeds [`u64::MAX`].
-    pub(super) fn new(
+    pub(in crate::edit) fn new(
         engine: &'engine mut WriteEngine,
         requested_root: PhysicalAddress,
     ) -> Result<Self, FormatError> {

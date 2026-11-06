@@ -96,6 +96,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` leaving supported object allocations unreclaimed when a batch removes all their hard links. The editor retains storage when reference-count or ownership evidence is incomplete.
 - Fixed loss of stored reference counts when `File::commit` converts supported version 1 group headers ([#1099](https://github.com/CramBL/hdf5-pure/pull/1099)).
 - Fixed unbounded version 1 object-header continuation traversal in `File::from_bytes` and related metadata reads. Each header is limited to 256 continuation visits ([#1069](https://github.com/CramBL/hdf5-pure/pull/1069)).
 - Fixed `File::commit` dropping dense attributes when converting a version 1 group header containing Attribute Info. Such conversions return `Error::EditUnsupported` before writing changes ([#1068](https://github.com/CramBL/hdf5-pure/pull/1068)).

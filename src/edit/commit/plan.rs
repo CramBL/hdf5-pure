@@ -75,13 +75,6 @@ impl PreparedCommit {
     /// Returns [`CommitPreparation::Rejected`] with the original staged inputs on failure.
     /// In-place-only plans skip count discovery. Tree plans retain original count outcomes and
     /// protected source updates.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "count-aware preparation has no public commit consumer"
-        )
-    )]
     pub(super) fn prepare_counted(
         engine: &mut WriteEngine,
         staged: StagedEdits,
@@ -238,13 +231,6 @@ pub(super) struct GroupHeaders {
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
     /// Original count outcomes and checked source updates, absent for ordinary preparation.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "prepared count updates have no application consumer"
-        )
-    )]
     pub(super) counts: Option<PreparedTreeCounts>,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,

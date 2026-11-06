@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 use core::cell::Cell;
+use core::iter;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -495,6 +496,20 @@ impl<'a> AnalysisPhase<'a> {
         &mut self,
         candidates: CollectionCandidates,
     ) -> Vec<(FileRange, FreeClass)> {
+        self.unreferenced_collection_spans_with_roots(candidates, [])
+    }
+
+    /// Returns candidate allocations unreferenced from this phase's root and `roots`.
+    ///
+    /// Examines both root sets in one bounded traversal, reusing per-object summaries. Recomputes
+    /// the cached reference result when `roots` is nonempty. Returns an empty result if the
+    /// candidate session differs or reference analysis fails or is incomplete. Excludes
+    /// allocations whose class is unknown.
+    pub(super) fn unreferenced_collection_spans_with_roots(
+        &mut self,
+        candidates: CollectionCandidates,
+        roots: impl IntoIterator<Item = ObjectId>,
+    ) -> Vec<(FileRange, FreeClass)> {
         let CollectionCandidates {
             observations,
             collections,
@@ -507,7 +522,8 @@ impl<'a> AnalysisPhase<'a> {
         {
             return Vec::new();
         }
-        if self.liveness.is_none() {
+        let mut roots = roots.into_iter().peekable();
+        if self.liveness.is_none() || roots.peek().is_some() {
             let root = self.root.map_or_else(
                 || {
                     ObjectId::resolve(
@@ -517,10 +533,10 @@ impl<'a> AnalysisPhase<'a> {
                 },
                 Ok,
             );
-            self.liveness = Some(
-                root.map_err(Error::from)
-                    .and_then(|root| self.collections_reachable_from([root])),
-            );
+            self.liveness =
+                Some(root.map_err(Error::from).and_then(|root| {
+                    self.collections_reachable_from(iter::once(root).chain(roots))
+                }));
         }
         let Some(Ok(GlobalHeapLiveness {
             referenced_collections,

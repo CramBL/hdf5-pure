@@ -19,7 +19,7 @@ use crate::edit::analysis::heap::qualification::{
 };
 use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::physical::claims::{ClaimOrigin, ClaimProblem};
-use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
+use crate::edit::analysis::{AnalysisPhase, ProtectedCounts, ReconstructionSource};
 use crate::edit::commit::heap;
 use crate::edit::commit::heap::HeapMutationFailure;
 use crate::edit::commit::plan::PreparedTree;
@@ -29,10 +29,10 @@ use crate::edit::retirement::PendingRootFrees;
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 
-/// Owned original allocations and parent observations associated with one source phase.
+/// Original allocations with optional source-phase and parent observations.
 ///
-/// Records owner storage outside eligible deletions and superseded reclamation, and full
-/// candidate-parent framing. Independent ranges remain available when qualification fails.
+/// Records original owner allocations and any candidate-parent framing. Independent ranges
+/// remain available when qualification fails.
 pub(in crate::edit) struct OriginalStorage {
     source: Option<ReconstructionSource>,
     allocations: Vec<StorageAllocation>,
@@ -41,6 +41,30 @@ pub(in crate::edit) struct OriginalStorage {
 }
 
 impl OriginalStorage {
+    /// Collects complete header allocations containing updated counts for publication exclusions.
+    ///
+    /// Preserves the allocation order of [`ProtectedCounts`]. Records owner identities and header
+    /// ranges, with source-phase and parent observations absent. The caller checks count-source
+    /// applicability separately.
+    pub(in crate::edit) fn from_counts(counts: &ProtectedCounts) -> Self {
+        Self {
+            source: None,
+            allocations: counts
+                .updates()
+                .iter()
+                .map(|update| StorageAllocation {
+                    range: update.allocation().range(),
+                    origin: StorageOrigin::Owner {
+                        object: update.object(),
+                        kind: AllocationKind::Header,
+                    },
+                })
+                .collect(),
+            parents: Ok(BTreeMap::new()),
+            unavailable: None,
+        }
+    }
+
     /// Collects original storage exclusions from the prepared observations and reclamation input.
     pub(super) fn collect(
         engine: &WriteEngine,
@@ -392,6 +416,7 @@ impl<'a> PendingEditInventory<'a> {
             collections,
         } = applied;
         let AppliedTree {
+            counts: _,
             retirement,
             freed,
             relocations,
@@ -676,7 +701,7 @@ pub(in crate::edit) struct StorageAllocation {
 /// The owner or global heap parent associated with a protected range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::edit::commit) enum StorageOrigin {
-    /// An original object allocation identified by the physical-claims inventory.
+    /// An original object allocation with its physical owner identity.
     Owner {
         object: ObjectId,
         kind: AllocationKind,

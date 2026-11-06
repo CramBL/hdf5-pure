@@ -414,6 +414,7 @@ fn fixture(path: &Path, strategy: Strategy, base: u64) -> WriteEngine {
 
 fn tree(root: PhysicalAddress) -> AppliedTree {
     AppliedTree {
+        counts: None,
         retirement: RootRetirement::new(root, vec![]),
         freed: vec![],
         relocations: BTreeMap::new(),

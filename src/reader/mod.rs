@@ -3243,6 +3243,10 @@ impl File {
     /// Staged edits are applied as one transaction. Immediate [`Dataset::append`] calls publish
     /// their elements during the call. With no staged edits, the editor can publish manager changes
     /// pending from retired append allocations, including replacements that leave EOF unchanged.
+    /// For hard-link deletions and same-file copies, updates supported reference counts and
+    /// reclaims a deleted object's supported storage when the remaining hard-link and declared
+    /// counts are both zero. The editor retains affected storage when count or ownership evidence
+    /// is incomplete.
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
     /// [`Error::ReadOnly`].
@@ -3286,6 +3290,8 @@ impl File {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::InconsistentReferenceCount`] before applying staged edits if an original
+    /// declared count is below its known reference minimum. The staged batch remains available.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
     /// is uncertain.
     /// Close and reopen the file before editing again.
@@ -3307,10 +3313,8 @@ impl File {
     ///
     /// - [`Error::CommitPartiallyApplied`], where the restore itself failed, so
     ///   a dataset may hold either value.
-    /// - An error from a step *after* the commit published — repointing the
-    ///   object references that named a moved object is the one that can raise
-    ///   it. The batch is in the file and stays there; what failed is work the
-    ///   commit owed afterwards. The file is valid either way.
+    /// - An error while updating stored object references, decreasing source reference counts,
+    ///   or reclaiming the root header after publication. The batch's values remain committed.
     pub fn commit(&self) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| session.commit())
     }
