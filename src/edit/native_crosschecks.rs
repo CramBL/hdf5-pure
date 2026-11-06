@@ -16,6 +16,7 @@ mod large_page;
 mod link_patches;
 mod manager_allocations;
 mod object_counts;
+mod owner_domain;
 mod symbol_table_links;
 mod version_1_attributes;
 

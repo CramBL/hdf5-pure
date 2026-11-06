@@ -17,6 +17,7 @@ use crate::object_graph::ObjectId;
 use coverage::PhysicalCoverage;
 
 pub(in crate::edit) mod coverage;
+pub(in crate::edit) mod domain;
 
 impl AnalysisPhase<'_> {
     /// Collects physical storage claims for this phase's hard-link root.
