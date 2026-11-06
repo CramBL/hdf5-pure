@@ -136,7 +136,7 @@ impl WriteEngine {
         if path.split_leaf().is_none() {
             return Err(Error::EditUnsupported("cannot overwrite the root group"));
         }
-        let values = PreparedDataset::parse(builder)?
+        let values = PreparedDataset::parse(self.context.widths().lengths, builder)?
             .into_overwrite()?
             .into_widths(self.context.widths())?;
         self.staged
@@ -2124,7 +2124,8 @@ pub(super) fn flatten_dataset(
     db: DatasetBuilder,
     name: LinkNameBuf,
 ) -> Result<FlatDataset, Error> {
-    let InPlaceDataset { metadata, storage } = PreparedDataset::parse(db)?.into_in_place()?;
+    let InPlaceDataset { metadata, storage } =
+        PreparedDataset::parse(widths.lengths, db)?.into_in_place()?;
     let DatasetMetadata {
         dt,
         element_size: canonical_element_size,

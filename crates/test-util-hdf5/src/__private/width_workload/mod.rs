@@ -37,7 +37,7 @@ use crate::file_space::persisted::PersistedStrategy;
 /// The fixture contains dense group links and attributes, contiguous and chunked numeric
 /// datasets, variable-length strings, and scratch datasets for reclamation. Callers select
 /// the widths, series index, persistent space strategy, and series filtering independently.
-/// Unlimited series require eight-byte lengths.
+/// An Extensible Array series requires eight-byte lengths.
 ///
 /// # Examples
 ///
@@ -613,7 +613,7 @@ impl Phase {
     }
 }
 
-/// A length width that cannot encode the unlimited workload's maximum extent.
+/// A length width at which the writer indexes the unlimited series with a Fixed Array.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Unsupported {
     /// Requested length width.

@@ -247,7 +247,6 @@ enum AccessConflict {
 #[rstest]
 #[case::dimension(LengthFailure::Dimension)]
 #[case::maximum(LengthFailure::Maximum)]
-#[case::unlimited(LengthFailure::Unlimited)]
 fn staged_length_failures_preserve_published_content(
     #[case] failure: LengthFailure,
     #[values(LengthWidth::Two, LengthWidth::Four)] lengths: LengthWidth,
@@ -260,7 +259,6 @@ fn staged_length_failures_preserve_published_content(
     let (dimension, maximum, length) = match failure {
         LengthFailure::Dimension => (beyond, None, beyond),
         LengthFailure::Maximum => (1, Some(MaxExtent::Fixed(beyond)), beyond),
-        LengthFailure::Unlimited => (1, Some(MaxExtent::Unlimited), u64::MAX),
     };
     let file = File::create_with_options(
         &path,
@@ -311,10 +309,297 @@ fn staged_length_failures_preserve_published_content(
 }
 
 #[derive(Clone, Copy, Debug)]
+enum Emission {
+    Finish,
+    FinishTo,
+}
+
+#[rstest]
+#[case::one_two(
+    LengthWidth::Two,
+    &[3],
+    &[1024],
+    &[MaxExtent::Unlimited],
+    &[MaxExtent::Fixed(0xffff)]
+)]
+#[case::one_four(
+    LengthWidth::Four,
+    &[3],
+    &[1 << 20],
+    &[MaxExtent::Unlimited],
+    &[MaxExtent::Fixed(0xffff_ffff)]
+)]
+#[case::one_eight(
+    LengthWidth::Eight,
+    &[3],
+    &[1024],
+    &[MaxExtent::Unlimited],
+    &[MaxExtent::Unlimited]
+)]
+#[case::two_two(
+    LengthWidth::Two,
+    &[3, 4],
+    &[512, 512],
+    &[MaxExtent::Unlimited, MaxExtent::Unlimited],
+    &[MaxExtent::Fixed(0xffff), MaxExtent::Fixed(0xffff)]
+)]
+fn builders_store_an_unlimited_maximum_as_the_length_width_maximum(
+    #[case] lengths: LengthWidth,
+    #[case] shape: &[u64],
+    #[case] chunks: &[u64],
+    #[case] declared: &[MaxExtent],
+    #[case] stored: &[MaxExtent],
+    #[values(Emission::Finish, Emission::FinishTo)] emission: Emission,
+) {
+    let values: Vec<i32> = (0..i32::try_from(shape.iter().product::<u64>()).unwrap()).collect();
+    let mut builder = FileBuilder::new();
+    builder.with_create_properties(FileCreateProperties::new().with_length_width(lengths));
+    builder
+        .create_dataset("d")
+        .with_i32_data(&values)
+        .with_shape(shape)
+        .with_chunks(chunks)
+        .with_maxshape(declared);
+    let bytes = match emission {
+        Emission::Finish => builder.finish().unwrap(),
+        Emission::FinishTo => {
+            let mut bytes = Vec::new();
+            builder.finish_to(&mut bytes).unwrap();
+            bytes
+        }
+    };
+    let file = File::from_bytes(bytes).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.shape().unwrap(), shape);
+    assert_eq!(dataset.maxshape().unwrap(), Some(stored.to_vec()));
+    assert_eq!(dataset.read_i32().unwrap(), values);
+}
+
+#[rstest]
+#[case::one_two(
+    LengthWidth::Two,
+    &[3],
+    &[1024],
+    &[MaxExtent::Unlimited],
+    &[MaxExtent::Fixed(0xffff)]
+)]
+#[case::one_four(
+    LengthWidth::Four,
+    &[3],
+    &[1 << 20],
+    &[MaxExtent::Unlimited],
+    &[MaxExtent::Fixed(0xffff_ffff)]
+)]
+#[case::one_eight(
+    LengthWidth::Eight,
+    &[3],
+    &[1024],
+    &[MaxExtent::Unlimited],
+    &[MaxExtent::Unlimited]
+)]
+#[case::two_two(
+    LengthWidth::Two,
+    &[3, 4],
+    &[512, 512],
+    &[MaxExtent::Unlimited, MaxExtent::Unlimited],
+    &[MaxExtent::Fixed(0xffff), MaxExtent::Fixed(0xffff)]
+)]
+fn edits_store_an_unlimited_maximum_as_the_length_width_maximum(
+    #[case] lengths: LengthWidth,
+    #[case] shape: &[u64],
+    #[case] chunks: &[u64],
+    #[case] declared: &[MaxExtent],
+    #[case] stored: &[MaxExtent],
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unlimited.h5");
+    let values: Vec<i32> = (0..i32::try_from(shape.iter().product::<u64>()).unwrap()).collect();
+    let file = File::create_with_options(
+        &path,
+        FileCreateProperties::new().with_length_width(lengths),
+        FileAccessProperties::new(),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("d", |dataset| {
+            dataset
+                .with_i32_data(&values)
+                .with_shape(shape)
+                .with_chunks(chunks)
+                .with_maxshape(declared);
+        })
+        .unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().maxshape().unwrap(),
+        Some(stored.to_vec())
+    );
+    file.commit().unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().maxshape().unwrap(),
+        Some(stored.to_vec())
+    );
+    file.close().unwrap();
+    let reopened = File::open(&path).unwrap();
+    let dataset = reopened.dataset("d").unwrap();
+    assert_eq!(dataset.maxshape().unwrap(), Some(stored.to_vec()));
+    assert_eq!(dataset.read_i32().unwrap(), values);
+    drop(dataset);
+    reopened.close().unwrap();
+}
+
+// A Fixed Array slot for every chunk up to 0xffff_ffff, all but one unused, 8 bytes each.
+#[rstest]
+#[case::one_dimension(&[3], &[64], &[MaxExtent::Unlimited], 67_108_864, 536_870_904)]
+#[case::fixed_width_maximum(
+    &[3],
+    &[64],
+    &[MaxExtent::Fixed(0xffff_ffff)],
+    67_108_864,
+    536_870_904
+)]
+#[case::two_dimensions(
+    &[3, 4],
+    &[1 << 12, 1 << 12],
+    &[MaxExtent::Unlimited, MaxExtent::Unlimited],
+    1_099_511_627_776,
+    8_796_093_022_200
+)]
+fn maxima_at_the_four_byte_length_limit_reject_fine_chunks(
+    #[case] shape: &[u64],
+    #[case] chunks: &[u64],
+    #[case] declared: &[MaxExtent],
+    #[case] elements: u64,
+    #[case] unused_bytes: u64,
+) {
+    let mut builder = FileBuilder::new();
+    builder
+        .with_create_properties(FileCreateProperties::new().with_length_width(LengthWidth::Four));
+    builder
+        .create_dataset("d")
+        .with_i32_data(&vec![
+            0;
+            usize::try_from(shape.iter().product::<u64>()).unwrap()
+        ])
+        .with_shape(shape)
+        .with_chunks(chunks)
+        .with_maxshape(declared);
+    let error = builder.finish().unwrap_err();
+    let Error::Format(FormatError::ChunkedReadError(reason)) = &error else {
+        panic!("expected ChunkedReadError, got {error:?}");
+    };
+    assert_eq!(
+        *reason,
+        format!(
+            "at 4-byte lengths a maximum of 4294967295, the largest length the file holds and \
+             the one an unlimited dimension is stored as, needs a chunk index holding {elements} \
+             elements for 1 chunk(s) at this chunk shape, so {unused_bytes} bytes of it describe \
+             no chunk, past the 33554432 this writer will emit. Chunk the dimensions with that \
+             maximum more coarsely, or select eight-byte lengths for a dimension declared \
+             unlimited"
+        )
+    );
+}
+
+#[rstest]
+#[case::two(LengthWidth::Two, 0x1_0000, 1024)]
+#[case::four(LengthWidth::Four, 0x1_0000_0000, 1 << 20)]
+fn builders_reject_an_unlimited_dimension_whose_size_exceeds_the_length_width(
+    #[case] lengths: LengthWidth,
+    #[case] dimension: u64,
+    #[case] chunk: u64,
+) {
+    let mut builder = FileBuilder::new();
+    builder.with_create_properties(FileCreateProperties::new().with_length_width(lengths));
+    builder
+        .create_dataset("d")
+        .with_unallocated_storage(hdf5_pure::make_u8_type(), &[dimension])
+        .with_chunks(&[chunk])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    let error = builder.finish().unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::LengthTooLarge { length, length_size }) if length == dimension && length_size == lengths.get()),
+        "{error:?}"
+    );
+}
+
+#[rstest]
+#[case::two_committed(LengthWidth::Two, 1024, true)]
+#[case::two_staged(LengthWidth::Two, 1024, false)]
+#[case::four_committed(LengthWidth::Four, 1 << 20, true)]
+#[case::four_staged(LengthWidth::Four, 1 << 20, false)]
+fn appends_reach_the_length_width_maximum_of_an_unlimited_dimension(
+    #[case] lengths: LengthWidth,
+    #[case] chunk: u64,
+    #[case] committed: bool,
+) {
+    let maximum = u64::MAX >> (64 - 8 * lengths.get());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("append.h5");
+    let file = File::create_with_options(
+        &path,
+        FileCreateProperties::new().with_length_width(lengths),
+        FileAccessProperties::new(),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("d", |dataset| {
+            dataset
+                .with_unallocated_storage(hdf5_pure::make_u8_type(), &[maximum - 2])
+                .with_chunks(&[chunk])
+                .with_maxshape(&[MaxExtent::Unlimited]);
+        })
+        .unwrap();
+    if committed {
+        file.commit().unwrap();
+    }
+    let mut dataset = file.dataset("d").unwrap();
+    let error = if committed {
+        dataset.append(&[1_u8, 2]).unwrap();
+        assert_eq!(dataset.shape().unwrap(), [maximum]);
+        dataset.append(&[3_u8]).unwrap_err()
+    } else {
+        dataset
+            .append_staged(|append| {
+                append.append(&[1_u8, 2]);
+            })
+            .unwrap();
+        assert_eq!(dataset.shape().unwrap(), [maximum]);
+        dataset
+            .append_staged(|append| {
+                append.append(&[3_u8]);
+            })
+            .unwrap_err()
+    };
+    match (committed, &error) {
+        (true, Error::AppendInPlaceUnsupported(reason)) => {
+            assert_eq!(
+                *reason,
+                "append exceeds the dataset's maximum first dimension"
+            );
+        }
+        (false, Error::AppendUnsupported(reason)) => {
+            assert_eq!(
+                *reason,
+                "appending would grow the staged dataset past its maximum shape"
+            );
+        }
+        _ => panic!("expected the maximum shape to reject the append, got {error:?}"),
+    }
+    drop(dataset);
+    file.commit().unwrap();
+    file.close().unwrap();
+    let reopened = File::open(&path).unwrap();
+    let dataset = reopened.dataset("d").unwrap();
+    assert_eq!(dataset.shape().unwrap(), [maximum]);
+    assert_eq!(dataset.maxshape().unwrap(), None);
+    drop(dataset);
+    reopened.close().unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
 enum LengthFailure {
     Dimension,
     Maximum,
-    Unlimited,
 }
 
 #[rstest]

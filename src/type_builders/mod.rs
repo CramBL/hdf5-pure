@@ -3534,6 +3534,14 @@ impl DatasetBuilder {
     /// the unlimited size, `u64::MAX`, is rejected as well, since it is written
     /// as [`MaxExtent::Unlimited`].
     ///
+    /// With 2- or 4-byte lengths, the writer stores an unlimited dimension as
+    /// [`MaxExtent::Fixed`] at the largest length the file holds, `0xffff` or
+    /// `0xffff_ffff`, and the dataset reads back with that maximum. Only at
+    /// eight-byte lengths is a dataset limited to one unlimited dimension. A
+    /// chunk index has a slot for every chunk up to a fixed maximum, so a fine
+    /// chunk shape along such a dimension is rejected where the unused slots of
+    /// its index exceed the size the writer allows for them.
+    ///
     /// A dataset with a maximum shape is stored chunked, and a zero-element
     /// shape has no size to derive chunk dimensions from, so name them with
     /// [`with_chunks`](Self::with_chunks).

@@ -7,6 +7,7 @@ use hdf5_pure_core::__private::ElementCount;
 
 use crate::bytes;
 use crate::error::FormatError;
+use crate::width;
 use crate::width::LengthWidth;
 
 /// Type of dataspace.
@@ -179,7 +180,8 @@ impl Dataspace {
     ///
     /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, or
     /// [`FormatError::LengthTooLarge`] if a dimension or maximum dimension exceeds that width.
-    /// An unlimited maximum requires eight-byte lengths.
+    /// An unlimited maximum requires eight-byte lengths, and [`stored_max_extent`] returns the
+    /// maximum to store in its place at 2 and 4 bytes.
     pub fn serialize(&self, length_size: u8) -> Result<Vec<u8>, FormatError> {
         let length_width = LengthWidth::try_from(length_size)?;
         let mut buf = Vec::new();
@@ -306,12 +308,64 @@ impl<'a> Extent<'a> {
     }
 }
 
-// The maximum dimension size a dataspace message stores for a dimension that grows
-// without bound, the format's "unlimited size". libhdf5 defines `H5S_UNLIMITED` as
-// `HSIZE_UNDEF`, which is `UINT64_MAX` (`H5Spublic.h` and `H5public.h`, HDF5 2.2.0). A
-// message written with a narrower "Size of Lengths" cannot hold it: `H5O__sdspace_decode`
-// zero-extends the field it reads (`H5F_DECODE_LENGTH` in `H5Osdspace.c`, HDF5 2.2.0), so
-// only an eight-byte field decodes to this value.
+/// Returns the maxima a dataspace message with `length_width`-byte lengths stores for
+/// `max_dims`, each as [`stored_max_extent`] returns it.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if a dimension in `dims` exceeds `length_width`. The
+/// dimensions are checked first, since a dimension past the width also exceeds the maximum
+/// stored for an unlimited one.
+pub fn stored_max_dimensions(
+    length_width: LengthWidth,
+    dims: &[u64],
+    max_dims: Vec<MaxExtent>,
+) -> Result<Vec<MaxExtent>, FormatError> {
+    dims.iter()
+        .try_for_each(|&dim| bytes::require_length(dim, length_width))?;
+    Ok(max_dims
+        .into_iter()
+        .map(|max| stored_max_extent(length_width, max))
+        .collect())
+}
+
+/// Returns the maximum a dataspace message with `length_width`-byte lengths stores for `max`.
+///
+/// A fixed maximum, and any maximum at eight-byte lengths, is stored as it is. At 2- and 4-byte
+/// lengths an unlimited maximum is stored as [`MaxExtent::Fixed`] at the largest length the
+/// width holds, the value [`Dataspace::parse`] reads from an all-ones field of that width.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::{__private as format, LengthWidth, MaxExtent};
+///
+/// assert_eq!(
+///     format::stored_max_extent(LengthWidth::Four, MaxExtent::Unlimited),
+///     MaxExtent::Fixed(0xffff_ffff),
+/// );
+/// assert_eq!(
+///     format::stored_max_extent(LengthWidth::Eight, MaxExtent::Unlimited),
+///     MaxExtent::Unlimited,
+/// );
+/// ```
+pub fn stored_max_extent(length_width: LengthWidth, max: MaxExtent) -> MaxExtent {
+    match (length_width, max) {
+        (LengthWidth::Eight, _) | (_, MaxExtent::Fixed(_)) => max,
+        // libhdf5 reads the all-ones field back as this finite size and cannot open an extensible
+        // array over it (https://github.com/HDFGroup/hdf5/issues/6864).
+        (LengthWidth::Two | LengthWidth::Four, MaxExtent::Unlimited) => {
+            MaxExtent::Fixed(width::length_width_max(length_width))
+        }
+    }
+}
+
+// The maximum dimension size libhdf5 uses for a dimension that grows without bound:
+// `H5S_UNLIMITED` is `HSIZE_UNDEF`, which is `UINT64_MAX` (`H5Spublic.h` and `H5public.h`, HDF5
+// 2.2.0). `H5O__sdspace_encode` keeps its low "Size of Lengths" bytes and `H5O__sdspace_decode`
+// zero-extends them (`H5Osdspace.c`, and `H5_ENCODE_LENGTH_LEN` and `H5_DECODE_LENGTH_LEN` in
+// `H5encode.h`, HDF5 2.2.0), so only an eight-byte field decodes back to this value
+// (https://github.com/HDFGroup/hdf5/issues/6864).
 const UNLIMITED_LENGTH: u64 = u64::MAX;
 
 fn max_extent_from_length(length: u64) -> MaxExtent {

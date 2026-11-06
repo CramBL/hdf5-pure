@@ -132,7 +132,7 @@ impl PreparedDataset {
             metadata,
             mut storage,
             committed_datatype_targets: attr_committed_datatype_targets,
-        } = DatasetRequest::parse(db)?.into_whole_file()?;
+        } = DatasetRequest::parse(widths.lengths, db)?.into_whole_file()?;
         let DatasetMetadata {
             dt,
             element_size: canonical_element_size,
@@ -1432,14 +1432,18 @@ mod tests {
     use crate::width::OffsetWidth;
 
     #[rstest]
-    #[case::contiguous(false, false)]
-    #[case::fixed_array(true, false)]
-    #[case::extensible_array(true, true)]
+    #[case::contiguous_two(false, false, LengthWidth::Two)]
+    #[case::contiguous_four(false, false, LengthWidth::Four)]
+    #[case::contiguous_eight(false, false, LengthWidth::Eight)]
+    #[case::fixed_array_two(true, false, LengthWidth::Two)]
+    #[case::fixed_array_four(true, false, LengthWidth::Four)]
+    #[case::fixed_array_eight(true, false, LengthWidth::Eight)]
+    #[case::extensible_array_eight(true, true, LengthWidth::Eight)]
     fn lazy_payload_reads_begin_at_emission(
         #[case] chunked: bool,
         #[case] unlimited: bool,
+        #[case] lengths: LengthWidth,
         #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
-        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
     ) {
         let widths = FormatWidths { offsets, lengths };
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1481,17 +1485,6 @@ mod tests {
             LibVer::V110,
             super::super::HeaderOptions::PLAIN.with_widths(widths),
         );
-        if unlimited && lengths != LengthWidth::Eight {
-            assert_eq!(
-                measured.err().unwrap(),
-                FormatError::LengthTooLarge {
-                    length: u64::MAX,
-                    length_size: lengths.get()
-                }
-            );
-            assert_eq!(calls.load(Ordering::Relaxed), 0);
-            return;
-        }
         let measured = measured.unwrap();
         assert!(measured.header_len > 0);
         match measured.data.array.as_ref() {
