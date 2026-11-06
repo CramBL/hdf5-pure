@@ -95,17 +95,15 @@ fn group_inspection_reads_effective_policy(
         .map(|body| Message::new(MessageType::GROUP_INFO, body))
         .into_iter()
         .collect::<Vec<_>>();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("policy.h5");
-    std::fs::write(&path, group_info_bytes::file(&messages, version, userblock)).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend
+        .open_image(group_info_bytes::file(&messages, version, userblock))
+        .unwrap();
     assert_eq!(file.root().link_phase_change().unwrap(), expected);
     assert_eq!(
         file.group("child").unwrap().link_phase_change().unwrap(),
         expected
     );
     file.close().unwrap();
-    directory.close().unwrap();
 }
 
 #[rstest]
@@ -122,18 +120,13 @@ fn malformed_group_info_reports_its_format_error(
     #[case] expected: FormatError,
     #[values(ReadBackend::Bytes, ReadBackend::Source)] backend: ReadBackend,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("invalid-policy.h5");
-    std::fs::write(
-        &path,
-        group_info_bytes::file(
+    let file = backend
+        .open_image(group_info_bytes::file(
             &[Message::new(MessageType::GROUP_INFO, body)],
             HeaderVersion::V2,
             Userblock::Absent,
-        ),
-    )
-    .unwrap();
-    let file = backend.open(&path).unwrap();
+        ))
+        .unwrap();
     let error = file.root().link_phase_change().unwrap_err();
     let Error::Format(actual) = error else {
         panic!("expected Format, got {error:?}");
@@ -149,7 +142,6 @@ fn malformed_group_info_reports_its_format_error(
     };
     assert_eq!(actual, expected);
     file.close().unwrap();
-    directory.close().unwrap();
 }
 
 #[rstest]

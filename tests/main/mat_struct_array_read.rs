@@ -198,10 +198,8 @@ fn struct_array_into_single_struct_errors() {
 #[case::source(ReadBackend::Source)]
 #[case::streaming(ReadBackend::Streaming)]
 fn complete_struct_array_graph(#[case] backend: ReadBackend) {
-    let path = test_util::temp::temp_path("struct_array.mat");
     let bytes = mat_struct_array::struct_array();
-    std::fs::write(&path, &bytes).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(bytes.clone()).unwrap();
     test_util_hdf5::mat_struct_array::assert_contents(&file, &bytes);
     file.close().unwrap();
 }
@@ -212,10 +210,8 @@ fn complete_struct_array_graph(#[case] backend: ReadBackend) {
 #[case::source(ReadBackend::Source)]
 #[case::streaming(ReadBackend::Streaming)]
 fn complete_mismatched_struct_array_graph(#[case] backend: ReadBackend) {
-    let path = test_util::temp::temp_path("mismatched_struct_array.mat");
     let bytes = mat_struct_array::mismatched_struct_array();
-    std::fs::write(&path, &bytes).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(bytes.clone()).unwrap();
     test_util_hdf5::mat_struct_array::assert_mismatched_contents(&file, &bytes);
     file.close().unwrap();
 }

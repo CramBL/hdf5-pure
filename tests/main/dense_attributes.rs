@@ -27,16 +27,14 @@ fn independent_dense_attribute_files_have_complete_contents(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("dense_attributes.h5");
     let bytes = match fixture {
         Fixture::Dataset => test_util::dense_attributes::dense_attrs(),
         Fixture::Root => test_util::dense_attributes::dense_attrs_root(),
     };
-    std::fs::write(&path, &bytes).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(bytes.clone()).unwrap();
     dense_attributes::assert_contents(&file, fixture, DatatypeByteOrder::LittleEndian);
     dense_attributes::assert_storage(&file, &bytes, fixture, DatatypeByteOrder::LittleEndian);
-    drop(file);
+    file.close().unwrap();
 }
 
 #[rstest]

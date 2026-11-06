@@ -3,7 +3,6 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::{Error, File, FormatError, VlenStringReadOptions};
 
 use rstest::rstest;
-use test_util::temp;
 use test_util_hdf5::reader::ReadBackend;
 
 fn expected_names() -> Vec<String> {
@@ -23,9 +22,9 @@ fn vlen_dataset_read_and_size(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("vl_strings.h5");
-    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend
+        .open_image(test_util::legacy_attributes::vl_strings())
+        .unwrap();
     let dataset = file.dataset("names").unwrap();
 
     assert_eq!(dataset.vlen_string_payload_size().unwrap(), 15);
@@ -52,9 +51,9 @@ fn vlen_element_limit_is_checked_before_payload_read(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("vl_strings.h5");
-    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend
+        .open_image(test_util::legacy_attributes::vl_strings())
+        .unwrap();
     let dataset = file.dataset("names").unwrap();
     let error = dataset
         .read_vlen_strings(VlenStringReadOptions::new().with_max_elements(2))
@@ -79,9 +78,9 @@ fn vlen_payload_limit_reports_required_bytes(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("vl_strings.h5");
-    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend
+        .open_image(test_util::legacy_attributes::vl_strings())
+        .unwrap();
     let dataset = file.dataset("names").unwrap();
     let error = dataset
         .read_vlen_strings(VlenStringReadOptions::new().with_max_payload_bytes(14))
@@ -106,9 +105,9 @@ fn vlen_visitor_delivers_strings_in_order(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("vl_strings.h5");
-    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend
+        .open_image(test_util::legacy_attributes::vl_strings())
+        .unwrap();
     let dataset = file.dataset("names").unwrap();
     let mut names = Vec::new();
 

@@ -20,7 +20,6 @@ use test_util::object_header::Message;
 use test_util::object_header::MessageType;
 use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
-use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -44,15 +43,22 @@ fn malformed_chunks_are_rejected_before_cache_admission(
     #[values(Read::Whole, Read::Rows, Read::Region)] read: Read,
     #[values(false, true)] skipped: bool,
 ) {
-    let path = temp::temp_path("chunk.h5");
-    let bytes = chunk_file(Some(&stored), 2, skipped, 17);
-    std::fs::write(&path, &bytes).unwrap();
-    let file = match backend {
-        Backend::Cursor => {
-            File::from_source(ReadSeekSource::new(Cursor::new(bytes)).unwrap()).unwrap()
-        }
-        Backend::File(backend) => backend.open(&path).unwrap(),
-    };
+    let image = chunk_file(Some(&stored), 2, skipped, 17);
+    match backend {
+        Backend::Cursor => assert_rejected_before_cache_admission(
+            &File::from_source(ReadSeekSource::new(Cursor::new(image)).unwrap()).unwrap(),
+            &stored,
+            read,
+        ),
+        Backend::File(backend) => assert_rejected_before_cache_admission(
+            &backend.open_image(image).unwrap(),
+            &stored,
+            read,
+        ),
+    }
+}
+
+fn assert_rejected_before_cache_admission(file: &File, stored: &[u8], read: Read) {
     let dataset = file.dataset("d").unwrap();
     assert_eq!(
         dataset.chunks().unwrap()[0].storage_size,

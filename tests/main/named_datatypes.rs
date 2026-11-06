@@ -67,11 +67,9 @@ fn independent_identity_files_have_complete_contents(
     )]
     backend: ReadBackend,
 ) {
-    let path = test_util::temp::temp_path("identity.h5");
     let bytes = fixture.build();
-    std::fs::write(&path, &bytes).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(bytes.clone()).unwrap();
     identity::assert_contents(&file, fixture, DatatypeByteOrder::LittleEndian);
     identity::assert_storage(&file, &bytes, fixture);
-    drop(file);
+    file.close().unwrap();
 }
