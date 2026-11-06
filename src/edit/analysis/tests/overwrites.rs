@@ -25,6 +25,7 @@ use crate::FillTime;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::edit::WriteEngine;
 use crate::edit::analysis::heap::HeapReferenceError;
+use crate::edit::attributes::{self, AttrOp};
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
 use crate::global_heap::GlobalHeapId;
@@ -142,6 +143,16 @@ fn overwrite_candidates_preserve_original_values_before_either_commit_route(
         collection: PhysicalAddress::new(collection),
         index: 7.try_into().unwrap(),
     }]);
+    assert!(Arc::ptr_eq(
+        candidates
+            .observations
+            .as_ref()
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap(),
+        phase.identity.as_ref().unwrap(),
+    ));
     let facts = &candidates.observations.as_ref().unwrap().predecessors[&origin];
     assert_eq!(facts.objects, expected);
     assert!(facts.complete);
@@ -222,6 +233,52 @@ fn overwrite_candidates_preserve_original_values_before_either_commit_route(
         crate::edit::global_heap_liveness::DATASET_VALUE_WORK.with(|work| work.get()),
         1
     );
+    let region = WriteEngine::gather_oh_messages(
+        engine.image(),
+        PhysicalAddress::new(object),
+        engine.addresses(),
+        engine.widths(),
+    )
+    .unwrap();
+    let operations = [AttrOp::Remove {
+        name: "unchanged".into(),
+    }];
+    let edited = attributes::plan_attr_ops(
+        &engine.opened_source(),
+        &region,
+        &operations.iter().collect::<Vec<_>>(),
+    )
+    .unwrap();
+    candidates
+        .extend(
+            phase
+                .attribute_collections(super::object(object), edited.predecessors)
+                .unwrap(),
+        )
+        .unwrap();
+    let observations = candidates.observations.as_ref().unwrap();
+    assert_eq!(observations.predecessors.len(), 3);
+    assert!(Arc::ptr_eq(
+        observations.identity.as_ref().unwrap(),
+        phase.identity.as_ref().unwrap()
+    ));
+    assert_eq!(
+        observations.predecessors[&CollectionProvenance {
+            object: super::object(object),
+            content: CollectionContent::Attribute("unchanged".into()),
+        }]
+            .objects,
+        BTreeSet::from([GlobalHeapId {
+            collection: PhysicalAddress::new(collection),
+            index: 11.try_into().unwrap(),
+        }])
+    );
+    assert_eq!(
+        candidates.collections[&PhysicalAddress::new(collection)]
+            .origins
+            .len(),
+        3
+    );
     drop(phase);
     assert_eq!(engine.image.disk_bytes().unwrap(), original);
     assert!(engine.vl_overwrite_heaps.is_empty());
@@ -287,6 +344,16 @@ fn overwrite_candidates_preserve_unknown_or_partial_original_evidence(
     }
     let candidates = phase.overwrite_collections(&engine.staged).unwrap();
     assert!(candidates.collections.is_empty());
+    assert!(Arc::ptr_eq(
+        candidates
+            .observations
+            .as_ref()
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap(),
+        phase.identity.as_ref().unwrap()
+    ));
     let facts = &candidates.observations.as_ref().unwrap().predecessors[&CollectionProvenance {
         object: super::object(object),
         content: CollectionContent::DatasetValues,
@@ -351,6 +418,10 @@ fn overwrite_candidates_retain_unsupported_reference_interpretation() {
     let candidates = phase.overwrite_collections(&engine.staged).unwrap();
     assert!(candidates.collections.is_empty());
     let observations = candidates.observations.as_ref().unwrap();
+    assert!(Arc::ptr_eq(
+        observations.identity.as_ref().unwrap(),
+        phase.identity.as_ref().unwrap()
+    ));
     assert_eq!(observations.predecessors.len(), 1);
     let facts = &observations.predecessors[&CollectionProvenance {
         object: super::object(object),
@@ -423,6 +494,7 @@ fn overwrite_candidates_skip_reference_free_inputs(#[case] numeric: bool) {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(candidates.observations.is_none());
     assert!(candidates.collections.is_empty());
+    assert!(phase.identity.is_none());
     assert!(phase.value_references.is_empty());
     assert!(phase.allocations.is_empty());
     assert!(phase.references.is_empty());
