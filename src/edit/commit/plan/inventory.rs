@@ -1,7 +1,10 @@
-//! Original count and ownership observations paired with their prepared tree edits.
+//! Original count, ownership, and storage observations paired with prepared tree edits.
 //!
 //! The editor derives observations from the owned application inputs and retains them with the
 //! placed tree only after every placement and value write succeeds.
+
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_space::__private::FreeClass;
 
 use self::dispositions::{AppliedDispositions, ReconstructionDispositions};
 use super::{CommitPlan, OverwritePayloads, PreparedCommit, PreparedTree};
@@ -19,16 +22,20 @@ use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 
 pub(in crate::edit::commit) mod dispositions;
+pub(in crate::edit::commit) mod storage;
 
 /// Owns tree edits and the original observations derived from their deletion and copy inputs.
 ///
 /// The editor collects the observations in the same source phase as the tree plan. The caller
 /// preserves source freshness until application. The allocation session is checked separately.
+/// Original storage exclusions and captured reclamation spans stay paired with these inputs.
 pub(in crate::edit::commit) struct PreparedEditInventory {
     prepared: PreparedCommit,
     original: OriginalEdits,
     session: AllocationSession,
     dispositions: ReconstructionDispositions,
+    storage: storage::OriginalStorage,
+    reclamation: Result<Vec<(FileRange, FreeClass)>, Error>,
 }
 
 impl PreparedEditInventory {
@@ -55,10 +62,14 @@ impl PreparedEditInventory {
                     Some(OriginalPreparation {
                         original,
                         dispositions,
+                        storage,
+                        reclamation,
                     }) => InventoryPreparation::Tree(Self {
                         prepared,
                         original,
                         dispositions,
+                        storage,
+                        reclamation,
                         session: engine.context.allocations.session(),
                     }),
                     None => InventoryPreparation::InPlace(prepared),
@@ -73,6 +84,7 @@ impl PreparedEditInventory {
     /// Consumes the application inputs on success or failure. The caller handles rollback
     /// after a failure and publication after success. Predecessor classifications and placement
     /// reconciliation outcomes are retained independently of count and ownership qualification.
+    /// Consumes captured reclamation spans without repeating their original collection.
     ///
     /// # Errors
     ///
@@ -87,6 +99,8 @@ impl PreparedEditInventory {
             original,
             session,
             mut dispositions,
+            storage,
+            reclamation,
         } = self;
         if !session.same(&engine.context.allocations.session()) {
             return Err(FormatError::Internal(
@@ -104,13 +118,19 @@ impl PreparedEditInventory {
                 FormatError::Internal("a prepared edit inventory has no tree".into()).into(),
             );
         };
-        let tree =
-            engine.apply_tree_recording(&mut overwrites, tree, staged, Some(&mut dispositions))?;
+        let tree = engine.apply_tree_recording(
+            &mut overwrites,
+            tree,
+            staged,
+            Some(&mut dispositions),
+            Some(reclamation?),
+        )?;
         let dispositions = dispositions.finish(&tree);
         Ok(AppliedEditInventory {
             tree,
             original,
             dispositions,
+            storage,
         })
     }
 
@@ -142,11 +162,13 @@ pub(in crate::edit::commit) enum InventoryPreparation {
 /// A successfully placed tree paired with its prepared inputs' original observations.
 ///
 /// The editor constructs this pair after [`WriteEngine::apply_tree`] succeeds. Count writes,
-/// storage reuse, and publication require separate permission.
+/// storage reuse, and publication require separate permission. Original storage exclusions
+/// remain paired with the placed tree.
 pub(in crate::edit::commit) struct AppliedEditInventory {
     tree: AppliedTree,
     original: OriginalEdits,
     dispositions: AppliedDispositions,
+    storage: storage::OriginalStorage,
 }
 
 impl AppliedEditInventory {
@@ -165,29 +187,48 @@ impl AppliedEditInventory {
         &self.original
     }
 
-    /// Returns the placed tree, dropping its paired observations and dispositions.
+    /// Returns the placed tree, dropping its paired observations, dispositions, and storage evidence.
     pub(in crate::edit::commit) fn into_tree(self) -> AppliedTree {
         self.tree
     }
 }
 
-/// Count, ownership, and predecessor observations from the tree plan's source phase.
+/// Original observations, storage exclusions, and reclamation spans for one tree plan.
 pub(super) struct OriginalPreparation {
     original: OriginalEdits,
     dispositions: ReconstructionDispositions,
+    storage: storage::OriginalStorage,
+    reclamation: Result<Vec<(FileRange, FreeClass)>, Error>,
 }
 
 impl OriginalPreparation {
-    /// Collects count inputs and predecessor dispositions independently for the prepared tree.
+    /// Collects original observations and reclamation spans for the prepared tree.
+    ///
+    /// Moves deletion spans out of the tree into the captured reclamation input. Storage
+    /// exclusions are derived from these same observations and reclamation spans.
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
-        tree: &PreparedTree,
+        tree: &mut PreparedTree,
         staged: &StagedEdits,
     ) -> Self {
+        let original = OriginalEdits::collect(engine, phase, tree, staged);
+        let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
+        let reclamation =
+            engine.prepare_reclamation(&tree.groups, std::mem::take(&mut tree.deleted_free));
+        let storage = storage::OriginalStorage::collect(
+            engine,
+            phase,
+            tree,
+            &original,
+            &dispositions,
+            &reclamation,
+        );
         Self {
-            original: OriginalEdits::collect(engine, phase, tree, staged),
-            dispositions: ReconstructionDispositions::collect(engine, phase, tree),
+            original,
+            dispositions,
+            storage,
+            reclamation,
         }
     }
 }

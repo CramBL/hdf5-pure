@@ -97,13 +97,16 @@ impl WriteEngine {
         tree: PreparedTree,
         staged: StagedApply,
     ) -> Result<AppliedTree, Error> {
-        self.apply_tree_recording(overwrites, tree, staged, None)
+        self.apply_tree_recording(overwrites, tree, staged, None, None)
     }
 
     /// Places prepared objects and optionally records group and relocated-dataset placements.
     ///
     /// Records each event after successful placement. The caller reconciles the events against
     /// the returned tree after all placements and value writes succeed.
+    ///
+    /// Consumes captured reclamation spans when supplied. The caller passes spans collected
+    /// from this tree's original inputs. Otherwise, collects them before placement.
     ///
     /// # Errors
     ///
@@ -115,6 +118,7 @@ impl WriteEngine {
         tree: PreparedTree,
         staged: StagedApply,
         mut dispositions: Option<&mut ReconstructionDispositions>,
+        reclamation: Option<Vec<(FileRange, FreeClass)>>,
     ) -> Result<AppliedTree, Error> {
         let PreparedTree {
             mut groups,
@@ -156,7 +160,10 @@ impl WriteEngine {
                 .copies
                 .push((leaf, tree));
         }
-        let mut to_free = self.prepare_reclamation(&groups, deleted_free)?;
+        let mut to_free = match reclamation {
+            Some(reclamation) => reclamation,
+            None => self.prepare_reclamation(&groups, deleted_free)?,
+        };
         let mut tail_allocations = Vec::new();
         let base = self.context.addresses();
         let mut path_addr: BTreeMap<ObjectPathBuf, ObjectId> = BTreeMap::new();
@@ -329,7 +336,7 @@ impl WriteEngine {
     ///
     /// Returns an address-conversion error if an object-header span cannot be classified, or
     /// [`Error::EditUnsupported`] if a Link Info record extends past the gathered region.
-    fn prepare_reclamation(
+    pub(super) fn prepare_reclamation(
         &self,
         groups: &BTreeMap<ObjectPathBuf, Node>,
         deleted_free: Vec<(FileRange, FreeClass)>,
