@@ -38,100 +38,136 @@ fn matching_files_execute_bounded_metadata_operations(
 }
 
 #[rstest]
-#[case::version_one_truncated(AttributeVersion::One, 32, 68, true)]
-#[case::version_one_invalid_type(AttributeVersion::One, 32, 68, false)]
-#[case::version_one_valid(AttributeVersion::One, 32, 64, false)]
-#[case::version_two_truncated(AttributeVersion::Two, 26, 68, true)]
-#[case::version_two_invalid_type(AttributeVersion::Two, 26, 68, false)]
-#[case::version_two_valid(AttributeVersion::Two, 26, 64, false)]
-#[case::version_three_truncated(AttributeVersion::Three, 27, 68, true)]
-#[case::version_three_invalid_type(AttributeVersion::Three, 27, 68, false)]
-#[case::version_three_valid(AttributeVersion::Three, 27, 64, false)]
+#[case::version_one_truncated(AttributeCase {
+    version: AttributeVersion::One,
+    fields: AttributeFields::TruncatedDataspace,
+})]
+#[case::version_one_invalid_type(AttributeCase {
+    version: AttributeVersion::One,
+    fields: AttributeFields::InvalidDatatype,
+})]
+#[case::version_one_valid(AttributeCase {
+    version: AttributeVersion::One,
+    fields: AttributeFields::Valid,
+})]
+#[case::version_two_truncated(AttributeCase {
+    version: AttributeVersion::Two,
+    fields: AttributeFields::TruncatedDataspace,
+})]
+#[case::version_two_invalid_type(AttributeCase {
+    version: AttributeVersion::Two,
+    fields: AttributeFields::InvalidDatatype,
+})]
+#[case::version_two_valid(AttributeCase {
+    version: AttributeVersion::Two,
+    fields: AttributeFields::Valid,
+})]
+#[case::version_three_truncated(AttributeCase {
+    version: AttributeVersion::Three,
+    fields: AttributeFields::TruncatedDataspace,
+})]
+#[case::version_three_invalid_type(AttributeCase {
+    version: AttributeVersion::Three,
+    fields: AttributeFields::InvalidDatatype,
+})]
+#[case::version_three_valid(AttributeCase {
+    version: AttributeVersion::Three,
+    fields: AttributeFields::Valid,
+})]
 fn attribute_field_truncation_precedes_datatype_decoding(
-    #[case] version: AttributeVersion,
-    #[case] dataspace_at: usize,
-    #[case] precision: u16,
-    #[case] truncated: bool,
-    #[values(false, true)] dense: bool,
+    #[case] case: AttributeCase,
+    #[values(AttributeStorage::Compact, AttributeStorage::Dense)] storage: AttributeStorage,
     #[values(
-        ReadBackend::Buffered,
-        ReadBackend::Bytes,
-        ReadBackend::Source,
-        ReadBackend::Streaming
+        Check::Read(ReadBackend::Buffered),
+        Check::Read(ReadBackend::Bytes),
+        Check::Read(ReadBackend::Source),
+        Check::Read(ReadBackend::Streaming),
+        Check::ComparePathOpens
     )]
-    backend: ReadBackend,
+    check: Check,
 ) {
-    let mut datatype = datatype::header(datatype::Class::FIXED_POINT, 1, [0; 3], 8);
-    datatype.extend_from_slice(&0_u16.to_le_bytes());
-    datatype.extend_from_slice(&precision.to_le_bytes());
-    let scalar = dataspace::scalar();
-    let value = 42_u64.to_le_bytes();
-    let body = attribute::Attribute::new("value", &datatype, &scalar, &value);
-    let body = match version {
-        AttributeVersion::One => body,
-        AttributeVersion::Two => body.flags(attribute::Flags::NONE),
-        AttributeVersion::Three => body.character_set(0),
-    };
-    let mut body = body.build();
-    assert_eq!(&body[dataspace_at..dataspace_at + scalar.len()], scalar);
-    if truncated {
-        body[6..8].copy_from_slice(&4096_u16.to_le_bytes());
+    let body = case.body();
+    let image = storage.image(&body);
+    match check {
+        Check::ComparePathOpens => assert_eq!(
+            oracle::compare(&image),
+            Comparison::Opened {
+                groups: 1,
+                datasets: 0
+            },
+        ),
+        Check::Read(backend) => {
+            let file = backend.open_image(image).unwrap();
+            let actual = file.root().attrs().map_err(|error| match error {
+                Error::Format(error) => error,
+                error => panic!("expected an attribute format error, got {error:?}"),
+            });
+            assert_eq!(actual, case.expected(body.len()));
+            file.close().unwrap();
+        }
     }
-    let image = if dense {
-        test_util::dense_attributes::one_message(&body, Widths::EIGHT)
-    } else {
-        let header = Superblock::new(Widths::EIGHT);
-        let root_at = header.build().len();
-        let mut image = FileImage::starting_with(&header.build());
-        image.place(
-            root_at,
-            &v2::Header::new()
-                .message(Message::new(MessageType::ATTRIBUTE, &body))
-                .build(),
-        );
-        image.place(
-            0,
-            &header
-                .root_header_address(root_at as u64)
-                .eof_address(image.as_bytes().len() as u64)
-                .build(),
-        );
-        image.build()
-    };
-    let file = backend.open_image(image.clone()).unwrap();
-    let result = file.root().attrs();
-    if truncated || precision > 64 {
-        let expected = if truncated {
-            FormatError::UnexpectedEof {
-                expected: dataspace_at + 4096,
-                available: body.len(),
-            }
-        } else {
-            FormatError::InvalidFixedPointRange {
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AttributeCase {
+    version: AttributeVersion,
+    fields: AttributeFields,
+}
+
+impl AttributeCase {
+    fn body(self) -> Vec<u8> {
+        let Self { version, fields } = self;
+        let mut datatype = datatype::header(datatype::Class::FIXED_POINT, 1, [0; 3], 8);
+        datatype.extend_from_slice(&0_u16.to_le_bytes());
+        datatype.extend_from_slice(&fields.precision().to_le_bytes());
+        let scalar = dataspace::scalar();
+        let value = 42_u64.to_le_bytes();
+        let body = attribute::Attribute::new("value", &datatype, &scalar, &value);
+        let mut body = match version {
+            AttributeVersion::One => body,
+            AttributeVersion::Two => body.flags(attribute::Flags::NONE),
+            AttributeVersion::Three => body.character_set(0),
+        }
+        .build();
+        let dataspace_at = version.dataspace_offset();
+        assert_eq!(&body[dataspace_at..dataspace_at + scalar.len()], scalar);
+        if matches!(fields, AttributeFields::TruncatedDataspace) {
+            body[6..8].copy_from_slice(&4096_u16.to_le_bytes());
+        }
+        body
+    }
+
+    fn expected(self, body_len: usize) -> Result<HashMap<String, AttrValue>, FormatError> {
+        let Self { version, fields } = self;
+        match fields {
+            AttributeFields::InvalidDatatype => Err(FormatError::InvalidFixedPointRange {
                 size: 8,
                 bit_offset: 0,
-                bit_precision: precision,
-            }
-        };
-        let error = result.unwrap_err();
-        let Error::Format(actual) = error else {
-            panic!("expected an attribute format error, got {error:?}");
-        };
-        assert_eq!(actual, expected);
-    } else {
-        assert_eq!(
-            result.unwrap(),
-            HashMap::from([("value".into(), AttrValue::U64(42))])
-        );
+                bit_precision: fields.precision(),
+            }),
+            AttributeFields::TruncatedDataspace => Err(FormatError::UnexpectedEof {
+                expected: version.dataspace_offset() + 4096,
+                available: body_len,
+            }),
+            AttributeFields::Valid => Ok(HashMap::from([("value".into(), AttrValue::U64(42))])),
+        }
     }
-    file.close().unwrap();
-    assert_eq!(
-        oracle::compare(&image),
-        Comparison::Opened {
-            groups: 1,
-            datasets: 0
-        },
-    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AttributeFields {
+    InvalidDatatype,
+    TruncatedDataspace,
+    Valid,
+}
+
+impl AttributeFields {
+    fn precision(self) -> u16 {
+        match self {
+            Self::InvalidDatatype | Self::TruncatedDataspace => 68,
+            Self::Valid => 64,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +175,55 @@ enum AttributeVersion {
     One,
     Two,
     Three,
+}
+
+impl AttributeVersion {
+    fn dataspace_offset(self) -> usize {
+        match self {
+            Self::One => 32,
+            Self::Two => 26,
+            Self::Three => 27,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AttributeStorage {
+    Compact,
+    Dense,
+}
+
+impl AttributeStorage {
+    fn image(self, body: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Compact => {
+                let header = Superblock::new(Widths::EIGHT);
+                let root_at = header.build().len();
+                let mut image = FileImage::starting_with(&header.build());
+                image.place(
+                    root_at,
+                    &v2::Header::new()
+                        .message(Message::new(MessageType::ATTRIBUTE, body))
+                        .build(),
+                );
+                image.place(
+                    0,
+                    &header
+                        .root_header_address(root_at as u64)
+                        .eof_address(image.as_bytes().len() as u64)
+                        .build(),
+                );
+                image.build()
+            }
+            Self::Dense => test_util::dense_attributes::one_message(body, Widths::EIGHT),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Check {
+    ComparePathOpens,
+    Read(ReadBackend),
 }
 
 #[test]
