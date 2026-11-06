@@ -1,18 +1,23 @@
+use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use rstest::rstest;
 use test_util::datatype;
+use test_util::disk_log::{self, DiskOp};
 use test_util::object_header::{Message, MessageFlags, MessageType};
 use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
 use super::{EditInputError, InventoryPreparation, OriginalEdits, PreparedEditInventory};
 use crate::DatasetBuilder;
-use crate::edit::WriteEngine;
 use crate::edit::analysis::physical::claims::domain::{DomainUnavailable, OwnerDomain};
-use crate::edit::analysis::{AnalysisPhase, PlannedDeletion, ReconstructionSource};
-use crate::edit::commit::plan::CommitPlan;
+use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK, PlannedDeletion, ReconstructionSource};
+use crate::edit::commit::plan::{CommitPlan, CommitPreparation, PreparedCommit};
+use crate::edit::staging::StagedEdits;
 use crate::edit::test_util as edit_test_util;
+use crate::edit::{SyncPolicy, WriteEngine};
 use crate::error::{Error, FormatError};
+use crate::image::WriteBuffering;
 use crate::object_graph::ObjectId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::{
@@ -438,6 +443,107 @@ fn mixed_same_file_foreign_and_created_inputs_have_distinct_count_contributions(
         [target.header_address().get()]
     );
     assert_eq!(file.dataset("same").unwrap().read_f64().unwrap(), [17.0]);
+}
+
+#[test]
+fn copy_application_failure_preserves_source_bytes_through_rollback() {
+    let path = test_util::temp::temp_path("failed-application.h5");
+    fixture(&path, Target::Named(2));
+    let mut engine = edit_test_util::open_engine(&path);
+    let (_, source) = AnalysisPhase::new(&engine)
+        .topology()
+        .unwrap()
+        .find_link(&ObjectPathBuf::parse("source"))
+        .unwrap();
+    let original = WriteEngine::gather_oh_messages(
+        &engine.image(),
+        source.header_address(),
+        engine.addresses(),
+        engine.widths(),
+    )
+    .unwrap();
+    engine.set_sync_policy(SyncPolicy::Always);
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    engine
+        .copy(
+            &ObjectPathBuf::parse("source"),
+            &ObjectPathBuf::parse("first"),
+        )
+        .unwrap();
+    engine
+        .copy(
+            &ObjectPathBuf::parse("source"),
+            &ObjectPathBuf::parse("second"),
+        )
+        .unwrap();
+    let disk = engine.disk_bytes().unwrap();
+    let snapshot = engine.snapshot_free();
+    let root = engine.superblock().root_group_address;
+    let prepared = prepare(&mut engine);
+    disk_log::start();
+    disk_log::fail_write_after(1, 0);
+    let error = prepared.apply(&mut engine).err().unwrap();
+    disk_log::clear_failures();
+    let writes = disk_log::take();
+    let [DiskOp::Write { offset, .. }] = writes.as_slice() else {
+        panic!("expected one complete emitted header: {writes:?}");
+    };
+    assert!(*offset >= u64::try_from(disk.len()).unwrap());
+    let emitted = WriteEngine::gather_oh_messages(
+        &engine.image(),
+        PhysicalAddress::new(*offset),
+        engine.addresses(),
+        engine.widths(),
+    )
+    .unwrap();
+    assert_eq!(emitted.to_vec(), original.to_vec());
+    assert!(!engine.publication.attempted());
+    let error = engine.rollback_commit(snapshot, StagedEdits::default(), error);
+    let Error::Io(error) = error else {
+        panic!("unexpected application error: {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert_eq!(engine.superblock().root_group_address, root);
+    assert!(!engine.has_staged_edits());
+    assert_eq!(
+        engine.disk_bytes().unwrap().get(..disk.len()),
+        Some(disk.as_slice())
+    );
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.root().datasets().unwrap(), ["source"]);
+    assert_eq!(file.dataset("source").unwrap().read_f64().unwrap(), [17.0]);
+}
+
+#[test]
+fn ordinary_numeric_preparation_keeps_domain_and_count_discovery_lazy() {
+    let path = test_util::temp::temp_path("lazy-inventory.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("source").with_i32_data(&[11]);
+    builder.write(&path).unwrap();
+    let (mut engine, calls) = edit_test_util::open_counted_engine(&path);
+    engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
+    let staged = std::mem::take(&mut engine.staged);
+    DISCOVERY_WORK.with(|work| work.set((0, 0)));
+    calls.store(0, Ordering::Relaxed);
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(&mut engine, staged) else {
+        panic!("expected ordinary preparation");
+    };
+    assert_eq!(DISCOVERY_WORK.with(|work| work.get()), (0, 0));
+    let baseline = calls.load(Ordering::Relaxed);
+    assert!(baseline > 0);
+    drop(prepared);
+    engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
+    calls.store(0, Ordering::Relaxed);
+    let checked = prepare(&mut engine);
+    let owners = checked.original().owners().unwrap();
+    assert!(owners.facts().counts().changes().is_empty());
+    assert!(owners.facts().eligible_owners().is_empty());
+    assert_eq!(DISCOVERY_WORK.with(|work| work.get()), (1, 2));
+    assert!(calls.load(Ordering::Relaxed) > baseline);
 }
 
 fn original_source(original: &OriginalEdits) -> &ReconstructionSource {
