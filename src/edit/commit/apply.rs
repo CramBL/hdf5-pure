@@ -86,6 +86,8 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
+    /// Returns [`FormatError::Internal`] before placement if the staged cross-file copy count
+    /// or a destination differs from the prepared tree.
     /// Returns the reclamation, placement, serialization, or write error.
     fn apply_tree(
         &mut self,
@@ -112,12 +114,20 @@ impl WriteEngine {
             cross_copies: copies,
         } = staged;
         let mut flat = plan::group_by_parent(datasets);
-        debug_assert_eq!(
-            cross_copies.len(),
-            copies.len(),
-            "prepared copies match the consumed staged set"
-        );
-        for (CopyDestination { parent, leaf }, (_, tree)) in cross_copies.into_iter().zip(copies) {
+        if cross_copies.len() != copies.len() {
+            return Err(
+                FormatError::Internal("prepared copies differ from the staged set".into()).into(),
+            );
+        }
+        for (CopyDestination { parent, leaf }, (destination, tree)) in
+            cross_copies.into_iter().zip(copies)
+        {
+            if destination.name_under(&parent) != Some(&leaf) {
+                return Err(FormatError::Internal(
+                    "a prepared copy has a different destination".into(),
+                )
+                .into());
+            }
             groups
                 .get_mut(&parent)
                 .ok_or_else(|| FormatError::Internal("a prepared copy has no parent group".into()))?

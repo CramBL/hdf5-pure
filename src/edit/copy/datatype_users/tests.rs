@@ -264,6 +264,70 @@ fn copied_user_accumulation_retains_counts_on_overflow() {
     assert_eq!(users, BTreeMap::from([(address, NonZeroU64::MAX)]));
 }
 
+#[rstest]
+#[case::narrow(OffsetWidth::Two)]
+#[case::wide(OffsetWidth::Eight)]
+fn foreign_copies_qualify_zero_users_at_their_source_width(#[case] offsets: OffsetWidth) {
+    let widths = FormatWidths {
+        offsets,
+        lengths: LengthWidth::Eight,
+    };
+    let mut builder = CopyTreeBuilder::default();
+    builder.push(CopyNode::DatasetVerbatim {
+        region: OhRegion::new(widths, Vec::new(), ObjectHeaderPrefix::PLAIN),
+        dense_attrs: DenseAttrSet::default(),
+    });
+    let tree = builder.finish(CopyNode::DatasetVerbatim {
+        region: OhRegion::new(
+            widths,
+            v2::message_records(
+                &[Message::new(MessageType::DATATYPE, &datatype::f64_le())],
+                HeaderFlags::default(),
+            ),
+            ObjectHeaderPrefix::PLAIN,
+        ),
+        dense_attrs: DenseAttrSet::new(
+            widths,
+            vec![dense_attribute("numeric", None)],
+            DenseAttrCreationOrder::Untracked,
+            [],
+        )
+        .unwrap(),
+    });
+    tree.require_foreign_datatype_users_absent().unwrap();
+    assert_eq!(counts(&tree.datatype_users(widths).unwrap().unwrap()), []);
+}
+
+#[rstest]
+#[case::shared_type(shared_datatype(&datatype::committed_reference(900)), "a shared (committed/SOHM) object-header message cannot be copied to another file yet")]
+#[case::unknown_record(Message::new(MessageType(0xfe), &[]), "a foreign copy has an incomplete datatype inventory")]
+fn foreign_copy_qualification_rejects_unclassified_or_committed_descendants(
+    #[case] message: Message,
+    #[case] expected: &str,
+) {
+    let mut builder = CopyTreeBuilder::default();
+    builder.push(node(vec![message], Vec::new()));
+    let tree = builder.finish(node(Vec::new(), Vec::new()));
+    let error = tree.require_foreign_datatype_users_absent().unwrap_err();
+    let Error::EditUnsupported(reason) = error else {
+        panic!("unexpected qualification error: {error:?}");
+    };
+    assert_eq!(reason, expected);
+}
+
+#[test]
+fn foreign_copy_qualification_rejects_committed_dense_attribute_types() {
+    let tree = tree(Vec::new(), vec![dense_attribute("shared", Some(900))]);
+    let error = tree.require_foreign_datatype_users_absent().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::EditUnsupported("a foreign copy retains a committed datatype")
+        ),
+        "{error:?}"
+    );
+}
+
 fn counts(users: &CopiedDatatypeUsers<'_>) -> Vec<(u64, u64)> {
     users
         .users()

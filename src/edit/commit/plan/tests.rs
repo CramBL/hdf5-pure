@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use rstest::rstest;
+use test_util::disk_log;
 
 use super::CommitPlan;
 use super::CommitPreparation;
@@ -27,7 +28,7 @@ use crate::edit::analysis::RECONSTRUCTION_WORK;
 use crate::edit::dataset::MovingWrite;
 use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::type_builders::DatasetBuilder;
@@ -676,4 +677,50 @@ fn i32_dataset(values: &[i32]) -> DatasetBuilder {
 enum Replacement {
     Fixed,
     VariableLength,
+}
+
+#[rstest]
+#[case::missing(false)]
+#[case::wrong_destination(true)]
+fn late_cross_copy_mismatch_is_rejected_before_placement(#[case] wrong_destination: bool) {
+    let path = test_util::temp::temp_path("mismatched-input.h5");
+    let foreign_path = test_util::temp::temp_path("mismatched-source.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("source").with_i32_data(&[11]);
+    builder.write(&path).unwrap();
+    std::fs::copy(&path, &foreign_path).unwrap();
+    let foreign = File::open(&foreign_path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .copy_from(
+            &foreign,
+            &ObjectPathBuf::parse("source"),
+            &ObjectPathBuf::parse("foreign"),
+        )
+        .unwrap();
+    drop(foreign);
+    let staged = std::mem::take(&mut engine.staged);
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(&mut engine, staged) else {
+        panic!("expected preparation");
+    };
+    let mut prepared = prepared;
+    if wrong_destination {
+        prepared.staged.cross_copies[0].0 = ObjectPathBuf::parse("other");
+    } else {
+        prepared.staged.cross_copies.clear();
+    }
+    disk_log::start();
+    let error = engine.apply_commit(prepared).unwrap_err();
+    assert!(disk_log::take().is_empty());
+    let Error::Format(FormatError::Internal(reason)) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(
+        reason,
+        if wrong_destination {
+            "a prepared copy has a different destination"
+        } else {
+            "prepared copies differ from the staged set"
+        }
+    );
 }
