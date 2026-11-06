@@ -1,6 +1,5 @@
 use hdf5_pure::DatatypeByteOrder;
 use rstest::rstest;
-use test_util::temp;
 use test_util_hdf5::huge_links;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -14,11 +13,9 @@ fn independent_huge_links_have_complete_contents(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("huge_links.h5");
     let bytes = test_util::modern::huge_links_12();
-    std::fs::write(&path, &bytes).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(bytes.clone()).unwrap();
     huge_links::assert_contents(&file, DatatypeByteOrder::LittleEndian);
     huge_links::assert_storage(&file, &bytes);
-    drop(file);
+    file.close().unwrap();
 }

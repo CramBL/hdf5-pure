@@ -36,10 +36,7 @@ fn assert_root_address_overflow(err: Error) {
 #[case::bytes(ReadBackend::Bytes)]
 #[case::source(ReadBackend::Source)]
 fn root_address_overflow_is_reported_when_navigation_resolves_it(#[case] backend: ReadBackend) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("overflowing-base-address.h5");
-    std::fs::write(&path, overflowing_root_address_file()).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(overflowing_root_address_file()).unwrap();
     assert_eq!(file.superblock().base_address.get(), 512);
     assert_eq!(file.superblock().root_group_address.get(), u64::MAX);
     assert_root_address_overflow(file.group("/").unwrap_err());
@@ -76,10 +73,7 @@ fn opening_reports_eof_relocation_arithmetic_failure(
             .eof_address(stored_eof)
             .build(),
     );
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("invalid-eof-relocation.h5");
-    std::fs::write(&path, image).unwrap();
-    let error = backend.open(&path).unwrap_err();
+    let error = backend.open_image(image).unwrap_err();
     let Error::Format(format_error) = error else {
         panic!("expected a format error, got {error:?}");
     };

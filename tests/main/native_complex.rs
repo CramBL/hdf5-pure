@@ -31,10 +31,7 @@ fn native_complex_public_inspection_preserves_type_and_extent(
     )]
     backend: ReadBackend,
 ) {
-    let path = temp::temp_path("native_complex.h5");
-    let image = container.file(component);
-    std::fs::write(&path, &image).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(container.file(component)).unwrap();
     let dataset = file.dataset("values").unwrap();
     let expected = datatype(component, container);
     assert_eq!(dataset.datatype().unwrap(), expected);
@@ -64,7 +61,7 @@ fn native_complex_public_inspection_preserves_type_and_extent(
     assert!(dataset.attrs().unwrap().is_empty());
     assert!(file.root().attrs().unwrap().is_empty());
     drop(dataset);
-    drop(file);
+    file.close().unwrap();
 }
 
 #[rstest]

@@ -98,9 +98,7 @@ fn attribute_field_truncation_precedes_datatype_decoding(
         );
         image.build()
     };
-    let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-    std::fs::write(&path, &image).unwrap();
-    let file = backend.open(&path).unwrap();
+    let file = backend.open_image(image.clone()).unwrap();
     let result = file.root().attrs();
     if truncated || precision > 64 {
         let expected = if truncated {
