@@ -8,6 +8,7 @@ use test_util::disk_log::{self, DiskOp};
 use test_util::object_header::{Message, MessageFlags, MessageType};
 use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
+use super::storage::StorageOrigin;
 use super::{EditInputError, InventoryPreparation, OriginalEdits, PreparedEditInventory};
 use crate::DatasetBuilder;
 use crate::edit::analysis::physical::claims::domain::{DomainUnavailable, OwnerDomain};
@@ -73,6 +74,11 @@ fn actual_prepared_inputs_determine_original_counts(
             .collect::<Vec<_>>()
     );
     assert!(facts.eligible_owners().is_empty());
+    if original.is_some() {
+        assert!(prepared.storage().allocations().iter().any(|allocation| {
+            matches!(allocation.origin, StorageOrigin::Owner { object, .. } if object == target)
+        }));
+    }
     assert_eq!(
         original_source(prepared.original()).object(),
         ObjectId::new(PhysicalAddress::new(Fixture::ROOT))

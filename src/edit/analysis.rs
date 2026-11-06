@@ -1349,8 +1349,8 @@ struct AnalysisWork {
 std::thread_local! {
     pub(in crate::edit) static DISCOVERY_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     pub(in crate::edit) static RECONSTRUCTION_WORK: Cell<usize> = const { Cell::new(0) };
-    static COLLECTION_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static COLLECTION_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    pub(in crate::edit) static COLLECTION_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    pub(in crate::edit) static COLLECTION_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
 #[cfg(test)]
