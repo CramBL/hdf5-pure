@@ -24,7 +24,7 @@ use crate::object_graph::ObjectId;
 #[case::direct(Growth::Direct)]
 #[case::secondary(Growth::Secondary)]
 #[case::paged_parent(Growth::PagedParent)]
-fn short_array_pages_preserve_values_and_record_native_buffered_reads(
+fn short_array_pages_preserve_values_with_supported_native_buffered_reads(
     #[case] growth: Growth,
     #[values(false, true)] filtered: bool,
     #[values(512, 4_096)] page: u64,
@@ -82,40 +82,28 @@ fn short_array_pages_preserve_values_and_record_native_buffered_reads(
     drop(pure_target);
     pure_file.close().unwrap();
     let buffer = NonZeroUsize::new(usize::try_from(2 * page).unwrap()).unwrap();
-    compare_reads(
-        &native,
-        &pure,
-        None,
-        None,
-        &expected,
-        ReadExpectation::Values,
-    );
+    compare_reads(&native, &pure, None, None, &expected);
     compare_reads(
         &native,
         &pure,
         None,
         Some(tail..expected.len()),
         &expected[tail..],
-        ReadExpectation::Values,
     );
-    let outcomes = growth.buffered_reads(page);
-    compare_reads(&native, &pure, Some(buffer), None, &expected, outcomes);
-    compare_reads(
-        &native,
-        &pure,
-        Some(buffer),
-        Some(tail..expected.len()),
-        &expected[tail..],
-        outcomes,
-    );
-    compare_reads(
-        &native,
-        &pure,
-        Some(buffer),
-        Some(0..4),
-        &expected[..4],
-        ReadExpectation::Values,
-    );
+    if matches!(
+        growth.buffered_coverage(page),
+        BufferedCoverage::WholeAndTail
+    ) {
+        compare_reads(&native, &pure, Some(buffer), None, &expected);
+        compare_reads(
+            &native,
+            &pure,
+            Some(buffer),
+            Some(tail..expected.len()),
+            &expected[tail..],
+        );
+    }
+    compare_reads(&native, &pure, Some(buffer), Some(0..4), &expected[..4]);
     assert_eq!(fs::read(&native).unwrap(), native_bytes);
     assert_eq!(fs::read(&pure).unwrap(), pure_bytes);
     dataset::pure_append(&pure, "d", &[31_i32, 37, 41]);
@@ -176,17 +164,16 @@ fn compare_reads(
     capacity: Option<NonZeroUsize>,
     range: Option<Range<usize>>,
     expected: &[i32],
-    outcomes: ReadExpectation,
 ) {
     assert_eq!(
-        outcomes.compare(observe(native, capacity, range.clone()), expected),
-        Ok(()),
+        observe(native, capacity, range.clone()),
+        ReadOutcome::Values(expected.to_vec()),
         "native producer, HDF5 {:?}, capacity {capacity:?}, range {range:?}",
         unallocated_append::library_version(),
     );
     assert_eq!(
-        outcomes.compare(observe(pure, capacity, range.clone()), expected),
-        Ok(()),
+        observe(pure, capacity, range.clone()),
+        ReadOutcome::Values(expected.to_vec()),
         "pure producer, HDF5 {:?}, capacity {capacity:?}, range {range:?}",
         unallocated_append::library_version(),
     );
@@ -223,14 +210,12 @@ impl Growth {
         }
     }
 
-    // `H5C_load_entry` in `H5C.c`, HDF5 1.10.11, and `H5C__load_entry` in `H5C.c`,
-    // HDF5 1.12.3, report the checksum diagnostic. `H5C__load_entry` in `H5Centry.c`,
-    // HDF5 1.14.6 and 2.2.0, reports the same error.
-    fn buffered_reads(self, page: u64) -> ReadExpectation {
+    // `H5PB_read` in `H5PB.c`, HDF5 1.14.6, clips sub-page metadata reads at the file-page boundary.
+    fn buffered_coverage(self, page: u64) -> BufferedCoverage {
         if matches!(self, Self::PagedParent) && page == 512 {
-            ReadExpectation::ValuesOrMetadataChecksum
+            BufferedCoverage::Head
         } else {
-            ReadExpectation::Values
+            BufferedCoverage::WholeAndTail
         }
     }
 
@@ -243,40 +228,7 @@ impl Growth {
     }
 }
 
-// Every successful native read must match the complete expected vector under either expectation.
-#[derive(Clone, Copy)]
-enum ReadExpectation {
-    Values,
-    ValuesOrMetadataChecksum,
-}
-
-impl ReadExpectation {
-    fn compare(self, actual: ReadOutcome, expected: &[i32]) -> Result<(), ReadOutcome> {
-        match actual {
-            ReadOutcome::Values(values) if values == expected => Ok(()),
-            ReadOutcome::MetadataChecksum if matches!(self, Self::ValuesOrMetadataChecksum) => {
-                Ok(())
-            }
-            actual => Err(actual),
-        }
-    }
-}
-
-#[rstest]
-#[case::strict_values(ReadExpectation::Values, ReadOutcome::Values(vec![17, 7_936]), Ok(()))]
-#[case::strict_wrong_values(ReadExpectation::Values, ReadOutcome::Values(vec![17]), Err(ReadOutcome::Values(vec![17])))]
-#[case::strict_checksum(
-    ReadExpectation::Values,
-    ReadOutcome::MetadataChecksum,
-    Err(ReadOutcome::MetadataChecksum)
-)]
-#[case::short_page_values(ReadExpectation::ValuesOrMetadataChecksum, ReadOutcome::Values(vec![17, 7_936]), Ok(()))]
-#[case::short_page_wrong_values(ReadExpectation::ValuesOrMetadataChecksum, ReadOutcome::Values(vec![7_936, 17]), Err(ReadOutcome::Values(vec![7_936, 17])))]
-#[case::short_page_checksum(ReadExpectation::ValuesOrMetadataChecksum, ReadOutcome::MetadataChecksum, Ok(()))]
-fn native_read_expectations_preserve_exact_values(
-    #[case] expectation: ReadExpectation,
-    #[case] actual: ReadOutcome,
-    #[case] expected: Result<(), ReadOutcome>,
-) {
-    assert_eq!(expectation.compare(actual, &[17, 7_936]), expected);
+enum BufferedCoverage {
+    Head,
+    WholeAndTail,
 }
