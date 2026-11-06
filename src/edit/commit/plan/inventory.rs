@@ -23,6 +23,7 @@ use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 
 pub(in crate::edit::commit) mod dispositions;
+pub(in crate::edit::commit) mod members;
 pub(in crate::edit::commit) mod prospective;
 pub(in crate::edit::commit) mod storage;
 

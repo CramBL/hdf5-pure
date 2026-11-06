@@ -10,6 +10,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, FreeClass, RetainedKind};
 
 use super::dispositions::{AppliedDispositions, Disposition, ReconstructionDispositions};
+use super::members::MemberDecisions;
 use super::prospective::ProspectiveCollections;
 use super::{AppliedEditInventory, OriginalEdits, PreparedEditInventory};
 use crate::edit::WriteEngine;
@@ -19,11 +20,13 @@ use crate::edit::analysis::heap::qualification::{
 use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::physical::claims::{ClaimOrigin, ClaimProblem};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
+use crate::edit::commit::heap;
+use crate::edit::commit::heap::HeapMutationFailure;
 use crate::edit::commit::plan::PreparedTree;
 use crate::edit::commit::publish::{AppliedTree, PublicationError, PublishedTree};
 use crate::edit::dataset::MovingWrite;
 use crate::edit::retirement::PendingRootFrees;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 
 /// Owned original allocations and parent observations associated with one source phase.
@@ -365,7 +368,8 @@ impl PreparedEditInventory {
 /// checks allocator and retirement ranges against original storage and retains the outcome.
 /// With original candidates, the editor decodes heap references in a new phase after application
 /// and retains root-applicability failures independently of reference interpretation.
-/// The caller establishes mutation permission separately.
+/// [`Self::publish_compacting_members`] derives member removal permission from these observations.
+/// Other completion callbacks require independently established mutation permission.
 pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     engine: &'a mut WriteEngine,
     original: OriginalEdits,
@@ -435,7 +439,7 @@ impl<'a> PendingEditInventory<'a> {
     /// [`StoragePublicationFailure::Publication`] with the retained observations and error if
     /// publication or completion fails. The caller handles rollback according to publication state.
     pub(in crate::edit::commit) fn publish_with_completion<T>(
-        mut self,
+        self,
         complete: impl FnOnce(
             PublishedTree<'_>,
             &OriginalEdits,
@@ -445,6 +449,31 @@ impl<'a> PendingEditInventory<'a> {
             &ProspectiveCollections,
         ) -> Result<T, Error>,
     ) -> Result<T, Box<StoragePublicationFailure<'a>>> {
+        self.publish_with_observations(complete)
+            .map(|(value, _, _)| value)
+    }
+
+    /// Retains owned collection observations after successful publication and completion.
+    ///
+    /// Uses the publication and error contract of [`Self::publish_with_completion`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoragePublicationFailure::BeforePublication`] if placement reconciliation or
+    /// exclusion checks fail, or [`StoragePublicationFailure::Publication`] if publication or
+    /// completion fails.
+    fn publish_with_observations<T>(
+        mut self,
+        complete: impl FnOnce(
+            PublishedTree<'_>,
+            &OriginalEdits,
+            &AppliedDispositions,
+            &OriginalStorage,
+            &OriginalCollections,
+            &ProspectiveCollections,
+        ) -> Result<T, Error>,
+    ) -> Result<(T, OriginalCollections, ProspectiveCollections), Box<StoragePublicationFailure<'a>>>
+    {
         let reason = if self.dispositions.replacements().is_err() {
             Some(StoragePublicationRejection::Placement)
         } else {
@@ -472,8 +501,11 @@ impl<'a> PendingEditInventory<'a> {
             relocations,
             exclusion: _,
         } = self;
-        engine
-            .publish_pending_tree_excluding(pending, relocations, Some(&storage), |published| {
+        let result = engine.publish_pending_tree_excluding(
+            pending,
+            relocations,
+            Some(&storage),
+            |published| {
                 complete(
                     published,
                     &original,
@@ -483,17 +515,73 @@ impl<'a> PendingEditInventory<'a> {
                     &prospective,
                 )
                 .map_err(PublicationError::from)
-            })
-            .map_err(|error| {
-                Box::new(StoragePublicationFailure::Publication {
-                    original,
-                    dispositions,
-                    storage,
-                    collections,
-                    prospective,
-                    error,
-                })
-            })
+            },
+        );
+        match result {
+            Ok(value) => Ok((value, collections, prospective)),
+            Err(error) => Err(Box::new(StoragePublicationFailure::Publication {
+                original,
+                dispositions,
+                storage,
+                collections,
+                prospective,
+                error,
+            })),
+        }
+    }
+
+    /// Derives qualified removals from the owned original and fresh prospective observations.
+    pub(in crate::edit::commit) fn member_decisions(&self) -> MemberDecisions {
+        MemberDecisions::collect(&self.collections, &self.prospective, &self.storage)
+    }
+
+    /// Publishes the protected tree before compacting qualified global heap members.
+    ///
+    /// Derives plans from the owned original and prospective observations and checks publication
+    /// and prospective root associations against the pending root. The writer preserves each
+    /// parent allocation and applies the plans through [`heap::after_publication`].
+    ///
+    /// Returns the final adopted root and EOA with the observations and decisions. A heap
+    /// mutation failure is recorded in [`MemberCompletion::mutation`] after publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoragePublicationFailure::BeforePublication`] if placement reconciliation or
+    /// storage exclusion checks fail. Returns [`StoragePublicationFailure::Publication`] if
+    /// publication fails or a root association is incompatible.
+    pub(in crate::edit::commit) fn publish_compacting_members(
+        self,
+    ) -> Result<MemberCompletion, Box<StoragePublicationFailure<'a>>> {
+        let decisions = self.member_decisions();
+        let requested_root = self.pending.root;
+        let ((root, end, mutation), collections, prospective) =
+            self.publish_with_observations(|published, _, _, _, _, prospective| {
+                if published.requested_root() != requested_root
+                    || prospective
+                        .root()
+                        .is_some_and(|root| root != requested_root)
+                {
+                    return Err(FormatError::Internal(
+                        "heap decisions belong to another published tree".into(),
+                    )
+                    .into());
+                }
+                let root = published.root();
+                let end = published.end();
+                Ok((
+                    root,
+                    end,
+                    heap::after_publication(published, decisions.plans()),
+                ))
+            })?;
+        Ok(MemberCompletion {
+            collections,
+            prospective,
+            decisions,
+            root,
+            end,
+            mutation,
+        })
     }
 
     /// Borrows heap references and root-applicability outcomes collected after application.
@@ -531,6 +619,24 @@ impl<'a> PendingEditInventory<'a> {
     ) -> Result<(), StorageConflict> {
         self.storage.check_end(end)
     }
+}
+
+/// Owned observations and mutation outcome after successful protected tree publication.
+///
+/// The final root and EOA are retained even if heap compaction fails.
+pub(in crate::edit::commit) struct MemberCompletion {
+    /// Original qualification and collection framing used for member decisions.
+    pub(in crate::edit::commit) collections: OriginalCollections,
+    /// Fresh reference observations used to determine removal eligibility.
+    pub(in crate::edit::commit) prospective: ProspectiveCollections,
+    /// Member, parent, and planning outcomes used for this completion.
+    pub(in crate::edit::commit) decisions: MemberDecisions,
+    /// The final adopted root after tree publication.
+    pub(in crate::edit::commit) root: PhysicalAddress,
+    /// The final published EOA.
+    pub(in crate::edit::commit) end: PhysicalAddress,
+    /// The compaction result, including the completed prefix and allocation state on failure.
+    pub(in crate::edit::commit) mutation: Result<(), HeapMutationFailure>,
 }
 
 /// The inputs or observations retained after a failed constrained tree publication.

@@ -6,6 +6,7 @@ use test_util_hdf5::file;
 use test_util_hdf5::global_heap::attributes;
 
 use crate::edit::commit::heap;
+use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
 use crate::edit::test_util as edit_test_util;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
@@ -53,6 +54,57 @@ fn native_readers_observe_preserved_records_after_protected_compaction(#[case] s
         })
         .unwrap();
     heap::rootless(&mut engine, &[plan]).unwrap();
+    drop(engine);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(native.attr_names().unwrap(), ["second"]);
+    assert_eq!(
+        attributes::ascii_values(&native.attr("second").unwrap()),
+        ["right"]
+    );
+    assert_eq!(
+        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        [7, 11, 13, 17]
+    );
+    native.close().unwrap();
+}
+
+#[rstest]
+#[case::unbuffered(false)]
+#[case::session(true)]
+fn native_source_members_compact_through_checked_publication(#[case] session: bool) {
+    let path = test_util::temp::temp_path("native-checked-heap-compaction.h5");
+    assert!(heap_members::write(&path, false).is_none());
+    let original = std::fs::read(&path).unwrap();
+    let ranges = global_heap::collection_ranges(&original, Widths::EIGHT);
+    assert_eq!(ranges.len(), 1);
+    let parent = PhysicalAddress::new(ranges[0].start);
+    let mut engine = edit_test_util::open_engine(&path);
+    engine.set_sync_policy(SyncPolicy::OnClose);
+    engine
+        .set_write_buffering(if session {
+            WriteBuffering::Session {
+                page_size: 4096,
+                max_bytes: 1_000_000,
+            }
+        } else {
+            WriteBuffering::Unbuffered
+        })
+        .unwrap();
+    engine
+        .remove_group_attr(&ObjectPathBuf::root(), "first")
+        .unwrap();
+    let staged = std::mem::take(&mut engine.staged);
+    let InventoryPreparation::Tree(prepared) = PreparedEditInventory::prepare(&mut engine, staged)
+    else {
+        panic!("expected checked tree preparation");
+    };
+    let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
+    assert!(pending.prospective().is_complete());
+    assert_eq!(pending.member_decisions().plans().len(), 1);
+    let completion = pending.publish_compacting_members().ok().unwrap();
+    completion.mutation.unwrap();
+    assert_eq!(completion.decisions.plans()[0].range().start(), parent);
+    assert_eq!(completion.decisions.plans()[0].retained(), 1);
     drop(engine);
     let native = file::libhdf5_open(&path);
     assert_eq!(native.attr_names().unwrap(), ["second"]);
