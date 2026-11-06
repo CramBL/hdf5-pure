@@ -283,8 +283,7 @@ pub fn header_offsets(bytes: &[u8]) -> Vec<usize> {
 /// decided the file should have one.
 #[track_caller]
 fn header_at(bytes: &[u8]) -> usize {
-    *header_offsets(bytes)
-        .first()
+    bytes::find_signature(bytes, SIGNATURE)
         .expect("a dense attribute or link set has a fractal heap header")
 }
 
