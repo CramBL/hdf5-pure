@@ -149,7 +149,8 @@ fn storage_uses_only_count_eligible_objects_and_keeps_retained_reference_roots(
         .collect::<Vec<_>>();
     let plan = phase.net_count_plan(&deletions, &added).unwrap().unwrap();
     let work = DISCOVERY_WORK.with(Cell::get);
-    let storage = plan.collect_storage();
+    let facts = plan.original_owners(&engine).unwrap();
+    let storage = facts.storage();
     assert_eq!(DISCOVERY_WORK.with(Cell::get), work);
     assert!(storage.same_session(&engine));
     assert!(storage.shares_phase(plan.source().unwrap()));
@@ -181,10 +182,46 @@ fn storage_uses_only_count_eligible_objects_and_keeps_retained_reference_roots(
         _ => vec![],
     };
     assert_eq!(storage.reference_roots(), roots);
+    let retired = if matches!(
+        scenario,
+        Scenario::Excess | Scenario::Cycle | Scenario::NamedType
+    ) {
+        vec![]
+    } else if scenario == Scenario::Outside {
+        vec![id(owner + offset)]
+    } else {
+        vec![id(owner + offset), id(child + offset)]
+    };
+    assert_eq!(facts.eligible_owners(), retired);
+    let counts = facts
+        .counts()
+        .changes()
+        .iter()
+        .map(|change| {
+            (
+                change.object(),
+                change.original().value(),
+                change.remaining(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut expected_counts = match scenario {
+        Scenario::Excess | Scenario::Cycle => vec![(id(owner + offset), 2, 1)],
+        Scenario::NamedType => vec![(id(owner + offset), 1, 0)],
+        Scenario::Outside => vec![(id(owner + offset), 1, 0), (id(child + offset), 3, 1)],
+        Scenario::BrokenCycle => vec![(id(owner + offset), 2, 0), (id(child + offset), 2, 0)],
+        _ => vec![(id(owner + offset), 1, 0), (id(child + offset), 2, 0)],
+    };
+    if scenario == Scenario::Root {
+        expected_counts.insert(0, (id(Fixture::ROOT + offset), 2, 1));
+    }
+    assert_eq!(counts, expected_counts);
     drop(plan);
     drop(phase);
     assert_eq!(storage.allocations(), expected);
     assert_eq!(storage.reference_roots(), roots);
+    assert_eq!(facts.eligible_owners(), retired);
+    assert_eq!(facts.counts().changes().len(), expected_counts.len());
     let mut other_phase = AnalysisPhase::new(&engine);
     let other_source = other_phase
         .reconstruction_source(&engine, storage.root().unwrap())
@@ -318,10 +355,15 @@ fn storage_preserves_dense_indexes_when_heap_ownership_is_unproven(#[case] damag
         .deletion(&ObjectPathBuf::parse("data"))
         .unwrap();
     let plan = phase.net_count_plan([&deletion], &added).unwrap().unwrap();
-    let storage = plan.collect_storage();
+    let facts = plan.original_owners(&engine).unwrap();
+    let storage = facts.storage();
     assert_eq!(storage.allocations(), expected);
     assert!(storage.reference_roots().is_empty());
     assert_eq!(plan.removals().unwrap().counted_zero_objects().count(), 1);
+    assert_eq!(
+        facts.eligible_owners(),
+        [id(u64::try_from(headers[0]).unwrap())]
+    );
     assert!(engine.space.reusable_sections().next().is_none());
     drop(plan);
     drop(phase);

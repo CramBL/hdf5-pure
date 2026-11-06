@@ -22,6 +22,8 @@ use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
 
+pub(super) mod original;
+
 impl<'source> AnalysisPhase<'source> {
     /// Plans declared net counts for supplied copy users and original hard-link removals.
     ///
