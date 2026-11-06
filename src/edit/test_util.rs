@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 
 use hdf5_pure_core::__private::ByteLength;
@@ -298,6 +299,34 @@ pub(in crate::edit) fn open_counted_engine_with_bytes(
     })
     .unwrap();
     (engine, calls)
+}
+
+/// Opens a fixture without metadata caching and records requested image-read ranges.
+///
+/// Records reads during opening and requests [`FileLocking::Enabled`].
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be opened for editing.
+pub(in crate::edit) fn open_observed_engine(
+    path: &Path,
+    reads: Arc<Mutex<Vec<FileRange>>>,
+) -> WriteEngine {
+    WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
+        Ok(Box::new(
+            CountingImage::new(
+                Box::new(HandleImage::new(
+                    handle,
+                    len,
+                    MetadataCacheConfig::disabled(),
+                )),
+                Arc::default(),
+                Arc::default(),
+            )
+            .with_read_ranges(reads),
+        ))
+    })
+    .unwrap()
 }
 
 /// Deletes `g` after checking its reclaim plan against its subtree's allocations.

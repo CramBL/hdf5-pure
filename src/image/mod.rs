@@ -64,6 +64,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
 use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
@@ -1579,6 +1581,8 @@ pub(crate) struct CountingImage {
     /// Optional maximum requested read length, including failed requests.
     read_peak: Option<Arc<AtomicU64>>,
     syncs: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Optional requested read ranges, recorded before the inner read.
+    reads: Option<Arc<Mutex<Vec<FileRange>>>>,
 }
 
 #[cfg(test)]
@@ -1594,6 +1598,7 @@ impl CountingImage {
             read_calls: None,
             read_peak: None,
             syncs,
+            reads: None,
         }
     }
 
@@ -1614,6 +1619,14 @@ impl CountingImage {
         self
     }
 
+    /// Enables recording representable [`Source::read_at`] request ranges in `reads`.
+    ///
+    /// Records ranges before the inner read, including failed and empty reads.
+    pub(crate) fn with_read_ranges(mut self, reads: Arc<Mutex<Vec<FileRange>>>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
     fn count_sync(&self) {
         self.syncs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1627,6 +1640,12 @@ impl Source for CountingImage {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+        if let Some(reads) = &self.reads {
+            reads.lock().unwrap().push(FileRange::new(
+                PhysicalAddress::new(offset),
+                buf.len().to_u64(),
+            )?);
+        }
         if let Some(peak) = &self.read_peak {
             peak.fetch_max(buf.len() as u64, Ordering::Relaxed);
         }
