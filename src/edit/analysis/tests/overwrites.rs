@@ -221,7 +221,7 @@ fn overwrite_candidates_preserve_original_values_before_either_commit_route(
         1
     );
     drop(phase);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(engine.image.disk_bytes().unwrap(), original);
     assert!(engine.vl_overwrite_heaps.is_empty());
     let root = engine.superblock().root_group_address;
     engine.commit().unwrap();
