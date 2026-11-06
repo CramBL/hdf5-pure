@@ -36,6 +36,7 @@ use super::super::CollectionProvenance;
 use crate::FileLocking;
 use crate::MemoryStrategy;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::CollectionContent;
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
 use crate::edit::object_header;
@@ -160,7 +161,7 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
             predecessor.collection_allocation(range.start()).unwrap(),
             [CollectionProvenance {
                 object: ObjectId::new(PhysicalAddress::new(owner)),
-                attribute: Some("a0".into()),
+                content: CollectionContent::Attribute("a0".into()),
             }],
         )
         .unwrap();

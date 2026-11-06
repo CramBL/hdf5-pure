@@ -19,6 +19,7 @@ use super::HeapReferenceError;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::COLLECTION_ALLOCATIONS;
 use crate::edit::analysis::COLLECTION_WORK;
+use crate::edit::analysis::CollectionContent;
 use crate::edit::analysis::CollectionProvenance;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
@@ -286,7 +287,7 @@ fn reference_completeness_and_failures_remain_cached(#[case] input: ReferenceInp
         assert_eq!(observations.predecessors.len(), 1);
         let facts = &observations.predecessors[&CollectionProvenance {
             object: source.object(),
-            attribute: None,
+            content: CollectionContent::Object,
         }];
         assert_eq!(facts.objects(), &expected);
         assert!(facts.is_complete());

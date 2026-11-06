@@ -18,6 +18,7 @@ use super::super::{
 };
 use crate::data_layout::DataLayout;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::CollectionContent;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
 use crate::global_heap::GlobalHeapId;
@@ -71,7 +72,7 @@ fn phase_reuses_adjacency_and_reference_summaries(#[case] topology_first: bool) 
         candidate.origins,
         BTreeSet::from([CollectionProvenance {
             object: ObjectId::new(PhysicalAddress::new(dataset)),
-            attribute: None,
+            content: CollectionContent::Object,
         }])
     );
     assert_eq!(COLLECTION_WORK.with(Cell::get), (3, 3));
@@ -95,7 +96,9 @@ fn candidate_union_preserves_origins_and_reuses_complete_liveness() {
     let engine = edit_test_util::open_engine(&path);
     let provenance = |attribute: Option<&str>| CollectionProvenance {
         object: ObjectId::new(PhysicalAddress::new(survivor)),
-        attribute: attribute.map(String::from),
+        content: attribute.map_or(CollectionContent::Object, |name| {
+            CollectionContent::Attribute(name.into())
+        }),
     };
     let mut candidates = CollectionCandidates::default();
     let first_allocation = allocation(&engine, PhysicalAddress::new(first)).unwrap();
@@ -155,7 +158,7 @@ fn incomplete_references_do_not_retire_absent_collections_or_invalidate_topology
             allocation(&engine, PhysicalAddress::new(collection)).unwrap(),
             [CollectionProvenance {
                 object: ObjectId::new(PhysicalAddress::new(unknown)),
-                attribute: None,
+                content: CollectionContent::Object,
             }],
         )
         .unwrap();
@@ -476,7 +479,7 @@ fn undefined_hard_link_addresses_do_not_become_physical_references() {
 fn origin(object: u64) -> CollectionProvenance {
     CollectionProvenance {
         object: ObjectId::new(PhysicalAddress::new(object)),
-        attribute: None,
+        content: CollectionContent::Object,
     }
 }
 
