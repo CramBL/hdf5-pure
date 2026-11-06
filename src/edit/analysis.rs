@@ -33,6 +33,7 @@ use self::heap::CollectionContents;
 use self::heap::HeapReferenceError;
 use self::ownership::ObjectOwnership;
 use self::physical::PhysicalStorage;
+use self::physical::claims::PhysicalClaims;
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::GlobalHeapLiveness;
@@ -79,7 +80,7 @@ pub(in crate::edit) mod ownership;
 )]
 pub(in crate::edit) mod physical;
 
-/// Lazy topology, object-count, reference, and allocation queries for unchanged source contents.
+/// Lazy topology, object-count, reference, and storage queries for one source phase.
 ///
 /// Queries borrow the engine for the phase. The caller establishes source consistency and starts
 /// a new phase after relevant source writes. Owned count metadata can be retained after the phase
@@ -105,6 +106,8 @@ pub(super) struct AnalysisPhase<'a> {
     ownership: BTreeMap<ObjectId, ObjectOwnership>,
     /// Local file framing, recorded metadata capacity, and cached problems.
     physical: Option<PhysicalStorage>,
+    /// Physical range claims with their origins and independent support outcomes.
+    claims: Option<PhysicalClaims>,
     #[cfg(test)]
     candidate_lookups: u64,
 }
@@ -124,6 +127,7 @@ impl<'a> AnalysisPhase<'a> {
             counts: BTreeMap::new(),
             ownership: BTreeMap::new(),
             physical: None,
+            claims: None,
             #[cfg(test)]
             candidate_lookups: 0,
         }
@@ -184,6 +188,7 @@ impl<'a> AnalysisPhase<'a> {
             counts: _,
             ownership: _,
             physical: _,
+            claims: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -492,6 +497,7 @@ impl<'a> AnalysisPhase<'a> {
             counts: _,
             ownership: _,
             physical: _,
+            claims: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;
@@ -562,6 +568,7 @@ impl<'a> AnalysisPhase<'a> {
             counts: _,
             ownership: _,
             physical: _,
+            claims: _,
             candidate_lookups,
         } = self;
         let topology = topology.as_ref().and_then(Option::as_ref);

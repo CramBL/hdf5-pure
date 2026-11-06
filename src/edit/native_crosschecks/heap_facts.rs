@@ -11,6 +11,7 @@ use crate::PhysicalAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::physical::claims::ClaimOrigin;
 use crate::edit::test_util as edit_test_util;
 use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
@@ -96,6 +97,18 @@ fn native_heap_members_are_distinct_from_root_reference_completeness(#[case] ext
     } else {
         assert_eq!(missing, []);
     }
+    let expected_length = contents.range().length();
+    let claims = phase.physical_claims(&source).unwrap();
+    assert_eq!(claims.root(), Some(root));
+    assert_eq!(
+        claims
+            .claims()
+            .iter()
+            .filter(|claim| claim.origin() == ClaimOrigin::Heap(collection))
+            .map(|claim| (claim.range().start(), claim.range().length()))
+            .collect::<Vec<_>>(),
+        [(collection, expected_length)]
+    );
     drop(phase);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), original);

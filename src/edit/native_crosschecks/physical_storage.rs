@@ -5,6 +5,7 @@ use test_util_hdf5::file_space_oracle;
 use test_util_hdf5::page_managers;
 
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::physical::claims::ClaimOrigin;
 use crate::edit::analysis::physical::{CapacityKind, FileStorageKind};
 use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
@@ -108,6 +109,41 @@ fn native_file_storage_matches_framing_and_owned_manager_capacity(#[case] paged:
     } else {
         assert!(facts.metadata_capacity().is_empty());
     }
+    let expected_metadata = facts
+        .metadata_capacity()
+        .iter()
+        .copied()
+        .enumerate()
+        .collect::<Vec<_>>();
+    let expected_capacity = facts
+        .non_live()
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (index, entry.range(), entry.kind()))
+        .collect::<Vec<_>>();
+    let claims = phase.physical_claims(&source).unwrap();
+    assert_eq!(
+        claims
+            .claims()
+            .iter()
+            .filter_map(|claim| match claim.origin() {
+                ClaimOrigin::MetadataCapacity(index) => Some((index, claim.range())),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        expected_metadata
+    );
+    assert_eq!(
+        claims
+            .claims()
+            .iter()
+            .filter_map(|claim| match claim.origin() {
+                ClaimOrigin::NonLive { index, kind } => Some((index, claim.range(), kind)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        expected_capacity
+    );
     drop(phase);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), original);
