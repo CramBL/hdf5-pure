@@ -21,6 +21,14 @@ use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
 
+mod compaction;
+
+pub use compaction::GlobalHeapCompaction;
+pub use compaction::GlobalHeapFreeSpace;
+pub use compaction::GlobalHeapMemberCollector;
+pub use compaction::GlobalHeapMembers;
+pub use compaction::GlobalHeapMove;
+
 /// The position of a global heap collection and the width of its length fields.
 ///
 /// The caller reads the bytes of the range [`parse_range`](Self::parse_range) returns and passes
@@ -143,6 +151,13 @@ pub struct GlobalHeapCollection {
 }
 
 impl GlobalHeapCollection {
+    /// Starts collecting member metadata from object headers in physical order.
+    ///
+    /// See [`GlobalHeapMembers::compact`] for an example.
+    pub fn collect_members(&self) -> GlobalHeapMemberCollector {
+        GlobalHeapMemberCollector::new(*self)
+    }
+
     /// Starts a lookup of the object at `index`, at the first object header.
     pub fn lookup(&self, index: NonZeroU16) -> GlobalHeapLookup {
         GlobalHeapLookup {
