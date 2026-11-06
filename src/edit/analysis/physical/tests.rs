@@ -3,9 +3,14 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::{ByteLength, FileRange, NonZeroByteLength};
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_core::SuperblockVersion;
+use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
+use hdf5_pure_space::__private::{
+    AGGREGATE_BLOCK_SIZE, AllocationClass, Extent, FreeClass, ManagerKind, PageTransition,
+    PageType, RetainedKind, SessionSpace,
+};
 use rstest::rstest;
 use test_util::bytes;
 use test_util::checksum;
@@ -18,8 +23,9 @@ use test_util::superblock::v0;
 use test_util::superblock::v2;
 use test_util::widths::Widths;
 
-use super::{FileStorageKind, FileStorageRange, StorageProblem};
+use super::{CapacityKind, CapacityRange, FileStorageKind, FileStorageRange, StorageProblem};
 use crate::address::{StoredAddress, StoredAddressExt};
+use crate::edit::aggregation::AggregateSpace;
 use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK};
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
@@ -68,6 +74,7 @@ fn file_framing_preserves_versions_widths_and_source_bounds(
     ));
     assert_eq!(ranges, expected);
     assert!(facts.metadata_capacity().is_empty());
+    assert!(facts.non_live().is_empty());
     let before = calls.load(Ordering::Relaxed);
     assert!(before > 0);
     assert_eq!(
@@ -238,6 +245,10 @@ fn manager_framing_retains_allocated_capacity_and_failed_outcomes(#[case] outsid
                 .iter()
                 .any(|range| range.start().get() == list_at && range.length() == allocated)
         );
+        assert_eq!(
+            capacity_tuples(facts.non_live()),
+            [(6_144, 256, CapacityKind::Reusable(FreeClass::Dead))]
+        );
     }
     let before = calls.load(Ordering::Relaxed);
     assert_eq!(
@@ -245,6 +256,169 @@ fn manager_framing_retains_allocated_capacity_and_failed_outcomes(#[case] outsid
         usize::from(outside)
     );
     assert_eq!(calls.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn page_capacity_preserves_recorded_classes_and_boundaries() {
+    let path = test_util::temp::temp_path("physical-held-capacity.h5");
+    FileFixture::new(SuperblockVersion::Three, Widths::EIGHT, 512).write(&path, None);
+    let mut engine = edit_test_util::open_engine(&path);
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(128),
+        FileSpacePageSize::MIN,
+        [
+            (Some(ManagerKind::PagedSmallMetadata), extent(2_048, 256)),
+            (Some(ManagerKind::PagedSmallRaw), extent(3_072, 256)),
+            (None, extent(4_096, 64)),
+        ],
+    )
+    .unwrap();
+    engine.space.record_freed(
+        StoredAddress::new(8_192),
+        extent(5_120, 128),
+        FreeClass::Dead,
+    );
+    engine.space.record_page_padding(PageTransition::Pad {
+        extent: extent(6_144, 32),
+        track_as: Some(PageType::Raw),
+    });
+    engine.space.record_page_padding(PageTransition::Pad {
+        extent: extent(7_168, 16),
+        track_as: Some(PageType::Meta),
+    });
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase
+        .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(512 + ROOT)))
+        .unwrap();
+    let facts = phase.physical_storage(&source).unwrap();
+    assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+    assert_eq!(
+        capacity_tuples(facts.non_live()),
+        [
+            (
+                2_560,
+                256,
+                CapacityKind::Reusable(FreeClass::Page(PageType::Meta))
+            ),
+            (
+                3_584,
+                256,
+                CapacityKind::Reusable(FreeClass::Page(PageType::Raw))
+            ),
+            (5_632, 128, CapacityKind::Retained(RetainedKind::Dead)),
+            (
+                4_608,
+                64,
+                CapacityKind::Retained(RetainedKind::Unclassified)
+            ),
+            (
+                7_680,
+                16,
+                CapacityKind::Retained(RetainedKind::Padding(PageType::Meta))
+            ),
+            (
+                6_656,
+                32,
+                CapacityKind::Retained(RetainedKind::Padding(PageType::Raw))
+            ),
+        ]
+    );
+}
+
+#[rstest]
+#[case::metadata(AllocationClass::Metadata, false)]
+#[case::raw(AllocationClass::Raw, false)]
+#[case::both(AllocationClass::Metadata, true)]
+fn aggregate_capacity_preserves_classes_and_exact_spare_ranges(
+    #[case] first: AllocationClass,
+    #[case] both: bool,
+) {
+    let path = test_util::temp::temp_path("physical-aggregate-capacity.h5");
+    FileFixture::new(SuperblockVersion::Three, Widths::EIGHT, 512).write(&path, None);
+    let mut engine = edit_test_util::open_engine(&path);
+    let mut aggregate = AggregateSpace::new(StoredAddress::new(8_192));
+    aggregate
+        .reserve_with(
+            engine.widths().offsets,
+            engine.addresses(),
+            NonZeroByteLength::new(16).unwrap(),
+            first,
+            |_eoa, _extent| false,
+        )
+        .unwrap();
+    let mut expected = vec![(8_192 + 16, AGGREGATE_BLOCK_SIZE - 16, first)];
+    if both {
+        aggregate
+            .reserve_with(
+                engine.widths().offsets,
+                engine.addresses(),
+                NonZeroByteLength::new(24).unwrap(),
+                AllocationClass::Raw,
+                |_eoa, _extent| false,
+            )
+            .unwrap();
+        expected.push((
+            8_192 + AGGREGATE_BLOCK_SIZE + 24,
+            AGGREGATE_BLOCK_SIZE - 24,
+            AllocationClass::Raw,
+        ));
+    }
+    assert_eq!(
+        aggregate
+            .unused()
+            .map(|extent| (extent.start().get(), extent.len().get()))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|&(address, length, _class)| (address, length))
+            .collect::<Vec<_>>()
+    );
+    engine.aggregation = Some(aggregate);
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase
+        .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(512 + ROOT)))
+        .unwrap();
+    let facts = phase.physical_storage(&source).unwrap();
+    assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+    assert_eq!(
+        capacity_tuples(facts.non_live()),
+        expected
+            .into_iter()
+            .map(|(address, length, class)| (address + 512, length, CapacityKind::Aggregate(class)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn capacity_address_failures_preserve_other_recorded_ranges() {
+    let path = test_util::temp::temp_path("physical-capacity-address.h5");
+    FileFixture::new(SuperblockVersion::Three, Widths::EIGHT, 512).write(&path, None);
+    let mut engine = edit_test_util::open_engine(&path);
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::FsmAggr),
+        ByteLength::new(1),
+        FileSpacePageSize::MIN,
+        [
+            (None, extent(2_048, 64)),
+            (None, extent(u64::MAX - 511, 16)),
+        ],
+    )
+    .unwrap();
+    let mut phase = AnalysisPhase::new(&engine);
+    let source = phase
+        .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(512 + ROOT)))
+        .unwrap();
+    let facts = phase.physical_storage(&source).unwrap();
+    assert_eq!(
+        capacity_tuples(facts.non_live()),
+        [(2_560, 64, CapacityKind::Reusable(FreeClass::Dead))]
+    );
+    assert!(
+        matches!(facts.problems(), [StorageProblem::Address(FormatError::OffsetOverflow { offset, length: 512 })] if *offset == u64::MAX - 511),
+        "{:?}",
+        facts.problems()
+    );
 }
 
 #[rstest]
@@ -423,6 +597,97 @@ fn file_storage_queries_read_no_payload_or_residual_bytes() {
         allocation::measure("physical_file_payload_control", || vec![0_u8; 1_048_576]);
     assert_eq!(payload.len(), 1_048_576);
     assert!(positive.bytes >= 1_048_576);
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[rstest]
+#[case::one_page(1)]
+#[case::million_pages(1_000_000)]
+fn compact_capacity_queries_bound_source_reads_and_allocations(#[case] pages: u64) {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use test_util::allocation;
+
+    let path = test_util::temp::temp_path("physical-capacity-resources.h5");
+    let length = FileSpacePageSize::MIN.get() * pages;
+    let mut fixture = FileFixture::new(SuperblockVersion::Three, Widths::EIGHT, 0);
+    fixture.physical = 4_096 + length;
+    fixture.logical = fixture.physical;
+    fixture.write(&path, None);
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let (mut engine, calls) =
+        edit_test_util::open_counted_engine_with_bytes(&path, Arc::clone(&read_bytes));
+    engine.space = SessionSpace::from_persisted(
+        Some(FileSpaceStrategy::Page),
+        ByteLength::new(1),
+        FileSpacePageSize::MIN,
+        [(Some(ManagerKind::PagedLargeGeneric), extent(4_096, length))],
+    )
+    .unwrap();
+    calls.store(0, Ordering::Relaxed);
+    read_bytes.store(0, Ordering::Relaxed);
+    let (mut phase, empty) =
+        allocation::measure("physical_empty_phase", || AnalysisPhase::new(&engine));
+    assert_eq!((empty.blocks, empty.bytes), (0, 0));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let source = phase
+        .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(ROOT)))
+        .unwrap();
+    let ((), measured) = allocation::measure("physical_capacity_query", || {
+        let facts = phase.physical_storage(&source).unwrap();
+        assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+        assert_eq!(facts.non_live().len(), 1);
+        assert_eq!(facts.non_live()[0].range().length(), length);
+    });
+    assert!(
+        measured.blocks > 0
+            && measured.bytes > 0
+            && measured.bytes < 16_384
+            && measured.peak_bytes < 16_384
+            && measured.live_bytes < 16_384,
+        "{measured}"
+    );
+    let before = (
+        calls.load(Ordering::Relaxed),
+        read_bytes.load(Ordering::Relaxed),
+    );
+    assert!(
+        before.0 > 0 && before.0 < 8 && before.1 > 0 && before.1 < 256,
+        "{before:?}"
+    );
+    let ((), cached) = allocation::measure("physical_cached_capacity", || {
+        assert_eq!(phase.physical_storage(&source).unwrap().non_live().len(), 1);
+    });
+    assert_eq!((cached.blocks, cached.bytes), (0, 0));
+    assert_eq!(
+        (
+            calls.load(Ordering::Relaxed),
+            read_bytes.load(Ordering::Relaxed)
+        ),
+        before
+    );
+    let (payload, positive) =
+        allocation::measure("physical_payload_control", || vec![0_u8; 1_048_576]);
+    assert_eq!(payload.len(), 1_048_576);
+    assert!(positive.bytes >= 1_048_576);
+}
+
+fn capacity_tuples(ranges: &[CapacityRange]) -> Vec<(u64, u64, CapacityKind)> {
+    ranges
+        .iter()
+        .map(|entry| {
+            (
+                entry.range().start().get(),
+                entry.range().length(),
+                entry.kind(),
+            )
+        })
+        .collect()
+}
+
+fn extent(address: u64, length: u64) -> Extent {
+    Extent::new(StoredAddress::new(address), ByteLength::new(length)).unwrap()
 }
 
 fn facts_copy(ranges: &[(FileStorageKind, u64, u64)]) -> Vec<FileStorageRange> {
