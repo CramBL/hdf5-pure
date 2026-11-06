@@ -5,6 +5,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::ReturnedExtents;
 
 use crate::address::StoredAddress;
+use crate::edit::commit::{OriginalStorage, PublicationError, PublicationPurpose};
 use crate::error::{Error, FormatError};
 use crate::file_space_info::FileSpaceStrategy;
 
@@ -30,9 +31,34 @@ impl WriteEngine {
     pub(super) fn recycle_flat_tail(
         &mut self,
         root: PhysicalAddress,
-        mut to_free: ReturnedExtents,
+        to_free: ReturnedExtents,
         target: FreeExtent,
     ) -> Result<(), Error> {
+        self.recycle_flat_tail_excluding(root, to_free, target, None)
+            .map_err(PublicationError::without_storage)
+    }
+
+    /// Recycles a reserved metadata allocation with optional original storage exclusions.
+    ///
+    /// The caller first publishes with [`TailPlacement::Preserve`], as in
+    /// [`Self::recycle_flat_tail`]. With `storage`, checks allocator ranges, pending frees, old
+    /// managers, and the complete target before surrendering aggregate spare, and passes the
+    /// same exclusions to the replacement publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicationError::Storage`] if an exclusion check fails. Returns
+    /// [`PublicationError::Write`] for retirement, metadata, publication, or truncation errors.
+    pub(in crate::edit) fn recycle_flat_tail_excluding(
+        &mut self,
+        root: PhysicalAddress,
+        mut to_free: ReturnedExtents,
+        target: FreeExtent,
+        storage: Option<&OriginalStorage>,
+    ) -> Result<(), PublicationError> {
+        if let Some(storage) = storage {
+            storage.exclude_publication(self, &to_free, TailPlacement::Recycle(target))?;
+        }
         let spare = self
             .aggregation
             .map(|state| state.unused().collect::<Vec<_>>())
@@ -45,7 +71,13 @@ impl WriteEngine {
                 .insert(extent, FreeClass::Dead)
                 .map_err(|error| FormatError::Internal(error.to_string()))?;
         }
-        self.commit_persisting(root, to_free, TailPlacement::Recycle(target))
+        self.publish_persisting_excluding(
+            root,
+            to_free,
+            TailPlacement::Recycle(target),
+            PublicationPurpose::Commit,
+            storage,
+        )
     }
 
     /// Returns a contiguous persistent metadata allocation below the free-section threshold.
