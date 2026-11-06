@@ -127,6 +127,30 @@ fn address_queries_retain_sparse_member_ids_without_decoding_again(#[case] form:
         );
     }
     assert_eq!(contents.members().len(), 3);
+    let plan = contents
+        .framing()
+        .compact(|member| member.index().get() == 7)
+        .unwrap();
+    assert_eq!(plan.range(), allocation.range);
+    assert_eq!(plan.retained(), 2);
+    let [movement] = plan.moves() else {
+        panic!("expected one retained member move");
+    };
+    assert_eq!(movement.object(), contents.members()[2]);
+    assert_eq!(movement.destination(), contents.members()[1].range());
+    let free = plan.free_space().unwrap().range();
+    assert_eq!(free.start(), contents.members()[2].range().start());
+    assert_eq!(free.end(), allocation.range.end());
+    let framing = core::ptr::from_ref(contents.framing());
+    assert_eq!(
+        core::ptr::from_ref(
+            phase
+                .heap_members(&source, PhysicalAddress::new(collection))
+                .unwrap()
+                .framing()
+        ),
+        framing
+    );
     assert_eq!(calls.load(Ordering::Relaxed), read_calls);
     assert_eq!(COLLECTION_ALLOCATIONS.with(Cell::get), 1);
     drop(phase);

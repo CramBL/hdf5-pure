@@ -12,7 +12,9 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::GlobalHeapCollection;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
+use hdf5_pure_format::__private::GlobalHeapMembers;
 use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::GlobalHeapPayloadRef;
 
@@ -185,6 +187,54 @@ pub(crate) fn walk_collection(
     address: PhysicalAddress,
     mut visit: impl FnMut(GlobalHeapObject),
 ) -> Result<FileRange, FormatError> {
+    let collection = read_collection(source, lengths, address)?;
+    let mut window = HeaderWindow::new(collection.range());
+    let mut walk = collection.walk();
+    while let Some(range) = walk.parse_range() {
+        if let Some(object) = walk.parse(window.region(source, range)?)? {
+            visit(object);
+        }
+    }
+    Ok(collection.range())
+}
+
+/// Parses complete member framing from the collection at `address`.
+///
+/// Retains member metadata in physical order without retaining payload bytes. Reads object
+/// headers through the same bounded metadata windows as [`walk_collection`].
+///
+/// # Errors
+///
+/// Returns the errors of [`read_collection`], [`HeaderWindow::region`], and
+/// [`GlobalHeapMemberCollector::parse`](hdf5_pure_format::__private::GlobalHeapMemberCollector::parse).
+/// Returns [`FormatError::Internal`] if collection framing is incomplete after parsing.
+pub(crate) fn collect_members(
+    source: &(impl Source + ?Sized),
+    lengths: LengthWidth,
+    address: PhysicalAddress,
+) -> Result<GlobalHeapMembers, FormatError> {
+    let collection = read_collection(source, lengths, address)?;
+    let mut window = HeaderWindow::new(collection.range());
+    let mut collector = collection.collect_members();
+    while let Some(range) = collector.parse_range() {
+        collector.parse(window.region(source, range)?)?;
+    }
+    collector
+        .finish()
+        .ok_or_else(|| FormatError::Internal("global heap member collection is incomplete".into()))
+}
+
+/// Parses the collection header and checks the complete allocation against the source length.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedSourceEof`] if the declared allocation exceeds the source
+/// length. Propagates header geometry, parsing, and source errors.
+fn read_collection(
+    source: &(impl Source + ?Sized),
+    lengths: LengthWidth,
+    address: PhysicalAddress,
+) -> Result<GlobalHeapCollection, FormatError> {
     let locator = GlobalHeapCollectionLocator::new(address, lengths);
     let header_range = locator.parse_range()?;
     let header = read(source, header_range)?;
@@ -197,14 +247,7 @@ pub(crate) fn walk_collection(
         });
     }
 
-    let mut window = HeaderWindow::new(collection.range());
-    let mut walk = collection.walk();
-    while let Some(range) = walk.parse_range() {
-        if let Some(object) = walk.parse(window.region(source, range)?)? {
-            visit(object);
-        }
-    }
-    Ok(collection.range())
+    Ok(collection)
 }
 
 /// The bytes of one collection that a walk reads its object headers from.
@@ -319,11 +362,87 @@ const LOOKAHEAD: u64 = 32;
 mod tests {
     use core::cell::Cell;
 
+    use rstest::rstest;
     use test_util::global_heap;
     use test_util::widths::Widths;
 
     use super::*;
     use crate::source::BytesSource;
+
+    #[rstest]
+    #[case::two(LengthWidth::Two)]
+    #[case::four(LengthWidth::Four)]
+    #[case::eight(LengthWidth::Eight)]
+    fn collected_members_preserve_walk_framing_and_reads(#[case] lengths: LengthWidth) {
+        let source = CountingSource {
+            bytes: global_heap::collection(
+                &[
+                    global_heap::Object::new(7, b"first"),
+                    global_heap::Object {
+                        index: u16::MAX,
+                        reference_count: u16::MAX,
+                        data: b"last",
+                    },
+                ],
+                Widths::new(8, usize::from(lengths.get())),
+            ),
+            metadata_reads: Cell::new(0),
+            metadata_bytes: Cell::new(0),
+            raw_reads: Cell::new(0),
+        };
+        let address = PhysicalAddress::new(0);
+        let mut walked = Vec::new();
+        let range =
+            walk_collection(&source, lengths, address, |object| walked.push(object)).unwrap();
+        let reads = source.metadata_reads.replace(0);
+        let bytes = source.metadata_bytes.replace(0);
+        let collected = collect_members(&source, lengths, address).unwrap();
+        assert_eq!(collected.range(), range);
+        assert_eq!(collected.members(), walked);
+        assert_eq!(
+            collected
+                .members()
+                .iter()
+                .map(|member| (
+                    member.index().get(),
+                    member.reference_count(),
+                    member.range().start().get(),
+                    member.range().length(),
+                    member.payload().range().start().get(),
+                    member.payload().range().length(),
+                ))
+                .collect::<Vec<_>>(),
+            [(7, 1, 16, 24, 32, 5), (u16::MAX, u16::MAX, 40, 24, 56, 4)]
+        );
+        assert_eq!(source.metadata_reads.get(), reads);
+        assert_eq!(source.metadata_bytes.get(), bytes);
+        assert_eq!(source.raw_reads.get(), 0);
+    }
+
+    #[test]
+    fn member_collection_requires_the_complete_source_allocation() {
+        let mut bytes = global_heap::collection(&[], Widths::EIGHT);
+        let expected = u64::try_from(bytes.len()).unwrap();
+        bytes.pop();
+        let source = CountingSource {
+            bytes,
+            metadata_reads: Cell::new(0),
+            metadata_bytes: Cell::new(0),
+            raw_reads: Cell::new(0),
+        };
+        let error = collect_members(&source, LengthWidth::Eight, PhysicalAddress::new(0))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            FormatError::UnexpectedSourceEof {
+                expected,
+                available: expected - 1,
+            }
+        );
+        assert_eq!(source.metadata_reads.get(), 1);
+        assert_eq!(source.raw_reads.get(), 0);
+    }
 
     #[test]
     fn the_walk_reads_object_headers_as_metadata() {
