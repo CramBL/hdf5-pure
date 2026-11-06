@@ -53,6 +53,16 @@ pub(in crate::edit) struct OriginalOwnerFacts {
 }
 
 impl OriginalOwnerFacts {
+    /// Separates original count, allocation, and owner evidence without reanalysis.
+    pub(in crate::edit) fn into_parts(self) -> (CountInventory, CountStorage, Vec<ObjectId>) {
+        let Self {
+            counts,
+            storage,
+            eligible_owners,
+        } = self;
+        (counts, storage, eligible_owners)
+    }
+
     /// Associates the joint facts with a matching source and supported object-header domain.
     ///
     /// Checks the allocation session, phase, root, and domain association without source reads

@@ -22,6 +22,9 @@ use super::counts::CountQueries;
 
 pub(in crate::edit) use counts::CountPreflight;
 pub(in crate::edit) use counts::CountProjectionIdentity;
+pub(in crate::edit) use counts::{
+    CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
+};
 
 pub(in crate::edit) use counts::DeclaredCountChange;
 pub(in crate::edit) use counts::SourceRemovalPlan;

@@ -39,6 +39,7 @@ use crate::type_builders::ObjectRefTarget;
 
 pub(in crate::edit) use counts::CountProjectionError;
 pub(in crate::edit) use counts::CountProjectionProof;
+pub(super) use counts::PreparedTreeCounts;
 
 #[cfg_attr(
     not(test),
@@ -69,13 +70,49 @@ pub(super) struct PreparedCommit {
 }
 
 impl PreparedCommit {
+    /// Plans edits with count-eligible retirement and checked replacement count records.
+    ///
+    /// Returns [`CommitPreparation::Rejected`] with the original staged inputs on failure.
+    /// In-place-only plans skip count discovery. Tree plans retain original count outcomes and
+    /// protected source updates.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "count-aware preparation has no public commit consumer"
+        )
+    )]
+    pub(super) fn prepare_counted(
+        engine: &mut WriteEngine,
+        staged: StagedEdits,
+    ) -> CommitPreparation {
+        let plan = engine
+            .plan_commit_inner(&staged, false, true)
+            .map(|(plan, _)| plan);
+        Self::from_plan(plan, staged)
+    }
+
     /// Plans a commit, returning the original staged inputs on rejection.
     ///
     /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs
     /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
     /// and the preparation error.
     pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
-        match engine.plan_commit(&staged) {
+        Self::from_plan(engine.plan_commit(&staged), staged)
+    }
+
+    /// Returns the plan with the application inputs used to prepare it.
+    pub(super) fn into_parts(self) -> (CommitPlan, StagedApply, OverwritePayloads) {
+        let Self {
+            plan,
+            staged,
+            overwrites,
+        } = self;
+        (plan, staged, overwrites)
+    }
+
+    fn from_plan(plan: Result<CommitPlan, Error>, staged: StagedEdits) -> CommitPreparation {
+        match plan {
             Ok(mut plan) => {
                 let (staged, writes) = staged.into_apply();
                 let mut overwrites = OverwritePayloads { writes };
@@ -88,16 +125,6 @@ impl PreparedCommit {
             }
             Err(error) => CommitPreparation::Rejected { staged, error },
         }
-    }
-
-    /// Returns the plan with the application inputs used to prepare it.
-    pub(super) fn into_parts(self) -> (CommitPlan, StagedApply, OverwritePayloads) {
-        let Self {
-            plan,
-            staged,
-            overwrites,
-        } = self;
-        (plan, staged, overwrites)
     }
 }
 
@@ -114,6 +141,10 @@ pub(super) enum CommitPreparation {
 }
 
 /// Stores prepared writes before application consumes the staged inputs.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "prepared tree edits retain count facts without an additional allocation"
+)]
 pub(super) enum CommitPlan {
     /// Existing value ranges to overwrite without publishing a replacement root.
     InPlace(Vec<InPlaceWrite>),
@@ -206,6 +237,15 @@ pub(super) struct GroupHeaders {
 ///
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
+    /// Original count outcomes and checked source updates, absent for ordinary preparation.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "prepared count updates have no application consumer"
+        )
+    )]
+    pub(super) counts: Option<PreparedTreeCounts>,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
     pub(super) cross_copies: Vec<CopyDestination>,
@@ -423,6 +463,25 @@ impl WriteEngine {
         staged: &StagedEdits,
         capture: bool,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
+        self.plan_commit_inner(staged, capture, false)
+    }
+
+    /// Prepares edits with independent choices for original observations and count projections.
+    ///
+    /// With `counted`, applies local tree-count projections and uses eligible deletion allocations
+    /// for reference screening and retirement. Incomplete count evidence withholds deletion
+    /// allocations and collection candidates. With `capture`, retains original observations from
+    /// the same source phase. In-place-only plans skip both operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::plan_commit`] and [`PreparedTreeCounts::prepare`].
+    fn plan_commit_inner(
+        &mut self,
+        staged: &StagedEdits,
+        capture: bool,
+        counted: bool,
+    ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
         self.preflight_narrow_references()?;
         let mut analysis = AnalysisPhase::new(self);
         let mut edits = DatasetEdits {
@@ -460,6 +519,9 @@ impl WriteEngine {
                 .iter()
                 .map(|&(_, address)| address.header_address()),
         );
+        let mut counts = counted
+            .then(|| PreparedTreeCounts::prepare(self, &mut analysis, &mut nodes, staged))
+            .transpose()?;
         let TreeReferences {
             deleted_free,
             deleted_collections,
@@ -472,14 +534,19 @@ impl WriteEngine {
             &write_targets,
             &headers,
             moved_headers,
+            counts.as_mut(),
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
+        if matches!(counts, Some(PreparedTreeCounts::Unavailable)) {
+            collections = CollectionCandidates::default();
+        }
         let mut headers = headers;
         headers
             .keys
             .sort_by_key(|path| std::cmp::Reverse(path.len()));
         let mut tree = PreparedTree {
+            counts,
             groups: nodes,
             headers,
             cross_copies,
@@ -985,6 +1052,7 @@ impl WriteEngine {
         write_targets: &[ObjectPathBuf],
         headers: &GroupHeaders,
         moved_headers: Vec<PhysicalAddress>,
+        counts: Option<&mut PreparedTreeCounts>,
         analysis: &mut AnalysisPhase<'_>,
     ) -> Result<TreeReferences, Error> {
         let GroupHeaders {
@@ -1001,11 +1069,24 @@ impl WriteEngine {
         self.check_group_additions(nodes, keys, children, &datasets_by_group)?;
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         let delete_targets = staged.deletes();
-        let mut deleted_free: Vec<(FileRange, FreeClass)> = Vec::new();
-        let deleted_targets = analysis
-            .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
-            .collect_free_spans(&mut deleted_free);
-        let deleted_collections = analysis.deleted_collections(&deleted_targets);
+        let (deleted_free, deleted_collections) = match counts {
+            Some(PreparedTreeCounts::Complete {
+                retirement,
+                eligible_owners,
+                ..
+            }) => (
+                std::mem::take(retirement),
+                analysis.deleted_collections(eligible_owners),
+            ),
+            Some(PreparedTreeCounts::Unavailable) => (Vec::new(), CollectionCandidates::default()),
+            None => {
+                let mut deleted_free = Vec::new();
+                let deleted_targets = analysis
+                    .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
+                    .collect_free_spans(&mut deleted_free);
+                (deleted_free, analysis.deleted_collections(&deleted_targets))
+            }
+        };
         let for_copied = InvalidatedAddresses {
             removed: deleted_free.iter().map(|&(range, _)| range).collect(),
             moved: Vec::new(),
@@ -1446,8 +1527,7 @@ pub(in crate::edit) struct OverwriteId {
 /// Removed spans are also used for storage reclamation. Moved entries identify old object-header
 /// addresses whose replacements are published by the commit.
 pub(in crate::edit) struct InvalidatedAddresses {
-    /// Physical ranges this commit's deletions reclaim, as
-    /// [`collect_free_spans`](WriteEngine::collect_free_spans) reports them.
+    /// Original physical allocations selected for retirement by deletion planning.
     pub(in crate::edit) removed: Vec<FileRange>,
     /// Superseded object-header addresses from relocating dataset writes and rebuilt groups.
     pub(in crate::edit) moved: Vec<PhysicalAddress>,

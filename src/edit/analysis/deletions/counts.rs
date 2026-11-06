@@ -30,9 +30,10 @@ pub(in crate::edit) use net::original::{
     OriginalOwnerError, OriginalOwnerFacts, OriginalOwnerInventory,
 };
 pub(in crate::edit) use net::{NetCountError, NetCountPlan};
-pub(in crate::edit) use ownership::CountHandoffError;
 pub(in crate::edit) use ownership::inventory::CountPreflight;
 pub(in crate::edit) use ownership::inventory::CountProjectionIdentity;
+pub(in crate::edit) use ownership::inventory::{CountInventory, CountPreflightError};
+pub(in crate::edit) use ownership::{CountHandoffError, CountProtectionError, ProtectedCounts};
 
 mod added;
 mod net;
