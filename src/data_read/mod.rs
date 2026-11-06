@@ -85,7 +85,7 @@ pub fn read_raw_data_full(
     let expected_size = spec.byte_len()?;
 
     // Zero-element datasets have no data to read.
-    if dataspace.num_elements() == 0 {
+    if dataspace.num_elements().is_zero() {
         return Ok(Vec::new());
     }
 
@@ -142,7 +142,7 @@ pub fn read_raw_data_full_from_source(
     let (dataspace, fill) = (spec.dataspace(), spec.fill());
     let expected_size = spec.byte_len()?;
 
-    if dataspace.num_elements() == 0 {
+    if dataspace.num_elements().is_zero() {
         return Ok(Vec::new());
     }
 

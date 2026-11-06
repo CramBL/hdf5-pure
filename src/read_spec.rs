@@ -5,6 +5,9 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::ElementSize;
+
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
@@ -91,7 +94,7 @@ impl<'a> RawReadSpec<'a> {
     ) -> Result<Self, FormatError> {
         let element_size = crate::datatype::stored_type_size(datatype, offset_width)?;
         let byte_len = DatasetByteLen::parse(dataspace, element_size)?;
-        let storage = RawReadStorage::parse(layout, byte_len, dataspace.num_elements() != 0)?;
+        let storage = RawReadStorage::parse(layout, byte_len, !dataspace.num_elements().is_zero())?;
         Ok(Self {
             storage,
             dataspace,
@@ -119,11 +122,12 @@ impl<'a> RawReadSpec<'a> {
             pipeline: None,
             fill: FillPattern::ZERO,
             element_size: datatype.type_size(),
-            byte_len: DatasetByteLen(
+            byte_len: DatasetByteLen(ByteLength::new(
                 dataspace
                     .num_elements()
+                    .get()
                     .saturating_mul(u64::from(datatype.type_size())),
-            ),
+            )),
         }
     }
 
@@ -185,7 +189,7 @@ impl<'a> RawReadSpec<'a> {
     }
 
     pub(crate) fn byte_len_u64(&self) -> u64 {
-        self.byte_len.0
+        self.byte_len.0.get()
     }
 
     /// Returns fill bytes for a dataset whose storage is unallocated.
@@ -207,7 +211,7 @@ impl<'a> RawReadSpec<'a> {
             .to_usize()?
             .checked_mul(elem_size.get())
             .ok_or(FormatError::OffsetOverflow {
-                offset: self.dataspace.num_elements(),
+                offset: self.dataspace.num_elements().get(),
                 length: elem_size.get() as u64,
             })?;
         if total == 0 {
@@ -302,26 +306,36 @@ impl<'a> RawReadStorage<'a> {
 
 /// Logical bytes implied by a dataset's dataspace and datatype.
 #[derive(Clone, Copy)]
-struct DatasetByteLen(u64);
+struct DatasetByteLen(ByteLength);
 
 impl DatasetByteLen {
+    /// Computes logical bytes from the dataspace's element count and stored element size.
+    ///
+    /// A zero element size has a zero byte length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the byte length exceeds [`u64::MAX`].
     fn parse(dataspace: &Dataspace, element_size: u32) -> Result<Self, FormatError> {
         let num_elements = dataspace.num_elements();
         let elem_size = u64::from(element_size);
-        Ok(Self(num_elements.checked_mul(elem_size).ok_or(
-            FormatError::OffsetOverflow {
-                offset: num_elements,
-                length: elem_size,
-            },
-        )?))
+        Ok(Self(match ElementSize::new(elem_size) {
+            Some(size) => size
+                .byte_length(num_elements)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: num_elements.get(),
+                    length: elem_size,
+                })?,
+            None => ByteLength::new(0),
+        }))
     }
 
     fn require_storage_extent(self, actual: u64) -> Result<(), FormatError> {
-        if actual == self.0 {
+        if actual == self.0.get() {
             return Ok(());
         }
         Err(FormatError::LogicalDataSizeMismatch {
-            expected: self.0,
+            expected: self.0.get(),
             actual,
         })
     }
@@ -344,6 +358,33 @@ mod tests {
             dimensions: vec![4],
             max_dimensions: None,
         }
+    }
+
+    #[rstest::rstest]
+    #[case::empty(0, 4, Ok(ByteLength::new(0)))]
+    #[case::finite(3, 4, Ok(ByteLength::new(12)))]
+    #[case::exact_limit(u64::MAX, 1, Ok(ByteLength::new(u64::MAX)))]
+    #[case::zero_size(u64::MAX, 0, Ok(ByteLength::new(0)))]
+    #[case::overflow(
+        u64::MAX,
+        2,
+        Err(FormatError::OffsetOverflow { offset: u64::MAX, length: 2 }),
+    )]
+    fn cardinality_to_bytes_preserves_zero_and_overflow(
+        #[case] count: u64,
+        #[case] size: u32,
+        #[case] expected: Result<ByteLength, FormatError>,
+    ) {
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![count],
+            max_dimensions: None,
+        };
+        assert_eq!(
+            DatasetByteLen::parse(&dataspace, size).map(|len| len.0),
+            expected
+        );
     }
 
     #[test]

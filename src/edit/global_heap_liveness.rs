@@ -4,6 +4,8 @@ use alloc::collections::BTreeSet;
 use core::num::NonZeroU32;
 use core::num::NonZeroU64;
 
+use hdf5_pure_core::__private::ElementCount;
+
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
@@ -278,7 +280,7 @@ impl WriteEngine {
                 continue;
             }
             if let Some(value) = FillValueView::parse(*msg_type, data)?.value() {
-                self.collect_element_collections(value, 1, slots, referenced)?;
+                self.collect_element_collections(value, ElementCount::new(1), slots, referenced)?;
             }
         }
         Ok(())
@@ -303,7 +305,12 @@ impl WriteEngine {
                 })?;
             let read_len = (len - first).min(batch_len.get());
             let bytes = self.image().read_exact_at(offset, read_len.to_usize()?)?;
-            self.collect_element_collections(&bytes, read_len / element_size, slots, referenced)?;
+            self.collect_element_collections(
+                &bytes,
+                ElementCount::new(read_len / element_size),
+                slots,
+                referenced,
+            )?;
         }
         Ok(())
     }
@@ -336,7 +343,7 @@ impl WriteEngine {
                 };
                 self.collect_element_collections(
                     bytes,
-                    bytes.len() as u64 / element_size,
+                    ElementCount::new(bytes.len() as u64 / element_size),
                     slots,
                     referenced,
                 )
@@ -421,7 +428,7 @@ impl WriteEngine {
     fn collect_element_collections(
         &self,
         raw: &[u8],
-        count: u64,
+        count: ElementCount,
         ReferenceSlots {
             element_size,
             vlen_slots,
@@ -434,7 +441,7 @@ impl WriteEngine {
             .to_usize()?
             .checked_mul(stride)
             .ok_or(FormatError::OffsetOverflow {
-                offset: count,
+                offset: count.get(),
                 length: element_size.get(),
             })?;
         let elements = raw.get(..len).ok_or(FormatError::UnexpectedEof {
