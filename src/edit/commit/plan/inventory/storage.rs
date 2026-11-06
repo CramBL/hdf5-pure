@@ -168,6 +168,25 @@ impl OriginalStorage {
         result
     }
 
+    #[cfg(test)]
+    pub(in crate::edit::commit) fn from_test_ranges(ranges: &[FileRange]) -> Self {
+        Self {
+            source: None,
+            allocations: ranges
+                .iter()
+                .map(|&range| StorageAllocation {
+                    range,
+                    origin: StorageOrigin::Owner {
+                        object: ObjectId::new(range.start()),
+                        kind: AllocationKind::Data,
+                    },
+                })
+                .collect(),
+            parents: Ok(BTreeMap::new()),
+            unavailable: None,
+        }
+    }
+
     /// Borrows protected ranges in ascending order of their physical start addresses.
     pub(in crate::edit::commit) fn allocations(&self) -> &[StorageAllocation] {
         &self.allocations
@@ -189,7 +208,16 @@ impl OriginalStorage {
         self.parents.as_ref()
     }
 
-    fn exclude_space(&self, engine: &WriteEngine) -> Result<(), StorageConflict> {
+    /// Checks reusable sections, retained extents, and unused aggregate capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageConflict::Overlap`] if an allocator range overlaps protected storage.
+    /// Returns [`StorageConflict::Source`] if an address or range cannot be resolved.
+    pub(in crate::edit::commit) fn exclude_space(
+        &self,
+        engine: &WriteEngine,
+    ) -> Result<(), StorageConflict> {
         let resolve = |extent: Extent| {
             FileRange::new(
                 engine.addresses().resolve(extent.start())?,
@@ -216,7 +244,16 @@ impl OriginalStorage {
         Ok(())
     }
 
-    fn exclude(&self, range: FileRange, claim: SpaceClaim) -> Result<(), StorageConflict> {
+    /// Checks a physical space claim against the recorded original allocations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageConflict::Overlap`] with `claim` if `range` overlaps protected storage.
+    pub(in crate::edit::commit) fn exclude(
+        &self,
+        range: FileRange,
+        claim: SpaceClaim,
+    ) -> Result<(), StorageConflict> {
         let index = self
             .allocations
             .partition_point(|allocation| allocation.range.end() <= range.start());
@@ -229,6 +266,25 @@ impl OriginalStorage {
                 allocation,
                 range,
                 claim,
+            });
+        }
+        Ok(())
+    }
+
+    /// Checks whether a proposed physical end preserves every recorded original allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageConflict::End`] if `end` is below the greatest protected range end.
+    pub(in crate::edit::commit) fn check_end(
+        &self,
+        end: PhysicalAddress,
+    ) -> Result<(), StorageConflict> {
+        let required = self.maximum_end();
+        if end < required {
+            return Err(StorageConflict::End {
+                proposed: end,
+                required,
             });
         }
         Ok(())
@@ -369,14 +425,7 @@ impl<'a> PendingEditInventory<'a> {
         &self,
         end: PhysicalAddress,
     ) -> Result<(), StorageConflict> {
-        let required = self.maximum_end();
-        if end < required {
-            return Err(StorageConflict::End {
-                proposed: end,
-                required,
-            });
-        }
-        Ok(())
+        self.storage.check_end(end)
     }
 }
 
@@ -434,7 +483,7 @@ pub(in crate::edit::commit) enum StorageConflict {
         proposed: PhysicalAddress,
         required: PhysicalAddress,
     },
-    /// A reusable, retained, aggregate, or retirement range overlaps protected storage.
+    /// A space claim overlaps protected storage.
     Overlap {
         allocation: StorageAllocation,
         range: FileRange,
@@ -449,6 +498,12 @@ pub(in crate::edit::commit) enum StorageConflict {
 pub(in crate::edit::commit) enum SpaceClaim {
     /// Unused aggregate capacity.
     Aggregate,
+    /// A complete metadata reservation or publication padding range.
+    Metadata,
+    /// A previous persistent manager allocation pending replacement.
+    OldManager,
+    /// A complete reserved tail allocation proposed for recycling.
+    Recycle,
     /// A retained allocator extent with its retention kind.
     Retained(RetainedKind),
     /// A pending retirement range with its allocation class.
