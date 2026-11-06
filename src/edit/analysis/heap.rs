@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::GlobalHeapMembers;
 use hdf5_pure_format::__private::GlobalHeapObject;
 
 use super::AnalysisPhase;
@@ -153,8 +154,7 @@ impl From<HeapReferenceError> for Error {
 /// retaining payload bytes. Logical ownership, external references, and retirement permission
 /// require separate evidence.
 pub(in crate::edit) struct CollectionContents {
-    range: FileRange,
-    members: Vec<GlobalHeapObject>,
+    framing: GlobalHeapMembers,
 }
 
 impl CollectionContents {
@@ -162,27 +162,30 @@ impl CollectionContents {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`global_heap::walk_collection`], including its source-extent check
+    /// Returns the errors of [`global_heap::collect_members`], including its source-extent check
     /// for the complete allocation.
     fn read(engine: &WriteEngine, address: PhysicalAddress) -> Result<Self, FormatError> {
-        let mut members = Vec::new();
-        let range = global_heap::walk_collection(
-            engine.image(),
-            engine.widths().lengths,
-            address,
-            |member| members.push(member),
-        )?;
-        Ok(Self { range, members })
+        let framing =
+            global_heap::collect_members(engine.image(), engine.widths().lengths, address)?;
+        Ok(Self { framing })
     }
 
     /// Returns the complete parent allocation in physical coordinates.
     pub(in crate::edit) fn range(&self) -> FileRange {
-        self.range
+        self.framing().range()
     }
 
     /// Borrows the allocated object framing in collection order.
     pub(in crate::edit) fn members(&self) -> &[GlobalHeapObject] {
-        &self.members
+        self.framing().members()
+    }
+
+    /// Borrows the complete collection framing retained by this phase.
+    ///
+    /// Planning with this metadata requires separate source freshness and removal permission
+    /// checks, as described by [`GlobalHeapMembers::compact`].
+    pub(in crate::edit) fn framing(&self) -> &GlobalHeapMembers {
+        &self.framing
     }
 }
 
