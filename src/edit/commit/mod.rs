@@ -19,6 +19,14 @@ use crate::edit::SyncPolicy;
 use crate::error::Error;
 
 mod apply;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "heap execution is not selected by commit planning"
+    )
+)]
+pub(in crate::edit) mod heap;
 pub(super) mod plan;
 mod publish;
 mod rollback;
