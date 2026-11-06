@@ -1,10 +1,11 @@
+use hdf5_pure_space::__private::{FreeClass, RetainedKind};
 use rstest::rstest;
 use test_util_hdf5::file;
 use test_util_hdf5::file_space_oracle;
 use test_util_hdf5::page_managers;
 
 use crate::edit::analysis::AnalysisPhase;
-use crate::edit::analysis::physical::FileStorageKind;
+use crate::edit::analysis::physical::{CapacityKind, FileStorageKind};
 use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
 
@@ -30,6 +31,13 @@ fn native_file_storage_matches_framing_and_owned_manager_capacity(#[case] paged:
         native.close().unwrap();
         0
     };
+    let native_sections = if paged {
+        let checkpoint = file_space_oracle::observe(&path, "capacity", "native-closed");
+        assert!(checkpoint.c.bytes() > 0);
+        checkpoint.c.sections().to_vec()
+    } else {
+        vec![]
+    };
     let original = std::fs::read(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
     let object =
@@ -52,6 +60,27 @@ fn native_file_storage_matches_framing_and_owned_manager_capacity(#[case] paged:
             .sum::<u64>(),
         metadata_bytes
     );
+    let mut actual = facts
+        .non_live()
+        .iter()
+        .map(|entry| {
+            (
+                engine
+                    .addresses()
+                    .relative(entry.range().start())
+                    .unwrap()
+                    .get(),
+                entry.range().length(),
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    assert_eq!(actual, native_sections);
+    assert!(facts.non_live().iter().all(|entry| matches!(
+        entry.kind(),
+        CapacityKind::Reusable(FreeClass::Page(_))
+            | CapacityKind::Retained(RetainedKind::Unclassified)
+    )));
     let base = if paged { 8_192 } else { 0 };
     assert_eq!(engine.context.signature().get(), base);
     assert_eq!(

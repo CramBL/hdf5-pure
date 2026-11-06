@@ -1,13 +1,14 @@
-//! File framing and metadata capacity recorded by the producer for one source phase.
+//! File framing and recorded capacity for one source phase.
 //!
 //! Local ranges and problems are retained independently of topology and heap-reference facts.
-//! The caller establishes allocation ownership and retirement permission separately.
+//! The caller establishes source freshness, allocation ownership, and retirement permission
+//! separately.
 
 use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::Extent;
+use hdf5_pure_space::__private::{AllocationClass, Extent, FreeClass, RetainedKind};
 
 use super::AnalysisPhase;
 use super::ReconstructionSource;
@@ -25,7 +26,7 @@ use crate::source::SourceMetadata;
 use crate::superblock;
 
 impl AnalysisPhase<'_> {
-    /// Collects local file framing and producer metadata capacity once in this source phase.
+    /// Collects local file framing and recorded capacity once in this source phase.
     ///
     /// Requires a reconstruction source from the same phase. Records read and support failures
     /// in [`PhysicalStorage::problems`]. Source freshness remains the caller's responsibility.
@@ -53,7 +54,7 @@ impl AnalysisPhase<'_> {
     }
 }
 
-/// Local file observations and separately recorded metadata capacity for one source phase.
+/// Local file and allocator observations for one source phase.
 ///
 /// Retains observed extension allocations when later message parsing fails. Topology completeness,
 /// reference completeness, allocation ownership, and retirement permission require separate proofs.
@@ -65,21 +66,25 @@ pub(in crate::edit) struct PhysicalStorage {
     file: Vec<FileStorageRange>,
     /// Producer-recorded metadata capacity, resolved to physical coordinates.
     metadata_capacity: Vec<FileRange>,
+    /// Reusable sections, retained PAGE ranges, and unused aggregate capacity.
+    non_live: Vec<CapacityRange>,
     problems: Vec<StorageProblem>,
 }
 
 impl PhysicalStorage {
-    /// Collects file observations and recorded metadata capacity independently.
+    /// Collects file observations, metadata capacity, and allocator ranges independently.
     fn read(engine: &WriteEngine) -> Self {
         let mut storage = Self {
             physical_size: engine.image().len(),
             logical_eoa: engine.superblock().eof_address,
             file: Vec::new(),
             metadata_capacity: Vec::new(),
+            non_live: Vec::new(),
             problems: Vec::new(),
         };
         storage.read_file(engine);
         storage.read_metadata_capacity(engine);
+        storage.read_non_live(engine);
         storage
     }
 
@@ -99,6 +104,14 @@ impl PhysicalStorage {
     pub(in crate::edit) fn metadata_capacity(&self) -> &[FileRange] {
         &self.metadata_capacity
     }
+    /// Borrows recorded allocator ranges with their capacity categories.
+    ///
+    /// Reusable sections precede retained PAGE ranges, followed by aggregate spare. Preserves
+    /// original boundaries without sorting or coalescing.
+    pub(in crate::edit) fn non_live(&self) -> &[CapacityRange] {
+        &self.non_live
+    }
+
     /// Returns local failures and unsupported storage observations.
     pub(in crate::edit) fn problems(&self) -> &[StorageProblem] {
         &self.problems
@@ -262,6 +275,40 @@ impl PhysicalStorage {
         }
     }
 
+    /// Records reusable sections, retained PAGE extents, and aggregate spare.
+    ///
+    /// Traverses allocator records without source reads or page expansion. Records address
+    /// conversion failures and continues with the other ranges.
+    fn read_non_live(&mut self, engine: &WriteEngine) {
+        let page = engine.space.is_paged();
+        for (extent, class) in engine.space.admitted_snapshot().sections() {
+            if page && class == FreeClass::Dead {
+                continue;
+            }
+            self.record_capacity(engine, extent, CapacityKind::Reusable(class));
+        }
+        for retained in engine.space.retained_extents() {
+            self.record_capacity(
+                engine,
+                retained.extent(),
+                CapacityKind::Retained(retained.kind()),
+            );
+        }
+        if let Some(aggregate) = engine.aggregation {
+            for (extent, class) in aggregate.unused_with_class() {
+                self.record_capacity(engine, extent, CapacityKind::Aggregate(class));
+            }
+        }
+    }
+
+    /// Records one physical range with its category or an address-conversion problem.
+    fn record_capacity(&mut self, engine: &WriteEngine, extent: Extent, kind: CapacityKind) {
+        match Self::resolve(engine, extent) {
+            Ok(range) => self.non_live.push(CapacityRange { range, kind }),
+            Err(error) => self.problems.push(StorageProblem::Address(error)),
+        }
+    }
+
     /// Converts one complete stored extent to its checked physical range.
     ///
     /// # Errors
@@ -296,6 +343,39 @@ pub(in crate::edit) enum FileStorageKind {
     Superblock,
     /// The bytes before the superblock signature.
     Userblock,
+}
+
+/// A recorded allocator extent in physical coordinates with its capacity category.
+///
+/// Original boundaries and the [`CapacityKind`] association are preserved. Source freshness,
+/// allocation ownership, and permission to reuse storage require separate proofs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::edit) struct CapacityRange {
+    range: FileRange,
+    kind: CapacityKind,
+}
+
+impl CapacityRange {
+    /// Returns the complete recorded extent in physical coordinates.
+    pub(in crate::edit) fn range(self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the recorded capacity category.
+    pub(in crate::edit) fn kind(self) -> CapacityKind {
+        self.kind
+    }
+}
+
+/// The allocator category associated with a recorded capacity range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::edit) enum CapacityKind {
+    /// Spare within the metadata or raw-data aggregate.
+    Aggregate(AllocationClass),
+    /// A retained PAGE extent with its recorded kind.
+    Retained(RetainedKind),
+    /// An admitted reusable section with its recorded free class.
+    Reusable(FreeClass),
 }
 
 /// A failed or unsupported local storage observation.

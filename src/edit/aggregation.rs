@@ -197,9 +197,16 @@ impl AggregateSpace {
     }
 
     pub(super) fn unused(self) -> impl Iterator<Item = Extent> {
+        self.unused_with_class().map(|(extent, _class)| extent)
+    }
+
+    /// Returns metadata spare followed by raw-data spare, with their allocation classes.
+    ///
+    /// Uses stored coordinates and omits aggregates without spare.
+    pub(super) fn unused_with_class(self) -> impl Iterator<Item = (Extent, AllocationClass)> {
         [AllocationClass::Metadata, AllocationClass::Raw]
             .into_iter()
-            .filter_map(move |class| self.policy.unused(class))
+            .filter_map(move |class| self.policy.unused(class).map(|extent| (extent, class)))
     }
 
     pub(super) fn eoa(self) -> StoredAddress {
