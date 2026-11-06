@@ -279,6 +279,37 @@ fn overwrite_candidates_preserve_original_values_before_either_commit_route(
             .len(),
         3
     );
+    let source = phase
+        .reconstruction_source(&engine, super::object(object))
+        .unwrap();
+    let qualified = phase.qualify_collections(&source, candidates).unwrap();
+    assert!(qualified.predecessors_complete());
+    assert_eq!(qualified.parents().len(), 1);
+    assert_eq!(
+        qualified
+            .allocation_origins(PhysicalAddress::new(collection))
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        qualified.whole_parent(PhysicalAddress::new(collection)),
+        Ok(())
+    );
+    let predecessors = qualified.predecessors().unwrap();
+    assert_eq!(predecessors.len(), 3);
+    assert_eq!(
+        predecessors
+            .values()
+            .map(|references| references.objects().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 3]
+    );
+    for (origin, references) in predecessors {
+        for &id in references.objects() {
+            assert_eq!(qualified.member(origin, id), Ok(()));
+        }
+    }
     drop(phase);
     assert_eq!(engine.image.disk_bytes().unwrap(), original);
     assert!(engine.vl_overwrite_heaps.is_empty());
@@ -511,10 +542,10 @@ enum Layout {
 
 impl Layout {
     fn messages(self, fixture: &mut Fixture, raw: &[u8]) -> Vec<Message> {
-        let form = if matches!(self, Self::Compact) {
-            Form::CompactDataset
-        } else {
+        let form = if matches!(self, Self::Contiguous) {
             Form::ContiguousDataset
+        } else {
+            Form::CompactDataset
         };
         let mut messages = form.messages(
             fixture,
