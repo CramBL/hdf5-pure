@@ -17,11 +17,11 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 
 | Storage | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
-| Version 1 symbol table | ✅ | ⬆️ | 🟡 | Edits convert storage to compact/dense. Soft links prevent modification. |
+| Version 1 symbol table | ✅ | ⬆️ | 🟡 | Edits convert storage to compact or dense link storage. Conversion rejects links whose complete serialized Link message exceeds 65,535 bytes (`u16::MAX`). |
 | Compact link storage | ✅ | ✅ | ✅ | |
 | Dense link storage | ✅ | 🟡 | 🟡 | Edits: unfiltered managed heaps with seven-byte IDs. Encoded links up to 4096 bytes. |
 | Link creation-order tracking | ✅ | ❌ | ✅ | Preserved across compact/dense transitions. |
-| Link phase-change thresholds | ✅ | ❌ | ✅ | Existing thresholds preserved. New groups use 8/6. |
+| Link phase-change thresholds | ✅ | ✅ | ✅ | Default 8/6. |
 
 ### Link resolution
 
@@ -30,6 +30,15 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 | Hard link | ✅ | |
 | Soft link | ✅ | |
 | External link | ❌ | |
+
+### Object copying
+
+| Feature | Status | Detail |
+|---|:---:|---|
+| Copy within a file | 🟡 | [Copy API](https://docs.rs/hdf5-pure/latest/hdf5_pure/struct.File.html#method.copy). Excludes version-1 object headers, dense-link groups, and version-2 B-tree, sparse, or empty chunked sources. |
+| Copy between files | 🟡 | [Cross-file copy API](https://docs.rs/hdf5-pure/latest/hdf5_pure/struct.File.html#method.copy_from). Same exclusions as same-file copy, plus variable-length or reference datasets and attributes, and shared header messages. |
+| Preserve soft/external link targets | ✅ | Copy and repack. |
+| Preserve hard-link aliases/cycles | ❌ | Copy and repack. |
 
 ### Attributes
 
@@ -52,6 +61,7 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 | Maximum dimensions | ✅ | ✅ | |
 | Unlimited dimension | ✅ | ✅ | |
 | Multiple unlimited dimensions | ✅ | ❌ | |
+| Null dataspace | ✅ | ❌ | |
 
 ### Dataset layouts
 
@@ -86,7 +96,7 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 | Buffered append | 🟡 | Same geometry as in-place append. No SWMR. |
 | Filtered append | ✅ | Re-encodable pipelines only. |
 | Non-chunk-aligned lossless filtered append | ✅ | |
-| Lossy filtered partial-chunk append | 🟡 | Opt-in with `LossyTailReencoding::Allow`. |
+| Lossy filtered partial-chunk append | ✅ | Opt-in with `LossyTailReencoding::Allow`. |
 | Unfiltered partial tails with lossy filters | ✅ | `PartialEdgeFiltering::Skip`. |
 | Multiple unlimited dimensions | ❌ | |
 
@@ -97,7 +107,7 @@ The tables cover file-format compatibility and HDF5 behavior. Unlisted features 
 | Unallocated chunks | ✅ | ✅ | |
 | Sparse chunk grids | ✅ | ✅ | |
 | Partial edge chunks | ✅ | ✅ | |
-| Per-chunk filter masks | ✅ | ✅ | |
+| Per-chunk filter masks | ✅ | ✅ | Positional skip bits. Preserved for unchanged chunks and verbatim copy/repack. |
 | `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS` | ✅ | ✅ | |
 | Fill value | ✅ | ✅ | |
 | `H5D_FILL_TIME_NEVER` | ✅ | ✅ | |
@@ -197,8 +207,8 @@ The MATLAB complex helpers use the class-6 compound `{real, imag}` convention.
 | Variable-length ASCII | ✅ | ✅ | |
 | Variable-length UTF-8 | ✅ | ✅ | |
 | Null-padded fixed strings | ✅ | ✅ | |
-| Null-terminated fixed strings | ✅ | 🟡 | Writing requires raw datatype and data APIs. |
-| Space-padded fixed strings | ✅ | 🟡 | Writing requires raw datatype and data APIs. |
+| Null-terminated fixed strings | ✅ | ✅ | Writing requires raw datatype and data APIs. |
+| Space-padded fixed strings | ✅ | ✅ | Writing requires raw datatype and data APIs. |
 
 ## Extended HDF5 compatibility
 
@@ -270,11 +280,16 @@ The MATLAB complex helpers use the class-6 compound `{real, imag}` convention.
 | `H5F_FSPACE_STRATEGY_PAGE` | ✅ | ✅ | Without persistence: mirrored staged edits only, with supported attribute storage. Object references, page buffering, and space reuse are unsupported. |
 | `H5F_FSPACE_STRATEGY_AGGR` | ✅ | ✅ | Deleted object storage remains unavailable for reuse. |
 | `H5F_FSPACE_STRATEGY_NONE` | ✅ | ✅ | Freed storage remains allocated. |
-| Aggregators | ✅ | 🟡 | `FsmAggr` and `Aggr` only. Disabled in SWMR under `FsmAggr`. |
+| Aggregators | ✅ | ✅ | `FsmAggr` and `Aggr` only. Disabled in SWMR under `FsmAggr`. |
 | Persistent free-space managers | ✅ | ✅ | |
 | Free-space threshold | ✅ | ✅ | Page tails are tracked regardless of threshold. |
 | File-space page size | ✅ | ✅ | Writing and editing require a size from 512 bytes to 1 GiB. |
 | Persisted free-space reuse | ✅ | ✅ | |
+
+| Feature | Status | Detail |
+|---|:---:|---|
+| Dataset/group storage reclamation after deletion | ✅ | Commit-wide final-link reclamation when counts and allocation ownership are established. Admission follows the file-space policy. |
+| Free-tail truncation | ✅ | `FsmAggr` and persistent `Page`. Follows allocation/page boundaries and retains space needed for commit metadata. |
 
 ## HDF5 file-format compatibility
 
@@ -294,6 +309,7 @@ The MATLAB complex helpers use the class-6 compound `{real, imag}` convention.
 | File Space Info v0 | ✅ | ⬆️ | New messages use v1. |
 | File Space Info v1 | ✅ | ✅ | |
 | Metadata checksums | ✅ | ✅ | General validation requires the `checksum` feature. |
+| Independent address/length widths: 2, 4, or 8 bytes | ✅ | ✅ | |
 
 Shared object-header messages are supported for datatypes, dataspaces, fill values, filter pipelines, and attributes.
 
@@ -310,10 +326,19 @@ Shared object-header messages are supported for datatypes, dataspaces, fill valu
 
 `Enumerate` refers to `Dataset::chunks()`.
 
+### Fractal heaps
+
+| Feature | Read | Emit | Detail |
+|---|:---:|:---:|---|
+| Managed objects | ✅ | ✅ | |
+| Huge objects | ✅ | ✅ | Emitted for dense attributes. |
+| Tiny objects | ✅ | ⬆️ | Output uses managed objects. |
+| Filtered managed blocks and huge objects | ✅ | ❌ | Reading requires the decoder for the heap's filter pipeline. See the [filters table](#filters). |
+
 ### Unknown metadata
 
 | Feature | Read-only | Read-write | Repack | Detail |
 |---|:---:|:---:|:---:|---|
 | Unknown optional object-header message | ✅ | 🟡 | 🟡 | Write and repack support depends on the message flags. |
 | Unknown message mandatory for readers | ❌ | ❌ | ❌ | |
-| Unknown message mandatory for writers only | ✅ | ❌ | 🟡 | Repack can be configured to reject these messages. |
+| Unknown message mandatory for writers only | ✅ | ❌ | ✅ | Default repack omits the message from the output file. `RepackOptions::reject_unknown_messages_only_a_writer_must_understand` configures repack to reject the file. |
