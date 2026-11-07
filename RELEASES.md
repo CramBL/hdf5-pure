@@ -20,7 +20,7 @@ Name the operation. Back numerical claims with benchmarks.
 ## Cutting one
 
 1. Start from clean `main`. Run `just ci-local`.
-2. `just release::prepare VERSION`. Optional final-release summary: `--summary-file PATH`.
+2. `just release::prepare VERSION`. Optional release summary: `--summary-file PATH`.
 3. `just release::pr VERSION`, using the same version.
 4. Wait for approval and passing CI, including the workspace publication dry run.
 5. For unpublished crate names, follow the first-publication steps below.

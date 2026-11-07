@@ -254,16 +254,38 @@ def promoted_version(changelog_diff):
     return m.group(1) if m else None
 
 
+def split_unreleased_body(body):
+    """Split [Unreleased] body into (existing_summary, entries)."""
+    stripped = body.lstrip("\n")
+    m = re.match(r"^(.*?)(?=\n### |\Z)", stripped, re.S)
+    if m and not m.group(1).startswith("### "):
+        existing_summary = m.group(1).strip()
+        entries = stripped[len(m.group(1)) :].lstrip("\n")
+        return existing_summary, entries
+    return None, stripped
+
+
+def set_unreleased_summary(changelog, summary):
+    head, marker, body = changelog.partition("## [Unreleased]\n")
+    if not marker:
+        raise ValueError("no [Unreleased] section")
+    _, entries = split_unreleased_body(body)
+    summary_text = f"{summary.strip()}\n\n" if summary and summary.strip() else ""
+    return head + marker + "\n" + summary_text + entries
+
+
 def promote_changelog(changelog, version, previous, summary, repo_url, today):
     """The changelog with [Unreleased] emptied into a dated `version` section,
     opened by `summary` when there is one, and the compare links updated."""
     head, marker, body = changelog.partition("## [Unreleased]\n")
     if not marker:
         raise ValueError("no [Unreleased] section")
+    existing_summary, entries = split_unreleased_body(body)
+    effective_summary = summary.strip() if summary and summary.strip() else existing_summary
     section = f"## [{version}] - {today.isoformat()}\n\n"
-    if summary and summary.strip():
-        section += f"{summary.strip()}\n\n"
-    text = head + marker + "\n" + section + body.lstrip("\n")
+    if effective_summary:
+        section += f"{effective_summary}\n\n"
+    text = head + marker + "\n" + section + entries
     links = (
         f"[Unreleased]: {repo_url}/compare/v{version}...HEAD\n"
         f"[{version}]: {repo_url}/compare/v{previous}...v{version}"
@@ -367,16 +389,13 @@ def prepare(args):
         )
 
     summary = args.summary
-    if version.is_rc:
-        if summary or args.summary_file:
-            fail("a candidate takes no summary; the final release promotes the changelog")
-    else:
-        if changelog_section(changelog, str(version)) is not None:
-            fail(f"CHANGELOG.md already has a [{version}] section")
-        if args.summary_file:
-            if not args.summary_file.is_file():
-                fail(f"summary file not found: {args.summary_file}")
-            summary = args.summary_file.read_text()
+    if args.summary_file:
+        if not args.summary_file.is_file():
+            fail(f"summary file not found: {args.summary_file}")
+        summary = args.summary_file.read_text()
+
+    if not version.is_rc and changelog_section(changelog, str(version)) is not None:
+        fail(f"CHANGELOG.md already has a [{version}] section")
 
     note(f"Preparing {tag} after v{previous}")
 
@@ -400,7 +419,11 @@ def prepare(args):
         updated_lock = set_version(updated_lock, version, name)
     lock.write_text(updated_lock)
 
-    if not version.is_rc:
+    if version.is_rc:
+        if summary:
+            note("Adding summary to CHANGELOG.md [Unreleased]")
+            CHANGELOG.write_text(set_unreleased_summary(changelog, summary))
+    else:
         note(f"Promoting CHANGELOG.md [Unreleased] into [{version}]")
         promoted = promote_changelog(
             changelog, version, previous_stable, summary, manifest()["repository"], date.today()
@@ -598,7 +621,7 @@ def main():
         "prepare", help="set the version and the changelog in the working tree, and package"
     )
     p.add_argument("version", type=argument_version)
-    p.add_argument("--summary", help="a paragraph to open a final release's changelog section")
+    p.add_argument("--summary", help="a paragraph to open the changelog section")
     p.add_argument("--summary-file", type=Path, help="the same, read from a file")
     p.add_argument(
         "--skip-api-delta", action="store_true", help="prepare without the public-API delta report"
