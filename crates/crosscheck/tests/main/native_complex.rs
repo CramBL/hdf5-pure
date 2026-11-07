@@ -8,7 +8,7 @@ use hdf5::Datatype as NativeDatatype;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{
     AttrValue, ComplexType, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File,
-    FileBuilder, FloatingPointType, FormatError, RepackOptions, VariableLengthType,
+    FileBuilder, FloatingPointType, FormatError, LibVer, RepackOptions, VariableLengthType,
 };
 use hdf5_sys::h5a;
 use hdf5_sys::h5d;
@@ -20,6 +20,73 @@ use rstest::rstest;
 
 use test_util::native_complex::Component;
 use test_util_hdf5::lock;
+
+#[rstest]
+#[case::native(FixedShape::Native)]
+#[case::array(FixedShape::Array)]
+#[case::compound(FixedShape::Compound)]
+#[case::array_compound(FixedShape::ArrayCompound)]
+fn native_complex_creation_applies_ceilings_to_native_datatypes(
+    #[case] shape: FixedShape,
+    #[values(None, Some(LibVer::V18), Some(LibVer::V114))] ceiling: Option<LibVer>,
+) {
+    let _guard = lock::libhdf5_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("destination.h5");
+    let stored = shape.native_type(Component::F32Le);
+    {
+        let file = native_file(&source);
+        let dataset = file
+            .new_dataset_builder()
+            .empty_as(&stored)
+            .shape(1)
+            .create("values")
+            .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let datatype = {
+        let file = File::open(&source).unwrap();
+        let dataset = file.dataset("values").unwrap();
+        let datatype = dataset.datatype().unwrap();
+        assert_eq!(datatype, shape.pure_type(Component::F32Le));
+        drop(dataset);
+        file.close().unwrap();
+        datatype
+    };
+    let mut builder = FileBuilder::new();
+    if let Some(ceiling) = ceiling {
+        builder.with_libver_bounds(LibVer::Earliest, ceiling);
+    }
+    builder
+        .create_dataset("values")
+        .with_unallocated_storage(datatype, &[1]);
+    if let Some(ceiling) = ceiling {
+        let error = builder.write(&destination).unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+        assert!(!destination.exists());
+    } else {
+        builder.write(&destination).unwrap();
+        let file = hdf5::File::open(&destination).unwrap();
+        let dataset = file.dataset("values").unwrap();
+        assert_eq!(dataset.dtype().unwrap(), stored);
+        assert_eq!(dataset.shape(), [1]);
+        assert_eq!(dataset.storage_size(), 0);
+        drop(dataset);
+        file.close().unwrap();
+    }
+}
 
 #[rstest]
 #[case::f32_be(Component::F32Be)]

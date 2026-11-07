@@ -274,25 +274,20 @@ impl FileCreateProperties {
         self
     }
 
-    /// Constrain the on-disk format version to `[low, high]`.
+    /// Sets bounds on the superblock and layout profile and emitted content.
     ///
-    /// `high` **selects** the format: `Earliest..=V18` writes the HDF5 1.8 one
-    /// and anything reaching 1.10 writes the 1.10 one, so this changes the bytes
-    /// of every file the properties are applied to. Content the chosen format
-    /// cannot express is refused with
+    /// The writer selects its 1.8 profile when `high` is [`LibVer::V18`] and its 1.10 profile
+    /// when `high` is [`LibVer::V110`] or newer. It rejects content requiring a newer library
+    /// than `high` with
     /// [`FormatError::LibverTooOldForContent`](crate::FormatError::LibverTooOldForContent)
-    /// rather than silently upgraded — see
+    /// before output. Native complex datatypes require omitted bounds. See
     /// [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds)
-    /// for which content that is.
+    /// for content requirements.
     ///
-    /// `low` only rules formats out, licensing newer encodings without requiring
-    /// them, so a lower bound of `V112`, `V114` or `LATEST` writes the 1.10
-    /// format rather than being refused — provided `high` reaches it. An
-    /// inverted range such as `V114..=V110` is refused with
+    /// When `low` exceeds [`LibVer::WRITER_DEFAULT`] and `low <= high`, the writer selects
+    /// its 1.10 profile.
+    /// The writer rejects inverted bounds and an upper bound of [`LibVer::Earliest`] with
     /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable).
-    ///
-    /// HDF5 classes `H5Pset_libver_bounds` as a *file access* property; it sits
-    /// here because this crate resolves the bound at write time.
     #[doc(alias = "H5Pset_libver_bounds")]
     pub const fn with_libver_bounds(mut self, low: LibVer, high: LibVer) -> Self {
         self.libver_bounds = Some((low, high));

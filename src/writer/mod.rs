@@ -264,22 +264,29 @@ impl FileBuilder {
         self
     }
 
-    /// Sets the library-version bounds used to select the output format.
+    /// Sets bounds on the superblock and layout profile and emitted content.
     ///
-    /// The writer supports [`LibVer::V18`] and [`LibVer::V110`] output and selects the newest
-    /// permitted format. With an upper bound of [`LibVer::V18`], the writer emits a version 2
-    /// superblock and version 3 data-layout messages. With [`LibVer::V110`] or a newer upper bound,
-    /// it emits a version 3 superblock. Without explicit bounds, it uses [`LibVer::WRITER_DEFAULT`].
+    /// The writer supports [`LibVer::V18`] and [`LibVer::V110`] profiles and selects the newest
+    /// permitted profile. With an upper bound of [`LibVer::V18`], the writer emits a version 2
+    /// superblock and version 3 layout messages. With [`LibVer::V110`] or a newer upper bound,
+    /// it emits a version 3 superblock. Without explicit bounds, it uses
+    /// [`LibVer::WRITER_DEFAULT`] for the superblock and layout profile.
     ///
     /// The writer accepts a lower bound newer than [`LibVer::WRITER_DEFAULT`] when the range is
-    /// ordered. With both bounds set to [`LibVer::LATEST`], it selects the 1.10 format. When
+    /// ordered. With both bounds set to [`LibVer::LATEST`], it selects the 1.10 profile. When
     /// producing output, it rejects inverted bounds and an upper bound of [`LibVer::Earliest`]
     /// with [`Error::Format`] containing [`FormatError::LibverBoundsUnsatisfiable`].
     ///
-    /// This writer requires its 1.10 output format for chunked, filtered, or resizable datasets
-    /// and explicit file-space settings. Under a 1.8 upper bound, it rejects that content with
+    /// This writer requires its 1.10 profile for chunked, filtered, or resizable datasets and
+    /// explicit file-space settings. Under a 1.8 upper bound, it rejects that content with
     /// [`Error::Format`] containing [`FormatError::LibverTooOldForContent`].
     /// [`File::open_swmr_writer`](crate::File::open_swmr_writer) requires a version 3 superblock.
+    ///
+    /// Native complex datatypes require HDF5 2.0, including when nested in compounds, arrays,
+    /// or variable-length sequences. The writer rejects these datatypes in dataset definitions,
+    /// committed datatypes, and attributes under every explicit upper bound represented by
+    /// [`LibVer`]. It returns [`Error::Format`] containing [`FormatError::LibverTooOldForContent`]
+    /// before output. Native complex output is permitted when bounds are omitted.
     ///
     /// # Examples
     ///
@@ -291,6 +298,31 @@ impl FileBuilder {
     /// builder.create_dataset("values").with_f64_data(&[1.0, 2.0, 3.0]);
     /// let bytes = builder.finish().unwrap();
     /// assert_eq!(bytes[8], 2); // version 2 superblock
+    /// ```
+    ///
+    /// The writer checks a dataset's datatype against the bound even when storage is unallocated:
+    ///
+    /// ```
+    /// use hdf5_pure::{
+    ///     ComplexType, Datatype, DatatypeByteOrder, Error, FileBuilder, FloatingPointType,
+    ///     FormatError, LibVer,
+    /// };
+    ///
+    /// let component = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian);
+    /// let datatype = Datatype::Complex(ComplexType::new(component)?);
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_libver_bounds(LibVer::Earliest, LibVer::V114);
+    /// builder.create_dataset("z").with_unallocated_storage(datatype, &[1]);
+    ///
+    /// let Error::Format(error) = builder.finish().unwrap_err() else {
+    ///     panic!("expected incompatible content");
+    /// };
+    /// assert_eq!(error, FormatError::LibverTooOldForContent {
+    ///     content: "a native complex datatype",
+    ///     needs: "v2.0",
+    ///     writing: "v1.14",
+    /// });
+    /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     pub fn with_libver_bounds(&mut self, low: LibVer, high: LibVer) -> &mut Self {
         self.writer.with_libver_bounds(low, high);

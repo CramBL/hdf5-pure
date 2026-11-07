@@ -1,17 +1,13 @@
-//! Library-version bounds — the [`H5F_libver_t`] concept.
+//! Library-version boundaries for output format selection.
 //!
-//! Every HDF5 file is encoded with a set of *format versions* (superblock,
-//! object headers, message encodings). A reader needs a library new enough to
-//! understand those versions, and the HDF5 C API lets a writer bound which
-//! versions a new file may use via `H5Pset_libver_bounds`. [`LibVer`] names the
-//! release boundaries at which the on-disk format changed, so callers of this
-//! crate can ask which format an existing file requires
-//! ([`crate::File::libver_bound`]) or constrain what a new file may emit
-//! ([`crate::FileBuilder::with_libver_bounds`]).
-//!
-//! [`H5F_libver_t`]: https://portal.hdfgroup.org/documentation/hdf5/latest/group___f_a_p_l.html
+//! [`LibVer::WRITER_DEFAULT`] is the default superblock and layout profile. Datatypes can
+//! require a newer library than these structures. During file creation, the writer constrains
+//! emitted content according to the bounds configured through
+//! [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds).
 
 use crate::SuperblockVersion;
+use crate::datatype::Datatype;
+use crate::error;
 
 /// A library-version boundary, mirroring HDF5's `H5F_libver_t`.
 ///
@@ -37,8 +33,8 @@ pub enum LibVer {
     /// [`WRITER_OLDEST`](Self::WRITER_OLDEST).
     V18,
     /// HDF5 1.10: version 3 superblock, plus SWMR and the extensible/fixed
-    /// array chunk indices. The format this crate's writer emits unless bounds
-    /// say otherwise — see [`WRITER_DEFAULT`](Self::WRITER_DEFAULT).
+    /// array chunk indices. The writer's default superblock and layout profile is
+    /// [`WRITER_DEFAULT`](Self::WRITER_DEFAULT).
     V110,
     /// HDF5 1.12.
     V112,
@@ -47,35 +43,28 @@ pub enum LibVer {
 }
 
 impl LibVer {
-    /// The newest boundary this enum knows about — the meaning of
-    /// `H5F_LIBVER_LATEST`. Tracks the highest concrete variant.
+    /// The newest library-version boundary represented by this enum.
     ///
-    /// Usable as either bound. As a *lower* bound it is a licence to use newer
-    /// encodings, not a requirement to: `H5Pset_libver_bounds` lets the library
-    /// pick anything from the low bound upward, and what this crate writes at
-    /// [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) is already no newer than the
-    /// reference library emits under a low bound of 1.12 or 1.14, so a lower
-    /// bound above `WRITER_DEFAULT` is satisfied by it rather than refused.
+    /// When both bounds are set to this value, the writer uses
+    /// [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) for the superblock and layout profile. The writer
+    /// rejects native complex datatypes during file creation under this explicit upper bound.
     pub const LATEST: LibVer = LibVer::V114;
 
-    /// The on-disk format this crate's [`FileBuilder`](crate::FileBuilder)
-    /// produces when nothing constrains it: the version 3 superblock introduced
-    /// in HDF5 1.10.
+    /// The default superblock and layout profile, introduced in HDF5 1.10.
     ///
-    /// It is a *default*, not the only output.
-    /// [`with_libver_bounds`](crate::FileBuilder::with_libver_bounds) selects a
-    /// format within the bounds it is given, and the oldest this crate can write
-    /// is [`WRITER_OLDEST`](Self::WRITER_OLDEST).
+    /// [`FileBuilder`](crate::FileBuilder) writes a version 3 superblock under this profile.
+    /// Emitted datatypes can require a newer library version. Without explicit bounds, the
+    /// writer permits native complex datatypes, which require HDF5 2.0.
+    /// [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds) selects a
+    /// profile and constrains emitted content. The oldest supported profile is
+    /// [`WRITER_OLDEST`](Self::WRITER_OLDEST).
     pub const WRITER_DEFAULT: LibVer = LibVer::V110;
 
-    /// The oldest on-disk format this crate's [`FileBuilder`](crate::FileBuilder)
-    /// can produce: the version 2 superblock and "new style" object headers
-    /// introduced in HDF5 1.8.
+    /// The oldest superblock and layout profile the writer supports.
     ///
-    /// Nothing older is reachable. A version 0 or 1 superblock pairs with v1
-    /// symbol-table groups and local heaps, which this crate reads but does not
-    /// write, so a bound whose upper end is [`Earliest`](Self::Earliest) is
-    /// refused rather than silently satisfied with something newer.
+    /// Under this HDF5 1.8 profile, the writer uses a version 2 superblock and version 3
+    /// layout messages. An upper bound of [`Earliest`](Self::Earliest) is rejected with
+    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable).
     pub const WRITER_OLDEST: LibVer = LibVer::V18;
 
     /// Returns the minimum library version required by a superblock version.
@@ -90,27 +79,17 @@ impl LibVer {
         }
     }
 
-    /// The format to write under `bounds`: the newest this crate produces that
-    /// they admit, or [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) when they impose
-    /// nothing. Bounds admitting no such format give
-    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable).
+    /// Returns the newest supported superblock and layout profile permitted by `bounds`.
     ///
-    /// A lower bound above [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) is satisfied
-    /// by it, so `(LATEST, LATEST)` resolves to the 1.10 format rather than
-    /// failing. HDF5's low bound is a licence to use newer encodings, not a
-    /// requirement to use them, and every message this crate writes is already
-    /// at or below the version the reference library emits under a low bound of
-    /// 1.12 or 1.14. The value returned is the format actually written, so an
-    /// error naming it stays true.
+    /// Uses [`WRITER_DEFAULT`](Self::WRITER_DEFAULT) when bounds are omitted or when the lower
+    /// bound exceeds that profile. [`WritableTarget::with_datatypes`] checks datatype requirements
+    /// against the explicit upper bound.
     ///
-    /// That licence is not a licence to ignore `high`: an inverted range is
-    /// refused, as `H5Pset_libver_bounds` refuses one, and the check has to come
-    /// before the clamp that implements the licence — clamping first would turn
-    /// `(LATEST, V110)` into a bound the 1.10 format satisfies.
+    /// # Errors
     ///
-    /// One function so the whole-file writer and an editing session's fapl
-    /// answer the same bounds the same way; a second copy of this rule is how
-    /// the two would come to disagree about which format a caller asked for.
+    /// Returns
+    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable)
+    /// if the bounds are inverted or the upper bound is [`Earliest`](Self::Earliest).
     pub(crate) fn resolve_writable(
         bounds: Option<(LibVer, LibVer)>,
     ) -> Result<LibVer, crate::error::FormatError> {
@@ -145,6 +124,93 @@ impl LibVer {
             LibVer::V110 => "v1.10",
             LibVer::V112 => "v1.12",
             LibVer::V114 => "v1.14",
+        }
+    }
+}
+
+/// A parsed output target with a superblock and layout profile and an optional feature ceiling.
+///
+/// The parser retains the explicit upper bound separately from the selected profile. The writer
+/// adds datatype requirements through [`Self::with_datatypes`] before emission.
+#[derive(Clone, Copy)]
+pub(crate) struct WritableTarget {
+    profile: LibVer,
+    ceiling: Option<LibVer>,
+    content: ContentVersion,
+}
+
+impl WritableTarget {
+    /// Parses bounds and selects the superblock and layout profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns
+    /// [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable)
+    /// if the bounds are inverted or their upper bound is [`LibVer::Earliest`].
+    pub(crate) fn parse(bounds: Option<(LibVer, LibVer)>) -> Result<Self, error::FormatError> {
+        Ok(Self {
+            profile: LibVer::resolve_writable(bounds)?,
+            ceiling: bounds.map(|(_, high)| high),
+            content: ContentVersion::V18,
+        })
+    }
+
+    /// Adds recursive datatype requirements to this target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LibverTooOldForContent`](crate::FormatError::LibverTooOldForContent)
+    /// if bounds were supplied and a datatype contains native complex content.
+    pub(crate) fn with_datatypes<'a>(
+        mut self,
+        datatypes: impl IntoIterator<Item = &'a Datatype>,
+    ) -> Result<Self, error::FormatError> {
+        for datatype in datatypes {
+            self.content = self.content.max(ContentVersion::from_datatype(datatype));
+        }
+        if let Some(ceiling) = self.ceiling {
+            match self.content {
+                ContentVersion::V18 => {}
+                ContentVersion::V200 => {
+                    return Err(error::FormatError::LibverTooOldForContent {
+                        content: "a native complex datatype",
+                        needs: "v2.0",
+                        writing: ceiling.name(),
+                    });
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// Returns the profile used for superblock and layout versions.
+    pub(crate) fn profile(self) -> LibVer {
+        self.profile
+    }
+}
+
+/// The minimum output release tracked for datatype compatibility.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum ContentVersion {
+    V18,
+    // H5Tcomplex_create introduces native complex in H5Tcomplex.c, HDF5 2.0.0.
+    V200,
+}
+
+impl ContentVersion {
+    fn from_datatype(datatype: &Datatype) -> Self {
+        match datatype {
+            Datatype::Complex(_) => Self::V200,
+            Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
+                Self::from_datatype(base_type)
+            }
+            Datatype::Compound { members, .. } => members
+                .iter()
+                .map(|member| Self::from_datatype(&member.datatype))
+                .max()
+                .unwrap_or(Self::V18),
+            Datatype::VariableLength(kind) => Self::from_datatype(kind.base_type()),
+            _ => Self::V18,
         }
     }
 }
