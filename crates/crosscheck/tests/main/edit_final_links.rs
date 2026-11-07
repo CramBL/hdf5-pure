@@ -247,6 +247,150 @@ fn unused_named_datatype_unlinks_retain_storage_and_apply_other_count_updates(
     file.close().unwrap();
 }
 
+#[rstest]
+#[case::dataset(false)]
+#[case::group(true)]
+fn copied_aliases_reclaim_the_complete_independent_payload_after_reopen(
+    #[case] grouped: bool,
+    #[values(Session::BoundedFsm, Session::MirroredFsm)] session: Session,
+) {
+    let path = test_util::temp::temp_path("native-copied-alias.h5");
+    let values = (0..1_024).collect::<Vec<i32>>();
+    let native = hdf5::File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| {
+            properties.file_space_strategy(NativeSpace::FreeSpaceManager {
+                paged: false,
+                persist: true,
+                threshold: 1,
+            })
+        })
+        .create(&path)
+        .unwrap();
+    let source_path = if grouped { "a/values" } else { "a" };
+    if grouped {
+        drop(native.create_group("a").unwrap());
+    }
+    let dataset = native
+        .new_dataset_builder()
+        .empty_as(ByteOrder::LittleEndian.i32_datatype())
+        .layout(NativeLayout::Contiguous)
+        .shape([values.len()])
+        .create(source_path)
+        .unwrap();
+    dataset.write(&values).unwrap();
+    let original_start = dataset.offset().unwrap();
+    assert_eq!(dataset.storage_size(), 4_096);
+    drop(dataset);
+    native.link_hard("a", "b").unwrap();
+    if grouped {
+        native.link_hard("a/values", "outside").unwrap();
+    }
+    assert_eq!(native.loc_info_by_name("a").unwrap().num_links, 2);
+    assert_eq!(native.loc_info_by_name(source_path).unwrap().num_links, 2);
+    native.close().unwrap();
+    let file = session.open(&path);
+    file.copy("a", "copy").unwrap();
+    drop(
+        file.root()
+            .create_dataset("survivor", |dataset| {
+                dataset.with_i32_data(&[41; 1_024]);
+            })
+            .unwrap(),
+    );
+    file.commit().unwrap();
+    file.close().unwrap();
+    let native = hdf5::File::open(&path).unwrap();
+    let copied_path = if grouped { "copy/values" } else { "copy" };
+    assert_eq!(native.loc_info_by_name("copy").unwrap().num_links, 1);
+    let copied = native.dataset(copied_path).unwrap();
+    assert_eq!(copied.loc_info().unwrap().num_links, 1);
+    assert_eq!(copied.read_raw::<i32>().unwrap(), values);
+    assert_eq!(copied.storage_size(), 4_096);
+    let extent = copied.offset().unwrap()..copied.offset().unwrap() + copied.storage_size();
+    assert!(extent.end <= native.dataset("survivor").unwrap().offset().unwrap());
+    assert_ne!(extent.start, original_start);
+    drop(copied);
+    assert_copy_sources(&native, grouped, &values);
+    native.close().unwrap();
+    file_space_oracle::assert_persisted_sections(&path);
+    let file = session.open(&path);
+    assert_extent(&file, &extent, false);
+    file.root().delete("copy").unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    assert_extent(&file, &extent, true);
+    assert_extent(&file, &(original_start..original_start + 4_096), false);
+    assert_eq!(
+        file.dataset(source_path).unwrap().read_i32().unwrap(),
+        values
+    );
+    assert_eq!(
+        file.dataset("survivor").unwrap().read_i32().unwrap(),
+        [41; 1_024]
+    );
+    file.close().unwrap();
+    let native = hdf5::File::open(&path).unwrap();
+    if grouped {
+        absence::assert_libhdf5_absent(&native.group("copy").unwrap_err(), "copy");
+    } else {
+        absence::assert_libhdf5_absent(&native.dataset("copy").unwrap_err(), "copy");
+    }
+    assert_copy_sources(&native, grouped, &values);
+    assert_eq!(
+        native
+            .dataset("survivor")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [41; 1_024]
+    );
+    native.close().unwrap();
+    file_space_oracle::assert_persisted_sections(&path);
+    let file = session.open(&path);
+    assert_extent(&file, &extent, true);
+    assert_extent(&file, &(original_start..original_start + 4_096), false);
+    assert_eq!(
+        file.dataset(source_path).unwrap().read_i32().unwrap(),
+        values
+    );
+    assert_eq!(
+        file.dataset("survivor").unwrap().read_i32().unwrap(),
+        [41; 1_024]
+    );
+    file.close().unwrap();
+}
+
+fn assert_copy_sources(native: &hdf5::File, grouped: bool, values: &[i32]) {
+    assert_eq!(native.loc_info_by_name("a").unwrap().num_links, 2);
+    assert_eq!(native.loc_info_by_name("b").unwrap().num_links, 2);
+    let source_path = if grouped { "a/values" } else { "a" };
+    let alias_path = if grouped { "b/values" } else { "b" };
+    let source = native.dataset(source_path).unwrap();
+    assert_eq!(source.loc_info().unwrap().num_links, 2);
+    assert_eq!(source.read_raw::<i32>().unwrap(), values);
+    assert_eq!(
+        native
+            .dataset(alias_path)
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        values
+    );
+    if grouped {
+        assert_eq!(
+            native
+                .dataset("outside")
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            values
+        );
+    }
+}
+
 fn fixture(path: &Path, session: Session, removal: Removal) -> Range<u64> {
     let native = hdf5::File::with_options()
         .with_fapl(|properties| {
