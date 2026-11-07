@@ -1,6 +1,7 @@
 use hdf5_pure::{
     AttrValue, ComplexType, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File,
-    FileBuilder, FloatingPointType, FormatError, MaxExtent, MessageType, RepackOptions,
+    FileBuilder, FloatingPointType, FormatError, Layout, LibVer, MaxExtent, MessageType,
+    RepackOptions, VariableLengthType,
 };
 use hdf5_pure_format::__private::{AccessMode, AttributeMessage, ObjectHeader};
 use rstest::rstest;
@@ -248,6 +249,118 @@ fn native_complex_overwrite_rejects_a_compound_substitution() {
         );
     }
     assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[rstest]
+#[case::native(datatype(Component::F32Le, Container::Native))]
+#[case::array(datatype(Component::F32Le, Container::Array))]
+#[case::compound(datatype(Component::F32Le, Container::Compound))]
+#[case::sequence(Datatype::VariableLength(VariableLengthType::sequence(datatype(
+    Component::F32Le,
+    Container::Native
+))))]
+#[case::nested_sequence(Datatype::VariableLength(VariableLengthType::sequence(datatype(
+    Component::F32Le,
+    Container::Array
+))))]
+fn native_complex_creation_honors_explicit_content_ceilings(
+    #[case] datatype: Datatype,
+    #[values(
+        None,
+        Some(LibVer::V18),
+        Some(LibVer::V110),
+        Some(LibVer::V112),
+        Some(LibVer::V114)
+    )]
+    ceiling: Option<LibVer>,
+    #[values(
+        CreationTarget::Dataset,
+        CreationTarget::GroupDataset,
+        CreationTarget::Committed,
+        CreationTarget::GroupCommitted
+    )]
+    target: CreationTarget,
+) {
+    let mut builder = FileBuilder::new();
+    if let Some(ceiling) = ceiling {
+        builder.with_libver_bounds(LibVer::Earliest, ceiling);
+    }
+    let path = match target {
+        CreationTarget::Dataset => {
+            builder
+                .create_dataset("value")
+                .with_unallocated_storage(datatype.clone(), &[1]);
+            "value"
+        }
+        CreationTarget::GroupDataset => {
+            let mut group = builder.create_group("group");
+            group
+                .create_dataset("value")
+                .with_unallocated_storage(datatype.clone(), &[1]);
+            builder.add_group(group.finish());
+            "group/value"
+        }
+        CreationTarget::Committed => {
+            builder.commit_datatype("value", datatype.clone());
+            "value"
+        }
+        CreationTarget::GroupCommitted => {
+            let mut group = builder.create_group("group");
+            group.commit_datatype("value", datatype.clone());
+            builder.add_group(group.finish());
+            "group/value"
+        }
+    };
+    if let Some(ceiling) = ceiling {
+        let error = builder.finish().unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+        assert_eq!(
+            actual.to_string(),
+            format!(
+                "a native complex datatype requires the v2.0 format, but the requested \
+                 library-version bounds allow at most {}",
+                ceiling.name(),
+            ),
+        );
+    } else {
+        let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+        assert_eq!(file.libver_bound(), LibVer::WRITER_DEFAULT);
+        match target {
+            CreationTarget::Dataset | CreationTarget::GroupDataset => {
+                let dataset = file.dataset(path).unwrap();
+                assert_eq!(dataset.datatype().unwrap(), datatype);
+                assert_eq!(dataset.shape().unwrap(), [1]);
+                assert_eq!(
+                    dataset.layout().unwrap(),
+                    Layout::Contiguous {
+                        address: None,
+                        size: u64::from(datatype.type_size()),
+                    },
+                );
+            }
+            CreationTarget::Committed | CreationTarget::GroupCommitted => {
+                assert_eq!(file.root().named_datatype(path).unwrap(), datatype);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CreationTarget {
+    Committed,
+    Dataset,
+    GroupCommitted,
+    GroupDataset,
 }
 
 fn datatype(component: Component, container: Container) -> Datatype {

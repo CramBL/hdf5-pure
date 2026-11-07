@@ -82,7 +82,7 @@ use crate::file_space_info::FileSpaceInfo;
 #[cfg(test)]
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
-use crate::libver::LibVer;
+use crate::libver::{LibVer, WritableTarget};
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
@@ -786,31 +786,10 @@ impl FileWriter {
         }
     }
 
-    /// Constrain the on-disk format version of the file, mirroring HDF5's
-    /// `H5Pset_libver_bounds`. The file is written in the newest format the
-    /// bounds allow, between [`LibVer::WRITER_OLDEST`] and
-    /// [`LibVer::WRITER_DEFAULT`]; bounds that leave no such format fail with
-    /// [`FormatError::LibverBoundsUnsatisfiable`].
+    /// Sets bounds on the superblock and layout profile and emitted content.
     ///
-    /// `high` is what selects the format, so `Earliest..=V18` writes the 1.8
-    /// format and anything reaching 1.10 or beyond writes the 1.10 one. This
-    /// differs from the C library, which picks the *oldest* format the content
-    /// needs and treats `low` as the floor; the difference shows on
-    /// `Earliest..=Latest`, where `H5Fcreate` writes a version 0 superblock and
-    /// this writes a version 3 one. Leaving the bounds unset is the same as
-    /// leaving `high` at `Latest`. `low` only rules formats out, licensing newer
-    /// encodings without requiring them, so a lower bound of `V112`, `V114` or
-    /// `LATEST` is satisfied by the 1.10 format rather than refused — provided
-    /// `high` reaches it. An inverted range such as `V114..=V110` is refused with
-    /// [`FormatError::LibverBoundsUnsatisfiable`], as `H5Pset_libver_bounds`
-    /// refuses one.
-    ///
-    /// Some content cannot be written in the 1.8 format at all, and asking for
-    /// both is an error rather than a silent upgrade: a chunked (or resizable,
-    /// or filtered) dataset needs the version 4 data-layout message and the
-    /// chunk indices that came with 1.10, and a file-space setting — a strategy
-    /// or a page size — needs the File Space Info message. Both report
-    /// [`FormatError::LibverTooOldForContent`].
+    /// See [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds) for
+    /// supported profiles and content requirements. The writer checks these bounds before output.
     pub fn with_libver_bounds(&mut self, low: LibVer, high: LibVer) -> &mut Self {
         self.libver_bounds = Some((low, high));
         self
@@ -839,14 +818,14 @@ impl FileWriter {
         self
     }
 
-    /// The format to write, being the newest this crate produces that the
-    /// requested [`libver_bounds`](Self::libver_bounds) admit.
+    /// Parses bounds into a profile and explicit feature ceiling before layout planning.
     ///
-    /// Resolved once, before any layout work, so every version field in the file
-    /// comes from one decision rather than from each emitter's own reading of the
-    /// bounds.
-    fn resolve_libver(&self) -> Result<LibVer, FormatError> {
-        LibVer::resolve_writable(self.libver_bounds)
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LibverBoundsUnsatisfiable`] if the bounds are inverted or their
+    /// upper bound is [`LibVer::Earliest`].
+    fn resolve_libver(&self) -> Result<WritableTarget, FormatError> {
+        WritableTarget::parse(self.libver_bounds)
     }
 
     /// Sets the size of the reserved prefix before the HDF5 signature.
@@ -1031,7 +1010,8 @@ impl FileWriter {
         let widths = self.widths;
         let superblock_size =
             hdf5_pure_format::__private::superblock_serialized_size(widths.offsets);
-        let libver = self.resolve_libver()?;
+        let target = self.resolve_libver()?;
+        let libver = target.profile();
         let file_space = self.file_space_settings;
         let reuse_threshold = match file_space {
             None => Some(ByteLength::new(DEFAULT_THRESHOLD)),
@@ -1289,6 +1269,24 @@ impl FileWriter {
             committed_datatype_targets: root_attr_committed_datatype_targets,
             heaps: vl_root,
         } = PreparedAttributes::with_widths(widths, &self.root_attrs)?;
+
+        let target =
+            target.with_datatypes(
+                all_ds
+                    .iter()
+                    .map(|dataset| &dataset.dt)
+                    .chain(committed.iter().map(|datatype| &datatype.dt))
+                    .chain(root_attrs.iter().map(|attribute| &attribute.datatype))
+                    .chain(
+                        groups.iter().flat_map(|group| {
+                            group.attrs.iter().map(|attribute| &attribute.datatype)
+                        }),
+                    )
+                    .chain(all_ds.iter().flat_map(|dataset| {
+                        dataset.attrs.iter().map(|attribute| &attribute.datatype)
+                    })),
+            )?;
+        let libver = target.profile();
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
         //
@@ -1557,7 +1555,7 @@ impl FileWriter {
 
         let is_chunked: Vec<bool> = all_ds.iter().map(PreparedDataset::is_chunked).collect();
 
-        // Chunked storage here means a version 4 data-layout message and one of
+        // Chunked storage here means a version 4 layout message and one of
         // the chunk indices HDF5 1.10 introduced (extensible array, fixed array,
         // single chunk, implicit). The 1.8 format indexes chunks with a version 1
         // B-tree instead, which this crate reads but does not write, so there is

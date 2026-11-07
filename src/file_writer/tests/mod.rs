@@ -3,7 +3,6 @@ use hdf5_pure_format::__private::BTreeV2Header;
 use rstest::rstest;
 
 use super::*;
-use crate::File;
 use crate::access_mode::AccessMode;
 use crate::attribute_policy;
 use crate::group::v2 as group_v2;
@@ -15,11 +14,80 @@ use crate::source;
 use crate::source::PhysicalBytes;
 use crate::superblock::Superblock;
 use crate::type_builders;
+use crate::{ComplexType, DatatypeByteOrder, File, FloatingPointType};
 
 #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod allocation;
 #[cfg(feature = "std")]
 mod paged_arrays;
+
+#[rstest]
+#[case::unbounded(None)]
+#[case::v18(Some(LibVer::V18))]
+#[case::v114(Some(LibVer::V114))]
+fn native_complex_attribute_creation_honors_explicit_content_ceilings(
+    #[case] ceiling: Option<LibVer>,
+    #[values(
+        AttributeTarget::Dataset,
+        AttributeTarget::Group,
+        AttributeTarget::Root
+    )]
+    target: AttributeTarget,
+    #[values(false, true)] dense: bool,
+) {
+    let mut writer = FileWriter::new();
+    if let Some(ceiling) = ceiling {
+        writer.with_libver_bounds(LibVer::Earliest, ceiling);
+    }
+    let component = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian);
+    let datatype = Datatype::Complex(ComplexType::new(component).unwrap());
+    let mut message = type_builders::build_attr_message("complex", &AttrValue::I32(0)).unwrap();
+    message.datatype = datatype.clone();
+    message.raw_data = vec![0; 8];
+    let mut group = writer.create_group("group");
+    let mut owner = match target {
+        AttributeTarget::Dataset => {
+            AttributeOwner::Dataset(writer.create_dataset("data").with_i32_data(&[1]))
+        }
+        AttributeTarget::Group => AttributeOwner::Group(&mut group),
+        AttributeTarget::Root => AttributeOwner::Root(&mut writer),
+    };
+    if dense {
+        for index in 0..10 {
+            owner.insert(&format!("filler{index}"), AttributeForm::Value, index);
+        }
+    }
+    match owner {
+        AttributeOwner::Dataset(owner) => {
+            owner.set_attr_verbatim(message, None);
+        }
+        AttributeOwner::Group(owner) => owner.set_attr_verbatim(message, None),
+        AttributeOwner::Root(owner) => owner.set_root_attr_verbatim(message, None),
+    }
+    writer.add_group(group.finish());
+    if let Some(ceiling) = ceiling {
+        let mut bytes = b"previous bytes".to_vec();
+        let error = writer.finish_to_sink(&mut bytes).unwrap_err().into_format();
+        assert_eq!(
+            error,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+        assert_eq!(bytes, b"previous bytes");
+    } else {
+        let file = File::from_bytes(writer.finish().unwrap()).unwrap();
+        let datatypes = match target {
+            AttributeTarget::Dataset => file.dataset("data").unwrap().attr_datatypes().unwrap(),
+            AttributeTarget::Group => file.group("group").unwrap().attr_datatypes().unwrap(),
+            AttributeTarget::Root => file.root().attr_datatypes().unwrap(),
+        };
+        assert_eq!(datatypes.get("complex"), Some(&datatype));
+        assert_eq!(datatypes.len(), if dense { 11 } else { 1 });
+    }
+}
 
 #[rstest]
 #[case::empty("", None)]

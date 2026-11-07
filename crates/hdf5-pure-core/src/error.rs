@@ -1090,7 +1090,7 @@ pub enum FormatError {
         content: &'static str,
         /// The library-version label of the format that content requires.
         needs: &'static str,
-        /// The library-version label of the format the bounds resolved to.
+        /// The explicit upper bound's library-version label.
         writing: &'static str,
     },
     /// A dataset's storage extent differs from its logical byte length.
@@ -2620,7 +2620,7 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "{content} requires the {needs} format, but the requested \
-                     library-version bounds write {writing}"
+                     library-version bounds allow at most {writing}"
                 )
             }
             Self::InvalidObjectReference(addr) => {

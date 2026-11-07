@@ -111,7 +111,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed invalid tag lengths and padded logical tags in `Datatype::Opaque` metadata. Reading rejects malformed tag properties, and writing rejects tags with NULs or more than 247 bytes ([#1045](https://github.com/CramBL/hdf5-pure/pull/1045)).
 - Fixed `File::commit` accepting oversized hard Link messages during staged edits ([#1047](https://github.com/CramBL/hdf5-pure/pull/1047)).
 - Fixed `File::commit` splitting contiguous PAGE free runs into page-sized records, preventing reuse for larger allocations and inflating manager storage ([#1040](https://github.com/CramBL/hdf5-pure/pull/1040)).
-- Fixed native complex datatype messages being decoded as compounds. `Datatype::Complex` preserves homogeneous rectangular complex metadata and its floating-point component type ([#1039](https://github.com/CramBL/hdf5-pure/pull/1039)).
+- Fixed native complex datatype messages being decoded as compounds. `Datatype::Complex` preserves homogeneous rectangular complex metadata and its floating-point component type, and file creation rejects native complex under explicit library-version bounds ([#1039](https://github.com/CramBL/hdf5-pure/pull/1039)).
 - Fixed `Dataset::datatype` reporting version 1 compound array members as scalars, omitting their dimensions and full byte sizes ([#1027](https://github.com/CramBL/hdf5-pure/pull/1027)).
 
 - Fixed `File::copy` and cross-file copies rejecting a compact group with soft or external links, and marking the UTF-8 names of a copied group's hard links as ASCII ([#1006](https://github.com/CramBL/hdf5-pure/pull/1006)).
