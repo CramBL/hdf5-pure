@@ -1,3 +1,5 @@
+use core::num::NonZeroU32;
+
 use hdf5_pure_format::__private::DenseAttrPlan;
 use rstest::rstest;
 use test_util::allocation;
@@ -21,7 +23,42 @@ use crate::superblock;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 use crate::{AttrValue, FileBuilder, StoredAddress};
 
-use super::super::{CopyNode, CopyOutput, WriteEngine};
+use super::super::{CopyNode, CopyOutput, CopyTree, FreshCopyCount, WriteEngine};
+
+#[rstest]
+#[case::small(1, "copy_destination_counts_small")]
+#[case::large(8_192, "copy_destination_counts_large")]
+fn fresh_copy_counts_allocate_one_u32_per_descendant(#[case] count: usize, #[case] name: &str) {
+    let tree = CopyTree {
+        descendants: (0..count).map(|_| super::group_node(vec![])).collect(),
+        root: super::group_node((0..count).collect()),
+    };
+    let (counts, measured) = allocation::measure(name, || tree.fresh_counts().unwrap());
+    assert_eq!(counts.len(), count);
+    assert!(counts.iter().all(|count| count.0 == NonZeroU32::MIN));
+    assert_eq!(measured.blocks, 1, "{measured}");
+    assert_eq!(
+        measured.bytes,
+        u64::try_from(count * core::mem::size_of::<u32>()).unwrap(),
+        "{measured}"
+    );
+    assert_eq!(measured.live_bytes, measured.bytes, "{measured}");
+    let (control_counts, control) = allocation::measure(&format!("{name}_control"), || {
+        let retained = vec![0_u32; count];
+        let counts = tree.fresh_counts().unwrap();
+        std::hint::black_box(retained);
+        counts
+    });
+    assert_eq!(control_counts.len(), counts.len());
+    assert!(
+        control_counts
+            .iter()
+            .all(|count| count.0 == NonZeroU32::MIN)
+    );
+    assert_eq!(control.blocks, 2, "{control}");
+    assert_eq!(control.bytes, measured.bytes * 2, "{control}");
+    assert_eq!(control.live_bytes, measured.live_bytes, "{control}");
+}
 
 #[rstest]
 #[case::narrow_offsets(OffsetWidth::Two, LengthWidth::Eight, 256, ["copy_header_narrow_offsets", "copy_header_clone_narrow_offsets"])]
@@ -98,8 +135,11 @@ fn chunked_copy_bounds_header_allocations(
         layout: Some(layout.clone()),
         header: Vec::with_capacity(header_len),
     };
-    let (address, measured) =
-        allocation::measure(names[0], || tree.root.emit(&mut output, &[]).unwrap());
+    let (address, measured) = allocation::measure(names[0], || {
+        tree.root
+            .emit(&mut output, &[], FreshCopyCount(NonZeroU32::MIN))
+            .unwrap()
+    });
     assert_eq!(address, StoredAddress::new(32_768));
     assert!(output.layout.is_none());
     assert_eq!(output.header.len(), header_len);
@@ -129,7 +169,10 @@ fn chunked_copy_bounds_header_allocations(
     };
     let (address, copied) = allocation::measure(names[1], || {
         let retained = tree.root.region().clone();
-        let address = tree.root.emit(&mut control, &[]).unwrap();
+        let address = tree
+            .root
+            .emit(&mut control, &[], FreshCopyCount(NonZeroU32::MIN))
+            .unwrap();
         std::hint::black_box(retained);
         address
     });

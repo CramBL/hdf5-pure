@@ -1,5 +1,7 @@
 //! Object-tree copies, source reads, and reference screening for staged edits.
 
+use core::num::NonZeroU32;
+
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
@@ -38,6 +40,7 @@ use super::dataset::{self, ChunkGeometry};
 use super::group;
 use super::group_links;
 use super::object_header::OhRegion;
+use super::object_header::reference_count::HeaderCountError;
 use super::staging::StagedOp;
 use super::{InvalidatedAddresses, WriteEngine};
 
@@ -361,13 +364,14 @@ impl WriteEngine {
     /// Writes the descendants in the order the tree stores them and the root last, so each group
     /// is written after the objects its links target. Encodes addresses relative to the
     /// destination file's base and preserves unallocated contiguous storage.
+    /// Sets the copied root's count to one and derives descendant counts from destination links.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if a retained header cannot be rebuilt, [`Error::Format`]
-    /// if header encoding, attribute encoding, or allocation geometry is invalid, and [`Error::Io`]
-    /// if writing the copy fails. Propagates errors from [`Self::write_chunked_relocatable`] for
-    /// chunked copies.
+    /// if header encoding, attribute encoding, allocation geometry, or destination topology is
+    /// invalid, and [`Error::Io`] if writing the copy fails. Propagates errors from
+    /// [`Self::write_chunked_relocatable`] for chunked copies.
     pub(super) fn write_copy_subtree(&mut self, tree: &CopyTree) -> Result<ObjectId, Error> {
         let root = tree.emit(self)?;
         Ok(ObjectId::resolve(self.context.addresses(), root)?)
@@ -537,17 +541,53 @@ impl CopyTree {
 
     /// Places descendants before their parents and returns the copied root's stored address.
     ///
+    /// Derives destination counts before placement, with one reference for the copied root.
     /// The caller publishes the returned root after successful placement.
     ///
     /// # Errors
     ///
-    /// Returns errors from [`CopyNode::emit`]. Earlier nodes may have been placed before an error.
+    /// Returns [`FormatError::Internal`] for invalid destination topology, or errors from
+    /// [`CopyNode::emit`]. Earlier nodes may have been placed before an error.
     fn emit(&self, output: &mut impl CopyOutput) -> Result<StoredAddress, Error> {
+        let counts = self.fresh_counts()?;
         let mut written = Vec::with_capacity(self.descendants.len());
-        for node in &self.descendants {
-            written.push(node.emit(output, &written)?);
+        for (node, count) in self.descendants.iter().zip(counts) {
+            written.push(node.emit(output, &written, count)?);
         }
-        self.root.emit(output, &written)
+        self.root
+            .emit(output, &written, FreshCopyCount(NonZeroU32::MIN))
+    }
+
+    /// Counts hard links within the copy for every descendant in stored order.
+    ///
+    /// Excludes the root, whose destination count is one. Uses destination links without reading
+    /// source counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a link targets a missing descendant, a descendant has
+    /// zero incoming links, or a destination count exceeds [`u32::MAX`].
+    fn fresh_counts(&self) -> Result<Vec<FreshCopyCount>, Error> {
+        let mut counts = vec![0_u32; self.descendants.len()];
+        for node in self.descendants.iter().chain([&self.root]) {
+            for link in node.links() {
+                let count = counts.get_mut(link.target.index()).ok_or_else(|| {
+                    FormatError::Internal("a copied link has no destination object".into())
+                })?;
+                *count = count.checked_add(1).ok_or_else(|| {
+                    FormatError::Internal("a copied object's destination count overflows".into())
+                })?;
+            }
+        }
+        counts
+            .into_iter()
+            .map(|count| {
+                NonZeroU32::new(count).map(FreshCopyCount).ok_or_else(|| {
+                    FormatError::Internal("a copied descendant has no destination link".into())
+                        .into()
+                })
+            })
+            .collect()
     }
 
     /// Returns the nodes depth first, each group before its targets and the targets in link
@@ -619,6 +659,38 @@ impl CopyNodeId {
     }
 }
 
+/// A positive count for a fresh destination object.
+///
+/// The copied root has one reference. Descendant counts equal the number of hard links to them
+/// within the destination subtree.
+struct FreshCopyCount(NonZeroU32);
+
+impl FreshCopyCount {
+    /// Sets the count in the destination's owned header records.
+    ///
+    /// Updates an existing count message or inserts a missing one when the destination count
+    /// differs from the parsed or implicit count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for repeated, shared, or unsupported count messages, and
+    /// [`Error::Format`] for invalid record framing or count update geometry.
+    fn apply(self, region: &mut OhRegion) -> Result<(), Error> {
+        region
+            .reference_count_mut()
+            .and_then(|projection| projection.set(self.0.get()))
+            .map_err(|error| match error {
+                HeaderCountError::Ambiguous => {
+                    Error::EditUnsupported("a copied object has repeated reference-count messages")
+                }
+                HeaderCountError::Unsupported(_) => Error::EditUnsupported(
+                    "a copied object has an unsupported reference-count message",
+                ),
+                HeaderCountError::Framing(error) => error.into(),
+            })
+    }
+}
+
 /// An object of a [`CopyTree`], with the header records and data the writer needs to copy it.
 pub(super) enum CopyNode {
     /// Stored chunks with checked geometry and their verbatim filter-pipeline message.
@@ -661,17 +733,19 @@ impl CopyNode {
     ///
     /// Checks the retained region's widths against the destination before placement. Rebuilds a
     /// chunked layout from borrowed records using the retained geometry and finalizes dense
-    /// attribute storage separately.
+    /// attribute storage separately. Applies `count` to the owned header before serialization.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the source and destination widths differ,
-    /// [`FormatError::Internal`] if a child address is missing, or address-patch, header-encoding,
-    /// dense-plan, and placement errors.
+    /// Returns [`Error::EditUnsupported`] if the source and destination widths differ or a count
+    /// message is repeated, shared, or unsupported. Returns [`FormatError::Internal`] if a child
+    /// address is missing. Propagates errors from count projection, address patching, header
+    /// encoding, dense attribute planning, and placement.
     fn emit(
         &self,
         output: &mut impl CopyOutput,
         written: &[StoredAddress],
+        count: FreshCopyCount,
     ) -> Result<StoredAddress, Error> {
         let widths = output.output_widths();
         require_copy_widths(widths, self.region().widths())?;
@@ -729,6 +803,7 @@ impl CopyNode {
             }
             _ => self.region().clone(),
         };
+        count.apply(&mut region)?;
         if let Some(plan) = self.dense_attrs().clone().into_plan()? {
             region.push(MessageType::ATTRIBUTE_INFO, &output.place_attributes(plan)?);
         }
