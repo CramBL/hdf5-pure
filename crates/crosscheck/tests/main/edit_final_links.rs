@@ -13,10 +13,13 @@ use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSpacePolicy;
+use hdf5_pure::PhysicalAddress;
 use rstest::rstest;
+use test_util_hdf5::__private::c_object;
 use test_util_hdf5::absence;
 use test_util_hdf5::file_space_oracle;
 use test_util_hdf5::numeric::ByteOrder;
+use test_util_hdf5::storage;
 
 #[rstest]
 #[case::together(Removal::Together)]
@@ -129,6 +132,118 @@ fn final_link_commits_reuse_the_original_contiguous_allocation_after_reopen(
         file.dataset("survivor").unwrap().read_i32().unwrap(),
         survivor()
     );
+    file.close().unwrap();
+}
+
+#[rstest]
+#[case::direct(false)]
+#[case::containing_group(true)]
+fn unused_named_datatype_unlinks_retain_storage_and_apply_other_count_updates(
+    #[case] containing_group: bool,
+    #[values(Session::BoundedFsm, Session::MirroredFsm)] session: Session,
+) {
+    let path = test_util::temp::temp_path("native-retained-unlink.h5");
+    let native = hdf5::File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| {
+            properties.file_space_strategy(NativeSpace::FreeSpaceManager {
+                paged: false,
+                persist: true,
+                threshold: 1,
+            })
+        })
+        .create(&path)
+        .unwrap();
+    drop(native.create_group("links").unwrap());
+    let unused = ByteOrder::LittleEndian.i32_datatype();
+    native.commit_datatype("links/unused", &unused).unwrap();
+    let header = c_object::header_address(&native, "links/unused");
+    assert_eq!(
+        native.loc_info_by_name("links/unused").unwrap().num_links,
+        1
+    );
+    drop(unused);
+    let used = ByteOrder::LittleEndian.i32_datatype();
+    native.commit_datatype("used", &used).unwrap();
+    let dataset = native
+        .new_dataset_builder()
+        .empty_as(&used)
+        .shape([2])
+        .create("source")
+        .unwrap();
+    dataset.write(&[7_i32, 11]).unwrap();
+    assert!(dataset.dtype().unwrap().is_committed());
+    drop(dataset);
+    drop(used);
+    assert_eq!(native.loc_info_by_name("used").unwrap().num_links, 2);
+    native.close().unwrap();
+    let before = fs::read(&path).unwrap();
+    let file = session.open(&path);
+    let extents = storage::header_extents(&file, &before, PhysicalAddress::new(header));
+    file.root()
+        .delete(if containing_group {
+            "links"
+        } else {
+            "links/unused"
+        })
+        .unwrap();
+    file.copy("source", "copied").unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    assert_eq!(file.root().named_datatype_references("used").unwrap(), 3);
+    for extent in &extents {
+        assert_extent(&file, &(extent.start().get()..extent.end().get()), false);
+    }
+    file.close().unwrap();
+    let after = fs::read(&path).unwrap();
+    for extent in &extents {
+        let start = usize::try_from(extent.start().get()).unwrap();
+        let end = usize::try_from(extent.end().get()).unwrap();
+        assert_eq!(&after[start..end], &before[start..end]);
+    }
+    let native = hdf5::File::open(&path).unwrap();
+    if containing_group {
+        absence::assert_libhdf5_absent(&native.group("links").unwrap_err(), "links");
+    } else {
+        absence::assert_libhdf5_absent(
+            &native.dataset("links/unused").unwrap_err(),
+            "links/unused",
+        );
+    }
+    assert_eq!(native.loc_info_by_name("used").unwrap().num_links, 3);
+    for name in ["source", "copied"] {
+        let dataset = native.dataset(name).unwrap();
+        assert!(dataset.dtype().unwrap().is_committed());
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), [7, 11]);
+    }
+    let mut names = native.member_names().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        if containing_group {
+            vec!["copied", "source", "used"]
+        } else {
+            assert!(
+                native
+                    .group("links")
+                    .unwrap()
+                    .member_names()
+                    .unwrap()
+                    .is_empty()
+            );
+            vec!["copied", "links", "source", "used"]
+        }
+    );
+    native.close().unwrap();
+    let file = session.open(&path);
+    for extent in &extents {
+        assert_extent(&file, &(extent.start().get()..extent.end().get()), false);
+    }
+    assert_eq!(file.root().named_datatype_references("used").unwrap(), 3);
+    assert_eq!(file.dataset("source").unwrap().read_i32().unwrap(), [7, 11]);
+    assert_eq!(file.dataset("copied").unwrap().read_i32().unwrap(), [7, 11]);
     file.close().unwrap();
 }
 

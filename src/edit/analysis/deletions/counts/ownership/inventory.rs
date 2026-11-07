@@ -8,8 +8,9 @@ use super::ProtectedCounts;
 use super::{CountHandoffError, CountSource, SurvivingCount, SurvivingCounts};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
-use crate::edit::analysis::counts::changes::owned::OwnedOriginalCount;
-use crate::edit::analysis::counts::changes::owned::{CountDisposition, OwnedCountChange};
+use crate::edit::analysis::counts::changes::owned::{
+    CountDisposition, OwnedCountChange, UnresolvedCount,
+};
 use crate::edit::analysis::{NetCountPlan, ReconstructionSource};
 use crate::edit::commit::CountProjectionError;
 use crate::edit::commit::CountProjectionProof;
@@ -67,6 +68,7 @@ impl CountInventory {
     /// only when a count changes. Preserves every original entry and protects changed positive
     /// explicit source fields outside the reconstruction set against recorded allocator claims.
     /// A changed positive implicit count requires a matching reconstruction.
+    /// Accepts [`CountDisposition::Retain`] entries without preparing zero-count writes.
     ///
     /// Uses existing count facts without source reads or topology discovery. Skips reconstruction
     /// iteration and requires no heap allocation for empty or entirely unchanged work. Retains the
@@ -75,8 +77,7 @@ impl CountInventory {
     ///
     /// # Errors
     ///
-    /// Returns [`CountPreflightError::OriginalZero`] for an original zero count,
-    /// [`CountPreflightError::RetainedZero`] for a changed zero count outside the ordinary class,
+    /// Returns [`CountPreflightError::OriginalZero`] for an original zero count
     /// or [`CountPreflightError::MissingField`] for a changed positive implicit count without a
     /// reconstruction. Returns [`CountPreflightError::Protection`] for an inapplicable source
     /// association, unavailable publication, missing or overlapping complete allocations, or
@@ -121,21 +122,25 @@ impl CountInventory {
                     object: change.object(),
                 });
             }
-            if change.remaining() == change.original().value() {
-                continue;
-            }
-            if change.remaining() == 0 {
-                if !matches!(change.original(), OwnedOriginalCount::Ordinary { .. }) {
-                    return Err(CountPreflightError::RetainedZero {
+            match change.disposition() {
+                CountDisposition::Retain(_)
+                | CountDisposition::Surviving { .. }
+                | CountDisposition::Unchanged(_)
+                | CountDisposition::Unresolved {
+                    reason: UnresolvedCount::Zero,
+                    ..
+                } => {}
+                CountDisposition::Unresolved {
+                    change,
+                    reason: UnresolvedCount::MissingField,
+                } if !replaced.contains(&change.object()) => {
+                    return Err(CountPreflightError::MissingField {
                         object: change.object(),
+                        original: change.original().value(),
+                        remaining: change.remaining(),
                     });
                 }
-            } else if change.field().is_none() && !replaced.contains(&change.object()) {
-                return Err(CountPreflightError::MissingField {
-                    object: change.object(),
-                    original: change.original().value(),
-                    remaining: change.remaining(),
-                });
+                CountDisposition::Unresolved { .. } => {}
             }
         }
         let (inventory, surviving) = self.partition().into_parts();
@@ -372,11 +377,6 @@ pub(in crate::edit) enum CountPreflightError {
     },
     /// A source, reconstruction, publication, or allocator-protection failure.
     Protection(CountProtectionError),
-    /// A changed zero count outside the ordinary class.
-    RetainedZero {
-        /// The physical identity of the retained target.
-        object: ObjectId,
-    },
 }
 
 #[cfg(test)]

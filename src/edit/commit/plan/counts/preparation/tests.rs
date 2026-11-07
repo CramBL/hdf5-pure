@@ -1,12 +1,15 @@
 use std::path::Path;
 
 use rstest::rstest;
+use test_util::datatype;
 use test_util::disk_log;
 use test_util::object_header::Message;
+use test_util::object_header::MessageType;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::PreparedTreeCounts;
 use crate::edit::analysis::DISCOVERY_WORK;
+use crate::edit::analysis::counts::changes::owned::CountDisposition;
 use crate::edit::commit::plan::{CommitPlan, CommitPreparation, PreparedCommit, PreparedTree};
 use crate::edit::test_util as edit_test_util;
 use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, WriteEngine};
@@ -71,6 +74,48 @@ fn count_aware_preparation_selects_retirement_allocations_at_zero_remaining_coun
     assert_eq!(actual, if retired { expected } else { Vec::new() });
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::explicit(Some(1))]
+#[case::implicit(None)]
+fn retained_zero_counts_preserve_reference_roots_without_retirement(#[case] count: Option<u32>) {
+    let path = test_util::temp::temp_path("retained-count-preparation.h5");
+    let mut fixture = Fixture::new();
+    let mut messages = vec![Message::new(MessageType::DATATYPE, &datatype::f64_le())];
+    messages.extend(count.map(Message::reference_count));
+    let header = fixture.append_header(messages);
+    fixture.link("type", header);
+    fixture.write(&path);
+    let mut engine = edit_test_util::open_engine(&path);
+    engine.delete(&ObjectPathBuf::parse("type")).unwrap();
+    let tree = prepare(&mut engine);
+    let Some(PreparedTreeCounts::Complete {
+        inventory,
+        protected,
+        retained_roots,
+        eligible_owners,
+        retirement,
+    }) = tree.counts
+    else {
+        panic!("expected complete retained-count preparation");
+    };
+    let [change] = inventory.changes() else {
+        panic!("expected the retained target");
+    };
+    let CountDisposition::Retain(retained) = change.disposition() else {
+        panic!("expected an unlinked retained object");
+    };
+    assert!(std::ptr::eq(change, retained));
+    assert_eq!((change.original().value(), change.remaining()), (1, 0));
+    assert_eq!(
+        retained_roots,
+        [ObjectId::new(PhysicalAddress::new(header))]
+    );
+    assert!(protected.updates().is_empty());
+    assert!(eligible_owners.is_empty());
+    assert!(retirement.is_empty());
+    assert!(tree.deleted_free.is_empty());
 }
 
 #[rstest]

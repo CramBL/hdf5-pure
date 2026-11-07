@@ -579,7 +579,7 @@ fn an_empty_net_plan_skips_source_and_heap_work() {
     false,
     CountContext::Default,
     0,
-    Expected::Zero
+    Expected::Retain
 )]
 #[case::partial_allocation(
     Some(2),
@@ -728,7 +728,13 @@ fn owned_inventory_preserves_complete_original_facts_after_phase_release(
             };
             assert!(std::ptr::eq(observed, change));
         }
-        Expected::Missing | Expected::Zero => {
+        Expected::Retain => {
+            let CountDisposition::Retain(observed) = change.disposition() else {
+                panic!("expected an unlinked retained object");
+            };
+            assert!(std::ptr::eq(observed, change));
+        }
+        Expected::Missing => {
             let CountDisposition::Unresolved {
                 change: observed,
                 reason,
@@ -737,14 +743,7 @@ fn owned_inventory_preserves_complete_original_facts_after_phase_release(
                 panic!("expected an unresolved count");
             };
             assert!(std::ptr::eq(observed, change));
-            assert_eq!(
-                reason,
-                if matches!(expected, Expected::Missing) {
-                    UnresolvedCount::MissingField
-                } else {
-                    UnresolvedCount::Zero
-                }
-            );
+            assert_eq!(reason, UnresolvedCount::MissingField);
         }
     }
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -1086,9 +1085,9 @@ fn prepared(
 #[derive(Clone, Copy)]
 enum Expected {
     Missing,
+    Retain,
     Surviving,
     Unchanged,
-    Zero,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

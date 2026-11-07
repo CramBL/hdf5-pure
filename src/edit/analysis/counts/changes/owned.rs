@@ -103,9 +103,10 @@ impl OwnedCountChange {
 
     /// Classifies the planned count while borrowing the original entry and any explicit field.
     ///
-    /// Checks numeric equality first, including zero or implicit counts. Classifies changed counts
-    /// as positive with an explicit field, zero, or missing a field. Requires no source reads or
-    /// heap allocation.
+    /// Checks numeric equality first, including zero or implicit counts. Classifies a changed zero
+    /// count outside [`OwnedOriginalCount::Ordinary`] as [`CountDisposition::Retain`]. Classifies
+    /// other changed counts as positive with an explicit field, zero, or missing a field. Requires
+    /// no source reads or heap allocation.
     pub(in crate::edit) fn disposition(&self) -> CountDisposition<'_> {
         let Self {
             object: _,
@@ -116,6 +117,9 @@ impl OwnedCountChange {
         } = self;
         if original.value() == *remaining {
             return CountDisposition::Unchanged(self);
+        }
+        if *remaining == 0 && !matches!(original, OwnedOriginalCount::Ordinary { .. }) {
+            return CountDisposition::Retain(self);
         }
         match (NonZeroU32::new(*remaining), field.as_ref()) {
             (None, _) => CountDisposition::Unresolved {
@@ -177,12 +181,14 @@ impl OwnedOriginalCount {
     }
 }
 
-/// A borrowed classification for positive explicit count preparation.
+/// A borrowed classification of a planned count and its original observation class.
 ///
 /// Every variant retains the original entry. Allocation ownership, source freshness, and write or
 /// retirement permissions require separate evidence, including for positive explicit counts.
 #[derive(Debug)]
 pub(in crate::edit) enum CountDisposition<'a> {
+    /// A changed zero count outside [`OwnedOriginalCount::Ordinary`].
+    Retain(&'a OwnedCountChange),
     /// A changed positive count with an original explicit field.
     Surviving {
         change: &'a OwnedCountChange,
@@ -203,6 +209,6 @@ pub(in crate::edit) enum CountDisposition<'a> {
 pub(in crate::edit) enum UnresolvedCount {
     /// A positive planned count without an original explicit field.
     MissingField,
-    /// A planned count of zero, independently of any original field.
+    /// A changed zero count in [`OwnedOriginalCount::Ordinary`], with or without an explicit field.
     Zero,
 }
