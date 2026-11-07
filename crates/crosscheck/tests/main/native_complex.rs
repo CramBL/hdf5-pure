@@ -89,6 +89,60 @@ fn native_complex_creation_applies_ceilings_to_native_datatypes(
 }
 
 #[rstest]
+#[case::native(FixedShape::Native)]
+#[case::array(FixedShape::Array)]
+#[case::compound(FixedShape::Compound)]
+#[case::array_compound(FixedShape::ArrayCompound)]
+fn native_complex_repack_applies_ceilings_to_native_datatypes(
+    #[case] shape: FixedShape,
+    #[values(None, Some(LibVer::V18), Some(LibVer::V114))] ceiling: Option<LibVer>,
+) {
+    let _guard = lock::libhdf5_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.h5");
+    let destination = directory.path().join("destination.h5");
+    let stored = shape.native_type(Component::F32Le);
+    {
+        let file = native_file(&source);
+        let dataset = file
+            .new_dataset_builder()
+            .empty_as(&stored)
+            .shape(1)
+            .create("values")
+            .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let options = ceiling.map_or_else(RepackOptions::new, |ceiling| {
+        RepackOptions::new().with_libver_bounds(LibVer::Earliest, ceiling)
+    });
+    if let Some(ceiling) = ceiling {
+        let error = hdf5_pure::repack(&source, &destination, &options).unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+        assert!(!destination.exists());
+    } else {
+        hdf5_pure::repack(&source, &destination, &options).unwrap();
+        let file = hdf5::File::open(&destination).unwrap();
+        let dataset = file.dataset("values").unwrap();
+        assert_eq!(dataset.dtype().unwrap(), stored);
+        assert_eq!(dataset.shape(), [1]);
+        assert_eq!(dataset.storage_size(), 0);
+        drop(dataset);
+        file.close().unwrap();
+    }
+}
+
+#[rstest]
 #[case::f32_be(Component::F32Be)]
 #[case::f32_le(Component::F32Le)]
 #[case::f64_be(Component::F64Be)]

@@ -62,6 +62,7 @@ use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
+use crate::libver::WritableTarget;
 use crate::link_info::LinkInfoMessage;
 use crate::object_path::ObjectPathBuf;
 use crate::object_path::ObjectTarget;
@@ -242,6 +243,20 @@ impl Object {
         }
         self.inherited = Some(inherited);
         Ok(self)
+    }
+
+    /// Returns an iterator over the object's datatype, if any, and the datatypes of its attributes.
+    fn datatypes(&self) -> impl Iterator<Item = &Datatype> {
+        let datatype = match &self.kind {
+            Kind::Committed(datatype) => Some(datatype),
+            Kind::Dataset(dataset) => Some(&dataset.dt),
+            Kind::Group { .. } => None,
+        };
+        datatype.into_iter().chain(
+            self.attributes()
+                .iter()
+                .map(|attribute| &attribute.datatype),
+        )
     }
 
     /// Returns inherited prefix and creation metadata, or fresh header defaults.
@@ -678,7 +693,12 @@ impl<S: ObjectSource> Plan<S> {
         bounds: Option<(LibVer, LibVer)>,
         inherited: LibVer,
     ) -> Result<Self, Error> {
-        let mut libver = LibVer::resolve_writable(bounds.or(Some((LibVer::Earliest, inherited))))?;
+        let mut target = WritableTarget::parse(bounds)?;
+        let mut libver = if bounds.is_some() {
+            target.profile()
+        } else {
+            LibVer::resolve_writable(Some((LibVer::Earliest, inherited)))?
+        };
         let mut latest = settings.is_some();
         let threshold = match settings {
             None => Some(ByteLength::new(DEFAULT_THRESHOLD)),
@@ -706,6 +726,7 @@ impl<S: ObjectSource> Plan<S> {
         let mut references = vec![1u32; source.len()];
         for index in 0..source.len() {
             let object = source.load(index)?;
+            target = target.with_datatypes(object.datatypes())?;
             object.count_uses(&source, &mut references)?;
             if let Kind::Dataset(dataset) = &object.kind {
                 latest |= dataset.is_chunked();

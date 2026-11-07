@@ -22,6 +22,7 @@ use crate::superblock::LocatedSuperblock;
 mod array_descriptors;
 // Private attribute messages expose encoding details omitted by decoded values.
 mod attribute_fidelity;
+mod content_ceiling;
 
 #[rstest]
 #[case::reuse(true)]

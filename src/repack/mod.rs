@@ -232,27 +232,70 @@ impl RepackOptions {
         &self.drop
     }
 
-    /// Write the output in the format these bounds select, rather than in the
-    /// source's own format. Same meaning as
-    /// [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds):
-    /// `high` picks the format, and content it cannot express is refused with
-    /// [`FormatError::LibverTooOldForContent`] rather than written in a newer
-    /// one.
+    /// Sets bounds on the superblock and layout profile and emitted content.
     ///
-    /// A repack carries the source's format forward by default, because
-    /// compacting a file is not a request to re-target it — but it does upgrade
-    /// where the content leaves no choice, since a chunked dataset needs the 1.10
-    /// chunk indices and there is no older one this crate writes. Set this to make
-    /// the format a guarantee instead: an `Earliest..=V18` bound turns that
-    /// upgrade into an error, so a file that must stay loadable by an old reader
-    /// says so rather than finding out later.
+    /// Writes the destination in the format selected by `high`. Content the selected format
+    /// cannot express is rejected with [`FormatError::LibverTooOldForContent`]. This matches
+    /// [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds).
     ///
-    /// ```no_run
-    /// use hdf5_pure::{LibVer, RepackOptions, repack};
+    /// Without bounds, repacking selects a supported superblock and layout profile from the
+    /// source's superblock version, with HDF5 1.8 as the minimum. Chunked output and file-space
+    /// settings require the HDF5 1.10 profile. Setting `high` enforces an explicit format
+    /// ceiling: repacking rejects content requiring a newer library version before writing
+    /// destination bytes.
     ///
-    /// // Fails rather than producing a file MATLAB before R2021b cannot open.
+    /// Native complex datatypes require HDF5 2.0, including when nested in compounds, arrays,
+    /// or variable-length sequences. Repacking rejects these datatypes in retained dataset
+    /// definitions, committed datatypes, and attributes under every explicit upper bound
+    /// represented by [`LibVer`]. Dropped objects impose no output requirements, and native
+    /// complex output is permitted when bounds are omitted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # let dir = tempfile::tempdir()?;
+    /// # let source = dir.path().join("source.h5");
+    /// # let destination = dir.path().join("destination.h5");
+    /// # let mut builder = hdf5_pure::FileBuilder::new();
+    /// # builder.create_dataset("values").with_f64_data(&[1.0, 2.0, 3.0]);
+    /// # builder.write(&source)?;
+    /// use hdf5_pure::{File, LibVer, RepackOptions, repack};
+    ///
     /// let options = RepackOptions::new().with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    /// repack("data.mat", "compact.mat", &options)?;
+    /// repack(&source, &destination, &options)?;
+    ///
+    /// let file = File::open(&destination)?;
+    /// assert_eq!(file.libver_bound(), LibVer::V18);
+    /// file.close()?;
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    ///
+    /// Repacking checks retained datatypes against the bound even when storage is unallocated:
+    ///
+    /// ```
+    /// use hdf5_pure::{
+    ///     ComplexType, Datatype, DatatypeByteOrder, Error, FileBuilder, FloatingPointType,
+    ///     FormatError, LibVer, RepackOptions, repack,
+    /// };
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let source = dir.path().join("source.h5");
+    /// # let destination = dir.path().join("destination.h5");
+    /// let component = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian);
+    /// let datatype = Datatype::Complex(ComplexType::new(component)?);
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("z").with_unallocated_storage(datatype, &[1]);
+    /// builder.write(&source)?;
+    ///
+    /// let options = RepackOptions::new().with_libver_bounds(LibVer::Earliest, LibVer::V114);
+    /// let Error::Format(error) = repack(&source, &destination, &options).unwrap_err() else {
+    ///     panic!("expected incompatible content");
+    /// };
+    /// assert_eq!(error, FormatError::LibverTooOldForContent {
+    ///     content: "a native complex datatype",
+    ///     needs: "v2.0",
+    ///     writing: "v1.14",
+    /// });
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     ///
@@ -262,8 +305,8 @@ impl RepackOptions {
         self
     }
 
-    /// The library-version bounds this repack will write to, or `None` when it
-    /// carries the source's format forward.
+    /// Returns the library-version bounds configured for the destination file, or `None` if
+    /// bounds were omitted.
     pub fn libver_bounds(&self) -> Option<(LibVer, LibVer)> {
         self.libver_bounds
     }
@@ -407,7 +450,8 @@ impl RepackOptions {
 /// or if, after the drop paths, `src` nests groups more than 128 levels deep.
 /// Returns [`Error::RepackUnsupported`] for group link filters, including those configured on
 /// compact groups before dense storage is allocated, or embedded variable-length references in
-/// a source with two- or four-byte addresses.
+/// a source with two- or four-byte addresses. Returns [`Error::Format`] containing
+/// [`FormatError::LibverTooOldForContent`] if explicit bounds cannot represent retained content.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,
