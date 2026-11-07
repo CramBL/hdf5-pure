@@ -182,7 +182,7 @@ def _with_suffix(root: Path, suffixes: tuple[str, ...]) -> list[str]:
 
 def docs_files(root: Path) -> list[str]:
     """The Markdown files, read whole."""
-    return _with_suffix(root, (".md",))
+    return [path for path in _with_suffix(root, (".md",)) if not path.endswith("summary.md")]
 
 
 def source_files(root: Path) -> list[str]:
@@ -409,11 +409,37 @@ def _merge_base_with_head(root: Path, base: str) -> str:
     return _git(root, ["merge-base", base, "HEAD"]).strip()
 
 
+def _changelog_summary_lines(changelog_path: Path) -> set[int]:
+    if not changelog_path.is_file():
+        return set()
+    lines = changelog_path.read_text(errors="replace").splitlines()
+    in_section = False
+    in_summary = False
+    summary_lines = set()
+    for idx, line in enumerate(lines, start=1):
+        if line.startswith("## ["):
+            in_section = True
+            in_summary = False
+        elif in_section:
+            if line.startswith("### ") or line.startswith("["):
+                in_section = False
+                in_summary = False
+            elif line.strip():
+                in_summary = True
+                summary_lines.add(idx)
+            elif in_summary:
+                in_section = False
+                in_summary = False
+    return summary_lines
+
+
 def added_since(root: Path, merge_base: str) -> dict[str, set[int]]:
     """Returns the line numbers each file in the working tree adds over `merge_base`."""
     diff = _git(root, [*REPRODUCIBLE_DIFF, "-U0", "--diff-filter=AMR", merge_base])
     added = added_lines(diff)
     added.update(_untracked_added(root))
+    if "CHANGELOG.md" in added:
+        added["CHANGELOG.md"] -= _changelog_summary_lines(root / "CHANGELOG.md")
     return added
 
 
