@@ -1,7 +1,7 @@
 use hdf5_pure::{
     AttrValue, ComplexType, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File,
-    FileBuilder, FloatingPointType, FormatError, Layout, LibVer, MaxExtent, MessageType,
-    RepackOptions, VariableLengthType,
+    FileAccessProperties, FileBuilder, FloatingPointType, FormatError, Layout, LibVer, MaxExtent,
+    MessageType, RepackOptions, VariableLengthType,
 };
 use hdf5_pure_format::__private::{AccessMode, AttributeMessage, ObjectHeader};
 use rstest::rstest;
@@ -9,6 +9,170 @@ use test_util::native_complex::{Component, Container};
 use test_util::temp;
 use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::storage;
+
+#[rstest]
+#[case::native(datatype(Component::F32Le, Container::Native))]
+#[case::array(datatype(Component::F32Le, Container::Array))]
+#[case::compound(datatype(Component::F32Le, Container::Compound))]
+#[case::sequence(Datatype::VariableLength(VariableLengthType::sequence(datatype(
+    Component::F32Le,
+    Container::Native
+))))]
+#[case::nested_sequence(Datatype::VariableLength(VariableLengthType::sequence(datatype(
+    Component::F32Le,
+    Container::Array
+))))]
+fn native_complex_editing_applies_ceilings_to_new_datasets(
+    #[case] datatype: Datatype,
+    #[values(
+        None,
+        Some(LibVer::V18),
+        Some(LibVer::V110),
+        Some(LibVer::V112),
+        Some(LibVer::V114)
+    )]
+    ceiling: Option<LibVer>,
+    #[values(false, true)] nested: bool,
+) {
+    let path = temp::temp_path("native_complex_edit_ceiling.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let properties = editing_properties(ceiling);
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    let group = if nested {
+        file.root().create_group("group").unwrap()
+    } else {
+        file.root()
+    };
+    let dataset = group
+        .create_dataset("value", |builder| {
+            builder.with_unallocated_storage(datatype.clone(), &[1]);
+        })
+        .unwrap();
+    if let Some(ceiling) = ceiling {
+        assert_content_ceiling(file.commit().unwrap_err(), ceiling);
+        assert_eq!(dataset.datatype().unwrap(), datatype);
+        assert_content_ceiling(file.commit().unwrap_err(), ceiling);
+    } else {
+        file.commit().unwrap();
+        assert_eq!(dataset.datatype().unwrap(), datatype);
+        assert_eq!(dataset.shape().unwrap(), [1]);
+        assert_eq!(
+            dataset.layout().unwrap(),
+            Layout::Contiguous {
+                address: None,
+                size: u64::from(datatype.type_size())
+            }
+        );
+    }
+    drop(dataset);
+    drop(group);
+    drop(file);
+    if ceiling.is_some() {
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+}
+
+#[rstest]
+#[case::native(Container::Native)]
+#[case::array(Container::Array)]
+#[case::compound(Container::Compound)]
+fn editing_ceilings_preserve_existing_native_complex_content(
+    #[case] container: Container,
+    #[values(LibVer::V18, LibVer::V110, LibVer::V112, LibVer::V114)] ceiling: LibVer,
+) {
+    let path = temp::temp_path("native_complex_existing_ceiling.h5");
+    std::fs::write(&path, container.file(Component::F32Le)).unwrap();
+    let file = File::open_rw_with_options(&path, editing_properties(Some(ceiling))).unwrap();
+    let mut dataset = file.dataset("values").unwrap();
+    assert_eq!(
+        dataset.datatype().unwrap(),
+        datatype(Component::F32Le, container)
+    );
+    dataset.set_attr("label", AttrValue::I32(9)).unwrap();
+    file.root().set_attr("label", AttrValue::I32(10)).unwrap();
+    file.root()
+        .create_dataset("plain", |builder| {
+            builder.with_i32_data(&[11]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert_eq!(dataset.read_raw().unwrap(), Component::F32Le.values());
+    drop(dataset);
+    file.close().unwrap();
+    let image = std::fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    assert_attribute_bytes(
+        &file,
+        &image,
+        &datatype(Component::F32Le, container),
+        &Component::F32Le.values(),
+    );
+    assert_eq!(file.dataset("plain").unwrap().read_i32().unwrap(), [11]);
+    file.close().unwrap();
+}
+
+fn editing_properties(ceiling: Option<LibVer>) -> FileAccessProperties {
+    ceiling.map_or_else(FileAccessProperties::new, |ceiling| {
+        FileAccessProperties::new().with_libver_bounds(LibVer::Earliest, ceiling)
+    })
+}
+
+#[rstest]
+#[case::native(Container::Native)]
+#[case::array(Container::Array)]
+#[case::compound(Container::Compound)]
+fn native_complex_editing_applies_ceilings_to_copies(
+    #[case] container: Container,
+    #[values(None, Some(LibVer::V18), Some(LibVer::V114))] ceiling: Option<LibVer>,
+    #[values(false, true)] foreign: bool,
+) {
+    let path = temp::temp_path("native_complex_copy_ceiling.h5");
+    let source = Container::file(container, Component::F32Le);
+    std::fs::write(&path, &source).unwrap();
+    let file = File::open_rw_with_options(&path, editing_properties(ceiling)).unwrap();
+    if foreign {
+        let source = File::from_bytes(source.clone()).unwrap();
+        file.copy_from(&source, "values", "copied").unwrap();
+        source.close().unwrap();
+    } else {
+        file.copy("values", "copied").unwrap();
+    }
+    if let Some(ceiling) = ceiling {
+        assert_content_ceiling(file.commit().unwrap_err(), ceiling);
+    } else {
+        file.commit().unwrap();
+        let copied = file.dataset("copied").unwrap();
+        assert_eq!(
+            copied.datatype().unwrap(),
+            datatype(Component::F32Le, container)
+        );
+        assert_eq!(copied.read_raw().unwrap(), Component::F32Le.values());
+        assert_eq!(
+            copied.attr_datatypes().unwrap(),
+            [("values".into(), datatype(Component::F32Le, container))].into()
+        );
+        drop(copied);
+    }
+    drop(file);
+    if ceiling.is_some() {
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+    }
+}
+
+fn assert_content_ceiling(error: Error, ceiling: LibVer) {
+    let Error::Format(actual) = error else {
+        panic!("expected format error, got {error:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::LibverTooOldForContent {
+            content: "a native complex datatype",
+            needs: "v2.0",
+            writing: ceiling.name(),
+        }
+    );
+}
 
 #[rstest]
 #[case::f32_le(Component::F32Le)]

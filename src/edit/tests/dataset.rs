@@ -9,15 +9,20 @@ use rstest::rstest;
 use super::common;
 
 use crate::AttrValue;
+use crate::ComplexType;
 use crate::DatatypeByteOrder;
 use crate::DeflateLevel;
 use crate::FixedPointType;
 use crate::FloatingPointType;
+use crate::LibVer;
+use crate::MessageType;
 use crate::PhysicalAddress;
 use crate::VariableLengthStringType;
 use crate::VariableLengthType;
 #[cfg(feature = "zfp")]
 use crate::ZfpRate;
+use crate::access_mode::AccessMode;
+use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_write;
 use crate::chunked_write::{ChunkProvider, StorageAllocation};
 use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
@@ -41,10 +46,189 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::filters;
 use crate::filters::ChunkContext;
 use crate::object_graph::ObjectId;
+use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, ObjectPathBuf};
+use crate::reader::{File, FileAccessProperties};
+use crate::source::PhysicalBytes;
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
+use crate::width::FormatWidths;
 use crate::writer::FileBuilder;
+
+#[rstest]
+#[case::native(false)]
+#[case::array(true)]
+fn native_complex_editing_applies_ceilings_to_attribute_metadata(
+    #[case] array: bool,
+    #[values(None, Some(LibVer::V18), Some(LibVer::V114))] ceiling: Option<LibVer>,
+    #[values(false, true)] dense: bool,
+) {
+    let path = test_util::temp::temp_path("editing_attribute_ceiling.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let properties = ceiling
+        .map_or_else(FileAccessProperties::new, |ceiling| {
+            FileAccessProperties::new().with_libver_bounds(LibVer::Earliest, ceiling)
+        })
+        .with_locking(FileLocking::Disabled);
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    let component = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian);
+    let datatype = Datatype::Complex(ComplexType::new(component).unwrap());
+    let datatype = if array {
+        Datatype::Array {
+            base_type: Box::new(datatype),
+            dimensions: vec![1],
+        }
+    } else {
+        datatype
+    };
+    let mut message = type_builders::build_attr_message("complex", &AttrValue::I32(0)).unwrap();
+    message.datatype = datatype.clone();
+    message.raw_data = vec![0; 8];
+    let dataset = file
+        .root()
+        .create_dataset("data", |builder| {
+            builder.with_i32_data(&[1]);
+            if dense {
+                for index in 0..10 {
+                    builder.set_attr(&format!("filler{index}"), AttrValue::I32(index));
+                }
+            }
+            builder.set_attr_verbatim(message, None);
+        })
+        .unwrap();
+    if let Some(ceiling) = ceiling {
+        let error = file.commit().unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    } else {
+        file.commit().unwrap();
+        assert_eq!(dataset.read_i32().unwrap(), [1]);
+        let attributes = dataset.attr_datatypes().unwrap();
+        assert_eq!(attributes["complex"], datatype);
+        assert_eq!(attributes.len(), if dense { 11 } else { 1 });
+        let image = std::fs::read(&path).unwrap();
+        let file = File::from_bytes(image.clone()).unwrap();
+        let address = crate::group::v2::resolve_path_any(
+            PhysicalBytes::for_test(&image, file.addresses()),
+            AccessMode::ReadOnly,
+            file.superblock(),
+            FormatWidths {
+                offsets: file.superblock().offset_size,
+                lengths: file.superblock().length_size,
+            },
+            &ObjectPathBuf::parse("data").as_path(),
+        )
+        .unwrap();
+        let header = ObjectHeader::parse(
+            &image,
+            AccessMode::ReadOnly,
+            usize::try_from(address).unwrap(),
+            file.superblock().offset_size.get(),
+            file.superblock().length_size.get(),
+        )
+        .unwrap();
+        let info = header
+            .messages
+            .iter()
+            .find(|message| message.msg_type == MessageType::ATTRIBUTE_INFO)
+            .unwrap();
+        let info = AttributeInfoMessage::parse_with_offset_width(
+            &info.data,
+            file.superblock().offset_size,
+        )
+        .unwrap();
+        assert_eq!(info.fractal_heap_address.is_some(), dense);
+    }
+    drop(dataset);
+    drop(file);
+}
+
+#[rstest]
+#[case::unbounded(None)]
+#[case::v18(Some(LibVer::V18))]
+#[case::v114(Some(LibVer::V114))]
+fn native_complex_editing_applies_ceilings_to_copied_group_attributes(
+    #[case] ceiling: Option<LibVer>,
+    #[values(false, true)] dense: bool,
+    #[values(false, true)] foreign: bool,
+) {
+    let path = test_util::temp::temp_path("editing_copied_attribute_ceiling.h5");
+    let datatype = Datatype::Array {
+        base_type: Box::new(Datatype::Complex(
+            ComplexType::new(FloatingPointType::ieee754_binary32(
+                DatatypeByteOrder::LittleEndian,
+            ))
+            .unwrap(),
+        )),
+        dimensions: vec![1],
+    };
+    let mut message = type_builders::build_attr_message("complex", &AttrValue::I32(0)).unwrap();
+    message.datatype = datatype.clone();
+    message.raw_data = vec![0; 8];
+    let mut builder = FileBuilder::new();
+    let mut group = builder.create_group("group");
+    group.create_dataset("plain").with_i32_data(&[7]);
+    if dense {
+        for index in 0..10 {
+            group.set_attr(&format!("filler{index}"), AttrValue::I32(index));
+        }
+    }
+    group.set_attr_verbatim(message, None);
+    builder.add_group(group.finish());
+    let original = builder.finish().unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let properties = ceiling.map_or_else(FileAccessProperties::new, |ceiling| {
+        FileAccessProperties::new().with_libver_bounds(LibVer::Earliest, ceiling)
+    });
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    if foreign {
+        let source = File::from_bytes(original.clone()).unwrap();
+        file.copy_from(&source, "group", "copied").unwrap();
+        source.close().unwrap();
+    } else {
+        file.copy("group", "copied").unwrap();
+    }
+    if let Some(ceiling) = ceiling {
+        let error = file.commit().unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+    } else {
+        file.commit().unwrap();
+        let group = file.group("copied").unwrap();
+        let attributes = group.attr_datatypes().unwrap();
+        assert_eq!(attributes["complex"], datatype);
+        assert_eq!(attributes.len(), if dense { 11 } else { 1 });
+        assert_eq!(
+            file.dataset("copied/plain").unwrap().read_i32().unwrap(),
+            [7]
+        );
+        drop(group);
+    }
+    drop(file);
+    if ceiling.is_some() {
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+}
 
 #[rstest]
 #[case::missing_datatype(|b: &mut DatasetBuilder| b.datatype = None, FormatError::DatasetMissingDatatype)]

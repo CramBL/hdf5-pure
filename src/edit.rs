@@ -327,7 +327,7 @@ use crate::free_sections::ReusableSpaceStats;
 use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
-use crate::libver::LibVer;
+use crate::libver::{LibVer, WritableTarget};
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
@@ -659,15 +659,13 @@ pub(crate) struct WriteEngine {
     /// is what lets a file the C library wrote under its own bounds be edited at
     /// all.
     ///
-    /// Set below [`LibVer::V110`] it refuses content the older format cannot
-    /// carry, the way the whole-file writer does. The file's *own* superblock
-    /// version cannot stand in for this: a version 2 superblock says the file is
-    /// 1.8-readable today, not that the caller wants it to stay that way, and
-    /// deriving the ceiling from it would refuse the C-library-file edits of
-    /// issue #101.
+    /// When bounds are configured, the editor rejects newly added chunked storage
+    /// below [`LibVer::V110`] and newly emitted native complex datatypes under every
+    /// explicit upper bound. This ceiling is independent of the file's superblock
+    /// version.
     ///
     /// [`FileAccessProperties::with_libver_bounds`]: crate::FileAccessProperties::with_libver_bounds
-    libver_ceiling: Option<LibVer>,
+    libver_ceiling: Option<WritableTarget>,
     /// The physical file length associated with the persisted free-space state.
     ///
     /// [`finalize_persist`](Self::finalize_persist) compares this length with the image length
@@ -2674,41 +2672,56 @@ impl WriteEngine {
         &mut self,
         bounds: Option<(LibVer, LibVer)>,
     ) -> Result<(), Error> {
-        self.libver_ceiling = match bounds {
-            Some(_) => Some(LibVer::resolve_writable(bounds).map_err(Error::Format)?),
-            None => None,
-        };
+        let target = WritableTarget::parse(bounds)?;
+        self.libver_ceiling = bounds.map(|_| target);
         Ok(())
     }
 
-    /// Refuse staged content the session's [`libver_ceiling`](Self::libver_ceiling)
-    /// cannot express, before the commit writes anything.
+    /// Rejects staged content that exceeds the session's library-version ceiling.
     ///
-    /// Only chunked storage is at stake: `build_chunked_dataset_oh` writes a
-    /// version 4 data-layout message and a 1.10 chunk index unconditionally,
-    /// while everything else this session adds is expressible in both formats
-    /// (`libver` already picks the contiguous layout version). A filter or an
-    /// unlimited dimension arrives as chunked storage, so they are covered here
-    /// too.
+    /// Checks recursive datatypes against the target ceiling and rejects chunked layouts if the
+    /// target ceiling is below HDF5 1.10.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LibverTooOldForContent`] if explicit bounds exclude a dataset or
+    /// attribute datatype containing native complex content, or if a chunked or resizable dataset
+    /// has a ceiling below [`LibVer::V110`].
     fn check_libver_admits<'a>(
         &self,
         datasets: impl IntoIterator<Item = &'a FlatDataset>,
     ) -> Result<(), Error> {
-        let Some(ceiling) = self.libver_ceiling else {
+        let Some(target) = self.libver_ceiling else {
             return Ok(());
         };
-        if ceiling >= LibVer::V110 {
-            return Ok(());
+        for dataset in datasets {
+            target.with_datatypes(
+                core::iter::once(&dataset.dt)
+                    .chain(dataset.attrs.iter().map(|attr| &attr.datatype)),
+            )?;
+            if dataset.chunk_options.is_chunked() || dataset.maxshape.is_some() {
+                Self::check_chunked_libver(target)?;
+            }
         }
-        let chunked = datasets
-            .into_iter()
-            .any(|fd| fd.chunk_options.is_chunked() || fd.maxshape.is_some());
-        if chunked {
-            return Err(Error::Format(FormatError::LibverTooOldForContent {
+        Ok(())
+    }
+
+    /// Rejects chunked layouts if the target ceiling is older than HDF5 1.10.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LibverTooOldForContent`] if `target` sets a ceiling below
+    /// [`LibVer::V110`].
+    fn check_chunked_libver(target: WritableTarget) -> Result<(), Error> {
+        if let Some(ceiling) = target.ceiling()
+            && ceiling < LibVer::V110
+        {
+            return Err(FormatError::LibverTooOldForContent {
                 content: "a chunked, filtered, or resizable dataset",
                 needs: LibVer::V110.name(),
                 writing: ceiling.name(),
-            }));
+            }
+            .into());
         }
         Ok(())
     }

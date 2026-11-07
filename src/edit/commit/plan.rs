@@ -468,6 +468,7 @@ impl WriteEngine {
         capture: bool,
         counted: bool,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
+        self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         self.preflight_narrow_references()?;
         let mut analysis = AnalysisPhase::new(self);
         let mut edits = DatasetEdits {
@@ -724,7 +725,12 @@ impl WriteEngine {
                     base,
                     self.context.widths(),
                 )?;
-                let attributes = attributes::plan_attr_ops(&self.opened_source(), &region, &ops)?;
+                let attributes = attributes::plan_attr_ops_with_target(
+                    &self.opened_source(),
+                    &region,
+                    &ops,
+                    self.libver_ceiling,
+                )?;
                 edits
                     .collections
                     .extend(analysis.attribute_collections(addr, attributes.predecessors)?)?;
@@ -988,7 +994,12 @@ impl WriteEngine {
         for (key, node) in nodes.iter_mut() {
             if let Some(ops) = attrs_by_group.get(key) {
                 let region = std::mem::take(&mut node.prepared.region);
-                let edits = attributes::plan_attr_ops(&self.opened_source(), &region, ops)?;
+                let edits = attributes::plan_attr_ops_with_target(
+                    &self.opened_source(),
+                    &region,
+                    ops,
+                    self.libver_ceiling,
+                )?;
                 if let Some(replaced) = &node.prepared.replaces {
                     collections.extend(
                         analysis.attribute_collections(replaced.object(), edits.predecessors)?,
@@ -1053,7 +1064,6 @@ impl WriteEngine {
                 .map(|(path, dataset)| (path, dataset)),
         );
         self.check_group_additions(nodes, keys, children, &datasets_by_group)?;
-        self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         let delete_targets = staged.deletes();
         let (deleted_free, deleted_collections) = match counts {
             Some(PreparedTreeCounts::Complete {
@@ -1082,12 +1092,20 @@ impl WriteEngine {
             let opened = self.opened_source();
             for key in keys {
                 for (_, tree) in &nodes[key].prepared.copies {
+                    if let Some(target) = self.libver_ceiling {
+                        tree.check_libver(&opened, target)?;
+                    }
                     copy::screen_copied_references(
                         tree,
                         self.context.widths(),
                         &for_copied,
                         &opened,
                     )?;
+                }
+            }
+            for (_, tree) in staged.cross_copies() {
+                if let Some(target) = self.libver_ceiling {
+                    tree.check_libver(&opened, target)?;
                 }
             }
         }

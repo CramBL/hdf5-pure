@@ -8,7 +8,8 @@ use hdf5::Datatype as NativeDatatype;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{
     AttrValue, ComplexType, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File,
-    FileBuilder, FloatingPointType, FormatError, LibVer, RepackOptions, VariableLengthType,
+    FileAccessProperties, FileBuilder, FileLocking, FloatingPointType, FormatError, LibVer,
+    RepackOptions, VariableLengthType,
 };
 use hdf5_sys::h5a;
 use hdf5_sys::h5d;
@@ -20,6 +21,92 @@ use rstest::rstest;
 
 use test_util::native_complex::Component;
 use test_util_hdf5::lock;
+
+#[rstest]
+#[case::native(FixedShape::Native)]
+#[case::array(FixedShape::Array)]
+#[case::compound(FixedShape::Compound)]
+#[case::array_compound(FixedShape::ArrayCompound)]
+fn native_complex_editing_applies_ceilings_to_native_datatypes(
+    #[case] shape: FixedShape,
+    #[values(None, Some(LibVer::V18), Some(LibVer::V114))] ceiling: Option<LibVer>,
+) {
+    let _guard = lock::libhdf5_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("editing.h5");
+    let stored = shape.native_type(Component::F32Le);
+    {
+        let file = native_file(&path);
+        let dataset = file
+            .new_dataset_builder()
+            .empty_as(&stored)
+            .shape(1)
+            .create("existing")
+            .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let original = std::fs::read(&path).unwrap();
+    let properties = ceiling
+        .map_or_else(FileAccessProperties::new, |ceiling| {
+            FileAccessProperties::new().with_libver_bounds(LibVer::Earliest, ceiling)
+        })
+        .with_locking(FileLocking::Disabled);
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    let existing = file.dataset("existing").unwrap();
+    let datatype = existing.datatype().unwrap();
+    assert_eq!(datatype, shape.pure_type(Component::F32Le));
+    drop(existing);
+    let added = file
+        .root()
+        .create_dataset("added", |builder| {
+            builder.with_unallocated_storage(datatype, &[1]);
+        })
+        .unwrap();
+    drop(added);
+    if let Some(ceiling) = ceiling {
+        let error = file.commit().unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a native complex datatype",
+                needs: "v2.0",
+                writing: ceiling.name(),
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        file.root().delete("added").unwrap();
+        file.root()
+            .create_dataset("plain", |builder| {
+                builder.with_i32_data(&[7]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+    } else {
+        file.commit().unwrap();
+    }
+    file.close().unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    let existing = file.dataset("existing").unwrap();
+    assert_eq!(existing.dtype().unwrap(), stored);
+    assert_eq!(existing.shape(), [1]);
+    drop(existing);
+    if ceiling.is_none() {
+        let added = file.dataset("added").unwrap();
+        assert_eq!(added.dtype().unwrap(), stored);
+        assert_eq!(added.shape(), [1]);
+        assert_eq!(added.storage_size(), 0);
+        drop(added);
+    } else {
+        let plain = file.dataset("plain").unwrap();
+        assert_eq!(plain.read_raw::<i32>().unwrap(), [7]);
+        drop(plain);
+    }
+    file.close().unwrap();
+}
 
 #[rstest]
 #[case::native(FixedShape::Native)]

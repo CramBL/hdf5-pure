@@ -187,6 +187,11 @@ impl WritableTarget {
     pub(crate) fn profile(self) -> LibVer {
         self.profile
     }
+
+    /// Returns the explicit upper bound, if bounds were configured.
+    pub(crate) fn ceiling(self) -> Option<LibVer> {
+        self.ceiling
+    }
 }
 
 /// The minimum output release tracked for datatype compatibility.
