@@ -255,7 +255,7 @@ def promoted_version(changelog_diff):
 
 
 def split_unreleased_body(body):
-    """Split [Unreleased] body into (existing_summary, entries)."""
+    """Split [Unreleased] body into (`existing_summary`, `entries`)."""
     stripped = body.lstrip("\n")
     m = re.match(r"^(.*?)(?=\n### |\Z)", stripped, re.S)
     if m and not m.group(1).startswith("### "):
