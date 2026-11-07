@@ -23,12 +23,57 @@ use hdf5_pure::FilterParameters;
 use hdf5_pure::{Chunk, ChunkIndex, File, FileBuilder, Layout, MaxExtent, MessageType};
 use hdf5_pure::{Error, FormatError};
 use hdf5_pure_format::__private::{AccessMode, ObjectHeader};
+use hdf5_pure_format::__private::{FormatWidths, LengthWidth, OffsetWidth};
 use rstest::rstest;
 use test_util::data_layout;
 use test_util_hdf5::dataset;
+use test_util_hdf5::file;
 use test_util_hdf5::reader::ReadBackend;
 
 use crate::test_util::c_object;
+
+#[rstest]
+#[case::single_chunk(dataset::FiniteChunkIndex::Single, ChunkIndex::SingleChunk)]
+#[case::fixed_array(dataset::FiniteChunkIndex::Fixed, ChunkIndex::FixedArray)]
+fn unallocated_finite_indexes_report_append_capability(
+    #[case] fixture: dataset::FiniteChunkIndex,
+    #[case] index: ChunkIndex,
+    #[values(false, true)] filtered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("deferred-capability.h5");
+    dataset::write_native_empty_finite_chunked_i32(
+        &path,
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Eight,
+        },
+        filtered,
+        fixture,
+    );
+    let file = File::open_rw(&path).unwrap();
+    let mut target = file.dataset("d").unwrap();
+    assert_eq!(target.chunk_index().unwrap(), Some(index));
+    assert!(index.supports_inplace_append());
+    assert_eq!(target.shape().unwrap(), [0]);
+    assert_eq!(
+        target.maxshape().unwrap(),
+        Some(vec![MaxExtent::Fixed(fixture.maximum())])
+    );
+    assert_eq!(target.chunks().unwrap(), vec![]);
+    target.append(&[1_i32, 2, 3]).unwrap();
+    assert_eq!(target.read_i32().unwrap(), [1, 2, 3]);
+    assert_eq!(target.shape().unwrap(), [3]);
+    drop(target);
+    file.close().unwrap();
+    let native = file::libhdf5_open(&path);
+    let target = native.dataset("d").unwrap();
+    assert_eq!(target.read_raw::<i32>().unwrap(), [1, 2, 3]);
+    assert_eq!(target.shape(), [3]);
+    drop(target);
+    native.close().unwrap();
+    directory.close().unwrap();
+}
 
 #[rstest]
 #[case::two_byte_max(65_535, 2)]

@@ -6949,18 +6949,44 @@ the same commit to replace it",
     /// A dataset this session has staged and not yet committed reports what was
     /// staged.
     ///
-    /// Together with [`is_chunked`](Self::is_chunked) and
-    /// [`chunk_shape`](Self::chunk_shape), this lets a caller check up front
-    /// whether a dataset is eligible for
-    /// [`Dataset::append_staged`](crate::Dataset::append_staged), which needs a
-    /// chunked dataset whose first maximum dimension is
-    /// [`MaxExtent::Unlimited`].
+    /// Together with [`is_chunked`](Self::is_chunked), [`chunk_shape`](Self::chunk_shape),
+    /// and [`chunk_index`](Self::chunk_index), this lets a caller check whether a committed
+    /// dataset can accept further appends. For committed datasets,
+    /// [`Dataset::append_staged`](crate::Dataset::append_staged) and
+    /// [`Dataset::append`](crate::Dataset::append) require a chunked dataset whose first
+    /// maximum dimension accommodates the appended elements: an unlimited maximum for an
+    /// extensible array, or a finite maximum large enough to contain the growth for a
+    /// single chunk or fixed array. Staging an append on a pending creation can also
+    /// extend a dataset without chunked storage (see [`append_staged`](Self::append_staged)).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the dataspace message cannot be parsed, and
     /// [`Error::StaleHandle`] for a handle an object reference produced once a
     /// commit has run under it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, MaxExtent};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("maxshape.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder
+    ///     .create_dataset("series")
+    ///     .with_i32_data(&[1, 2])
+    ///     .with_chunks(&[2])
+    ///     .with_maxshape(&[MaxExtent::Fixed(10)]);
+    /// builder.write(&path)?;
+    ///
+    /// let file = File::open(&path)?;
+    /// let dataset = file.dataset("series")?;
+    /// assert_eq!(dataset.maxshape()?, Some(vec![MaxExtent::Fixed(10)]));
+    /// drop(dataset);
+    /// drop(file);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn maxshape(&self) -> Result<Option<Vec<MaxExtent>>, Error> {
         if let Some(meta) = self.staged_meta()? {
             return Ok(meta.maxshape);

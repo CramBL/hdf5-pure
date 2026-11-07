@@ -247,17 +247,3 @@ fn every_parsed_chunk_index_maps_to_a_kind(
 ) {
     assert_eq!(ChunkIndex::from_layout(parsed), kind);
 }
-
-#[test]
-fn only_extensible_array_supports_inplace_append() {
-    assert!(ChunkIndex::ExtensibleArray.supports_inplace_append());
-    for idx in [
-        ChunkIndex::BTreeV1,
-        ChunkIndex::SingleChunk,
-        ChunkIndex::Implicit,
-        ChunkIndex::FixedArray,
-        ChunkIndex::BTreeV2,
-    ] {
-        assert!(!idx.supports_inplace_append());
-    }
-}

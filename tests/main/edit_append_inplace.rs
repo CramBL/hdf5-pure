@@ -409,8 +409,10 @@ fn fallback_non_extensible_array_refused() {
     let err = s.dataset("d").unwrap().append(&[5]).unwrap_err();
     test_util_hdf5::assertion::append_in_place_unsupported(
         err,
-        "dataset has no unlimited (maxshape) dimension",
+        "append requires a single-chunk, Fixed Array, or Extensible Array index",
     );
+    s.close().unwrap();
+    dir.close().unwrap();
 }
 
 #[test]

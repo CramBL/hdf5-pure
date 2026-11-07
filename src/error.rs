@@ -59,16 +59,16 @@ pub enum Error {
     /// An interrupted file can fail to reopen.
     AllocationPublicationUncertain,
     /// The dataset or file is not a supported target for the fast, immediate
-    /// in-place append
-    /// ([`Dataset::append`](crate::Dataset::append)) - for
-    /// example a userblock or non-latest-format file, a dataset whose
-    /// Extensible-Array index is not yet allocated, one that is not rank-1 /
-    /// unlimited / Extensible-Array indexed, one reachable through more than one
+    /// in-place append ([`Dataset::append`](crate::Dataset::append)).
+    ///
+    /// Examples include a userblock or non-latest-format file, a dataset that is
+    /// not rank 1, an unsupported chunk index kind, an append that exceeds a
+    /// finite maximum dimension, a dataset reachable through more than one
     /// hard link, or a path an uncommitted staged edit in the same session will
     /// relocate or delete. Distinct from [`AppendUnsupported`](Self::AppendUnsupported)
     /// so a caller can catch this fast-path rejection and fall back to the staged
-    /// [`Dataset::append_staged`](crate::Dataset::append_staged). The
-    /// payload is a human-readable reason.
+    /// [`Dataset::append_staged`](crate::Dataset::append_staged). The payload is a
+    /// human-readable reason.
     AppendInPlaceUnsupported(&'static str),
     /// The dataset or appended values are unsupported by
     /// [`Dataset::append_staged`](crate::Dataset::append_staged).

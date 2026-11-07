@@ -336,7 +336,7 @@ fn refuse_contiguous() {
     with_writer(&path, |w| {
         assert_unsupported(
             w.dataset("d").unwrap().append(&[4, 5]),
-            "dataset has no unlimited (maxshape) dimension",
+            "append requires a single-chunk, Fixed Array, or Extensible Array index",
         )
     });
     assert_eq!(
