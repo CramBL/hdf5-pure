@@ -20,6 +20,7 @@ use crate::convert::Narrow;
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_writer::DenseAttrCreationOrder;
+use crate::libver::WritableTarget;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -509,10 +510,36 @@ pub(super) struct DenseAttrEdit {
 /// reference patching. Returns [`FormatError::InvalidAttributePhaseChange`] if the stored
 /// minimum dense count exceeds the maximum compact count. Propagates source-read, parsing,
 /// and storage-planning errors.
+#[cfg(any(test, doc))]
 pub(super) fn plan_attr_ops(
     src: &(impl OriginalSource + ?Sized),
     region: &OhRegion,
     ops: &[&AttrOp],
+) -> Result<AttrEdits, Error> {
+    plan_attr_ops_with_target(src, region, ops, None)
+}
+
+/// Plans attribute changes for an object header against an optional library-version target.
+///
+/// Checks compact and dense thresholds and [`OBJECT_HEADER_MESSAGE_MAX`]. Retains dense storage
+/// by count when the minimum is zero.
+///
+/// Reuses stored bodies for surviving attributes absent from `ops` when rebuilding compact
+/// storage. Serializes dense replacements in version 3 format. Both rebuilds preserve creation
+/// indexes and the next-index counter. An empty result requires no attribute storage.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if an edit cannot be reproduced, a required attribute is
+/// absent, creation indexes are exhausted, or conversion to dense storage would prevent
+/// reference patching. Returns [`FormatError::InvalidAttributePhaseChange`] if the stored
+/// minimum dense count exceeds the maximum compact count. Propagates source-read, parsing,
+/// and storage-planning errors.
+pub(super) fn plan_attr_ops_with_target(
+    src: &(impl OriginalSource + ?Sized),
+    region: &OhRegion,
+    ops: &[&AttrOp],
+    target: Option<WritableTarget>,
 ) -> Result<AttrEdits, Error> {
     let policy = AttributePolicy::from_prefix(region.props().attribute_phase_change)?;
     let dense_now = region_uses_dense_attrs(region)?;
@@ -522,7 +549,7 @@ pub(super) fn plan_attr_ops(
         AttributeStorage::Compact
     };
     if current == AttributeStorage::Compact {
-        return plan_compact_batch(src, region, ops, policy);
+        return plan_compact_batch(src, region, ops, policy, target);
     }
 
     // Reject flagged records before resolving attributes for a dense rebuild.
@@ -545,7 +572,7 @@ pub(super) fn plan_attr_ops(
                 let PreparedAttributeValue {
                     attribute,
                     collections,
-                } = prepare_attribute_value(region.widths(), name, value)?;
+                } = prepare_attribute_value(region.widths(), name, value, target)?;
                 let attribute = SlotAttribute::Prepared(attribute);
                 match set.get_mut(name) {
                     // Preserve the existing creation index on replacement.
@@ -622,8 +649,12 @@ fn prepare_attribute_value(
     widths: FormatWidths,
     name: &str,
     value: &AttrValue,
+    target: Option<WritableTarget>,
 ) -> Result<PreparedAttributeValue, Error> {
     let mut message = AttributeName::try_from(name)?.build_value(value)?;
+    if let Some(target) = target {
+        target.with_datatypes([&message.datatype])?;
+    }
     let collections = value
         .var_len_strings()
         .map(type_builders::build_global_heap_collections)
@@ -709,6 +740,7 @@ fn plan_compact_batch(
     original: &OhRegion,
     ops: &[&AttrOp],
     policy: AttributePolicy,
+    target: Option<WritableTarget>,
 ) -> Result<AttrEdits, Error> {
     if ops.is_empty() {
         let count = compact_attr_count(original)?;
@@ -723,6 +755,7 @@ fn plan_compact_batch(
         }
     }
     let mut batch = CompactBatch::parse(original)?;
+    batch.target = target;
     let previous_count = batch.count;
     for (order, op) in ops.iter().enumerate() {
         batch.apply(op, order)?;
@@ -752,6 +785,8 @@ fn plan_compact_batch(
 /// Creation indexes are updated as operations are applied. Unchanged original records are copied
 /// during reconstruction, and new global heap references are patched during placement.
 struct CompactBatch<'a> {
+    /// The target bounds applied to newly prepared attribute values.
+    target: Option<WritableTarget>,
     original: &'a OhRegion,
     records: Vec<CompactRecord>,
     names: BTreeMap<String, usize>,
@@ -777,6 +812,7 @@ impl<'a> CompactBatch<'a> {
     /// Propagates attribute-name parsing errors.
     fn parse(original: &'a OhRegion) -> Result<Self, Error> {
         let mut batch = Self {
+            target: None,
             original,
             records: Vec::new(),
             names: BTreeMap::new(),
@@ -846,6 +882,7 @@ impl<'a> CompactBatch<'a> {
                 self.original.widths(),
                 name,
                 value,
+                self.target,
             )?),
             AttrOp::Remove { .. } => None,
         };
@@ -932,6 +969,7 @@ impl<'a> CompactBatch<'a> {
     /// Propagates Attribute Info record-splicing errors.
     fn into_compact(self, predecessors: AttributePredecessors) -> Result<AttrEdits, Error> {
         let Self {
+            target: _,
             original,
             records,
             names: _,

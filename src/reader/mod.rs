@@ -537,10 +537,10 @@ impl FileAccessProperties {
         self
     }
 
-    /// Constrain the on-disk format an editing session may write, mirroring
-    /// HDF5's `H5Pset_libver_bounds` — which the C library classes as a *file
-    /// access* property for exactly this reason: it governs what a later write
-    /// to an existing file is allowed to add.
+    /// Constrains the on-disk format an editing session may write, mirroring
+    /// HDF5's `H5Pset_libver_bounds`. The C library classifies this property
+    /// as a file access property because it governs what a write to an existing
+    /// file may add.
     ///
     /// Unset by default, which keeps [`File::open_rw`] adding whatever the
     /// content needs. That default is what lets a file the C library wrote under
@@ -551,23 +551,58 @@ impl FileAccessProperties {
     /// message and a 1.10 chunk index, since this crate does not write the
     /// version 1 B-tree index that 1.8 used.
     ///
-    /// Setting a `high` below [`LibVer::V110`] refuses that addition with
+    /// Setting a `high` below [`LibVer::V110`] rejects that addition with
     /// [`FormatError::LibverTooOldForContent`]
-    /// at [`File::commit`] instead — the same refusal
+    /// at [`File::commit`] instead, matching the behavior of
     /// [`FileBuilder::with_libver_bounds`](crate::FileBuilder::with_libver_bounds)
-    /// gives when writing a whole file, so a `.mat` bounded to 1.8 for MATLAB
-    /// stays loadable by MATLAB after an edit.
+    /// when writing a whole file.
     ///
-    /// `low` only rules formats out — as in the C library it licenses newer
-    /// encodings without requiring them — so a lower bound of [`LibVer::V112`],
-    /// [`LibVer::V114`] or [`LibVer::LATEST`] leaves the session writing the 1.10
-    /// format rather than failing, provided `high` reaches it. An inverted range
-    /// such as `V114..=V110` is refused with
+    /// Native complex datatypes require HDF5 2.0, including when nested in compounds, arrays,
+    /// or variable-length sequences. Under every explicit upper bound represented by [`LibVer`],
+    /// [`File::commit`] rejects newly emitted native complex datatypes in added datasets, added or
+    /// replaced attributes, and copied objects with [`Error::Format`] containing
+    /// [`FormatError::LibverTooOldForContent`]. The editor does not screen retained native complex
+    /// metadata in existing datasets and attributes, and omitted bounds permit native complex output.
+    ///
+    /// The editor accepts a lower bound newer than [`LibVer::V110`] when the range is ordered.
+    /// Read-write opens reject inverted bounds and an upper bound of [`LibVer::Earliest`] with
     /// [`FormatError::LibverBoundsUnsatisfiable`].
     ///
-    /// The read-only opens ignore this: they write nothing. [`File::open_swmr_writer`]
-    /// requires a version 3 superblock, so it refuses a `high` below
-    /// [`LibVer::V110`] up front rather than accepting a bound it cannot honor.
+    /// Read-only opens ignore this setting. [`File::open_swmr_writer`] requires a version 3
+    /// superblock and rejects a `high` below [`LibVer::V110`] immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{
+    ///     ComplexType, Datatype, DatatypeByteOrder, Error, File, FileAccessProperties,
+    ///     FileBuilder, FloatingPointType, FormatError, LibVer,
+    /// };
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("example.h5");
+    /// # FileBuilder::new().write(&path)?;
+    /// let properties = FileAccessProperties::new()
+    ///     .with_libver_bounds(LibVer::Earliest, LibVer::V114);
+    /// let file = File::open_rw_with_options(&path, properties)?;
+    ///
+    /// let component = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian);
+    /// let datatype = Datatype::Complex(ComplexType::new(component)?);
+    /// file.root().create_dataset("z", |builder| {
+    ///     builder.with_unallocated_storage(datatype, &[1]);
+    /// })?;
+    ///
+    /// let Error::Format(error) = file.commit().unwrap_err() else {
+    ///     panic!("expected incompatible content");
+    /// };
+    /// assert_eq!(error, FormatError::LibverTooOldForContent {
+    ///     content: "a native complex datatype",
+    ///     needs: "v2.0",
+    ///     writing: "v1.14",
+    /// });
+    /// drop(file);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
     #[doc(alias = "H5Pset_libver_bounds")]
     pub const fn with_libver_bounds(mut self, low: LibVer, high: LibVer) -> Self {
         self.libver_bounds = Some((low, high));

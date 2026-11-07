@@ -19,6 +19,7 @@ use crate::dataspace::Dataspace;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError};
 use crate::file_writer;
+use crate::libver::WritableTarget;
 use crate::link_info::LinkInfoMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
@@ -504,6 +505,72 @@ pub(super) struct CopyTree {
 }
 
 impl CopyTree {
+    /// Screens copied datatypes, dense attributes, and chunked layouts against `target`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LibverTooOldForContent`] if a datatype or layout exceeds the target
+    /// ceiling, or [`FormatError::UnsupportedSohmReference`] if a retained attribute is shared.
+    /// Propagates source-read, header-record, and datatype-parsing errors.
+    pub(super) fn check_libver(
+        &self,
+        source: &(impl OriginalSource + ?Sized),
+        target: WritableTarget,
+    ) -> Result<(), Error> {
+        for node in core::iter::once(&self.root).chain(&self.descendants) {
+            let region = node.region();
+            let resolver = crate::shared_message::SourceResolver::new(
+                source,
+                AccessMode::ReadWrite,
+                region.widths(),
+                None,
+            );
+            let mut position = 0;
+            while let Some(record) = region
+                .layout()
+                .next_message(region, position)
+                .map_err(super::object_header::record_error)?
+            {
+                match record.msg_type {
+                    MessageType::DATATYPE => {
+                        let resolved;
+                        let encoded = if record.flags.is_shared() {
+                            resolved = resolver.resolve(record.body, MessageType::DATATYPE)?;
+                            resolved.as_slice()
+                        } else {
+                            record.body
+                        };
+                        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
+                        target.with_datatypes([&datatype])?;
+                    }
+                    MessageType::ATTRIBUTE => {
+                        if record.flags.is_shared() {
+                            return Err(FormatError::UnsupportedSohmReference.into());
+                        }
+                        let datatype =
+                            crate::attribute::AttributeMessage::parse_datatype_resolving(
+                                record.body,
+                                &resolver,
+                            )?;
+                        target.with_datatypes([&datatype])?;
+                    }
+                    _ => {}
+                }
+                position = record.body_range.end;
+            }
+            for attribute in node.dense_attrs().attrs() {
+                target.with_datatypes([&attribute.datatype])?;
+            }
+        }
+        if core::iter::once(&self.root)
+            .chain(&self.descendants)
+            .any(|node| matches!(node, CopyNode::DatasetChunked { .. }))
+        {
+            WriteEngine::check_chunked_libver(target)?;
+        }
+        Ok(())
+    }
+
     /// Screens retained headers and dense attributes at the copy's source widths.
     ///
     /// Counts committed-datatype uses with the root header's retained source widths.
