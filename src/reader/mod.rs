@@ -16,6 +16,7 @@ use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::OwnedLink;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::MetadataBytes;
 
 #[cfg(test)]

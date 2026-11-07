@@ -2912,6 +2912,7 @@ mod tests {
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
+    use hdf5_pure_core::__private::MetadataBytesExt;
     #[cfg(feature = "std")]
     use hdf5_pure_core::MetadataBytes;
     #[cfg(feature = "std")]

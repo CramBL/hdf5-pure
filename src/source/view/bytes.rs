@@ -3,6 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::__private::{FileRange, MetadataFrame};
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::MetadataBytes;
