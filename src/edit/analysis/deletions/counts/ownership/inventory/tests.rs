@@ -50,6 +50,8 @@ use crate::object_path::ObjectPathBuf;
 #[case::unchanged(Work::Unchanged, Some(2), true, false)]
 #[case::ordinary_zero(Work::Retired, Some(1), true, false)]
 #[case::implicit_zero(Work::Retired, None, true, false)]
+#[case::retained_zero(Work::Retain, Some(1), true, false)]
+#[case::implicit_retained_zero(Work::Retain, None, true, false)]
 fn preflight_preserves_original_inventory_and_selected_source_allocations(
     #[case] work: Work,
     #[case] original: Option<u32>,
@@ -63,7 +65,7 @@ fn preflight_preserves_original_inventory_and_selected_source_allocations(
     let source = phase.reconstruction_source(&engine, target).unwrap();
     let copy = phase.copy_users(&tree).unwrap().unwrap();
     let added = phase
-        .added_copy_users((!matches!(work, Work::Retired)).then_some(Some(&copy)))
+        .added_copy_users((!matches!(work, Work::Retired | Work::Retain)).then_some(Some(&copy)))
         .unwrap()
         .unwrap();
     let deletion = named.then(|| {
@@ -130,7 +132,6 @@ fn preflight_preserves_original_inventory_and_selected_source_allocations(
 
 #[rstest]
 #[case::original_zero(Rejection::OriginalZero)]
-#[case::retained_zero(Rejection::RetainedZero)]
 #[case::missing_field(Rejection::MissingField)]
 #[case::allocation(Rejection::Allocation)]
 #[case::phase(Rejection::Phase)]
@@ -147,12 +148,10 @@ fn preflight_rejects_unsupported_counts_and_inapplicable_source_facts_before_wri
     let original = match rejection {
         Rejection::OriginalZero => Some(0),
         Rejection::MissingField => None,
-        Rejection::RetainedZero => Some(1),
         _ => Some(2),
     };
-    let named = matches!(rejection, Rejection::RetainedZero);
-    let (mut engine, tree, target, _) = fixture(&path, original, named, Work::Source);
-    let (other, _, _, _) = fixture(&other_path, original, named, Work::Source);
+    let (mut engine, tree, target, _) = fixture(&path, original, false, Work::Source);
+    let (other, _, _, _) = fixture(&other_path, original, false, Work::Source);
     let before = engine.disk_bytes().unwrap();
     let mut phase = AnalysisPhase::new(&engine);
     let source = phase.reconstruction_source(&engine, target).unwrap();
@@ -165,22 +164,10 @@ fn preflight_rejects_unsupported_counts_and_inapplicable_source_facts_before_wri
     }
     let copy = phase.copy_users(&tree).unwrap().unwrap();
     let added = phase
-        .added_copy_users(
-            (!named && !matches!(rejection, Rejection::EmptySession)).then_some(Some(&copy)),
-        )
+        .added_copy_users((!matches!(rejection, Rejection::EmptySession)).then_some(Some(&copy)))
         .unwrap()
         .unwrap();
-    let deletion = named.then(|| {
-        phase
-            .topology()
-            .unwrap()
-            .deletion(&ObjectPathBuf::parse("target"))
-            .unwrap()
-    });
-    let plan = phase
-        .net_count_plan(deletion.as_ref(), &added)
-        .unwrap()
-        .unwrap();
+    let plan = phase.net_count_plan([], &added).unwrap().unwrap();
     let inventory = plan.owned_counts(&engine).unwrap();
     drop(plan);
     drop(phase);
@@ -214,8 +201,7 @@ fn preflight_rejects_unsupported_counts_and_inapplicable_source_facts_before_wri
         panic!("expected count preflight rejection")
     };
     match (rejection, error) {
-        (Rejection::OriginalZero, CountPreflightError::OriginalZero { object })
-        | (Rejection::RetainedZero, CountPreflightError::RetainedZero { object }) => {
+        (Rejection::OriginalZero, CountPreflightError::OriginalZero { object }) => {
             assert_eq!(object, target)
         }
         (
@@ -493,6 +479,7 @@ fn id(address: u64) -> ObjectId {
 
 #[derive(Clone, Copy)]
 enum Work {
+    Retain,
     Retired,
     Source,
     Unchanged,
@@ -506,7 +493,6 @@ enum Rejection {
     OriginalZero,
     Phase,
     Repeated,
-    RetainedZero,
     Root,
     Session,
     Uncertain,
