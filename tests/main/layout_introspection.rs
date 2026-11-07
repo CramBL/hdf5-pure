@@ -17,6 +17,73 @@ use hdf5_pure::UserblockSize;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 
 #[rstest::rstest]
+#[case::btree_v1(ChunkIndex::BTreeV1, false)]
+#[case::single_chunk(ChunkIndex::SingleChunk, true)]
+#[case::implicit(ChunkIndex::Implicit, false)]
+#[case::fixed_array(ChunkIndex::FixedArray, true)]
+#[case::extensible_array(ChunkIndex::ExtensibleArray, true)]
+#[case::btree_v2(ChunkIndex::BTreeV2, false)]
+fn index_kind_reports_inplace_append_capability(
+    #[case] index: ChunkIndex,
+    #[case] supported: bool,
+) {
+    assert_eq!(index.supports_inplace_append(), supported);
+}
+
+#[rstest::rstest]
+#[case::single_chunk(ChunkIndex::SingleChunk, MaxExtent::Fixed(4), false)]
+#[case::fixed_array(ChunkIndex::FixedArray, MaxExtent::Fixed(8), false)]
+#[case::extensible_array(ChunkIndex::ExtensibleArray, MaxExtent::Unlimited, false)]
+#[case::unallocated_fixed_array(ChunkIndex::FixedArray, MaxExtent::Fixed(8), true)]
+#[case::unallocated_extensible_array(ChunkIndex::ExtensibleArray, MaxExtent::Unlimited, true)]
+fn capable_indexes_append_within_the_maximum(
+    #[case] index: ChunkIndex,
+    #[case] maximum: MaxExtent,
+    #[case] unallocated: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("capability.h5");
+    let mut builder = FileBuilder::new();
+    let target = builder.create_dataset("d");
+    if unallocated {
+        target.with_unallocated_storage_for::<i32>(&[0]);
+    } else {
+        target.with_i32_data(&[1]);
+    }
+    target.with_chunks(&[4]).with_maxshape(&[maximum]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let mut target = file.dataset("d").unwrap();
+    assert_eq!(target.chunk_index().unwrap(), Some(index));
+    assert!(index.supports_inplace_append());
+    assert_eq!(target.maxshape().unwrap(), Some(vec![maximum]));
+    assert_eq!(target.chunks().unwrap().is_empty(), unallocated);
+    target.append(&[2_i32, 3]).unwrap();
+    let expected = if unallocated {
+        vec![2, 3]
+    } else {
+        vec![1, 2, 3]
+    };
+    assert_eq!(target.read_i32().unwrap(), expected);
+    assert_eq!(target.shape().unwrap(), [expected.len() as u64]);
+    if let MaxExtent::Fixed(_) = maximum {
+        let error = target.append(&[4_i32; 8]).unwrap_err();
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected AppendInPlaceUnsupported, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "append exceeds the dataset's maximum first dimension"
+        );
+        assert_eq!(target.read_i32().unwrap(), expected);
+        assert_eq!(target.shape().unwrap(), [expected.len() as u64]);
+    }
+    drop(target);
+    file.close().unwrap();
+    directory.close().unwrap();
+}
+
+#[rstest::rstest]
 #[case::two_byte_max(65_535)]
 #[case::three_byte_min(65_536)]
 #[case::cell_ranger(80_000)]
@@ -108,7 +175,7 @@ fn chunked_single_chunk() {
         }
     );
     assert_eq!(ds.chunk_index().unwrap(), Some(ChunkIndex::SingleChunk));
-    assert!(!ChunkIndex::SingleChunk.supports_inplace_append());
+    assert!(ChunkIndex::SingleChunk.supports_inplace_append());
 
     let chunks = ds.chunks().unwrap();
     assert_eq!(chunks.len(), 1);
@@ -116,6 +183,9 @@ fn chunked_single_chunk() {
     assert_eq!(chunks[0].storage_size, 8 * 4, "unfiltered chunk byte size");
     assert_eq!(chunks[0].filter_mask().raw_bits(), 0);
     assert!(chunks[0].address != 0);
+    drop(ds);
+    f.close().unwrap();
+    dir.close().unwrap();
 }
 
 #[test]
@@ -141,7 +211,7 @@ fn chunked_fixed_array() {
             index: ChunkIndex::FixedArray,
         }
     );
-    assert!(!ChunkIndex::FixedArray.supports_inplace_append());
+    assert!(ChunkIndex::FixedArray.supports_inplace_append());
 
     let chunks = ds.chunks().unwrap();
     assert_eq!(chunks.len(), 2);
@@ -153,6 +223,9 @@ fn chunked_fixed_array() {
     }
     // Distinct chunk addresses.
     assert_ne!(chunks[0].address, chunks[1].address);
+    drop(ds);
+    f.close().unwrap();
+    dir.close().unwrap();
 }
 
 /// The oracle is the file's own bytes: an address left in the stored frame

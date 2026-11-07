@@ -88,8 +88,8 @@ pub enum Layout {
 /// The kind of index a chunked dataset uses to locate its chunks.
 ///
 /// An enumeration naming HDF5 chunk-index types (`H5D_CHUNK_IDX_*`). The index kind is fixed
-/// at dataset creation by the shape and its extensibility, and it determines
-/// whether the dataset can be grown in place: see
+/// at dataset creation by the shape and its extensibility, and it indicates
+/// whether the index structure supports in-place growth: see
 /// [`supports_inplace_append`](ChunkIndex::supports_inplace_append).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -104,17 +104,13 @@ pub enum ChunkIndex {
     /// (a fixed dataspace with every chunk allocated); there is no separate
     /// index structure.
     Implicit,
-    /// A fixed array indexes a fixed number of chunks (a non-extensible
-    /// dataspace with more than one chunk).
+    /// A fixed array indexes a fixed number of chunks for a dataset with
+    /// finite maximum dimensions and more than one chunk.
     FixedArray,
     /// An extensible array indexes chunks along a single unlimited dimension.
-    /// This is the index [`Dataset::append`](crate::Dataset::append) and
-    /// [`Dataset::append_staged`](crate::Dataset::append_staged) grow
-    /// in place.
     ExtensibleArray,
-    /// A version-2 B-tree indexes the chunks (several unlimited dimensions). The reader can
-    /// enumerate and read this index, but the editor does not create or mutate it, and deletion
-    /// does not yet reclaim its index structure.
+    /// A version-2 B-tree indexes the chunks for several unlimited dimensions. The reader
+    /// enumerates and reads this index, but the editor does not create or mutate it.
     BTreeV2,
 }
 
@@ -130,16 +126,37 @@ impl ChunkIndex {
         }
     }
 
-    /// Whether a dataset with this index kind can be grown in place with
-    /// [`Dataset::append`](crate::Dataset::append) — true only for
+    /// Returns `true` if this index kind supports in-place growth with
+    /// [`Dataset::append`](crate::Dataset::append).
+    ///
+    /// Returns `true` for [`SingleChunk`](ChunkIndex::SingleChunk),
+    /// [`FixedArray`](ChunkIndex::FixedArray), and
     /// [`ExtensibleArray`](ChunkIndex::ExtensibleArray).
     ///
-    /// This reflects the index *structure* alone; an actual append also requires
-    /// the dataset's first maximum dimension to be unlimited (see
-    /// [`Dataset::maxshape`](crate::Dataset::maxshape)).
+    /// This check reflects the index structure alone. An actual append also requires
+    /// a rank-1 dataset, compatible datatypes, and a maximum first dimension that
+    /// accommodates the new elements (see [`Dataset::maxshape`](crate::Dataset::maxshape)).
+    /// An extensible array requires an unlimited maximum. A single chunk or fixed
+    /// array requires a finite maximum that accommodates the appended elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::ChunkIndex;
+    ///
+    /// assert!(ChunkIndex::SingleChunk.supports_inplace_append());
+    /// assert!(ChunkIndex::FixedArray.supports_inplace_append());
+    /// assert!(ChunkIndex::ExtensibleArray.supports_inplace_append());
+    /// assert!(!ChunkIndex::BTreeV1.supports_inplace_append());
+    /// assert!(!ChunkIndex::BTreeV2.supports_inplace_append());
+    /// assert!(!ChunkIndex::Implicit.supports_inplace_append());
+    /// ```
     #[must_use]
     pub const fn supports_inplace_append(self) -> bool {
-        matches!(self, ChunkIndex::ExtensibleArray)
+        matches!(
+            self,
+            ChunkIndex::SingleChunk | ChunkIndex::FixedArray | ChunkIndex::ExtensibleArray
+        )
     }
 }
 

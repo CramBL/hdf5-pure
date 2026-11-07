@@ -422,11 +422,9 @@ impl AppendIndex {
     fn into_allocated(self) -> Result<Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
-            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => {
-                Err(Error::AppendUnsupported(
-                    "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
-                ))
-            }
+            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => Err(
+                Error::AppendUnsupported("allocated Extensible Array metadata is required"),
+            ),
         }
     }
 
@@ -439,11 +437,9 @@ impl AppendIndex {
     pub(crate) fn allocated(&self) -> Result<&Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
-            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => {
-                Err(Error::AppendUnsupported(
-                    "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
-                ))
-            }
+            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => Err(
+                Error::AppendUnsupported("allocated Extensible Array metadata is required"),
+            ),
         }
     }
 
@@ -455,11 +451,9 @@ impl AppendIndex {
     pub(crate) fn allocated_mut(&mut self) -> Result<&mut Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
-            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => {
-                Err(Error::AppendUnsupported(
-                    "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
-                ))
-            }
+            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => Err(
+                Error::AppendUnsupported("allocated Extensible Array metadata is required"),
+            ),
         }
     }
 
@@ -804,13 +798,20 @@ impl Located {
 
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
         let (layout, fields) = DataLayout::parse_with_index_fields(&layout_bytes, widths)?;
-        if maximum != MaxExtent::Unlimited
-            && !matches!(
-                fields,
-                Some(ChunkIndexFields::SingleChunk(_) | ChunkIndexFields::FixedArray { .. })
-            )
-        {
-            return Err(unsupported("dataset has no unlimited (maxshape) dimension"));
+        match &fields {
+            Some(ChunkIndexFields::SingleChunk(_) | ChunkIndexFields::FixedArray { .. }) => {}
+            Some(ChunkIndexFields::ExtensibleArray(_)) => {
+                if maximum != MaxExtent::Unlimited {
+                    return Err(unsupported(
+                        "an extensible-array index requires an unlimited maximum",
+                    ));
+                }
+            }
+            _ => {
+                return Err(unsupported(
+                    "append requires a single-chunk, Fixed Array, or Extensible Array index",
+                ));
+            }
         }
         let dt_bytes = file.read_metadata_at(datatype_msg.data_off, datatype_msg.size)?;
         let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
@@ -952,7 +953,7 @@ impl Located {
             ) => (*address, *creation, *flags, field.range()),
             _ => {
                 return Err(unsupported(
-                    "only Extensible-Array-indexed chunked datasets are supported",
+                    "append requires a single-chunk, Fixed Array, or Extensible Array index",
                 ));
             }
         };

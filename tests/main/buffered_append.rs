@@ -455,7 +455,13 @@ fn an_ineligible_dataset_is_refused_at_construction() {
     let Error::AppendInPlaceUnsupported(actual) = err else {
         panic!("unexpected error: {err:?}");
     };
-    assert_eq!(actual, "dataset has no unlimited (maxshape) dimension");
+    assert_eq!(
+        actual,
+        "append requires a single-chunk, Fixed Array, or Extensible Array index"
+    );
+    drop(ds);
+    session.close().unwrap();
+    dir.close().unwrap();
 }
 
 /// A read-only file has nothing to append to.
