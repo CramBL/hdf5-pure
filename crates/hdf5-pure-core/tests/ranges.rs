@@ -1,6 +1,6 @@
 use core::fmt::Debug;
 
-use hdf5_pure_core::__private::{Address, MetadataFrame, StoredAddressExt};
+use hdf5_pure_core::__private::{Address, MetadataBytesExt, MetadataFrame, StoredAddressExt};
 use hdf5_pure_core::{AddressRange, FormatError, PhysicalAddress, StoredAddress};
 use rstest::rstest;
 

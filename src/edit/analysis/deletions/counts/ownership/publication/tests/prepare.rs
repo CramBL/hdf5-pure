@@ -3,6 +3,7 @@ use core::num::NonZeroU32;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectReferenceCount;

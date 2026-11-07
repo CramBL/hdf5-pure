@@ -4,6 +4,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::__private::{FileRange, FileRegion, MetadataFrame};
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::MetadataBytes;

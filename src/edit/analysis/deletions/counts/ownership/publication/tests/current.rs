@@ -2,6 +2,7 @@ use core::cell::Cell;
 use core::cell::RefCell;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::MetadataSource;

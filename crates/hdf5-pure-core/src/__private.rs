@@ -39,6 +39,7 @@ pub use crate::file_space_info::FileSpaceSettingsExt;
 pub use crate::filter_mask::FILTER_COUNT_MAX;
 pub use crate::filter_mask::PipelineFilterMask;
 pub use crate::metadata_bytes::MetadataBytes;
+pub use crate::metadata_bytes::MetadataBytesExt;
 pub use crate::metadata_bytes::MetadataFrame;
 pub use crate::quantity::ByteLength;
 pub use crate::quantity::ChunkSlot;

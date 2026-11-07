@@ -6,6 +6,7 @@ use crate::address::PhysicalAddress;
 use crate::address_range::AddressRange;
 use crate::error::FormatError;
 use crate::metadata_bytes::MetadataBytes;
+use crate::metadata_bytes::MetadataBytesExt;
 
 /// Borrowed bytes associated with a physical file range.
 ///

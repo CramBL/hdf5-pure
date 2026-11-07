@@ -1,4 +1,5 @@
 use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::AllocationClass;
 use rstest::rstest;

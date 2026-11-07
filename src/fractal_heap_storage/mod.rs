@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_core::__private::MetadataBytesExt;
 #[cfg(test)]
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 #[cfg(test)]
