@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "hdf5-pure"
-version = "0.47.0"
+version = "0.48.0-rc.1"
 dependencies = [
  "criterion",
  "hdf5-pure-core",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "hdf5-pure-core"
-version = "0.47.0"
+version = "0.48.0-rc.1"
 dependencies = [
  "rstest",
 ]
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "hdf5-pure-filter"
-version = "0.47.0"
+version = "0.48.0-rc.1"
 dependencies = [
  "flate2",
  "hdf5-pure-core",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "hdf5-pure-format"
-version = "0.47.0"
+version = "0.48.0-rc.1"
 dependencies = [
  "byteorder",
  "hdf5-pure-core",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "hdf5-pure-space"
-version = "0.47.0"
+version = "0.48.0-rc.1"
 dependencies = [
  "hdf5-pure-core",
  "proptest",

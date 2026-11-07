@@ -54,7 +54,7 @@ resolver = "3"
 
 # The metadata every published crate shares. The release tooling writes the version here and below.
 [workspace.package]
-version = "0.47.0"
+version = "0.48.0-rc.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -65,10 +65,10 @@ categories = ["science", "no-std"]
 # Workspace crates, the published ones at the exact release, and versions several crates share.
 [workspace.dependencies]
 hdf5-pure = { path = ".", default-features = false }
-hdf5-pure-core = { path = "crates/hdf5-pure-core", version = "=0.47.0", default-features = false }
-hdf5-pure-filter = { path = "crates/hdf5-pure-filter", version = "=0.47.0", default-features = false }
-hdf5-pure-format = { path = "crates/hdf5-pure-format", version = "=0.47.0", default-features = false }
-hdf5-pure-space = { path = "crates/hdf5-pure-space", version = "=0.47.0", default-features = false }
+hdf5-pure-core = { path = "crates/hdf5-pure-core", version = "=0.48.0-rc.1", default-features = false }
+hdf5-pure-filter = { path = "crates/hdf5-pure-filter", version = "=0.48.0-rc.1", default-features = false }
+hdf5-pure-format = { path = "crates/hdf5-pure-format", version = "=0.48.0-rc.1", default-features = false }
+hdf5-pure-space = { path = "crates/hdf5-pure-space", version = "=0.48.0-rc.1", default-features = false }
 test-util = { path = "crates/test-util" }
 test-util-hdf5 = { path = "crates/test-util-hdf5" }
 byteorder = { version = "1", default-features = false }

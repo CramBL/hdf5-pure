@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+`hdf5-pure` is now organized as a workspace, with `hdf5-pure` as the top-level crate. This release ships a feature-complete free space manager that tracks, coalesces, and reuses space from deleted objects, replaced chunks, modified headers, and B-tree indexes across flat and page-allocated files. With support for persisted section lists, aggregate management, and strict validation, in-place editing, appends, and repacking sustain bounded file sizes under continuous write churn. Format coverage expands substantially, adding dense link storage, version 2 B-tree chunk indexes, fractal heap reads, complex datatypes, and paged file editing. Numerous fixes address edge cases in object header decoding, chunk index geometry, free-space recovery, and 32-bit platforms.
+
 ### Added
 
 - `Dataset::append_staged` supports finite maximum extents and single-chunk or Fixed Array indexes for rank-1 datasets, including filtered storage ([#1091](https://github.com/CramBL/hdf5-pure/pull/1091)).
