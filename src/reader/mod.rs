@@ -4799,10 +4799,9 @@ impl Group {
         if !group_v2::is_group(&header) {
             return Err(Error::NotAGroup(reported_path(self.path.as_ref())));
         }
-        Ok(
-            LinkPhaseChange::try_from(self.file.group_info_of(&header)?.phase_change())
-                .map_err(|_error| FormatError::Internal("parsed group policy is invalid".into()))?,
-        )
+        Ok(LinkPhaseChange::from_group_phase_change(
+            self.file.group_info_of(&header)?.phase_change(),
+        ))
     }
 
     /// List the names of datasets in this group.
