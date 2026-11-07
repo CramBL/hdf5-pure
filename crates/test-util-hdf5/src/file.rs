@@ -40,6 +40,32 @@ pub fn libhdf5_open_with_page_buffer(path: &Path, capacity: NonZeroUsize) -> hdf
         .unwrap_or_else(|error| panic!("open {path:?}: {error}"))
 }
 
+/// Opens an existing file read-only, using a native page buffer where supported.
+///
+/// Under HDF5 1.14 and later, opens `path` with a page-buffer capacity of four `page`-byte pages.
+/// Under earlier releases, opens `path` without a page buffer.
+///
+/// `H5PB_read` reads past the end of heap buffers during paged reads on releases before 1.14
+/// (`H5PB.c`, HDF5 1.10.11 and 1.12.3).
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot open `path`. Under HDF5 1.14 and later, also panics if four times
+/// `page` cannot be represented as a [`NonZeroUsize`].
+#[cfg(feature = "__hdf5-1.10")]
+#[track_caller]
+pub(crate) fn libhdf5_open_page_compatible(path: &Path, page: u64) -> hdf5::File {
+    if cfg!(feature = "__hdf5-1.14") {
+        let capacity = usize::try_from(4 * u128::from(page))
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .unwrap_or_else(|| panic!("page-buffer capacity for page size {page} is out of range"));
+        libhdf5_open_with_page_buffer(path, capacity)
+    } else {
+        libhdf5_open(path)
+    }
+}
+
 /// Creates a native PAGE fixture with threshold 1 and optional persistence.
 ///
 /// # Panics
@@ -276,4 +302,37 @@ fn create_bounded(path: &Path, low: LibraryVersion) -> hdf5::File {
         .with_fapl(|p| p.libver_bounds(low, LibraryVersion::latest()))
         .create(path)
         .unwrap_or_else(|e| panic!("create {path:?}: {e}"))
+}
+
+#[cfg(all(test, feature = "__hdf5-1.10"))]
+mod tests {
+    use rstest::rstest;
+
+    use crate::file;
+    use crate::page_managers;
+    use crate::page_managers::Geometry;
+
+    #[rstest]
+    #[case::small(Geometry::Small)]
+    #[case::userblock_aligned_page(Geometry::UserblockAlignedPage)]
+    #[case::large(Geometry::Large)]
+    fn page_reader_uses_version_compatible_buffer(#[case] geometry: Geometry) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("page.h5");
+        page_managers::write_native(&path, geometry);
+        let file = file::libhdf5_open_page_compatible(&path, geometry.page_size());
+        let buffer = file.fapl().unwrap().get_page_buffer_size().unwrap();
+        assert_eq!(
+            buffer.buf_size,
+            if cfg!(feature = "__hdf5-1.14") {
+                usize::try_from(4 * geometry.page_size()).unwrap()
+            } else {
+                0
+            }
+        );
+        assert_eq!(buffer.min_meta_perc, 0);
+        assert_eq!(buffer.min_raw_perc, 0);
+        file.close().unwrap();
+        directory.close().unwrap();
+    }
 }

@@ -10,6 +10,7 @@ use hdf5::plist::group_create::LinkPhaseChange;
 
 use crate::creation_order::Indexing;
 use crate::dense_links;
+use crate::file;
 
 /// The attribute sizes and storage transition of a native PAGE fixture.
 #[derive(Clone, Copy, Debug)]
@@ -151,7 +152,7 @@ pub fn write_native(path: &Path, page: u64, base: u64, contents: Contents, index
 
 /// Checks edited links, attributes, and creation properties through a native PAGE reader.
 ///
-/// Opens with a page buffer of four pages. Checks names and values for indexes in
+/// Opens with a page buffer of four pages where supported. Checks names and values for indexes in
 /// [`Contents::removed`] to [`Contents::end`], and checks link storage and the creation-order
 /// properties selected by `contents` and `indexing`. Attribute zero, when present, must
 /// contain copies of 99. Other attributes must contain copies of their index.
@@ -161,12 +162,7 @@ pub fn write_native(path: &Path, page: u64, base: u64, contents: Contents, index
 /// Panics if an observation differs, if the page-buffer size or an index cannot be represented,
 /// or if libhdf5 cannot open, read, or close the file.
 pub fn assert_edited(path: &Path, page: u64, contents: Contents, indexing: Indexing) {
-    let file = File::with_options()
-        .with_fapl(|properties| {
-            properties.page_buffer_size(usize::try_from(4 * page).unwrap(), 0, 0)
-        })
-        .open(path)
-        .unwrap();
+    let file = file::libhdf5_open_page_compatible(path, page);
     let group = file.group("g").unwrap();
     let expected = (contents.removed()..contents.end())
         .map(|index| format!("c{index:02}"))

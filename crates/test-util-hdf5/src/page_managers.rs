@@ -5,6 +5,8 @@ use std::path::Path;
 use hdf5::File;
 use hdf5::plist::file_create::FileSpaceStrategy;
 
+use crate::file;
+
 /// Page-size and userblock configurations for manager-placement checks.
 #[derive(Clone, Copy, Debug)]
 pub enum Geometry {
@@ -74,22 +76,17 @@ pub fn write_native(path: &Path, geometry: Geometry) {
     file.close().unwrap();
 }
 
-/// Checks surviving dataset values and the final generation through a native page buffer.
+/// Checks surviving dataset values and the final generation through a native reader.
 ///
-/// The caller deletes `d2` and writes the root attribute `generation` with the value 3.
-/// Requires positive free space and closes the native file before returning.
+/// Opens with a page buffer of four pages where supported. The caller deletes `d2` and writes the
+/// root attribute `generation` with the value 3. Requires positive free space and closes the native
+/// file before returning.
 ///
 /// # Panics
 ///
 /// Panics if a file operation fails or an expected value, member name, or free-space check fails.
 pub fn assert_native(path: &Path, geometry: Geometry) {
-    let page = geometry.page_size();
-    let file = File::with_options()
-        .with_fapl(|properties| {
-            properties.page_buffer_size(usize::try_from(4 * page).unwrap(), 0, 0)
-        })
-        .open(path)
-        .unwrap();
+    let file = file::libhdf5_open_page_compatible(path, geometry.page_size());
     assert_eq!(file.member_names().unwrap(), ["d0", "d1", "d3", "d4", "d5"]);
     for index in [0_u8, 1, 3, 4, 5] {
         assert_eq!(
