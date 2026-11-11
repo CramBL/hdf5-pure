@@ -172,6 +172,46 @@ fn table_meta_key_does_not_leak_into_plain_targets() {
 }
 
 #[test]
+fn mattimetable_rowtimes_from_sample_rate_and_time_step() {
+    #[derive(Deserialize)]
+    struct File {
+        timetable_from_sample_rate: MatTimetable,
+        timetable_from_duration: MatTimetable,
+        timetable_from_starttime_duration: MatTimetable,
+        timetable_from_starttime_datetime: MatTimetable,
+        #[serde(rename = "timetable_from_starttime_calendarDuration")]
+        timetable_from_starttime_calendar_duration: MatTimetable,
+    }
+    let f = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>);
+    let millis = |tt: &MatTimetable| match tt.row_times() {
+        Some(MatColumn::Duration(d)) => d.millis.clone(),
+        Some(MatColumn::Datetime(d)) => d.millis_utc.clone(),
+        other => panic!("unexpected row times {:?}", other.map(MatColumn::kind)),
+    };
+    assert_eq!(millis(&f.timetable_from_sample_rate), [0.0, 0.1, 0.2]);
+    assert_eq!(millis(&f.timetable_from_duration), [0.0, 1000.0, 2000.0]);
+    assert_eq!(
+        millis(&f.timetable_from_starttime_duration),
+        [10_000.0, 11_000.0, 12_000.0]
+    );
+    assert_eq!(
+        millis(&f.timetable_from_starttime_datetime),
+        [
+            1_577_836_800_000.0,
+            1_577_836_801_000.0,
+            1_577_836_802_000.0
+        ]
+    );
+    // A calendar step (months) has no fixed length in milliseconds.
+    assert_eq!(
+        f.timetable_from_starttime_calendar_duration
+            .row_times()
+            .map(MatColumn::kind),
+        Some("other")
+    );
+}
+
+#[test]
 fn mattimetable_duration_rowtimes() {
     #[derive(Deserialize)]
     struct File {

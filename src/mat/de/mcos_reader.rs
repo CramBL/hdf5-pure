@@ -745,8 +745,7 @@ fn decode_table(class_name: String, mut fields: Vec<(String, MatValue)>) -> MatV
 }
 
 /// Re-key a decoded `timetable` like [`decode_table`], additionally carrying the
-/// row-time vector (a `datetime` / `duration` column, or a sample-rate/time-step
-/// descriptor) under [`TABLE_META_KEY`].
+/// row-time vector (a `datetime` / `duration` column) under [`TABLE_META_KEY`].
 fn decode_timetable(class_name: String, mut fields: Vec<(String, MatValue)>) -> MatValue {
     if let Some(MatValue::Struct(inner)) = take_field(&mut fields, "any") {
         fields = inner;
@@ -759,7 +758,91 @@ fn decode_timetable(class_name: String, mut fields: Vec<(String, MatValue)>) -> 
     let names = field_strings(&mut fields, &["varNames", "varnames"]);
     let row_times = take_field(&mut fields, "rowTimes");
     let num_rows = take_field(&mut fields, "numRows").or_else(|| take_field(&mut fields, "nrows"));
+    let row_times = row_times.map(|rt| expand_row_times(rt, num_rows.as_ref()));
     keyed_table(class_name, columns, &names, None, num_rows, row_times)
+}
+
+/// Expand the row times of a timetable built from a sample rate or time step.
+///
+/// MATLAB stores them as a struct of `origin` (a `datetime` or `duration`),
+/// `specifiedAsRate`, `sampleRate` and `stepSize` (a `duration`). Row `k` lies
+/// `k * 1000 / sampleRate` or `k * stepSize` milliseconds after `origin`, in
+/// the order MATLAB computes it. For a `datetime` the sum is a double-double
+/// like MATLAB's, normalized so `millis_utc` and `sub_ms` match its high and
+/// low parts. Anything else, such as a `calendarDuration` step, is returned
+/// unchanged.
+fn expand_row_times(row_times: MatValue, num_rows: Option<&MatValue>) -> MatValue {
+    let (MatValue::Struct(desc), Some(MatValue::Scalar(n))) = (&row_times, num_rows) else {
+        return row_times;
+    };
+    let field = |name: &str| desc.iter().find(|(f, _)| f == name).map(|(_, v)| v);
+    // The first element of a property of a decoded `datetime` / `duration`.
+    let first = |value: Option<&MatValue>, class: &str, prop: &str| match value {
+        Some(MatValue::Opaque { class_name, fields }) if class_name == class => {
+            fields.iter().find_map(|(f, v)| match v {
+                MatValue::Vec1D(NumVec::F64(x)) if f == prop => x.first().copied(),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    let set = |fields: &mut Vec<(String, MatValue)>, name: &str, values: Vec<f64>| {
+        if let Some((_, v)) = fields.iter_mut().find(|(f, _)| f == name) {
+            *v = MatValue::Vec1D(NumVec::F64(values));
+        }
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the row count is a whole number that MATLAB stores as a double"
+    )]
+    let n = scalar_to_f64(n.clone()) as usize;
+    let offsets: Vec<f64> = match (field("specifiedAsRate"), field("sampleRate")) {
+        (Some(MatValue::Scalar(ScalarNum::Bool(true))), Some(MatValue::Scalar(fs))) => {
+            let fs = scalar_to_f64(fs.clone());
+            (0..n).map(|k| k as f64 * 1000.0 / fs).collect()
+        }
+        (Some(MatValue::Scalar(ScalarNum::Bool(false))), _) => {
+            match first(field("stepSize"), "duration", "millis") {
+                Some(step) => (0..n).map(|k| k as f64 * step).collect(),
+                None => return row_times,
+            }
+        }
+        _ => return row_times,
+    };
+    let origin = field("origin");
+    let Some(MatValue::Opaque { class_name, fields }) = origin else {
+        return row_times;
+    };
+    let mut fields = fields.clone();
+    if let Some(hi) = first(origin, "datetime", "millis_utc") {
+        let lo = first(origin, "datetime", "sub_ms").unwrap_or(0.0);
+        let (millis, sub): (Vec<f64>, Vec<f64>) = offsets
+            .iter()
+            .map(|&t| {
+                let sum = hi + t;
+                let b = sum - hi;
+                let err = (hi - (sum - b)) + (t - b) + lo;
+                let high = sum + err;
+                (high, err - (high - sum))
+            })
+            .unzip();
+        set(&mut fields, "millis_utc", millis);
+        set(&mut fields, "sub_ms", sub);
+    } else if class_name == "duration" {
+        // A start of 0 can be stored without a value, MATLAB reads it as 0.
+        let start = first(origin, "duration", "millis").unwrap_or(0.0);
+        set(
+            &mut fields,
+            "millis",
+            offsets.iter().map(|t| start + t).collect(),
+        );
+    } else {
+        return row_times;
+    }
+    MatValue::Opaque {
+        class_name: class_name.clone(),
+        fields,
+    }
 }
 
 /// Build the column-keyed opaque value shared by [`decode_table`] and
@@ -1690,5 +1773,50 @@ mod tests {
             }
             other => panic!("expected lossless opaque, got {}", other.kind()),
         }
+    }
+
+    // Expected bits from MATLAB for `timetable(zeros(3,1), 'SampleRate', 3,
+    // 'StartTime', datetime(2026,1,15,8,0,0.1234567))`. Row 2 needs the
+    // normalized double-double sum.
+    #[test]
+    fn sample_rate_row_times_match_matlab_bits() {
+        let f = |bits: u64| MatValue::Vec1D(NumVec::F64(vec![f64::from_bits(bits)]));
+        let origin = MatValue::Opaque {
+            class_name: "datetime".to_owned(),
+            fields: vec![
+                ("millis_utc".to_owned(), f(0x4279_bc0a_b247_b74f)),
+                ("sub_ms".to_owned(), f(0xbf16_d5cf_aad0_0000)),
+            ],
+        };
+        let desc = MatValue::Struct(vec![
+            ("origin".to_owned(), origin),
+            ("sampleRate".to_owned(), scalar(ScalarNum::F64(3.0))),
+            ("specifiedAsRate".to_owned(), scalar(ScalarNum::Bool(true))),
+        ]);
+        let MatValue::Opaque { fields, .. } =
+            expand_row_times(desc, Some(&scalar(ScalarNum::F64(3.0))))
+        else {
+            panic!("row times were not expanded");
+        };
+        let bits = |name: &str| match &fields.iter().find(|(f, _)| f == name).unwrap().1 {
+            MatValue::Vec1D(NumVec::F64(x)) => x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            other => panic!("unexpected {}", other.kind()),
+        };
+        assert_eq!(
+            bits("millis_utc"),
+            [
+                0x4279_bc0a_b247_b74f,
+                0x4279_bc0a_b25c_8ca4,
+                0x4279_bc0a_b271_61f9
+            ]
+        );
+        assert_eq!(
+            bits("sub_ms"),
+            [
+                0xbf16_d5cf_aad0_0000,
+                0xbed8_07a5_5900_0000,
+                0x3f13_d4da_ffb0_0000
+            ]
+        );
     }
 }

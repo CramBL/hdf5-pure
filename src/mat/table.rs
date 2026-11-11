@@ -302,10 +302,11 @@ impl<'de> Deserialize<'de> for MatTable {
 
 /// A decoded MATLAB `timetable`: named columns plus a row-time vector.
 ///
-/// The row times are a [`MatColumn::Datetime`] or [`MatColumn::Duration`] when
-/// stored explicitly. A timetable built from a sample rate or time step stores
-/// a start/step descriptor instead of an explicit vector; that is not expanded
-/// into a row-time vector here and surfaces as [`MatColumn::Other`].
+/// The row times are a [`MatColumn::Datetime`] or [`MatColumn::Duration`]. A
+/// timetable built from a sample rate or time step stores only its start and
+/// step, and the row times are computed from them as MATLAB does. A calendar
+/// step such as `calmonths(1)` has no fixed length and surfaces as
+/// [`MatColumn::Other`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatTimetable {
     columns: Vec<(String, MatColumn)>,
