@@ -9,6 +9,7 @@ use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
+use hdf5_pure_format::__private::LinkMessageV1;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
@@ -490,11 +491,14 @@ pub(super) fn link_message_region(
 /// padding is included in the message size, as defined in "Version 1 Data Object Header Prefix"
 /// of the [format specification, version 4.0][spec]. The length of the body is read from the
 /// message's own fields.
+/// For a Link message, the reader retains the parsed extent and checks that the editor supports
+/// its target kind before returning the body.
 ///
 /// # Errors
 ///
-/// Returns the parse errors of the Link Info, Group Info, or Link message, and
-/// [`FormatError::Internal`] for any other message type.
+/// Returns [`Error::EditUnsupported`] for a user-defined link or other link metadata the editor
+/// cannot reproduce. Returns the parse errors of the Link Info, Group Info, or Link message,
+/// and [`FormatError::Internal`] for any other message type.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&[u8], Error> {
@@ -507,9 +511,10 @@ fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&
             GroupPhaseChange::encoded_len(data).map_err(group_links::group_info_error)?
         }
         MessageType::LINK => {
-            OwnedLink::parse_padded(data, offset_width)
-                .map_err(group_links::storage_error)?
-                .1
+            let (wire, consumed) = LinkMessageV1::parse_prefix(data, offset_width)
+                .map_err(group_links::storage_error)?;
+            OwnedLink::try_from(wire).map_err(group_links::storage_error)?;
+            consumed
         }
         _ => {
             return Err(FormatError::Internal(
@@ -819,6 +824,7 @@ mod tests {
     use crate::message_type::MessageType;
     use crate::object_path::LinkNameBuf;
 
+    mod link_messages;
     mod reference_count;
 
     #[rstest]

@@ -3,6 +3,7 @@
 use hdf5_pure_format::__private::GroupInfoError;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
+use hdf5_pure_format::__private::LinkMessageV1;
 use hdf5_pure_format::__private::OwnedLink;
 
 use crate::error::Error;
@@ -29,8 +30,8 @@ use super::object_header::OhRegion;
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if the region describes a dataset, link metadata is
-/// inconsistent or unsupported, or the Link Info message is absent. Returns parsing and
-/// source-read errors from the object-header, heap, and index readers.
+/// inconsistent or unsupported, a link has a user-defined kind, or the Link Info message is absent.
+/// Returns parsing and source-read errors from the object-header, heap, and index readers.
 pub(super) fn inspect(
     source: &(impl OriginalSource + ?Sized),
     widths: FormatWidths,
@@ -66,10 +67,9 @@ pub(super) fn inspect(
                 group_info = true;
             }
             MessageType::LINK => {
-                links.push(
-                    OwnedLink::parse(record.body, widths.offsets)
-                        .map_err(storage::storage_error)?,
-                );
+                let wire = LinkMessageV1::parse(record.body, widths.offsets)
+                    .map_err(storage::storage_error)?;
+                links.push(OwnedLink::try_from(wire).map_err(storage::storage_error)?);
             }
             MessageType::SYMBOL_TABLE => {
                 return Err(Error::EditUnsupported(

@@ -47,6 +47,99 @@ use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 
 #[rstest]
+#[case::user_65_empty(b"\x01\x08\x41\x01u\x00\x00", LinkEditFailure::Unsupported)]
+#[case::user_255_empty(b"\x01\x08\xff\x01u\x00\x00", LinkEditFailure::Unsupported)]
+#[case::user_65_binary(
+    b"\x01\x08\x41\x01u\x04\x00\x00\xff\x80\x00",
+    LinkEditFailure::Unsupported
+)]
+#[case::user_255_binary(
+    b"\x01\x08\xff\x01u\x04\x00\x00\xff\x80\x00",
+    LinkEditFailure::Unsupported
+)]
+#[case::missing_length(b"\x01\x08\x41\x01u", LinkEditFailure::Format(FormatError::UnexpectedEof { expected: 7, available: 5 }))]
+#[case::partial_length(b"\x01\x08\xff\x01u\x00", LinkEditFailure::Format(FormatError::UnexpectedEof { expected: 7, available: 6 }))]
+#[case::truncated_value(b"\x01\x08\xff\x01u\x04\x00\x00\xff", LinkEditFailure::Format(FormatError::UnexpectedEof { expected: 11, available: 9 }))]
+#[case::reserved_2(
+    b"\x01\x08\x02\x01u",
+    LinkEditFailure::Format(FormatError::InvalidLinkType(2))
+)]
+#[case::reserved_63(
+    b"\x01\x08\x3f\x01u",
+    LinkEditFailure::Format(FormatError::InvalidLinkType(63))
+)]
+#[case::charset(
+    b"\x01\x18\xff\x02\x01u\x00\x00",
+    LinkEditFailure::Format(FormatError::InvalidCharacterSet(2))
+)]
+#[case::empty_name(b"\x01\x08\xff\x00\x00\x00", LinkEditFailure::Storage)]
+#[case::dot_name(b"\x01\x08\xff\x01.\x00\x00", LinkEditFailure::Storage)]
+#[case::slash_name(b"\x01\x08\xff\x01/\x00\x00", LinkEditFailure::Storage)]
+#[case::nul_name(b"\x01\x08\xff\x01\x00\x00\x00", LinkEditFailure::Storage)]
+#[case::trailing(b"\x01\x08\xff\x01u\x00\x00\x00", LinkEditFailure::Storage)]
+fn link_inspection_classifies_user_links_and_malformed_records(
+    #[case] body: &[u8],
+    #[case] expected: LinkEditFailure,
+    #[values(false, true)] dense: bool,
+) {
+    let mut region = OhRegion::empty(widths(), ObjectHeaderPrefix::PLAIN);
+    let bytes = if dense {
+        let (bytes, info) = test_util::link_message::dense_storage(b"u", body);
+        region.push(MessageType::LINK_INFO, &info);
+        bytes
+    } else {
+        region.push(
+            MessageType::LINK_INFO,
+            &crate::file_writer::COMPACT_LINK_INFO
+                .serialize(widths().offsets)
+                .unwrap(),
+        );
+        region.push(MessageType::LINK, body);
+        Vec::new()
+    };
+    let error = group_links::inspect(
+        &OpenedSource::for_test(
+            &BytesSource::new(bytes),
+            AddressContext::from_effective_base(BaseAddress::new(0)),
+        ),
+        widths(),
+        &region,
+    )
+    .unwrap_err();
+    match expected {
+        LinkEditFailure::Format(expected) => {
+            let Error::Format(actual) = error else {
+                panic!("expected a format error, got {error:?}");
+            };
+            assert_eq!(actual, expected);
+        }
+        LinkEditFailure::Storage => assert!(
+            matches!(
+                error,
+                Error::EditUnsupported(
+                    "a group's links or link-info metadata cannot be reproduced"
+                )
+            ),
+            "{error:?}"
+        ),
+        LinkEditFailure::Unsupported => assert!(
+            matches!(
+                error,
+                Error::EditUnsupported("a group's user-defined links cannot be reproduced")
+            ),
+            "{error:?}"
+        ),
+    }
+}
+
+#[derive(Debug)]
+enum LinkEditFailure {
+    Format(FormatError),
+    Storage,
+    Unsupported,
+}
+
+#[rstest]
 #[case::untracked_zero(false, false, 0)]
 #[case::untracked_userblock(false, false, 512)]
 #[case::untracked_relocated(false, false, 1024)]

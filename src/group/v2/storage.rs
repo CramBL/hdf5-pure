@@ -16,7 +16,10 @@ use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::FractalHeapLayout;
 use hdf5_pure_format::__private::GROUP_HEAP_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::LinkInfoMessage;
+use hdf5_pure_format::__private::LinkMessageV1;
+use hdf5_pure_format::__private::LinkProjectionError;
 use hdf5_pure_format::__private::LinkStorageError;
+use hdf5_pure_format::__private::LinkWireError;
 use hdf5_pure_format::__private::OwnedLink;
 
 use crate::access_mode::AccessMode;
@@ -40,8 +43,8 @@ use crate::width::FormatWidths;
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] for unsupported storage encodings, inconsistent keys or
-/// counts, or links the editor cannot reproduce. Returns errors from address resolution,
-/// metadata reads, heap and link parsing, or index traversal.
+/// counts, or links the editor cannot reproduce, including user-defined links. Returns errors
+/// from address resolution, metadata reads, heap and link parsing, or index traversal.
 pub(crate) fn read_dense(
     source: &dyn StoredRead,
     widths: FormatWidths,
@@ -107,7 +110,8 @@ pub(crate) fn read_dense(
             ));
         }
         let bytes = heap.read(view)?;
-        let link = OwnedLink::parse(&bytes, widths.offsets).map_err(storage_error)?;
+        let wire = LinkMessageV1::parse(&bytes, widths.offsets).map_err(storage_error)?;
+        let link = OwnedLink::try_from(wire).map_err(storage_error)?;
         if link.encoded_len(widths.offsets).map_err(storage_error)?
             > GROUP_HEAP_MAX_MANAGED_OBJECT.to_usize()?
         {
@@ -279,15 +283,47 @@ impl<S: StoredRead + ?Sized> IndexReader<'_, S> {
     }
 }
 
-/// Converts link-storage errors to format or unsupported-edit errors.
-pub(crate) fn storage_error(error: LinkStorageError) -> Error {
-    match error {
-        LinkStorageError::Format(error) => error.into(),
-        LinkStorageError::CreationOrderCounterRange { .. }
-        | LinkStorageError::IndexingWithoutTracking => {
-            Error::EditUnsupported("a group's link creation-order policy cannot be reproduced")
+/// Converts link decoding, projection, and storage errors for edit inspection.
+///
+/// Preserves format errors and reports user-defined kinds as [`Error::EditUnsupported`].
+pub(crate) fn storage_error(error: impl Into<LinkEditError>) -> Error {
+    match error.into() {
+        LinkEditError::Projection(LinkProjectionError::Format(error))
+        | LinkEditError::Storage(LinkStorageError::Format(error)) => error.into(),
+        LinkEditError::Projection(LinkProjectionError::UnsupportedKind(_)) => {
+            Error::EditUnsupported("a group's user-defined links cannot be reproduced")
         }
-        _ => Error::EditUnsupported("a group's links or link-info metadata cannot be reproduced"),
+        LinkEditError::Storage(
+            LinkStorageError::CreationOrderCounterRange { .. }
+            | LinkStorageError::IndexingWithoutTracking,
+        ) => Error::EditUnsupported("a group's link creation-order policy cannot be reproduced"),
+        LinkEditError::Storage(_) => {
+            Error::EditUnsupported("a group's links or link-info metadata cannot be reproduced")
+        }
+    }
+}
+
+/// An error decoding links or checking their editable representation.
+pub(crate) enum LinkEditError {
+    Projection(LinkProjectionError),
+    Storage(LinkStorageError),
+}
+
+impl From<LinkProjectionError> for LinkEditError {
+    fn from(error: LinkProjectionError) -> Self {
+        Self::Projection(error)
+    }
+}
+
+impl From<LinkStorageError> for LinkEditError {
+    fn from(error: LinkStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<LinkWireError> for LinkEditError {
+    fn from(error: LinkWireError) -> Self {
+        Self::Storage(error.into())
     }
 }
 
