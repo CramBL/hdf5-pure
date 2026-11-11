@@ -7,11 +7,12 @@ uv := "uv run --project scripts/python --locked"
 
 default: semver msrv
 
-# Each guaranteed crate's API delta against its last release, or PACKAGE's under PROFILE alone.
+# Each guaranteed crate's API delta, or PACKAGE's under PROFILE alone.
+# A version change uses the previous stable release. Other changes use the latest publication.
 semver BASE="origin/main" PACKAGE="" PROFILE="":
-    {{ uv }} semver {{ if PACKAGE == "" { "" } else { "--package " + PACKAGE } }} \
-        {{ if PROFILE == "" { "" } else { "--profile " + PROFILE } }} \
-        --release-type "$({{ quote(just_executable()) }} api::semver-release-type {{ BASE }})"
+    {{ uv }} release check-api --base {{ quote(BASE) }} \
+        {{ if PACKAGE == "" { "" } else { "--package " + PACKAGE } }} \
+        {{ if PROFILE == "" { "" } else { "--profile " + PROFILE } }}
 
 # The release type the changelog calls for: minor with a **Breaking:** entry
 # under [Unreleased], or in the dated section the diff against BASE promotes.
