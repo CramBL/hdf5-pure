@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-11-11
+
 `hdf5-pure` is now organized as a workspace, with `hdf5-pure` as the top-level crate. This release ships a feature-complete free space manager that tracks, coalesces, and reuses space from deleted objects, replaced chunks, modified headers, and B-tree indexes across flat and page-allocated files. With support for persisted section lists, aggregate management, and strict validation, in-place editing, appends, and repacking sustain bounded file sizes under continuous write churn. Format coverage expands substantially, adding dense link storage, version 2 B-tree chunk indexes, fractal heap reads, complex datatypes, and paged file editing. Numerous fixes address edge cases in object header decoding, chunk index geometry, free-space recovery, and 32-bit platforms.
 
 ### Added
@@ -1193,7 +1195,8 @@ Internal robustness and tests ([#26](https://github.com/CramBL/hdf5-pure/issues/
 - The MAT deserializer flattens 1×N and N×1 values to a 1-D sequence in `deserialize_any` (matching `deserialize_seq`).
 - Numeric/complex readers preserve 1×N / N×1 shape at the value layer; any flattening happens at the serde level.
 
-[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.47.0...HEAD
+[Unreleased]: https://github.com/CramBL/hdf5-pure/compare/v0.48.0...HEAD
+[0.48.0]: https://github.com/CramBL/hdf5-pure/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/CramBL/hdf5-pure/compare/v0.46.1...v0.47.0
 [0.46.1]: https://github.com/CramBL/hdf5-pure/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/CramBL/hdf5-pure/compare/v0.45.0...v0.46.0
