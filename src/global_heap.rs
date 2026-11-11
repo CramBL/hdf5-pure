@@ -419,9 +419,19 @@ mod tests {
         assert_eq!(source.raw_reads.get(), 0);
     }
 
-    #[test]
-    fn member_collection_requires_the_complete_source_allocation() {
-        let mut bytes = global_heap::collection(&[], Widths::EIGHT);
+    #[rstest]
+    #[case::explicit_free_header(0)]
+    #[case::implied_free_tail(4056)]
+    fn member_collection_requires_the_complete_source_allocation(
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+        #[case] payload_len: usize,
+    ) {
+        let payload = vec![9; payload_len];
+        let mut bytes = global_heap::collection_of_size(
+            &[global_heap::Object::new(1, &payload)],
+            Widths::new(8, usize::from(lengths.get())),
+            4096,
+        );
         let expected = u64::try_from(bytes.len()).unwrap();
         bytes.pop();
         let source = CountingSource {
@@ -430,7 +440,7 @@ mod tests {
             metadata_bytes: Cell::new(0),
             raw_reads: Cell::new(0),
         };
-        let error = collect_members(&source, LengthWidth::Eight, PhysicalAddress::new(0))
+        let error = collect_members(&source, lengths, PhysicalAddress::new(0))
             .err()
             .unwrap();
         assert_eq!(

@@ -34,8 +34,8 @@ pub use compaction::GlobalHeapMove;
 /// The caller reads the bytes of the range [`parse_range`](Self::parse_range) returns and passes
 /// them to [`parse`](Self::parse), which parses the collection header. The
 /// [`GlobalHeapCollection`] it returns starts a [`GlobalHeapWalk`] or a [`GlobalHeapLookup`],
-/// which returns the range of each object header in turn. The collection is defined in
-/// "Global Heap" of the [format specification, version 4.0][spec].
+/// which returns the range of each object header and any implied free tail in turn. The
+/// collection is defined in "Global Heap" of the [format specification, version 4.0][spec].
 ///
 /// # Examples
 ///
@@ -138,9 +138,9 @@ impl GlobalHeapCollectionLocator {
 /// A global heap collection, parsed from its header.
 ///
 /// A [`GlobalHeapWalk`] parses every object of the collection in turn, and a [`GlobalHeapLookup`]
-/// finds the object at one index. Both parse one object header per step, from a region the caller
-/// reads. The collection is defined in "Global Heap" of the [format specification, version
-/// 4.0][spec].
+/// finds the object at one index. For each step, the caller supplies either a complete object
+/// header or an implied free tail. The collection is defined in "Global Heap" of the [format
+/// specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,7 +171,7 @@ impl GlobalHeapCollection {
     pub fn walk(&self) -> GlobalHeapWalk {
         GlobalHeapWalk {
             collection: *self,
-            next: Some(self.first),
+            next: GlobalHeapSpan::Header(GlobalHeapObjectHeader { range: self.first }),
             seen: IndexSet::new(),
         }
     }
@@ -181,34 +181,96 @@ impl GlobalHeapCollection {
         self.range
     }
 
-    /// Parses the object header in `header`, or returns `None` for the free space.
+    /// Classifies the span at `start` from the declared collection boundary.
     ///
-    /// `header` spans the range [`header_range`](Self::header_range) returns. A `header` shorter
-    /// than an object header is a tail of the collection, and free space where its index is 0.
-    fn parse_object(
+    /// For version 1 collections, "Global Heap" of the [format specification, version 4.0][spec]
+    /// defines a terminal span too short for an object header as free space with an implied header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `start` is past the collection end.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+    fn next_span(&self, start: PhysicalAddress) -> Result<GlobalHeapSpan, FormatError> {
+        let remaining = self.remaining(start)?;
+        Ok(if remaining == 0 {
+            GlobalHeapSpan::End
+        } else if remaining < header_len(self.lengths) {
+            GlobalHeapSpan::ImpliedFree(FileRange::new(start, remaining)?)
+        } else {
+            GlobalHeapSpan::Header(GlobalHeapObjectHeader {
+                range: FileRange::new(start, header_len(self.lengths))?,
+            })
+        })
+    }
+
+    /// Returns the number of bytes from `start` to the end of the collection.
+    fn remaining(&self, start: PhysicalAddress) -> Result<u64, FormatError> {
+        self.range
+            .end()
+            .get()
+            .checked_sub(start.get())
+            .ok_or_else(|| {
+                FormatError::Internal(
+                    "a global heap object header starts past its collection".into(),
+                )
+            })
+    }
+}
+
+/// The next parsing position within a collection's declared extent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlobalHeapSpan {
+    End,
+    Header(GlobalHeapObjectHeader),
+    ImpliedFree(FileRange),
+}
+
+impl GlobalHeapSpan {
+    const fn range(self) -> Option<FileRange> {
+        match self {
+            Self::End => None,
+            Self::Header(header) => Some(header.range),
+            Self::ImpliedFree(range) => Some(range),
+        }
+    }
+}
+
+/// The range of a complete object header within its collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GlobalHeapObjectHeader {
+    range: FileRange,
+}
+
+impl GlobalHeapObjectHeader {
+    /// Parses the complete header from `region`, returning `None` for an explicit free-space record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain the header range,
+    /// [`FormatError::GlobalHeapObjectOutsideCollection`] if the padded member extent overflows or
+    /// exceeds the collection boundary, and [`FormatError::MisplacedGlobalHeapFreeSpace`] if an
+    /// explicit free-space record does not span the rest of the collection.
+    fn parse(
         &self,
-        header: FileRegion<'_>,
+        collection: GlobalHeapCollection,
+        region: FileRegion<'_>,
     ) -> Result<Option<GlobalHeapObject>, FormatError> {
-        let range = header.range();
-        let collection_end = self.range.end().get();
+        let header = region.subregion(self.range)?;
+        let range = self.range;
+        let collection_end = collection.range.end().get();
         let outside = |index| FormatError::GlobalHeapObjectOutsideCollection {
             address: range.start().get(),
             index,
             collection_end,
         };
-        let header_len = header_len(self.lengths);
+        let header_len = header_len(collection.lengths);
         let mut fields = bytes::Fields::new(header.bytes(), 0);
         let index = fields.u16()?;
-        if range.length() < header_len {
-            return match index {
-                0 => Ok(None),
-                index => Err(outside(index)),
-            };
-        }
         let reference_count = fields.u16()?;
         fields.array::<OBJECT_RESERVED_LEN>()?;
-        let size = fields.length(self.lengths)?;
-        let remaining = self.remaining(range.start())?;
+        let size = fields.length(collection.lengths)?;
+        let remaining = collection.remaining(range.start())?;
         let Some(index) = NonZeroU16::new(index) else {
             if size != remaining {
                 return Err(FormatError::MisplacedGlobalHeapFreeSpace {
@@ -233,34 +295,9 @@ impl GlobalHeapCollection {
             },
         }))
     }
-
-    /// Returns the range of the object header at `start`, cut short at the end of the collection,
-    /// or `None` at the end of the collection.
-    fn header_range(&self, start: PhysicalAddress) -> Result<Option<FileRange>, FormatError> {
-        Ok(match self.remaining(start)? {
-            0 => None,
-            remaining => Some(FileRange::new(
-                start,
-                remaining.min(header_len(self.lengths)),
-            )?),
-        })
-    }
-
-    /// Returns the number of bytes from `start` to the end of the collection.
-    fn remaining(&self, start: PhysicalAddress) -> Result<u64, FormatError> {
-        self.range
-            .end()
-            .get()
-            .checked_sub(start.get())
-            .ok_or_else(|| {
-                FormatError::Internal(
-                    "a global heap object header starts past its collection".into(),
-                )
-            })
-    }
 }
 
-/// A lookup of the object at one index of a global heap collection, one object header per step.
+/// A lookup of the object at one index of a global heap collection.
 ///
 /// The lookup parses every object header of the collection, the ones after the object included,
 /// so it rejects a collection that holds an index twice wherever the second one sits.
@@ -297,8 +334,9 @@ pub struct GlobalHeapLookup {
 }
 
 impl GlobalHeapLookup {
-    /// Parses the next object header from `region`, and returns `None` until the step that
-    /// parses the last header, which returns the object at the index.
+    /// Parses the next object header or implied free tail from `region`.
+    ///
+    /// Returns the object at the index once the walk ends, and `None` at earlier steps.
     ///
     /// After an error from [`GlobalHeapWalk::parse`], [`parse_range`](Self::parse_range) returns
     /// the same range.
@@ -327,14 +365,14 @@ impl GlobalHeapLookup {
             })
     }
 
-    /// Returns the range of the object header the next step parses, or `None` once the last header
-    /// is parsed.
+    /// Returns the range of the next object header or implied free tail, or `None` once the
+    /// walk ends.
     pub const fn parse_range(&self) -> Option<FileRange> {
         self.walk.parse_range()
     }
 }
 
-/// A walk over the objects of a global heap collection, one object header per step.
+/// A walk over the objects of a global heap collection.
 ///
 /// The walk ends after the free space object, at the end of the collection, or after a tail too
 /// short for an object header, which "Global Heap" of the [format specification, version
@@ -344,15 +382,15 @@ impl GlobalHeapLookup {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GlobalHeapWalk {
     collection: GlobalHeapCollection,
-    next: Option<FileRange>,
+    next: GlobalHeapSpan,
     seen: IndexSet,
 }
 
 impl GlobalHeapWalk {
-    /// Parses the next object header from `region`, and returns the object, or `None` for the free
-    /// space.
+    /// Parses the next object header or implied free tail from `region`.
     ///
-    /// Once the walk has parsed the last header, every call returns `None`. After an error,
+    /// Returns the object for a member header, or `None` for free space. The parser ignores the
+    /// bytes of an implied free tail. Once the walk ends, every call returns `None`. After an error,
     /// [`parse_range`](Self::parse_range) returns the same range.
     ///
     /// # Errors
@@ -360,8 +398,7 @@ impl GlobalHeapWalk {
     /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain the range
     /// [`parse_range`](Self::parse_range) returns,
     /// [`FormatError::GlobalHeapObjectOutsideCollection`] if the object, with its data padded to a
-    /// multiple of 8 bytes, runs past the end of the collection or a tail too short for an object
-    /// header has a nonzero index,
+    /// multiple of 8 bytes, runs past the end of the collection,
     /// [`FormatError::MisplacedGlobalHeapFreeSpace`] if the free space object does not span the
     /// rest of the collection, and [`FormatError::DuplicateGlobalHeapObjectIndex`] if an earlier
     /// step returned an object at the same index.
@@ -369,12 +406,16 @@ impl GlobalHeapWalk {
         &mut self,
         region: FileRegion<'_>,
     ) -> Result<Option<GlobalHeapObject>, FormatError> {
-        let Some(range) = self.next else {
-            return Ok(None);
+        let object = match self.next {
+            GlobalHeapSpan::End => return Ok(None),
+            GlobalHeapSpan::Header(header) => header.parse(self.collection, region)?,
+            GlobalHeapSpan::ImpliedFree(range) => {
+                region.subregion(range)?;
+                None
+            }
         };
-        let object = self.collection.parse_object(region.subregion(range)?)?;
-        let next = object.map_or(Ok(None), |object| {
-            self.collection.header_range(object.range.end())
+        let next = object.map_or(Ok(GlobalHeapSpan::End), |object| {
+            self.collection.next_span(object.range.end())
         })?;
         if let Some(object) = object
             && !self.seen.insert(object.index)
@@ -388,10 +429,10 @@ impl GlobalHeapWalk {
         Ok(object)
     }
 
-    /// Returns the range of the object header the next step parses, or `None` once the last header
-    /// is parsed.
+    /// Returns the range of the next object header or implied free tail, or `None` once the
+    /// walk ends.
     pub const fn parse_range(&self) -> Option<FileRange> {
-        self.next
+        self.next.range()
     }
 }
 
@@ -1140,39 +1181,64 @@ mod tests {
                 .map(|objects| objects.iter().map(|&(index, _)| index).collect()),
             expected
         );
+        if let Err(expected) = expected {
+            let image = region(0, &bytes);
+            let mut lookup =
+                collection_at(image, LengthWidth::Eight).lookup(NonZeroU16::new(1).unwrap());
+            let err = loop {
+                let range = lookup.parse_range().unwrap();
+                match lookup.parse(image.subregion(range).unwrap()) {
+                    Ok(found) => assert_eq!(found, None),
+                    Err(err) => break err,
+                }
+            };
+            assert_eq!(err, expected);
+        }
     }
 
     #[rstest]
-    #[case::implicit_free_space(4096, 4056, 0, Ok(vec![1]))]
-    #[case::implicit_free_space_in_a_larger_collection(4104, 4064, 0, Ok(vec![1]))]
-    #[case::no_free_space(4096, 4064, 0, Ok(vec![1]))]
-    #[case::nonzero_index_in_the_tail(
-        4096,
-        4056,
-        7,
-        Err(FormatError::GlobalHeapObjectOutsideCollection {
-            address: 4088,
-            index: 7,
-            collection_end: 4096,
-        })
-    )]
+    #[case::zero_tail(4096, 4056, [0; 8])]
+    #[case::nonzero_tail(4096, 4056, [7, 0, 0, 0, 0, 0, 0, 0])]
+    #[case::all_nonzero_tail(4096, 4056, [0xff; 8])]
+    #[case::larger_collection(4104, 4064, [7, 0, 0, 0, 0, 0, 0, 0])]
+    #[case::no_free_space(4096, 4064, [0; 8])]
     fn a_tail_shorter_than_an_object_header_is_free_space(
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
         #[case] collection_size: usize,
         #[case] object_len: usize,
-        #[case] tail_index: u16,
-        #[case] expected: Result<Vec<u16>, FormatError>,
+        #[case] tail: [u8; 8],
     ) {
-        let object = vec![9; object_len];
-        let mut bytes = padded_collection(LengthWidth::Eight, collection_size, &[(1, &object)]);
-        if tail_index != 0 {
-            bytes[collection_size - 8..collection_size - 6]
-                .copy_from_slice(&tail_index.to_le_bytes());
+        let payload = vec![9; object_len];
+        let mut bytes = padded_collection(lengths, collection_size, &[(1, &payload)]);
+        let member_end = 32 + object_len;
+        if member_end < collection_size {
+            assert_eq!(collection_size - member_end, tail.len());
+            bytes[member_end..].copy_from_slice(&tail);
         }
+        let image = region(0, &bytes);
         assert_eq!(
-            walk_objects(region(0, &bytes), LengthWidth::Eight)
-                .map(|objects| objects.iter().map(|&(index, _)| index).collect()),
-            expected
+            walk_objects(image, lengths).unwrap(),
+            [(1, payload.as_slice())]
         );
+
+        let mut lookup = collection_at(image, lengths).lookup(NonZeroU16::new(1).unwrap());
+        let mut requested = Vec::new();
+        let found = loop {
+            let range = lookup.parse_range().unwrap();
+            requested.push(range.start().get()..range.end().get());
+            if let Some(object) = lookup.parse(image.subregion(range).unwrap()).unwrap() {
+                break object;
+            }
+        };
+        assert_eq!(found.index().get(), 1);
+        assert_eq!(found.payload().parse(image).unwrap(), payload);
+        assert_eq!(lookup.parse_range(), None);
+        let expected: Vec<_> = core::iter::once(16..32)
+            .chain(
+                (member_end < collection_size).then_some(member_end as u64..collection_size as u64),
+            )
+            .collect();
+        assert_eq!(requested, expected);
     }
 
     #[rstest]
@@ -1211,9 +1277,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_step_rejects_a_region_short_of_its_range_and_accepts_the_range_after() {
-        let bytes = padded_collection(LengthWidth::Eight, 4096, &[(1, b"first")]);
+    #[rstest]
+    #[case::complete_free_header(5)]
+    #[case::implied_free_tail(4056)]
+    fn each_step_rejects_a_region_short_of_its_range_and_accepts_the_range_after(
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+        #[case] payload_len: usize,
+    ) {
+        let payload_bytes = vec![9; payload_len];
+        let bytes = padded_collection(lengths, 4096, &[(1, &payload_bytes)]);
         let image = region(256, &bytes);
         let short = |range: FileRange| {
             image
@@ -1227,8 +1299,7 @@ mod tests {
             provided_length: range.length() - 1,
         };
 
-        let locator =
-            GlobalHeapCollectionLocator::new(PhysicalAddress::new(256), LengthWidth::Eight);
+        let locator = GlobalHeapCollectionLocator::new(PhysicalAddress::new(256), lengths);
         let collection_header = locator.parse_range().unwrap();
         assert_eq!(
             locator.parse(short(collection_header)).unwrap_err(),
@@ -1266,7 +1337,7 @@ mod tests {
             object.payload().parse(short(payload)).unwrap_err(),
             insufficient(payload)
         );
-        assert_eq!(object.payload().parse(image).unwrap(), b"first");
+        assert_eq!(object.payload().parse(image).unwrap(), payload_bytes);
     }
 
     static LARGE_OBJECT: [u8; 70_000] = [7; 70_000];

@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::read_string` rejecting global-heap collections with nonzero bytes in terminal free space without an object header ([#1224](https://github.com/CramBL/hdf5-pure/pull/1224)).
 - Fixed `File::commit` reporting a format error for edits of groups with well-formed user-defined links ([#1216](https://github.com/CramBL/hdf5-pure/pull/1216)).
 - Fixed `OwnedLink` serialization discarding stored name-length widths and explicit default fields ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
