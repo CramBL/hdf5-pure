@@ -438,19 +438,40 @@ def prepare(args):
     run("git", "status", "--short")
 
 
-def print_release_type(args):
-    """Prints the release type of a pull request from `HEAD` into `args.base`."""
+def changelog_diff(base):
     resolve = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}"], capture_output=True
+        ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], capture_output=True
     )
     if resolve.returncode != 0:
-        fail(f"no such commit: {args.base!r} (a shallow clone has no remote branches)")
-    diff = output("git", *REPRODUCIBLE_DIFF, f"{args.base}...HEAD", "--", str(CHANGELOG))
-    release_type = pull_request_release_type(CHANGELOG.read_text(), diff)
+        fail(f"no such commit: {base!r} (a shallow clone has no remote branches)")
+    return output("git", *REPRODUCIBLE_DIFF, f"{base}...HEAD", "--", str(CHANGELOG))
+
+
+def print_release_type(args):
+    """Prints the release type of a pull request from `HEAD` into `args.base`."""
+    release_type = pull_request_release_type(CHANGELOG.read_text(), changelog_diff(args.base))
     if args.for_semver_checks:
         baseline = Version.parse(manifest()["version"])
         release_type = semver_checks_release_type(release_type, baseline)
     print(release_type)
+
+
+def check_api(args):
+    diff = changelog_diff(args.base)
+    version = Version.parse(manifest()["version"])
+    base_manifest = tomllib.loads(output("git", "show", f"{args.base}:Cargo.toml"))
+    base_version = Version.parse(base_manifest["workspace"]["package"]["version"])
+    baseline = (
+        previous_release_baseline(tagged_versions(), version) if version != base_version else None
+    )
+    release_type = pull_request_release_type(CHANGELOG.read_text(), diff)
+    release_type_word = semver_checks_release_type(release_type, baseline or version)
+    check_all(
+        release_type_word,
+        str(baseline) if baseline is not None else None,
+        args.package,
+        args.profile,
+    )
 
 
 def pr(args):
@@ -639,6 +660,12 @@ def main():
         help="print it in the word `cargo semver-checks --release-type` takes",
     )
     p.set_defaults(func=print_release_type)
+
+    p = commands.add_parser("check-api", help="check the API delta against the changelog's bump")
+    p.add_argument("--base", required=True, help="the ref the change diffs against")
+    p.add_argument("--package", help="check only this package")
+    p.add_argument("--profile", help="check only this API profile")
+    p.set_defaults(func=check_api)
 
     p = commands.add_parser(
         "pr", help="commit the prepared release on its branch, then push it and open the PR"

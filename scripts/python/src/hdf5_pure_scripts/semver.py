@@ -71,20 +71,29 @@ def checks(package: str | None = None, profile_name: str | None = None) -> list[
     ]
 
 
-def check_all(release_type: str, expected_baseline: str | None = None) -> None:
-    for package, profile_name in checks():
-        check_api(package, profile_name, release_type, expected_baseline)
-
-
-def check_api(
-    package: str, profile_name: str, release_type: str, expected_baseline: str | None = None
+def check_all(
+    release_type: str,
+    expected_baseline: str | None = None,
+    package: str | None = None,
+    profile_name: str | None = None,
 ) -> None:
-    selected = profile(package, profile_name)
+    selected = checks(package, profile_name)
+    if not selected:
+        sys.exit(f"no API profile {profile_name!r} for {package or 'any crate'}")
     manifest = tomllib.loads((repo_root() / "Cargo.toml").read_text())
     candidate_version = manifest["workspace"]["package"]["version"]
-    baseline = comparison_baseline(
-        package, released_version(package), expected_baseline, candidate_version
-    )
+    baselines = {
+        name: comparison_baseline(
+            name, released_version(name), expected_baseline, candidate_version
+        )
+        for name in dict.fromkeys(name for name, _ in selected)
+    }
+    for name, selected_profile in selected:
+        check_api(name, selected_profile, release_type, baselines[name])
+
+
+def check_api(package: str, profile_name: str, release_type: str, baseline: str) -> None:
+    selected = profile(package, profile_name)
     if package == FACADE:
         subprocess.run(
             [
@@ -111,8 +120,7 @@ def main() -> None:
     selected = checks(args.package, args.profile)
     if not selected:
         parser.error(f"no API profile {args.profile!r} for {args.package or 'any crate'}")
-    for package, profile_name in selected:
-        check_api(package, profile_name, args.release_type)
+    check_all(args.release_type, package=args.package, profile_name=args.profile)
 
 
 if __name__ == "__main__":

@@ -68,18 +68,8 @@ Prepare the final release explicitly.
 `just api::release-type` reads the bump from `[Unreleased]` or the section promoted by the release PR.
 `just api::semver-release-type` translates it for `cargo semver-checks`, as CI uses it.
 
+API checks resolve each package's baseline once before running its profiles. A version change against
+the comparison ref uses the previous stable release, including after publication. Other changes use
+each package's latest published stable release.
+
 Manual override: `--skip-api-delta` on `prepare` or `publish`.
-
-## Migration cleanup
-
-Keep the ownership migration bridge through candidates. After the first stable workspace release,
-open a cleanup PR to remove:
-
-- `migration.py`, `rustdoc_json.py`, `nightly.py` and their tests, `test_migration.py` and `test_nightly.py`
-- the migration branches in `semver.py` and their cases in `test_semver.py`
-- the `core_features` keys in `scripts/api-profiles.toml` and their handling in `api_profiles.py`
-- `[package.metadata.hdf5-pure-api-migration]` and the
-  `[package.metadata.cargo-semver-checks.lints]` downgrades in `Cargo.toml`
-- the rustdoc JSON nightly step in `api.yml` and `release.yml`, if nothing else there needs it
-
-Check the list against the code. CI rejects the bridge once the stable facade baseline advances.

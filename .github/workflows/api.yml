@@ -58,7 +58,8 @@ jobs:
   # The public-API delta against the latest release, checked against the
   # release type the changelog calls for: a pull request that breaks the API
   # marks its entry **Breaking:**, and a release commit, whose [Unreleased] is
-  # empty, is measured against the section it promotes. RELEASES.md covers what
+  # empty, is measured against the section it promotes. Version changes use the
+  # previous stable API baseline, including after publication. RELEASES.md covers what
   # this cannot see.
   semver:
     name: semver / ubuntu-latest
