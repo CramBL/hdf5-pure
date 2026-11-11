@@ -78,12 +78,15 @@ pub struct LinkMessage {
 pub(crate) struct LinkPrefix<'a> {
     /// The link name as stored, undecoded.
     pub(crate) name: &'a [u8],
-    /// 0 for a hard link, 1 soft, 64 external.
+    /// The stored kind code, or zero for an omitted hard-link type field.
     pub(crate) link_type_code: u8,
     pub(crate) creation_order: Option<u64>,
     pub(crate) charset: CharacterSet,
     /// Offset of the target data that follows the name.
     pub(crate) target_pos: usize,
+    pub(crate) name_width: UintWidth,
+    pub(crate) has_link_type: bool,
+    pub(crate) has_charset: bool,
 }
 
 impl<'a> LinkPrefix<'a> {
@@ -167,6 +170,9 @@ impl<'a> LinkPrefix<'a> {
             creation_order,
             charset,
             target_pos: pos,
+            name_width: name_size_field_width,
+            has_link_type,
+            has_charset,
         })
     }
 
@@ -575,6 +581,9 @@ impl LinkMessage {
             creation_order,
             charset,
             target_pos: _,
+            name_width: _,
+            has_link_type: _,
+            has_charset: _,
         } = prefix;
         Ok(LinkMessage {
             name: String::from_utf8_lossy(name).into_owned(),
