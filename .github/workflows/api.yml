@@ -51,7 +51,6 @@ jobs:
               - scripts/python/**
               - justfile
               - scripts/constants.just
-              - scripts/nightly.txt
               - scripts/api.just
               - scripts/api-profiles.toml
               - .github/workflows/api.yml
@@ -94,10 +93,6 @@ jobs:
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just@1.59.0 cargo-semver-checks@0.50.0
-
-      # The migration check reads rustdoc JSON from the dated nightly the scripts pin.
-      - name: Install the rustdoc JSON nightly
-        run: just nightly
 
       # Each guaranteed crate's public API under each profile scripts/api-profiles.toml lists.
       - name: Public API delta

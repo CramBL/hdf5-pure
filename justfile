@@ -120,7 +120,7 @@ examples:
             cargo run --locked -p "$package" --example "$example" ${features:+--features "$features"} </dev/null
         done
 
-# Install the pinned nightly the rustdoc JSON, docs.rs and fuzzing checks use.
+# Install the pinned nightly the docs.rs and fuzzing checks use.
 nightly:
     rustup toolchain install --no-self-update --profile minimal {{ NIGHTLY }}
 

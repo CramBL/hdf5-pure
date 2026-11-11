@@ -3,7 +3,6 @@ import tomllib
 from hdf5_pure_scripts import repo_root
 
 FACADE = "hdf5-pure"
-CORE = "hdf5-pure-core"
 
 
 def crates() -> dict[str, list[dict]]:

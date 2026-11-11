@@ -22,16 +22,6 @@ include = [
     "/LICENSE-*",
 ]
 
-# Report 0.47.0 ownership artifacts as warnings until the API checker expires the bridge.
-[package.metadata.cargo-semver-checks.lints]
-enum_missing = "warn"
-struct_missing = "warn"
-pub_module_level_const_missing = "warn"
-
-# The release the one-time ownership migration check compares hdf5-pure-core's types with.
-[package.metadata.hdf5-pure-api-migration]
-from-version = "0.47.0"
-
 # Publish the full public API on docs.rs. The default feature set hides the
 # `ndarray`, `serde` (`mat`), `zfp`, and `provenance` surfaces (and
 # leaves their cross-references as dead links).
