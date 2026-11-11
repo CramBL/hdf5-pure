@@ -83,6 +83,8 @@ pub mod soft_link;
 pub mod space_ownership;
 pub mod storage;
 pub mod symbol_table;
+#[cfg(feature = "hdf5")]
+pub mod user_defined_link;
 pub mod userblock;
 
 /// Includes the supplied items when the helper's HDF5 1.10 capability is enabled.

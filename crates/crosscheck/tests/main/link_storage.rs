@@ -12,7 +12,7 @@ use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{AttrValue, CharacterSet, Error, File, MessageType};
 use hdf5_pure_format::__private::{
     AccessMode, GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkInfoMessage,
-    ObjectHeader, ObjectHeaderPrefix, OffsetWidth, OwnedLink, OwnedLinkTarget,
+    LinkMessageV1, ObjectHeader, ObjectHeaderPrefix, OffsetWidth, OwnedLink, OwnedLinkTarget,
 };
 use rstest::rstest;
 
@@ -77,6 +77,8 @@ fn libhdf5_link_messages_preserve_targets_encodings_and_creation_policy(
         .iter()
         .filter(|message| message.msg_type == MessageType::LINK)
         .map(|message| {
+            let wire = LinkMessageV1::parse(&message.data, width).unwrap();
+            assert_eq!(wire.serialize(width).unwrap(), message.data);
             let link = OwnedLink::parse(&message.data, width).unwrap();
             assert_eq!(link.serialize(width).unwrap(), message.data);
             link

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `LinkMessageV1` in `hdf5-pure-format` decodes and encodes user-defined links, preserving raw bytes, selected name-length widths, and explicit optional fields.
+
 ### Fixed
 
 - Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
