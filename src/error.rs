@@ -78,6 +78,15 @@ pub enum Error {
     /// filters, incompatible element datatypes, sparse chunk grids, and shared hard links can
     /// also cause this error. The payload is a human-readable reason.
     AppendUnsupported(&'static str),
+    /// A supported attribute value could not be decoded.
+    ///
+    /// The original error is available through [`source`](std::error::Error::source).
+    AttributeDecode {
+        /// The name of the attribute whose value could not be decoded.
+        name: String,
+        /// The decoding or source-read failure.
+        source: FormatError,
+    },
     /// A [`commit`](crate::File::commit) failed, *and* could not put back a
     /// value it had already written over - so the file holds part of a batch
     /// that was rejected.
@@ -328,6 +337,9 @@ impl fmt::Display for Error {
                 f,
                 "allocation publication is unconfirmed; close and reopen the file before editing"
             ),
+            Error::AttributeDecode { name, source } => {
+                write!(f, "cannot decode attribute {name:?}: {source}")
+            }
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Format(e) => write!(f, "HDF5 format error: {e}"),
             Error::InconsistentReferenceCount {
@@ -466,6 +478,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Format(e) => Some(e),
+            Error::AttributeDecode { source, .. } => Some(source),
             Error::CopyScreenUnreadable { source, .. } => Some(source),
             Error::PersistedFreeSpace { source, .. } => Some(&**source),
             Error::CommitPartiallyApplied { restore, .. } => Some(&**restore),

@@ -2381,23 +2381,22 @@ impl FileInner {
         })
     }
 
-    /// Read all attributes attached to an object header, dispatching on the
-    /// backend.
+    /// Reads supported attribute values through the object's storage backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AttributeDecode`] if decoding a supported value fails.
+    /// Propagates errors from reading and parsing attribute metadata.
     fn attrs_of(&self, hdr: &ObjectHeader) -> Result<HashMap<String, AttrValue>, Error> {
         let (widths, base) = (self.widths, self.addresses());
         let attr_msgs = self.attr_messages_of(hdr)?;
         match &self.backend {
-            Backend::Edit(m) => Ok(Self::with_engine(
+            Backend::Edit(m) => Self::with_engine(
                 m,
                 |d| types::attrs_to_map(&attr_msgs, &BytesSource::new(d), widths, base),
                 |s| types::attrs_to_map(&attr_msgs, s, widths, base),
-            )),
-            _ => Ok(types::attrs_to_map(
-                &attr_msgs,
-                &self.source(),
-                widths,
-                base,
-            )),
+            ),
+            _ => types::attrs_to_map(&attr_msgs, &self.source(), widths, base),
         }
     }
 
@@ -5105,25 +5104,21 @@ impl Group {
         }))
     }
 
-    /// Read all attributes of this group.
+    /// Returns the supported attribute values, keyed by name.
     ///
-    /// Each value takes the [`AttrValue`] variant that describes its on-disk
-    /// encoding, so the variant reflects the charset, width and dataspace its
-    /// writer chose rather than the shape of the data alone: a one-element array
-    /// stays an array, an ASCII string does not arrive as a UTF-8
-    /// [`String`](AttrValue::String), and a 16-bit integer arrives as
-    /// [`I16`](AttrValue::I16) rather than widened, a 32-bit float as
-    /// [`F32`](AttrValue::F32). Prefer the accessors —
-    /// [`AttrValue::as_str`], [`as_strings`](AttrValue::as_strings),
-    /// [`as_i64`](AttrValue::as_i64) and the rest — over matching on the variant,
-    /// unless the encoding is the thing you care about. **The variant may become
-    /// more specific in a future release** as `AttrValue` grows further ones
-    /// (variable-length strings, say), and a `_` arm is required regardless
-    /// because the enum is `#[non_exhaustive]`.
+    /// The reader selects the corresponding [`AttrValue`] variants for standard integer
+    /// and float widths and string character sets. One-element arrays remain arrays.
+    /// Use the [`AttrValue`] accessors when the exact representation is unimportant.
     ///
-    /// An attribute whose datatype has no `AttrValue` representation is omitted
-    /// from the map rather than reported as an error. Read
-    /// [`attr_datatypes`](Self::attr_datatypes) to see it.
+    /// Attributes whose datatypes have no [`AttrValue`] representation are omitted.
+    /// Their metadata is available through [`attr_datatypes`](Self::attr_datatypes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AttributeDecode`] if decoding a supported value fails. The error
+    /// identifies the attribute and retains the original [`FormatError`], also available
+    /// through [`std::error::Error::source`]. Propagates errors from resolving the group,
+    /// reading its metadata, or parsing attribute messages.
     pub fn attrs(&self) -> Result<HashMap<String, AttrValue>, Error> {
         let hdr = self.file.parse_header(self.header_address()?)?;
         self.file.attrs_of(&hdr)
@@ -7773,11 +7768,18 @@ the same commit to replace it",
         })
     }
 
-    /// Read all attributes of this dataset.
+    /// Returns the supported attribute values, keyed by name.
     ///
-    /// The variant of each value describes its on-disk encoding; see
-    /// [`Group::attrs`] for what that means for matching on it, and prefer the
-    /// [`AttrValue`] accessors.
+    /// See [`Group::attrs`] for value representations. Attributes whose datatypes have no
+    /// [`AttrValue`] representation are omitted. Their metadata is available through
+    /// [`attr_datatypes`](Self::attr_datatypes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AttributeDecode`] if decoding a supported value fails. The error
+    /// identifies the attribute and retains the original [`FormatError`], also available
+    /// through [`std::error::Error::source`]. Propagates errors from resolving the dataset,
+    /// reading its metadata, or parsing attribute messages.
     pub fn attrs(&self) -> Result<HashMap<String, AttrValue>, Error> {
         self.file.attrs_of(&self.resolved()?.header)
     }

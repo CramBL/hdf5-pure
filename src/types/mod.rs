@@ -9,9 +9,11 @@ use crate::VariableLengthType;
 use crate::address::AddressContext;
 use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
+use crate::error::{Error, FormatError};
 #[cfg(test)]
 use crate::{FixedPointType, FloatingPointType, TimeType};
 
+use crate::convert::Narrow;
 use crate::display::{self, DISPLAY_MAX_MEMBERS, Dims, EscapedName};
 use crate::width::FormatWidths;
 
@@ -160,21 +162,41 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
 
 /// Decodes attribute messages into a name-to-value map.
 ///
-/// Attributes that cannot be decoded are omitted. `addresses` resolves the stored
-/// collection addresses of variable-length data to physical positions in `source`.
+/// Omits datatypes without an [`AttrValue`] representation. The reader uses `addresses`
+/// to resolve stored collection addresses for variable-length reads from `source`.
+///
+/// # Errors
+///
+/// Returns [`Error::AttributeDecode`] at the first supported-value decoding failure,
+/// preserving the attribute name and original [`FormatError`].
 pub(crate) fn attrs_to_map<S: crate::source::Source + ?Sized>(
     attrs: &[crate::attribute::AttributeMessage],
     source: &S,
     widths: FormatWidths,
     addresses: AddressContext,
-) -> HashMap<std::string::String, AttrValue> {
+) -> Result<HashMap<std::string::String, AttrValue>, Error> {
     let mut map = HashMap::new();
     for attr in attrs {
-        if let Some(val) = decode_attr_value(attr, source, widths, addresses) {
-            map.insert(attr.name.clone(), val);
+        match decode_attr_value(attr, source, widths, addresses).map_err(|source| {
+            Error::AttributeDecode {
+                name: attr.name.clone(),
+                source,
+            }
+        })? {
+            DecodedAttrValue::Value(value) => {
+                map.insert(attr.name.clone(), value);
+            }
+            DecodedAttrValue::Unsupported => {}
         }
     }
-    map
+    Ok(map)
+}
+
+/// A decoded attribute value or a datatype without an [`AttrValue`] representation.
+#[derive(Debug, PartialEq)]
+enum DecodedAttrValue {
+    Unsupported,
+    Value(AttrValue),
 }
 
 /// Decodes an attribute's datatype, dataspace, and raw bytes into an [`AttrValue`].
@@ -201,15 +223,21 @@ pub(crate) fn attrs_to_map<S: crate::source::Source + ?Sized>(
 /// their variable-length representation for both scalars and arrays.
 ///
 /// Numeric arrays contain the complete elements decoded from the supplied bytes.
-/// An incomplete element, an empty numeric scalar, or an unsupported datatype
-/// returns `None`. Numeric elements wider than eight bytes are unsupported.
-/// A zero-size fixed-string scalar decodes to an empty string.
+/// Returns [`DecodedAttrValue::Unsupported`] for datatypes without an [`AttrValue`]
+/// representation, including numeric elements wider than eight bytes. A zero-size
+/// fixed-string scalar decodes to an empty string.
+///
+/// # Errors
+///
+/// Returns [`FormatError::DataSizeMismatch`] for incomplete numeric or fixed-string
+/// elements, or an empty numeric scalar. Propagates other numeric, fixed-string,
+/// and variable-length decoding errors, including heap and source-read failures.
 fn decode_attr_value<S: crate::source::Source + ?Sized>(
     attr: &crate::attribute::AttributeMessage,
     source: &S,
     widths: FormatWidths,
     addresses: AddressContext,
-) -> Option<AttrValue> {
+) -> Result<DecodedAttrValue, FormatError> {
     use crate::dataspace::DataspaceType;
     use crate::datatype::Datatype;
 
@@ -220,77 +248,100 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
     let scalar = attr.dataspace.space_type == DataspaceType::Scalar;
 
     // Enumeration values decode through their integer base type.
-    match crate::data_read::effective_numeric(&attr.datatype) {
-        Datatype::FloatingPoint(numeric) if numeric.size().get() == 4 => {
-            let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).ok()?;
-            if scalar {
-                Some(AttrValue::F32(narrow_f32(*vals.first()?)))
-            } else {
-                Some(AttrValue::F32Array(
-                    vals.into_iter().map(narrow_f32).collect(),
-                ))
+    Ok(DecodedAttrValue::Value(
+        match crate::data_read::effective_numeric(&attr.datatype) {
+            Datatype::FixedPoint(numeric) if numeric.size().get() > 8 => {
+                return Ok(DecodedAttrValue::Unsupported);
             }
-        }
-        Datatype::FloatingPoint(..) => {
-            let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).ok()?;
-            if scalar {
-                Some(AttrValue::F64(*vals.first()?))
-            } else {
-                Some(AttrValue::F64Array(vals))
+            Datatype::FloatingPoint(numeric) if numeric.size().get() > 8 => {
+                return Ok(DecodedAttrValue::Unsupported);
             }
-        }
-        Datatype::FixedPoint(numeric) if numeric.layout().signed() => signed_attr_value(
-            crate::data_read::read_as_i64(&attr.raw_data, &attr.datatype).ok()?,
-            scalar,
-            numeric.size().get(),
-        ),
-        Datatype::FixedPoint(numeric) => unsigned_attr_value(
-            crate::data_read::read_as_u64(&attr.raw_data, &attr.datatype).ok()?,
-            scalar,
-            numeric.size().get(),
-        ),
-        Datatype::String { charset, size, .. } => {
-            let strings = crate::data_read::read_as_strings(&attr.raw_data, &attr.datatype).ok()?;
-            // Preserve empty scalar strings and stored widths larger than the content.
-            Some(if scalar {
-                crate::type_builders::decoded_fixed_string(one_or_empty(strings), *size, charset)
-            } else {
-                crate::type_builders::decoded_fixed_string_array(strings, *size, charset)
-            })
-        }
-        Datatype::VariableLength(kind)
-            if crate::vl_data::is_vlen_string_datatype(&attr.datatype) =>
-        {
-            let strings = crate::vl_data::read_vl_strings_from_source(
-                source,
-                &attr.raw_data,
-                attr.dataspace.num_elements(),
-                widths,
-                addresses,
-                crate::vl_data::VlenStringReadOptions::default(),
-            )
-            .ok()?;
-            // Standard variable-length strings retain their representation in scalars and arrays.
-            // The ASCII character-sequence representation has only an array variant.
-            match (vlen_string_shape(kind), scalar) {
-                (VlenStringShape::AsciiCharSequence, true) => {
-                    Some(AttrValue::AsciiString(one_or_empty(strings)))
+            Datatype::FloatingPoint(numeric) if numeric.size().get() == 4 => {
+                let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype)?;
+                if scalar {
+                    AttrValue::F32(narrow_f32(numeric_scalar(&vals, numeric.size().get())?))
+                } else {
+                    AttrValue::F32Array(vals.into_iter().map(narrow_f32).collect())
                 }
-                (VlenStringShape::AsciiCharSequence, false) => {
-                    Some(AttrValue::VarLenAsciiCharArray(strings))
-                }
-                (VlenStringShape::Ascii, true) => {
-                    Some(AttrValue::VarLenAsciiString(one_or_empty(strings)))
-                }
-                (VlenStringShape::Ascii, false) => Some(AttrValue::VarLenAsciiStringArray(strings)),
-                (VlenStringShape::Utf8, true) => {
-                    Some(AttrValue::VarLenString(one_or_empty(strings)))
-                }
-                (VlenStringShape::Utf8, false) => Some(AttrValue::VarLenStringArray(strings)),
             }
-        }
-        _ => None,
-    }
+            Datatype::FloatingPoint(numeric) => {
+                let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype)?;
+                if scalar {
+                    AttrValue::F64(numeric_scalar(&vals, numeric.size().get())?)
+                } else {
+                    AttrValue::F64Array(vals)
+                }
+            }
+            Datatype::FixedPoint(numeric) if numeric.layout().signed() => signed_attr_value(
+                crate::data_read::read_as_i64(&attr.raw_data, &attr.datatype)?,
+                scalar,
+                numeric.size().get(),
+            )?,
+            Datatype::FixedPoint(numeric) => unsigned_attr_value(
+                crate::data_read::read_as_u64(&attr.raw_data, &attr.datatype)?,
+                scalar,
+                numeric.size().get(),
+            )?,
+            Datatype::String { charset, size, .. } => {
+                let strings = crate::data_read::read_as_strings(&attr.raw_data, &attr.datatype)?;
+                // Preserve empty scalar strings and stored widths larger than the content.
+                if scalar {
+                    crate::type_builders::decoded_fixed_string(
+                        one_or_empty(strings),
+                        *size,
+                        charset,
+                    )
+                } else {
+                    crate::type_builders::decoded_fixed_string_array(strings, *size, charset)
+                }
+            }
+            Datatype::VariableLength(kind)
+                if crate::vl_data::is_vlen_string_datatype(&attr.datatype) =>
+            {
+                let strings = crate::vl_data::read_vl_strings_from_source(
+                    source,
+                    &attr.raw_data,
+                    attr.dataspace.num_elements(),
+                    widths,
+                    addresses,
+                    crate::vl_data::VlenStringReadOptions::default(),
+                )?;
+                // Standard variable-length strings retain their representation in scalars and arrays.
+                // The ASCII character-sequence representation has only an array variant.
+                match (vlen_string_shape(kind), scalar) {
+                    (VlenStringShape::AsciiCharSequence, true) => {
+                        AttrValue::AsciiString(one_or_empty(strings))
+                    }
+                    (VlenStringShape::AsciiCharSequence, false) => {
+                        AttrValue::VarLenAsciiCharArray(strings)
+                    }
+                    (VlenStringShape::Ascii, true) => {
+                        AttrValue::VarLenAsciiString(one_or_empty(strings))
+                    }
+                    (VlenStringShape::Ascii, false) => AttrValue::VarLenAsciiStringArray(strings),
+                    (VlenStringShape::Utf8, true) => AttrValue::VarLenString(one_or_empty(strings)),
+                    (VlenStringShape::Utf8, false) => AttrValue::VarLenStringArray(strings),
+                }
+            }
+            _ => return Ok(DecodedAttrValue::Unsupported),
+        },
+    ))
+}
+
+/// Returns the first decoded numeric element.
+///
+/// # Errors
+///
+/// Returns [`FormatError::DataSizeMismatch`] if `values` is empty, or
+/// [`FormatError::ValueTooLargeForPlatform`] if `width` exceeds [`usize::MAX`].
+fn numeric_scalar<T: Copy>(values: &[T], width: u32) -> Result<T, FormatError> {
+    values
+        .first()
+        .copied()
+        .ok_or(FormatError::DataSizeMismatch {
+            expected: width.to_usize()?,
+            actual: 0,
+        })
 }
 
 /// Converts an exactly widened binary32 value back to [`f32`].
@@ -308,34 +359,46 @@ fn narrow_f32(value: f64) -> f32 {
 ///
 /// Widths of 1, 2, and 4 bytes use their variants if the first scalar element
 /// or every array element fits. Other widths and failed conversions use the
-/// 64-bit variant. An empty scalar returns `None`.
-fn signed_attr_value(values: Vec<i64>, scalar: bool, width: u32) -> Option<AttrValue> {
+/// 64-bit variant.
+///
+/// # Errors
+///
+/// Returns the errors of [`numeric_scalar`] when selecting a scalar.
+fn signed_attr_value(values: Vec<i64>, scalar: bool, width: u32) -> Result<AttrValue, FormatError> {
     let narrowed = match width {
         1 => narrow_elements(&values, scalar, AttrValue::I8, AttrValue::I8Array),
         2 => narrow_elements(&values, scalar, AttrValue::I16, AttrValue::I16Array),
         4 => narrow_elements(&values, scalar, AttrValue::I32, AttrValue::I32Array),
         _ => None,
     };
-    match narrowed {
-        Some(value) => Some(value),
-        None if scalar => Some(AttrValue::I64(*values.first()?)),
-        None => Some(AttrValue::I64Array(values)),
-    }
+    Ok(match narrowed {
+        Some(value) => value,
+        None if scalar => AttrValue::I64(numeric_scalar(&values, width)?),
+        None => AttrValue::I64Array(values),
+    })
 }
 
 /// Selects an unsigned attribute variant using the rules of [`signed_attr_value`].
-fn unsigned_attr_value(values: Vec<u64>, scalar: bool, width: u32) -> Option<AttrValue> {
+///
+/// # Errors
+///
+/// Returns the errors of [`numeric_scalar`] when selecting a scalar.
+fn unsigned_attr_value(
+    values: Vec<u64>,
+    scalar: bool,
+    width: u32,
+) -> Result<AttrValue, FormatError> {
     let narrowed = match width {
         1 => narrow_elements(&values, scalar, AttrValue::U8, AttrValue::U8Array),
         2 => narrow_elements(&values, scalar, AttrValue::U16, AttrValue::U16Array),
         4 => narrow_elements(&values, scalar, AttrValue::U32, AttrValue::U32Array),
         _ => None,
     };
-    match narrowed {
-        Some(value) => Some(value),
-        None if scalar => Some(AttrValue::U64(*values.first()?)),
-        None => Some(AttrValue::U64Array(values)),
-    }
+    Ok(match narrowed {
+        Some(value) => value,
+        None if scalar => AttrValue::U64(numeric_scalar(&values, width)?),
+        None => AttrValue::U64Array(values),
+    })
 }
 
 /// Converts the first element for a scalar or every element for an array.
