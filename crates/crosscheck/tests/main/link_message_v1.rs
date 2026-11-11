@@ -3,7 +3,10 @@
 use std::path::Path;
 
 use hdf5_pure::{File, MessageType};
-use hdf5_pure_format::__private::{AccessMode, LinkMessageV1, LinkTargetV1, ObjectHeader};
+use hdf5_pure_format::__private::{
+    AccessMode, LinkMessage, LinkMessageV1, LinkProjectionError, LinkTargetV1, ObjectHeader,
+    OwnedLink, UserLinkKind,
+};
 use rstest::rstest;
 use test_util_hdf5::{file, user_defined_link};
 
@@ -55,4 +58,7 @@ fn wire_codec_preserves_libhdf5_user_defined_link_messages(
     assert_eq!(parsed_value.as_bytes(), value);
     assert_eq!(wire.encoded_len(width).unwrap(), consumed);
     assert_eq!(wire.serialize(width).unwrap(), messages[0].data[..consumed]);
+    let expected = LinkProjectionError::UnsupportedKind(UserLinkKind::new(255).unwrap());
+    assert_eq!(OwnedLink::try_from(wire.clone()).unwrap_err(), expected);
+    assert_eq!(LinkMessage::try_from(wire).unwrap_err(), expected);
 }
