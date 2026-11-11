@@ -10,6 +10,8 @@ use crate::{CharacterSet, DatatypeByteOrder, StringPadding};
 #[cfg(feature = "std")]
 mod display;
 
+mod decoding;
+
 // The declared `u32::MAX` width exercises bit-count formatting beyond 32 bits.
 #[rstest]
 #[case::fixed_point(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "other(i34359738360(bits 0..1))")]
@@ -162,7 +164,11 @@ fn a_width_the_content_implies_reads_back_as_the_plain_variant() {
     );
 }
 
-/// Decodes an attribute from its datatype, raw bytes, and dimensions.
+/// Decodes raw attribute values, returning `None` for unsupported datatypes.
+///
+/// # Panics
+///
+/// Panics if decoding fails.
 fn decode_raw(datatype: Datatype, raw_data: Vec<u8>, dimensions: Vec<u64>) -> Option<AttrValue> {
     use crate::dataspace::{Dataspace, DataspaceType};
 
@@ -184,7 +190,7 @@ fn decode_raw(datatype: Datatype, raw_data: Vec<u8>, dimensions: Vec<u64>) -> Op
         raw_data,
         datatype_location: crate::shared_message::DatatypeLocation::Inline,
     };
-    decode_attr_value(
+    match decode_attr_value(
         &attr,
         &crate::source::BytesSource::new(Vec::new()),
         FormatWidths {
@@ -193,6 +199,11 @@ fn decode_raw(datatype: Datatype, raw_data: Vec<u8>, dimensions: Vec<u64>) -> Op
         },
         AddressContext::from_effective_base(BaseAddress::ZERO),
     )
+    .unwrap()
+    {
+        DecodedAttrValue::Value(value) => Some(value),
+        DecodedAttrValue::Unsupported => None,
+    }
 }
 
 // Invalid UTF-8 expands the two-byte slot into four bytes of decoded text.

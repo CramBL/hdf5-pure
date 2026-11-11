@@ -8,6 +8,7 @@ pub mod allocation;
 pub mod allocation_oracle;
 pub mod attribute;
 pub mod attribute_policy;
+pub mod attribute_values;
 pub mod btree;
 pub mod bytes;
 pub mod checksum;
