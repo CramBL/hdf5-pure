@@ -7,7 +7,7 @@ dependencies = []
 
 [project.scripts]
 hdf5-build = "hdf5_pure_scripts.build_hdf5:main"
-# Check the semver delta and compile the moved public re-exports.
+# Check the semver delta and compile the public re-exports.
 semver = "hdf5_pure_scripts.semver:main"
 release = "hdf5_pure_scripts.release:main"
 lint-prose = "hdf5_pure_scripts.prose:main"

@@ -14,7 +14,6 @@ from hdf5_pure_scripts.api_profiles import (
     feature_args,
     profile,
 )
-from hdf5_pure_scripts.migration import check_migration_paths, migration_baseline
 
 
 def released_version(package: str) -> str | None:
@@ -83,39 +82,10 @@ def check_api(
     selected = profile(package, profile_name)
     manifest = tomllib.loads((repo_root() / "Cargo.toml").read_text())
     candidate_version = manifest["workspace"]["package"]["version"]
-    facade_baseline = comparison_baseline(
-        FACADE, released_version(FACADE), expected_baseline, candidate_version
-    )
-    try:
-        migration = migration_baseline(manifest, facade_baseline)
-    except ValueError as error:
-        sys.exit(str(error))
-    if package == FACADE:
-        check_facade(selected, facade_baseline, release_type, migration)
-        return
-    if migration:
-        print(
-            f"{package} {profile_name}: no API baseline until {FACADE} releases after "
-            f"{facade_baseline}; the migration check compares its types with that release",
-            flush=True,
-        )
-        return
     baseline = comparison_baseline(
         package, released_version(package), expected_baseline, candidate_version
     )
-    check_package(package, baseline, release_type, feature_args(selected))
-
-
-def check_facade(selected: dict, baseline: str, release_type: str, migration: bool) -> None:
-    if migration:
-        print(
-            f"Ownership migration from {FACADE} {baseline}, the release before hdf5-pure-core",
-            flush=True,
-        )
-        try:
-            check_migration_paths(baseline, selected)
-        except ValueError as error:
-            sys.exit(str(error))
+    if package == FACADE:
         subprocess.run(
             [
                 "cargo",
@@ -129,7 +99,7 @@ def check_facade(selected: dict, baseline: str, release_type: str, migration: bo
             ],
             check=True,
         )
-    check_package(FACADE, baseline, release_type, feature_args(selected))
+    check_package(package, baseline, release_type, feature_args(selected))
 
 
 def main() -> None:
