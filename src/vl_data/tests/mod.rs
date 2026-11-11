@@ -162,12 +162,6 @@ fn parse_vl_references_truncated_error() {
     &[b"beta".as_slice(), b"alpha".as_slice()]
 )]
 #[case::one_alignment_past_the_minimum_size(4104, &[(1, b"alpha".as_slice())], &[(1, 5)], &[b"alpha".as_slice()])]
-#[case::a_tail_shorter_than_an_object_header(
-    4096,
-    &[(1, [9u8; 4056].as_slice())],
-    &[(1, 4056)],
-    &[[9u8; 4056].as_slice()]
-)]
 fn a_read_returns_the_requested_objects(
     #[values(2, 4, 8)] lengths: usize,
     #[case] size: usize,
@@ -181,6 +175,26 @@ fn a_read_returns_the_requested_objects(
         lengths,
         BaseAddress::ZERO,
         Ok(expected.iter().copied().map(payload).collect()),
+    );
+}
+
+#[rstest]
+#[case::zero([0; 8])]
+#[case::nonzero_prefix([7, 0, 0, 0, 0, 0, 0, 0])]
+#[case::nonzero_bytes([0xff; 8])]
+fn a_read_returns_an_object_before_an_implied_free_tail(
+    #[values(2, 4, 8)] lengths: usize,
+    #[case] tail: [u8; 8],
+) {
+    let object = [9u8; 4056];
+    let mut file = collection_file(lengths, Some(4096), &[(1, &object)], Patch::None);
+    file[COLLECTION + 4088..COLLECTION + 4096].copy_from_slice(&tail);
+    assert_every_reader_returns(
+        &file,
+        &references(&[(1, 4056)]),
+        lengths,
+        BaseAddress::ZERO,
+        Ok(vec![payload(&object)]),
     );
 }
 
@@ -244,16 +258,6 @@ fn a_read_returns_an_object_larger_than_a_two_byte_length(#[values(4, 8)] length
     FormatError::MisplacedGlobalHeapFreeSpace {
         address: 552,
         size: 4048,
-        collection_end: 4608,
-    }
-)]
-#[case::a_nonzero_index_in_a_short_tail(
-    &[(1, [9u8; 4056].as_slice())],
-    Patch::Index { at: 4088, value: 7 },
-    1,
-    FormatError::GlobalHeapObjectOutsideCollection {
-        address: 4600,
-        index: 7,
         collection_end: 4608,
     }
 )]
@@ -444,7 +448,6 @@ fn collection_file(
     };
     match patch {
         Patch::None => {}
-        Patch::Index { at, value } => bytes::set_u16_at(&mut collection, at, value),
         Patch::Length { at, value } => {
             bytes::set_uint_at(&mut collection, at, lengths, value);
         }
@@ -510,10 +513,9 @@ fn payload(data: &[u8]) -> VlByteObject {
     VlByteObject::Bytes(data.to_vec())
 }
 
-/// A change to the bytes of a collection: the object index or the length field at the offset
+/// A change to the bytes of a collection: the length field at the offset
 /// `at` from its start, set to `value`.
 enum Patch {
-    Index { at: usize, value: u16 },
     Length { at: usize, value: u64 },
     None,
 }
