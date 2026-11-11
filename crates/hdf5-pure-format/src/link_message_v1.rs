@@ -1,12 +1,15 @@
 //! Version 1 Link messages with raw names, target bytes, and retained field widths.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkPrefix, SOFT_LINK};
+use crate::link_message::{
+    EXTERNAL_LINK, HARD_LINK, LinkMessage, LinkPrefix, LinkTarget, SOFT_LINK,
+};
 use crate::link_storage::LinkStorageError;
 use crate::width::{self, OffsetWidth, UintWidth};
 
@@ -244,6 +247,81 @@ impl LinkMessageV1 {
         debug_assert_eq!(out.len(), len);
         Ok(out)
     }
+
+    pub(crate) fn into_parts(self) -> (LinkTargetV1, Option<u64>, Option<CharacterSet>, LinkName) {
+        let Self {
+            target,
+            creation_order,
+            charset,
+            name,
+        } = self;
+        (target, creation_order, charset, name)
+    }
+}
+
+impl TryFrom<LinkMessageV1> for LinkMessage {
+    type Error = LinkProjectionError;
+
+    /// Converts a checked message to a supported link with text names and paths.
+    ///
+    /// Replaces invalid UTF-8 in names and external paths with the replacement character.
+    /// Soft-link paths must be valid UTF-8. The character-set declaration is retained
+    /// independently of text conversion.
+    ///
+    /// The converter discards the stored name-length width and explicit default-field presence.
+    /// [`LinkMessage::serialize`] writes the smallest name-length width and omits default fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkProjectionError::UnsupportedKind`] for a user-defined link, or
+    /// [`LinkProjectionError::Format`] containing [`FormatError::InvalidSoftLinkEncoding`]
+    /// if the soft-link target is not UTF-8.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::__private::{LinkMessage, LinkMessageV1, OffsetWidth};
+    ///
+    /// let wire = LinkMessageV1::parse(b"\x01\x00\x01\xff\x34\x12", OffsetWidth::Two).unwrap();
+    /// let text = LinkMessage::try_from(wire).unwrap();
+    /// assert_eq!(text.name, "\u{fffd}");
+    /// ```
+    fn try_from(link: LinkMessageV1) -> Result<Self, Self::Error> {
+        let (target, creation_order, charset, name) = link.into_parts();
+        let link_target = match target {
+            LinkTargetV1::Hard {
+                object_header_address,
+                explicit_type: _,
+            } => LinkTarget::Hard {
+                object_header_address,
+            },
+            LinkTargetV1::Soft { target_path } => {
+                LinkTarget::soft(String::from_utf8(target_path).map_err(|error| {
+                    LinkProjectionError::Format(FormatError::InvalidSoftLinkEncoding {
+                        source: error.utf8_error(),
+                    })
+                })?)
+            }
+            LinkTargetV1::External {
+                filename,
+                object_path,
+            } => LinkTarget::external(into_lossy_string(filename), into_lossy_string(object_path)),
+            LinkTargetV1::UserDefined { kind, value: _ } => {
+                return Err(LinkProjectionError::UnsupportedKind(kind));
+            }
+        };
+        Ok(Self {
+            name: into_lossy_string(name.into_bytes()),
+            link_target,
+            creation_order,
+            charset: charset.unwrap_or(CharacterSet::Ascii),
+        })
+    }
+}
+
+fn into_lossy_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 /// A raw link-name component whose length fits its stored field width.
@@ -305,6 +383,10 @@ impl LinkName {
     /// Returns the name bytes without text conversion.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
@@ -511,6 +593,17 @@ impl UserLinkValue {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// An error converting a checked wire message to a supported link model.
+///
+/// The converter reports user-defined kinds separately from text-conversion errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkProjectionError {
+    /// Text conversion failed for a supported target.
+    Format(FormatError),
+    /// The checked message contains a user-defined link kind.
+    UnsupportedKind(UserLinkKind),
 }
 
 /// An error constructing, decoding, or encoding a version 1 Link message.

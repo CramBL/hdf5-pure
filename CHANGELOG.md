@@ -8,10 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `LinkMessageV1` in `hdf5-pure-format` decodes and encodes user-defined links, preserving raw bytes, selected name-length widths, and explicit optional fields.
+- `LinkMessageV1` in `hdf5-pure-format` decodes and encodes user-defined links, preserving raw bytes, selected name-length widths, and explicit optional fields. Conversions into supported models report user-defined kinds separately from text-conversion errors ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 
 ### Fixed
 
+- Fixed `OwnedLink` serialization discarding stored name-length widths and explicit default fields ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
 
 ## [0.48.0] - 2026-11-11

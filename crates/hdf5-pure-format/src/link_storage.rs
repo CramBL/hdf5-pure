@@ -12,11 +12,15 @@ use alloc::vec::Vec;
 
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes;
+use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 use crate::link_info::LinkInfoMessage;
-use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkPrefix, SOFT_LINK};
-use crate::width::{self, OffsetWidth, UintWidth};
+use crate::link_message::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
+use crate::link_message_v1::{
+    LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError,
+};
+use crate::width::{self, OffsetWidth};
 
 /// A group link set with distinct names and consistent creation-order and storage metadata.
 ///
@@ -135,7 +139,7 @@ impl GroupLinkStorage {
             return Err(LinkStorageError::CreationOrderPresence);
         }
         if links.iter().any(|existing| existing.name() == link.name()) {
-            return Err(LinkStorageError::DuplicateName(link.name));
+            return Err(LinkStorageError::DuplicateName(link.name.into_bytes()));
         }
         link.encoded_len(*offset_width)?;
         let mut next_policy = *creation_order;
@@ -346,11 +350,12 @@ impl LinkCreationCounter {
     }
 }
 
-/// An owned Link message with byte-preserving name and symbolic-target fields.
+/// An owned version 1 Link message with raw bytes and retained encoding choices.
 ///
-/// Character-set markers are retained independently of the name bytes. The name is checked as a
-/// link component, and targets are checked for syntax and encoded lengths without decoding their
-/// character data.
+/// The name-length width and explicit hard-kind and ASCII fields are retained when parsed or
+/// converted from [`LinkMessageV1`]. Character-set markers are retained independently of the name
+/// bytes. The name is checked as a link component, and targets are checked for syntax and encoded
+/// lengths without decoding their character data.
 /// Creation indexes are checked against a group's policy by [`GroupLinkStorage::new`].
 /// The fields are defined in "The Link Message" of the [format specification, version 4.0][spec].
 ///
@@ -359,14 +364,19 @@ impl LinkCreationCounter {
 pub struct OwnedLink {
     creation_order: Option<u64>,
     charset: CharacterSet,
-    name: Vec<u8>,
+    name: LinkName,
     target: OwnedLinkTarget,
+    explicit_type: bool,
+    explicit_charset: bool,
 }
 
 impl OwnedLink {
     /// Parses a version 1 Link message while preserving name and symbolic-target bytes.
     ///
     /// Supports hard, soft, and version 0 external links with zero external flags.
+    /// User-defined values are decoded completely before the kind is rejected. Convert a parsed
+    /// [`LinkMessageV1`] with [`Self::try_from`] to distinguish an unsupported kind from a
+    /// decoding error.
     ///
     /// # Errors
     ///
@@ -376,14 +386,12 @@ impl OwnedLink {
     /// and [`LinkStorageError::ExternalValue`] for incomplete external framing.
     /// Returns [`LinkStorageError::UndefinedAddress`] for an undefined hard target and the
     /// errors of [`Self::new`] for invalid names or targets. Returns
-    /// [`LinkStorageError::Format`] for malformed prefix fields, unsupported link types, or
-    /// truncated fields.
+    /// [`LinkStorageError::Format`] for malformed prefix fields or truncated fields, and
+    /// [`FormatError::InvalidLinkType`] wrapped in [`LinkStorageError::Format`] for reserved
+    /// or user-defined kinds.
     pub fn parse(data: &[u8], offset_width: OffsetWidth) -> Result<Self, LinkStorageError> {
-        let (link, len) = Self::parse_padded(data, offset_width)?;
-        if len != data.len() {
-            return Err(LinkStorageError::TrailingBytes);
-        }
-        Ok(link)
+        Self::try_from(LinkMessageV1::parse(data, offset_width).map_err(LinkStorageError::from)?)
+            .map_err(LinkStorageError::from)
     }
 
     /// Parses the version 1 Link message at the start of `data` and returns it with its length.
@@ -399,66 +407,14 @@ impl OwnedLink {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<(Self, usize), LinkStorageError> {
-        let prefix = LinkPrefix::parse(data)?;
-        let flags = data
-            .get(1)
-            .copied()
-            .ok_or(LinkStorageError::TrailingBytes)?;
-        if flags & LINK_RESERVED_FLAGS != 0 {
-            return Err(LinkStorageError::Flags(flags));
-        }
-        let mut fields = bytes::Fields::new(data, prefix.target_pos);
-        let (target, end) = match prefix.link_type_code {
-            HARD_LINK => match fields.decoded_address(offset_width)? {
-                DecodedStoredAddress::Defined(object_header_address) => (
-                    OwnedLinkTarget::Hard {
-                        object_header_address,
-                    },
-                    fields.pos(),
-                ),
-                DecodedStoredAddress::Undefined => return Err(LinkStorageError::UndefinedAddress),
-            },
-            SOFT_LINK | EXTERNAL_LINK => {
-                let length = usize::from(fields.u16()?);
-                let pos = fields.pos();
-                bytes::ensure_len(data, pos, length)?;
-                let value = data
-                    .get(pos..)
-                    .and_then(|bytes| bytes.get(..length))
-                    .ok_or(LinkStorageError::TrailingBytes)?;
-                let target = if prefix.link_type_code == SOFT_LINK {
-                    OwnedLinkTarget::soft(value.to_vec())
-                } else {
-                    let (&version_flags, strings) =
-                        value.split_first().ok_or(LinkStorageError::ExternalValue)?;
-                    if version_flags != EXTERNAL_VERSION_FLAGS {
-                        return Err(LinkStorageError::ExternalVersionFlags(version_flags));
-                    }
-                    let separator = strings
-                        .iter()
-                        .position(|&byte| byte == 0)
-                        .ok_or(LinkStorageError::ExternalValue)?;
-                    let (filename, rest) = strings.split_at(separator);
-                    let object_path = rest
-                        .get(1..)
-                        .and_then(|rest| rest.strip_suffix(&[0]))
-                        .ok_or(LinkStorageError::ExternalValue)?;
-                    OwnedLinkTarget::external(filename.to_vec(), object_path.to_vec())
-                };
-                (target, pos + length)
-            }
-            other => return Err(FormatError::InvalidLinkType(other).into()),
-        };
-        let link = Self::new(
-            prefix.name.to_vec(),
-            prefix.charset,
-            target,
-            prefix.creation_order,
-        )?;
-        Ok((link, end))
+        let (link, len) =
+            LinkMessageV1::parse_prefix(data, offset_width).map_err(LinkStorageError::from)?;
+        Ok((Self::try_from(link).map_err(LinkStorageError::from)?, len))
     }
 
     /// Creates an owned link from encoded name and target bytes and an optional creation index.
+    ///
+    /// Selects the smallest name-length width. The writer omits the hard-kind and ASCII fields.
     ///
     /// # Errors
     ///
@@ -474,15 +430,17 @@ impl OwnedLink {
         target: OwnedLinkTarget,
         creation_order: Option<u64>,
     ) -> Result<Self, LinkStorageError> {
-        if name.is_empty() || name == b"." || name.contains(&0) || name.contains(&b'/') {
-            return Err(LinkStorageError::InvalidName(name));
-        }
+        let name = LinkName::new(name).map_err(LinkStorageError::from)?;
         target.encoded_len(OffsetWidth::Eight)?;
+        let explicit_type = !matches!(target, OwnedLinkTarget::Hard { .. });
+        let explicit_charset = charset != CharacterSet::Ascii;
         Ok(Self {
             creation_order,
             charset,
             name,
             target,
+            explicit_type,
+            explicit_charset,
         })
     }
 
@@ -523,7 +481,7 @@ impl OwnedLink {
 
     /// Returns the name bytes without character decoding.
     pub fn name(&self) -> &[u8] {
-        &self.name
+        self.name.as_bytes()
     }
 
     /// Returns the hard address or symbolic-target bytes.
@@ -533,6 +491,8 @@ impl OwnedLink {
 
     /// Returns the complete serialized Link message length at `offset_width`.
     ///
+    /// Includes the retained name-length width and optional fields.
+    ///
     /// # Errors
     ///
     /// Returns [`LinkStorageError::UndefinedAddress`] for an undefined hard target,
@@ -541,27 +501,29 @@ impl OwnedLink {
     pub fn encoded_len(&self, offset_width: OffsetWidth) -> Result<usize, LinkStorageError> {
         let Self {
             creation_order,
-            charset,
+            charset: _,
             name,
             target,
+            explicit_type,
+            explicit_charset,
         } = self;
-        let name_width = UintWidth::smallest_for_len(name.len());
+        let name_width = name.width();
         let prefix = LINK_PREFIX_LEN
             + usize::from(name_width.get())
             + usize::from(creation_order.is_some()) * CREATION_ORDER_LEN
-            + usize::from(charset != &CharacterSet::Ascii)
-            + usize::from(!matches!(target, OwnedLinkTarget::Hard { .. }));
+            + usize::from(*explicit_charset)
+            + usize::from(*explicit_type);
         let target_length = target.encoded_len(offset_width)?;
         prefix
-            .checked_add(name.len())
+            .checked_add(name.as_bytes().len())
             .and_then(|len| len.checked_add(target_length))
             .ok_or(LinkStorageError::LengthOverflow)
     }
 
-    /// Encodes a Link message using the smallest field that can encode its name length.
+    /// Encodes a Link message with its retained name-length width and optional fields.
     ///
-    /// Preserves name bytes, target bytes, character-set marker, and creation index. The writer
-    /// emits the type field for symbolic links and the character-set field for names marked UTF-8.
+    /// Preserves name bytes, target bytes, character-set declaration, and creation index.
+    /// The returned bytes exclude object-header padding.
     ///
     /// # Errors
     ///
@@ -574,37 +536,42 @@ impl OwnedLink {
             charset,
             name,
             target,
+            explicit_type,
+            explicit_charset,
         } = self;
         let mut out = Vec::with_capacity(length);
-        let name_width = UintWidth::smallest_for_len(name.len());
+        let name_width = name.width();
         let mut flags = name_width.flag_bits();
         if creation_order.is_some() {
             flags |= CREATION_ORDER_PRESENT;
         }
-        if charset != &CharacterSet::Ascii {
+        if *explicit_charset {
             flags |= CHARSET_PRESENT;
         }
-        if !matches!(target, OwnedLinkTarget::Hard { .. }) {
+        if *explicit_type {
             flags |= LINK_TYPE_PRESENT;
         }
         out.extend_from_slice(&[LINK_VERSION, flags]);
-        if let OwnedLinkTarget::Indirect(target) = target {
-            out.push(match target.as_ref() {
-                OwnedSymbolicLinkTarget::Soft { .. } => SOFT_LINK,
-                OwnedSymbolicLinkTarget::External { .. } => EXTERNAL_LINK,
+        if *explicit_type {
+            out.push(match target {
+                OwnedLinkTarget::Hard { .. } => HARD_LINK,
+                OwnedLinkTarget::Indirect(target) => match target.as_ref() {
+                    OwnedSymbolicLinkTarget::Soft { .. } => SOFT_LINK,
+                    OwnedSymbolicLinkTarget::External { .. } => EXTERNAL_LINK,
+                },
             });
         }
         if let Some(index) = creation_order {
             out.extend_from_slice(&index.to_le_bytes());
         }
-        if charset != &CharacterSet::Ascii {
+        if *explicit_charset {
             out.push(match charset {
                 CharacterSet::Ascii => ASCII_CHARSET,
                 CharacterSet::Utf8 => UTF8_CHARSET,
             });
         }
-        name_width.write(&mut out, name.len());
-        out.extend_from_slice(name);
+        name_width.write(&mut out, name.as_bytes().len());
+        out.extend_from_slice(name.as_bytes());
         match target {
             OwnedLinkTarget::Hard {
                 object_header_address,
@@ -642,6 +609,70 @@ impl OwnedLink {
         }
         debug_assert_eq!(out.len(), length);
         Ok(out)
+    }
+}
+
+impl TryFrom<LinkMessageV1> for OwnedLink {
+    type Error = LinkProjectionError;
+
+    /// Converts a checked message while retaining its raw bytes and encoding choices.
+    ///
+    /// Preserves the name-length width, optional-field presence, declared character set, and
+    /// creation index. Name and target bytes are not decoded as text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkProjectionError::UnsupportedKind`] for a user-defined link.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::__private::{
+    ///     LinkMessageV1, LinkProjectionError, OffsetWidth, OwnedLink, UserLinkKind,
+    /// };
+    ///
+    /// let bytes = b"\x01\x01\x01\x00x\x34\x12";
+    /// let wire = LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap();
+    /// let owned = OwnedLink::try_from(wire).unwrap();
+    /// assert_eq!(owned.serialize(OffsetWidth::Two).unwrap(), bytes);
+    ///
+    /// let wire = LinkMessageV1::parse(b"\x01\x08\xff\x01u\x00\x00", OffsetWidth::Two).unwrap();
+    /// assert_eq!(
+    ///     OwnedLink::try_from(wire).unwrap_err(),
+    ///     LinkProjectionError::UnsupportedKind(UserLinkKind::new(255).unwrap()),
+    /// );
+    /// ```
+    fn try_from(link: LinkMessageV1) -> Result<Self, Self::Error> {
+        let (target, creation_order, charset, name) = link.into_parts();
+        let explicit_type = match &target {
+            LinkTargetV1::Hard { explicit_type, .. } => *explicit_type,
+            _ => true,
+        };
+        let target = match target {
+            LinkTargetV1::Hard {
+                object_header_address,
+                explicit_type: _,
+            } => OwnedLinkTarget::Hard {
+                object_header_address,
+            },
+            LinkTargetV1::Soft { target_path } => OwnedLinkTarget::soft(target_path),
+            LinkTargetV1::External {
+                filename,
+                object_path,
+            } => OwnedLinkTarget::external(filename, object_path),
+            LinkTargetV1::UserDefined { kind, value: _ } => {
+                return Err(LinkProjectionError::UnsupportedKind(kind));
+            }
+        };
+        let explicit_charset = charset.is_some();
+        Ok(Self {
+            creation_order,
+            charset: charset.unwrap_or(CharacterSet::Ascii),
+            name,
+            target,
+            explicit_type,
+            explicit_charset,
+        })
     }
 }
 
@@ -881,6 +912,31 @@ impl From<FormatError> for LinkStorageError {
     }
 }
 
+impl From<LinkWireError> for LinkStorageError {
+    fn from(error: LinkWireError) -> Self {
+        match error {
+            LinkWireError::NameWidth { length, width } => {
+                Self::Format(FormatError::LengthTooLarge {
+                    length: length.to_u64(),
+                    length_size: width.get(),
+                })
+            }
+            LinkWireError::Storage(error) => error,
+        }
+    }
+}
+
+impl From<LinkProjectionError> for LinkStorageError {
+    fn from(error: LinkProjectionError) -> Self {
+        match error {
+            LinkProjectionError::Format(error) => Self::Format(error),
+            LinkProjectionError::UnsupportedKind(kind) => {
+                Self::Format(FormatError::InvalidLinkType(kind.get()))
+            }
+        }
+    }
+}
+
 /// Checks that a stored address is defined and fits its encoded width.
 ///
 /// # Errors
@@ -923,8 +979,6 @@ const CREATION_ORDER_PRESENT: u8 = 0x04;
 const LINK_TYPE_PRESENT: u8 = 0x08;
 /// Bit 4 of the Link flags, declaring the character set in the table cited by [`LINK_VERSION`].
 const CHARSET_PRESENT: u8 = 0x10;
-/// Bits 5 through 7, reserved in the Link flags table cited by [`LINK_VERSION`].
-const LINK_RESERVED_FLAGS: u8 = 0xe0;
 /// Bits 2 through 7, reserved in version 0 Link Info flags.
 ///
 /// Defined in "The Link Info Message" of the [format specification, version 4.0][spec].
@@ -1152,7 +1206,7 @@ mod tests {
     #[case::version(vec![2, 0, 1, b'a', 0, 0], LinkStorageError::Format(FormatError::InvalidLinkVersion(2)))]
     #[case::reserved_flags(vec![1, 0x20, 1, b'a', 0, 0], LinkStorageError::Flags(0x20))]
     #[case::charset(vec![1, CHARSET_PRESENT, 2, 1, b'a', 0, 0], LinkStorageError::Format(FormatError::InvalidCharacterSet(2)))]
-    #[case::user_type(vec![1, LINK_TYPE_PRESENT, 65, 1, b'a'], LinkStorageError::Format(FormatError::InvalidLinkType(65)))]
+    #[case::missing_user_value_length(vec![1, LINK_TYPE_PRESENT, 65, 1, b'a'], LinkStorageError::Format(FormatError::UnexpectedEof { expected: 7, available: 5 }))]
     #[case::undefined(vec![1, 0, 1, b'a', 0xff, 0xff], LinkStorageError::UndefinedAddress)]
     #[case::trailing(vec![1, 0, 1, b'a', 0, 0, 1], LinkStorageError::TrailingBytes)]
     #[case::external_version(vec![1, LINK_TYPE_PRESENT, EXTERNAL_LINK, 1, b'a', 5, 0, 0x10, b'f', 0, b'/', 0], LinkStorageError::ExternalVersionFlags(0x10))]
