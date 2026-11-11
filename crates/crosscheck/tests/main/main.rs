@@ -137,6 +137,7 @@ mod symbol_table_soft_links;
 #[cfg(feature = "__hdf5-1.10")]
 mod test_util;
 mod unallocated_datasets;
+mod user_defined_link_edit;
 mod userblock_base_address;
 mod vlen_chunked;
 mod vlen_metadata;

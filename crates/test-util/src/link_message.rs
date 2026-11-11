@@ -1,7 +1,11 @@
 //! Link message bodies: section
 //! `subsubsec_fmt4_dataobject_hdr_msg_link`, version 4.0.
 
+use crate::btree::v2 as btree;
 use crate::bytes;
+use crate::checksum;
+use crate::fractal_heap;
+use crate::image::Image;
 use crate::widths::Widths;
 
 /// The body of a Link message pointing at the object at `address`.
@@ -168,6 +172,51 @@ impl<'n> SymbolicLink<'n> {
     }
 }
 
+/// Builds a managed-heap image and version 0 Link Info body for one supplied Link message.
+///
+/// Uses eight-byte addresses and lengths. The caller passes `name` for the name-index hash and
+/// `body` as uninterpreted object bytes.
+/// The Link Info fields are defined in "The Link Info Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// # Panics
+///
+/// Panics if `body` exceeds the heap's 64-byte managed-object limit.
+///
+/// # Examples
+///
+/// ```
+/// use test_util::link_message::{self, HardLink};
+/// use test_util::widths::Widths;
+///
+/// let body = HardLink::new("u", 42).build(Widths::EIGHT);
+/// let (image, info) = link_message::dense_storage(b"u", &body);
+/// assert_eq!(&image[..4], b"FRHP");
+/// assert_eq!(info.len(), 18);
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
+pub fn dense_storage(name: &[u8], body: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let widths = Widths::EIGHT;
+    let heap = fractal_heap::Header::new(256).managed_object_count(1);
+    let mut image = Image::starting_with(&heap.build(widths));
+    let mut block = heap.direct_block(0, body, widths);
+    let object_offset = u16::try_from(block.len() - body.len()).unwrap();
+    block.resize(usize::try_from(heap.direct_block_size()).unwrap(), 0);
+    image.place(256, &block);
+    let mut record = checksum::lookup3(name).to_le_bytes().to_vec();
+    record.extend_from_slice(&heap.managed_id(object_offset, u8::try_from(body.len()).unwrap()));
+    image.place(
+        512,
+        &btree::Header::new(LINK_NAME_INDEX, LINK_NAME_RECORD_SIZE, 1024, 1).build(widths),
+    );
+    image.place(1024, &btree::leaf(LINK_NAME_INDEX, &[record]));
+    let mut info = vec![LINK_INFO_VERSION, 0];
+    bytes::push_address(&mut info, Some(0), widths.offset);
+    bytes::push_address(&mut info, Some(512), widths.offset);
+    (image.build(), info)
+}
+
 /// How a link's name is encoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CharacterSet(pub u8);
@@ -191,3 +240,13 @@ const EXTERNAL_LINK: u8 = 64;
 const EXTERNAL_LINK_VERSION_AND_FLAGS: u8 = 0;
 
 const VERSION: u8 = 1;
+
+// "Version 2 B-trees" in the format specification, version 4.0, defines type 5 for link-name
+// indexes.
+const LINK_NAME_INDEX: u8 = 5;
+// "Version 2 B-trees" in the format specification, version 4.0, defines a four-byte hash and
+// seven-byte heap ID in type 5 records.
+const LINK_NAME_RECORD_SIZE: u16 = 4 + 7;
+
+// "The Link Info Message" in the format specification, version 4.0, defines version 0.
+const LINK_INFO_VERSION: u8 = 0;
