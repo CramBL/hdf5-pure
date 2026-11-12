@@ -14,6 +14,7 @@ use hdf5_pure_core::{
     VariableLengthStringType, VariableLengthType,
 };
 
+use self::compound_layout::CompoundLayout;
 use super::{
     ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_VERSION_FIVE,
     DATATYPE_VERSION_FOUR, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
@@ -25,6 +26,7 @@ use crate::convert::Narrow;
 use crate::width::OffsetWidth;
 
 mod codec;
+mod compound_layout;
 
 /// A datatype message version from 1 through 5.
 ///
@@ -201,8 +203,8 @@ pub struct DatatypeMessage {
 impl DatatypeMessage {
     /// Constructs a description with compatible versions and class properties.
     ///
-    /// A compound must have at least one member, with unique names. Member ranges must fit
-    /// at the smallest supported offset width of two bytes.
+    /// A compound must have at least one member, with unique names. Member ranges must be
+    /// disjoint and fit at the smallest supported offset width of two bytes.
     /// Array dimensions and element sizes must fit their stored fields. Opaque tags may contain
     /// up to 248 bytes and must not contain NUL bytes.
     ///
@@ -221,7 +223,8 @@ impl DatatypeMessage {
     /// Returns [`FormatError::InvalidCompoundMemberCount`] for a compound without members,
     /// [`FormatError::DuplicateCompoundField`] for duplicate compound names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a compound member outside its
-    /// element. Returns [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base, and
+    /// element. Returns [`FormatError::CompoundFieldOverlap`] for overlapping compound members,
+    /// [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base, and
     /// [`FormatError::EnumMemberValueSize`] for a value whose width differs from its base type.
     /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field.
     /// Returns [`FormatError::InvalidComplexParent`] if a complex component is not floating
@@ -281,28 +284,22 @@ impl DatatypeMessage {
                 positive_size(class, *size)?;
                 compound_member_count(members.len())?;
                 let mut names = BTreeSet::new();
-                for DatatypeMessageMember {
-                    name,
-                    byte_offset,
-                    datatype,
-                } in members
+                let mut layout = CompoundLayout::new(*size);
+                for (
+                    index,
+                    DatatypeMessageMember {
+                        name,
+                        byte_offset: _,
+                        datatype,
+                    },
+                ) in members.iter().enumerate()
                 {
                     if !names.insert(name.as_str()) {
                         return Err(FormatError::DuplicateCompoundField(name.clone()));
                     }
                     compatible_child(version, class, datatype)?;
                     let field_size = datatype.stored_size(OffsetWidth::Two)?;
-                    if byte_offset
-                        .checked_add(u64::from(field_size))
-                        .is_none_or(|end| end > u64::from(*size))
-                    {
-                        return Err(FormatError::CompoundFieldOutOfBounds {
-                            name: name.clone(),
-                            offset: *byte_offset,
-                            field_size,
-                            compound_size: *size,
-                        });
-                    }
+                    layout.insert(members, index, field_size)?;
                 }
             }
             DatatypeProperties::Enumeration { base_type, members } => {
