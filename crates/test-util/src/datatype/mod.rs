@@ -2,6 +2,7 @@
 //! `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
 
 pub mod containers;
+pub mod float_context;
 pub mod leaf;
 
 /// The eight bytes every datatype message begins with: its class and version

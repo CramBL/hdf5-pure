@@ -5,6 +5,13 @@ use std::ffi::CString;
 use hdf5::Datatype as NativeDatatype;
 use hdf5::file::LibraryVersion;
 use hdf5::globals;
+use hdf5::types::CompoundField;
+use hdf5::types::CompoundType;
+use hdf5::types::FloatSize;
+use hdf5::types::TypeDescriptor;
+use hdf5_pure::File;
+use hdf5_pure_core::__private;
+use hdf5_pure_core::Datatype;
 use hdf5_pure_core::{
     BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType,
     MantissaNormalization, StringPadding, TimeType,
@@ -76,6 +83,10 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     assert_eq!(message.properties(), &leaf.properties());
     let canonical = message.serialize(OffsetWidth::Eight).unwrap();
     let semantic = message.to_datatype().unwrap();
+    assert_eq!(
+        format::parse_datatype(body).unwrap(),
+        (semantic.clone(), consumed)
+    );
     let semantic_encoded = format::serialize_datatype(&semantic).unwrap();
     let mut expected = canonical.clone();
     let canonical_version = if matches!(leaf, Leaf::Vax) {
@@ -126,6 +137,89 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
             .windows(consumed)
             .any(|window| window == &body[..consumed])
     );
+}
+
+#[rstest]
+#[case::compound(false, Version::One)]
+#[case::array(true, Version::Two)]
+fn ordinary_float_parser_reads_native_legacy_containers(
+    #[case] array: bool,
+    #[case] version: Version,
+) {
+    let _guard = lock::libhdf5_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy.h5");
+    let parent = TypeDescriptor::Float(FloatSize::U8);
+    let descriptor = if array {
+        TypeDescriptor::FixedArray(Box::new(parent), 1)
+    } else {
+        TypeDescriptor::Compound(CompoundType {
+            fields: vec![CompoundField::new("x", parent, 0, 0)],
+            size: 8,
+        })
+    };
+    let datatype = NativeDatatype::from_descriptor(&descriptor).unwrap();
+    let file = hdf5::File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18)
+        })
+        .create(&path)
+        .unwrap();
+    let dataset = file
+        .new_dataset_builder()
+        .empty_as(&datatype)
+        .shape(0)
+        .create("values")
+        .unwrap();
+    drop(dataset);
+    drop(datatype);
+    file.close().unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let datatype = dataset.dtype().unwrap();
+    let encoded = encode(&datatype);
+    drop(datatype);
+    drop(dataset);
+    file.close().unwrap();
+    let body = &encoded[NATIVE_PREFIX_LEN..];
+    assert_eq!(
+        body[0],
+        datatype::header(
+            if array { Class::ARRAY } else { Class::COMPOUND },
+            version.get(),
+            [0; 3],
+            0,
+        )[0]
+    );
+    let parent = Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
+        if cfg!(target_endian = "big") {
+            DatatypeByteOrder::BigEndian
+        } else {
+            DatatypeByteOrder::LittleEndian
+        },
+    ));
+    let expected = if array {
+        Datatype::Array {
+            base_type: Box::new(parent),
+            dimensions: vec![1],
+        }
+    } else {
+        Datatype::Compound {
+            size: 8,
+            members: vec![__private::compound_member("x".into(), 0, parent)],
+        }
+    };
+    let (actual, consumed) = format::parse_datatype(body).unwrap();
+    assert_eq!(actual, expected);
+    let image = std::fs::read(&path).unwrap();
+    assert!(
+        image
+            .windows(consumed)
+            .any(|window| window == &body[..consumed])
+    );
+    let pure = File::from_bytes(image).unwrap();
+    let dataset = pure.dataset("values").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), expected);
 }
 
 #[derive(Clone, Copy, Debug)]

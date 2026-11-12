@@ -68,6 +68,10 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         .unwrap()
         .data;
     let (message, consumed) = DatatypeMessage::parse(bytes).unwrap();
+    assert_eq!(
+        format::parse_datatype(bytes).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
     assert_eq!(message.to_datatype().unwrap(), shape.semantic(big_endian));
     assert_eq!(
         message.serialize(superblock.offset_size).unwrap(),

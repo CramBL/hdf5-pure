@@ -114,6 +114,10 @@ fn assert_native(
         .data;
     let (message, consumed) = DatatypeMessage::parse(bytes).unwrap();
     assert_eq!(
+        format::parse_datatype(bytes).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
+    assert_eq!(
         message.to_datatype().unwrap(),
         shape.semantic(width, placement, big_endian)
     );

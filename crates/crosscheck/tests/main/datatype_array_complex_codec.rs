@@ -135,6 +135,10 @@ fn assert_native(
         .unwrap()
         .data;
     let (message, consumed) = DatatypeMessage::parse(bytes).unwrap();
+    assert_eq!(
+        format::parse_datatype(bytes).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
     assert_eq!(message.to_datatype().unwrap(), semantic);
     assert_eq!(message.serialize(width).unwrap(), bytes[..consumed]);
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);

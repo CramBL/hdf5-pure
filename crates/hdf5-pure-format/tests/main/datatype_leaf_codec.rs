@@ -2,6 +2,7 @@ use hdf5_pure_core::{
     BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType, FormatError,
     MantissaNormalization, StringPadding, TimeType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -297,6 +298,10 @@ fn assert_leaf_bytes(expected: Vec<u8>, properties: DatatypeProperties, offsets:
     assert_eq!(parsed, message);
     assert_eq!(parsed.properties(), &properties);
     assert_eq!(parsed.serialize(offsets).unwrap(), expected);
+    assert_eq!(
+        format::parse_datatype(&input).unwrap(),
+        (message.to_datatype().unwrap(), expected.len())
+    );
 }
 
 fn properties(leaf: &Leaf) -> DatatypeProperties {
