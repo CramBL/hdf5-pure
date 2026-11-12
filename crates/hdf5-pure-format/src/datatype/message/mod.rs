@@ -1,6 +1,7 @@
 //! Datatype descriptions with checked message versions and recursive properties.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -205,7 +206,9 @@ impl DatatypeMessage {
     ///
     /// A compound must have at least one member, with unique names. Member ranges must be
     /// disjoint and fit at the smallest supported offset width of two bytes.
-    /// Array dimensions and element sizes must fit their stored fields. Opaque tags may contain
+    /// An enumeration must have at least one member, with nonempty, NUL-free, unique names
+    /// and distinct raw values of the integer parent's width. Array dimensions and element
+    /// sizes must fit their stored fields. Opaque tags may contain
     /// up to 248 bytes and must not contain NUL bytes.
     ///
     /// # Errors
@@ -226,6 +229,10 @@ impl DatatypeMessage {
     /// element. Returns [`FormatError::CompoundFieldOverlap`] for overlapping compound members,
     /// [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base, and
     /// [`FormatError::EnumMemberValueSize`] for a value whose width differs from its base type.
+    /// Returns [`FormatError::InvalidEnumerationMemberCount`] for an enumeration without members,
+    /// [`FormatError::EmptyEnumMemberName`] for an empty name,
+    /// [`FormatError::DuplicateEnumMemberName`] for duplicate names, and
+    /// [`FormatError::DuplicateEnumMemberValue`] for duplicate raw values.
     /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field.
     /// Returns [`FormatError::InvalidComplexParent`] if a complex component is not floating
     /// point, and [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`].
@@ -307,16 +314,31 @@ impl DatatypeMessage {
                 if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
                     return Err(FormatError::EnumBaseNotInteger);
                 }
-                member_count(members.len())?;
+                enumeration_member_count(members.len())?;
                 let size = base_type.stored_size(OffsetWidth::Two)?;
-                for member in members {
-                    member_name(class, &member.name)?;
-                    if u64::try_from(member.value.len()).ok() != Some(u64::from(size)) {
+                let mut names = BTreeSet::new();
+                let mut values = BTreeMap::new();
+                for (index, member) in members.iter().enumerate() {
+                    let (name, value) = __private::enum_member_parts(member);
+                    if name.is_empty() {
+                        return Err(FormatError::EmptyEnumMemberName { index });
+                    }
+                    member_name(class, name)?;
+                    if value.len().to_u64() != u64::from(size) {
                         return Err(FormatError::EnumMemberValueSize(
-                            member.name.clone(),
+                            name.into(),
                             size,
-                            member.value.len(),
+                            value.len(),
                         ));
+                    }
+                    if !names.insert(name) {
+                        return Err(FormatError::DuplicateEnumMemberName(name.into()));
+                    }
+                    if let Some(first) = values.insert(value, name) {
+                        return Err(FormatError::DuplicateEnumMemberValue {
+                            first: first.into(),
+                            second: name.into(),
+                        });
                     }
                 }
             }
@@ -662,6 +684,23 @@ fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatError> {
 /// [`FormatError::ValueTooLargeForRepresentation`] if it exceeds [`u16::MAX`].
 fn compound_member_count(count: usize) -> Result<NonZeroU16, FormatError> {
     NonZeroU16::new(member_count(count)?).ok_or(FormatError::InvalidCompoundMemberCount { count })
+}
+
+/// Converts an enumeration member count to a positive two-byte count.
+///
+/// The count field is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec]. `H5T_is_sensible` in `H5T.c`, HDF5 2.2.0, returns false for an
+/// enumeration without members.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidEnumerationMemberCount`] if `count` is zero, and
+/// [`FormatError::ValueTooLargeForRepresentation`] if it exceeds [`u16::MAX`].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+fn enumeration_member_count(count: usize) -> Result<NonZeroU16, FormatError> {
+    NonZeroU16::new(member_count(count)?)
+        .ok_or(FormatError::InvalidEnumerationMemberCount { count })
 }
 
 /// Converts a member count to the two-byte class field.

@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::str;
 
+use hdf5_pure_core::__private;
 use hdf5_pure_core::{
     BitFieldType, CharacterSet, ComplexType, DatatypeByteOrder, FixedPointType, FloatingPointType,
     FormatError, MantissaNormalization, StringPadding, TimeType,
@@ -16,6 +17,7 @@ use super::{
     FloatingPointByteOrder,
 };
 use crate::bytes::Fields;
+use crate::convert::Narrow;
 use crate::datatype::{
     self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
     COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
@@ -33,18 +35,22 @@ impl DatatypeMessage {
     /// Parses a datatype message and returns the number of bytes consumed.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
-    /// descriptions at versions 1 through 5, compounds and arrays at versions 3 through 5,
-    /// and homogeneous rectangular complex descriptions at version 5. Each nested description
-    /// retains its own version, at most the containing description's version. Complex parents
-    /// are floating-point descriptions. VAX order requires version 3 or later. Floating-point
-    /// order and reserved bits are checked through [`FloatingPointByteOrder::parse`].
+    /// descriptions at versions 1 through 5, compounds, enumerations, and arrays at versions
+    /// 3 through 5, and homogeneous rectangular complex descriptions at version 5. Each nested
+    /// description retains its own version, at most the containing description's version.
+    /// Complex parents are floating-point descriptions. VAX order requires version 3 or later.
+    /// Floating-point order and reserved bits are checked through
+    /// [`FloatingPointByteOrder::parse`].
     ///
     /// Variable-length descriptor sizes must be 10, 12, or 16 bytes, corresponding to heap
     /// address widths of 2, 4, or 8 bytes. The parser checks array element sizes against the
     /// recorded parent size and dimensions, and complex sizes against twice the component size.
     /// Compound member bounds and overlaps are checked using their declared source sizes.
     /// A compound must have at least one member, with unique UTF-8 names.
-    /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
+    /// Enumerations have a fixed-point parent and at least one member, with nonempty, unique
+    /// UTF-8 names and distinct raw values of the parent's width. The enumeration and parent
+    /// sizes must match. The nesting limit is 64 descriptions on one parent chain, including
+    /// the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
     /// The writer uses terminated tags, as described in [`serialize`](Self::serialize).
@@ -57,9 +63,9 @@ impl DatatypeMessage {
     /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`, and
     /// [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
-    /// if reserved atomic, compound, or array class bits are set. Returns
-    /// [`FormatError::InvalidDatatypeVersion`] for compound or array versions 1 or 2, complex
-    /// versions 1 through 4, or a complex parent version outside `1..=5`.
+    /// if reserved atomic, compound, enumeration, or array class bits are set. Returns
+    /// [`FormatError::InvalidDatatypeVersion`] for compound, enumeration, or array versions 1 or 2,
+    /// complex versions 1 through 4, or a complex parent version outside `1..=5`.
     ///
     /// Returns [`FormatError::InvalidVariableLengthSize`] for an unsupported descriptor size,
     /// [`FormatError::DatatypeChildVersion`] if a parent has a higher version than its container,
@@ -73,6 +79,14 @@ impl DatatypeMessage {
     /// Returns [`FormatError::CompoundFieldOverlap`] for overlapping member ranges.
     /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] if a member name is not
     /// UTF-8, retaining the name's byte offset and the original [`str::Utf8Error`].
+    ///
+    /// Returns [`FormatError::EnumBaseNotInteger`] for a non-fixed-point enumeration parent,
+    /// and [`FormatError::EnumBaseSizeMismatch`] if its size differs from the enumeration size.
+    /// Returns [`FormatError::InvalidEnumerationMemberCount`] for an enumeration without members,
+    /// [`FormatError::EmptyEnumMemberName`] for an empty name,
+    /// [`FormatError::DuplicateEnumMemberName`] for duplicate names, and
+    /// [`FormatError::DuplicateEnumMemberValue`] for duplicate raw values.
+    /// Propagates checked range and platform-conversion errors when reading values.
     ///
     /// Returns [`FormatError::InvalidComplexFlags`] for reserved complex class bits,
     /// [`FormatError::UnsupportedComplexForm`] for heterogeneous or non-rectangular descriptions,
@@ -256,6 +270,47 @@ impl DatatypeMessage {
                     fields.pos(),
                 )
             }
+            ENUMERATION_CLASS => {
+                let count = header.modern_member_count()?;
+                let Parsed {
+                    message: base_type,
+                    end,
+                    size: base_size,
+                } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
+                if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
+                    return Err(FormatError::EnumBaseNotInteger);
+                }
+                if header.size != base_size {
+                    return Err(FormatError::EnumBaseSizeMismatch {
+                        size: header.size,
+                        base_size,
+                    });
+                }
+                fields = Fields::new(data, end);
+                let mut names = Vec::new();
+                for _ in 0..count {
+                    let (name, end) = member_name(data, ENUMERATION_CLASS, fields.pos())?;
+                    names.push(name);
+                    fields = Fields::new(data, end);
+                }
+                let value_size = base_size.to_usize()?;
+                let members = names
+                    .into_iter()
+                    .map(|name| {
+                        Ok(__private::enum_member(
+                            name,
+                            fields.slice(value_size)?.to_vec(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, FormatError>>()?;
+                (
+                    DatatypeProperties::Enumeration {
+                        base_type: Box::new(base_type),
+                        members,
+                    },
+                    fields.pos(),
+                )
+            }
             VARIABLE_LENGTH_CLASS => {
                 let metadata = datatype::parse_variable_length_metadata(header.flags)?;
                 descriptor_width(header.size)?;
@@ -360,7 +415,9 @@ impl DatatypeMessage {
     /// Serializes the classes accepted by [`parse`](Self::parse). The writer derives each
     /// variable-length descriptor size from `offset_width`, including nested descriptions.
     /// Array sizes are derived from the encoded parent size and dimensions at that width.
-    /// Atomic element sizes are independent of it.
+    /// Atomic element sizes are independent of it. Enumeration sizes are derived from the
+    /// encoded integer parent. The writer appends unpadded, NUL-terminated names, followed
+    /// by the raw values in the same member order. Values retain their stored bytes.
     /// Compound sizes and member offsets are retained. The writer checks member bounds and
     /// overlaps using their encoded sizes at that width and writes each UTF-8 name with a NUL
     /// terminator.
@@ -486,6 +543,38 @@ impl DatatypeMessage {
     /// assert_eq!(consumed, bytes.len());
     /// # Ok::<(), FormatError>(())
     /// ```
+    ///
+    /// Enumeration parents retain their versions, and all names precede the values:
+    ///
+    /// ```
+    /// use hdf5_pure_core::{__private, FixedPointType, FormatError};
+    /// use hdf5_pure_format::__private::{
+    ///     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    /// };
+    ///
+    /// let integer = DatatypeMessage::new(
+    ///     DatatypeVersion::Two,
+    ///     DatatypeProperties::FixedPoint(FixedPointType::u8()),
+    /// )?;
+    /// let enumeration = DatatypeMessage::new(
+    ///     DatatypeVersion::Five,
+    ///     DatatypeProperties::Enumeration {
+    ///         base_type: Box::new(integer),
+    ///         members: vec![
+    ///             __private::enum_member("low".into(), vec![1]),
+    ///             __private::enum_member("high".into(), vec![2]),
+    ///         ],
+    ///     },
+    /// )?;
+    /// let bytes = enumeration.serialize(OffsetWidth::Eight)?;
+    /// assert_eq!(&bytes[..8], &[0x58, 2, 0, 0, 1, 0, 0, 0]);
+    /// assert_eq!(bytes[8], 0x20);
+    /// assert_eq!(&bytes[20..], b"low\0high\0\x01\x02");
+    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// assert_eq!(parsed, enumeration);
+    /// assert_eq!(consumed, bytes.len());
+    /// # Ok::<(), FormatError>(())
+    /// ```
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         let mut output = Vec::new();
         self.encode_into(&mut output, offset_width, 0)?;
@@ -510,7 +599,7 @@ impl DatatypeMessage {
         let flags = self.class_flags()?;
         let start = output.len();
         let size = match self.properties {
-            DatatypeProperties::Array { .. } => 0,
+            DatatypeProperties::Enumeration { .. } | DatatypeProperties::Array { .. } => 0,
             _ => self.stored_size(offset_width)?,
         };
         let mut header = datatype::append_header(
@@ -575,8 +664,17 @@ impl DatatypeMessage {
                     layout.insert(members, index, field_size)?;
                 }
             }
-            DatatypeProperties::Enumeration { .. } => {
-                return Err(FormatError::InvalidDatatypeClass(ENUMERATION_CLASS));
+            DatatypeProperties::Enumeration { base_type, members } => {
+                header.type_size = base_type.encode_into(output, offset_width, depth + 1)?;
+                for member in members {
+                    let (name, _) = __private::enum_member_parts(member);
+                    output.extend_from_slice(name.as_bytes());
+                    output.push(0);
+                }
+                for member in members {
+                    let (_, value) = __private::enum_member_parts(member);
+                    output.extend_from_slice(value);
+                }
             }
             DatatypeProperties::VariableLengthSequence { base_type }
             | DatatypeProperties::VariableLengthString { base_type, .. } => {
@@ -664,9 +762,7 @@ impl DatatypeMessage {
                 [OpaqueTagWire::encode(tag)?.encoded_len, 0, 0]
             }
             DatatypeProperties::Compound { members, .. } => member_flags(members.len())?,
-            DatatypeProperties::Enumeration { .. } => {
-                return Err(FormatError::InvalidDatatypeClass(ENUMERATION_CLASS));
-            }
+            DatatypeProperties::Enumeration { members, .. } => member_flags(members.len())?,
             DatatypeProperties::VariableLengthSequence { .. } => [VARIABLE_LENGTH_SEQUENCE, 0, 0],
             DatatypeProperties::VariableLengthString {
                 padding, charset, ..

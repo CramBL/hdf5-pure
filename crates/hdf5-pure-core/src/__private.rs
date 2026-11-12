@@ -102,6 +102,23 @@ pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
     EnumMember { name, value }
 }
 
+/// Borrows an enumeration member's name and stored value bytes without copying.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::__private;
+///
+/// let member = __private::enum_member("active".into(), vec![1, 0]);
+/// let (name, value) = __private::enum_member_parts(&member);
+/// assert_eq!(name, "active");
+/// assert_eq!(value, &[1, 0]);
+/// ```
+pub fn enum_member_parts(member: &EnumMember) -> (&str, &[u8]) {
+    let EnumMember { name, value } = member;
+    (name, value)
+}
+
 /// The fields of a [`Superblock`], for the other workspace crates to build one.
 ///
 /// Each field holds the value of the [`Superblock`] field of the same name.
