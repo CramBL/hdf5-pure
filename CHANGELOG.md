@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::datatype` interpreting reserved floating-point byte-order bits as VAX, including in nested descriptions ([#1231](https://github.com/CramBL/hdf5-pure/pull/1231)).
 - Fixed `Group::attrs` silently omitting attributes when decoding a supported value fails. Attribute reads report the name and original error ([#1225](https://github.com/CramBL/hdf5-pure/pull/1225)).
 - Fixed `Dataset::read_string` rejecting global-heap collections with nonzero bytes in terminal free space without an object header ([#1224](https://github.com/CramBL/hdf5-pure/pull/1224)).
 - Fixed `File::commit` reporting a format error for edits of groups with well-formed user-defined links ([#1216](https://github.com/CramBL/hdf5-pure/pull/1216)).

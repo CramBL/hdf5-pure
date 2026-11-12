@@ -26,6 +26,8 @@ use hdf5_pure_core::VariableLengthStringType;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
+use self::message::DatatypeVersion;
+use self::message::FloatingPointByteOrder;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -135,6 +137,11 @@ pub fn stored_element_size_usize(
 /// by tag bytes. `H5O__dtype_encode_helper` writes that form for tags whose logical length is a
 /// multiple of eight (H5Odtype.c, HDF5 2.2.0).
 ///
+/// Parses floating-point message versions and byte-order bits together through
+/// [`FloatingPointByteOrder::parse`], including nested descriptions in legacy containers.
+/// Accepts little- and big-endian order at versions 1 through 5 and VAX order at versions
+/// 3 through 5, subject to the numeric layout checks.
+///
 /// # Errors
 ///
 /// Returns [`FormatError::UnexpectedEof`] if the body ends within a field,
@@ -150,6 +157,12 @@ pub fn stored_element_size_usize(
 /// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
 /// outside that range, [`FormatError::OverlappingFloatingPointFields`] if fields overlap, or
 /// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
+///
+/// For a floating-point description outside a complex parent, returns
+/// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`,
+/// [`FormatError::InvalidByteOrder`] for masked order bits `0x40`,
+/// [`FormatError::InvalidDatatypeVersion`] for VAX order in versions 1 or 2, or
+/// [`FormatError::InvalidDatatypeFlags`] for reserved class bits.
 ///
 /// Returns [`FormatError::InvalidOpaqueReservedBits`] if an opaque datatype has nonzero reserved
 /// bits, [`FormatError::InvalidOpaqueTagLength`] if its property length is not a multiple of
@@ -171,7 +184,8 @@ pub fn stored_element_size_usize(
 /// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
 /// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
 /// or [`FormatError::InvalidComplexParent`] if its parent is not floating point. Returns
-/// [`FormatError::InvalidComplexParentFlags`] if the parent has reserved bits or byte order,
+/// [`FormatError::InvalidComplexParentFlags`] if the parent has reserved bits, the reserved
+/// order pattern, or VAX order in versions 1 or 2. Returns
 /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
@@ -215,7 +229,11 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
         FLOATING_POINT_CLASS => {
             // Floating-Point
             bytes::ensure_len(data, pos, 12)?;
-            let byte_order = parse_float_byte_order(bf0);
+            let byte_order = FloatingPointByteOrder::parse(
+                DatatypeVersion::try_from(version)?,
+                [bf0, bf1, bf2],
+            )?
+            .order();
             let mantissa_normalization = match (bf0 >> FLOAT_NORMALIZATION_SHIFT)
                 & FLOAT_NORMALIZATION_MASK
             {
@@ -737,18 +755,11 @@ fn parse_complex(
         return Err(FormatError::InvalidComplexParent { class });
     }
     let version = parent[0] >> DATATYPE_VERSION_SHIFT;
-    if !(DATATYPE_VERSION_ONE..=DATATYPE_VERSION_FIVE).contains(&version) {
-        return Err(FormatError::InvalidDatatypeVersion { class, version });
-    }
+    let parent_version = DatatypeVersion::try_from(version)
+        .map_err(|_unsupported_version| FormatError::InvalidDatatypeVersion { class, version })?;
     let flags = u32::from(parent[1]) | (u32::from(parent[2]) << 8) | (u32::from(parent[3]) << 16);
-    let has_extended_order = flags & u32::from(FLOAT_BYTE_ORDER_HIGH_BIT) != 0;
-    if flags & FLOAT_RESERVED_MASK != 0
-        || (has_extended_order
-            && (version < DATATYPE_VERSION_THREE
-                || flags & u32::from(FLOAT_BYTE_ORDER_LOW_BIT) == 0))
-    {
-        return Err(FormatError::InvalidComplexParentFlags { version, flags });
-    }
+    FloatingPointByteOrder::parse(parent_version, [parent[1], parent[2], parent[3]])
+        .map_err(|_invalid_flags| FormatError::InvalidComplexParentFlags { version, flags })?;
     let (parent, consumed) = parse_datatype(parent)?;
     bytes::ensure_len(data, DATATYPE_HEADER_SIZE, consumed)?;
     let Datatype::FloatingPoint(component) = parent else {
@@ -950,26 +961,6 @@ fn parse_string_padding(val: u8) -> Result<StringPadding, FormatError> {
         1 => Ok(StringPadding::NullPad),
         2 => Ok(StringPadding::SpacePad),
         _ => Err(FormatError::InvalidStringPadding(val)),
-    }
-}
-
-/// Returns the byte order a floating-point datatype's class bit field encodes.
-///
-/// Bit 6 and bit 0 select it together: neither set is little-endian, bit 0 alone big-endian, and
-/// both VAX. The reserved pattern with bit 6 alone also parses as VAX.
-///
-/// The bit field is defined in "The Datatype Message" of the [format specification, version
-/// 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-fn parse_float_byte_order(bit_field: u8) -> DatatypeByteOrder {
-    match (
-        bit_field & FLOAT_BYTE_ORDER_HIGH_BIT != 0,
-        bit_field & FLOAT_BYTE_ORDER_LOW_BIT != 0,
-    ) {
-        (false, false) => DatatypeByteOrder::LittleEndian,
-        (false, true) => DatatypeByteOrder::BigEndian,
-        (true, _) => DatatypeByteOrder::Vax,
     }
 }
 

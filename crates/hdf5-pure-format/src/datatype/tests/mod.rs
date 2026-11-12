@@ -350,25 +350,6 @@ fn test_float_f64_le() {
     );
 }
 
-#[rstest]
-#[case::little_endian(0x00, DatatypeByteOrder::LittleEndian)]
-#[case::big_endian(0x01, DatatypeByteOrder::BigEndian)]
-#[case::vax_low_bit_clear(0x40, DatatypeByteOrder::Vax)]
-#[case::vax_low_bit_set(0x41, DatatypeByteOrder::Vax)]
-fn each_pair_of_byte_order_bits_parses_to_its_order(
-    #[case] bit_field: u8,
-    #[case] expected: DatatypeByteOrder,
-) {
-    let mut data = build_float(4, 23, 8, 0, 23, 127);
-    data[1] = (data[1] & !(FLOAT_BYTE_ORDER_HIGH_BIT | FLOAT_BYTE_ORDER_LOW_BIT)) | bit_field;
-
-    let (dt, _) = parse_datatype(&data).unwrap();
-    let Datatype::FloatingPoint(numeric) = dt else {
-        panic!("expected a floating-point datatype, got {dt:?}");
-    };
-    assert_eq!(numeric.byte_order(), expected);
-}
-
 #[test]
 fn test_string_null_terminated_ascii() {
     let buf = build_dt_header(3, DATATYPE_VERSION_ONE, [0x00, 0, 0], 10); // padding=0(nullterm), charset=0(ascii)
