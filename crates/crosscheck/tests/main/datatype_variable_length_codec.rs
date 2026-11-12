@@ -10,8 +10,9 @@ use hdf5_pure_core::{
     MantissaNormalization, MessageType, StringPadding, VariableLengthStringType,
     VariableLengthType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    AccessMode, DatatypeMessage, FormatWidths, ObjectHeader, OffsetWidth,
+    AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader, OffsetWidth,
 };
 use hdf5_sys::h5t;
 use hdf5_sys::h5t::{H5T_cset_t, H5T_str_t};
@@ -102,6 +103,18 @@ fn datatype_variable_length_codecs_preserve_native_file_metadata(
     }
     assert_eq!(message.serialize(width).unwrap(), body[..consumed]);
     assert_eq!(&body[consumed..], vec![0; body.len() - consumed]);
+    let canonical = format::serialize_datatype_with_offset_width(&kind.semantic(), width).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    assert_eq!(consumed, canonical.len());
+    assert_eq!(parsed.to_datatype().unwrap(), kind.semantic());
+    assert_eq!(
+        parsed.version(),
+        if matches!(kind, Kind::Vax) {
+            DatatypeVersion::Three
+        } else {
+            DatatypeVersion::One
+        }
+    );
     drop(pure);
 }
 

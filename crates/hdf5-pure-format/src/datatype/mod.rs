@@ -26,7 +26,7 @@ use hdf5_pure_core::VariableLengthStringType;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
-use self::message::{AtomicMessage, AtomicProperties};
+use self::message::{AtomicMessage, AtomicProperties, CanonicalContainer};
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -505,6 +505,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 ///
 /// Writes fixed-point, time, string, bitfield, opaque, and little- or big-endian floating-point
 /// descriptions at version 1, and VAX floating-point descriptions at version 3.
+/// Uses version 1 as the minimum for variable-length descriptions and version 3 for arrays.
 /// Writes [`Datatype::Complex`] as class 11 in version 5, with one floating-point parent.
 /// Writes each containing datatype at a message version at least as high as its children's.
 /// Writes a nonempty opaque tag with a NUL terminator and zero padding to a multiple of eight
@@ -513,6 +514,10 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 ///
 /// Encodes nested descriptions into the returned buffer with eight-byte heap addresses.
 /// Computes array sizes while encoding their base types.
+///
+/// Canonical serialization accepts empty compound or enumeration member sets and zero
+/// array extents. The checked [`message::DatatypeMessage`] codec requires nonempty member
+/// sets and nonzero element sizes.
 ///
 /// # Errors
 ///
@@ -550,9 +555,29 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
 /// # Errors
 ///
 /// Returns the errors of [`serialize_datatype`] for zero-sized string or opaque types,
-/// invalid opaque tags, oversized array sizes,
-/// array ranks or member counts that exceed their encoded fields, or out-of-bounds compound
-/// members.
+/// invalid opaque tags, oversized array sizes, array ranks or member counts that exceed their
+/// encoded fields, or out-of-bounds compound members.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::{Datatype, FixedPointType, FormatError, VariableLengthType};
+/// use hdf5_pure_format::__private::{
+///     serialize_datatype_with_offset_width, DatatypeMessage, OffsetWidth,
+/// };
+///
+/// let sequence = Datatype::VariableLength(VariableLengthType::sequence(
+///     Datatype::FixedPoint(FixedPointType::u16()),
+/// ));
+/// let array = Datatype::Array { base_type: Box::new(sequence), dimensions: vec![2] };
+/// let bytes = serialize_datatype_with_offset_width(&array, OffsetWidth::Two)?;
+/// assert_eq!(&bytes[..8], &[0x3a, 0, 0, 0, 20, 0, 0, 0]);
+/// assert_eq!(&bytes[13..21], &[0x19, 0, 0, 0, 10, 0, 0, 0]);
+/// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+/// assert_eq!(consumed, bytes.len());
+/// assert_eq!(parsed.to_datatype()?, array);
+/// # Ok::<(), FormatError>(())
+/// ```
 pub fn serialize_datatype_with_offset_width(
     datatype: &Datatype,
     offset_width: OffsetWidth,
@@ -581,19 +606,7 @@ fn serialize_datatype_into(
             );
         }
         Datatype::Complex(complex) => {
-            let mut header = append_header(
-                output,
-                COMPLEX_CLASS,
-                DATATYPE_VERSION_FIVE,
-                [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
-                complex.size().get(),
-            );
-            header.append_child(
-                output,
-                &Datatype::FloatingPoint(complex.component()),
-                offset_width,
-            )?;
-            header
+            return CanonicalContainer::Complex(complex).encode_into(output, offset_width);
         }
         Datatype::String {
             size,
@@ -608,33 +621,7 @@ fn serialize_datatype_into(
             .encode_into(output));
         }
         Datatype::VariableLength(kind) => {
-            let (bf0, bf1) = match kind {
-                VariableLengthType::Sequence { .. } => (VARIABLE_LENGTH_SEQUENCE, 0),
-                VariableLengthType::String(string) => {
-                    let padding = match string.padding() {
-                        StringPadding::NullTerminate => 0,
-                        StringPadding::NullPad => 1,
-                        StringPadding::SpacePad => 2,
-                    };
-                    let charset = match string.charset() {
-                        CharacterSet::Ascii => 0,
-                        CharacterSet::Utf8 => 1,
-                    };
-                    (
-                        VARIABLE_LENGTH_STRING | (padding << VARIABLE_LENGTH_PADDING_SHIFT),
-                        charset,
-                    )
-                }
-            };
-            let mut header = append_header(
-                output,
-                VARIABLE_LENGTH_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, bf1, 0],
-                stored_element_size(datatype, offset_width)?.get(),
-            );
-            header.append_child(output, kind.base_type(), offset_width)?;
-            header
+            return CanonicalContainer::VariableLength(kind).encode_into(output, offset_width);
         }
         Datatype::Compound { size, members } => {
             let num = members.len().narrow_or_else::<u16, _>(|| {
@@ -713,21 +700,11 @@ fn serialize_datatype_into(
             base_type,
             dimensions,
         } => {
-            let rank = dimensions.len().narrow_or_else::<u8, _>(|| {
-                FormatError::ValueTooLargeForRepresentation {
-                    value: dimensions.len().to_u64(),
-                    target: "u8",
-                }
-            })?;
-            let mut header =
-                append_header(output, ARRAY_CLASS, DATATYPE_VERSION_THREE, [0, 0, 0], 0);
-            output.push(rank);
-            for &d in dimensions {
-                output.extend_from_slice(&d.to_le_bytes());
+            return CanonicalContainer::Array {
+                base_type,
+                dimensions,
             }
-            let child = header.append_child(output, base_type, offset_width)?;
-            header.type_size = array_type_size(child.type_size, dimensions)?;
-            header
+            .encode_into(output, offset_width);
         }
         Datatype::Reference { size, ref_type } => {
             let bf0 = match ref_type {
