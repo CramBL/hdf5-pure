@@ -186,6 +186,15 @@ pub enum FormatError {
         /// The dimension whose multiplication would overflow.
         dimension: u64,
     },
+    /// A containing datatype message has a lower version than one of its children.
+    DatatypeChildVersion {
+        /// The containing datatype's class code.
+        class: u8,
+        /// The containing message's version.
+        version: u8,
+        /// The child message's version.
+        child_version: u8,
+    },
     /// A decoder's output exceeds the bound derived from the declared decoded payload size.
     ///
     /// The minimum describes this filter's output stream, which can include bytes removed by
@@ -574,6 +583,26 @@ pub enum FormatError {
     InvalidDataspaceVersion(u8),
     /// Invalid datatype class.
     InvalidDatatypeClass(u8),
+    /// A datatype message has reserved class bits set.
+    InvalidDatatypeFlags {
+        /// The datatype class code.
+        class: u8,
+        /// The message version.
+        version: u8,
+        /// The complete 24-bit class bit field.
+        flags: u32,
+    },
+    /// A compound or enumeration member name contains a NUL byte.
+    InvalidDatatypeMemberName {
+        /// The datatype class code.
+        class: u8,
+        /// The rejected member name.
+        name: String,
+    },
+    /// A datatype message version is outside 1 through 5.
+    ///
+    /// Contains the rejected version number.
+    InvalidDatatypeMessageVersion(u8),
     /// Invalid datatype version for a given class.
     InvalidDatatypeVersion {
         /// The type class.
@@ -1183,7 +1212,7 @@ pub enum FormatError {
         /// Second operand (typically the length/size).
         length: u64,
     },
-    /// A caller-supplied opaque tag exceeds the 247-byte encoding limit.
+    /// An opaque tag exceeds the logical-length limit.
     OpaqueTagTooLong {
         /// The logical tag length, in bytes.
         length: usize,
@@ -1734,6 +1763,35 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "unsupported complex datatype form {form} with homogeneous={homogeneous}"
+                )
+            }
+            Self::InvalidDatatypeFlags {
+                class,
+                version,
+                flags,
+            } => {
+                write!(
+                    f,
+                    "invalid datatype flags {flags:#08x} for class {class} version {version}"
+                )
+            }
+            Self::InvalidDatatypeMemberName { class, name } => {
+                write!(
+                    f,
+                    "datatype class {class} member name {name:?} contains a NUL byte"
+                )
+            }
+            Self::InvalidDatatypeMessageVersion(version) => {
+                write!(f, "invalid datatype message version {version}")
+            }
+            Self::DatatypeChildVersion {
+                class,
+                version,
+                child_version,
+            } => {
+                write!(
+                    f,
+                    "datatype class {class} version {version} is below child version {child_version}"
                 )
             }
             Self::InvalidDatatypeVersion { class, version } => {
