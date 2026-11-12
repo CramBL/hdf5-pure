@@ -26,6 +26,9 @@ use super::{
 use crate::convert::Narrow;
 use crate::width::OffsetWidth;
 
+pub(super) use self::atomic::{AtomicMessage, AtomicProperties};
+
+mod atomic;
 mod codec;
 mod compound_layout;
 

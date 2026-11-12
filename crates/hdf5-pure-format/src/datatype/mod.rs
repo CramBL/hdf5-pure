@@ -26,6 +26,7 @@ use hdf5_pure_core::VariableLengthStringType;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
+use self::message::{AtomicMessage, AtomicProperties};
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -502,6 +503,8 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 
 /// Serializes a datatype into an HDF5 Datatype message body.
 ///
+/// Writes fixed-point, time, string, bitfield, opaque, and little- or big-endian floating-point
+/// descriptions at version 1, and VAX floating-point descriptions at version 3.
 /// Writes [`Datatype::Complex`] as class 11 in version 5, with one floating-point parent.
 /// Writes each containing datatype at a message version at least as high as its children's.
 /// Writes a nonempty opaque tag with a NUL terminator and zero padding to a multiple of eight
@@ -513,12 +516,28 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 ///
 /// # Errors
 ///
+/// Returns [`FormatError::ZeroSizedDatatype`] for a zero-sized string or opaque type,
+/// including in nested descriptions.
 /// Returns [`FormatError::OpaqueTagTooLong`] if an opaque tag exceeds 247 bytes, or
 /// [`FormatError::InvalidOpaqueTagByte`] if it contains a NUL byte, including in nested types.
 /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field, or
 /// [`FormatError::ValueTooLargeForRepresentation`] if an array rank or member count exceeds its
 /// encoded field. Returns [`FormatError::CompoundFieldOutOfBounds`] if a compound member extends
 /// past the declared record size.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::{Datatype, FixedPointType, FormatError};
+/// use hdf5_pure_format::__private::serialize_datatype;
+///
+/// let datatype = Datatype::FixedPoint(FixedPointType::u16());
+/// assert_eq!(
+///     serialize_datatype(&datatype)?,
+///     [0x10, 0, 0, 0, 2, 0, 0, 0, 0, 0, 16, 0],
+/// );
+/// # Ok::<(), FormatError>(())
+/// ```
 pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
     serialize_datatype_with_offset_width(datatype, OffsetWidth::Eight)
 }
@@ -530,7 +549,8 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
 ///
 /// # Errors
 ///
-/// Returns the errors of [`serialize_datatype`] for invalid opaque tags, oversized array sizes,
+/// Returns the errors of [`serialize_datatype`] for zero-sized string or opaque types,
+/// invalid opaque tags, oversized array sizes,
 /// array ranks or member counts that exceed their encoded fields, or out-of-bounds compound
 /// members.
 pub fn serialize_datatype_with_offset_width(
@@ -549,63 +569,16 @@ fn serialize_datatype_into(
 ) -> Result<EncodedNode, FormatError> {
     let header = match datatype {
         Datatype::FixedPoint(datatype) => {
-            let layout = datatype.layout();
-            let mut bf0 = padding_bits(layout.low_padding(), layout.high_padding());
-            if datatype.byte_order() == DatatypeByteOrder::BigEndian {
-                bf0 |= 0x01;
-            }
-            if layout.signed() {
-                bf0 |= 0x08;
-            }
-            let header = append_header(
-                output,
-                FIXED_POINT_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, 0, 0],
-                datatype.size().get(),
+            return Ok(
+                AtomicMessage::canonical(AtomicProperties::FixedPoint(datatype))?
+                    .encode_into(output),
             );
-            output.extend_from_slice(&layout.bit_offset().to_le_bytes());
-            output.extend_from_slice(&layout.bit_precision().to_le_bytes());
-            header
         }
         Datatype::FloatingPoint(datatype) => {
-            let layout = datatype.layout();
-            let normalization = match layout.mantissa_normalization() {
-                MantissaNormalization::Unnormalized => FLOAT_NORMALIZATION_UNNORMALIZED,
-                MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
-                MantissaNormalization::ImpliedLeadingOne => FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
-            };
-            let mut bf0 = (normalization << FLOAT_NORMALIZATION_SHIFT)
-                | padding_bits(layout.low_padding(), layout.high_padding());
-            if layout.internal_padding() {
-                bf0 |= FLOAT_INTERNAL_PADDING_BIT;
-            }
-            let version = match datatype.byte_order() {
-                DatatypeByteOrder::LittleEndian => DATATYPE_VERSION_ONE,
-                DatatypeByteOrder::BigEndian => {
-                    bf0 |= FLOAT_BYTE_ORDER_LOW_BIT;
-                    DATATYPE_VERSION_ONE
-                }
-                DatatypeByteOrder::Vax => {
-                    bf0 |= FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT;
-                    DATATYPE_VERSION_THREE
-                }
-            };
-            let header = append_header(
-                output,
-                FLOATING_POINT_CLASS,
-                version,
-                [bf0, layout.sign_location(), 0],
-                datatype.size().get(),
+            return Ok(
+                AtomicMessage::canonical(AtomicProperties::FloatingPoint(datatype))?
+                    .encode_into(output),
             );
-            output.extend_from_slice(&layout.bit_offset().to_le_bytes());
-            output.extend_from_slice(&layout.bit_precision().to_le_bytes());
-            output.push(layout.exponent_location());
-            output.push(layout.exponent_size());
-            output.push(layout.mantissa_location());
-            output.push(layout.mantissa_size());
-            output.extend_from_slice(&layout.exponent_bias().to_le_bytes());
-            header
         }
         Datatype::Complex(complex) => {
             let mut header = append_header(
@@ -627,23 +600,12 @@ fn serialize_datatype_into(
             padding,
             charset,
         } => {
-            let pad_val = match padding {
-                StringPadding::NullTerminate => 0,
-                StringPadding::NullPad => 1,
-                StringPadding::SpacePad => 2,
-            };
-            let cs_val = match charset {
-                CharacterSet::Ascii => 0,
-                CharacterSet::Utf8 => 1,
-            };
-            let bf0 = pad_val | (cs_val << 4);
-            append_header(
-                output,
-                STRING_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, 0, 0],
-                *size,
-            )
+            return Ok(AtomicMessage::canonical(AtomicProperties::String {
+                size: *size,
+                padding,
+                charset,
+            })?
+            .encode_into(output));
         }
         Datatype::VariableLength(kind) => {
             let (bf0, bf1) = match kind {
@@ -786,46 +748,20 @@ fn serialize_datatype_into(
             )
         }
         Datatype::Time(datatype) => {
-            let bf0 = u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
-            let header = append_header(
-                output,
-                TIME_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, 0, 0],
-                datatype.size().get(),
+            return Ok(
+                AtomicMessage::canonical(AtomicProperties::Time(datatype))?.encode_into(output)
             );
-            output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
-            header
         }
         Datatype::BitField(datatype) => {
-            let bf0 = padding_bits(datatype.low_padding(), datatype.high_padding())
-                | u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
-            let header = append_header(
-                output,
-                BIT_FIELD_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, 0, 0],
-                datatype.size().get(),
+            return Ok(
+                AtomicMessage::canonical(AtomicProperties::BitField(datatype))?.encode_into(output),
             );
-            output.extend_from_slice(&datatype.bit_offset().to_le_bytes());
-            output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
-            header
         }
         Datatype::Opaque { size, tag } => {
-            let tag = OpaqueTagWire::encode(tag)?;
-            let header = append_header(
-                output,
-                OPAQUE_CLASS,
-                DATATYPE_VERSION_ONE,
-                [tag.encoded_len, 0, 0],
-                *size,
+            return Ok(
+                AtomicMessage::canonical(AtomicProperties::Opaque { size: *size, tag })?
+                    .encode_into(output),
             );
-            output.extend_from_slice(tag.logical);
-            output.resize(
-                header.offset + DATATYPE_HEADER_SIZE + usize::from(tag.encoded_len),
-                0,
-            );
-            header
         }
         #[expect(
             clippy::unreachable,

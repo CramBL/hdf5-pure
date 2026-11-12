@@ -7,10 +7,11 @@ use core::str;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, DatatypeByteOrder, FixedPointType, FloatingPointType,
-    FormatError, MantissaNormalization, StringPadding, TimeType,
+    BitFieldType, CharacterSet, ComplexType, DatatypeByteOrder, EnumMember, FixedPointType,
+    FloatingPointType, FormatError, MantissaNormalization, StringPadding, TimeType,
 };
 
+use super::atomic::{AtomicMessage, AtomicProperties};
 use super::compound_layout::CompoundLayout;
 use super::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
@@ -21,8 +22,8 @@ use crate::convert::Narrow;
 use crate::datatype::{
     self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
     COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
-    DATATYPE_CLASS_MASK, DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS,
-    FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
+    DATATYPE_CLASS_MASK, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, FIXED_POINT_CLASS,
+    FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
     FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT,
     FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT,
     OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
@@ -596,51 +597,155 @@ impl DatatypeMessage {
         if depth >= MAX_MESSAGE_DEPTH {
             return Err(FormatError::NestingDepthExceeded);
         }
-        let flags = self.class_flags()?;
-        let start = output.len();
-        let size = match self.properties {
-            DatatypeProperties::Enumeration { .. } | DatatypeProperties::Array { .. } => 0,
-            _ => self.stored_size(offset_width)?,
-        };
-        let mut header = datatype::append_header(
-            output,
-            self.properties.class(),
-            self.version.get(),
-            flags,
-            size,
-        );
-        match &self.properties {
+        let Self {
+            version,
+            properties,
+        } = self;
+        let properties = match properties {
             DatatypeProperties::FixedPoint(datatype) => {
-                output.extend_from_slice(&datatype.layout().bit_offset().to_le_bytes());
-                output.extend_from_slice(&datatype.layout().bit_precision().to_le_bytes());
+                return Ok(
+                    AtomicMessage::new(*version, AtomicProperties::FixedPoint(datatype))?
+                        .encode_into(output)
+                        .type_size,
+                );
             }
             DatatypeProperties::FloatingPoint(datatype) => {
-                let layout = datatype.layout();
-                output.extend_from_slice(&layout.bit_offset().to_le_bytes());
-                output.extend_from_slice(&layout.bit_precision().to_le_bytes());
-                output.extend_from_slice(&[
-                    layout.exponent_location(),
-                    layout.exponent_size(),
-                    layout.mantissa_location(),
-                    layout.mantissa_size(),
-                ]);
-                output.extend_from_slice(&layout.exponent_bias().to_le_bytes());
+                return Ok(AtomicMessage::new(
+                    *version,
+                    AtomicProperties::FloatingPoint(datatype),
+                )?
+                .encode_into(output)
+                .type_size);
             }
             DatatypeProperties::Time(datatype) => {
-                output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes())
+                return Ok(
+                    AtomicMessage::new(*version, AtomicProperties::Time(datatype))?
+                        .encode_into(output)
+                        .type_size,
+                );
+            }
+            DatatypeProperties::String {
+                size,
+                padding,
+                charset,
+            } => {
+                return Ok(AtomicMessage::new(
+                    *version,
+                    AtomicProperties::String {
+                        size: *size,
+                        padding,
+                        charset,
+                    },
+                )?
+                .encode_into(output)
+                .type_size);
             }
             DatatypeProperties::BitField(datatype) => {
-                output.extend_from_slice(&datatype.bit_offset().to_le_bytes());
-                output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
+                return Ok(
+                    AtomicMessage::new(*version, AtomicProperties::BitField(datatype))?
+                        .encode_into(output)
+                        .type_size,
+                );
             }
-            DatatypeProperties::Opaque { tag, .. } => {
-                output.extend_from_slice(tag);
-                output.resize(start + DATATYPE_HEADER_SIZE + usize::from(flags[0]), 0);
+            DatatypeProperties::Opaque { size, tag } => {
+                return Ok(AtomicMessage::new(
+                    *version,
+                    AtomicProperties::Opaque { size: *size, tag },
+                )?
+                .encode_into(output)
+                .type_size);
             }
-            DatatypeProperties::String { .. } => {}
-            DatatypeProperties::Compound { size, members } => {
-                let offset_bytes = datatype::offset_bytes_for_size(*size);
-                let mut layout = CompoundLayout::new(*size);
+            DatatypeProperties::Compound { size, members } => ContainerProperties::Compound {
+                size: *size,
+                members,
+            },
+            DatatypeProperties::Enumeration { base_type, members } => {
+                ContainerProperties::Enumeration { base_type, members }
+            }
+            DatatypeProperties::VariableLengthSequence { base_type } => {
+                ContainerProperties::VariableLengthSequence { base_type }
+            }
+            DatatypeProperties::VariableLengthString {
+                padding,
+                charset,
+                base_type,
+            } => ContainerProperties::VariableLengthString {
+                padding,
+                charset,
+                base_type,
+            },
+            DatatypeProperties::Array {
+                base_type,
+                dimensions,
+            } => ContainerProperties::Array {
+                base_type,
+                dimensions,
+            },
+            DatatypeProperties::Complex { component } => ContainerProperties::Complex { component },
+        };
+        let size = match properties {
+            ContainerProperties::Enumeration { .. } | ContainerProperties::Array { .. } => 0,
+            _ => self.stored_size(offset_width)?,
+        };
+        properties.encode_into(output, offset_width, depth, *version, size)
+    }
+}
+
+/// Borrowed recursive properties of a checked [`DatatypeMessage`].
+enum ContainerProperties<'a> {
+    Compound {
+        size: u32,
+        members: &'a [DatatypeMessageMember],
+    },
+    Enumeration {
+        base_type: &'a DatatypeMessage,
+        members: &'a [EnumMember],
+    },
+    VariableLengthSequence {
+        base_type: &'a DatatypeMessage,
+    },
+    VariableLengthString {
+        padding: &'a StringPadding,
+        charset: &'a CharacterSet,
+        base_type: &'a DatatypeMessage,
+    },
+    Array {
+        base_type: &'a DatatypeMessage,
+        dimensions: &'a [u32],
+    },
+    Complex {
+        component: &'a DatatypeMessage,
+    },
+}
+
+impl ContainerProperties<'_> {
+    /// Appends this description and its children at the selected message versions.
+    ///
+    /// Uses `size` for compound, variable-length, and complex descriptions. Derives array
+    /// and enumeration sizes from the encoded children at `offset_width`. The property
+    /// layouts are defined in "The Datatype Message" of the [format specification,
+    /// version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`DatatypeMessage::serialize`]. Child descriptions are encoded
+    /// at `depth + 1`.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+    fn encode_into(
+        self,
+        output: &mut Vec<u8>,
+        offset_width: OffsetWidth,
+        depth: u8,
+        version: DatatypeVersion,
+        size: u32,
+    ) -> Result<u32, FormatError> {
+        let flags = self.class_flags()?;
+        let mut header = datatype::append_header(output, self.class(), version.get(), flags, size);
+        match self {
+            Self::Compound { size, members } => {
+                let offset_bytes = datatype::offset_bytes_for_size(size);
+                let mut layout = CompoundLayout::new(size);
                 for (
                     index,
                     DatatypeMessageMember {
@@ -664,7 +769,7 @@ impl DatatypeMessage {
                     layout.insert(members, index, field_size)?;
                 }
             }
-            DatatypeProperties::Enumeration { base_type, members } => {
+            Self::Enumeration { base_type, members } => {
                 header.type_size = base_type.encode_into(output, offset_width, depth + 1)?;
                 for member in members {
                     let (name, _) = __private::enum_member_parts(member);
@@ -676,11 +781,11 @@ impl DatatypeMessage {
                     output.extend_from_slice(value);
                 }
             }
-            DatatypeProperties::VariableLengthSequence { base_type }
-            | DatatypeProperties::VariableLengthString { base_type, .. } => {
+            Self::VariableLengthSequence { base_type }
+            | Self::VariableLengthString { base_type, .. } => {
                 base_type.encode_into(output, offset_width, depth + 1)?;
             }
-            DatatypeProperties::Array {
+            Self::Array {
                 base_type,
                 dimensions,
             } => {
@@ -693,86 +798,49 @@ impl DatatypeMessage {
                 let base_size = base_type.encode_into(output, offset_width, depth + 1)?;
                 header.type_size = datatype::array_type_size(base_size, dimensions)?;
             }
-            DatatypeProperties::Complex { component } => {
+            Self::Complex { component } => {
                 component.encode_into(output, offset_width, depth + 1)?;
             }
         }
         Ok(header.finish(output).type_size)
     }
 
-    /// Encodes the three class-specific flag bytes.
+    fn class(&self) -> u8 {
+        match self {
+            Self::Compound { .. } => COMPOUND_CLASS,
+            Self::Enumeration { .. } => ENUMERATION_CLASS,
+            Self::VariableLengthSequence { .. } | Self::VariableLengthString { .. } => {
+                VARIABLE_LENGTH_CLASS
+            }
+            Self::Array { .. } => ARRAY_CLASS,
+            Self::Complex { .. } => COMPLEX_CLASS,
+        }
+    }
+
+    /// Encodes the three class-specific flag bytes from checked recursive properties.
+    ///
+    /// The fields are defined in "The Datatype Message" of the [format specification,
+    /// version 4.0][spec].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions.
-    /// Propagates floating-point version/order and opaque-tag encoding errors.
+    /// Returns [`FormatError::Internal`] if a checked member count exceeds [`u16::MAX`].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     fn class_flags(&self) -> Result<[u8; 3], FormatError> {
-        Ok(match &self.properties {
-            DatatypeProperties::FixedPoint(datatype) => [
-                binary_order_bit(datatype.byte_order())
-                    | datatype::padding_bits(
-                        datatype.layout().low_padding(),
-                        datatype.layout().high_padding(),
-                    )
-                    | if datatype.layout().signed() {
-                        SIGNED_BIT
-                    } else {
-                        0
-                    },
-                0,
-                0,
-            ],
-            DatatypeProperties::FloatingPoint(datatype) => {
-                let layout = datatype.layout();
-                let normalization = match layout.mantissa_normalization() {
-                    MantissaNormalization::Unnormalized => FLOAT_NORMALIZATION_UNNORMALIZED,
-                    MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
-                    MantissaNormalization::ImpliedLeadingOne => {
-                        FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE
-                    }
-                };
-                [
-                    FloatingPointByteOrder::new(self.version, datatype.byte_order())?.bits()
-                        | datatype::padding_bits(layout.low_padding(), layout.high_padding())
-                        | if layout.internal_padding() {
-                            FLOAT_INTERNAL_PADDING_BIT
-                        } else {
-                            0
-                        }
-                        | (normalization << FLOAT_NORMALIZATION_SHIFT),
-                    layout.sign_location(),
-                    0,
-                ]
-            }
-            DatatypeProperties::Time(datatype) => [binary_order_bit(datatype.byte_order()), 0, 0],
-            DatatypeProperties::String {
-                padding, charset, ..
-            } => {
-                let padding = padding_code(padding);
-                let charset = charset_code(charset);
-                [padding | (charset << STRING_CHARSET_SHIFT), 0, 0]
-            }
-            DatatypeProperties::BitField(datatype) => [
-                binary_order_bit(datatype.byte_order())
-                    | datatype::padding_bits(datatype.low_padding(), datatype.high_padding()),
-                0,
-                0,
-            ],
-            DatatypeProperties::Opaque { tag, .. } => {
-                [OpaqueTagWire::encode(tag)?.encoded_len, 0, 0]
-            }
-            DatatypeProperties::Compound { members, .. } => member_flags(members.len())?,
-            DatatypeProperties::Enumeration { members, .. } => member_flags(members.len())?,
-            DatatypeProperties::VariableLengthSequence { .. } => [VARIABLE_LENGTH_SEQUENCE, 0, 0],
-            DatatypeProperties::VariableLengthString {
+        Ok(match self {
+            Self::Compound { members, .. } => member_flags(members.len())?,
+            Self::Enumeration { members, .. } => member_flags(members.len())?,
+            Self::VariableLengthSequence { .. } => [VARIABLE_LENGTH_SEQUENCE, 0, 0],
+            Self::VariableLengthString {
                 padding, charset, ..
             } => [
                 VARIABLE_LENGTH_STRING | (padding_code(padding) << VARIABLE_LENGTH_PADDING_SHIFT),
                 charset_code(charset),
                 0,
             ],
-            DatatypeProperties::Array { .. } => [0; 3],
-            DatatypeProperties::Complex { .. } => [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
+            Self::Array { .. } => [0; 3],
+            Self::Complex { .. } => [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
         })
     }
 }
@@ -970,7 +1038,14 @@ fn descriptor_width(size: u32) -> Result<OffsetWidth, FormatError> {
     OffsetWidth::try_from(width).map_err(|_err| FormatError::InvalidVariableLengthSize { size })
 }
 
-fn padding_code(padding: &StringPadding) -> u8 {
+/// Encodes the padding code for fixed- and variable-length strings.
+///
+/// Returns 0, 1, or 2 for [`StringPadding::NullTerminate`], [`StringPadding::NullPad`],
+/// or [`StringPadding::SpacePad`], respectively. The fields are defined in "The Datatype
+/// Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) fn padding_code(padding: &StringPadding) -> u8 {
     match padding {
         StringPadding::NullTerminate => NULL_TERMINATE,
         StringPadding::NullPad => NULL_PAD,
@@ -978,7 +1053,13 @@ fn padding_code(padding: &StringPadding) -> u8 {
     }
 }
 
-fn charset_code(charset: &CharacterSet) -> u8 {
+/// Encodes the character-set code for fixed- and variable-length strings.
+///
+/// Returns 0 for [`CharacterSet::Ascii`] and 1 for [`CharacterSet::Utf8`]. The fields
+/// are defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) fn charset_code(charset: &CharacterSet) -> u8 {
     match charset {
         CharacterSet::Ascii => ASCII_CHARSET,
         CharacterSet::Utf8 => UTF8_CHARSET,
@@ -993,7 +1074,14 @@ fn binary_order(flags: u8) -> DatatypeByteOrder {
     }
 }
 
-fn binary_order_bit(order: DatatypeByteOrder) -> u8 {
+/// Encodes bit 0 for fixed-point, time, and bitfield byte order.
+///
+/// Callers pass [`DatatypeByteOrder::LittleEndian`] or [`DatatypeByteOrder::BigEndian`]
+/// from checked metadata. The fields are defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) fn binary_order_bit(order: DatatypeByteOrder) -> u8 {
     if order == DatatypeByteOrder::BigEndian {
         BINARY_ORDER_BIT
     } else {
@@ -1042,7 +1130,7 @@ const BINARY_ORDER_BIT: u8 = 0x01;
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const SIGNED_BIT: u8 = 0x08;
+pub(super) const SIGNED_BIT: u8 = 0x08;
 /// The mask for string padding bits 0 through 3.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
@@ -1056,7 +1144,7 @@ const STRING_PADDING_MASK: u8 = 0x0f;
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const STRING_CHARSET_SHIFT: u8 = 4;
+pub(super) const STRING_CHARSET_SHIFT: u8 = 4;
 
 /// The string padding code for NUL termination.
 ///

@@ -9,11 +9,14 @@ use hdf5_pure_core::{
     BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType,
     MantissaNormalization, StringPadding, TimeType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{DatatypeMessage, DatatypeProperties, OffsetWidth};
 use hdf5_sys::h5i::hid_t;
 use hdf5_sys::h5t;
 use hdf5_sys::h5t::{H5T_class_t, H5T_cset_t, H5T_str_t};
 use rstest::rstest;
+use test_util::datatype::leaf::Version;
+use test_util::datatype::{self, Class};
 use test_util_hdf5::lock;
 
 #[rstest]
@@ -72,6 +75,16 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     assert_eq!(message.version().get(), version);
     assert_eq!(message.properties(), &leaf.properties());
     let canonical = message.serialize(OffsetWidth::Eight).unwrap();
+    let semantic = message.to_datatype().unwrap();
+    let semantic_encoded = format::serialize_datatype(&semantic).unwrap();
+    let mut expected = canonical.clone();
+    let canonical_version = if matches!(leaf, Leaf::Vax) {
+        Version::Three
+    } else {
+        Version::One
+    };
+    expected[0] = datatype::header(Class(leaf.class()), canonical_version.get(), [0; 3], 0)[0];
+    assert_eq!(semantic_encoded, expected);
     if let Leaf::Opaque(tag) = leaf {
         let mut expected = body[..8].to_vec();
         expected[1] = tag.encoded_len();
@@ -90,6 +103,23 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
         assert_eq!(canonical, &body[..consumed]);
     }
     assert_eq!(&body[consumed..], vec![0; body.len() - consumed]);
+    let mut wrapped = encoded[..NATIVE_PREFIX_LEN].to_vec();
+    wrapped.extend(semantic_encoded);
+    let reference = hdf5::sync::sync(|| {
+        // SAFETY: The frame matches the complete native description at its canonical version,
+        // with a terminated property for opaque tags.
+        owned(unsafe { h5t::H5Tdecode1(wrapped.as_ptr().cast()) })
+    });
+    let decoded = encode(&reference);
+    assert_eq!(
+        DatatypeMessage::parse(&decoded[NATIVE_PREFIX_LEN..])
+            .unwrap()
+            .0
+            .to_datatype()
+            .unwrap(),
+        semantic,
+    );
+    drop(reference);
     let image = std::fs::read(&path).unwrap();
     assert!(
         image
