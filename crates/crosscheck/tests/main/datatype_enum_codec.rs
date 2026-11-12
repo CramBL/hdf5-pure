@@ -10,6 +10,7 @@ use hdf5_pure_core::__private;
 use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FixedPointType, MessageType, VariableLengthType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader,
 };
@@ -73,6 +74,13 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         bytes[..consumed]
     );
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
+    let semantic = shape.semantic(big_endian);
+    let canonical =
+        format::serialize_datatype_with_offset_width(&semantic, superblock.offset_size).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    assert_eq!(consumed, canonical.len());
+    assert_eq!(parsed.to_datatype().unwrap(), semantic);
+    assert_eq!(parsed.version(), DatatypeVersion::Three);
     if !latest {
         assert_eq!(message.version(), DatatypeVersion::Three);
     }

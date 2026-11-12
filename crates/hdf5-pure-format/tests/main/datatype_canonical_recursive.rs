@@ -1,3 +1,4 @@
+use hdf5_pure_core::__private;
 use hdf5_pure_core::{Datatype, FormatError, ReferenceType, VariableLengthType};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{DatatypeMessage, OffsetWidth};
@@ -23,7 +24,7 @@ use test_util::datatype::leaf::{self, Leaf, OpaqueTag, Order, VaxVersion, Versio
 #[case::vax_complex(Parent::Complex(true))]
 fn datatype_canonical_recursive_preserves_properties_and_minimal_versions(
     #[case] parent: Parent,
-    #[values(Wrapper::Sequence, Wrapper::Array)] wrapper: Wrapper,
+    #[values(Wrapper::Sequence, Wrapper::Array, Wrapper::Compound)] wrapper: Wrapper,
     #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
 ) {
     let source = parent.bytes(OffsetWidth::Eight, true);
@@ -51,7 +52,7 @@ fn datatype_canonical_recursive_preserves_legacy_reference_parents(
     #[case] ref_type: ReferenceType,
     #[case] flags: [u8; 3],
     #[case] size: u32,
-    #[values(Wrapper::Sequence, Wrapper::Array)] wrapper: Wrapper,
+    #[values(Wrapper::Sequence, Wrapper::Array, Wrapper::Compound)] wrapper: Wrapper,
     #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
 ) {
     let parent = Datatype::Reference { size, ref_type };
@@ -68,7 +69,7 @@ fn datatype_canonical_recursive_preserves_legacy_reference_parents(
 #[case::zero_array(EmptyModel::Array)]
 fn datatype_canonical_recursive_preserves_constructed_models_outside_checked_messages(
     #[case] model: EmptyModel,
-    #[values(Wrapper::Sequence, Wrapper::Array)] wrapper: Wrapper,
+    #[values(Wrapper::Sequence, Wrapper::Array, Wrapper::Compound)] wrapper: Wrapper,
 ) {
     let parent = model.datatype();
     let expected = wrapper.bytes(
@@ -87,9 +88,93 @@ fn datatype_canonical_recursive_preserves_constructed_models_outside_checked_mes
     );
 }
 
+#[rstest]
+#[case::big(Leaf::Integer)]
+#[case::little(Leaf::LittleInteger)]
+fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
+    #[case] leaf: Leaf,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let base = DatatypeMessage::parse(&leaf.bytes(Version::Five))
+        .unwrap()
+        .0
+        .to_datatype()
+        .unwrap();
+    let datatype = Datatype::Enumeration {
+        size: 4,
+        base_type: Box::new(base),
+        members: vec![
+            __private::enum_member("first".into(), vec![0x11; 4]),
+            __private::enum_member("第二".into(), vec![0x22; 4]),
+        ],
+    };
+    let parent = leaf.bytes(Version::One);
+    let expected = containers::enumeration(
+        Version::Three.get(),
+        [2, 0, 0],
+        4,
+        &parent,
+        &[
+            EnumValue {
+                name: b"first",
+                value: &[0x11; 4],
+            },
+            EnumValue {
+                name: "第二".as_bytes(),
+                value: &[0x22; 4],
+            },
+        ],
+    );
+    assert_eq!(
+        format::serialize_datatype_with_offset_width(&datatype, width).unwrap(),
+        expected
+    );
+}
+
+#[rstest]
+#[case::zero(0)]
+#[case::mismatched(7)]
+fn datatype_canonical_enumeration_preserves_supplied_model_size_and_value_width(
+    #[case] size: u32,
+    #[values(Wrapper::Array, Wrapper::Compound, Wrapper::Sequence)] wrapper: Wrapper,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let source = Leaf::Integer.bytes(Version::One);
+    let base = DatatypeMessage::parse(&source)
+        .unwrap()
+        .0
+        .to_datatype()
+        .unwrap();
+    let datatype = Datatype::Enumeration {
+        size,
+        base_type: Box::new(base),
+        members: vec![__private::enum_member("raw".into(), vec![1, 2])],
+    };
+    let enumeration = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
+        size,
+        &source,
+        &[EnumValue {
+            name: b"raw",
+            value: &[1, 2],
+        }],
+    );
+    let expected = wrapper.bytes(width, &enumeration, size, Version::Three);
+    assert_eq!(
+        format::serialize_datatype_with_offset_width(&wrapper.wrap(datatype), width).unwrap(),
+        expected
+    );
+    assert_eq!(
+        DatatypeMessage::parse(&enumeration).unwrap_err(),
+        FormatError::EnumBaseSizeMismatch { size, base_size: 4 }
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Wrapper {
     Array,
+    Compound,
     Sequence,
 }
 
@@ -99,6 +184,10 @@ impl Wrapper {
             Self::Array => Datatype::Array {
                 base_type: Box::new(parent),
                 dimensions: vec![2, 3],
+            },
+            Self::Compound => Datatype::Compound {
+                size: 32,
+                members: vec![__private::compound_member("field".into(), 8, parent)],
             },
             Self::Sequence => Datatype::VariableLength(VariableLengthType::sequence(parent)),
         }
@@ -113,6 +202,17 @@ impl Wrapper {
                 2,
                 &[2, 3],
                 parent,
+            ),
+            Self::Compound => containers::compound(
+                version.get().max(Version::Three.get()),
+                [1, 0, 0],
+                32,
+                MemberOffset::One,
+                &[CompoundField {
+                    name: b"field",
+                    offset: 8,
+                    datatype: parent,
+                }],
             ),
             Self::Sequence => {
                 datatype::variable_length(version.get(), [0; 3], descriptor_size(width), parent)

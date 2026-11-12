@@ -26,8 +26,7 @@ use super::{
 use crate::convert::Narrow;
 use crate::width::OffsetWidth;
 
-pub(super) use self::atomic::{AtomicMessage, AtomicProperties};
-pub(super) use self::codec::CanonicalContainer;
+pub(super) use self::codec::encode_canonical;
 
 mod atomic;
 mod codec;

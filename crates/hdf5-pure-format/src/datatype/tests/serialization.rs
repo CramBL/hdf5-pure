@@ -160,7 +160,7 @@ fn appending_after_a_prefix_preserves_earlier_headers(
         size: 4,
         tag: b"first".to_vec(),
     };
-    let first_node = serialize_datatype_into(&mut output, &first, OffsetWidth::Eight).unwrap();
+    let first_node = message::encode_canonical(&mut output, OffsetWidth::Eight, &first).unwrap();
     assert_eq!(first_node.version, DATATYPE_VERSION_ONE);
     assert_eq!(first_node.type_size, 4);
     let mut expected = prefix.to_vec();
@@ -174,14 +174,14 @@ fn appending_after_a_prefix_preserves_earlier_headers(
     assert_eq!(output, expected);
 
     let datatype = parse_datatype(&message).unwrap().0;
-    let node = serialize_datatype_into(&mut output, &datatype, OffsetWidth::Eight).unwrap();
+    let node = message::encode_canonical(&mut output, OffsetWidth::Eight, &datatype).unwrap();
     assert_eq!(node.version, version);
     assert_eq!(node.type_size, datatype.type_size());
     expected.extend_from_slice(&message);
     assert_eq!(output, expected);
 
     let final_node =
-        serialize_datatype_into(&mut output, &byte_member_type(), OffsetWidth::Eight).unwrap();
+        message::encode_canonical(&mut output, OffsetWidth::Eight, &byte_member_type()).unwrap();
     assert_eq!(final_node.version, DATATYPE_VERSION_ONE);
     assert_eq!(final_node.type_size, 1);
     expected.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
