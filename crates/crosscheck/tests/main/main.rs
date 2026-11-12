@@ -144,6 +144,7 @@ mod test_util;
 mod unallocated_datasets;
 mod user_defined_link_edit;
 mod userblock_base_address;
+mod variable_length_descriptor;
 mod vlen_chunked;
 mod vlen_metadata;
 mod vlen_string_attrs;
