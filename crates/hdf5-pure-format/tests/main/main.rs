@@ -1,5 +1,6 @@
 mod btree;
 mod datatype_array_complex_codec;
+mod datatype_compound_codec;
 mod datatype_leaf_codec;
 mod datatype_message;
 mod datatype_variable_length_codec;
