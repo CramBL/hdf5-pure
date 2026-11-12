@@ -26,6 +26,7 @@ fn datatype_compound_codecs_preserve_native_sequences(
     #[values(false, true)] big_endian: bool,
     #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
     #[values(false, true)] latest: bool,
+    #[values(Placement::Adjacent, Placement::Disjoint)] placement: Placement,
 ) {
     assert_native(
         width,
@@ -34,6 +35,7 @@ fn datatype_compound_codecs_preserve_native_sequences(
         } else {
             LibraryVersion::V110
         },
+        placement,
         Shape::Sequence,
         big_endian,
     );
@@ -41,20 +43,30 @@ fn datatype_compound_codecs_preserve_native_sequences(
 
 #[cfg(feature = "__hdf5-2")]
 #[rstest]
-fn datatype_compound_codecs_preserve_native_complex(#[values(false, true)] big_endian: bool) {
+fn datatype_compound_codecs_preserve_native_complex(
+    #[values(false, true)] big_endian: bool,
+    #[values(Placement::Adjacent, Placement::Disjoint)] placement: Placement,
+) {
     assert_native(
         OffsetWidth::Eight,
         LibraryVersion::latest(),
+        placement,
         Shape::Complex,
         big_endian,
     );
 }
 
-fn assert_native(width: OffsetWidth, version: LibraryVersion, shape: Shape, big_endian: bool) {
+fn assert_native(
+    width: OffsetWidth,
+    version: LibraryVersion,
+    placement: Placement,
+    shape: Shape,
+    big_endian: bool,
+) {
     let _guard = lock::libhdf5_guard();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("compound.h5");
-    let datatype = shape.native(big_endian);
+    let datatype = shape.native(placement, big_endian);
     let file = hdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(version, version))
         .with_fcpl(|properties| {
@@ -102,7 +114,7 @@ fn assert_native(width: OffsetWidth, version: LibraryVersion, shape: Shape, big_
     let (message, consumed) = DatatypeMessage::parse(bytes).unwrap();
     assert_eq!(
         message.to_datatype().unwrap(),
-        shape.semantic(width, big_endian)
+        shape.semantic(width, placement, big_endian)
     );
     assert_eq!(message.serialize(width).unwrap(), bytes[..consumed]);
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
@@ -124,7 +136,7 @@ enum Shape {
 }
 
 impl Shape {
-    fn native(self, big_endian: bool) -> NativeDatatype {
+    fn native(self, placement: Placement, big_endian: bool) -> NativeDatatype {
         hdf5::sync::sync(|| {
             let base = if big_endian {
                 *globals::H5T_IEEE_F64BE
@@ -138,8 +150,9 @@ impl Shape {
                 // SAFETY: The predefined parent is live and the call creates a new ID.
                 Self::Sequence => owned(unsafe { h5t::H5Tvlen_create(base) }),
             };
-            // SAFETY: Compound is a defined class and the fixture's positive size holds both fields.
-            let datatype = owned(unsafe { h5t::H5Tcreate(H5T_class_t::H5T_COMPOUND, 32) });
+            // SAFETY: Compound is a defined class. Both fields fit within the element.
+            let datatype =
+                owned(unsafe { h5t::H5Tcreate(H5T_class_t::H5T_COMPOUND, placement.size()) });
             let first = CString::new("first").unwrap();
             let second = CString::new("é").unwrap();
             assert_eq!(
@@ -148,8 +161,16 @@ impl Shape {
                 0,
             );
             assert_eq!(
-                // SAFETY: Both IDs and the terminated name are live. The child fits the remaining sixteen bytes.
-                unsafe { h5t::H5Tinsert(datatype.id(), second.as_ptr(), 16, child.id()) },
+                // SAFETY: Both IDs and the terminated name are live. The child fits the remaining
+                // sixteen bytes.
+                unsafe {
+                    h5t::H5Tinsert(
+                        datatype.id(),
+                        second.as_ptr(),
+                        placement.offset(),
+                        child.id(),
+                    )
+                },
                 0,
             );
             datatype
@@ -158,7 +179,7 @@ impl Shape {
 
     // H5T_set_loc in H5T.c, libhdf5 1.10.11 and 2.2.0, adjusts a compound's size by
     // the size changes of its members when their storage location changes.
-    fn semantic(self, width: OffsetWidth, big_endian: bool) -> Datatype {
+    fn semantic(self, width: OffsetWidth, placement: Placement, big_endian: bool) -> Datatype {
         let component = FloatingPointType::ieee754_binary64(if big_endian {
             DatatypeByteOrder::BigEndian
         } else {
@@ -166,9 +187,13 @@ impl Shape {
         });
         let (size, child) = match self {
             #[cfg(feature = "__hdf5-2")]
-            Self::Complex => (32, Datatype::Complex(ComplexType::new(component).unwrap())),
+            Self::Complex => (
+                u32::try_from(placement.size()).unwrap(),
+                Datatype::Complex(ComplexType::new(component).unwrap()),
+            ),
             Self::Sequence => (
-                32 - u32::try_from(core::mem::size_of::<h5t::hvl_t>()).unwrap()
+                u32::try_from(placement.size()).unwrap()
+                    - u32::try_from(core::mem::size_of::<h5t::hvl_t>()).unwrap()
                     + 8
                     + u32::from(width.get()),
                 Datatype::VariableLength(VariableLengthType::sequence(Datatype::FloatingPoint(
@@ -180,8 +205,33 @@ impl Shape {
             size,
             members: vec![
                 __private::compound_member("first".into(), 0, Datatype::FloatingPoint(component)),
-                __private::compound_member("é".into(), 16, child),
+                __private::compound_member(
+                    "é".into(),
+                    u64::try_from(placement.offset()).unwrap(),
+                    child,
+                ),
             ],
+        }
+    }
+}
+
+/// The position of the second member after the first eight-byte field.
+#[derive(Clone, Copy, Debug)]
+enum Placement {
+    /// Starts immediately after the first field.
+    Adjacent,
+    /// Starts after an eight-byte gap.
+    Disjoint,
+}
+
+impl Placement {
+    fn size(self) -> usize {
+        self.offset() + 16
+    }
+    fn offset(self) -> usize {
+        match self {
+            Self::Adjacent => 8,
+            Self::Disjoint => 16,
         }
     }
 }

@@ -10,6 +10,7 @@ use hdf5_pure_core::{
     FormatError, MantissaNormalization, StringPadding, TimeType,
 };
 
+use super::compound_layout::CompoundLayout;
 use super::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder,
@@ -41,8 +42,8 @@ impl DatatypeMessage {
     /// Variable-length descriptor sizes must be 10, 12, or 16 bytes, corresponding to heap
     /// address widths of 2, 4, or 8 bytes. The parser checks array element sizes against the
     /// recorded parent size and dimensions, and complex sizes against twice the component size.
-    /// Compound member ranges are checked using their declared source sizes. A compound must
-    /// have at least one member, with unique UTF-8 names.
+    /// Compound member bounds and overlaps are checked using their declared source sizes.
+    /// A compound must have at least one member, with unique UTF-8 names.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
@@ -69,6 +70,7 @@ impl DatatypeMessage {
     /// Returns [`FormatError::InvalidCompoundMemberCount`] for a compound without members,
     /// [`FormatError::DuplicateCompoundField`] for duplicate names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a member outside its compound element.
+    /// Returns [`FormatError::CompoundFieldOverlap`] for overlapping member ranges.
     /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] if a member name is not
     /// UTF-8, retaining the name's byte offset and the original [`str::Utf8Error`].
     ///
@@ -231,6 +233,7 @@ impl DatatypeMessage {
                 super::positive_size(COMPOUND_CLASS, header.size)?;
                 let offset_bytes = datatype::offset_bytes_for_size(header.size);
                 let mut members = Vec::new();
+                let mut layout = CompoundLayout::new(header.size);
                 for _ in 0..count {
                     let (name, end) = member_name(data, COMPOUND_CLASS, fields.pos())?;
                     fields = Fields::new(data, end);
@@ -240,18 +243,9 @@ impl DatatypeMessage {
                         end,
                         size: field_size,
                     } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
-                    if offset
-                        .checked_add(u64::from(field_size))
-                        .is_none_or(|end| end > u64::from(header.size))
-                    {
-                        return Err(FormatError::CompoundFieldOutOfBounds {
-                            name,
-                            offset,
-                            field_size,
-                            compound_size: header.size,
-                        });
-                    }
+                    let index = members.len();
                     members.push(DatatypeMessageMember::new(name, offset, datatype)?);
+                    layout.insert(&members, index, field_size)?;
                     fields = Fields::new(data, end);
                 }
                 (
@@ -367,8 +361,9 @@ impl DatatypeMessage {
     /// variable-length descriptor size from `offset_width`, including nested descriptions.
     /// Array sizes are derived from the encoded parent size and dimensions at that width.
     /// Atomic element sizes are independent of it.
-    /// Compound sizes and member offsets are retained. The writer checks member ranges using
-    /// their encoded sizes at that width and writes each UTF-8 name with a NUL terminator.
+    /// Compound sizes and member offsets are retained. The writer checks member bounds and
+    /// overlaps using their encoded sizes at that width and writes each UTF-8 name with a NUL
+    /// terminator.
     /// Member offsets occupy the minimum number of bytes needed for the compound size.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
@@ -385,7 +380,8 @@ impl DatatypeMessage {
     /// field at `offset_width`. Propagates errors from checking floating-point version/order
     /// compatibility and calculating the stored element size. Returns
     /// [`FormatError::CompoundFieldOutOfBounds`] if a member exceeds its compound element
-    /// at `offset_width`.
+    /// at `offset_width`, and [`FormatError::CompoundFieldOverlap`] if members overlap at that
+    /// width.
     ///
     /// # Examples
     ///
@@ -555,11 +551,15 @@ impl DatatypeMessage {
             DatatypeProperties::String { .. } => {}
             DatatypeProperties::Compound { size, members } => {
                 let offset_bytes = datatype::offset_bytes_for_size(*size);
-                for DatatypeMessageMember {
-                    name,
-                    byte_offset: offset,
-                    datatype,
-                } in members
+                let mut layout = CompoundLayout::new(*size);
+                for (
+                    index,
+                    DatatypeMessageMember {
+                        name,
+                        byte_offset: offset,
+                        datatype,
+                    },
+                ) in members.iter().enumerate()
                 {
                     let offset = *offset;
                     output.extend_from_slice(name.as_bytes());
@@ -572,17 +572,7 @@ impl DatatypeMessage {
                         },
                     )?);
                     let field_size = datatype.encode_into(output, offset_width, depth + 1)?;
-                    if offset
-                        .checked_add(u64::from(field_size))
-                        .is_none_or(|end| end > u64::from(*size))
-                    {
-                        return Err(FormatError::CompoundFieldOutOfBounds {
-                            name: name.clone(),
-                            offset,
-                            field_size,
-                            compound_size: *size,
-                        });
-                    }
+                    layout.insert(members, index, field_size)?;
                 }
             }
             DatatypeProperties::Enumeration { .. } => {
