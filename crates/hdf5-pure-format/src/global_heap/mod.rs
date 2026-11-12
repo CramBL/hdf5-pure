@@ -1,11 +1,12 @@
 //! The global heap collection parser and encoder.
 //!
 //! A collection holds global heap objects, such as the bytes of variable-length values, each at a
-//! 1-based index. A global heap ID in the file holds the address of a collection and the index of
+//! nonzero index. A global heap ID in the file holds the address of a collection and the index of
 //! an object in it.
 //!
 //! [`GlobalHeapCollectionLocator`] parses one from the regions of the file the caller reads, one
-//! header at a time.
+//! header at a time. The caller prepares supplied member fields and capacity through
+//! [`PreparedGlobalHeapCollection::new`].
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -18,16 +19,18 @@ use hdf5_pure_core::PhysicalAddress;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::width;
 use crate::width::LengthWidth;
 
 mod compaction;
+mod write;
 
 pub use compaction::GlobalHeapCompaction;
 pub use compaction::GlobalHeapFreeSpace;
 pub use compaction::GlobalHeapMemberCollector;
 pub use compaction::GlobalHeapMembers;
 pub use compaction::GlobalHeapMove;
+pub use write::GlobalHeapMember;
+pub use write::PreparedGlobalHeapCollection;
 
 /// The position of a global heap collection and the width of its length fields.
 ///
@@ -547,78 +550,9 @@ pub fn encode_global_heap_collection(
     length_width: LengthWidth,
     objects: &[&[u8]],
 ) -> Result<Vec<u8>, GlobalHeapCollectionError> {
-    if objects.len() > GLOBAL_HEAP_MAX_OBJECTS {
-        return Err(GlobalHeapCollectionError::TooManyObjects {
-            count: objects.len(),
-        });
-    }
-    // The length of the collection header, sig(4) + ver(1) + reserved(3) + `collection_size`, and
-    // of each object header, index(2) + reference count(2) + reserved(4) + size, padded to
-    // `ALIGNMENT`.
-    let header_size = aligned_collection_size(FIXED_HEADER_LEN + u64::from(length_width.get()))?;
-    let collection_size = objects.iter().try_fold(header_size, |size, object| {
-        add_collection_size(
-            add_collection_size(size, header_size)?,
-            aligned_collection_size(object.len().to_u64())?,
-        )
-    })?;
-    let padded_collection = aligned_collection_size(
-        add_collection_size(collection_size, header_size)?.max(MIN_COLLECTION_SIZE.to_u64()),
-    )?;
-    // Every length the collection stores is at most its own size.
-    if !width::length_width_holds(length_width, padded_collection) {
-        return Err(GlobalHeapCollectionError::TooLarge {
-            size: padded_collection,
-            length_width,
-        });
-    }
-    let padded_collection = padded_collection.to_usize()?;
-    let header_size = header_size.to_usize()?;
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(padded_collection)
-        .map_err(|source| FormatError::AllocationFailed {
-            values: padded_collection,
-            source,
-        })?;
-    // Header
-    buf.extend_from_slice(&GCOL_SIGNATURE);
-    buf.push(GCOL_VERSION);
-    buf.extend_from_slice(&[0u8; 3]); // reserved
-    bytes::write_length(&mut buf, padded_collection as u64, length_width);
-    buf.resize(header_size, 0);
-
-    // Objects (1-based indices)
-    for (i, obj) in objects.iter().enumerate() {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the check above bounds the object count by `u16::MAX`, so the 1-based \
-                      index `i + 1` fits the 2-byte heap object index field"
-        )]
-        let index = (i + 1) as u16;
-        let start = buf.len();
-        buf.extend_from_slice(&index.to_le_bytes());
-        buf.extend_from_slice(&1u16.to_le_bytes()); // reference count
-        buf.extend_from_slice(&[0u8; 4]); // reserved
-        bytes::write_length(&mut buf, obj.len() as u64, length_width);
-        buf.resize(start + header_size, 0);
-        buf.extend_from_slice(obj);
-        // Pad to 8-byte boundary
-        buf.resize(buf.len().next_multiple_of(ALIGNMENT), 0);
-    }
-
-    // Free space marker (index 0): the C library uses this size as the total
-    // skip distance from the start of the object (including its header), so
-    // it must equal the remaining bytes in the collection from this point.
-    let free_total_size = padded_collection - buf.len();
-    buf.extend_from_slice(&0u16.to_le_bytes()); // index 0
-    buf.extend_from_slice(&0u16.to_le_bytes()); // reference count
-    buf.extend_from_slice(&[0u8; 4]); // reserved
-    bytes::write_length(&mut buf, free_total_size as u64, length_width); // size
-
-    // Pad collection to full size
-    buf.resize(padded_collection, 0);
-
-    Ok(buf)
+    PreparedGlobalHeapCollection::from_objects(length_width, objects)?
+        .serialize()
+        .map_err(GlobalHeapCollectionError::from)
 }
 
 /// An error encoding a global heap collection.

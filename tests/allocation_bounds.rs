@@ -77,6 +77,9 @@ mod extensible_array;
 #[path = "allocation_bounds/free_space.rs"]
 mod free_space;
 
+#[path = "allocation_bounds/global_heap.rs"]
+mod global_heap;
+
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
 

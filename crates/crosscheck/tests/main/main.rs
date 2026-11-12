@@ -121,6 +121,7 @@ mod owned_swmr;
 mod page_buffer;
 mod paged_index;
 mod partial_edge_chunk_filters;
+mod prepared_global_heap;
 mod primitive_read;
 mod provenance;
 mod region_read;
