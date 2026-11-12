@@ -561,6 +561,11 @@ pub enum FormatError {
         /// The byte size of one floating-point component.
         component_size: u32,
     },
+    /// A compound datatype has no members.
+    InvalidCompoundMemberCount {
+        /// The supplied member count.
+        count: usize,
+    },
     /// A compound datatype has a zero total size.
     InvalidCompoundSize,
     /// A version 1 compound member has a zero extent in an active dimension.
@@ -1402,6 +1407,15 @@ pub enum FormatError {
     ///
     /// Contains the raw permutation field.
     UnsupportedCompoundV1Permutation(u32),
+    /// A datatype member name cannot be represented as UTF-8 text.
+    UnsupportedDatatypeMemberEncoding {
+        /// The containing datatype's class code.
+        class: u8,
+        /// The name's byte offset from the start of the supplied message.
+        offset: usize,
+        /// The original UTF-8 decoding error.
+        source: Utf8Error,
+    },
     /// A dataset's element bytes live in files outside this one
     /// (`H5Pset_external`, the External Data Files header message). Its layout
     /// message is contiguous with an undefined data address, the same encoding
@@ -1808,6 +1822,16 @@ impl fmt::Display for FormatError {
                     "datatype class {class} version {version} is below child version {child_version}"
                 )
             }
+            Self::UnsupportedDatatypeMemberEncoding {
+                class,
+                offset,
+                source,
+            } => {
+                write!(
+                    f,
+                    "datatype class {class} member name at byte {offset} is not UTF-8: {source}"
+                )
+            }
             Self::InvalidDatatypeSize {
                 class,
                 size,
@@ -1946,6 +1970,9 @@ impl fmt::Display for FormatError {
                 f,
                 "version 1 compound member has unsupported permutation {permutation:#x}"
             ),
+            Self::InvalidCompoundMemberCount { count } => {
+                write!(f, "invalid compound datatype member count {count}")
+            }
             Self::InvalidCompoundSize => {
                 write!(f, "compound datatype size must be greater than zero")
             }
@@ -2920,6 +2947,7 @@ impl std::error::Error for FormatError {
             FormatError::AllocationFailed { source, .. } => Some(source),
             FormatError::InvalidLocalHeapName { source, .. } => Some(source),
             FormatError::InvalidSoftLinkEncoding { source } => Some(source),
+            FormatError::UnsupportedDatatypeMemberEncoding { source, .. } => Some(source),
             _ => None,
         }
     }

@@ -1,8 +1,10 @@
 //! Datatype descriptions with checked message versions and recursive properties.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU16;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private;
@@ -199,7 +201,8 @@ pub struct DatatypeMessage {
 impl DatatypeMessage {
     /// Constructs a description with compatible versions and class properties.
     ///
-    /// Compound member ranges must fit at the smallest supported offset width of two bytes.
+    /// A compound must have at least one member, with unique names. Member ranges must fit
+    /// at the smallest supported offset width of two bytes.
     /// Array dimensions and element sizes must fit their stored fields. Opaque tags may contain
     /// up to 248 bytes and must not contain NUL bytes.
     ///
@@ -215,8 +218,10 @@ impl DatatypeMessage {
     /// a NUL byte. Returns [`FormatError::ValueTooLargeForRepresentation`] if a member count
     /// or array rank exceeds its field.
     ///
-    /// Returns [`FormatError::CompoundFieldOutOfBounds`] for a compound member outside its
-    /// element, [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base, and
+    /// Returns [`FormatError::InvalidCompoundMemberCount`] for a compound without members,
+    /// [`FormatError::DuplicateCompoundField`] for duplicate compound names, and
+    /// [`FormatError::CompoundFieldOutOfBounds`] for a compound member outside its
+    /// element. Returns [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base, and
     /// [`FormatError::EnumMemberValueSize`] for a value whose width differs from its base type.
     /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field.
     /// Returns [`FormatError::InvalidComplexParent`] if a complex component is not floating
@@ -274,18 +279,26 @@ impl DatatypeMessage {
             }
             DatatypeProperties::Compound { size, members } => {
                 positive_size(class, *size)?;
-                member_count(members.len())?;
-                for member in members {
-                    compatible_child(version, class, &member.datatype)?;
-                    let field_size = member.datatype.stored_size(OffsetWidth::Two)?;
-                    if member
-                        .byte_offset
+                compound_member_count(members.len())?;
+                let mut names = BTreeSet::new();
+                for DatatypeMessageMember {
+                    name,
+                    byte_offset,
+                    datatype,
+                } in members
+                {
+                    if !names.insert(name.as_str()) {
+                        return Err(FormatError::DuplicateCompoundField(name.clone()));
+                    }
+                    compatible_child(version, class, datatype)?;
+                    let field_size = datatype.stored_size(OffsetWidth::Two)?;
+                    if byte_offset
                         .checked_add(u64::from(field_size))
                         .is_none_or(|end| end > u64::from(*size))
                     {
                         return Err(FormatError::CompoundFieldOutOfBounds {
-                            name: member.name.clone(),
-                            offset: member.byte_offset,
+                            name: name.clone(),
+                            offset: *byte_offset,
                             field_size,
                             compound_size: *size,
                         });
@@ -640,6 +653,18 @@ fn compatible_child(
 /// Returns [`FormatError::ZeroSizedDatatype`] if `size` is zero.
 fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatError> {
     NonZeroU32::new(size).ok_or(FormatError::ZeroSizedDatatype { class })
+}
+
+/// Converts a compound member count to a positive two-byte count.
+///
+/// `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 2.2.0, rejects zero compound members.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidCompoundMemberCount`] if `count` is zero, and
+/// [`FormatError::ValueTooLargeForRepresentation`] if it exceeds [`u16::MAX`].
+fn compound_member_count(count: usize) -> Result<NonZeroU16, FormatError> {
+    NonZeroU16::new(member_count(count)?).ok_or(FormatError::InvalidCompoundMemberCount { count })
 }
 
 /// Converts a member count to the two-byte class field.

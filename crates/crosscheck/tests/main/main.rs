@@ -31,6 +31,7 @@ mod continuation_order;
 mod conversions;
 mod creation_widths;
 mod datatype_array_complex_codec;
+mod datatype_compound_codec;
 mod datatype_leaf_codec;
 mod datatype_variable_length_codec;
 mod decoded_chunk_size;
