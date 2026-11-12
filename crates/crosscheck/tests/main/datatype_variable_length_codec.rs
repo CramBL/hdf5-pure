@@ -168,6 +168,8 @@ impl Kind {
         })
     }
 
+    // `H5T__set_size` in `H5T.c`, HDF5 1.10.11 and 2.2.0, copies `H5T_NATIVE_UCHAR`
+    // as the parent of a variable-length string.
     fn semantic(self) -> Datatype {
         let integer = Datatype::FixedPoint(
             FixedPointType::new(2, DatatypeByteOrder::BigEndian, true, 0, 16).unwrap(),
@@ -175,7 +177,7 @@ impl Kind {
         let base = match self {
             Self::Ascii | Self::Utf8 => {
                 return Datatype::VariableLength(VariableLengthType::String(
-                    VariableLengthStringType::new(
+                    VariableLengthStringType::with_base_type(
                         if matches!(self, Self::Utf8) {
                             StringPadding::SpacePad
                         } else {
@@ -186,7 +188,22 @@ impl Kind {
                         } else {
                             CharacterSet::Ascii
                         },
-                    ),
+                        Datatype::FixedPoint(
+                            FixedPointType::new(
+                                1,
+                                if cfg!(target_endian = "big") {
+                                    DatatypeByteOrder::BigEndian
+                                } else {
+                                    DatatypeByteOrder::LittleEndian
+                                },
+                                false,
+                                0,
+                                8,
+                            )
+                            .unwrap(),
+                        ),
+                    )
+                    .unwrap(),
                 ));
             }
             Self::Float => Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
