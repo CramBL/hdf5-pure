@@ -7,9 +7,9 @@ use core::str;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, EnumMember,
-    FixedPointType, FloatingPointType, FormatError, MantissaNormalization, StringPadding, TimeType,
-    VariableLengthType,
+    BitFieldType, CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeByteOrder,
+    EnumMember, FixedPointType, FloatingPointType, FormatError, MantissaNormalization,
+    ReferenceType, StringPadding, TimeType, VariableLengthType,
 };
 
 use super::atomic::{AtomicMessage, AtomicProperties};
@@ -27,11 +27,27 @@ use crate::datatype::{
     FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
     FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT,
     FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT,
-    OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
+    OPAQUE_CLASS, OpaqueTagWire, REFERENCE_CLASS, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
     VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
     VariableLengthMetadata,
 };
 use crate::width::OffsetWidth;
+
+/// Appends a semantic datatype description with canonical version selection.
+///
+/// Uses `offset_width` for every nested variable-length reference. On error, `output`
+/// may contain part of the description.
+///
+/// # Errors
+///
+/// Propagates the errors of [`datatype::serialize_datatype`].
+pub(in crate::datatype) fn encode_canonical(
+    output: &mut Vec<u8>,
+    offset_width: OffsetWidth,
+    datatype: &Datatype,
+) -> Result<EncodedNode, FormatError> {
+    Description::Canonical(datatype).encode_into(output, offset_width)
+}
 
 impl DatatypeMessage {
     /// Parses a datatype message and returns the number of bytes consumed.
@@ -670,8 +686,10 @@ impl DatatypeMessage {
             }
             DatatypeProperties::Compound { size, members } => ContainerProperties::Compound {
                 size: *size,
-                members,
-                child_depth: depth.child()?,
+                members: CompoundMembers::Preserved {
+                    members,
+                    child_depth: depth.child()?,
+                },
             },
             DatatypeProperties::Enumeration { base_type, members } => {
                 ContainerProperties::Enumeration {
@@ -680,6 +698,7 @@ impl DatatypeMessage {
                         depth: depth.child()?,
                     },
                     members,
+                    declared_size: None,
                 }
             }
             DatatypeProperties::VariableLengthSequence { base_type } => {
@@ -734,8 +753,24 @@ impl DatatypeMessage {
     }
 }
 
-/// A borrowed variable-length, array, or complex description for canonical encoding.
-pub(in crate::datatype) enum CanonicalContainer<'a> {
+/// Borrowed recursive semantic properties for canonical encoding.
+enum CanonicalContainer<'a> {
+    /// A compound with its declared size and semantic members.
+    Compound {
+        /// The model's compound element size in bytes.
+        size: u32,
+        /// The members in declaration order.
+        members: &'a [CompoundMember],
+    },
+    /// An enumeration with its supplied size and raw member values.
+    Enumeration {
+        /// The model's element size, retained in the encoded header.
+        size: u32,
+        /// The semantic parent description.
+        base_type: &'a Datatype,
+        /// The names and raw value bytes in declaration order.
+        members: &'a [EnumMember],
+    },
     /// A sequence or string with its semantic parent description.
     VariableLength(&'a VariableLengthType),
     /// An array with its semantic parent and dimensions.
@@ -750,33 +785,48 @@ pub(in crate::datatype) enum CanonicalContainer<'a> {
 }
 
 impl<'a> CanonicalContainer<'a> {
-    /// Appends the canonical description and its children to `output`.
+    /// Prepares borrowed properties with canonical version and size policies.
+    ///
+    /// Uses version 1 as the minimum for variable-length descriptions, version 3 for
+    /// compounds, enumerations, and arrays, and version 5 for complex descriptions.
+    /// The property layouts are defined in "The Datatype Message" of the [format
+    /// specification, version 4.0][spec].
     ///
     /// # Errors
     ///
-    /// Propagates errors from canonical [`datatype::serialize_datatype`] encoding.
-    pub(in crate::datatype) fn encode_into(
-        self,
-        output: &mut Vec<u8>,
-        offset_width: OffsetWidth,
-    ) -> Result<EncodedNode, FormatError> {
-        Description::Container(self).encode_into(output, offset_width)
-    }
-
-    /// Prepares borrowed properties at the canonical minimum version.
-    ///
-    /// Uses version 1 for variable-length, version 3 for array, and version 5 for complex
-    /// descriptions. These property layouts are defined in "The Datatype Message" of the
-    /// [format specification, version 4.0][spec].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if the array rank exceeds
-    /// [`u8::MAX`].
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if an array rank exceeds
+    /// [`u8::MAX`] or a compound or enumeration member count exceeds [`u16::MAX`].
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     fn encoding_plan(self, offset_width: OffsetWidth) -> Result<EncodingPlan<'a>, FormatError> {
         let (properties, version, size) = match self {
+            Self::Compound { size, members } => {
+                super::member_count(members.len())?;
+                (
+                    ContainerProperties::Compound {
+                        size,
+                        members: CompoundMembers::Canonical(members),
+                    },
+                    DatatypeVersion::Three,
+                    size,
+                )
+            }
+            Self::Enumeration {
+                size,
+                base_type,
+                members,
+            } => {
+                super::member_count(members.len())?;
+                (
+                    ContainerProperties::Enumeration {
+                        base_type: Description::Canonical(base_type),
+                        members,
+                        declared_size: Some(size),
+                    },
+                    DatatypeVersion::Three,
+                    size,
+                )
+            }
             Self::VariableLength(kind) => {
                 let base_type = Description::Canonical(kind.base_type());
                 let properties = match kind {
@@ -839,8 +889,6 @@ impl<'a> CanonicalContainer<'a> {
 enum Description<'a> {
     /// A borrowed semantic description with canonical version selection.
     Canonical(&'a Datatype),
-    /// A borrowed canonical container.
-    Container(CanonicalContainer<'a>),
     /// A copied floating-point component of a semantic complex description.
     FloatingPoint(FloatingPointType),
     /// A checked description with retained versions and bounded nesting.
@@ -863,7 +911,8 @@ impl Description<'_> {
     /// # Errors
     ///
     /// Propagates errors from canonical [`datatype::serialize_datatype`] encoding or
-    /// retained-version [`DatatypeMessage::serialize`] encoding.
+    /// retained-version [`DatatypeMessage::serialize`] encoding. Returns
+    /// [`FormatError::Internal`] for a semantic reference kind without a legacy encoding.
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     fn encode_into(
@@ -872,24 +921,7 @@ impl Description<'_> {
         offset_width: OffsetWidth,
     ) -> Result<EncodedNode, FormatError> {
         let plan = match self {
-            Self::Canonical(datatype) => match datatype {
-                Datatype::VariableLength(kind) => {
-                    CanonicalContainer::VariableLength(kind).encoding_plan(offset_width)?
-                }
-                Datatype::Array {
-                    base_type,
-                    dimensions,
-                } => CanonicalContainer::Array {
-                    base_type,
-                    dimensions,
-                }
-                .encoding_plan(offset_width)?,
-                Datatype::Complex(complex) => {
-                    CanonicalContainer::Complex(complex).encoding_plan(offset_width)?
-                }
-                _ => return datatype::serialize_datatype_into(output, datatype, offset_width),
-            },
-            Self::Container(container) => container.encoding_plan(offset_width)?,
+            Self::Canonical(datatype) => EncodingPlan::canonical(datatype, offset_width)?,
             Self::FloatingPoint(datatype) => {
                 return Ok(
                     AtomicMessage::canonical(AtomicProperties::FloatingPoint(&datatype))?
@@ -900,6 +932,25 @@ impl Description<'_> {
         };
         let (properties, version, size) = match plan {
             EncodingPlan::Atomic(atomic) => return Ok(atomic.encode_into(output)),
+            EncodingPlan::Reference { size, kind } => {
+                let flags = match kind {
+                    ReferenceType::Object => [OBJECT_REFERENCE_KIND, 0, 0],
+                    ReferenceType::DatasetRegion => [REGION_REFERENCE_KIND, 0, 0],
+                    _ => {
+                        return Err(FormatError::Internal(
+                            "a semantic reference kind has no legacy encoding".into(),
+                        ));
+                    }
+                };
+                return Ok(datatype::append_header(
+                    output,
+                    REFERENCE_CLASS,
+                    DatatypeVersion::One.get(),
+                    flags,
+                    size,
+                )
+                .finish(output));
+            }
             EncodingPlan::Recursive {
                 properties,
                 version,
@@ -915,45 +966,46 @@ impl Description<'_> {
             size,
         );
         match properties {
-            ContainerProperties::Compound {
-                size,
-                members,
-                child_depth,
-            } => {
+            ContainerProperties::Compound { size, members } => {
                 let offset_bytes = datatype::offset_bytes_for_size(size);
                 let mut layout = CompoundLayout::new(size);
-                for (
-                    index,
-                    DatatypeMessageMember {
+                for index in 0..members.len() {
+                    let CompoundField {
                         name,
-                        byte_offset: offset,
+                        byte_offset,
                         datatype,
-                    },
-                ) in members.iter().enumerate()
-                {
-                    let offset = *offset;
+                    } = members.member(offset_width, size, index)?;
                     output.extend_from_slice(name.as_bytes());
                     output.push(0);
-                    output.extend_from_slice(offset.to_le_bytes().get(..offset_bytes).ok_or_else(
-                        || {
-                            FormatError::Internal(
-                                "a compound offset field exceeds eight bytes".into(),
-                            )
-                        },
-                    )?);
-                    let child = Self::Preserved {
-                        message: datatype,
-                        depth: child_depth,
-                    }
-                    .encode_into(output, offset_width)?;
+                    output.extend_from_slice(
+                        byte_offset
+                            .to_le_bytes()
+                            .get(..offset_bytes)
+                            .ok_or_else(|| {
+                                FormatError::Internal(
+                                    "a compound offset field exceeds eight bytes".into(),
+                                )
+                            })?,
+                    );
+                    let child = datatype.encode_into(output, offset_width)?;
                     version.include(&mut header, &child);
-                    layout.insert(members, index, child.type_size)?;
+                    if let CompoundMembers::Preserved {
+                        members,
+                        child_depth: _,
+                    } = members
+                    {
+                        layout.insert(members, index, child.type_size)?;
+                    }
                 }
             }
-            ContainerProperties::Enumeration { base_type, members } => {
+            ContainerProperties::Enumeration {
+                base_type,
+                members,
+                declared_size,
+            } => {
                 let child = base_type.encode_into(output, offset_width)?;
                 version.include(&mut header, &child);
-                header.type_size = child.type_size;
+                header.type_size = declared_size.unwrap_or(child.type_size);
                 for member in members {
                     let (name, _) = __private::enum_member_parts(member);
                     output.extend_from_slice(name.as_bytes());
@@ -1051,22 +1103,223 @@ enum EncodingPlan<'a> {
         properties: ContainerProperties<'a>,
         /// The policy for the containing description's version.
         version: VersionPolicy,
-        /// The initial element size, replaced after encoding array or enumeration children.
+        /// The element size written before child encoding.
+        /// For arrays and retained-version enumerations, this is a zero placeholder.
+        /// Their final header sizes are derived from encoded children.
         size: u32,
     },
+    /// A legacy reference encoded at datatype message version 1.
+    Reference {
+        /// The model's element size, retained in the encoded header.
+        size: u32,
+        /// The reference kind to encode in the legacy type field.
+        kind: &'a ReferenceType,
+    },
+}
+
+impl<'a> EncodingPlan<'a> {
+    /// Prepares one encoding step from a borrowed semantic description.
+    ///
+    /// Retains model sizes for compounds, enumerations, and legacy references. The layouts
+    /// are defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Propagates atomic property and canonical rank/count errors. Returns
+    /// [`FormatError::Internal`] for a datatype kind without a canonical encoding.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+    fn canonical(datatype: &'a Datatype, offset_width: OffsetWidth) -> Result<Self, FormatError> {
+        Ok(match datatype {
+            Datatype::FixedPoint(datatype) => Self::Atomic(AtomicMessage::canonical(
+                AtomicProperties::FixedPoint(datatype),
+            )?),
+            Datatype::FloatingPoint(datatype) => Self::Atomic(AtomicMessage::canonical(
+                AtomicProperties::FloatingPoint(datatype),
+            )?),
+            Datatype::Time(datatype) => {
+                Self::Atomic(AtomicMessage::canonical(AtomicProperties::Time(datatype))?)
+            }
+            Datatype::String {
+                size,
+                padding,
+                charset,
+            } => Self::Atomic(AtomicMessage::canonical(AtomicProperties::String {
+                size: *size,
+                padding,
+                charset,
+            })?),
+            Datatype::BitField(datatype) => Self::Atomic(AtomicMessage::canonical(
+                AtomicProperties::BitField(datatype),
+            )?),
+            Datatype::Opaque { size, tag } => {
+                Self::Atomic(AtomicMessage::canonical(AtomicProperties::Opaque {
+                    size: *size,
+                    tag,
+                })?)
+            }
+            Datatype::Compound { size, members } => {
+                return CanonicalContainer::Compound {
+                    size: *size,
+                    members,
+                }
+                .encoding_plan(offset_width);
+            }
+            Datatype::Reference { size, ref_type } => Self::Reference {
+                size: *size,
+                kind: ref_type,
+            },
+            Datatype::Enumeration {
+                size,
+                base_type,
+                members,
+            } => {
+                return CanonicalContainer::Enumeration {
+                    size: *size,
+                    base_type,
+                    members,
+                }
+                .encoding_plan(offset_width);
+            }
+            Datatype::VariableLength(kind) => {
+                return CanonicalContainer::VariableLength(kind).encoding_plan(offset_width);
+            }
+            Datatype::Array {
+                base_type,
+                dimensions,
+            } => {
+                return CanonicalContainer::Array {
+                    base_type,
+                    dimensions,
+                }
+                .encoding_plan(offset_width);
+            }
+            Datatype::Complex(complex) => {
+                return CanonicalContainer::Complex(complex).encoding_plan(offset_width);
+            }
+            _ => {
+                return Err(FormatError::Internal(
+                    "a semantic datatype has no canonical encoding".into(),
+                ));
+            }
+        })
+    }
+}
+
+/// Borrowed compound members with canonical or retained-version encoding rules.
+enum CompoundMembers<'a> {
+    /// Semantic members with model-size checks before child encoding.
+    Canonical(&'a [CompoundMember]),
+    /// Checked members with encoded-size checks after child encoding.
+    Preserved {
+        /// The members in declaration order.
+        members: &'a [DatatypeMessageMember],
+        /// The checked depth used for every member description.
+        child_depth: MessageDepth,
+    },
+}
+
+impl CompoundMembers<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Canonical(members) => members.len(),
+            Self::Preserved {
+                members,
+                child_depth: _,
+            } => members.len(),
+        }
+    }
+
+    /// Borrows one member and prepares its child encoding description.
+    ///
+    /// Canonical member ranges are checked against `size` using stored sizes at
+    /// `offset_width`. Retained-version ranges and overlaps are checked after child
+    /// encoding in [`Description::encode_into`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `index` is outside the member slice, or
+    /// [`FormatError::CompoundFieldOutOfBounds`] for a canonical member outside the element.
+    /// Propagates stored-size errors from [`datatype::stored_type_size`].
+    fn member(
+        &self,
+        offset_width: OffsetWidth,
+        size: u32,
+        index: usize,
+    ) -> Result<CompoundField<'_>, FormatError> {
+        match self {
+            Self::Canonical(members) => {
+                let member = members.get(index).ok_or_else(|| {
+                    FormatError::Internal(
+                        "canonical encoding refers to a missing compound member".into(),
+                    )
+                })?;
+                let (name, byte_offset, datatype) = __private::compound_member_parts(member);
+                let field_size = datatype::stored_type_size(datatype, offset_width)?;
+                if byte_offset
+                    .checked_add(u64::from(field_size))
+                    .is_none_or(|end| end > u64::from(size))
+                {
+                    return Err(FormatError::CompoundFieldOutOfBounds {
+                        name: name.into(),
+                        offset: byte_offset,
+                        field_size,
+                        compound_size: size,
+                    });
+                }
+                Ok(CompoundField {
+                    name,
+                    byte_offset,
+                    datatype: Description::Canonical(datatype),
+                })
+            }
+            Self::Preserved {
+                members,
+                child_depth,
+            } => {
+                let DatatypeMessageMember {
+                    name,
+                    byte_offset,
+                    datatype,
+                } = members.get(index).ok_or_else(|| {
+                    FormatError::Internal(
+                        "retained encoding refers to a missing compound member".into(),
+                    )
+                })?;
+                Ok(CompoundField {
+                    name,
+                    byte_offset: *byte_offset,
+                    datatype: Description::Preserved {
+                        message: datatype,
+                        depth: *child_depth,
+                    },
+                })
+            }
+        }
+    }
+}
+
+/// Borrowed fields and the child encoding policy of one compound member.
+struct CompoundField<'a> {
+    /// The member name without a wire terminator.
+    name: &'a str,
+    /// The byte offset from the start of the compound element.
+    byte_offset: u64,
+    /// The semantic or retained-version child description.
+    datatype: Description<'a>,
 }
 
 /// Recursive properties shared by canonical and retained-version encoding.
 enum ContainerProperties<'a> {
     Compound {
         size: u32,
-        members: &'a [DatatypeMessageMember],
-        /// The checked nesting depth of every compound member.
-        child_depth: MessageDepth,
+        members: CompoundMembers<'a>,
     },
     Enumeration {
         base_type: Description<'a>,
         members: &'a [EnumMember],
+        /// The supplied size for canonical models, or `None` to use the encoded parent's size.
+        declared_size: Option<u32>,
     },
     VariableLengthSequence {
         base_type: Description<'a>,
@@ -1483,3 +1736,16 @@ const ARRAY_RESERVED: u32 = 0xff_ffff;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const MEMBER_COUNT_RESERVED: u32 = 0xff_0000;
+
+/// The object-reference kind for datatype message versions 1 through 3.
+///
+/// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const OBJECT_REFERENCE_KIND: u8 = 0;
+/// The dataset-region reference kind for datatype message versions 1 through 3.
+///
+/// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const REGION_REFERENCE_KIND: u8 = 1;

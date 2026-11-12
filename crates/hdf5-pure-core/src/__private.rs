@@ -97,6 +97,30 @@ pub fn compound_member(name: String, byte_offset: u64, datatype: Datatype) -> Co
     }
 }
 
+/// Borrows a compound member's name and datatype and copies its byte offset.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::{__private, Datatype, FixedPointType};
+///
+/// let member = __private::compound_member(
+///     "field".into(), 4, Datatype::FixedPoint(FixedPointType::u16()),
+/// );
+/// let (name, offset, datatype) = __private::compound_member_parts(&member);
+/// assert_eq!(name, "field");
+/// assert_eq!(offset, 4);
+/// assert_eq!(datatype, &Datatype::FixedPoint(FixedPointType::u16()));
+/// ```
+pub fn compound_member_parts(member: &CompoundMember) -> (&str, u64, &Datatype) {
+    let CompoundMember {
+        name,
+        byte_offset,
+        datatype,
+    } = member;
+    (name, *byte_offset, datatype)
+}
+
 /// Constructs an enumeration member from fields read from a datatype message.
 pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
     EnumMember { name, value }

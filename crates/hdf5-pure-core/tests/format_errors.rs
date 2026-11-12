@@ -1,3 +1,6 @@
+use hdf5_pure_core::__private;
+use hdf5_pure_core::Datatype;
+use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
 
 #[rstest::rstest]
@@ -103,4 +106,14 @@ fn enumeration_diagnostics_preserve_their_fields(
     #[case] expected: &str,
 ) {
     assert_eq!(error.to_string(), expected);
+}
+
+#[test]
+fn compound_member_parts_borrow_the_complete_member() {
+    let datatype = Datatype::FixedPoint(FixedPointType::u32());
+    let member = __private::compound_member("field".into(), 3, datatype.clone());
+    let (name, offset, borrowed) = __private::compound_member_parts(&member);
+    assert_eq!((name, offset, borrowed), ("field", 3, &datatype));
+    assert_eq!(name.as_ptr(), member.name.as_ptr());
+    assert!(core::ptr::eq(borrowed, &member.datatype));
 }

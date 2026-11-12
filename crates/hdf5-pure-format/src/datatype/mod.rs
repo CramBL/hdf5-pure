@@ -26,7 +26,6 @@ use hdf5_pure_core::VariableLengthStringType;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
-use self::message::{AtomicMessage, AtomicProperties, CanonicalContainer};
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -505,7 +504,9 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 ///
 /// Writes fixed-point, time, string, bitfield, opaque, and little- or big-endian floating-point
 /// descriptions at version 1, and VAX floating-point descriptions at version 3.
-/// Uses version 1 as the minimum for variable-length descriptions and version 3 for arrays.
+/// Uses version 1 as the minimum for variable-length descriptions and version 3 for compounds,
+/// enumerations, and arrays. Writes object and dataset-region references at version 1, retaining
+/// their supplied sizes.
 /// Writes [`Datatype::Complex`] as class 11 in version 5, with one floating-point parent.
 /// Writes each containing datatype at a message version at least as high as its children's.
 /// Writes a nonempty opaque tag with a NUL terminator and zero padding to a multiple of eight
@@ -516,8 +517,9 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 /// Computes array sizes while encoding their base types.
 ///
 /// Canonical serialization accepts empty compound or enumeration member sets and zero
-/// array extents. The checked [`message::DatatypeMessage`] codec requires nonempty member
-/// sets and nonzero element sizes.
+/// array extents. Enumeration serialization retains the supplied model size and raw value
+/// bytes. The checked [`message::DatatypeMessage`] codec requires nonempty member sets,
+/// nonzero element sizes, and enumeration values matching their integer parent's width.
 ///
 /// # Errors
 ///
@@ -583,170 +585,8 @@ pub fn serialize_datatype_with_offset_width(
     offset_width: OffsetWidth,
 ) -> Result<Vec<u8>, FormatError> {
     let mut output = Vec::new();
-    serialize_datatype_into(&mut output, datatype, offset_width)?;
+    message::encode_canonical(&mut output, offset_width, datatype)?;
     Ok(output)
-}
-
-fn serialize_datatype_into(
-    output: &mut Vec<u8>,
-    datatype: &Datatype,
-    offset_width: OffsetWidth,
-) -> Result<EncodedNode, FormatError> {
-    let header = match datatype {
-        Datatype::FixedPoint(datatype) => {
-            return Ok(
-                AtomicMessage::canonical(AtomicProperties::FixedPoint(datatype))?
-                    .encode_into(output),
-            );
-        }
-        Datatype::FloatingPoint(datatype) => {
-            return Ok(
-                AtomicMessage::canonical(AtomicProperties::FloatingPoint(datatype))?
-                    .encode_into(output),
-            );
-        }
-        Datatype::Complex(complex) => {
-            return CanonicalContainer::Complex(complex).encode_into(output, offset_width);
-        }
-        Datatype::String {
-            size,
-            padding,
-            charset,
-        } => {
-            return Ok(AtomicMessage::canonical(AtomicProperties::String {
-                size: *size,
-                padding,
-                charset,
-            })?
-            .encode_into(output));
-        }
-        Datatype::VariableLength(kind) => {
-            return CanonicalContainer::VariableLength(kind).encode_into(output, offset_width);
-        }
-        Datatype::Compound { size, members } => {
-            let num = members.len().narrow_or_else::<u16, _>(|| {
-                FormatError::ValueTooLargeForRepresentation {
-                    value: members.len().to_u64(),
-                    target: "u16",
-                }
-            })?;
-            let bf0 = (num & 0xFF) as u8;
-            let bf1 = ((num >> 8) & 0xFF) as u8;
-            let mut header = append_header(
-                output,
-                COMPOUND_CLASS,
-                DATATYPE_VERSION_THREE,
-                [bf0, bf1, 0],
-                *size,
-            );
-            let ob = offset_bytes_for_size(*size);
-            for m in members {
-                let field_size = stored_type_size(&m.datatype, offset_width)?;
-                if m.byte_offset
-                    .checked_add(u64::from(field_size))
-                    .is_none_or(|end| end > u64::from(*size))
-                {
-                    return Err(FormatError::CompoundFieldOutOfBounds {
-                        name: m.name.clone(),
-                        offset: m.byte_offset,
-                        field_size,
-                        compound_size: *size,
-                    });
-                }
-                // Null-terminated name
-                output.extend_from_slice(m.name.as_bytes());
-                output.push(0);
-                // Byte offset (variable-width)
-                output.extend_from_slice(&m.byte_offset.to_le_bytes()[..ob]);
-                // Recursively serialize member datatype
-                header.append_child(output, &m.datatype, offset_width)?;
-            }
-            header
-        }
-        Datatype::Enumeration {
-            size,
-            base_type,
-            members,
-        } => {
-            let num = members.len().narrow_or_else::<u16, _>(|| {
-                FormatError::ValueTooLargeForRepresentation {
-                    value: members.len().to_u64(),
-                    target: "u16",
-                }
-            })?;
-            let bf0 = (num & 0xFF) as u8;
-            let bf1 = ((num >> 8) & 0xFF) as u8;
-            let mut header = append_header(
-                output,
-                ENUMERATION_CLASS,
-                DATATYPE_VERSION_THREE,
-                [bf0, bf1, 0],
-                *size,
-            );
-            // Base type
-            header.append_child(output, base_type, offset_width)?;
-            // All names (null-terminated)
-            for m in members {
-                output.extend_from_slice(m.name.as_bytes());
-                output.push(0);
-            }
-            // All values
-            for m in members {
-                output.extend_from_slice(&m.value);
-            }
-            header
-        }
-        Datatype::Array {
-            base_type,
-            dimensions,
-        } => {
-            return CanonicalContainer::Array {
-                base_type,
-                dimensions,
-            }
-            .encode_into(output, offset_width);
-        }
-        Datatype::Reference { size, ref_type } => {
-            let bf0 = match ref_type {
-                ReferenceType::Object => 0,
-                ReferenceType::DatasetRegion => 1,
-                #[expect(
-                    clippy::unreachable,
-                    reason = "the version-locked core crate defines only the two matched reference kinds"
-                )]
-                _ => unreachable!("core reference kind lacks an HDF5 encoder"),
-            };
-            append_header(
-                output,
-                REFERENCE_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, 0, 0],
-                *size,
-            )
-        }
-        Datatype::Time(datatype) => {
-            return Ok(
-                AtomicMessage::canonical(AtomicProperties::Time(datatype))?.encode_into(output)
-            );
-        }
-        Datatype::BitField(datatype) => {
-            return Ok(
-                AtomicMessage::canonical(AtomicProperties::BitField(datatype))?.encode_into(output),
-            );
-        }
-        Datatype::Opaque { size, tag } => {
-            return Ok(
-                AtomicMessage::canonical(AtomicProperties::Opaque { size: *size, tag })?
-                    .encode_into(output),
-            );
-        }
-        #[expect(
-            clippy::unreachable,
-            reason = "the version-locked core crate defines only the matched datatype variants"
-        )]
-        _ => unreachable!("core datatype variant lacks an HDF5 encoder"),
-    };
-    Ok(header.finish(output))
 }
 
 /// The effective version and element size of a completely serialized datatype.
@@ -765,19 +605,6 @@ struct DatatypeHeader {
 }
 
 impl DatatypeHeader {
-    // `H5O__dtype_decode_helper` checks that a container's datatype version is at least its
-    // highest child version (H5Odtype.c, HDF5 2.2.0).
-    fn append_child(
-        &mut self,
-        output: &mut Vec<u8>,
-        datatype: &Datatype,
-        offset_width: OffsetWidth,
-    ) -> Result<EncodedNode, FormatError> {
-        let child = serialize_datatype_into(output, datatype, offset_width)?;
-        self.version = self.version.max(child.version);
-        Ok(child)
-    }
-
     fn finish(self, output: &mut [u8]) -> EncodedNode {
         output[self.offset] =
             (output[self.offset] & DATATYPE_CLASS_MASK) | (self.version << DATATYPE_VERSION_SHIFT);

@@ -13,6 +13,7 @@ use hdf5_pure_core::ComplexType;
 use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FloatingPointType, MessageType, VariableLengthType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader, OffsetWidth,
 };
@@ -118,6 +119,19 @@ fn assert_native(
     );
     assert_eq!(message.serialize(width).unwrap(), bytes[..consumed]);
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
+    let semantic = shape.semantic(width, placement, big_endian);
+    let canonical = format::serialize_datatype_with_offset_width(&semantic, width).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    assert_eq!(consumed, canonical.len());
+    assert_eq!(parsed.to_datatype().unwrap(), semantic);
+    assert_eq!(
+        parsed.version(),
+        match shape {
+            #[cfg(feature = "__hdf5-2")]
+            Shape::Complex => DatatypeVersion::Five,
+            Shape::Sequence => DatatypeVersion::Three,
+        }
+    );
     if version == LibraryVersion::V110 {
         assert_eq!(message.version(), DatatypeVersion::Three);
     }
