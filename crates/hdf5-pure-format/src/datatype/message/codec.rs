@@ -1,4 +1,4 @@
-//! Datatype-message parsing and serialization with retained versions.
+//! Datatype-message parsing and serialization with canonical or retained versions.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -7,8 +7,9 @@ use core::str;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, DatatypeByteOrder, EnumMember, FixedPointType,
-    FloatingPointType, FormatError, MantissaNormalization, StringPadding, TimeType,
+    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, EnumMember,
+    FixedPointType, FloatingPointType, FormatError, MantissaNormalization, StringPadding, TimeType,
+    VariableLengthType,
 };
 
 use super::atomic::{AtomicMessage, AtomicProperties};
@@ -22,8 +23,8 @@ use crate::convert::Narrow;
 use crate::datatype::{
     self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
     COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
-    DATATYPE_CLASS_MASK, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, FIXED_POINT_CLASS,
-    FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
+    DATATYPE_CLASS_MASK, DATATYPE_VERSION_SHIFT, DatatypeHeader, ENUMERATION_CLASS, EncodedNode,
+    FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
     FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT,
     FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT,
     OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
@@ -578,7 +579,7 @@ impl DatatypeMessage {
     /// ```
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         let mut output = Vec::new();
-        self.encode_into(&mut output, offset_width, 0)?;
+        self.encode_into(&mut output, offset_width, MessageDepth::ROOT)?;
         Ok(output)
     }
 
@@ -586,84 +587,108 @@ impl DatatypeMessage {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`serialize`](Self::serialize). The nesting limit includes
-    /// `depth` enclosing descriptions.
+    /// Returns the errors of [`serialize`](Self::serialize). The nesting limit is tracked
+    /// by `depth`.
     fn encode_into(
         &self,
         output: &mut Vec<u8>,
         offset_width: OffsetWidth,
-        depth: u8,
+        depth: MessageDepth,
     ) -> Result<u32, FormatError> {
-        if depth >= MAX_MESSAGE_DEPTH {
-            return Err(FormatError::NestingDepthExceeded);
+        Description::Preserved {
+            message: self,
+            depth,
         }
+        .encode_into(output, offset_width)
+        .map(|node| node.type_size)
+    }
+
+    /// Prepares one encoding step with retained versions and a checked child depth.
+    ///
+    /// The property layouts are defined in "The Datatype Message" of the [format
+    /// specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`serialize`](Self::serialize), including
+    /// [`FormatError::NestingDepthExceeded`] if a child would exceed the depth limit.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+    fn encoding_plan(
+        &self,
+        offset_width: OffsetWidth,
+        depth: MessageDepth,
+    ) -> Result<EncodingPlan<'_>, FormatError> {
         let Self {
             version,
             properties,
         } = self;
         let properties = match properties {
             DatatypeProperties::FixedPoint(datatype) => {
-                return Ok(
-                    AtomicMessage::new(*version, AtomicProperties::FixedPoint(datatype))?
-                        .encode_into(output)
-                        .type_size,
-                );
+                return Ok(EncodingPlan::Atomic(AtomicMessage::new(
+                    *version,
+                    AtomicProperties::FixedPoint(datatype),
+                )?));
             }
             DatatypeProperties::FloatingPoint(datatype) => {
-                return Ok(AtomicMessage::new(
+                return Ok(EncodingPlan::Atomic(AtomicMessage::new(
                     *version,
                     AtomicProperties::FloatingPoint(datatype),
-                )?
-                .encode_into(output)
-                .type_size);
+                )?));
             }
             DatatypeProperties::Time(datatype) => {
-                return Ok(
-                    AtomicMessage::new(*version, AtomicProperties::Time(datatype))?
-                        .encode_into(output)
-                        .type_size,
-                );
+                return Ok(EncodingPlan::Atomic(AtomicMessage::new(
+                    *version,
+                    AtomicProperties::Time(datatype),
+                )?));
             }
             DatatypeProperties::String {
                 size,
                 padding,
                 charset,
             } => {
-                return Ok(AtomicMessage::new(
+                return Ok(EncodingPlan::Atomic(AtomicMessage::new(
                     *version,
                     AtomicProperties::String {
                         size: *size,
                         padding,
                         charset,
                     },
-                )?
-                .encode_into(output)
-                .type_size);
+                )?));
             }
             DatatypeProperties::BitField(datatype) => {
-                return Ok(
-                    AtomicMessage::new(*version, AtomicProperties::BitField(datatype))?
-                        .encode_into(output)
-                        .type_size,
-                );
+                return Ok(EncodingPlan::Atomic(AtomicMessage::new(
+                    *version,
+                    AtomicProperties::BitField(datatype),
+                )?));
             }
             DatatypeProperties::Opaque { size, tag } => {
-                return Ok(AtomicMessage::new(
+                return Ok(EncodingPlan::Atomic(AtomicMessage::new(
                     *version,
                     AtomicProperties::Opaque { size: *size, tag },
-                )?
-                .encode_into(output)
-                .type_size);
+                )?));
             }
             DatatypeProperties::Compound { size, members } => ContainerProperties::Compound {
                 size: *size,
                 members,
+                child_depth: depth.child()?,
             },
             DatatypeProperties::Enumeration { base_type, members } => {
-                ContainerProperties::Enumeration { base_type, members }
+                ContainerProperties::Enumeration {
+                    base_type: Description::Preserved {
+                        message: base_type,
+                        depth: depth.child()?,
+                    },
+                    members,
+                }
             }
             DatatypeProperties::VariableLengthSequence { base_type } => {
-                ContainerProperties::VariableLengthSequence { base_type }
+                ContainerProperties::VariableLengthSequence {
+                    base_type: Description::Preserved {
+                        message: base_type,
+                        depth: depth.child()?,
+                    },
+                }
             }
             DatatypeProperties::VariableLengthString {
                 padding,
@@ -672,78 +697,229 @@ impl DatatypeMessage {
             } => ContainerProperties::VariableLengthString {
                 padding,
                 charset,
-                base_type,
+                base_type: Description::Preserved {
+                    message: base_type,
+                    depth: depth.child()?,
+                },
             },
             DatatypeProperties::Array {
                 base_type,
                 dimensions,
             } => ContainerProperties::Array {
-                base_type,
+                base_type: Description::Preserved {
+                    message: base_type,
+                    depth: depth.child()?,
+                },
                 dimensions,
+                rank: u8::try_from(dimensions.len()).map_err(|_err| {
+                    FormatError::Internal("a checked array rank exceeds u8".into())
+                })?,
             },
-            DatatypeProperties::Complex { component } => ContainerProperties::Complex { component },
+            DatatypeProperties::Complex { component } => ContainerProperties::Complex {
+                component: Description::Preserved {
+                    message: component,
+                    depth: depth.child()?,
+                },
+            },
         };
         let size = match properties {
             ContainerProperties::Enumeration { .. } | ContainerProperties::Array { .. } => 0,
             _ => self.stored_size(offset_width)?,
         };
-        properties.encode_into(output, offset_width, depth, *version, size)
+        Ok(EncodingPlan::Recursive {
+            properties,
+            version: VersionPolicy::Preserve(*version),
+            size,
+        })
     }
 }
 
-/// Borrowed recursive properties of a checked [`DatatypeMessage`].
-enum ContainerProperties<'a> {
-    Compound {
-        size: u32,
-        members: &'a [DatatypeMessageMember],
-    },
-    Enumeration {
-        base_type: &'a DatatypeMessage,
-        members: &'a [EnumMember],
-    },
-    VariableLengthSequence {
-        base_type: &'a DatatypeMessage,
-    },
-    VariableLengthString {
-        padding: &'a StringPadding,
-        charset: &'a CharacterSet,
-        base_type: &'a DatatypeMessage,
-    },
+/// A borrowed variable-length, array, or complex description for canonical encoding.
+pub(in crate::datatype) enum CanonicalContainer<'a> {
+    /// A sequence or string with its semantic parent description.
+    VariableLength(&'a VariableLengthType),
+    /// An array with its semantic parent and dimensions.
     Array {
-        base_type: &'a DatatypeMessage,
+        /// The description of one array element.
+        base_type: &'a Datatype,
+        /// The extents in stored dimension order.
         dimensions: &'a [u32],
     },
-    Complex {
-        component: &'a DatatypeMessage,
-    },
+    /// A homogeneous rectangular complex description.
+    Complex(&'a ComplexType),
 }
 
-impl ContainerProperties<'_> {
-    /// Appends this description and its children at the selected message versions.
-    ///
-    /// Uses `size` for compound, variable-length, and complex descriptions. Derives array
-    /// and enumeration sizes from the encoded children at `offset_width`. The property
-    /// layouts are defined in "The Datatype Message" of the [format specification,
-    /// version 4.0][spec].
+impl<'a> CanonicalContainer<'a> {
+    /// Appends the canonical description and its children to `output`.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`DatatypeMessage::serialize`]. Child descriptions are encoded
-    /// at `depth + 1`.
+    /// Propagates errors from canonical [`datatype::serialize_datatype`] encoding.
+    pub(in crate::datatype) fn encode_into(
+        self,
+        output: &mut Vec<u8>,
+        offset_width: OffsetWidth,
+    ) -> Result<EncodedNode, FormatError> {
+        Description::Container(self).encode_into(output, offset_width)
+    }
+
+    /// Prepares borrowed properties at the canonical minimum version.
+    ///
+    /// Uses version 1 for variable-length, version 3 for array, and version 5 for complex
+    /// descriptions. These property layouts are defined in "The Datatype Message" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if the array rank exceeds
+    /// [`u8::MAX`].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+    fn encoding_plan(self, offset_width: OffsetWidth) -> Result<EncodingPlan<'a>, FormatError> {
+        let (properties, version, size) = match self {
+            Self::VariableLength(kind) => {
+                let base_type = Description::Canonical(kind.base_type());
+                let properties = match kind {
+                    VariableLengthType::Sequence { .. } => {
+                        ContainerProperties::VariableLengthSequence { base_type }
+                    }
+                    VariableLengthType::String(string) => {
+                        ContainerProperties::VariableLengthString {
+                            padding: string.padding(),
+                            charset: string.charset(),
+                            base_type,
+                        }
+                    }
+                };
+                (
+                    properties,
+                    DatatypeVersion::One,
+                    datatype::SEQUENCE_LENGTH_SIZE
+                        + u32::from(offset_width.get())
+                        + datatype::HEAP_INDEX_SIZE,
+                )
+            }
+            Self::Array {
+                base_type,
+                dimensions,
+            } => {
+                let rank = dimensions.len().narrow_or_else(|| {
+                    FormatError::ValueTooLargeForRepresentation {
+                        value: dimensions.len().to_u64(),
+                        target: "u8",
+                    }
+                })?;
+                (
+                    ContainerProperties::Array {
+                        base_type: Description::Canonical(base_type),
+                        dimensions,
+                        rank,
+                    },
+                    DatatypeVersion::Three,
+                    0,
+                )
+            }
+            Self::Complex(complex) => (
+                ContainerProperties::Complex {
+                    component: Description::FloatingPoint(complex.component()),
+                },
+                DatatypeVersion::Five,
+                complex.size().get(),
+            ),
+        };
+        Ok(EncodingPlan::Recursive {
+            properties,
+            version: VersionPolicy::Canonical(version),
+            size,
+        })
+    }
+}
+
+/// A semantic or retained-version description used by the shared encoder.
+enum Description<'a> {
+    /// A borrowed semantic description with canonical version selection.
+    Canonical(&'a Datatype),
+    /// A borrowed canonical container.
+    Container(CanonicalContainer<'a>),
+    /// A copied floating-point component of a semantic complex description.
+    FloatingPoint(FloatingPointType),
+    /// A checked description with retained versions and bounded nesting.
+    Preserved {
+        /// The description to encode.
+        message: &'a DatatypeMessage,
+        /// The number of enclosing descriptions on this path.
+        depth: MessageDepth,
+    },
+}
+
+impl Description<'_> {
+    /// Appends a canonical or retained-version description and all its children.
+    ///
+    /// Writes each description into `output`, applying its version policy and deriving
+    /// variable-length and array sizes at `offset_width`. Retained-version paths use
+    /// [`MessageDepth`]. The property layouts are defined in "The Datatype Message" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from canonical [`datatype::serialize_datatype`] encoding or
+    /// retained-version [`DatatypeMessage::serialize`] encoding.
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     fn encode_into(
         self,
         output: &mut Vec<u8>,
         offset_width: OffsetWidth,
-        depth: u8,
-        version: DatatypeVersion,
-        size: u32,
-    ) -> Result<u32, FormatError> {
-        let flags = self.class_flags()?;
-        let mut header = datatype::append_header(output, self.class(), version.get(), flags, size);
-        match self {
-            Self::Compound { size, members } => {
+    ) -> Result<EncodedNode, FormatError> {
+        let plan = match self {
+            Self::Canonical(datatype) => match datatype {
+                Datatype::VariableLength(kind) => {
+                    CanonicalContainer::VariableLength(kind).encoding_plan(offset_width)?
+                }
+                Datatype::Array {
+                    base_type,
+                    dimensions,
+                } => CanonicalContainer::Array {
+                    base_type,
+                    dimensions,
+                }
+                .encoding_plan(offset_width)?,
+                Datatype::Complex(complex) => {
+                    CanonicalContainer::Complex(complex).encoding_plan(offset_width)?
+                }
+                _ => return datatype::serialize_datatype_into(output, datatype, offset_width),
+            },
+            Self::Container(container) => container.encoding_plan(offset_width)?,
+            Self::FloatingPoint(datatype) => {
+                return Ok(
+                    AtomicMessage::canonical(AtomicProperties::FloatingPoint(&datatype))?
+                        .encode_into(output),
+                );
+            }
+            Self::Preserved { message, depth } => message.encoding_plan(offset_width, depth)?,
+        };
+        let (properties, version, size) = match plan {
+            EncodingPlan::Atomic(atomic) => return Ok(atomic.encode_into(output)),
+            EncodingPlan::Recursive {
+                properties,
+                version,
+                size,
+            } => (properties, version, size),
+        };
+        let flags = properties.class_flags()?;
+        let mut header = datatype::append_header(
+            output,
+            properties.class(),
+            version.initial().get(),
+            flags,
+            size,
+        );
+        match properties {
+            ContainerProperties::Compound {
+                size,
+                members,
+                child_depth,
+            } => {
                 let offset_bytes = datatype::offset_bytes_for_size(size);
                 let mut layout = CompoundLayout::new(size);
                 for (
@@ -765,12 +941,19 @@ impl ContainerProperties<'_> {
                             )
                         },
                     )?);
-                    let field_size = datatype.encode_into(output, offset_width, depth + 1)?;
-                    layout.insert(members, index, field_size)?;
+                    let child = Self::Preserved {
+                        message: datatype,
+                        depth: child_depth,
+                    }
+                    .encode_into(output, offset_width)?;
+                    version.include(&mut header, &child);
+                    layout.insert(members, index, child.type_size)?;
                 }
             }
-            Self::Enumeration { base_type, members } => {
-                header.type_size = base_type.encode_into(output, offset_width, depth + 1)?;
+            ContainerProperties::Enumeration { base_type, members } => {
+                let child = base_type.encode_into(output, offset_width)?;
+                version.include(&mut header, &child);
+                header.type_size = child.type_size;
                 for member in members {
                     let (name, _) = __private::enum_member_parts(member);
                     output.extend_from_slice(name.as_bytes());
@@ -781,30 +964,130 @@ impl ContainerProperties<'_> {
                     output.extend_from_slice(value);
                 }
             }
-            Self::VariableLengthSequence { base_type }
-            | Self::VariableLengthString { base_type, .. } => {
-                base_type.encode_into(output, offset_width, depth + 1)?;
+            ContainerProperties::VariableLengthSequence { base_type }
+            | ContainerProperties::VariableLengthString { base_type, .. } => {
+                let child = base_type.encode_into(output, offset_width)?;
+                version.include(&mut header, &child);
             }
-            Self::Array {
+            ContainerProperties::Array {
                 base_type,
                 dimensions,
+                rank,
             } => {
-                output.push(u8::try_from(dimensions.len()).map_err(|_err| {
-                    FormatError::Internal("a checked array rank exceeds u8".into())
-                })?);
+                output.push(rank);
                 for dimension in dimensions {
                     output.extend_from_slice(&dimension.to_le_bytes());
                 }
-                let base_size = base_type.encode_into(output, offset_width, depth + 1)?;
-                header.type_size = datatype::array_type_size(base_size, dimensions)?;
+                let child = base_type.encode_into(output, offset_width)?;
+                version.include(&mut header, &child);
+                header.type_size = datatype::array_type_size(child.type_size, dimensions)?;
             }
-            Self::Complex { component } => {
-                component.encode_into(output, offset_width, depth + 1)?;
+            ContainerProperties::Complex { component } => {
+                let child = component.encode_into(output, offset_width)?;
+                version.include(&mut header, &child);
             }
         }
-        Ok(header.finish(output).type_size)
+        Ok(header.finish(output))
+    }
+}
+
+/// The initial version and the policy for including child versions.
+enum VersionPolicy {
+    /// A canonical minimum raised to include higher child versions.
+    Canonical(DatatypeVersion),
+    /// The version checked when constructing the containing message.
+    Preserve(DatatypeVersion),
+}
+
+impl VersionPolicy {
+    /// Raises a canonical header's version to the child's version when higher.
+    ///
+    /// `H5O__dtype_encode_helper` in `H5Odtype.c`, HDF5 2.2.0, requires containing versions
+    /// to be at least their children's versions.
+    fn include(&self, header: &mut DatatypeHeader, child: &EncodedNode) {
+        if matches!(self, Self::Canonical(_)) {
+            header.version = header.version.max(child.version);
+        }
     }
 
+    /// Returns the version written before encoding children.
+    fn initial(&self) -> DatatypeVersion {
+        match self {
+            Self::Preserve(version) | Self::Canonical(version) => *version,
+        }
+    }
+}
+
+/// The number of enclosing descriptions on a retained-version path, less than 64.
+#[derive(Clone, Copy)]
+struct MessageDepth(u8);
+
+impl MessageDepth {
+    /// Returns the depth of a child description within the checked nesting limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::NestingDepthExceeded`] if the child would exceed 64 descriptions
+    /// on one parent chain, including the outer description.
+    fn child(self) -> Result<Self, FormatError> {
+        self.0
+            .checked_add(1)
+            .filter(|&depth| depth < MAX_MESSAGE_DEPTH)
+            .map(Self)
+            .ok_or(FormatError::NestingDepthExceeded)
+    }
+
+    /// The depth of the outer description.
+    const ROOT: Self = Self(0);
+}
+
+/// The properties, version policy, and size needed to encode one description.
+enum EncodingPlan<'a> {
+    /// An atomic description ready for encoding.
+    Atomic(AtomicMessage<'a>),
+    /// Recursive properties with child descriptions prepared for encoding.
+    Recursive {
+        /// The borrowed properties and child descriptions.
+        properties: ContainerProperties<'a>,
+        /// The policy for the containing description's version.
+        version: VersionPolicy,
+        /// The initial element size, replaced after encoding array or enumeration children.
+        size: u32,
+    },
+}
+
+/// Recursive properties shared by canonical and retained-version encoding.
+enum ContainerProperties<'a> {
+    Compound {
+        size: u32,
+        members: &'a [DatatypeMessageMember],
+        /// The checked nesting depth of every compound member.
+        child_depth: MessageDepth,
+    },
+    Enumeration {
+        base_type: Description<'a>,
+        members: &'a [EnumMember],
+    },
+    VariableLengthSequence {
+        base_type: Description<'a>,
+    },
+    VariableLengthString {
+        padding: &'a StringPadding,
+        charset: &'a CharacterSet,
+        base_type: Description<'a>,
+    },
+    Array {
+        base_type: Description<'a>,
+        dimensions: &'a [u32],
+        /// The dimension count checked to fit the rank field.
+        rank: u8,
+    },
+    Complex {
+        component: Description<'a>,
+    },
+}
+
+impl ContainerProperties<'_> {
     fn class(&self) -> u8 {
         match self {
             Self::Compound { .. } => COMPOUND_CLASS,
@@ -817,7 +1100,7 @@ impl ContainerProperties<'_> {
         }
     }
 
-    /// Encodes the three class-specific flag bytes from checked recursive properties.
+    /// Encodes the three class-specific flag bytes from recursive properties.
     ///
     /// The fields are defined in "The Datatype Message" of the [format specification,
     /// version 4.0][spec].

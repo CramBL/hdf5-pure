@@ -6,12 +6,14 @@ use hdf5::globals;
 use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::File;
 #[cfg(feature = "__hdf5-2")]
-use hdf5_pure_core::ComplexType;
+use hdf5_pure_core::{ComplexType, MantissaNormalization};
 use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FloatingPointType, MessageType, VariableLengthType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader, OffsetWidth,
+    AccessMode, DatatypeMessage, DatatypeProperties, DatatypeVersion, FormatWidths, ObjectHeader,
+    OffsetWidth,
 };
 use hdf5_sys::h5i::hid_t;
 use hdf5_sys::h5t;
@@ -60,9 +62,13 @@ fn datatype_array_complex_codecs_preserve_native_arrays(
 
 #[cfg(feature = "__hdf5-2")]
 #[rstest]
-fn datatype_array_complex_codecs_preserve_native_complex(#[values(false, true)] big_endian: bool) {
+#[case::little(ComplexParent::Little)]
+#[case::big(ComplexParent::Big)]
+#[case::vax(ComplexParent::Vax)]
+fn datatype_array_complex_codecs_preserve_native_complex(#[case] parent: ComplexParent) {
     let _guard = lock::libhdf5_guard();
-    let parent = native_float(big_endian);
+    let component = parent.semantic();
+    let parent = parent.native();
     let datatype = hdf5::sync::sync(|| {
         // SAFETY: The parent is a live floating-point type and the call returns a new ID.
         owned(unsafe { h5t::H5Tcomplex_create(parent.id()) })
@@ -72,7 +78,7 @@ fn datatype_array_complex_codecs_preserve_native_complex(#[values(false, true)] 
         OffsetWidth::Eight,
         LibraryVersion::latest(),
         datatype,
-        Datatype::Complex(ComplexType::new(component(big_endian)).unwrap()),
+        Datatype::Complex(ComplexType::new(component).unwrap()),
     );
 }
 
@@ -132,12 +138,83 @@ fn assert_native(
     assert_eq!(message.to_datatype().unwrap(), semantic);
     assert_eq!(message.serialize(width).unwrap(), bytes[..consumed]);
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
+    let canonical = format::serialize_datatype_with_offset_width(&semantic, width).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    assert_eq!(consumed, canonical.len());
+    assert_eq!(parsed.to_datatype().unwrap(), semantic);
+    match parsed.properties() {
+        DatatypeProperties::Array {
+            base_type,
+            dimensions: _,
+        } => {
+            assert_eq!(parsed.version(), DatatypeVersion::Three);
+            assert_eq!(base_type.version(), DatatypeVersion::One);
+        }
+        DatatypeProperties::Complex { component } => {
+            assert_eq!(parsed.version(), DatatypeVersion::Five);
+            let DatatypeProperties::FloatingPoint(properties) = component.properties() else {
+                panic!("{component:?}")
+            };
+            assert_eq!(
+                component.version(),
+                if properties.byte_order() == DatatypeByteOrder::Vax {
+                    DatatypeVersion::Three
+                } else {
+                    DatatypeVersion::One
+                }
+            );
+        }
+        _ => panic!("{parsed:?}"),
+    }
     if matches!(semantic, Datatype::Complex(_)) {
         assert_eq!(message.version(), DatatypeVersion::Five);
     } else if version == LibraryVersion::V110 {
         assert_eq!(message.version(), DatatypeVersion::Three);
     }
     drop(pure);
+}
+
+#[cfg(feature = "__hdf5-2")]
+#[derive(Clone, Copy, Debug)]
+enum ComplexParent {
+    Big,
+    Little,
+    Vax,
+}
+
+#[cfg(feature = "__hdf5-2")]
+impl ComplexParent {
+    fn native(self) -> NativeDatatype {
+        match self {
+            Self::Big => native_float(true),
+            Self::Little => native_float(false),
+            Self::Vax => hdf5::sync::sync(|| {
+                // SAFETY: The predefined VAX datatype is live and the call returns a new ID.
+                owned(unsafe { h5t::H5Tcopy(*globals::H5T_VAX_F64) })
+            }),
+        }
+    }
+
+    fn semantic(self) -> FloatingPointType {
+        match self {
+            Self::Big => component(true),
+            Self::Little => component(false),
+            Self::Vax => FloatingPointType::new(
+                8,
+                DatatypeByteOrder::Vax,
+                MantissaNormalization::ImpliedLeadingOne,
+                63,
+                0,
+                64,
+                52,
+                11,
+                0,
+                52,
+                VAX_BIAS,
+            )
+            .unwrap(),
+        }
+    }
 }
 
 fn native_float(big_endian: bool) -> NativeDatatype {
@@ -165,3 +242,7 @@ fn owned(id: hid_t) -> NativeDatatype {
     // SAFETY: Every caller transfers a newly created datatype ID exactly once.
     unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }
+
+/// The VAX exponent bias assigned by `H5T_INIT_TYPE_DOUBLEVAX_CORE` (`H5T.c`, HDF5 2.2.0).
+#[cfg(feature = "__hdf5-2")]
+const VAX_BIAS: u32 = 0x0401;
