@@ -1068,6 +1068,11 @@ pub enum FormatError {
         /// The encoded character-set code.
         charset: u8,
     },
+    /// A variable-length datatype descriptor has a size other than 10, 12, or 16 bytes.
+    InvalidVariableLengthSize {
+        /// The descriptor size from the datatype message header, in bytes.
+        size: u32,
+    },
     /// A variable-length datatype has a subtype other than sequence (0) or string (1).
     ///
     /// Contains the encoded subtype.
@@ -2443,6 +2448,9 @@ impl fmt::Display for FormatError {
                     f,
                     "variable-length sequence has string metadata: padding {padding}, character set {charset}"
                 )
+            }
+            Self::InvalidVariableLengthSize { size } => {
+                write!(f, "invalid variable-length datatype descriptor size {size}")
             }
             Self::InvalidVariableLengthSubtype(subtype) => {
                 write!(f, "unsupported variable-length datatype subtype: {subtype}")
