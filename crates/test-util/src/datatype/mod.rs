@@ -21,6 +21,42 @@ pub fn variable_length(version: u8, flags: [u8; 3], size: u32, parent: &[u8]) ->
     bytes
 }
 
+/// Builds an array message using the property layout of versions 3 through 5.
+///
+/// Accepts unchecked header and parent encodings. `rank` and `dimensions` are independent
+/// for malformed fixtures. The layout is defined in "The Datatype Message" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub fn array(
+    version: u8,
+    flags: [u8; 3],
+    size: u32,
+    rank: u8,
+    dimensions: &[u32],
+    parent: &[u8],
+) -> Vec<u8> {
+    let mut bytes = header(Class::ARRAY, version, flags, size);
+    bytes.push(rank);
+    for dimension in dimensions {
+        bytes.extend_from_slice(&dimension.to_le_bytes());
+    }
+    bytes.extend_from_slice(parent);
+    bytes
+}
+
+/// Builds a complex message with unchecked header fields and parent bytes.
+///
+/// Uses the version 5 complex property layout defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec]. Accepts other versions for malformed fixtures.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub fn complex(version: u8, flags: [u8; 3], size: u32, parent: &[u8]) -> Vec<u8> {
+    let mut bytes = header(Class::COMPLEX, version, flags, size);
+    bytes.extend_from_slice(parent);
+    bytes
+}
+
 /// A little-endian IEEE 754 double, laid out as the reference library writes
 /// one.
 pub fn f64_le() -> Vec<u8> {
@@ -75,6 +111,12 @@ impl Class {
     pub const ENUMERATED: Self = Self(8);
     pub const VARIABLE_LENGTH: Self = Self(9);
     pub const ARRAY: Self = Self(10);
+    /// The native complex class code for datatype message version 5.
+    ///
+    /// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+    pub const COMPLEX: Self = Self(11);
 }
 
 /// The version of the shared message reference the reference library writes

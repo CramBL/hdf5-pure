@@ -4,20 +4,21 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType, FormatError,
-    MantissaNormalization, StringPadding, TimeType,
+    BitFieldType, CharacterSet, ComplexType, DatatypeByteOrder, FixedPointType, FloatingPointType,
+    FormatError, MantissaNormalization, StringPadding, TimeType,
 };
 
 use super::{DatatypeMessage, DatatypeProperties, DatatypeVersion, FloatingPointByteOrder};
 use crate::bytes::Fields;
 use crate::datatype::{
-    self, BIT_FIELD_CLASS, DATATYPE_CLASS_MASK, DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT,
-    FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
-    FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT,
-    FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT,
-    OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
-    VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
-    VariableLengthMetadata,
+    self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
+    COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, DATATYPE_CLASS_MASK,
+    DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT,
+    FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
+    FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
+    FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT, OPAQUE_CLASS, OpaqueTagWire,
+    STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS, VARIABLE_LENGTH_PADDING_SHIFT,
+    VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING, VariableLengthMetadata,
 };
 use crate::width::OffsetWidth;
 
@@ -25,13 +26,16 @@ impl DatatypeMessage {
     /// Parses a datatype message and returns the number of bytes consumed.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
-    /// descriptions at versions 1 through 5. Each variable-length parent retains its own version,
-    /// at most the containing description's version. VAX order requires version 3 or later.
-    /// Floating-point order and reserved bits are checked through [`FloatingPointByteOrder::parse`].
+    /// descriptions at versions 1 through 5, arrays at versions 3 through 5, and homogeneous
+    /// rectangular complex descriptions at version 5. Each nested description retains its own
+    /// version, at most the containing description's version. Complex parents are floating-point
+    /// descriptions. VAX order requires version 3 or later. Floating-point order and reserved
+    /// bits are checked through [`FloatingPointByteOrder::parse`].
     ///
     /// Variable-length descriptor sizes must be 10, 12, or 16 bytes, corresponding to heap
-    /// address widths of 2, 4, or 8 bytes. The nesting limit is 64 descriptions on one parent
-    /// chain, including the outer description.
+    /// address widths of 2, 4, or 8 bytes. The parser checks array element sizes against the
+    /// recorded parent size and dimensions, and complex sizes against twice the component size.
+    /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
     /// The writer uses terminated tags, as described in [`serialize`](Self::serialize).
@@ -44,13 +48,24 @@ impl DatatypeMessage {
     /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`, and
     /// [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
-    /// if reserved atomic class bits are set.
+    /// if reserved atomic or array class bits are set. Returns [`FormatError::InvalidDatatypeVersion`]
+    /// for array versions 1 or 2, complex versions 1 through 4, or a complex parent version
+    /// outside `1..=5`.
     ///
     /// Returns [`FormatError::InvalidVariableLengthSize`] for an unsupported descriptor size,
     /// [`FormatError::DatatypeChildVersion`] if a parent has a higher version than its container,
     /// and [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting limit.
+    /// Returns [`FormatError::InvalidDatatypeSize`] if an array size differs from its properties,
+    /// and [`FormatError::LengthTooLarge`] if the array dimension product exceeds the size field.
+    ///
+    /// Returns [`FormatError::InvalidComplexFlags`] for reserved complex class bits,
+    /// [`FormatError::UnsupportedComplexForm`] for heterogeneous or non-rectangular descriptions,
+    /// [`FormatError::InvalidComplexParent`] for a non-floating parent, and
+    /// [`FormatError::InvalidComplexSize`] if the declared size differs from twice the component
+    /// size. Returns [`FormatError::InvalidComplexParentFlags`] for a floating-point parent's
+    /// reserved class bits, reserved byte order, or VAX order before version 3.
     /// Propagates numeric layout, floating-point byte-order, string metadata, opaque-tag,
-    /// variable-length metadata, and element-size errors.
+    /// variable-length metadata, component-size, and element-size errors.
     ///
     /// # Examples
     ///
@@ -68,21 +83,34 @@ impl DatatypeMessage {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     pub fn parse(data: &[u8]) -> Result<(Self, usize), FormatError> {
-        Self::parse_at(data, 0, 0)
+        let Parsed {
+            message,
+            end,
+            size: _,
+        } = Self::parse_at(data, Context::Description, 0, 0)?;
+        Ok((message, end))
     }
 
-    /// Parses a description at `position`, returning its end position within `data`.
+    /// Parses a description and its declared element size at `position`.
+    ///
+    /// The returned end position is relative to `data`. Complex-parent class checks and
+    /// diagnostics are applied according to `context`.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`parse`](Self::parse), with [`FormatError::UnexpectedEof`]
-    /// positions relative to `data`. The nesting limit includes `depth` enclosing descriptions.
-    fn parse_at(data: &[u8], position: usize, depth: u8) -> Result<(Self, usize), FormatError> {
+    /// Returns the errors of [`parse`](Self::parse). The nesting limit includes `depth`
+    /// enclosing descriptions.
+    fn parse_at(
+        data: &[u8],
+        context: Context,
+        position: usize,
+        depth: u8,
+    ) -> Result<Parsed, FormatError> {
         if depth >= MAX_MESSAGE_DEPTH {
             return Err(FormatError::NestingDepthExceeded);
         }
         let mut fields = Fields::new(data, position);
-        let header = Header::parse(&mut fields)?;
+        let header = Header::parse(&mut fields, context)?;
         let (properties, consumed) = match header.class {
             FIXED_POINT_CLASS => {
                 header.reserved(FIXED_RESERVED)?;
@@ -100,7 +128,8 @@ impl DatatypeMessage {
                 (DatatypeProperties::FixedPoint(datatype), fields.pos())
             }
             FLOATING_POINT_CLASS => {
-                let order = FloatingPointByteOrder::parse(header.version, header.flags)?;
+                let order = FloatingPointByteOrder::parse(header.version, header.flags)
+                    .map_err(|error| context.float_error(&header, error))?;
                 let normalization = match (header.flags[0] >> FLOAT_NORMALIZATION_SHIFT)
                     & FLOAT_NORMALIZATION_MASK
                 {
@@ -186,7 +215,11 @@ impl DatatypeMessage {
             VARIABLE_LENGTH_CLASS => {
                 let metadata = datatype::parse_variable_length_metadata(header.flags)?;
                 descriptor_width(header.size)?;
-                let (base_type, consumed) = Self::parse_at(data, fields.pos(), depth + 1)?;
+                let Parsed {
+                    message: base_type,
+                    end: consumed,
+                    size: _,
+                } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
                 let base_type = Box::new(base_type);
                 let properties = match metadata {
                     VariableLengthMetadata::Sequence => {
@@ -202,17 +235,89 @@ impl DatatypeMessage {
                 };
                 (properties, consumed)
             }
+            ARRAY_CLASS => {
+                header
+                    .version
+                    .for_class(ARRAY_CLASS, DatatypeVersion::Three)?;
+                header.reserved(ARRAY_RESERVED)?;
+                let rank = fields.u8()?;
+                let dimensions = (0..rank)
+                    .map(|_| fields.u32())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let Parsed {
+                    message: base_type,
+                    end,
+                    size: base_size,
+                } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
+                let expected = datatype::array_type_size(base_size, &dimensions)?;
+                if header.size != expected {
+                    return Err(FormatError::InvalidDatatypeSize {
+                        class: ARRAY_CLASS,
+                        size: header.size,
+                        expected,
+                    });
+                }
+                (
+                    DatatypeProperties::Array {
+                        base_type: Box::new(base_type),
+                        dimensions,
+                    },
+                    end,
+                )
+            }
+            COMPLEX_CLASS => {
+                header
+                    .version
+                    .for_class(COMPLEX_CLASS, DatatypeVersion::Five)?;
+                let flags = header.flag_bits();
+                if flags & COMPLEX_RESERVED_MASK != 0 {
+                    return Err(FormatError::InvalidComplexFlags(flags));
+                }
+                let homogeneous = header.flags[0] & COMPLEX_HOMOGENEOUS_BIT != 0;
+                let form = (header.flags[0] & COMPLEX_FORM_MASK) >> COMPLEX_FORM_SHIFT;
+                if !homogeneous || form != COMPLEX_RECTANGULAR_FORM {
+                    return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
+                }
+                let Parsed {
+                    message: parent,
+                    end,
+                    size: _,
+                } = Self::parse_at(data, Context::ComplexParent, fields.pos(), depth + 1)?;
+                let DatatypeProperties::FloatingPoint(component) = parent.properties() else {
+                    return Err(FormatError::Internal(
+                        "a checked complex parent is not floating point".into(),
+                    ));
+                };
+                let complex = ComplexType::new(*component)?;
+                if header.size != complex.size().get() {
+                    return Err(FormatError::InvalidComplexSize {
+                        size: header.size,
+                        component_size: component.size().get(),
+                    });
+                }
+                (
+                    DatatypeProperties::Complex {
+                        component: Box::new(parent),
+                    },
+                    end,
+                )
+            }
             class => return Err(FormatError::InvalidDatatypeClass(class)),
         };
-        Ok((Self::new(header.version, properties)?, consumed))
+        Ok(Parsed {
+            message: Self::new(header.version, properties)?,
+            end: consumed,
+            size: header.size,
+        })
     }
 
     /// Serializes a datatype description with its retained message versions.
     ///
     /// Serializes the classes accepted by [`parse`](Self::parse). The writer derives each
     /// variable-length descriptor size from `offset_width`, including nested descriptions.
-    /// Atomic element sizes are independent of that width. The nesting limit is 64 descriptions
-    /// on one parent chain, including the outer description.
+    /// Array sizes are derived from the encoded parent size and dimensions at that width.
+    /// Atomic element sizes are independent of it. The nesting limit is 64 descriptions on one
+    /// parent chain, including the outer description.
     ///
     /// The writer appends a NUL terminator to each nonempty opaque tag and pads its property
     /// to a multiple of eight bytes. The maximum writable logical tag length is 247 bytes.
@@ -223,8 +328,9 @@ impl DatatypeMessage {
     /// [`FormatError::OpaqueTagTooLong`] for a tag longer than 247 bytes, and
     /// [`FormatError::InvalidOpaqueTagByte`] for a tag containing a NUL byte.
     /// Returns [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting
-    /// limit. Propagates errors from checking floating-point version/order compatibility and
-    /// calculating the stored element size.
+    /// limit, and [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte size
+    /// field at `offset_width`. Propagates errors from checking floating-point version/order
+    /// compatibility and calculating the stored element size.
     ///
     /// # Examples
     ///
@@ -269,13 +375,45 @@ impl DatatypeMessage {
     /// assert_eq!(consumed, bytes.len());
     /// # Ok::<(), FormatError>(())
     /// ```
+    ///
+    /// Arrays and complex descriptions retain their component versions:
+    ///
+    /// ```
+    /// use hdf5_pure_core::{DatatypeByteOrder, FloatingPointType, FormatError};
+    /// use hdf5_pure_format::__private::{
+    ///     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    /// };
+    ///
+    /// let component = DatatypeMessage::new(
+    ///     DatatypeVersion::Two,
+    ///     DatatypeProperties::FloatingPoint(FloatingPointType::ieee754_binary32(
+    ///         DatatypeByteOrder::BigEndian,
+    ///     )),
+    /// )?;
+    /// let complex = DatatypeMessage::new(
+    ///     DatatypeVersion::Five,
+    ///     DatatypeProperties::Complex { component: Box::new(component) },
+    /// )?;
+    /// let array = DatatypeMessage::new(
+    ///     DatatypeVersion::Five,
+    ///     DatatypeProperties::Array { base_type: Box::new(complex), dimensions: vec![2] },
+    /// )?;
+    /// let bytes = array.serialize(OffsetWidth::Eight)?;
+    /// assert_eq!(&bytes[..8], &[0x5a, 0, 0, 0, 16, 0, 0, 0]);
+    /// assert_eq!(bytes[13], 0x5b);
+    /// assert_eq!(bytes[21], 0x21);
+    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// assert_eq!(parsed, array);
+    /// assert_eq!(consumed, bytes.len());
+    /// # Ok::<(), FormatError>(())
+    /// ```
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
         let mut output = Vec::new();
         self.encode_into(&mut output, offset_width, 0)?;
         Ok(output)
     }
 
-    /// Appends this description and its nested parents to `output`.
+    /// Appends this description and its nested parents, returning the stored element size.
     ///
     /// # Errors
     ///
@@ -286,15 +424,23 @@ impl DatatypeMessage {
         output: &mut Vec<u8>,
         offset_width: OffsetWidth,
         depth: u8,
-    ) -> Result<(), FormatError> {
+    ) -> Result<u32, FormatError> {
         if depth >= MAX_MESSAGE_DEPTH {
             return Err(FormatError::NestingDepthExceeded);
         }
         let flags = self.class_flags()?;
         let start = output.len();
-        output.push(self.properties.class() | (self.version.get() << DATATYPE_VERSION_SHIFT));
-        output.extend_from_slice(&flags);
-        output.extend_from_slice(&self.stored_size(offset_width)?.to_le_bytes());
+        let size = match self.properties {
+            DatatypeProperties::Array { .. } => 0,
+            _ => self.stored_size(offset_width)?,
+        };
+        let mut header = datatype::append_header(
+            output,
+            self.properties.class(),
+            self.version.get(),
+            flags,
+            size,
+        );
         match &self.properties {
             DatatypeProperties::FixedPoint(datatype) => {
                 output.extend_from_slice(&datatype.layout().bit_offset().to_le_bytes());
@@ -328,9 +474,25 @@ impl DatatypeMessage {
             | DatatypeProperties::VariableLengthString { base_type, .. } => {
                 base_type.encode_into(output, offset_width, depth + 1)?;
             }
+            DatatypeProperties::Array {
+                base_type,
+                dimensions,
+            } => {
+                output.push(u8::try_from(dimensions.len()).map_err(|_err| {
+                    FormatError::Internal("a checked array rank exceeds u8".into())
+                })?);
+                for dimension in dimensions {
+                    output.extend_from_slice(&dimension.to_le_bytes());
+                }
+                let base_size = base_type.encode_into(output, offset_width, depth + 1)?;
+                header.type_size = datatype::array_type_size(base_size, dimensions)?;
+            }
+            DatatypeProperties::Complex { component } => {
+                component.encode_into(output, offset_width, depth + 1)?;
+            }
             properties => return Err(FormatError::InvalidDatatypeClass(properties.class())),
         }
-        Ok(())
+        Ok(header.finish(output).type_size)
     }
 
     /// Encodes the three class-specific flag bytes.
@@ -402,6 +564,8 @@ impl DatatypeMessage {
                 charset_code(charset),
                 0,
             ],
+            DatatypeProperties::Array { .. } => [0; 3],
+            DatatypeProperties::Complex { .. } => [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
             properties => return Err(FormatError::InvalidDatatypeClass(properties.class())),
         })
     }
@@ -422,11 +586,22 @@ impl Header {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete, or
     /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`.
-    fn parse(fields: &mut Fields<'_>) -> Result<Self, FormatError> {
+    /// In [`Context::ComplexParent`], returns [`FormatError::InvalidComplexParent`] for a
+    /// non-floating class and [`FormatError::InvalidDatatypeVersion`] for an unsupported version.
+    fn parse(fields: &mut Fields<'_>, context: Context) -> Result<Self, FormatError> {
         let class_and_version = fields.u8()?;
+        let class = class_and_version & DATATYPE_CLASS_MASK;
+        if context == Context::ComplexParent && class != FLOATING_POINT_CLASS {
+            return Err(FormatError::InvalidComplexParent { class });
+        }
+        let version = class_and_version >> DATATYPE_VERSION_SHIFT;
+        let version = DatatypeVersion::try_from(version).map_err(|error| match context {
+            Context::ComplexParent => FormatError::InvalidDatatypeVersion { class, version },
+            Context::Description => error,
+        })?;
         Ok(Self {
-            class: class_and_version & DATATYPE_CLASS_MASK,
-            version: DatatypeVersion::try_from(class_and_version >> DATATYPE_VERSION_SHIFT)?,
+            class,
+            version,
             flags: fields.array()?,
             size: fields.u32()?,
         })
@@ -438,9 +613,7 @@ impl Header {
     ///
     /// Returns [`FormatError::InvalidDatatypeFlags`] if any masked bit is set.
     fn reserved(&self, mask: u32) -> Result<(), FormatError> {
-        let flags = u32::from(self.flags[0])
-            | (u32::from(self.flags[1]) << 8)
-            | (u32::from(self.flags[2]) << 16);
+        let flags = self.flag_bits();
         if flags & mask != 0 {
             return Err(FormatError::InvalidDatatypeFlags {
                 class: self.class,
@@ -449,6 +622,46 @@ impl Header {
             });
         }
         Ok(())
+    }
+
+    /// Returns the complete 24-bit class bit field.
+    fn flag_bits(&self) -> u32 {
+        u32::from_le_bytes([self.flags[0], self.flags[1], self.flags[2], 0])
+    }
+}
+
+/// A checked description with its source end position and declared element size.
+struct Parsed {
+    /// The description, including retained versions at each node.
+    message: DatatypeMessage,
+    /// The first byte after this description within the input slice.
+    end: usize,
+    /// The element size from the source header, in bytes.
+    size: u32,
+}
+
+/// The role of a description in a recursive parse.
+#[derive(Clone, Copy, PartialEq)]
+enum Context {
+    /// A floating-point parent within a complex description.
+    ComplexParent,
+    /// A description without a required parent class.
+    Description,
+}
+
+impl Context {
+    /// Maps a floating-point flag error to the diagnostic for this context.
+    ///
+    /// Returns [`FormatError::InvalidComplexParentFlags`] for [`Self::ComplexParent`],
+    /// using the header's version and flags. Returns `error` for [`Self::Description`].
+    fn float_error(self, header: &Header, error: FormatError) -> FormatError {
+        match self {
+            Self::ComplexParent => FormatError::InvalidComplexParentFlags {
+                version: header.version.get(),
+                flags: header.flag_bits(),
+            },
+            Self::Description => error,
+        }
     }
 }
 
@@ -592,3 +805,11 @@ const UTF8_CHARSET: u8 = 1;
 
 /// The maximum number of descriptions on a parsing or serialization path.
 const MAX_MESSAGE_DEPTH: u8 = 64;
+
+/// The mask for reserved array class bits 0 through 23.
+///
+/// Array descriptions at versions 3 through 5 have no class flags, as defined in "The
+/// Datatype Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const ARRAY_RESERVED: u32 = 0xff_ffff;
