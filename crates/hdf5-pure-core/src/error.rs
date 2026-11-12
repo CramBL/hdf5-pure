@@ -603,6 +603,15 @@ pub enum FormatError {
     ///
     /// Contains the rejected version number.
     InvalidDatatypeMessageVersion(u8),
+    /// A datatype's declared element size differs from the size derived from its properties.
+    InvalidDatatypeSize {
+        /// The datatype class code.
+        class: u8,
+        /// The declared element size, in bytes.
+        size: u32,
+        /// The element size derived from the properties, in bytes.
+        expected: u32,
+    },
     /// Invalid datatype version for a given class.
     InvalidDatatypeVersion {
         /// The type class.
@@ -1797,6 +1806,16 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "datatype class {class} version {version} is below child version {child_version}"
+                )
+            }
+            Self::InvalidDatatypeSize {
+                class,
+                size,
+                expected,
+            } => {
+                write!(
+                    f,
+                    "datatype class {class} size {size} differs from its property size {expected}"
                 )
             }
             Self::InvalidDatatypeVersion { class, version } => {
