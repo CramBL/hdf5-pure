@@ -364,4 +364,5 @@ pub use crate::width::LengthWidth;
 pub use crate::width::OffsetWidth;
 pub use crate::width::UintWidth;
 
+pub use crate::variable_length_descriptor::VariableLengthDescriptor;
 pub use crate::variable_length_write::narrow_variable_length_references;

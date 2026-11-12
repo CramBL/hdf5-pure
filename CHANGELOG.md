@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `VariableLengthDescriptor` in `hdf5-pure-format` parses and encodes variable-length value records at each supported address width, preserving the element count, stored collection address, and full object index ([#1232](https://github.com/CramBL/hdf5-pure/pull/1232)).
 - `DatatypeMessage` in `hdf5-pure-format` parses and encodes atomic, compound, enumeration, variable-length, array, and complex descriptions with retained versions at every node and checked class properties, including disjoint compound member ranges ([#1227](https://github.com/CramBL/hdf5-pure/pull/1227), [#1228](https://github.com/CramBL/hdf5-pure/pull/1228), [#1230](https://github.com/CramBL/hdf5-pure/pull/1230)).
 - `LinkMessageV1` in `hdf5-pure-format` decodes and encodes user-defined links, preserving raw bytes, selected name-length widths, and explicit optional fields. Conversions into supported models report user-defined kinds separately from text-conversion errors ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - `MatTimetable::row_times` returns the row times of a timetable built from a sample rate or time step, computed from its start and step as MATLAB does ([#1207](https://github.com/CramBL/hdf5-pure/pull/1207)).

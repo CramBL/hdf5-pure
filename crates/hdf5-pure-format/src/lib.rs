@@ -68,6 +68,7 @@ mod signature;
 mod sohm;
 mod superblock;
 mod symbol_table;
+mod variable_length_descriptor;
 mod variable_length_write;
 mod width;
 
