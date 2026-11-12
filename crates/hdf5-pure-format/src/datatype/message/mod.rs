@@ -22,6 +22,8 @@ use super::{
 use crate::convert::Narrow;
 use crate::width::OffsetWidth;
 
+mod codec;
+
 /// A datatype message version from 1 through 5.
 ///
 /// The version occupies the high four bits of the class-and-version byte, defined in "The
