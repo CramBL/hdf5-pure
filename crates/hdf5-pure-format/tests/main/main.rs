@@ -1,4 +1,5 @@
 mod btree;
+mod datatype_message;
 mod dense_attribute_placement;
 mod dense_link_placement;
 mod extensible_array_creation;

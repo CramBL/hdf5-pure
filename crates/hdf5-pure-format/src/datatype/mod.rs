@@ -34,6 +34,7 @@ use crate::width::OffsetWidth;
 pub(crate) mod byte_order;
 pub(crate) mod layout;
 mod legacy_member;
+pub(crate) mod message;
 
 /// Returns the datatype's element size as a nonzero host-sized integer.
 ///
@@ -1384,6 +1385,11 @@ const COMPLEX_CLASS: u8 = 11;
 const DATATYPE_VERSION_ONE: u8 = 1;
 const DATATYPE_VERSION_TWO: u8 = 2;
 const DATATYPE_VERSION_THREE: u8 = 3;
+/// Datatype message version 4, defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const DATATYPE_VERSION_FOUR: u8 = 4;
 const DATATYPE_VERSION_FIVE: u8 = 5;
 
 /// Returns `true` if `dt` contains an object address anywhere in its structure.
