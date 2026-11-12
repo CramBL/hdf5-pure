@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `DatatypeMessage` in `hdf5-pure-format` retains message versions in checked recursive datatype descriptions.
+- `DatatypeMessage` in `hdf5-pure-format` parses and encodes atomic descriptions with retained message versions and checked class properties.
 - `LinkMessageV1` in `hdf5-pure-format` decodes and encodes user-defined links, preserving raw bytes, selected name-length widths, and explicit optional fields. Conversions into supported models report user-defined kinds separately from text-conversion errors ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - `MatTimetable::row_times` returns the row times of a timetable built from a sample rate or time step, computed from its start and step as MATLAB does ([#1207](https://github.com/CramBL/hdf5-pure/pull/1207)).
 

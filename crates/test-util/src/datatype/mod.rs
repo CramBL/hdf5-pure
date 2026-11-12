@@ -1,6 +1,8 @@
 //! Datatype message bodies: section
 //! `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
 
+pub mod leaf;
+
 /// The eight bytes every datatype message begins with: its class and version
 /// packed into one byte, the three class bit fields, and the element size.
 pub fn header(class: Class, version: u8, bit_fields: [u8; 3], size: u32) -> Vec<u8> {
