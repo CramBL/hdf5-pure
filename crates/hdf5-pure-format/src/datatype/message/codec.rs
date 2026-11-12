@@ -1,5 +1,6 @@
-//! Atomic datatype-message parsing and serialization with retained versions.
+//! Datatype-message parsing and serialization with retained versions.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use hdf5_pure_core::{
@@ -14,16 +15,23 @@ use crate::datatype::{
     FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
     FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT,
     FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT,
-    OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS,
+    OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
+    VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
+    VariableLengthMetadata,
 };
 use crate::width::OffsetWidth;
 
 impl DatatypeMessage {
-    /// Parses an atomic datatype message and returns the number of bytes consumed.
+    /// Parses a datatype message and returns the number of bytes consumed.
     ///
-    /// Supports fixed-point, floating-point, time, string, bitfield, and opaque descriptions
-    /// at versions 1 through 5. VAX order requires version 3 or later. Floating-point order
-    /// and reserved bits are checked through [`FloatingPointByteOrder::parse`].
+    /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
+    /// descriptions at versions 1 through 5. Each variable-length parent retains its own version,
+    /// at most the containing description's version. VAX order requires version 3 or later.
+    /// Floating-point order and reserved bits are checked through [`FloatingPointByteOrder::parse`].
+    ///
+    /// Variable-length descriptor sizes must be 10, 12, or 16 bytes, corresponding to heap
+    /// address widths of 2, 4, or 8 bytes. The nesting limit is 64 descriptions on one parent
+    /// chain, including the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
     /// The writer uses terminated tags, as described in [`serialize`](Self::serialize).
@@ -34,10 +42,15 @@ impl DatatypeMessage {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete,
     /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`, and
-    /// [`FormatError::InvalidDatatypeClass`] for a class outside the supported atomic types.
+    /// [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
-    /// if reserved class bits are set. Propagates numeric layout, floating-point byte-order,
-    /// string metadata, opaque-tag, and element-size errors.
+    /// if reserved atomic class bits are set.
+    ///
+    /// Returns [`FormatError::InvalidVariableLengthSize`] for an unsupported descriptor size,
+    /// [`FormatError::DatatypeChildVersion`] if a parent has a higher version than its container,
+    /// and [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting limit.
+    /// Propagates numeric layout, floating-point byte-order, string metadata, opaque-tag,
+    /// variable-length metadata, and element-size errors.
     ///
     /// # Examples
     ///
@@ -55,7 +68,20 @@ impl DatatypeMessage {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     pub fn parse(data: &[u8]) -> Result<(Self, usize), FormatError> {
-        let mut fields = Fields::new(data, 0);
+        Self::parse_at(data, 0, 0)
+    }
+
+    /// Parses a description at `position`, returning its end position within `data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`parse`](Self::parse), with [`FormatError::UnexpectedEof`]
+    /// positions relative to `data`. The nesting limit includes `depth` enclosing descriptions.
+    fn parse_at(data: &[u8], position: usize, depth: u8) -> Result<(Self, usize), FormatError> {
+        if depth >= MAX_MESSAGE_DEPTH {
+            return Err(FormatError::NestingDepthExceeded);
+        }
+        let mut fields = Fields::new(data, position);
         let header = Header::parse(&mut fields)?;
         let (properties, consumed) = match header.class {
             FIXED_POINT_CLASS => {
@@ -157,23 +183,47 @@ impl DatatypeMessage {
                     fields.pos() + usize::from(tag.encoded_len),
                 )
             }
+            VARIABLE_LENGTH_CLASS => {
+                let metadata = datatype::parse_variable_length_metadata(header.flags)?;
+                descriptor_width(header.size)?;
+                let (base_type, consumed) = Self::parse_at(data, fields.pos(), depth + 1)?;
+                let base_type = Box::new(base_type);
+                let properties = match metadata {
+                    VariableLengthMetadata::Sequence => {
+                        DatatypeProperties::VariableLengthSequence { base_type }
+                    }
+                    VariableLengthMetadata::String { padding, charset } => {
+                        DatatypeProperties::VariableLengthString {
+                            padding,
+                            charset,
+                            base_type,
+                        }
+                    }
+                };
+                (properties, consumed)
+            }
             class => return Err(FormatError::InvalidDatatypeClass(class)),
         };
         Ok((Self::new(header.version, properties)?, consumed))
     }
 
-    /// Serializes an atomic description with its retained message version.
+    /// Serializes a datatype description with its retained message versions.
     ///
-    /// Atomic element sizes are independent of `offset_width`. The writer appends a NUL
-    /// terminator to each nonempty opaque tag and pads its property to a multiple of eight
-    /// bytes. The maximum writable logical tag length is 247 bytes.
+    /// Serializes the classes accepted by [`parse`](Self::parse). The writer derives each
+    /// variable-length descriptor size from `offset_width`, including nested descriptions.
+    /// Atomic element sizes are independent of that width. The nesting limit is 64 descriptions
+    /// on one parent chain, including the outer description.
+    ///
+    /// The writer appends a NUL terminator to each nonempty opaque tag and pads its property
+    /// to a multiple of eight bytes. The maximum writable logical tag length is 247 bytes.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidDatatypeClass`] for a non-atomic description,
+    /// Returns [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions,
     /// [`FormatError::OpaqueTagTooLong`] for a tag longer than 247 bytes, and
     /// [`FormatError::InvalidOpaqueTagByte`] for a tag containing a NUL byte.
-    /// Propagates errors from checking floating-point version/order compatibility and
+    /// Returns [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting
+    /// limit. Propagates errors from checking floating-point version/order compatibility and
     /// calculating the stored element size.
     ///
     /// # Examples
@@ -194,9 +244,54 @@ impl DatatypeMessage {
     /// );
     /// # Ok::<(), FormatError>(())
     /// ```
+    ///
+    /// Variable-length parents retain their own versions:
+    ///
+    /// ```
+    /// use hdf5_pure_core::{FixedPointType, FormatError};
+    /// use hdf5_pure_format::__private::{
+    ///     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    /// };
+    ///
+    /// let parent = DatatypeMessage::new(
+    ///     DatatypeVersion::Two,
+    ///     DatatypeProperties::FixedPoint(FixedPointType::i16()),
+    /// )?;
+    /// let sequence = DatatypeMessage::new(
+    ///     DatatypeVersion::Five,
+    ///     DatatypeProperties::VariableLengthSequence { base_type: Box::new(parent) },
+    /// )?;
+    /// let bytes = sequence.serialize(OffsetWidth::Two)?;
+    /// assert_eq!(&bytes[..8], &[0x59, 0, 0, 0, 10, 0, 0, 0]);
+    /// assert_eq!(bytes[8], 0x20);
+    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// assert_eq!(parsed, sequence);
+    /// assert_eq!(consumed, bytes.len());
+    /// # Ok::<(), FormatError>(())
+    /// ```
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
-        let flags = self.leaf_flags()?;
         let mut output = Vec::new();
+        self.encode_into(&mut output, offset_width, 0)?;
+        Ok(output)
+    }
+
+    /// Appends this description and its nested parents to `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`serialize`](Self::serialize). The nesting limit includes
+    /// `depth` enclosing descriptions.
+    fn encode_into(
+        &self,
+        output: &mut Vec<u8>,
+        offset_width: OffsetWidth,
+        depth: u8,
+    ) -> Result<(), FormatError> {
+        if depth >= MAX_MESSAGE_DEPTH {
+            return Err(FormatError::NestingDepthExceeded);
+        }
+        let flags = self.class_flags()?;
+        let start = output.len();
         output.push(self.properties.class() | (self.version.get() << DATATYPE_VERSION_SHIFT));
         output.extend_from_slice(&flags);
         output.extend_from_slice(&self.stored_size(offset_width)?.to_le_bytes());
@@ -226,21 +321,25 @@ impl DatatypeMessage {
             }
             DatatypeProperties::Opaque { tag, .. } => {
                 output.extend_from_slice(tag);
-                output.resize(DATATYPE_HEADER_SIZE + usize::from(flags[0]), 0);
+                output.resize(start + DATATYPE_HEADER_SIZE + usize::from(flags[0]), 0);
             }
             DatatypeProperties::String { .. } => {}
+            DatatypeProperties::VariableLengthSequence { base_type }
+            | DatatypeProperties::VariableLengthString { base_type, .. } => {
+                base_type.encode_into(output, offset_width, depth + 1)?;
+            }
             properties => return Err(FormatError::InvalidDatatypeClass(properties.class())),
         }
-        Ok(output)
+        Ok(())
     }
 
-    /// Encodes the three class-specific flag bytes for an atomic description.
+    /// Encodes the three class-specific flag bytes.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidDatatypeClass`] for a non-atomic description.
+    /// Returns [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions.
     /// Propagates floating-point version/order and opaque-tag encoding errors.
-    fn leaf_flags(&self) -> Result<[u8; 3], FormatError> {
+    fn class_flags(&self) -> Result<[u8; 3], FormatError> {
         Ok(match &self.properties {
             DatatypeProperties::FixedPoint(datatype) => [
                 binary_order_bit(datatype.byte_order())
@@ -282,15 +381,8 @@ impl DatatypeMessage {
             DatatypeProperties::String {
                 padding, charset, ..
             } => {
-                let padding = match padding {
-                    StringPadding::NullTerminate => NULL_TERMINATE,
-                    StringPadding::NullPad => NULL_PAD,
-                    StringPadding::SpacePad => SPACE_PAD,
-                };
-                let charset = match charset {
-                    CharacterSet::Ascii => ASCII_CHARSET,
-                    CharacterSet::Utf8 => UTF8_CHARSET,
-                };
+                let padding = padding_code(padding);
+                let charset = charset_code(charset);
                 [padding | (charset << STRING_CHARSET_SHIFT), 0, 0]
             }
             DatatypeProperties::BitField(datatype) => [
@@ -302,6 +394,14 @@ impl DatatypeMessage {
             DatatypeProperties::Opaque { tag, .. } => {
                 [OpaqueTagWire::encode(tag)?.encoded_len, 0, 0]
             }
+            DatatypeProperties::VariableLengthSequence { .. } => [VARIABLE_LENGTH_SEQUENCE, 0, 0],
+            DatatypeProperties::VariableLengthString {
+                padding, charset, ..
+            } => [
+                VARIABLE_LENGTH_STRING | (padding_code(padding) << VARIABLE_LENGTH_PADDING_SHIFT),
+                charset_code(charset),
+                0,
+            ],
             properties => return Err(FormatError::InvalidDatatypeClass(properties.class())),
         })
     }
@@ -349,6 +449,35 @@ impl Header {
             });
         }
         Ok(())
+    }
+}
+
+/// Parses the heap-address width from a variable-length descriptor size.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidVariableLengthSize`] if `size` is not 10, 12, or 16 bytes.
+fn descriptor_width(size: u32) -> Result<OffsetWidth, FormatError> {
+    let width = size
+        .checked_sub(datatype::SEQUENCE_LENGTH_SIZE + datatype::HEAP_INDEX_SIZE)
+        .ok_or(FormatError::InvalidVariableLengthSize { size })?;
+    let width =
+        u8::try_from(width).map_err(|_err| FormatError::InvalidVariableLengthSize { size })?;
+    OffsetWidth::try_from(width).map_err(|_err| FormatError::InvalidVariableLengthSize { size })
+}
+
+fn padding_code(padding: &StringPadding) -> u8 {
+    match padding {
+        StringPadding::NullTerminate => NULL_TERMINATE,
+        StringPadding::NullPad => NULL_PAD,
+        StringPadding::SpacePad => SPACE_PAD,
+    }
+}
+
+fn charset_code(charset: &CharacterSet) -> u8 {
+    match charset {
+        CharacterSet::Ascii => ASCII_CHARSET,
+        CharacterSet::Utf8 => UTF8_CHARSET,
     }
 }
 
@@ -460,3 +589,6 @@ const ASCII_CHARSET: u8 = 0;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const UTF8_CHARSET: u8 = 1;
+
+/// The maximum number of descriptions on a parsing or serialization path.
+const MAX_MESSAGE_DEPTH: u8 = 64;

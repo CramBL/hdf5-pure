@@ -1,6 +1,7 @@
 mod btree;
 mod datatype_leaf_codec;
 mod datatype_message;
+mod datatype_variable_length_codec;
 mod dense_attribute_placement;
 mod dense_link_placement;
 mod extensible_array_creation;

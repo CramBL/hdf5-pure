@@ -12,6 +12,15 @@ pub fn header(class: Class, version: u8, bit_fields: [u8; 3], size: u32) -> Vec<
     datatype
 }
 
+/// Builds a variable-length message with the supplied parent bytes.
+///
+/// Accepts unchecked version, flag, size, and parent encodings for malformed fixtures.
+pub fn variable_length(version: u8, flags: [u8; 3], size: u32, parent: &[u8]) -> Vec<u8> {
+    let mut bytes = header(Class::VARIABLE_LENGTH, version, flags, size);
+    bytes.extend_from_slice(parent);
+    bytes
+}
+
 /// A little-endian IEEE 754 double, laid out as the reference library writes
 /// one.
 pub fn f64_le() -> Vec<u8> {
