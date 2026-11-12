@@ -1,4 +1,4 @@
-//! Modern compound datatype message fixtures.
+//! Modern compound and enumeration datatype message fixtures.
 //!
 //! The layout is defined in "The Datatype Message" of the [format specification,
 //! version 4.0][spec].
@@ -81,4 +81,54 @@ impl MemberOffset {
             Self::Four => 4,
         }
     }
+}
+
+/// Builds an enumeration message using the property layout of versions 3 through 5.
+///
+/// Writes the parent, all NUL-terminated names, and all raw values in that order, without
+/// padding. Accepts unchecked header fields, parent bytes, names, and values for malformed
+/// fixtures. The count in `flags` is independent of `members`. The layout is defined in
+/// "The Datatype Message" of the [format specification, version 4.0][spec].
+///
+/// # Examples
+///
+/// ```
+/// use test_util::datatype::{containers::{self, EnumValue}, leaf::{Leaf, Version}};
+///
+/// let parent = Leaf::LittleInteger.bytes(Version::One);
+/// let bytes = containers::enumeration(3, [1, 0, 0], 4, &parent, &[EnumValue {
+///     name: b"x",
+///     value: &[7, 0, 0, 0],
+/// }]);
+/// assert_eq!(&bytes[..8], &[0x38, 1, 0, 0, 4, 0, 0, 0]);
+/// assert_eq!(&bytes[8..20], parent);
+/// assert_eq!(&bytes[20..], &[b'x', 0, 7, 0, 0, 0]);
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub fn enumeration(
+    version: u8,
+    flags: [u8; 3],
+    size: u32,
+    parent: &[u8],
+    members: &[EnumValue<'_>],
+) -> Vec<u8> {
+    let mut bytes = super::header(Class::ENUMERATED, version, flags, size);
+    bytes.extend_from_slice(parent);
+    for EnumValue { name, value: _ } in members {
+        bytes.extend_from_slice(name);
+        bytes.push(0);
+    }
+    for EnumValue { name: _, value } in members {
+        bytes.extend_from_slice(value);
+    }
+    bytes
+}
+
+/// An enumeration member's raw name and stored value bytes.
+pub struct EnumValue<'a> {
+    /// The name bytes without the appended NUL terminator.
+    pub name: &'a [u8],
+    /// The bytes appended unchanged after all names.
+    pub value: &'a [u8],
 }

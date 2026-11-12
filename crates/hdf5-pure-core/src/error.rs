@@ -277,6 +277,15 @@ pub enum FormatError {
     DuplicateAttributeName(String),
     /// A compound datatype contains the same field name more than once.
     DuplicateCompoundField(String),
+    /// An enumeration datatype contains the same member name more than once.
+    DuplicateEnumMemberName(String),
+    /// Two enumeration members have identical stored value bytes.
+    DuplicateEnumMemberValue {
+        /// The earlier member's name in declaration order.
+        first: String,
+        /// The later member's name in declaration order.
+        second: String,
+    },
     /// A global heap collection holds two objects at the same index.
     DuplicateGlobalHeapObjectIndex {
         /// The physical address of the collection.
@@ -290,6 +299,11 @@ pub enum FormatError {
     DuplicateLinkName(String),
     /// A compound datatype contains no fields.
     EmptyCompoundType,
+    /// An enumeration datatype contains an empty member name.
+    EmptyEnumMemberName {
+        /// The zero-based member index in declaration order.
+        index: usize,
+    },
     /// An enumeration datatype was built over a base type that is not an
     /// integer. HDF5 enumerations must have a fixed-point base.
     EnumBaseNotInteger,
@@ -628,6 +642,11 @@ pub enum FormatError {
     InvalidDeflateLevel {
         /// The compression level that exceeds `9`.
         level: u32,
+    },
+    /// An enumeration datatype has no members.
+    InvalidEnumerationMemberCount {
+        /// The supplied member count.
+        count: usize,
     },
     /// An Extensible Array index block, super block, or data block whose client ID differs from
     /// its header's.
@@ -1930,6 +1949,19 @@ impl fmt::Display for FormatError {
                     f,
                     "a section list with {sections} sections cannot have {size_groups} size groups"
                 )
+            }
+            Self::DuplicateEnumMemberName(name) => {
+                write!(f, "duplicate enumeration member name {name:?}")
+            }
+            Self::DuplicateEnumMemberValue { first, second } => write!(
+                f,
+                "enumeration members {first:?} and {second:?} have the same stored value"
+            ),
+            Self::EmptyEnumMemberName { index } => {
+                write!(f, "enumeration member {index} has an empty name")
+            }
+            Self::InvalidEnumerationMemberCount { count } => {
+                write!(f, "invalid enumeration member count {count}")
             }
             Self::EnumBaseNotInteger => {
                 write!(

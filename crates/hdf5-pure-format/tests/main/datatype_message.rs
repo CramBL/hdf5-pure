@@ -8,6 +8,7 @@ use hdf5_pure_format::__private::{
     FloatingPointByteOrder, OffsetWidth,
 };
 use rstest::rstest;
+use test_util::datatype::leaf::{Leaf, Version};
 
 #[rstest]
 #[case::one(1, DatatypeVersion::One)]
@@ -287,19 +288,27 @@ fn complex_components_must_be_floating_point() {
     );
 }
 
-#[test]
-fn enum_values_have_the_integer_base_width() {
-    let member = __private::enum_member("value".into(), vec![1]);
+#[rstest]
+#[case::two_byte_short(integer(DatatypeVersion::One), "value", vec![1], 2, 1)]
+#[case::four_byte_short(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap().0, "x", vec![0; 3], 4, 3)]
+#[case::four_byte_long(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap().0, "x", vec![0; 5], 4, 5)]
+fn enum_values_have_the_integer_base_width(
+    #[case] base_type: DatatypeMessage,
+    #[case] name: &str,
+    #[case] value: Vec<u8>,
+    #[case] expected: u32,
+    #[case] actual: usize,
+) {
     assert_eq!(
         DatatypeMessage::new(
             DatatypeVersion::Three,
             DatatypeProperties::Enumeration {
-                base_type: Box::new(integer(DatatypeVersion::One)),
-                members: vec![member],
+                base_type: Box::new(base_type),
+                members: vec![__private::enum_member(name.into(), value)],
             }
         )
         .unwrap_err(),
-        FormatError::EnumMemberValueSize("value".into(), 2, 1),
+        FormatError::EnumMemberValueSize(name.into(), expected, actual),
     );
 }
 
@@ -410,20 +419,26 @@ fn enumeration_bases_must_be_integer_messages() {
     );
 }
 
-#[test]
-fn enumeration_names_reject_embedded_nuls() {
+#[rstest]
+#[case::two_byte_base(integer(DatatypeVersion::One), "bad\0name", vec![0; 2])]
+#[case::four_byte_base(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap().0, "x\0y", vec![0; 4])]
+fn enumeration_names_reject_embedded_nuls(
+    #[case] base_type: DatatypeMessage,
+    #[case] name: &str,
+    #[case] value: Vec<u8>,
+) {
     assert_eq!(
         DatatypeMessage::new(
             DatatypeVersion::Three,
             DatatypeProperties::Enumeration {
-                base_type: Box::new(integer(DatatypeVersion::One)),
-                members: vec![__private::enum_member("bad\0name".into(), vec![0; 2])],
+                base_type: Box::new(base_type),
+                members: vec![__private::enum_member(name.into(), value)],
             }
         )
         .unwrap_err(),
         FormatError::InvalidDatatypeMemberName {
             class: 8,
-            name: "bad\0name".into()
+            name: name.into()
         },
     );
 }

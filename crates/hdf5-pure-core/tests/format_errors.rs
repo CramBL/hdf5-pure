@@ -83,3 +83,24 @@ fn object_header_allocation_diagnostics_preserve_their_fields(
 ) {
     assert_eq!(error.to_string(), expected);
 }
+
+#[test]
+fn enum_member_parts_borrow_the_complete_member() {
+    let member = hdf5_pure_core::__private::enum_member("value".into(), vec![1, 2, 3, 4]);
+    let (name, value) = hdf5_pure_core::__private::enum_member_parts(&member);
+    assert_eq!((name, value), ("value", &[1, 2, 3, 4][..]));
+    assert_eq!(name.as_ptr(), member.name.as_ptr());
+    assert_eq!(value.as_ptr(), member.value.as_ptr());
+}
+
+#[rstest::rstest]
+#[case::empty(FormatError::InvalidEnumerationMemberCount { count: 0 }, "invalid enumeration member count 0")]
+#[case::empty_name(FormatError::EmptyEnumMemberName { index: 2 }, "enumeration member 2 has an empty name")]
+#[case::duplicate_name(FormatError::DuplicateEnumMemberName("x\ny".into()), "duplicate enumeration member name \"x\\ny\"")]
+#[case::duplicate_value(FormatError::DuplicateEnumMemberValue { first: "x\ny".into(), second: "z".into() }, "enumeration members \"x\\ny\" and \"z\" have the same stored value")]
+fn enumeration_diagnostics_preserve_their_fields(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}

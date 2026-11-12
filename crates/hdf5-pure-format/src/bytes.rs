@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::convert::{self, Narrow};
 use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
@@ -549,6 +550,27 @@ impl<'a> Fields<'a> {
             .copy_from_slice(bytes);
         self.pos += len;
         Ok(u64::from_le_bytes(value))
+    }
+
+    /// Reads the next `len` bytes without copying.
+    ///
+    /// On success, advances the cursor by `len`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the range is incomplete,
+    /// [`FormatError::OffsetOverflow`] if its end exceeds [`u64::MAX`], and
+    /// [`FormatError::ValueTooLargeForPlatform`] if its end exceeds [`usize::MAX`].
+    pub(crate) fn slice(&mut self, len: usize) -> Result<&'a [u8], FormatError> {
+        let Self { data, pos } = self;
+        let range = convert::slice_range(pos.to_u64(), len.to_u64())?;
+        let end = range.end;
+        let bytes = data.get(range).ok_or(FormatError::UnexpectedEof {
+            expected: end,
+            available: data.len(),
+        })?;
+        *pos = end;
+        Ok(bytes)
     }
 
     /// Reads the next `N` bytes.
