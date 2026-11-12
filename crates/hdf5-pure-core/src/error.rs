@@ -286,6 +286,11 @@ pub enum FormatError {
         /// The later member's name in declaration order.
         second: String,
     },
+    /// Supplied members of an unplaced global heap collection share an index.
+    DuplicateGlobalHeapMemberIndex {
+        /// The repeated nonzero member index.
+        index: u16,
+    },
     /// A global heap collection holds two objects at the same index.
     DuplicateGlobalHeapObjectIndex {
         /// The physical address of the collection.
@@ -445,6 +450,20 @@ pub enum FormatError {
         first: usize,
         /// The input index of the second overlapping block in address order.
         second: usize,
+    },
+    /// A global heap collection's members exceed its requested allocation size.
+    GlobalHeapCapacityExceeded {
+        /// The capacity passed to preparation, in bytes.
+        capacity: u64,
+        /// The bytes required by the collection header, member headers, and padded payloads.
+        required: u64,
+    },
+    /// A requested global heap capacity is smaller than the format's minimum allocation.
+    GlobalHeapCapacityTooSmall {
+        /// The capacity passed to preparation, in bytes.
+        capacity: u64,
+        /// The minimum collection capacity in bytes.
+        minimum: u64,
     },
     /// A global heap collection is smaller than 4096 bytes, the minimum collection size.
     GlobalHeapCollectionTooSmall {
@@ -1364,6 +1383,13 @@ pub enum FormatError {
         expected: &'static str,
         /// Actual type description.
         actual: &'static str,
+    },
+    /// A requested global heap capacity is not a multiple of the required byte alignment.
+    UnalignedGlobalHeapCapacity {
+        /// The capacity passed to preparation, in bytes.
+        capacity: u64,
+        /// The required collection alignment in bytes.
+        alignment: u64,
     },
     /// The size of a global heap collection is not a multiple of 8 bytes.
     UnalignedGlobalHeapCollection {
@@ -2459,6 +2485,30 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "global heap object not found: collection {collection_address:#x}, index {index}"
+                )
+            }
+            Self::DuplicateGlobalHeapMemberIndex { index } => {
+                write!(f, "global heap members hold index {index} more than once")
+            }
+            Self::GlobalHeapCapacityExceeded { capacity, required } => {
+                write!(
+                    f,
+                    "global heap members require {required} bytes, beyond capacity {capacity}"
+                )
+            }
+            Self::GlobalHeapCapacityTooSmall { capacity, minimum } => {
+                write!(
+                    f,
+                    "global heap capacity {capacity} is below the minimum {minimum}"
+                )
+            }
+            Self::UnalignedGlobalHeapCapacity {
+                capacity,
+                alignment,
+            } => {
+                write!(
+                    f,
+                    "global heap capacity {capacity} is not aligned to {alignment} bytes"
                 )
             }
             Self::DuplicateGlobalHeapObjectIndex {

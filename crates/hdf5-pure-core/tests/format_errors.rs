@@ -117,3 +117,21 @@ fn compound_member_parts_borrow_the_complete_member() {
     assert_eq!(name.as_ptr(), member.name.as_ptr());
     assert!(core::ptr::eq(borrowed, &member.datatype));
 }
+
+#[rstest::rstest]
+#[case::duplicate_member(FormatError::DuplicateGlobalHeapMemberIndex { index: 400 }, "global heap members hold index 400 more than once")]
+#[case::insufficient_capacity(FormatError::GlobalHeapCapacityExceeded { capacity: HEAP_MINIMUM, required: HEAP_MINIMUM + HEAP_ALIGNMENT }, "global heap members require 4104 bytes, beyond capacity 4096")]
+#[case::minimum_capacity(FormatError::GlobalHeapCapacityTooSmall { capacity: HEAP_MINIMUM - HEAP_ALIGNMENT, minimum: HEAP_MINIMUM }, "global heap capacity 4088 is below the minimum 4096")]
+#[case::alignment(FormatError::UnalignedGlobalHeapCapacity { capacity: HEAP_MINIMUM + 1, alignment: HEAP_ALIGNMENT }, "global heap capacity 4097 is not aligned to 8 bytes")]
+fn global_heap_preparation_errors_report_unplaced_inputs(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}
+
+// Version 1 collections use this geometry ("Global Heap", format specification, version 4.0).
+const HEAP_MINIMUM: u64 = 4096;
+
+// Version 1 collections use this geometry ("Global Heap", format specification, version 4.0).
+const HEAP_ALIGNMENT: u64 = 8;
