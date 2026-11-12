@@ -1,5 +1,6 @@
 mod btree;
 mod datatype_array_complex_codec;
+mod datatype_canonical_atomic;
 mod datatype_compound_codec;
 mod datatype_compound_layout;
 mod datatype_enum_codec;
