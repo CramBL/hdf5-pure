@@ -16,7 +16,11 @@ use hdf5_pure_space::__private::FreeClass;
 use super::CollectionContents;
 use super::associations::{MemberAssociations, MemberPresence};
 use crate::edit::allocation::AllocationSession;
+use crate::edit::analysis::physical::claims::domain::DomainUnavailable;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
+use crate::edit::analysis::physical::claims::domain::residual::{
+    ResidualGroups, ResidualUnavailable,
+};
 use crate::edit::analysis::{
     AnalysisPhase, CollectionCandidates, CollectionProvenance, ObjectReferences,
     ReconstructionSource,
@@ -108,18 +112,24 @@ impl AnalysisPhase<'_> {
     /// # Errors
     ///
     /// Returns [`Error::Format`] with [`FormatError::Internal`] for a phase or session mismatch.
-    /// Returns the errors of [`Self::supported_owner_domain`] and [`Self::member_associations`].
+    /// Returns the errors of [`Self::supported_owner_domain`], [`Self::residual_group_domain`],
+    /// and [`Self::member_associations`].
     pub(in crate::edit) fn qualify_collections(
         &mut self,
         source: &ReconstructionSource,
         candidates: CollectionCandidates,
     ) -> Result<CollectionQualification, Error> {
-        let checks = self.inspect_collections(source, &candidates)?;
+        let CollectionChecks {
+            domain,
+            residual_groups,
+            parents,
+        } = self.inspect_collections(source, &candidates)?;
         Ok(CollectionQualification {
             source: source.clone(),
             candidates,
-            domain: checks.domain,
-            parents: checks.parents,
+            domain,
+            residual_groups,
+            parents,
         })
     }
 
@@ -172,11 +182,19 @@ impl AnalysisPhase<'_> {
             }
         }
         let qualification = match checks {
-            Ok((source, checks)) => OriginalQualification::Qualified(CollectionQualification {
+            Ok((
+                source,
+                CollectionChecks {
+                    domain,
+                    residual_groups,
+                    parents,
+                },
+            )) => OriginalQualification::Qualified(CollectionQualification {
                 source,
                 candidates,
-                domain: checks.domain,
-                parents: checks.parents,
+                domain,
+                residual_groups,
+                parents,
             }),
             Err(error) => OriginalQualification::Unavailable { candidates, error },
         };
@@ -235,6 +253,14 @@ impl AnalysisPhase<'_> {
             None
         } else {
             Some(self.supported_owner_domain(source)?)
+        };
+        let residual_groups = if matches!(
+            &domain,
+            Some(OwnerDomain::Unavailable(DomainUnavailable::Residual(_)))
+        ) {
+            Some(self.residual_group_domain(source)?)
+        } else {
+            None
         };
         let mut qualified = BTreeMap::new();
         for (address, mut members) in parents {
@@ -301,6 +327,7 @@ impl AnalysisPhase<'_> {
         }
         Ok(CollectionChecks {
             domain,
+            residual_groups,
             parents: qualified,
         })
     }
@@ -346,6 +373,14 @@ impl OriginalCollections {
         }
     }
 
+    /// Borrows successful residual-group evidence retained with original qualification.
+    pub(in crate::edit) fn residual_groups(&self) -> Option<&ResidualGroups> {
+        match &self.qualification {
+            OriginalQualification::Qualified(qualification) => qualification.residual_groups(),
+            OriginalQualification::Empty | OriginalQualification::Unavailable { .. } => None,
+        }
+    }
+
     /// Borrows captured full framing and framing failures by physical collection address.
     pub(in crate::edit) fn contents(
         &self,
@@ -377,6 +412,7 @@ pub(in crate::edit) enum OriginalCollectionError {
 
 struct CollectionChecks {
     domain: Option<OwnerDomain>,
+    residual_groups: Option<Arc<Result<ResidualGroups, ResidualUnavailable>>>,
     parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
 
@@ -396,13 +432,16 @@ pub(in crate::edit) struct ParentStorage {
 /// Owned predecessor observations and member and parent outcomes for one source phase.
 ///
 /// Full framing and root referrers are borrowed through the original [`AnalysisPhase`].
-/// Member qualification requires a complete observation for its origin and an available
-/// source domain. Whole-parent qualification also requires complete root references and
-/// matching allocated members. Source freshness and storage reuse require separate evidence.
+/// Member qualification requires a complete observation for its origin and either the strict
+/// owner domain or bounded residual-group evidence. Whole-parent qualification also requires
+/// complete root references and matching allocated members. Source freshness and storage reuse
+/// require separate evidence.
 pub(in crate::edit) struct CollectionQualification {
     source: ReconstructionSource,
     candidates: CollectionCandidates,
     domain: Option<OwnerDomain>,
+    /// Bounded interpretation retained independently of the strict domain outcome.
+    residual_groups: Option<Arc<Result<ResidualGroups, ResidualUnavailable>>>,
     parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
 
@@ -412,9 +451,14 @@ impl CollectionQualification {
         &self.source
     }
 
-    /// Borrows the common source-domain outcome, or returns [`None`] for empty default input.
+    /// Borrows the strict owner-domain outcome, or returns [`None`] for empty default input.
     pub(in crate::edit) fn domain(&self) -> Option<&OwnerDomain> {
         self.domain.as_ref()
+    }
+
+    /// Borrows successful bounded residual interpretation, independently of the strict domain.
+    pub(in crate::edit) fn residual_groups(&self) -> Option<&ResidualGroups> {
+        self.residual_groups.as_ref()?.as_ref().as_ref().ok()
     }
 
     /// Borrows independent outcomes keyed by physical collection address.
@@ -506,20 +550,20 @@ impl CollectionQualification {
             _ => return Err(MemberUnavailable::Unknown),
         }
         parent.allocation.map_err(MemberUnavailable::Parent)?;
-        if !matches!(self.domain, Some(OwnerDomain::Available(_))) {
+        if !self.domain_available() {
             return Err(MemberUnavailable::Domain);
         }
         Ok(())
     }
 
-    /// Checks whole-parent evidence with the common source-domain prerequisite.
+    /// Checks whole-parent evidence with strict-domain or bounded residual-group qualification.
     ///
     /// Prospective ownership and permission to reuse the collection require separate evidence.
     ///
     /// # Errors
     ///
     /// Returns [`ParentUnavailable::Allocation`] for an absent parent, the parent's local
-    /// restriction, or [`ParentUnavailable::Domain`] if the source domain is unavailable.
+    /// restriction, or [`ParentUnavailable::Domain`] if both domain qualifications are unavailable.
     pub(in crate::edit) fn whole_parent(
         &self,
         address: PhysicalAddress,
@@ -528,7 +572,7 @@ impl CollectionQualification {
             .get(&address)
             .ok_or(ParentUnavailable::Allocation)?
             .whole?;
-        if !matches!(self.domain, Some(OwnerDomain::Available(_))) {
+        if !self.domain_available() {
             return Err(ParentUnavailable::Domain);
         }
         Ok(())
@@ -599,6 +643,10 @@ impl CollectionQualification {
     ) -> Result<&'a MemberAssociations, Error> {
         phase.member_associations(&self.source)
     }
+
+    fn domain_available(&self) -> bool {
+        matches!(self.domain, Some(OwnerDomain::Available(_))) || self.residual_groups().is_some()
+    }
 }
 
 /// A complete original parent allocation with qualified source, session, and free-space class.
@@ -637,7 +685,7 @@ impl QualifiedParentAllocation {
 
 /// Independent framing, selected-member presence, and local outcomes for one parent.
 ///
-/// The common source-domain outcome is checked by [`CollectionQualification::member`] and
+/// Domain qualification is checked by [`CollectionQualification::member`] and
 /// [`CollectionQualification::whole_parent`].
 pub(in crate::edit) struct ParentQualification {
     framing: Result<FileRange, FormatError>,
@@ -670,7 +718,7 @@ impl ParentQualification {
         self.allocation
     }
 
-    /// Returns the local whole-parent outcome independently of the common source domain.
+    /// Returns the local whole-parent outcome independently of domain qualification.
     ///
     /// # Errors
     ///
@@ -683,7 +731,7 @@ impl ParentQualification {
 /// An unmet prerequisite for original allocated-member evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::edit) enum MemberUnavailable {
-    /// The common source domain is unavailable.
+    /// Strict-domain and bounded residual-group qualification are both unavailable.
     Domain,
     /// The selected origin's reference interpretation is incomplete.
     Interpretation,
@@ -708,7 +756,7 @@ pub(in crate::edit) enum ParentUnavailable {
     Association,
     /// The candidate allocation class is unknown.
     Class,
-    /// The common source domain is unavailable.
+    /// Strict-domain and bounded residual-group qualification are both unavailable.
     Domain,
     /// Collection framing failed.
     Framing,

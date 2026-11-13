@@ -39,6 +39,7 @@ mod parents;
 mod prospective;
 mod publication;
 mod releases;
+mod residual_groups;
 
 #[rstest]
 #[case::root_only(false)]

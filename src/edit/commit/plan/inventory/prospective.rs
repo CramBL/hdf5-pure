@@ -17,7 +17,7 @@ use crate::edit::analysis::heap::qualification::OriginalQualification;
 use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
-/// Heap-reference observations from the applied tree and translated retained roots.
+/// Heap-reference observations from the applied tree and translated count and residual roots.
 ///
 /// Root applicability and reference interpretation are independent outcomes. The caller
 /// establishes original member qualification, storage protection, and mutation permission
@@ -37,6 +37,8 @@ pub(in crate::edit::commit) struct ProspectiveCollections {
 impl ProspectiveCollections {
     /// Collects references in a new phase after tree placement and in-place writes.
     ///
+    /// Adds translated count-retained and residual-group roots to the applied root before one
+    /// reference traversal.
     /// Records retained-root association failures independently of the decoded references.
     pub(super) fn collect(
         engine: &WriteEngine,
@@ -49,7 +51,11 @@ impl ProspectiveCollections {
             return Self::default();
         }
         let mut roots = BTreeSet::from([ObjectId::new(root)]);
-        let unavailable = Self::retained_roots(engine, original, dispositions, &mut roots).err();
+        let unavailable = Self::retained_roots(engine, original, dispositions, &mut roots)
+            .and_then(|()| {
+                Self::residual_roots(engine, original, dispositions, collections, &mut roots)
+            })
+            .err();
         let references = Some(
             AnalysisPhase::prospective(engine, root)
                 .heap_references_reachable_from(roots.iter().copied()),
@@ -162,6 +168,43 @@ impl ProspectiveCollections {
         }
     }
 
+    /// Adds translated residual-group roots after checking source and session associations.
+    ///
+    /// Earlier roots remain if a later translation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProspectiveUnavailable::Source`] for incompatible original source associations,
+    /// [`ProspectiveUnavailable::Session`] for a different allocation session, or
+    /// [`ProspectiveUnavailable::Dispositions`] for failed placement reconciliation or translation.
+    fn residual_roots(
+        engine: &WriteEngine,
+        original: &OriginalEdits,
+        dispositions: &AppliedDispositions,
+        collections: &OriginalCollections,
+        roots: &mut BTreeSet<ObjectId>,
+    ) -> Result<(), ProspectiveUnavailable> {
+        let Some(groups) = collections.residual_groups() else {
+            return Ok(());
+        };
+        if Some(groups.source()) != original.source()
+            || dispositions.original().source().as_ref().ok() != Some(groups.source())
+        {
+            return Err(ProspectiveUnavailable::Source);
+        }
+        if !groups.session().same(&engine.context.allocations.session()) {
+            return Err(ProspectiveUnavailable::Session);
+        }
+        for &object in groups.roots() {
+            roots.insert(
+                dispositions
+                    .translate(object)
+                    .map_err(|error| ProspectiveUnavailable::Dispositions(error.clone()))?,
+            );
+        }
+        Ok(())
+    }
+
     /// Adds translated original reference roots after checking count and storage facts.
     ///
     /// Checks source identity, allocation session, and placement reconciliation independently of
@@ -257,8 +300,8 @@ pub(in crate::edit::commit) enum ProspectiveUnavailable {
     Dispositions(TransitionWithheld),
     /// Original count or storage facts are unavailable.
     Original,
-    /// Original storage belongs to another allocation session.
+    /// Retained original evidence belongs to another allocation session.
     Session,
-    /// Original owner facts and dispositions have different source associations.
+    /// An original source association is absent or differs across retained evidence.
     Source,
 }

@@ -84,7 +84,8 @@ impl OriginalStorage {
     /// Retains known ranges when qualification fails. For candidate parents, protects the enclosing
     /// range of the original allocation and parsed framing. Reuses cached phase observations for
     /// source-integrity checks. Omits an eligible or superseded owner's allocation only when its
-    /// exact range is recorded for retirement or deferred tail replacement.
+    /// exact range is recorded for retirement or deferred tail replacement. Preserves original
+    /// allocations reachable from accepted residual groups, including superseded owners.
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
@@ -107,6 +108,23 @@ impl OriginalStorage {
             return result;
         };
         result.parents = phase.collection_storage(source, &tree.collection_candidates);
+        let residual_owners = if original.owners().is_none() {
+            match phase.residual_group_domain(source) {
+                Ok(groups) => groups
+                    .as_ref()
+                    .as_ref()
+                    .map(|groups| groups.objects().clone())
+                    .unwrap_or_default(),
+                Err(error) => {
+                    result.unavailable = Some(StorageUnavailable::Coverage(error));
+                    result.integrity = Err(StorageIntegrityError::Unavailable);
+                    result.capture_parents();
+                    return result;
+                }
+            }
+        } else {
+            BTreeSet::new()
+        };
         let claims = match phase.physical_claims(source) {
             Ok(claims) => claims,
             Err(error) => {
@@ -183,7 +201,7 @@ impl OriginalStorage {
                     .ok()
                     .is_some_and(|index| retired[index].0 == claim.range())
             }) || tails.contains(&(claim.range().start(), claim.range().end()));
-            if !((eligible || superseded) && retired) {
+            if residual_owners.contains(&object) || !((eligible || superseded) && retired) {
                 result.allocations.push(StorageAllocation {
                     range: claim.range(),
                     origin: StorageOrigin::Owner { object, kind },

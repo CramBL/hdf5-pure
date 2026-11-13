@@ -76,6 +76,10 @@ pub(in crate::edit) struct PhysicalClaims {
     problems: Vec<ClaimProblem>,
     /// Coverage derived lazily from the original claims and recorded bounds.
     coverage: Option<PhysicalCoverage>,
+    /// Cached residual-group interpretation or its independent qualification restriction.
+    residual_groups: Option<
+        Arc<Result<domain::residual::ResidualGroups, domain::residual::ResidualUnavailable>>,
+    >,
 }
 
 impl PhysicalClaims {
@@ -107,6 +111,7 @@ impl PhysicalClaims {
             claims: Vec::new(),
             problems: Vec::new(),
             coverage: None,
+            residual_groups: None,
         };
         let physical = phase.physical_storage(source)?;
         claims

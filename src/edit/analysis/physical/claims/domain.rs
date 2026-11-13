@@ -16,6 +16,8 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
 
+pub(in crate::edit) mod residual;
+
 impl AnalysisPhase<'_> {
     /// Qualifies the original root's reachable objects against the source's physical storage.
     ///
