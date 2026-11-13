@@ -248,11 +248,7 @@ impl WriteEngine {
             });
         }
         self.begin_commit(&staged);
-        let prepared = if staged.deletes().is_empty() && staged.copies().is_empty() {
-            PreparedCommit::prepare(self, staged)
-        } else {
-            PreparedCommit::prepare_counted(self, staged)
-        };
+        let prepared = PreparedCommit::prepare(self, staged);
         match prepared {
             CommitPreparation::Prepared(prepared) => {
                 CommitOutcome::Applied(self.apply_commit(prepared))

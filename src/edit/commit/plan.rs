@@ -70,26 +70,12 @@ pub(super) struct PreparedCommit {
 }
 
 impl PreparedCommit {
-    /// Plans edits with count-eligible retirement and checked replacement count records.
-    ///
-    /// Returns [`CommitPreparation::Rejected`] with the original staged inputs on failure.
-    /// In-place-only plans skip count discovery. Tree plans retain original count outcomes and
-    /// protected source updates.
-    pub(super) fn prepare_counted(
-        engine: &mut WriteEngine,
-        staged: StagedEdits,
-    ) -> CommitPreparation {
-        let plan = engine
-            .plan_commit_inner(&staged, false, true)
-            .map(|(plan, _)| plan);
-        Self::from_plan(plan, staged)
-    }
-
     /// Plans a commit, returning the original staged inputs on rejection.
     ///
     /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs
     /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
-    /// and the preparation error.
+    /// and the preparation error. The planner checks count projections and retirement for tree
+    /// plans with deletions or same-file copies. It skips count discovery for in-place-only plans.
     pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
         Self::from_plan(engine.plan_commit(&staged), staged)
     }
@@ -230,7 +216,8 @@ pub(super) struct GroupHeaders {
 ///
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
-    /// Original count outcomes and checked source updates, absent for ordinary preparation.
+    /// Original count outcomes and checked source updates for deletions or same-file copies.
+    /// Absent for tree plans without either operation.
     pub(super) counts: Option<PreparedTreeCounts>,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
@@ -436,37 +423,24 @@ impl WriteEngine {
 
     /// Prepares edits with optional original observations from the same source phase.
     ///
-    /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
-    /// passes false. Count and ownership outcomes are retained in [`inventory::OriginalEdits`],
-    /// and predecessor outcomes in [`inventory::dispositions::ReconstructionDispositions`].
-    /// Captures original storage exclusions and reclamation spans with the same tree inputs.
+    /// Prepares counts for deletions or same-file copies independently of `capture`. The planner
+    /// skips count and original-observation discovery for in-place-only plans. It returns
+    /// count-preparation errors before capturing original observations.
+    ///
+    /// With `capture`, collects original observations for tree plans. Retains additional count and
+    /// ownership qualification outcomes in [`inventory::OriginalEdits`] and predecessor outcomes in
+    /// [`inventory::dispositions::ReconstructionDispositions`]. Captures original storage
+    /// exclusions and reclamation spans with the same tree inputs.
     ///
     /// # Errors
     ///
-    /// Returns the planning errors described by [`Self::plan_commit`].
+    /// Returns the planning errors described by [`Self::plan_commit`], the count-preparation errors
+    /// of [`PreparedTreeCounts::prepare`], and the observation errors of
+    /// [`inventory::OriginalPreparation::collect`].
     fn plan_commit_with_inventory(
         &mut self,
         staged: &StagedEdits,
         capture: bool,
-    ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
-        self.plan_commit_inner(staged, capture, false)
-    }
-
-    /// Prepares edits with independent choices for original observations and count projections.
-    ///
-    /// With `counted`, applies local tree-count projections and uses eligible deletion allocations
-    /// for reference screening and retirement. Incomplete count evidence withholds deletion
-    /// allocations and collection candidates. With `capture`, retains original observations from
-    /// the same source phase. In-place-only plans skip both operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Self::plan_commit`] and [`PreparedTreeCounts::prepare`].
-    fn plan_commit_inner(
-        &mut self,
-        staged: &StagedEdits,
-        capture: bool,
-        counted: bool,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         self.preflight_narrow_references()?;
@@ -506,6 +480,7 @@ impl WriteEngine {
                 .iter()
                 .map(|&(_, address)| address.header_address()),
         );
+        let counted = !staged.deletes().is_empty() || !staged.copies().is_empty();
         let mut counts = counted
             .then(|| PreparedTreeCounts::prepare(self, &mut analysis, &mut nodes, staged))
             .transpose()?;
@@ -542,9 +517,11 @@ impl WriteEngine {
             collection_candidates: collections,
             references,
         };
-        let inventory = capture.then(|| {
-            inventory::OriginalPreparation::collect(self, &mut analysis, &mut tree, staged)
-        });
+        let inventory = capture
+            .then(|| {
+                inventory::OriginalPreparation::collect(self, &mut analysis, &mut tree, staged)
+            })
+            .transpose()?;
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
         }

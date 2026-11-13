@@ -50,8 +50,9 @@ impl PreparedEditInventory {
     /// Prepares staged edits and collects their original observations before placement.
     ///
     /// Returns the original staged set on planning failure. In-place-only plans are returned
-    /// without an inventory. Count or ownership qualification failures are retained in
-    /// [`OriginalEdits`] independently of successful tree preparation.
+    /// without an inventory. The planner prepares counts for deletions and same-file copies.
+    /// Returns the staged set if count preparation fails. Retains additional count or ownership
+    /// qualification outcomes in [`OriginalEdits`].
     pub(in crate::edit::commit) fn prepare(
         engine: &mut WriteEngine,
         staged: StagedEdits,
@@ -230,13 +231,24 @@ impl OriginalPreparation {
     ///
     /// Moves deletion spans out of the tree into the captured reclamation input. Storage
     /// exclusions are derived from these same observations and reclamation spans. Moves collection
-    /// candidates and cached framing into the inventory after storage collection.
+    /// candidates and cached framing into the inventory after storage collection. Collects
+    /// candidates from distinct deletion targets independently of count-eligible retirement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the binding errors of [`AnalysisPhase::removed_links`] and candidate-merge errors
+    /// of [`crate::edit::analysis::CollectionCandidates::extend`].
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         tree: &mut PreparedTree,
         staged: &StagedEdits,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        let targets = phase
+            .removed_links(tree.groups.values().flat_map(|node| &node.prepared.deletes))?
+            .targets();
+        tree.collection_candidates
+            .extend(phase.deleted_collections(&targets))?;
         let original = OriginalEdits::collect(engine, phase, tree, staged);
         let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
         let reclamation =
@@ -253,13 +265,13 @@ impl OriginalPreparation {
             dispositions.source().as_ref().ok(),
             std::mem::take(&mut tree.collection_candidates),
         );
-        Self {
+        Ok(Self {
             original,
             dispositions,
             storage,
             collections,
             reclamation,
-        }
+        })
     }
 }
 

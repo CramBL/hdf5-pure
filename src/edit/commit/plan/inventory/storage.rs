@@ -217,6 +217,44 @@ impl OriginalStorage {
         }
     }
 
+    /// Adds complete original count-header allocations in physical address order.
+    ///
+    /// Retains an identical allocation with the same owner and header kind once. The caller checks
+    /// count-source applicability separately. Earlier insertions remain if a later range conflicts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageConflict::Overlap`] if a count-header allocation overlaps other protected
+    /// storage, including an identical range with a different owner or kind.
+    pub(in crate::edit) fn include_counts(
+        &mut self,
+        counts: &ProtectedCounts,
+    ) -> Result<(), StorageConflict> {
+        for update in counts.updates() {
+            let allocation = StorageAllocation {
+                range: update.allocation().range(),
+                origin: StorageOrigin::Owner {
+                    object: update.object(),
+                    kind: AllocationKind::Header,
+                },
+            };
+            match self
+                .allocations
+                .binary_search_by_key(&allocation.range.start(), |existing| existing.range.start())
+            {
+                Ok(index) if self.allocations[index] == allocation => continue,
+                Ok(_) | Err(_) => {
+                    self.exclude(allocation.range, SpaceClaim::CountHeader)?;
+                }
+            }
+            let index = self
+                .allocations
+                .partition_point(|existing| existing.range.start() < allocation.range.start());
+            self.allocations.insert(index, allocation);
+        }
+        Ok(())
+    }
+
     /// Borrows protected ranges in ascending order of their physical start addresses.
     pub(in crate::edit::commit) fn allocations(&self) -> &[StorageAllocation] {
         &self.allocations
@@ -393,9 +431,12 @@ impl PreparedEditInventory {
 /// With original candidates, the editor decodes heap references in a new phase after application
 /// and retains root-applicability failures independently of reference interpretation.
 /// [`Self::publish_compacting_members`] derives member removal permission from these observations.
-/// Other completion callbacks require independently established mutation permission.
+/// Other completion callbacks require independently established mutation permission. Source count
+/// updates are retained for ordered publication with the original storage exclusions.
 pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     engine: &'a mut WriteEngine,
+    /// Protected source-count updates retained from the applied tree.
+    counts: Option<ProtectedCounts>,
     original: OriginalEdits,
     dispositions: AppliedDispositions,
     storage: OriginalStorage,
@@ -416,7 +457,7 @@ impl<'a> PendingEditInventory<'a> {
             collections,
         } = applied;
         let AppliedTree {
-            counts: _,
+            counts,
             retirement,
             freed,
             relocations,
@@ -437,6 +478,7 @@ impl<'a> PendingEditInventory<'a> {
         );
         Self {
             engine,
+            counts,
             original,
             dispositions,
             storage,
@@ -451,8 +493,11 @@ impl<'a> PendingEditInventory<'a> {
     /// Publishes the pending tree and borrows its retained observations for completion.
     ///
     /// Checks placement reconciliation and current allocator claims before consuming the pending
-    /// batch. Calls `complete` after publication, reference updates, root reclamation, truncation,
-    /// and final storage checks succeed. The callback receives the original observations, applied
+    /// batch. Writes source-count increases before publication and decreases afterward, before
+    /// `complete`. Adds complete original count-header allocations to the inventory's exclusions.
+    /// Retains the inventory's exclusions even for an empty count batch. Calls `complete` after
+    /// publication, reference updates, root reclamation, truncation, count writes, and final
+    /// storage checks succeed. The callback receives the original observations, applied
     /// dispositions, storage exclusions, and original collection qualification and framing
     /// associated with these inputs, together with prospective observations collected after
     /// application.
@@ -462,7 +507,8 @@ impl<'a> PendingEditInventory<'a> {
     /// Returns [`StoragePublicationFailure::BeforePublication`] with these pending inputs if
     /// placement reconciliation or exclusion checks fail. Returns
     /// [`StoragePublicationFailure::Publication`] with the retained observations and error if
-    /// publication or completion fails. The caller handles rollback according to publication state.
+    /// count protection, source-count writes, publication, or completion fails. The caller handles
+    /// rollback according to publication state.
     pub(in crate::edit::commit) fn publish_with_completion<T>(
         self,
         complete: impl FnOnce(
@@ -486,7 +532,7 @@ impl<'a> PendingEditInventory<'a> {
     ///
     /// Returns [`StoragePublicationFailure::BeforePublication`] if placement reconciliation or
     /// exclusion checks fail, or [`StoragePublicationFailure::Publication`] if publication or
-    /// completion fails.
+    /// count protection, source-count writes, or completion fails.
     fn publish_with_observations<T>(
         mut self,
         complete: impl FnOnce(
@@ -517,31 +563,48 @@ impl<'a> PendingEditInventory<'a> {
         }
         let Self {
             engine,
+            counts,
             original,
             dispositions,
-            storage,
+            mut storage,
             collections,
             prospective,
             pending,
             relocations,
             exclusion: _,
         } = self;
-        let result = engine.publish_pending_tree_excluding(
-            pending,
-            relocations,
-            Some(&storage),
-            |published| {
-                complete(
-                    published,
-                    &original,
-                    &dispositions,
-                    &storage,
-                    &collections,
-                    &prospective,
-                )
-                .map_err(PublicationError::from)
-            },
-        );
+        let completion = |published: PublishedTree<'_>, storage: &OriginalStorage| {
+            complete(
+                published,
+                &original,
+                &dispositions,
+                storage,
+                &collections,
+                &prospective,
+            )
+        };
+        let result = match counts {
+            Some(counts) => {
+                let end = PhysicalAddress::new(engine.image.len());
+                counts
+                    .before_publication(engine, pending)
+                    .map_err(|error| PublicationError::from(Error::from(error)))
+                    .and_then(|phase| {
+                        phase
+                            .at_end(end)
+                            .map_err(|failure| PublicationError::from(Error::from(failure.error)))
+                    })
+                    .and_then(|bounds| {
+                        bounds.with_ordered_counts_excluding(relocations, &mut storage, completion)
+                    })
+            }
+            None => engine.publish_pending_tree_excluding(
+                pending,
+                relocations,
+                Some(&storage),
+                |published| completion(published, &storage).map_err(PublicationError::from),
+            ),
+        };
         match result {
             Ok(value) => Ok((value, collections, prospective)),
             Err(error) => Err(Box::new(StoragePublicationFailure::Publication {
@@ -760,6 +823,8 @@ pub(in crate::edit) enum StorageConflict {
 pub(in crate::edit) enum SpaceClaim {
     /// Unused aggregate capacity.
     Aggregate,
+    /// A complete original header allocation containing an updated source count.
+    CountHeader,
     /// A complete metadata reservation or publication padding range.
     Metadata,
     /// A previous persistent manager allocation pending replacement.

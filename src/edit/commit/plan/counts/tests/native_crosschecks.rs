@@ -571,15 +571,20 @@ fn native_committed_type_edits_retain_actual_copy_and_removal_inputs() {
 }
 
 #[rstest]
-#[case::increase(2, false, false, 3)]
-#[case::decrease(1, true, false, 2)]
-#[case::balanced(1, false, false, 2)]
-#[case::removed_dataset_user(1, false, true, 2)]
+#[case::increase_public(2, false, false, 3, false)]
+#[case::decrease_public(1, true, false, 2, false)]
+#[case::balanced_public(1, false, false, 2, false)]
+#[case::removed_dataset_user_public(1, false, true, 2, false)]
+#[case::increase_inventory(2, false, false, 3, true)]
+#[case::decrease_inventory(1, true, false, 2, true)]
+#[case::balanced_inventory(1, false, false, 2, true)]
+#[case::removed_dataset_user_inventory(1, false, true, 2, true)]
 fn native_committed_type_counts_follow_copy_and_delete_commits(
     #[case] copies: usize,
     #[case] extra_alias: bool,
     #[case] remove_source: bool,
     #[case] expected: usize,
+    #[case] inventory: bool,
 ) {
     let path = test_util::temp::temp_path("native-public-counts.h5");
     let native = file::libhdf5_create_v18(&path);
@@ -618,7 +623,21 @@ fn native_committed_type_counts_follow_copy_and_delete_commits(
     if remove_source {
         engine.delete(&ObjectPathBuf::parse("source")).unwrap();
     }
-    engine.commit().unwrap();
+    if inventory {
+        let staged = mem::take(&mut engine.staged);
+        engine.begin_commit(&staged);
+        let prepared = match PreparedEditInventory::prepare(&mut engine, staged) {
+            InventoryPreparation::Tree(prepared) => prepared,
+            InventoryPreparation::Rejected { error, .. } => {
+                panic!("unexpected preparation failure: {error:?}")
+            }
+            InventoryPreparation::InPlace(_) => panic!("expected tree preparation"),
+        };
+        let applied = prepared.apply(&mut engine).unwrap();
+        engine.publish_tree(applied.into_tree()).unwrap();
+    } else {
+        engine.commit().unwrap();
+    }
     drop(engine);
     let native = file::libhdf5_open(&path);
     let dataset = native.dataset("copy0").unwrap();

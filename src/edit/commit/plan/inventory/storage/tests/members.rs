@@ -235,10 +235,14 @@ fn translated_retained_roots_preserve_their_observed_members(#[case] aliased: bo
         .image()
         .read_exact_at(parent, usize::try_from(owner - parent).unwrap())
         .unwrap();
-    let pending = super::prepare(&mut engine)
-        .apply_excluding(&mut engine)
-        .ok()
-        .unwrap();
+    let mut applied = super::prepare(&mut engine).apply(&mut engine).unwrap();
+    if !aliased {
+        applied.tree.freed.push((
+            super::range(owner, owner_end - owner),
+            FreeClass::Page(PageType::Meta),
+        ));
+    }
+    let pending = PendingEditInventory::new(&mut engine, applied);
     assert!(pending.prospective().is_complete());
     assert!(
         pending
