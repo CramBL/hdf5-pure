@@ -575,23 +575,195 @@ impl<'a> Fields<'a> {
 
     /// Reads the next `N` bytes.
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
+        self.take_array().copied()
+    }
+
+    /// Borrows the next `N` bytes and advances the cursor.
+    ///
+    /// The returned reference remains valid for the original input's lifetime, including after
+    /// subsequent cursor operations. A zero-length read succeeds at any position through the
+    /// input's end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the range is incomplete or its end exceeds
+    /// [`usize::MAX`]. Leaves the cursor unchanged on error. The error's `expected` field is the
+    /// saturating requested end, and `available` is the original input length.
+    pub(crate) fn take_array<const N: usize>(&mut self) -> Result<&'a [u8; N], FormatError> {
         let value = self
             .data
             .get(self.pos..)
             .and_then(|rest| rest.first_chunk::<N>())
-            .copied()
-            .ok_or(FormatError::UnexpectedEof {
+            .ok_or_else(|| FormatError::UnexpectedEof {
                 expected: self.pos.saturating_add(N),
                 available: self.data.len(),
             })?;
         self.pos += N;
         Ok(value)
     }
+
+    /// Borrows `count` consecutive `N`-byte arrays and advances the cursor.
+    ///
+    /// The returned slice remains valid for the original input's lifetime, including after
+    /// subsequent cursor operations. `N` must be greater than zero. A zero count succeeds at any
+    /// position through the input's end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `count * N` or the range's end exceeds
+    /// [`usize::MAX`], or the range is incomplete. Leaves the cursor unchanged on error. The error's
+    /// `expected` field is the saturating requested end, and `available` is the original input length.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only unit tests acquire a counted array slice")
+    )]
+    pub(crate) fn take_arrays<const N: usize>(
+        &mut self,
+        count: usize,
+    ) -> Result<&'a [[u8; N]], FormatError> {
+        const { assert!(N > 0) };
+        let bytes = count
+            .checked_mul(N)
+            .and_then(|len| self.data.get(self.pos..)?.get(..len))
+            .ok_or_else(|| FormatError::UnexpectedEof {
+                expected: self.pos.saturating_add(count.saturating_mul(N)),
+                available: self.data.len(),
+            })?;
+        let (arrays, remainder) = bytes.as_chunks::<N>();
+        debug_assert!(remainder.is_empty());
+        self.pos += bytes.len();
+        Ok(arrays)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acquired_arrays_borrow_the_original_bytes_across_cursor_operations() {
+        let data = [0xaa, 1, 2, 3, 4, 5, 6, 7];
+        let mut fields = Fields::new(&data, 1);
+        let first: &[u8; 2] = fields.take_array().unwrap();
+        let second: &[[u8; 2]] = fields.take_arrays(2).unwrap();
+        assert_eq!(fields.u8().unwrap(), 7);
+        assert_eq!(fields.pos(), data.len());
+        assert_eq!(first, &[1, 2]);
+        assert_eq!(second, &[[3, 4], [5, 6]]);
+        assert_eq!(first.as_ptr(), data[1..].as_ptr());
+        assert_eq!(second.as_ptr().cast::<u8>(), data[3..].as_ptr());
+    }
+
+    #[rstest::rstest]
+    #[case::prefix(0)]
+    #[case::middle(2)]
+    #[case::exact_end(4)]
+    fn a_borrowed_array_advances_by_its_extent(#[case] pos: usize) {
+        let data = [1, 2, 3, 4, 5, 6];
+        let mut fields = Fields::new(&data, pos);
+        let value: &[u8; 2] = fields.take_array().unwrap();
+        assert_eq!(value.as_slice(), &data[pos..pos + 2]);
+        assert_eq!(fields.pos(), pos + 2);
+    }
+
+    #[rstest::rstest]
+    #[case::short(5, 7)]
+    #[case::at_end(6, 8)]
+    #[case::past_end(7, 9)]
+    #[case::end_overflow(usize::MAX, usize::MAX)]
+    fn a_failed_array_acquisition_preserves_its_position(
+        #[case] pos: usize,
+        #[case] expected: usize,
+    ) {
+        let data = [1, 2, 3, 4, 5, 6];
+        let mut fields = Fields::new(&data, pos);
+        assert_eq!(
+            fields.take_array::<2>().unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available: data.len(),
+            }
+        );
+        assert_eq!(fields.pos(), pos);
+    }
+
+    #[rstest::rstest]
+    #[case::prefix(0, 2)]
+    #[case::middle(1, 2)]
+    #[case::exact_end(2, 2)]
+    fn counted_arrays_acquire_exactly_the_requested_region(
+        #[case] pos: usize,
+        #[case] count: usize,
+    ) {
+        let data = [1, 2, 3, 4, 5, 6];
+        let mut fields = Fields::new(&data, pos);
+        let arrays: &[[u8; 2]] = fields.take_arrays(count).unwrap();
+        assert_eq!(arrays.len(), count);
+        assert_eq!(arrays.as_flattened(), &data[pos..pos + count * 2]);
+        assert_eq!(fields.pos(), pos + count * 2);
+    }
+
+    #[rstest::rstest]
+    #[case::short(3, 2, 7)]
+    #[case::at_end(6, 1, 8)]
+    #[case::past_end(7, 1, 9)]
+    #[case::end_overflow(usize::MAX, 1, usize::MAX)]
+    #[case::product_overflow(1, usize::MAX / 2 + 1, usize::MAX)]
+    fn failed_counted_array_acquisition_preserves_its_position(
+        #[case] pos: usize,
+        #[case] count: usize,
+        #[case] expected: usize,
+    ) {
+        let data = [1, 2, 3, 4, 5, 6];
+        let mut fields = Fields::new(&data, pos);
+        assert_eq!(
+            fields.take_arrays::<2>(count).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available: data.len(),
+            }
+        );
+        assert_eq!(fields.pos(), pos);
+    }
+
+    #[rstest::rstest]
+    #[case::prefix(0)]
+    #[case::middle(1)]
+    #[case::at_end(3)]
+    fn empty_array_acquisitions_preserve_valid_positions(#[case] pos: usize) {
+        let data = [1, 2, 3];
+        let mut fields = Fields::new(&data, pos);
+        assert_eq!(fields.take_array::<0>().unwrap(), &[]);
+        assert!(fields.take_arrays::<2>(0).unwrap().is_empty());
+        assert_eq!(fields.array::<0>().unwrap(), []);
+        assert_eq!(fields.pos(), pos);
+    }
+
+    #[rstest::rstest]
+    #[case::past_end(4)]
+    #[case::largest_position(usize::MAX)]
+    fn empty_array_acquisitions_reject_positions_past_the_input(#[case] pos: usize) {
+        let data = [1, 2, 3];
+        let mut fields = Fields::new(&data, pos);
+        let error = FormatError::UnexpectedEof {
+            expected: pos,
+            available: data.len(),
+        };
+        assert_eq!(fields.take_array::<0>().unwrap_err(), error);
+        assert_eq!(fields.take_arrays::<2>(0).unwrap_err(), error);
+        assert_eq!(fields.array::<0>().unwrap_err(), error);
+        assert_eq!(fields.pos(), pos);
+    }
+
+    #[test]
+    fn a_copied_array_remains_usable_after_cursor_advancement() {
+        let data = [0xaa, 1, 2, 3];
+        let mut fields = Fields::new(&data, 1);
+        let value = fields.array::<2>().unwrap();
+        assert_eq!(fields.u8().unwrap(), 3);
+        assert_eq!(value, [1, 2]);
+        assert_eq!(fields.pos(), data.len());
+    }
 
     #[rstest::rstest]
     #[case::two(LengthWidth::Two, u64::from(u16::MAX), &[0xff, 0xff])]
