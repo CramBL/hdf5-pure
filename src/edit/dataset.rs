@@ -2132,18 +2132,19 @@ pub(super) fn flatten_dataset(
     db: DatasetBuilder,
     name: LinkNameBuf,
 ) -> Result<FlatDataset, Error> {
-    let InPlaceDataset { metadata, storage } =
-        PreparedDataset::parse(widths.lengths, db)?.into_in_place()?;
+    let InPlaceDataset {
+        metadata,
+        storage,
+        vl_attrs,
+    } = PreparedDataset::parse(widths.lengths, db)?.into_in_place()?;
     let DatasetMetadata {
         dt,
         element_size: canonical_element_size,
         ds,
         extent: canonical_extent,
-        attrs:
-            PreparedAttributes {
-                messages: mut attrs,
-                collections: vl_attrs,
-            },
+        attrs: PreparedAttributes {
+            messages: mut attrs,
+        },
         chunk_options,
         mut fill,
         fill_time,

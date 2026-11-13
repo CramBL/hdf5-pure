@@ -9,10 +9,12 @@ use alloc::{boxed::Box, string::String, string::ToString, vec, vec::Vec};
 use core::fmt;
 use core::slice;
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 
 use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
+use hdf5_pure_format::__private::GLOBAL_HEAP_MIN_COLLECTION_SIZE;
+use hdf5_pure_format::__private::GlobalHeapCollectionWriter;
 
 use crate::DeflateLevel;
 use crate::LinkPhaseChange;
@@ -1054,8 +1056,8 @@ pub(crate) fn build_global_heap_collections(
 ///
 /// Objects are packed [`GLOBAL_HEAP_MAX_OBJECTS`] to a collection, so object `n` lives
 /// in collection `n / GLOBAL_HEAP_MAX_OBJECTS` at 1-based index
-/// `n % GLOBAL_HEAP_MAX_OBJECTS + 1`. [`patch_vl_refs`] and [`patch_vl_refs_masked`]
-/// resolve references with that same rule, and [`stage_vl_elements`] and
+/// `n % GLOBAL_HEAP_MAX_OBJECTS + 1`. [`patch_vl_refs_masked`] and
+/// [`patch_vl_refs_with_width`] resolve references with that same rule, and [`stage_vl_elements`] and
 /// [`build_attr_message`] write the matching indices.
 ///
 /// # Errors
@@ -1089,32 +1091,6 @@ fn build_global_heap_collections_with_width(
         );
     }
     Ok(collections)
-}
-
-/// Patch VL attribute references with the actual global heap collection
-/// addresses. The raw_data contains VL references with placeholder addresses
-/// (0), one per attribute element, each holding an object of the collection its
-/// position selects (see [`build_global_heap_collections_from_bytes`]);
-/// `collection_addresses` gives those collections' placed addresses in order.
-pub(crate) fn patch_vl_refs(raw_data: &mut [u8], collection_addresses: &[u64]) {
-    // Only a value that writes whole variable-length references reaches a heap,
-    // and [`AttrValue::var_len_strings`] is what decides which values those are.
-    // This is a screen on that decision, not a proof of it: it catches a value
-    // whose element bytes are not a whole number of references — the division
-    // below would then patch its *data*, or patch nothing and leave the
-    // collection it caused to be written unreferenced — but a fixed-width value
-    // whose bytes happen to be a multiple of 16, two `u64`s say, passes it.
-    debug_assert_eq!(
-        raw_data.len() % VL_REF_SIZE,
-        0,
-        "a value routed through the global heap must hold whole variable-length references"
-    );
-    let count = raw_data.len() / VL_REF_SIZE;
-    for i in 0..count {
-        let address = collection_addresses[i / GLOBAL_HEAP_MAX_OBJECTS];
-        let addr_offset = i * VL_REF_SIZE + 4; // skip sequence_length
-        raw_data[addr_offset..addr_offset + 8].copy_from_slice(&address.to_le_bytes());
-    }
 }
 
 /// A single element of a VL-string dataset being written: either a null
@@ -1361,7 +1337,7 @@ pub(crate) fn stage_embedded_vl_elements(
 
 /// Patch the heap address of each VL reference named by `patch_offsets`, leaving
 /// null references (which are absent from that list) with their zero address so
-/// they read back as null. Mirrors [`patch_vl_refs`], but because only
+/// they read back as null. Mirrors [`patch_vl_refs_with_width`], but because only
 /// heap-backed references are listed, the collection a reference resolves to is
 /// selected by its *object* position rather than its element position — and the
 /// references need not sit at a fixed stride, which is what lets a compound with
@@ -1450,6 +1426,125 @@ pub(crate) fn patch_vl_refs_masked_with_width(
             StoredAddress::new(*address),
             offsets,
         )?;
+    }
+    Ok(())
+}
+
+/// Where an object of a set of global heap collections is: the position of its collection in the
+/// set, and its 1-based index in that collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HeapLocation {
+    pub(crate) collection: usize,
+    pub(crate) index: NonZeroU16,
+}
+
+/// Global heap collections that the strings of several attributes share.
+///
+/// [`add`](Self::add) puts each string in the newest collection, and starts another once the
+/// string does not fit the newest's [`GLOBAL_HEAP_MIN_COLLECTION_SIZE`] bytes. libhdf5 writes
+/// collections of that size, so a reader that walks a collection to find one string reads no more
+/// than it reads in a file libhdf5 writes, however many attributes share the collections.
+pub(crate) struct SharedHeapCollections {
+    /// The encoded collections before the newest.
+    full: Vec<Vec<u8>>,
+    /// The collection [`add`](Self::add) puts strings in, absent before the first string.
+    newest: Option<GlobalHeapCollectionWriter>,
+}
+
+impl SharedHeapCollections {
+    pub(crate) fn new() -> Self {
+        Self {
+            full: Vec::new(),
+            newest: None,
+        }
+    }
+
+    /// Adds `object` and returns where it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`GlobalHeapCollectionWriter::push`] and
+    /// [`GlobalHeapCollectionWriter::finish`].
+    pub(crate) fn add(&mut self, object: &[u8]) -> Result<HeapLocation, FormatError> {
+        if let Some(newest) = &mut self.newest {
+            if let Some(index) = newest.push(object)? {
+                return Ok(HeapLocation {
+                    collection: self.full.len(),
+                    index,
+                });
+            }
+        }
+        let mut newest = Self::collection();
+        let index = newest.push(object)?.ok_or_else(|| {
+            FormatError::Internal("an empty global heap collection rejected an object".into())
+        })?;
+        if let Some(full) = self.newest.replace(newest) {
+            self.full.push(full.finish()?);
+        }
+        Ok(HeapLocation {
+            collection: self.full.len(),
+            index,
+        })
+    }
+
+    /// Returns the encoded collections, in the order of [`HeapLocation::collection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`GlobalHeapCollectionWriter::finish`].
+    pub(crate) fn finish(self) -> Result<Vec<Vec<u8>>, FormatError> {
+        let Self { mut full, newest } = self;
+        if let Some(newest) = newest {
+            full.push(newest.finish()?);
+        }
+        Ok(full)
+    }
+
+    fn collection() -> GlobalHeapCollectionWriter {
+        GlobalHeapCollectionWriter::new(
+            LengthWidth::Eight,
+            GLOBAL_HEAP_MIN_COLLECTION_SIZE.to_u64(),
+        )
+    }
+}
+
+/// Points each variable-length reference in `raw` at the object at the same position of
+/// `locations`, whose collections are at `addresses`.
+///
+/// Each reference is a four-byte count, an `offsets`-wide collection address and a four-byte
+/// object index.
+///
+/// # Errors
+///
+/// Returns [`FormatError::DataSizeMismatch`] if `raw` does not hold one reference per location, or
+/// [`FormatError::Internal`] if a collection address is absent. Propagates defined-address and
+/// buffer-range errors. Earlier patches remain written if a later patch fails.
+pub(crate) fn patch_vl_refs_at(
+    offsets: OffsetWidth,
+    raw: &mut [u8],
+    addresses: &[u64],
+    locations: &[HeapLocation],
+) -> Result<(), FormatError> {
+    let reference_size = VlElement::serialized_size(offsets);
+    let expected = locations.len() * reference_size;
+    if raw.len() != expected {
+        return Err(FormatError::DataSizeMismatch {
+            expected,
+            actual: raw.len(),
+        });
+    }
+    for (reference, location) in raw.chunks_exact_mut(reference_size).zip(locations) {
+        let address = addresses.get(location.collection).ok_or_else(|| {
+            FormatError::Internal("a variable-length collection address is absent".into())
+        })?;
+        hdf5_pure_format::__private::write_defined_stored_address_at(
+            reference,
+            VL_COUNT_SIZE,
+            StoredAddress::new(*address),
+            offsets,
+        )?;
+        let index_at = VL_COUNT_SIZE + usize::from(offsets.get());
+        reference[index_at..].copy_from_slice(&u32::from(location.index.get()).to_le_bytes());
     }
     Ok(())
 }

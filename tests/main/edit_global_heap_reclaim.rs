@@ -221,6 +221,65 @@ fn a_collection_two_deleted_datasets_share_is_reclaimed() {
     file.close().unwrap();
 }
 
+#[rstest]
+#[case::replaced(Change::Replace)]
+#[case::removed(Change::Remove)]
+#[case::owner_deleted(Change::DeleteOwner)]
+fn a_collection_string_attributes_share_is_kept_while_one_refers_to_it(#[case] change: Change) {
+    let path = temp::temp_path("reclaim_shared_attribute.h5");
+    let mut builder = FileBuilder::new();
+    builder.set_attr("kept", strings(&["alpha", "beta"]));
+    builder
+        .create_dataset("x")
+        .with_i32_data(&[1, 2])
+        .set_attr("changed", strings(&["gamma", "delta"]));
+    builder.write(&path).unwrap();
+    let collections = collections(&path);
+    assert_eq!(collections.len(), 1, "the attributes share one collection");
+    let file = File::open_rw(&path).unwrap();
+
+    change.apply(&file);
+    file.commit().unwrap();
+
+    assert_kept(&file, &collections[0]);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.root().attrs().unwrap()["kept"],
+        strings(&["alpha", "beta"])
+    );
+    if matches!(change, Change::Replace) {
+        assert_eq!(
+            file.dataset("x").unwrap().attrs().unwrap()["changed"],
+            strings(&["epsilon"])
+        );
+    }
+}
+
+#[test]
+fn a_collection_the_string_attributes_of_two_deleted_datasets_share_is_reclaimed() {
+    let path = temp::temp_path("reclaim_shared_attribute_deleted.h5");
+    let mut builder = FileBuilder::new();
+    for (name, value) in [("x", "alpha"), ("y", "beta")] {
+        builder
+            .create_dataset(name)
+            .with_i32_data(&[1, 2])
+            .set_attr("label", strings(&[value]));
+    }
+    builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    builder.write(&path).unwrap();
+    let collections = collections(&path);
+    assert_eq!(collections.len(), 1, "the attributes share one collection");
+    let file = File::open_rw(&path).unwrap();
+
+    file.root().delete("x").unwrap();
+    file.root().delete("y").unwrap();
+    file.commit().unwrap();
+
+    assert_reclaimed(&file, &collections[0]);
+    file.close().unwrap();
+}
+
 #[test]
 fn deleting_one_of_two_hard_links_keeps_the_collection() {
     let mut fixture = Fixture::new();
@@ -444,6 +503,32 @@ impl Written {
     }
 }
 
+/// A change to the attribute `changed` of dataset `x`, whose strings share a collection with the
+/// root attribute `kept`.
+#[derive(Clone, Copy, Debug)]
+enum Change {
+    /// Deletes the dataset.
+    DeleteOwner,
+    /// Removes the attribute.
+    Remove,
+    /// Replaces the strings of the attribute, which go to a collection of their own.
+    Replace,
+}
+
+impl Change {
+    fn apply(self, file: &File) {
+        match self {
+            Self::DeleteOwner => file.root().delete("x").unwrap(),
+            Self::Remove => file.dataset("x").unwrap().remove_attr("changed").unwrap(),
+            Self::Replace => file
+                .dataset("x")
+                .unwrap()
+                .set_attr("changed", strings(&["epsilon"]))
+                .unwrap(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Unreadable {
     DataPastTheEndOfTheFile,
@@ -498,6 +583,10 @@ fn collections(path: &Path) -> Vec<Range<u64>> {
 
 fn minimum_collection(start: u64) -> Range<u64> {
     start..start + global_heap::MIN_COLLECTION_SIZE as u64
+}
+
+fn strings(values: &[&str]) -> AttrValue {
+    AttrValue::VarLenStringArray(values.iter().map(|&value| value.to_owned()).collect())
 }
 
 #[track_caller]

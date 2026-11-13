@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `LinkMessageV1` in `hdf5-pure-format` decodes and encodes user-defined links, preserving raw bytes, selected name-length widths, and explicit optional fields. Conversions into supported models report user-defined kinds separately from text-conversion errors ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - `MatTimetable::row_times` returns the row times of a timetable built from a sample rate or time step, computed from its start and step as MATLAB does ([#1207](https://github.com/CramBL/hdf5-pure/pull/1207)).
 
+### Changed
+
+- `FileBuilder` stores the strings of variable-length string attributes in global heap collections shared across the file, and `repack` in collections shared across each object, filling each collection to 4096 bytes as libhdf5 does ([#881](https://github.com/CramBL/hdf5-pure/pull/881)).
+
 ### Fixed
 
 - Fixed `Dataset::datatype` interpreting reserved floating-point byte-order bits as VAX, including in nested descriptions ([#1231](https://github.com/CramBL/hdf5-pure/pull/1231)).

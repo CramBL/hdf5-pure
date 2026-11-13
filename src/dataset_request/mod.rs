@@ -200,6 +200,7 @@ impl PreparedDataset {
             committed_datatype_targets: self.attribute_specs.committed_datatype_targets(),
             metadata: self.metadata,
             storage: self.storage,
+            attribute_specs: self.attribute_specs,
         })
     }
 
@@ -301,7 +302,7 @@ impl PreparedDataset {
         let Self {
             metadata,
             storage,
-            attribute_specs: _,
+            attribute_specs,
         } = self;
         let storage = match storage {
             PreparedStorage::Elements(elements) => elements,
@@ -338,7 +339,11 @@ impl PreparedDataset {
                 "a dataset or attribute naming a committed (shared) datatype cannot be added in place; write the file with FileBuilder instead",
             ));
         }
-        Ok(InPlaceDataset { metadata, storage })
+        Ok(InPlaceDataset {
+            vl_attrs: crate::attribute_request::attribute_collections(&attribute_specs)?,
+            metadata,
+            storage,
+        })
     }
 }
 
@@ -370,6 +375,8 @@ pub(crate) struct WholeFileDataset {
     pub(crate) storage: PreparedStorage,
     /// Attribute indices paired with committed datatype targets awaiting address resolution.
     pub(crate) committed_datatype_targets: Vec<(usize, ObjectTarget)>,
+    /// The attributes as requested, whose variable-length strings the writer places.
+    pub(crate) attribute_specs: AttributeSpecs,
 }
 
 /// A creation request with inline datatypes and storage without providers.
@@ -377,6 +384,8 @@ pub(crate) struct WholeFileDataset {
 pub(crate) struct InPlaceDataset {
     pub(crate) metadata: DatasetMetadata,
     pub(crate) storage: PreparedElements,
+    /// Attribute collections awaiting placement.
+    pub(crate) vl_attrs: crate::attribute_request::AttributeCollections,
 }
 
 /// Replacement values without creation options, pending compatibility with an existing dataset.

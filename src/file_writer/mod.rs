@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileSpaceSettingsExt;
 use hdf5_pure_core::__private::SuperblockFields;
-pub(crate) use hdf5_pure_format::__private as dense_attribute_write;
 #[cfg(test)]
 use hdf5_pure_format::__private::DENSE_ATTR_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::DenseAttrBlob;
@@ -62,7 +61,6 @@ use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_policy::AttributePolicy;
 use crate::attribute_policy::AttributeStorage;
-use crate::bytes;
 use crate::chunked_write::ByteSink;
 use crate::chunked_write::CompressedChunkSet;
 use crate::convert::Narrow;
@@ -93,8 +91,8 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
     self, AttrSpec, AttributeSpecs, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder,
+    SharedHeapCollections,
 };
-use crate::vl_data::VlElement;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -579,14 +577,13 @@ pub(crate) fn make_link(name: &str, addr: StoredAddress) -> LinkMessage {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::Internal`] if a prepared attribute or collection reference is absent,
-/// a committed datatype is inline, a collection offset overflows, or a payload changes length.
-/// Propagates address errors from [`PreparedDenseAttrs::finalize`] and reference-read errors.
+/// Returns [`FormatError::Internal`] if a prepared attribute is absent, a committed datatype is
+/// inline, or a payload changes length. Propagates address and reference-read errors from
+/// [`PreparedDenseAttrs::finalize`].
 pub(crate) fn finalize_dense_attrs(
     prepared: PreparedDenseAttrs,
     attrs: &[AttributeMessage],
 ) -> Result<DenseAttrPlan, FormatError> {
-    let widths = prepared.widths();
     let attribute = |index: usize| {
         attrs.get(index).ok_or_else(|| {
             FormatError::Internal("a prepared dense attribute is absent during finalization".into())
@@ -601,32 +598,6 @@ pub(crate) fn finalize_dense_attrs(
                         "a prepared committed attribute has an inline datatype".into(),
                     )),
                 }
-            }
-            DenseAttrReference::GlobalHeap {
-                attribute: index,
-                collection,
-            } => {
-                let offset = collection
-                    .checked_mul(dense_attribute_write::GLOBAL_HEAP_MAX_OBJECTS)
-                    .and_then(|element| {
-                        element.checked_mul(VlElement::serialized_size(widths.offsets))
-                    })
-                    .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
-                    .ok_or_else(|| {
-                        FormatError::Internal(
-                            "a prepared attribute collection offset overflows".into(),
-                        )
-                    })?;
-                // `H5T__vlen_disk_write` writes the sequence length before the heap address
-                // (`H5Tvlen.c`, HDF5 2.2.0).
-                bytes::read_offset_width(&attribute(index)?.raw_data, offset, widths.offsets)
-                    .map(StoredAddress::new)
-                    .map_err(|error| match error {
-                        FormatError::UnexpectedEof { .. } => FormatError::Internal(
-                            "a prepared attribute collection reference is absent".into(),
-                        ),
-                        error => error,
-                    })
             }
         },
         |index| Ok(attribute(index)?.raw_data.as_slice()),
@@ -1130,8 +1101,10 @@ impl FileWriter {
             builder: DatasetBuilder,
             datasets: &mut Vec<PreparedDataset>,
             heaps: &mut Vec<Vec<VlPatch>>,
+            attr_heap: &mut SharedHeapCollections,
         ) -> Result<usize, FormatError> {
-            let (dataset, patches) = PreparedDataset::prepare_with_widths(widths, builder)?;
+            let (dataset, patches) =
+                PreparedDataset::prepare_with_widths(widths, builder, attr_heap)?;
             let index = datasets.len();
             datasets.push(dataset);
             heaps.push(patches);
@@ -1172,6 +1145,7 @@ impl FileWriter {
             committed: &mut Vec<CtFlat>,
             grp_vl: &mut Vec<Vec<VlPatch>>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
+            attr_heap: &mut SharedHeapCollections,
         ) -> Result<usize, FormatError> {
             let FinishedGroup {
                 name,
@@ -1186,16 +1160,16 @@ impl FileWriter {
                 messages: gattrs,
                 committed_datatype_targets: attr_committed_datatype_targets,
                 heaps: patches,
-            } = PreparedAttributes::with_widths(widths, &attrs)?;
+            } = PreparedAttributes::with_widths(widths, &attrs, attr_heap)?;
             let committed_idx = flatten_committed(group_committed, committed)?;
             let mut ds_idx = Vec::new();
             for db in datasets {
-                ds_idx.push(flatten_dataset(widths, db, all_ds, ds_vl)?);
+                ds_idx.push(flatten_dataset(widths, db, all_ds, ds_vl, attr_heap)?);
             }
             let mut sub_grp_idx = Vec::new();
             for sg in sub_groups {
                 sub_grp_idx.push(flatten_group(
-                    widths, sg, all_ds, groups, committed, grp_vl, ds_vl,
+                    widths, sg, all_ds, groups, committed, grp_vl, ds_vl, attr_heap,
                 )?);
             }
             let gi = groups.len();
@@ -1214,11 +1188,21 @@ impl FileWriter {
 
         let mut grp_vl: Vec<Vec<VlPatch>> = Vec::new();
         let mut ds_vl: Vec<Vec<VlPatch>> = Vec::new();
+        // libhdf5 shares global heap collections across objects. A collection takes at least
+        // 4096 bytes, so one per attribute would make a file of many short string attributes
+        // mostly padding.
+        let mut attr_heap = SharedHeapCollections::new();
 
         let root_committed_indices = flatten_committed(self.root_committed, &mut committed)?;
 
         for db in self.root_datasets {
-            root_ds_indices.push(flatten_dataset(widths, db, &mut all_ds, &mut ds_vl)?);
+            root_ds_indices.push(flatten_dataset(
+                widths,
+                db,
+                &mut all_ds,
+                &mut ds_vl,
+                &mut attr_heap,
+            )?);
         }
 
         for g in self.groups.into_iter() {
@@ -1230,11 +1214,36 @@ impl FileWriter {
                 &mut committed,
                 &mut grp_vl,
                 &mut ds_vl,
+                &mut attr_heap,
             )?);
         }
 
-        // Build global heap collections for variable-length string attributes.
-        // Track which attribute messages need VL patching, across root, groups, and datasets.
+        /// Points the references of each attribute of `patches` at its strings in the shared
+        /// collections at `addresses`.
+        ///
+        /// # Errors
+        ///
+        /// Returns the errors of [`type_builders::patch_vl_refs_at`].
+        fn patch_shared_vl_refs(
+            offsets: OffsetWidth,
+            patches: &[VlPatch],
+            attrs: &mut [AttributeMessage],
+            addresses: &[u64],
+        ) -> Result<(), FormatError> {
+            for patch in patches {
+                let attr = attrs.get_mut(patch.attr_index).ok_or_else(|| {
+                    FormatError::Internal("a variable-length attribute is absent".into())
+                })?;
+                type_builders::patch_vl_refs_at(
+                    offsets,
+                    &mut attr.raw_data,
+                    addresses,
+                    &patch.locations,
+                )?;
+            }
+            Ok(())
+        }
+
         /// Reserves raw collection allocations and returns addresses for reference patching.
         ///
         /// If `retain` is set, appends the addresses to `retained` for address-ordered emission.
@@ -1268,7 +1277,9 @@ impl FileWriter {
             messages: mut root_attrs,
             committed_datatype_targets: root_attr_committed_datatype_targets,
             heaps: vl_root,
-        } = PreparedAttributes::with_widths(widths, &self.root_attrs)?;
+        } = PreparedAttributes::with_widths(widths, &self.root_attrs, &mut attr_heap)?;
+        let attr_collections = attr_heap.finish()?;
+        preparation::validate_collections(widths, &attr_collections)?;
 
         let target =
             target.with_datatypes(
@@ -1597,33 +1608,13 @@ impl FileWriter {
                     },
                 )
             };
-            for patch in &vl_root {
-                let addrs = place(&patch.collections)?;
-                type_builders::patch_vl_refs_with_width(
-                    widths.offsets,
-                    &mut root_attrs[patch.attr_index].raw_data,
-                    &addrs,
-                )?;
-            }
+            let addrs = place(&attr_collections)?;
+            patch_shared_vl_refs(widths.offsets, &vl_root, &mut root_attrs, &addrs)?;
             for (gi, patches) in grp_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place(&patch.collections)?;
-                    type_builders::patch_vl_refs_with_width(
-                        widths.offsets,
-                        &mut groups[gi].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    )?;
-                }
+                patch_shared_vl_refs(widths.offsets, patches, &mut groups[gi].attrs, &addrs)?;
             }
             for (di, patches) in ds_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place(&patch.collections)?;
-                    type_builders::patch_vl_refs_with_width(
-                        widths.offsets,
-                        &mut all_ds[di].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    )?;
-                }
+                patch_shared_vl_refs(widths.offsets, patches, &mut all_ds[di].attrs, &addrs)?;
             }
             for (i, dataset) in all_ds.iter_mut().enumerate() {
                 if dataset.storage.chunks().is_some() {
@@ -2382,11 +2373,7 @@ impl FileWriter {
             sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)
                 .map_err(EmissionError::Sink)?;
 
-            let collections = vl_root
-                .iter()
-                .map(|patch| &patch.collections)
-                .chain(grp_vl.iter().flatten().map(|patch| &patch.collections))
-                .chain(ds_vl.iter().flatten().map(|patch| &patch.collections))
+            let collections = core::iter::once(&attr_collections)
                 .chain(early_gcol.iter().filter_map(|&i| {
                     all_ds[i]
                         .storage
@@ -2586,59 +2573,27 @@ impl FileWriter {
         }
 
         // Reserve the remaining global heaps as raw allocations and patch their references.
-        // Reserve attribute collections in root, group, and dataset order, then dataset-element
-        // collections. With aggregation enabled, retain every address for emission.
-        let has_vl = !vl_root.is_empty()
-            || grp_vl.iter().any(|v| !v.is_empty())
-            || ds_vl.iter().any(|v| !v.is_empty())
+        // Reserve the shared attribute collections, then dataset-element collections. With
+        // aggregation enabled, retain every address for emission.
+        let has_vl = !attr_collections.is_empty()
             || all_ds
                 .iter()
                 .any(|d| d.storage.vl_string_staging().is_some());
 
         let gcol_start = allocation.end();
         if has_vl {
-            for patch in &vl_root {
-                let addrs = place_collections(
-                    &patch.collections,
-                    &mut allocation,
-                    &mut aggregate_collection_addresses,
-                    aggregated,
-                )?;
-                type_builders::patch_vl_refs_with_width(
-                    widths.offsets,
-                    &mut root_attrs[patch.attr_index].raw_data,
-                    &addrs,
-                )?;
-            }
+            let addrs = place_collections(
+                &attr_collections,
+                &mut allocation,
+                &mut aggregate_collection_addresses,
+                aggregated,
+            )?;
+            patch_shared_vl_refs(widths.offsets, &vl_root, &mut root_attrs, &addrs)?;
             for (gi, patches) in grp_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place_collections(
-                        &patch.collections,
-                        &mut allocation,
-                        &mut aggregate_collection_addresses,
-                        aggregated,
-                    )?;
-                    type_builders::patch_vl_refs_with_width(
-                        widths.offsets,
-                        &mut groups[gi].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    )?;
-                }
+                patch_shared_vl_refs(widths.offsets, patches, &mut groups[gi].attrs, &addrs)?;
             }
             for (di, patches) in ds_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place_collections(
-                        &patch.collections,
-                        &mut allocation,
-                        &mut aggregate_collection_addresses,
-                        aggregated,
-                    )?;
-                    type_builders::patch_vl_refs_with_width(
-                        widths.offsets,
-                        &mut all_ds[di].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    )?;
-                }
+                patch_shared_vl_refs(widths.offsets, patches, &mut all_ds[di].attrs, &addrs)?;
             }
             // Patch dataset-element references in the contiguous bytes held in prepared storage.
             // The writer reserves chunked datasets' collections and patches their references before
@@ -2798,11 +2753,7 @@ impl FileWriter {
                     )
                 },
             );
-        let attribute_collections = vl_root
-            .iter()
-            .chain(grp_vl.iter().flatten())
-            .chain(ds_vl.iter().flatten())
-            .flat_map(|patch| &patch.collections);
+        let attribute_collections = attr_collections.iter();
         let late_collections = all_ds
             .iter()
             .enumerate()

@@ -11,7 +11,6 @@ use alloc::vec::Vec;
 
 use crate::__private as format_boundary;
 use crate::address::StoredAddress;
-#[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_message::{AttributeMessage, PreparedAttributeMessage};
@@ -138,8 +137,8 @@ impl PreparedDenseAttrs {
     ///
     /// Attribute numbers in `fixups` refer to positions in `attrs`. A committed-datatype
     /// fixup requires a committed datatype reference. A global-heap fixup requires a
-    /// variable-length datatype and consecutive object indexes starting at one per collection.
-    /// A payload fixup requires a datatype without embedded file addresses.
+    /// variable-length datatype and whole references. A payload fixup requires a datatype
+    /// without embedded file addresses.
     ///
     /// # Errors
     ///
@@ -248,7 +247,6 @@ impl PreparedDenseAttrs {
         let reference_size = DENSE_ATTR_VL_ADDRESS_OFFSET
             + usize::from(widths.offsets.get())
             + core::mem::size_of::<u32>();
-        let object_offset = DENSE_ATTR_VL_ADDRESS_OFFSET + usize::from(widths.offsets.get());
         let mut prepared = Vec::new();
         let mut seen = BTreeSet::new();
         for fixup in fixups {
@@ -294,17 +292,6 @@ impl PreparedDenseAttrs {
                             "a global heap fixup requires whole variable-length attribute references".into(),
                         ));
                     }
-                    for (index, reference) in attr.raw_data.chunks_exact(reference_size).enumerate() {
-                        let object = u32::from_le_bytes([
-                            reference[object_offset], reference[object_offset + 1],
-                            reference[object_offset + 2], reference[object_offset + 3],
-                        ]);
-                        if u64::from(object) != (index % format_boundary::GLOBAL_HEAP_MAX_OBJECTS + 1) as u64 {
-                            return Err(FormatError::Internal(
-                                "a global heap fixup requires consecutive collection object indexes".into(),
-                            ));
-                        }
-                    }
                     PreparedAttrFixup::GlobalHeap { attribute, offset: data_offset }
                 }
                 DenseAttrFixup::Payload { .. } => {
@@ -325,16 +312,17 @@ impl PreparedDenseAttrs {
 
     /// Resolves the deferred updates within the retained geometry.
     ///
-    /// Calls `address` for each committed datatype and each global-heap collection used by
-    /// an attribute. Calls `payload` with the attribute position for each whole-payload fixup.
-    /// Replacement payloads must have the prepared length. The returned [`DenseAttrPlan`]
+    /// Calls `address` for each committed datatype. Calls `payload` with the attribute position
+    /// for each global-heap and whole-payload fixup. Replacement payloads must have the prepared
+    /// length, and the references of a global-heap fixup must hold defined addresses. The returned [`DenseAttrPlan`]
     /// contains the resolved bytes and the original heap and index layouts.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::DefinedAddressIsUndefined`] if a resolved address is undefined,
     /// [`FormatError::AddressTooLarge`] if it exceeds the retained address width, or
-    /// [`FormatError::Internal`] if a replacement payload has a different length.
+    /// [`FormatError::Internal`] if a replacement payload has a different length. Propagates
+    /// errors reading a reference address.
     /// Propagates errors from either resolver.
     ///
     /// # Examples
@@ -393,7 +381,6 @@ impl PreparedDenseAttrs {
         let reference_size = DENSE_ATTR_VL_ADDRESS_OFFSET
             + usize::from(widths.offsets.get())
             + core::mem::size_of::<u32>();
-        let object_offset = DENSE_ATTR_VL_ADDRESS_OFFSET + usize::from(widths.offsets.get());
         for fixup in fixups {
             match fixup {
                 PreparedAttrFixup::CommittedDatatype { attribute, offset } => {
@@ -406,21 +393,24 @@ impl PreparedDenseAttrs {
                         );
                 }
                 PreparedAttrFixup::GlobalHeap { attribute, offset } => {
-                    for (collection, references) in plan.attributes[attribute].bytes[offset..]
-                        .chunks_mut(format_boundary::GLOBAL_HEAP_MAX_OBJECTS * reference_size)
-                        .enumerate()
-                    {
-                        let resolved = address(DenseAttrReference::GlobalHeap {
-                            attribute,
-                            collection,
-                        })?;
-                        defined_dense_attr_reference(widths, resolved)?;
-                        for reference in references.chunks_exact_mut(reference_size) {
-                            reference[DENSE_ATTR_VL_ADDRESS_OFFSET..object_offset].copy_from_slice(
-                                &resolved.get().to_le_bytes()[..usize::from(widths.offsets.get())],
-                            );
-                        }
+                    let resolved = payload(attribute)?;
+                    let target = &mut plan.attributes[attribute].bytes[offset..];
+                    if target.len() != resolved.len() {
+                        return Err(FormatError::Internal(
+                            "a global heap fixup changes its prepared length".into(),
+                        ));
                     }
+                    for reference in resolved.chunks_exact(reference_size) {
+                        defined_dense_attr_reference(
+                            widths,
+                            StoredAddress::new(bytes::read_offset_width(
+                                reference,
+                                DENSE_ATTR_VL_ADDRESS_OFFSET,
+                                widths.offsets,
+                            )?),
+                        )?;
+                    }
+                    target.copy_from_slice(resolved);
                 }
                 PreparedAttrFixup::Payload { attribute, offset } => {
                     let resolved = payload(attribute)?;
@@ -500,7 +490,8 @@ pub enum DenseAttrFixup {
         /// The attribute position in the prepared set.
         attribute: usize,
     },
-    /// Replaces the collection addresses in variable-length references.
+    /// Replaces variable-length references, collection addresses and object indexes, with the
+    /// attribute's resolved raw data.
     GlobalHeap {
         /// The attribute position in the prepared set.
         attribute: usize,
@@ -519,13 +510,6 @@ pub enum DenseAttrReference {
     CommittedDatatype {
         /// The attribute position in the prepared set.
         attribute: usize,
-    },
-    /// The address of a collection used by an attribute's variable-length values.
-    GlobalHeap {
-        /// The attribute position in the prepared set.
-        attribute: usize,
-        /// The zero-based collection number within the attribute's values.
-        collection: usize,
     },
 }
 
