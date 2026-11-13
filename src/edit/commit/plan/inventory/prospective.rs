@@ -69,6 +69,13 @@ impl ProspectiveCollections {
         self.root
     }
 
+    /// Borrows the original source association retained with prospective observations.
+    ///
+    /// Returns [`None`] if no source association was captured.
+    pub(super) fn source(&self) -> Option<&ReconstructionSource> {
+        self.source.as_ref()
+    }
+
     /// Borrows the distinct physical roots supplied to the reference traversal.
     ///
     /// The set can be partial when retained-root applicability failed.

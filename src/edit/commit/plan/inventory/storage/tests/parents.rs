@@ -12,10 +12,13 @@ use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
 
 use super::super::PendingEditInventory;
+use super::super::SpaceClaim;
+use super::super::StorageConflict;
 use crate::AttrValue;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::commit::plan::inventory::members::ParentDisposition;
 use crate::edit::commit::plan::inventory::prospective::ReferencePresence;
+use crate::edit::retirement::RootRetirement;
 use crate::edit::test_util as edit_test_util;
 use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
@@ -90,7 +93,7 @@ fn each_parent_has_one_checked_disposition(#[case] disposition: Disposition) {
         prepared.collections = phase.capture_collections(None, candidates);
     }
     let applied = prepared.apply(&mut engine).unwrap();
-    let pending = PendingEditInventory::new(&mut engine, applied);
+    let mut pending = PendingEditInventory::new(&mut engine, applied);
     let decisions = pending.member_decisions();
     assert_eq!(decisions.dispositions().len(), 1);
     let parent = PhysicalAddress::new(parent);
@@ -134,6 +137,44 @@ fn each_parent_has_one_checked_disposition(#[case] disposition: Disposition) {
             assert_eq!(decisions.plans().count(), 0)
         }
         _ => panic!("unexpected parent disposition"),
+    }
+    let protected = pending.storage.allocations.clone();
+    let before = pending.pending.batch.entries().to_vec();
+    let prepared = pending.prepare_parents().unwrap();
+    if matches!(disposition, Disposition::Retire) {
+        let ParentDisposition::Retire(retirement) = &prepared.dispositions()[&parent] else {
+            panic!("expected prepared whole-parent retirement");
+        };
+        assert_eq!(retirement.range(), super::range(parent.get(), 4096));
+        assert_eq!(retirement.class(), FreeClass::Page(PageType::Raw));
+        assert_eq!(retirement.root(), pending.pending.root);
+        assert_eq!(
+            pending
+                .pending
+                .batch
+                .entries()
+                .iter()
+                .filter(|(range, _)| range.start() == parent)
+                .count(),
+            1
+        );
+        assert!(
+            pending
+                .storage
+                .allocations
+                .iter()
+                .all(|allocation| allocation.range.start() != parent)
+        );
+    } else {
+        assert_eq!(pending.storage.allocations, protected);
+        assert_eq!(pending.pending.batch.entries(), before);
+        assert_eq!(
+            prepared.plans().count(),
+            usize::from(matches!(
+                disposition,
+                Disposition::CompactLive | Disposition::CompactUnobserved
+            ))
+        );
     }
     if !matches!(disposition, Disposition::RetainUnavailable) {
         let id = GlobalHeapId {
@@ -192,7 +233,7 @@ fn whole_retirement_preserves_parent_extent_and_stored_counts(
         .unwrap();
     let prepared = super::prepare(&mut engine);
     let applied = prepared.apply(&mut engine).unwrap();
-    let pending = PendingEditInventory::new(&mut engine, applied);
+    let mut pending = PendingEditInventory::new(&mut engine, applied);
     let decisions = pending.member_decisions();
     let ParentDisposition::Retire(retirement) =
         &decisions.dispositions()[&PhysicalAddress::new(parent)]
@@ -227,6 +268,40 @@ fn whole_retirement_preserves_parent_extent_and_stored_counts(
             members.members()[0].reference_count()
         ),
         (91, reference_count)
+    );
+    let range = retirement.range();
+    let class = retirement.class();
+    let mut spans = pending.pending.batch.entries().to_vec();
+    spans.push((range, class));
+    pending.pending = RootRetirement::new(pending.pending.root, Vec::new())
+        .into_pending_frees(spans, pending.engine.image.len());
+    pending.exclusion = pending
+        .storage
+        .exclude(range, SpaceClaim::Retirement(class));
+    assert!(
+        matches!(pending.exclusion, Err(StorageConflict::Overlap { allocation, range: actual, claim: SpaceClaim::Retirement(actual_class) }) if allocation.range == range && actual == range && actual_class == class)
+    );
+    let prepared = pending.prepare_parents().unwrap();
+    assert!(matches!(
+        prepared.dispositions()[&PhysicalAddress::new(parent)],
+        ParentDisposition::Retire(_)
+    ));
+    assert_eq!(
+        pending
+            .pending
+            .batch
+            .entries()
+            .iter()
+            .filter(|(actual, _)| *actual == range)
+            .count(),
+        1
+    );
+    assert!(
+        pending
+            .storage
+            .allocations
+            .iter()
+            .all(|allocation| allocation.range != range)
     );
 }
 

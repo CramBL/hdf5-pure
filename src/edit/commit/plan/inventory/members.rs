@@ -24,14 +24,14 @@ use crate::global_heap::GlobalHeapId;
 /// Member and parent removal decisions with one disposition per physical parent.
 ///
 /// Compaction and whole-parent retirement are exclusive dispositions. Publication and parent
-/// allocation release require separate permission.
-#[derive(Default)]
-pub(in crate::edit::commit) struct MemberDecisions {
+/// allocation release require separate permission. `R` is [`ParentRetirement`] before consumption
+/// and [`PreparedParentRetirement`] after checked publication preparation.
+pub(in crate::edit::commit) struct MemberDecisions<R = ParentRetirement> {
     members:
         BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>,
     parents: BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>>,
     planning: BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>>,
-    dispositions: BTreeMap<PhysicalAddress, ParentDisposition>,
+    dispositions: BTreeMap<PhysicalAddress, ParentDisposition<R>>,
     #[cfg(test)]
     physical_members: usize,
 }
@@ -163,6 +163,48 @@ impl MemberDecisions {
         result
     }
 
+    /// Consumes active retirement evidence through `prepare`, preserving all other decisions.
+    ///
+    /// Calls `prepare` once per retiring parent in physical address order. Member and parent
+    /// qualification outcomes, planning diagnostics, and compaction-plan order are retained.
+    pub(super) fn map_retirements<R>(
+        self,
+        mut prepare: impl FnMut(ParentRetirement) -> R,
+    ) -> MemberDecisions<R> {
+        let Self {
+            members,
+            parents,
+            planning,
+            dispositions,
+            #[cfg(test)]
+            physical_members,
+        } = self;
+        MemberDecisions {
+            members,
+            parents,
+            planning,
+            dispositions: dispositions
+                .into_iter()
+                .map(|(address, disposition)| {
+                    (
+                        address,
+                        match disposition {
+                            ParentDisposition::Compact(plan) => ParentDisposition::Compact(plan),
+                            ParentDisposition::Retain => ParentDisposition::Retain,
+                            ParentDisposition::Retire(retirement) => {
+                                ParentDisposition::Retire(prepare(retirement))
+                            }
+                        },
+                    )
+                })
+                .collect(),
+            #[cfg(test)]
+            physical_members,
+        }
+    }
+}
+
+impl<R> MemberDecisions<R> {
     /// Borrows per-origin member qualification and prospective reference outcomes.
     pub(in crate::edit::commit) fn members(
         &self,
@@ -188,7 +230,7 @@ impl MemberDecisions {
     /// Borrows the exclusive disposition of each original parent in physical address order.
     pub(in crate::edit::commit) fn dispositions(
         &self,
-    ) -> &BTreeMap<PhysicalAddress, ParentDisposition> {
+    ) -> &BTreeMap<PhysicalAddress, ParentDisposition<R>> {
         &self.dispositions
     }
 
@@ -211,17 +253,67 @@ impl MemberDecisions {
     }
 }
 
+impl<R> Default for MemberDecisions<R> {
+    fn default() -> Self {
+        Self {
+            members: BTreeMap::new(),
+            parents: BTreeMap::new(),
+            planning: BTreeMap::new(),
+            dispositions: BTreeMap::new(),
+            #[cfg(test)]
+            physical_members: 0,
+        }
+    }
+}
+
+/// Range, class, and prospective-root metadata retained after retirement permission is consumed.
+///
+/// The caller retains the checked publication batch separately.
+pub(in crate::edit::commit) struct PreparedParentRetirement {
+    range: FileRange,
+    class: FreeClass,
+    root: PhysicalAddress,
+}
+
+impl PreparedParentRetirement {
+    /// Consumes retirement evidence and retains its range, class, and prospective root.
+    pub(super) fn new(retirement: ParentRetirement) -> Self {
+        let (allocation, root) = retirement.into_parts();
+        Self {
+            range: allocation.range(),
+            class: allocation.class(),
+            root,
+        }
+    }
+
+    /// Returns the complete original allocation range.
+    pub(in crate::edit::commit) fn range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the original allocation's free-space class.
+    pub(in crate::edit::commit) fn class(&self) -> FreeClass {
+        self.class
+    }
+
+    /// Returns the prospective root associated with the prepared retirement.
+    pub(in crate::edit::commit) fn root(&self) -> PhysicalAddress {
+        self.root
+    }
+}
+
 /// An exclusive prepared action for one global heap parent.
 ///
 /// The planner stores one disposition per physical parent. Publication, allocation release, and
-/// changes to storage protection require separate checks.
-pub(in crate::edit::commit) enum ParentDisposition {
+/// changes to storage protection require separate checks. `R` is original retirement evidence
+/// or reporting metadata after consumption.
+pub(in crate::edit::commit) enum ParentDisposition<R = ParentRetirement> {
     /// A checked compaction plan for selected obsolete members.
     Compact(GlobalHeapCompaction),
     /// The original allocation is preserved without member mutation.
     Retain,
-    /// Qualified whole-allocation retirement evidence paired with prospective absence.
-    Retire(ParentRetirement),
+    /// Original whole-parent retirement permission or reporting metadata after consumption.
+    Retire(R),
 }
 
 /// A qualified original allocation paired with matching prospective absence.

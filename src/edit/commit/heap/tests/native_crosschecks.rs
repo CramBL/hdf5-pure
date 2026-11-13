@@ -159,17 +159,7 @@ fn native_source_parent_dispositions_survive_checked_publication(
         assert_eq!(retirement.range().start(), parent);
         assert_eq!(Some(retirement.root()), completion.prospective.root());
         assert_eq!(completion.decisions.plans().count(), 0);
-        assert_eq!(
-            engine
-                .image()
-                .read_exact_at(
-                    parent.get(),
-                    usize::try_from(retirement.range().length()).unwrap()
-                )
-                .unwrap(),
-            original[usize::try_from(ranges[0].start).unwrap()
-                ..usize::try_from(ranges[0].end).unwrap()]
-        );
+        assert_eq!(retirement.range().end().get(), ranges[0].end);
     } else {
         assert_eq!(
             completion.decisions.plans().next().unwrap().range().start(),

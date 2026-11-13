@@ -139,6 +139,7 @@ impl PreparedEditInventory {
         )?;
         let dispositions = dispositions.finish(&tree);
         Ok(AppliedEditInventory {
+            session,
             tree,
             original,
             dispositions,
@@ -183,6 +184,8 @@ pub(in crate::edit::commit) enum InventoryPreparation {
 /// storage reuse, and publication require separate permission. Original storage exclusions
 /// remain paired with the placed tree.
 pub(in crate::edit::commit) struct AppliedEditInventory {
+    /// The preparation session checked before placement.
+    session: AllocationSession,
     tree: AppliedTree,
     original: OriginalEdits,
     dispositions: AppliedDispositions,

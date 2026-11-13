@@ -407,6 +407,11 @@ pub(in crate::edit) struct CollectionQualification {
 }
 
 impl CollectionQualification {
+    /// Borrows the original source-phase and object association used for qualification.
+    pub(in crate::edit) fn source(&self) -> &ReconstructionSource {
+        &self.source
+    }
+
     /// Borrows the common source-domain outcome, or returns [`None`] for empty default input.
     pub(in crate::edit) fn domain(&self) -> Option<&OwnerDomain> {
         self.domain.as_ref()

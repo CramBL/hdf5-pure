@@ -9,11 +9,14 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, FreeClass, RetainedKind};
 
+use self::parents::ParentPreparationError;
 use super::dispositions::{AppliedDispositions, Disposition, ReconstructionDispositions};
 use super::members::MemberDecisions;
+use super::members::PreparedParentRetirement;
 use super::prospective::ProspectiveCollections;
 use super::{AppliedEditInventory, OriginalEdits, PreparedEditInventory};
 use crate::edit::WriteEngine;
+use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::heap::qualification::{
     OriginalCollections, ParentStorage, ParentUnavailable,
 };
@@ -28,6 +31,8 @@ use crate::edit::dataset::MovingWrite;
 use crate::edit::retirement::PendingRootFrees;
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
+
+mod parents;
 
 /// Original allocations with optional source-phase and parent observations.
 ///
@@ -435,6 +440,8 @@ impl PreparedEditInventory {
 /// updates are retained for ordered publication with the original storage exclusions.
 pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     engine: &'a mut WriteEngine,
+    /// The allocation session retained from the prepared application inputs.
+    session: AllocationSession,
     /// Protected source-count updates retained from the applied tree.
     counts: Option<ProtectedCounts>,
     original: OriginalEdits,
@@ -450,6 +457,7 @@ pub(in crate::edit::commit) struct PendingEditInventory<'a> {
 impl<'a> PendingEditInventory<'a> {
     fn new(engine: &'a mut WriteEngine, applied: AppliedEditInventory) -> Self {
         let AppliedEditInventory {
+            session,
             tree,
             original,
             dispositions,
@@ -478,6 +486,7 @@ impl<'a> PendingEditInventory<'a> {
         );
         Self {
             engine,
+            session,
             counts,
             original,
             dispositions,
@@ -492,8 +501,11 @@ impl<'a> PendingEditInventory<'a> {
 
     /// Publishes the pending tree and borrows its retained observations for completion.
     ///
-    /// Checks placement reconciliation and current allocator claims before consuming the pending
-    /// batch. Writes source-count increases before publication and decreases afterward, before
+    /// Checks placement, source/root/session associations, current allocator claims, and complete
+    /// parent protection before consuming whole-parent retirement evidence into the pending batch.
+    /// Removes only matching retiring-parent exclusions after all retirement checks succeed.
+    /// Preserves full exclusions for retained and compacted parents. Writes source-count increases
+    /// before publication and decreases afterward, before
     /// `complete`. Adds complete original count-header allocations to the inventory's exclusions.
     /// Retains the inventory's exclusions even for an empty count batch. Calls `complete` after
     /// publication, reference updates, root reclamation, truncation, count writes, and final
@@ -505,7 +517,7 @@ impl<'a> PendingEditInventory<'a> {
     /// # Errors
     ///
     /// Returns [`StoragePublicationFailure::BeforePublication`] with these pending inputs if
-    /// placement reconciliation or exclusion checks fail. Returns
+    /// placement, parent preparation, association, or exclusion checks fail. Returns
     /// [`StoragePublicationFailure::Publication`] with the retained observations and error if
     /// count protection, source-count writes, publication, or completion fails. The caller handles
     /// rollback according to publication state.
@@ -520,18 +532,30 @@ impl<'a> PendingEditInventory<'a> {
             &ProspectiveCollections,
         ) -> Result<T, Error>,
     ) -> Result<T, Box<StoragePublicationFailure<'a>>> {
-        self.publish_with_observations(complete)
-            .map(|(value, _, _)| value)
+        self.publish_with_observations(
+            |published, original, dispositions, storage, collections, prospective, _| {
+                complete(
+                    published,
+                    original,
+                    dispositions,
+                    storage,
+                    collections,
+                    prospective,
+                )
+            },
+        )
+        .map(|(value, _, _, _)| value)
     }
 
-    /// Retains owned collection observations after successful publication and completion.
+    /// Retains observations and consumed-retirement metadata after publication and completion.
     ///
     /// Uses the publication and error contract of [`Self::publish_with_completion`].
     ///
     /// # Errors
     ///
-    /// Returns [`StoragePublicationFailure::BeforePublication`] if placement reconciliation or
-    /// exclusion checks fail, or [`StoragePublicationFailure::Publication`] if publication or
+    /// Returns [`StoragePublicationFailure::BeforePublication`] if placement, parent preparation,
+    /// association, or exclusion checks fail, or [`StoragePublicationFailure::Publication`] if
+    /// publication or
     /// count protection, source-count writes, or completion fails.
     fn publish_with_observations<T>(
         mut self,
@@ -542,27 +566,46 @@ impl<'a> PendingEditInventory<'a> {
             &OriginalStorage,
             &OriginalCollections,
             &ProspectiveCollections,
+            &MemberDecisions<PreparedParentRetirement>,
         ) -> Result<T, Error>,
-    ) -> Result<(T, OriginalCollections, ProspectiveCollections), Box<StoragePublicationFailure<'a>>>
-    {
-        let reason = if self.dispositions.replacements().is_err() {
-            Some(StoragePublicationRejection::Placement)
-        } else {
-            if self.exclusion.is_ok() {
-                self.exclusion = self.storage.exclude_space(self.engine);
-            }
-            self.exclusion
-                .is_err()
-                .then_some(StoragePublicationRejection::Exclusion)
-        };
-        if let Some(reason) = reason {
+    ) -> Result<
+        (
+            T,
+            OriginalCollections,
+            ProspectiveCollections,
+            MemberDecisions<PreparedParentRetirement>,
+        ),
+        Box<StoragePublicationFailure<'a>>,
+    > {
+        if self.dispositions.replacements().is_err() {
             return Err(Box::new(StoragePublicationFailure::BeforePublication {
                 pending: self,
-                reason,
+                reason: StoragePublicationRejection::Placement,
             }));
         }
+        let decisions = match self.prepare_parents() {
+            Ok(decisions) => decisions,
+            Err(error) => {
+                let reason = match error {
+                    ParentPreparationError::Storage(error) => {
+                        self.exclusion = Err(error);
+                        StoragePublicationRejection::Exclusion
+                    }
+                    ParentPreparationError::RecordedExclusion => {
+                        StoragePublicationRejection::Exclusion
+                    }
+                    error => StoragePublicationRejection::Parents(Box::new(error)),
+                };
+                return Err(Box::new(StoragePublicationFailure::BeforePublication {
+                    pending: self,
+                    reason,
+                }));
+            }
+        };
+        self.exclusion = Ok(());
         let Self {
             engine,
+            session: _,
             counts,
             original,
             dispositions,
@@ -581,6 +624,7 @@ impl<'a> PendingEditInventory<'a> {
                 storage,
                 &collections,
                 &prospective,
+                &decisions,
             )
         };
         let result = match counts {
@@ -606,7 +650,7 @@ impl<'a> PendingEditInventory<'a> {
             ),
         };
         match result {
-            Ok(value) => Ok((value, collections, prospective)),
+            Ok(value) => Ok((value, collections, prospective, decisions)),
             Err(error) => Err(Box::new(StoragePublicationFailure::Publication {
                 original,
                 dispositions,
@@ -625,9 +669,11 @@ impl<'a> PendingEditInventory<'a> {
 
     /// Publishes the protected tree before compacting qualified global heap members.
     ///
-    /// Derives plans from the owned original and prospective observations and checks publication
-    /// and prospective root associations against the pending root. The writer preserves each
-    /// parent allocation and applies the plans through [`heap::after_publication`].
+    /// Prepares exclusive parent dispositions and checks original and prospective associations.
+    /// Transfers checked whole-parent retirements into the pending batch and removes their
+    /// matching exclusions.
+    /// The publisher preserves full exclusions for retained and compacted parents. After
+    /// publication, applies the borrowed compaction plans through [`heap::after_publication`].
     ///
     /// Returns the final adopted root and EOA with the observations and decisions. A heap
     /// mutation failure is recorded in [`MemberCompletion::mutation`] after publication.
@@ -635,15 +681,15 @@ impl<'a> PendingEditInventory<'a> {
     /// # Errors
     ///
     /// Returns [`StoragePublicationFailure::BeforePublication`] if placement reconciliation or
-    /// storage exclusion checks fail. Returns [`StoragePublicationFailure::Publication`] if
-    /// publication fails or a root association is incompatible.
+    /// parent preparation, association, or storage exclusion checks fail. Returns
+    /// [`StoragePublicationFailure::Publication`] if count protection, source-count writes,
+    /// publication, or final root checks fail.
     pub(in crate::edit::commit) fn publish_compacting_members(
         self,
     ) -> Result<MemberCompletion, Box<StoragePublicationFailure<'a>>> {
-        let decisions = self.member_decisions();
         let requested_root = self.pending.root;
-        let ((root, end, mutation), collections, prospective) =
-            self.publish_with_observations(|published, _, _, _, _, prospective| {
+        let ((root, end, mutation), collections, prospective, decisions) = self
+            .publish_with_observations(|published, _, _, _, _, prospective, decisions| {
                 if published.requested_root() != requested_root
                     || prospective
                         .root()
@@ -717,8 +763,8 @@ pub(in crate::edit::commit) struct MemberCompletion {
     pub(in crate::edit::commit) collections: OriginalCollections,
     /// Fresh reference observations used to determine removal eligibility.
     pub(in crate::edit::commit) prospective: ProspectiveCollections,
-    /// Member, parent, and planning outcomes used for this completion.
-    pub(in crate::edit::commit) decisions: MemberDecisions,
+    /// Member, parent, and planning outcomes with consumed whole-retirement metadata.
+    pub(in crate::edit::commit) decisions: MemberDecisions<PreparedParentRetirement>,
     /// The final adopted root after tree publication.
     pub(in crate::edit::commit) root: PhysicalAddress,
     /// The final published EOA.
@@ -750,6 +796,8 @@ pub(in crate::edit::commit) enum StoragePublicationFailure<'a> {
 pub(in crate::edit::commit) enum StoragePublicationRejection {
     /// Allocator or pending-retirement ranges overlap protected storage or cannot be resolved.
     Exclusion,
+    /// Parent association, protection, or retirement preparation failed.
+    Parents(Box<ParentPreparationError>),
     /// Applied replacement placements could not be reconciled with the prepared dispositions.
     Placement,
 }

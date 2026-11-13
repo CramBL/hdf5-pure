@@ -35,6 +35,7 @@ mod members;
 mod parents;
 mod prospective;
 mod publication;
+mod releases;
 
 #[rstest]
 #[case::root_only(false)]
