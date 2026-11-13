@@ -143,6 +143,11 @@ impl OriginalStorage {
                 claim: claim(index)?,
                 end: PhysicalAddress::new(claims.logical_eoa()),
             })
+        } else if claims.logical_eoa() > claims.physical_size() {
+            Err(StorageIntegrityError::TruncatedSource {
+                end: PhysicalAddress::new(claims.physical_size()),
+                required: PhysicalAddress::new(claims.logical_eoa()),
+            })
         } else {
             Ok(())
         };
@@ -344,6 +349,13 @@ pub(in crate::edit) enum StorageIntegrityError {
         allocation: StorageAllocation,
         /// The lesser of the physical source end and logical end of allocation.
         end: PhysicalAddress,
+    },
+    /// The logical end of allocation exceeds the physical source end.
+    TruncatedSource {
+        /// The physical source end.
+        end: PhysicalAddress,
+        /// The logical end of allocation in physical coordinates.
+        required: PhysicalAddress,
     },
     /// Required source observations or conservative protection ranges could not be collected.
     Unavailable,

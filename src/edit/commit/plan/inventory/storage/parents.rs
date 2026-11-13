@@ -32,6 +32,8 @@ impl PendingEditInventory<'_> {
     /// allocator claims, and retirement bounds, classes, and overlap. Removes matching parent
     /// exclusions only after all checks pass. Preserves full exclusions for retained and compacted
     /// parents.
+    /// Accepts enclosing protection for retained parents. Requires exact ranges for compaction
+    /// and retirement and checks any required allocation class.
     /// If preparation fails, storage exclusions and the pending retirement batch remain unchanged.
     ///
     /// # Errors
@@ -169,9 +171,26 @@ impl<'a> ParentRelease<'a> {
             .exclude_space(engine)
             .map_err(ParentPreparationError::Storage)?;
         if let Ok(parents) = &storage.parents {
-            for parent in parents.values() {
-                if let Ok(range) = parent.framing {
-                    Self::protect(storage, range, parent.original.and_then(|(_, class)| class))?;
+            for (&address, parent) in parents {
+                for range in [
+                    parent.framing.as_ref().ok().copied(),
+                    parent.original.map(|(range, _)| range),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if matches!(
+                        decisions.dispositions().get(&address),
+                        None | Some(ParentDisposition::Retain)
+                    ) {
+                        Self::protect_enclosing(storage, address, range)?;
+                    } else {
+                        Self::protect(
+                            storage,
+                            range,
+                            parent.original.and_then(|(_, class)| class),
+                        )?;
+                    }
                 }
             }
         }
@@ -278,6 +297,38 @@ impl<'a> ParentRelease<'a> {
         decisions.map_retirements(PreparedParentRetirement::new)
     }
 
+    /// Checks that protection for `address` contains `range`, independently of allocation class.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParentPreparationError::Protection`] if an enclosing exclusion for this parent
+    /// is absent.
+    fn protect_enclosing(
+        storage: &OriginalStorage,
+        address: PhysicalAddress,
+        range: FileRange,
+    ) -> Result<(), ParentPreparationError> {
+        let index = storage
+            .allocations
+            .partition_point(|allocation| allocation.range.end() <= range.start());
+        let actual = storage
+            .allocations
+            .get(index)
+            .filter(|allocation| allocation.range.overlaps(range))
+            .copied();
+        if actual.is_some_and(|allocation| {
+            matches!(allocation.origin, StorageOrigin::Parent { address: actual, .. } if actual == address)
+                && allocation.range.contains(range)
+        }) {
+            return Ok(());
+        }
+        Err(ParentPreparationError::Protection {
+            range,
+            class: None,
+            actual,
+        })
+    }
+
     /// Checks an exact parent exclusion, including its class when `class` is supplied.
     ///
     /// # Errors
@@ -363,13 +414,13 @@ pub(in crate::edit::commit) enum ParentPreparationError {
         /// The engine's resolved root object.
         actual: ObjectId,
     },
-    /// A full parent exclusion is absent or has a different range, origin, or class.
+    /// A parent exclusion is absent or has incompatible bounds, origin, or class.
     Protection {
-        /// The complete range requiring protection.
+        /// The range requiring protection.
         range: FileRange,
-        /// The required allocation class, if known.
+        /// The required allocation class, if any.
         class: Option<FreeClass>,
-        /// The protected allocation with the same start, if any.
+        /// The protected allocation at the required start or first overlap, if any.
         actual: Option<StorageAllocation>,
     },
     /// A recorded exclusion is unrelated to an exact released-parent retirement.

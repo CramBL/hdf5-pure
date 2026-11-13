@@ -188,7 +188,10 @@ fn parent_rejection_preserves_protection_and_retirement_batch(#[case] restrictio
             },
         ) => {
             assert_eq!(actual, range);
-            assert_eq!(class, Some(FreeClass::Page(PageType::Raw)));
+            assert_eq!(
+                class,
+                matches!(restriction, Restriction::Class).then_some(FreeClass::Page(PageType::Raw))
+            );
             assert_eq!(
                 allocation,
                 allocations

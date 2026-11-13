@@ -6,7 +6,7 @@ use test_util_hdf5::file;
 use test_util_hdf5::global_heap::attributes;
 use test_util_hdf5::numeric::ByteOrder;
 
-use super::super::PendingEditInventory;
+use super::super::StorageApplyFailure;
 use super::super::StorageOrigin;
 use super::super::StoragePublicationFailure;
 use super::super::tests as storage_tests;
@@ -135,8 +135,15 @@ fn native_anonymous_count_headers_refine_unobserved_storage() {
             )
         })
         .collect::<Vec<_>>();
-    let applied = prepared.apply(&mut engine).unwrap();
-    let pending = PendingEditInventory::new(&mut engine, applied);
+    let pending = match prepared.apply_excluding(&mut engine) {
+        Ok(pending) => pending,
+        Err(StorageApplyFailure::BeforePlacement { error, .. }) => {
+            panic!("unexpected application rejection: {error:?}")
+        }
+        Err(StorageApplyFailure::Application(error)) => {
+            panic!("unexpected application failure: {error:?}")
+        }
+    };
     let result = pending.publish_with_completion(|published, _, _, storage, _, _| {
         let allocation = storage
             .allocations()

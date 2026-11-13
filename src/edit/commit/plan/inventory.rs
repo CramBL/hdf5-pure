@@ -96,11 +96,14 @@ impl PreparedEditInventory {
     /// after a failure and publication after success. Predecessor classifications and placement
     /// reconciliation outcomes are retained independently of count and ownership qualification.
     /// Consumes captured reclamation spans without repeating their original collection.
+    /// Uses an empty reclamation batch for a captured [`Error::EditUnsupported`].
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] before placement if the allocation session differs
-    /// or the prepared plan is not a tree. Returns the errors of [`WriteEngine::apply_tree`].
+    /// or the prepared plan is not a tree. Returns captured reclamation errors other than
+    /// [`Error::EditUnsupported`] before placement. Returns the errors of
+    /// [`WriteEngine::apply_tree`].
     pub(in crate::edit::commit) fn apply(
         self,
         engine: &mut WriteEngine,
@@ -130,12 +133,17 @@ impl PreparedEditInventory {
                 FormatError::Internal("a prepared edit inventory has no tree".into()).into(),
             );
         };
+        let reclamation = match reclamation {
+            Ok(reclamation) => reclamation,
+            Err(Error::EditUnsupported(_)) => Vec::new(),
+            Err(error) => return Err(error),
+        };
         let tree = engine.apply_tree_recording(
             &mut overwrites,
             tree,
             staged,
             Some(&mut dispositions),
-            Some(reclamation?),
+            Some(reclamation),
         )?;
         let dispositions = dispositions.finish(&tree);
         Ok(AppliedEditInventory {
@@ -236,6 +244,8 @@ impl OriginalPreparation {
     /// exclusions are derived from these same observations and reclamation spans. Moves collection
     /// candidates and cached framing into the inventory after storage collection. Collects
     /// candidates from distinct deletion targets independently of count-eligible retirement.
+    /// When owner qualification is unavailable, withholds generated retirements through
+    /// [`storage::OriginalStorage::withhold_unqualified_reclamation`].
     ///
     /// # Errors
     ///
@@ -254,7 +264,7 @@ impl OriginalPreparation {
             .extend(phase.deleted_collections(&targets))?;
         let original = OriginalEdits::collect(engine, phase, tree, staged);
         let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
-        let reclamation =
+        let mut reclamation =
             engine.prepare_reclamation(&tree.groups, std::mem::take(&mut tree.deleted_free));
         let storage = storage::OriginalStorage::collect(
             engine,
@@ -264,6 +274,7 @@ impl OriginalPreparation {
             &dispositions,
             &reclamation,
         );
+        storage.withhold_unqualified_reclamation(&original, &mut reclamation);
         let collections = phase.capture_collections(
             dispositions.source().as_ref().ok(),
             std::mem::take(&mut tree.collection_candidates),

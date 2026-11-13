@@ -81,7 +81,8 @@ impl OriginalStorage {
     ///
     /// Retains known ranges when qualification fails. For candidate parents, protects the enclosing
     /// range of the original allocation and parsed framing. Reuses cached phase observations for
-    /// source-integrity checks.
+    /// source-integrity checks. Omits an eligible or superseded owner's allocation only when its
+    /// exact range is recorded for retirement or deferred tail replacement.
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
@@ -180,7 +181,7 @@ impl OriginalStorage {
                     .ok()
                     .is_some_and(|index| retired[index].0 == claim.range())
             }) || tails.contains(&(claim.range().start(), claim.range().end()));
-            if !eligible && !(superseded && retired) {
+            if !((eligible || superseded) && retired) {
                 result.allocations.push(StorageAllocation {
                     range: claim.range(),
                     origin: StorageOrigin::Owner { object, kind },
@@ -202,6 +203,37 @@ impl OriginalStorage {
         result.capture_integrity(engine, phase, source);
 
         result
+    }
+
+    /// Preserves protected owner and unobserved storage when owner qualification is unavailable.
+    ///
+    /// Removes generated retirements equal to a protected owner allocation or contained in a
+    /// protected unobserved interval. Preserves parent requests and other ranges for exclusion
+    /// checks. Leaves reclamation errors and qualified-owner inputs unchanged.
+    pub(super) fn withhold_unqualified_reclamation(
+        &self,
+        original: &OriginalEdits,
+        reclamation: &mut Result<Vec<(FileRange, FreeClass)>, Error>,
+    ) {
+        if original.owners().is_some() {
+            return;
+        }
+        let Ok(retired) = reclamation else {
+            return;
+        };
+        retired.retain(|&(range, _)| {
+            let index = self
+                .allocations
+                .partition_point(|allocation| allocation.range.end() <= range.start());
+            !self
+                .allocations
+                .get(index)
+                .is_some_and(|allocation| match allocation.origin {
+                    StorageOrigin::Owner { .. } => allocation.range == range,
+                    StorageOrigin::Parent { .. } => false,
+                    StorageOrigin::Unobserved => allocation.range.contains(range),
+                })
+        });
     }
 
     #[cfg(test)]
@@ -441,42 +473,23 @@ impl PreparedEditInventory {
     /// Checks original storage exclusions before placement and records pending retirement.
     ///
     /// Checks the source-phase, root, and allocation-session associations before application.
+    /// Permits unavailable owner or individual-parent qualification while preserving original
+    /// storage exclusions. Requires complete predecessor replacement, associated parent
+    /// observations, valid source geometry, and allocation publication availability.
     /// On success, retains the allocator and pending-retirement exclusion outcome in
     /// [`PendingEditInventory::exclusion`]. The caller handles rollback after application failure.
     ///
     /// # Errors
     ///
     /// Returns [`StorageApplyFailure::BeforePlacement`] with the owned prepared inputs for
-    /// unavailable evidence, incompatible associations, or an allocator conflict. Returns
+    /// incompatible associations, unavailable parent associations or predecessor replacement,
+    /// invalid source geometry, or an allocator conflict. Returns
     /// [`StorageApplyFailure::Application`] for an error from [`Self::apply`].
     pub(in crate::edit::commit) fn apply_excluding(
         self,
         engine: &mut WriteEngine,
     ) -> Result<PendingEditInventory<'_>, StorageApplyFailure> {
-        let check = if self.storage.unavailable.is_some() {
-            Err(StorageApplyError::Unavailable)
-        } else if !self.session.same(&engine.context.allocations.session()) {
-            Err(StorageApplyError::Session)
-        } else if self.storage.source.as_ref() != self.dispositions.source().as_ref().ok() {
-            Err(StorageApplyError::Phase)
-        } else if self
-            .storage
-            .source
-            .as_ref()
-            .map(ReconstructionSource::object)
-            != ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).ok()
-        {
-            Err(StorageApplyError::Root)
-        } else {
-            engine
-                .context
-                .allocations
-                .before_reference()
-                .map_err(StorageConflict::Source)
-                .and_then(|()| self.storage.exclude_space(engine))
-                .map_err(StorageApplyError::Conflict)
-        };
-        if let Err(error) = check {
+        if let Err(error) = self.before_placement(engine) {
             return Err(StorageApplyFailure::BeforePlacement {
                 prepared: Box::new(self),
                 error,
@@ -486,6 +499,71 @@ impl PreparedEditInventory {
             .apply(engine)
             .map_err(StorageApplyFailure::Application)?;
         Ok(PendingEditInventory::new(engine, applied))
+    }
+
+    /// Checks mandatory associations, replacement dispositions, and original storage exclusions.
+    ///
+    /// Checks available count and storage facts independently of complete owner qualification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageApplyError::Session`], [`StorageApplyError::Phase`], or
+    /// [`StorageApplyError::Root`] for incompatible associations. Returns
+    /// [`StorageApplyError::Unavailable`] if parent observations have incompatible associations or
+    /// a predecessor is excluded from complete replacement. Returns [`StorageApplyError::Conflict`]
+    /// if allocation publication, recorded integrity, or allocator exclusion checks fail.
+    fn before_placement(&self, engine: &WriteEngine) -> Result<(), StorageApplyError> {
+        let Self {
+            prepared: _,
+            original,
+            session,
+            dispositions,
+            storage,
+            collections: _,
+            reclamation: _,
+        } = self;
+        if !session.same(&engine.context.allocations.session())
+            || original.facts().is_some_and(|facts| {
+                !facts.storage().same_session(engine) || !facts.counts().same_session(engine)
+            })
+        {
+            Err(StorageApplyError::Session)
+        } else if storage.source.as_ref() != dispositions.source().as_ref().ok()
+            || original.source() != storage.source.as_ref()
+            || original.facts().is_some_and(|facts| {
+                facts.counts().root().is_some()
+                    && storage
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| !facts.counts().shares_phase(source))
+            })
+        {
+            Err(StorageApplyError::Phase)
+        } else if storage.source.as_ref().map(ReconstructionSource::object)
+            != ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).ok()
+            || original.facts().is_some_and(|facts| {
+                facts.counts().root().is_some_and(|root| {
+                    storage.source.as_ref().map(ReconstructionSource::object) != Some(root)
+                })
+            })
+        {
+            Err(StorageApplyError::Root)
+        } else if storage.parents.is_err()
+            || dispositions
+                .predecessors()
+                .values()
+                .any(|old| old.disposition != Disposition::Supersede)
+        {
+            Err(StorageApplyError::Unavailable)
+        } else {
+            engine
+                .context
+                .allocations
+                .before_reference()
+                .map_err(StorageConflict::Source)
+                .and_then(|()| storage.exclude_space(engine))
+                .map_err(StorageApplyError::Conflict)
+        }
     }
 }
 
@@ -886,7 +964,7 @@ pub(in crate::edit::commit) enum StorageOrigin {
     Unobserved,
 }
 
-/// An unmet prerequisite for complete original storage exclusions.
+/// A qualification or observation failure recorded during original-storage capture.
 #[derive(Debug)]
 pub(in crate::edit::commit) enum StorageUnavailable {
     /// Physical-claims collection failed.
@@ -971,15 +1049,15 @@ pub(in crate::edit::commit) enum StorageApplyFailure {
 /// A failed prerequisite for placement with original storage exclusions.
 #[derive(Debug)]
 pub(in crate::edit::commit) enum StorageApplyError {
-    /// Allocation confirmation or original storage exclusion failed.
+    /// Allocation publication, source integrity, or original storage exclusion failed.
     Conflict(StorageConflict),
-    /// The storage and predecessor observations have different source phases.
+    /// Original storage, predecessor, or count observations have incompatible source associations.
     Phase,
-    /// The source object differs from the engine's current root.
+    /// An original source or count root differs from the engine or storage root.
     Root,
-    /// The preparation belongs to another allocation session.
+    /// An original observation or prepared input has a different allocation session.
     Session,
-    /// Complete original storage evidence is unavailable.
+    /// Parent associations or complete predecessor replacement are unavailable.
     Unavailable,
 }
 

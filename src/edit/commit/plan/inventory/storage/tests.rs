@@ -6,7 +6,6 @@ use hdf5_pure_space::__private::{Extent, FreeClass, PageType, SessionSpace};
 use rstest::rstest;
 use test_util::disk_log;
 use test_util::global_heap::Object as GlobalHeapObject;
-use test_util::object_header::{Message, MessageType};
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::{
@@ -28,6 +27,7 @@ use crate::object_path::ObjectPathBuf;
 use crate::{AttrValue, FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress};
 
 mod acceptance;
+mod admission;
 mod collections;
 mod count_refinement;
 mod counts;
@@ -362,23 +362,15 @@ fn failure_after_placement_preserves_application_error_ownership() {
 #[case::different_phase(Restriction::Phase)]
 #[case::different_session(Restriction::Session)]
 #[case::different_root(Restriction::Root)]
-#[case::incomplete_geometry(Restriction::Geometry)]
 #[case::excess_root_count(Restriction::Excess)]
-fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: Restriction) {
+fn incompatible_original_storage_withholds_placement(#[case] mode: Restriction) {
     let path = test_util::temp::temp_path("retained-unavailable.h5");
     let mut fixture = if matches!(mode, Restriction::Excess) {
         Fixture::new().with_root_reference_count(NonZeroU32::new(2).unwrap())
     } else {
         Fixture::new()
     };
-    fixture.object(
-        "owner",
-        if matches!(mode, Restriction::Geometry) {
-            vec![Message::new(MessageType(0x7f), &[])]
-        } else {
-            vec![]
-        },
-    );
+    fixture.object("owner", vec![]);
     fixture.write(&path);
     let mut engine = edit_test_util::open_engine(&path);
     engine.create_group(&ObjectPathBuf::parse("first")).unwrap();
@@ -418,7 +410,7 @@ fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: 
         Restriction::Phase => assert!(matches!(error, StorageApplyError::Phase), "{:?}", error),
         Restriction::Session => assert!(matches!(error, StorageApplyError::Session), "{error:?}"),
         Restriction::Root => assert!(matches!(error, StorageApplyError::Root), "{error:?}"),
-        Restriction::Geometry | Restriction::Excess => {
+        Restriction::Excess => {
             assert!(
                 matches!(error, StorageApplyError::Unavailable),
                 "{:?}",
@@ -426,16 +418,10 @@ fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: 
             );
             let original = prepared;
             assert!(!original.storage().allocations().is_empty());
-            assert!(
-                matches!(
-                    original.storage().unavailable(),
-                    Some(StorageUnavailable::Owners)
-                ) && matches!(mode, Restriction::Geometry)
-                    || matches!(
-                        original.storage().unavailable(),
-                        Some(StorageUnavailable::Dispositions)
-                    ) && matches!(mode, Restriction::Excess)
-            );
+            assert!(matches!(
+                original.storage().unavailable(),
+                Some(StorageUnavailable::Dispositions)
+            ));
         }
     }
     assert_eq!(engine.disk_bytes().unwrap(), before);
@@ -451,7 +437,6 @@ enum ParentRetirement {
 #[derive(Clone, Copy, Debug)]
 enum Restriction {
     Excess,
-    Geometry,
     Phase,
     Root,
     Session,
