@@ -389,7 +389,7 @@ impl<'a> Members<'a> {
     }
 
     fn iter(&self) -> impl Iterator<Item = GlobalHeapMember<'a>> + '_ {
-        (0..self.len()).map(|position| match self {
+        (0..self.len()).map(move |position| match self {
             Self::Consecutive(objects) => {
                 // The consecutive source is created only after its length is bounded by u16::MAX.
                 // Its 1-based position fits u16 and cannot be zero.
