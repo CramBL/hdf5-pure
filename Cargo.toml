@@ -427,6 +427,10 @@ required-features = ["std"]
 name = "hot_paths"
 harness = false
 
+[[bench]]
+name = "bounded_byte_reads"
+harness = false
+
 # Measure metadata-cache hit throughput across cache sizes.
 [[bench]]
 name = "metadata_cache"
