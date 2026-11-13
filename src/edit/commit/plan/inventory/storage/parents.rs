@@ -49,7 +49,7 @@ impl PendingEditInventory<'_> {
             session: _,
             counts: _,
             original: _,
-            dispositions: _,
+            dispositions,
             storage,
             collections,
             prospective,
@@ -57,7 +57,8 @@ impl PendingEditInventory<'_> {
             relocations: _,
             exclusion,
         } = self;
-        let decisions = MemberDecisions::collect(collections, prospective, storage);
+        let mut decisions = MemberDecisions::collect(collections, prospective, storage);
+        decisions.include_session_parents(dispositions, prospective);
         ParentRelease::new(engine, storage, pending, exclusion, decisions).map(ParentRelease::apply)
     }
 
@@ -425,7 +426,7 @@ pub(in crate::edit::commit) enum ParentPreparationError {
     },
     /// A recorded exclusion is unrelated to an exact released-parent retirement.
     RecordedExclusion,
-    /// Prospective absence was established for another pending root.
+    /// Prospective observations or retirement evidence are associated with another pending root.
     Root {
         /// The root awaiting publication.
         expected: PhysicalAddress,

@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{ChildLink, PreparedTree};
+use super::session::SessionParent;
+use crate::PhysicalAddress;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::{CountEvidence, CountEvidenceError, ROOT_REFERENCE_COUNT};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
@@ -22,6 +24,8 @@ use crate::object_path::ObjectPathBuf;
 /// observations independently of each predecessor's classification.
 pub(in crate::edit::commit) struct ReconstructionDispositions {
     source: Result<ReconstructionSource, Error>,
+    /// Complete protected parents captured from exclusive session overwrites.
+    pub(super) session_parents: BTreeMap<PhysicalAddress, SessionParent>,
     predecessors: BTreeMap<ObjectPathBuf, Predecessor>,
     expected: BTreeMap<ObjectPathBuf, Option<ObjectId>>,
     placed: BTreeMap<ObjectPathBuf, ObjectId>,
@@ -47,6 +51,7 @@ impl ReconstructionDispositions {
             });
         let mut result = Self {
             source,
+            session_parents: BTreeMap::new(),
             predecessors: BTreeMap::new(),
             expected: BTreeMap::new(),
             placed: BTreeMap::new(),
@@ -84,6 +89,7 @@ impl ReconstructionDispositions {
     ) {
         let Self {
             source: _,
+            session_parents: _,
             predecessors: _,
             expected,
             placed: placements,
@@ -130,6 +136,7 @@ impl ReconstructionDispositions {
     pub(super) fn into_source_error(self) -> Option<Error> {
         let Self {
             source,
+            session_parents: _,
             predecessors,
             expected: _,
             placed: _,
@@ -274,6 +281,7 @@ impl ReconstructionDispositions {
     ) -> Result<BTreeMap<ObjectId, ObjectId>, TransitionWithheld> {
         let Self {
             source,
+            session_parents: _,
             predecessors,
             expected,
             placed,

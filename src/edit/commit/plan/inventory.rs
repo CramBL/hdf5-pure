@@ -30,6 +30,7 @@ pub(in crate::edit::commit) mod dispositions;
 pub(in crate::edit::commit) mod members;
 mod outcomes;
 pub(in crate::edit::commit) mod prospective;
+mod session;
 pub(in crate::edit::commit) mod storage;
 
 /// Owns tree edits and their original count, ownership, and collection observations.
@@ -299,7 +300,7 @@ impl OriginalPreparation {
         staged: &StagedEdits,
     ) -> Self {
         let original = OriginalEdits::collect(engine, phase, tree, staged);
-        let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
+        let mut dispositions = ReconstructionDispositions::collect(engine, phase, tree);
         let mut reclamation =
             engine.prepare_reclamation(&tree.groups, std::mem::take(&mut tree.deleted_free));
         let storage = storage::OriginalStorage::collect(
@@ -315,6 +316,7 @@ impl OriginalPreparation {
             dispositions.source().as_ref().ok(),
             std::mem::take(&mut tree.collection_candidates),
         );
+        dispositions.capture_session_parents(engine, phase, staged, &collections, &storage);
         Self {
             original,
             dispositions,

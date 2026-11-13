@@ -831,9 +831,12 @@ impl<'a> PendingEditInventory<'a> {
         }
     }
 
-    /// Derives qualified removals from the owned original and fresh prospective observations.
+    /// Derives removals from qualified observations and checked session-owned parent evidence.
     pub(in crate::edit::commit) fn member_decisions(&self) -> MemberDecisions {
-        MemberDecisions::collect(&self.collections, &self.prospective, &self.storage)
+        let mut decisions =
+            MemberDecisions::collect(&self.collections, &self.prospective, &self.storage);
+        decisions.include_session_parents(&self.dispositions, &self.prospective);
+        decisions
     }
 
     /// Publishes the protected tree before compacting qualified global heap members.

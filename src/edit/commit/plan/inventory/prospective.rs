@@ -76,6 +76,13 @@ impl ProspectiveCollections {
         self.source.as_ref()
     }
 
+    /// Borrows the allocation session used for prospective observations.
+    ///
+    /// Returns [`None`] for empty original candidate input.
+    pub(super) fn session(&self) -> Option<&AllocationSession> {
+        self.session.as_ref()
+    }
+
     /// Borrows the distinct physical roots supplied to the reference traversal.
     ///
     /// The set can be partial when retained-root applicability failed.

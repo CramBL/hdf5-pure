@@ -7,9 +7,11 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCompaction;
 use hdf5_pure_space::__private::FreeClass;
 
+use super::dispositions::AppliedDispositions;
 use super::prospective::ParentAbsence;
 use super::prospective::ProspectiveCollections;
 use super::prospective::ReferencePresence;
+use super::session::SessionParentRetirement;
 use super::storage::{OriginalStorage, StorageOrigin};
 use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::CollectionProvenance;
@@ -163,6 +165,27 @@ impl MemberDecisions {
         result
     }
 
+    /// Selects whole-parent retirement for reconciled exclusive session overwrites.
+    ///
+    /// Replaces the parent decision, planning outcome, and disposition only after matching
+    /// session evidence with the applied owner replacement and prospective observations.
+    pub(super) fn include_session_parents(
+        &mut self,
+        dispositions: &AppliedDispositions,
+        prospective: &ProspectiveCollections,
+    ) {
+        for (&address, parent) in &dispositions.original().session_parents {
+            if let Some(retirement) = parent.retirement(dispositions, prospective) {
+                self.parents.insert(address, Ok(MemberDecision::Remove));
+                self.planning.insert(address, Ok(()));
+                self.dispositions.insert(
+                    address,
+                    ParentDisposition::Retire(ParentRetirement::from_session(retirement)),
+                );
+            }
+        }
+    }
+
     /// Consumes active retirement evidence through `prepare`, preserving all other decisions.
     ///
     /// Calls `prepare` once per retiring parent in physical address order. Member and parent
@@ -266,7 +289,7 @@ impl<R> Default for MemberDecisions<R> {
     }
 }
 
-/// Range, class, and prospective-root metadata retained after retirement permission is consumed.
+/// Range, class, and prospective-root metadata retained after retirement evidence is consumed.
 ///
 /// The caller retains the checked publication batch separately.
 pub(in crate::edit::commit) struct PreparedParentRetirement {
@@ -316,13 +339,14 @@ pub(in crate::edit::commit) enum ParentDisposition<R = ParentRetirement> {
     Retire(R),
 }
 
-/// A qualified original allocation paired with matching prospective absence.
+/// Original allocation evidence bound to a prospective root for whole-parent retirement.
 ///
-/// Construction matches the collection address, allocation session, and original source
-/// association. The prospective root is retained. Publication and storage-release permission
-/// require separate checks.
+/// Uses qualified original allocation and complete prospective absence, or exclusive session
+/// ownership and reconciled owner replacement. Both forms retain matching allocation-session
+/// and original-source associations. Publication and storage-release permission require
+/// separate checks.
 pub(in crate::edit::commit) struct ParentRetirement {
-    allocation: QualifiedParentAllocation,
+    allocation: ParentAllocation,
     root: PhysicalAddress,
 }
 
@@ -354,9 +378,17 @@ impl ParentRetirement {
             });
         }
         Ok(Self {
-            allocation,
+            allocation: ParentAllocation::Qualified(allocation),
             root: absence.root(),
         })
+    }
+
+    fn from_session(retirement: SessionParentRetirement) -> Self {
+        let root = retirement.root();
+        Self {
+            allocation: ParentAllocation::Session(retirement),
+            root,
+        }
     }
 
     /// Borrows the matched original source-phase and object association.
@@ -369,12 +401,12 @@ impl ParentRetirement {
         self.allocation.session()
     }
 
-    /// Returns the prospective root under which the parent was proved unreferenced.
+    /// Returns the prospective root associated with the retirement evidence.
     pub(in crate::edit::commit) fn root(&self) -> PhysicalAddress {
         self.root
     }
 
-    /// Returns the complete qualified original allocation range.
+    /// Returns the complete original allocation range.
     pub(in crate::edit::commit) fn range(&self) -> FileRange {
         self.allocation.range()
     }
@@ -384,14 +416,54 @@ impl ParentRetirement {
         self.allocation.class()
     }
 
-    /// Consumes the evidence and returns the qualified allocation and prospective root.
+    /// Consumes the evidence and returns the original allocation evidence and prospective root.
     ///
     /// The caller handles allocation release and protection changes separately.
-    pub(in crate::edit::commit) fn into_parts(
-        self,
-    ) -> (QualifiedParentAllocation, PhysicalAddress) {
+    pub(in crate::edit::commit) fn into_parts(self) -> (ParentAllocation, PhysicalAddress) {
         let Self { allocation, root } = self;
         (allocation, root)
+    }
+}
+
+/// Original allocation evidence retained until checked parent release.
+pub(in crate::edit::commit) enum ParentAllocation {
+    /// Whole-parent capacity qualified from original file observations.
+    Qualified(QualifiedParentAllocation),
+    /// Whole-parent capacity established by exclusive session ownership.
+    Session(SessionParentRetirement),
+}
+
+impl ParentAllocation {
+    /// Borrows the original root's source-phase association.
+    pub(in crate::edit::commit) fn source(&self) -> &ReconstructionSource {
+        match self {
+            Self::Qualified(allocation) => allocation.source(),
+            Self::Session(allocation) => allocation.source(),
+        }
+    }
+
+    /// Borrows the allocation session matched with prospective observations.
+    pub(in crate::edit::commit) fn session(&self) -> &AllocationSession {
+        match self {
+            Self::Qualified(allocation) => allocation.session(),
+            Self::Session(allocation) => allocation.session(),
+        }
+    }
+
+    /// Returns the complete original parent allocation.
+    pub(in crate::edit::commit) fn range(&self) -> FileRange {
+        match self {
+            Self::Qualified(allocation) => allocation.range(),
+            Self::Session(allocation) => allocation.range(),
+        }
+    }
+
+    /// Returns the original parent allocation's free-space class.
+    pub(in crate::edit::commit) fn class(&self) -> FreeClass {
+        match self {
+            Self::Qualified(allocation) => allocation.class(),
+            Self::Session(allocation) => allocation.class(),
+        }
     }
 }
 
@@ -416,14 +488,14 @@ pub(in crate::edit::commit) enum ParentRetirementMismatch {
     },
 }
 
-/// The removal eligibility of an originally qualified member or parent.
+/// Removal eligibility from qualified references or exclusive session ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::edit::commit) enum MemberDecision {
     /// A prospective reference to the member or parent was observed.
     Live,
     /// Complete prospective interpretation or root applicability is unavailable.
     Prospective,
-    /// The member or parent is absent from complete prospective references.
+    /// Removal is qualified by complete absence or checked session ownership.
     Remove,
 }
 
