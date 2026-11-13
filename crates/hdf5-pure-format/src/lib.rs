@@ -32,6 +32,7 @@ mod convert;
 mod data_layout;
 mod dataspace;
 mod datatype;
+mod decode;
 mod dense_attribute_write;
 mod dense_link_write;
 mod error;

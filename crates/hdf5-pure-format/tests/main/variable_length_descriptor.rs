@@ -61,60 +61,63 @@ fn variable_length_descriptor_construction_rejects_unrepresentable_addresses(
 }
 
 #[rstest]
-#[case::empty(Truncation::Empty)]
-#[case::partial_count(Truncation::Count)]
-#[case::partial_address(Truncation::Address)]
-#[case::partial_index(Truncation::Index)]
-fn variable_length_descriptor_parsing_requires_the_complete_frame(
-    #[case] truncation: Truncation,
-    #[values(
-        Address::Two(0x1234),
-        Address::Four(0x1234_5678),
-        Address::Eight(0x1234_5678_9abc_def0)
-    )]
-    address: Address,
-) {
-    let expected = address.descriptor(3, u32::MAX);
-    let available = truncation.len(address);
-    assert_eq!(
-        VariableLengthDescriptor::parse(
-            OffsetWidth::try_from(address.width()).unwrap(),
-            &expected[..available],
-        )
-        .unwrap_err(),
-        FormatError::UnexpectedEof {
-            expected: expected.len(),
-            available,
-        }
-    );
-}
-
-#[rstest]
-#[case::empty(Truncation::Empty)]
-#[case::partial_count(Truncation::Count)]
-#[case::partial_address(Truncation::Address)]
-#[case::partial_index(Truncation::Index)]
-fn variable_length_descriptor_encoding_preserves_a_short_output(
-    #[case] truncation: Truncation,
-    #[values(
-        Address::Two(0x1234),
-        Address::Four(0x1234_5678),
-        Address::Eight(0x1234_5678_9abc_def0)
-    )]
-    address: Address,
+#[case::two_0(Address::Two(0x1234), 0)]
+#[case::two_1(Address::Two(0x1234), 1)]
+#[case::two_2(Address::Two(0x1234), 2)]
+#[case::two_3(Address::Two(0x1234), 3)]
+#[case::two_4(Address::Two(0x1234), 4)]
+#[case::two_5(Address::Two(0x1234), 5)]
+#[case::two_6(Address::Two(0x1234), 6)]
+#[case::two_7(Address::Two(0x1234), 7)]
+#[case::two_8(Address::Two(0x1234), 8)]
+#[case::two_9(Address::Two(0x1234), 9)]
+#[case::four_0(Address::Four(0x1234_5678), 0)]
+#[case::four_1(Address::Four(0x1234_5678), 1)]
+#[case::four_2(Address::Four(0x1234_5678), 2)]
+#[case::four_3(Address::Four(0x1234_5678), 3)]
+#[case::four_4(Address::Four(0x1234_5678), 4)]
+#[case::four_5(Address::Four(0x1234_5678), 5)]
+#[case::four_6(Address::Four(0x1234_5678), 6)]
+#[case::four_7(Address::Four(0x1234_5678), 7)]
+#[case::four_8(Address::Four(0x1234_5678), 8)]
+#[case::four_9(Address::Four(0x1234_5678), 9)]
+#[case::four_10(Address::Four(0x1234_5678), 10)]
+#[case::four_11(Address::Four(0x1234_5678), 11)]
+#[case::eight_0(Address::Eight(0x1234_5678_9abc_def0), 0)]
+#[case::eight_1(Address::Eight(0x1234_5678_9abc_def0), 1)]
+#[case::eight_2(Address::Eight(0x1234_5678_9abc_def0), 2)]
+#[case::eight_3(Address::Eight(0x1234_5678_9abc_def0), 3)]
+#[case::eight_4(Address::Eight(0x1234_5678_9abc_def0), 4)]
+#[case::eight_5(Address::Eight(0x1234_5678_9abc_def0), 5)]
+#[case::eight_6(Address::Eight(0x1234_5678_9abc_def0), 6)]
+#[case::eight_7(Address::Eight(0x1234_5678_9abc_def0), 7)]
+#[case::eight_8(Address::Eight(0x1234_5678_9abc_def0), 8)]
+#[case::eight_9(Address::Eight(0x1234_5678_9abc_def0), 9)]
+#[case::eight_10(Address::Eight(0x1234_5678_9abc_def0), 10)]
+#[case::eight_11(Address::Eight(0x1234_5678_9abc_def0), 11)]
+#[case::eight_12(Address::Eight(0x1234_5678_9abc_def0), 12)]
+#[case::eight_13(Address::Eight(0x1234_5678_9abc_def0), 13)]
+#[case::eight_14(Address::Eight(0x1234_5678_9abc_def0), 14)]
+#[case::eight_15(Address::Eight(0x1234_5678_9abc_def0), 15)]
+fn variable_length_descriptor_requires_complete_input_and_output(
+    #[case] address: Address,
+    #[case] available: usize,
 ) {
     let offsets = OffsetWidth::try_from(address.width()).unwrap();
-    let descriptor =
-        VariableLengthDescriptor::new(offsets, 3, StoredAddress::new(address.get()), 7).unwrap();
-    let available = truncation.len(address);
-    let mut output = vec![0xab; available];
+    let expected = address.descriptor(3, u32::MAX);
+    let error = FormatError::UnexpectedEof {
+        expected: expected.len(),
+        available,
+    };
     assert_eq!(
-        descriptor.write_into(&mut output).unwrap_err(),
-        FormatError::UnexpectedEof {
-            expected: address.descriptor(3, 7).len(),
-            available,
-        }
+        VariableLengthDescriptor::parse(offsets, &expected[..available]).unwrap_err(),
+        error
     );
+    let descriptor =
+        VariableLengthDescriptor::new(offsets, 3, StoredAddress::new(address.get()), u32::MAX)
+            .unwrap();
+    let mut output = vec![0xab; available];
+    assert_eq!(descriptor.write_into(&mut output).unwrap_err(), error);
     assert_eq!(output, vec![0xab; available]);
 }
 
@@ -149,24 +152,4 @@ fn assert_descriptor(count: u32, address: Address, index: u32) {
         expected.len()
     );
     assert_eq!(parsed_output, expected);
-}
-
-#[derive(Clone, Copy)]
-enum Truncation {
-    Address,
-    Count,
-    Empty,
-    Index,
-}
-
-impl Truncation {
-    fn len(self, address: Address) -> usize {
-        let count_size = 0u32.to_le_bytes().len();
-        match self {
-            Self::Address => count_size + usize::from(address.width()) - 1,
-            Self::Count => count_size - 1,
-            Self::Empty => 0,
-            Self::Index => address.descriptor(0, 0).len() - 1,
-        }
-    }
 }
