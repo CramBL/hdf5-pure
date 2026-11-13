@@ -157,10 +157,10 @@ fn physical_member_decisions_preserve_each_predecessor(
         })
     );
     assert_eq!(
-        decisions.plans().len(),
+        decisions.plans().count(),
         usize::from(matches!(restriction, Restriction::None))
     );
-    if let Some(plan) = decisions.plans().first() {
+    if let Some(plan) = decisions.plans().next() {
         assert_eq!(plan.retained(), 1);
         assert_eq!(plan.moves()[0].object().index().get(), 91);
     }
@@ -237,7 +237,7 @@ fn unavailable_counts_preserve_independent_attribute_candidates() {
         Ok(MemberDecision::Prospective)
     );
     assert_eq!(decisions.physical_members(), 1);
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
 }
 
 #[derive(Clone, Copy)]

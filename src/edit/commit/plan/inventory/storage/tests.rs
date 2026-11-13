@@ -32,6 +32,7 @@ mod collections;
 mod counts;
 mod evidence;
 mod members;
+mod parents;
 mod prospective;
 mod publication;
 

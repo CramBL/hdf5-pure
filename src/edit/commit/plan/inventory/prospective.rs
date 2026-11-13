@@ -8,7 +8,9 @@ use super::OriginalEdits;
 use super::dispositions::AppliedDispositions;
 use super::dispositions::TransitionWithheld;
 use crate::edit::WriteEngine;
+use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::ReachableHeapReferences;
 use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::heap::qualification::OriginalQualification;
@@ -23,6 +25,10 @@ use crate::object_graph::ObjectId;
 #[derive(Default)]
 pub(in crate::edit::commit) struct ProspectiveCollections {
     root: Option<PhysicalAddress>,
+    /// The allocation session used for the applied-tree observations.
+    session: Option<AllocationSession>,
+    /// The original source association retained with the prospective observations.
+    source: Option<ReconstructionSource>,
     roots: BTreeSet<ObjectId>,
     unavailable: Option<ProspectiveUnavailable>,
     references: Option<ReachableHeapReferences>,
@@ -50,6 +56,8 @@ impl ProspectiveCollections {
         );
         Self {
             root: Some(root),
+            session: Some(engine.context.allocations.session()),
+            source: original.source().cloned(),
             roots,
             unavailable,
             references,
@@ -110,6 +118,25 @@ impl ProspectiveCollections {
         )
     }
 
+    /// Returns complete parent-absence evidence bound to the root, session, and original source.
+    ///
+    /// Returns [`None`] if a reference was observed, complete observations are unavailable, or a
+    /// required association is absent. Allocation ownership and publication are checked separately.
+    pub(in crate::edit::commit) fn parent_absence(
+        &self,
+        address: PhysicalAddress,
+    ) -> Option<ParentAbsence> {
+        if self.parent_presence(address) != ReferencePresence::Unreferenced {
+            return None;
+        }
+        Some(ParentAbsence {
+            address,
+            root: self.root?,
+            session: self.session.as_ref()?.clone(),
+            source: self.source.as_ref()?.clone(),
+        })
+    }
+
     /// Classifies an observation before considering completeness.
     fn presence(&self, observed: bool) -> ReferencePresence {
         if observed {
@@ -159,6 +186,39 @@ impl ProspectiveCollections {
             );
         }
         Ok(())
+    }
+}
+
+/// Complete prospective absence for one physical collection address.
+///
+/// The collector retains the prospective root, allocation session, and original source
+/// association. Original allocation qualification and permission to retire storage are separate.
+pub(in crate::edit::commit) struct ParentAbsence {
+    address: PhysicalAddress,
+    root: PhysicalAddress,
+    session: AllocationSession,
+    source: ReconstructionSource,
+}
+
+impl ParentAbsence {
+    /// Returns the collection address proved absent from the prospective references.
+    pub(in crate::edit::commit) fn address(&self) -> PhysicalAddress {
+        self.address
+    }
+
+    /// Returns the prospective root used to prove absence.
+    pub(in crate::edit::commit) fn root(&self) -> PhysicalAddress {
+        self.root
+    }
+
+    /// Borrows the allocation session used for the prospective observations.
+    pub(in crate::edit::commit) fn session(&self) -> &AllocationSession {
+        &self.session
+    }
+
+    /// Borrows the original source association retained with the prospective observations.
+    pub(in crate::edit::commit) fn source(&self) -> &ReconstructionSource {
+        &self.source
     }
 }
 

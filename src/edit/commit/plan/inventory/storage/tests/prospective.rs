@@ -432,7 +432,7 @@ fn prospective_decode_work_is_zero_for_empty_input_and_application_failure(#[cas
         assert_eq!(decisions.physical_members(), 0);
         assert!(decisions.members().is_empty());
         assert!(decisions.parents().is_empty());
-        assert!(decisions.plans().is_empty());
+        assert!(decisions.plans().next().is_none());
     }
     assert_eq!(COLLECTION_WORK.with(Cell::get), (0, 0));
 }

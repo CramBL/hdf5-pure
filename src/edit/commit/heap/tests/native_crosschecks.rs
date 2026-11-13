@@ -8,6 +8,7 @@ use test_util_hdf5::file;
 use test_util_hdf5::global_heap::attributes;
 
 use crate::edit::commit::heap;
+use crate::edit::commit::plan::inventory::members::ParentDisposition;
 use crate::edit::commit::plan::inventory::prospective::ReferencePresence;
 use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
 use crate::edit::test_util as edit_test_util;
@@ -73,9 +74,14 @@ fn native_readers_observe_preserved_records_after_protected_compaction(#[case] s
 }
 
 #[rstest]
-#[case::unbuffered(false)]
-#[case::session(true)]
-fn native_source_members_compact_through_checked_publication(#[case] session: bool) {
+#[case::compact_unbuffered(false, false)]
+#[case::compact_session(true, false)]
+#[case::retire_unbuffered(false, true)]
+#[case::retire_session(true, true)]
+fn native_source_parent_dispositions_survive_checked_publication(
+    #[case] session: bool,
+    #[case] retire: bool,
+) {
     let path = test_util::temp::temp_path("native-checked-heap-compaction.h5");
     assert!(heap_members::write(&path, false).is_none());
     let original = std::fs::read(&path).unwrap();
@@ -97,6 +103,11 @@ fn native_source_members_compact_through_checked_publication(#[case] session: bo
     engine
         .remove_group_attr(&ObjectPathBuf::root(), "first")
         .unwrap();
+    if retire {
+        engine
+            .remove_group_attr(&ObjectPathBuf::root(), "second")
+            .unwrap();
+    }
     let staged = std::mem::take(&mut engine.staged);
     let InventoryPreparation::Tree(prepared) = PreparedEditInventory::prepare(&mut engine, staged)
     else {
@@ -116,25 +127,67 @@ fn native_source_members_compact_through_checked_publication(#[case] session: bo
             collection: parent,
             index: NonZeroU16::new(2).unwrap()
         }),
-        ReferencePresence::ObservedLive
+        if retire {
+            ReferencePresence::Unreferenced
+        } else {
+            ReferencePresence::ObservedLive
+        }
     );
     assert_eq!(
         pending.prospective().parent_presence(parent),
-        ReferencePresence::ObservedLive
+        if retire {
+            ReferencePresence::Unreferenced
+        } else {
+            ReferencePresence::ObservedLive
+        }
     );
-    assert_eq!(pending.member_decisions().physical_members(), 1);
-    assert_eq!(pending.member_decisions().plans().len(), 1);
+    assert_eq!(
+        pending.member_decisions().physical_members(),
+        if retire { 2 } else { 1 }
+    );
+    assert_eq!(
+        pending.member_decisions().plans().count(),
+        usize::from(!retire)
+    );
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();
-    assert_eq!(completion.decisions.plans()[0].range().start(), parent);
-    assert_eq!(completion.decisions.plans()[0].retained(), 1);
+    if retire {
+        let ParentDisposition::Retire(retirement) = &completion.decisions.dispositions()[&parent]
+        else {
+            panic!("expected whole-parent retirement");
+        };
+        assert_eq!(retirement.range().start(), parent);
+        assert_eq!(Some(retirement.root()), completion.prospective.root());
+        assert_eq!(completion.decisions.plans().count(), 0);
+        assert_eq!(
+            engine
+                .image()
+                .read_exact_at(
+                    parent.get(),
+                    usize::try_from(retirement.range().length()).unwrap()
+                )
+                .unwrap(),
+            original[usize::try_from(ranges[0].start).unwrap()
+                ..usize::try_from(ranges[0].end).unwrap()]
+        );
+    } else {
+        assert_eq!(
+            completion.decisions.plans().next().unwrap().range().start(),
+            parent
+        );
+        assert_eq!(completion.decisions.plans().next().unwrap().retained(), 1);
+    }
     drop(engine);
     let native = file::libhdf5_open(&path);
-    assert_eq!(native.attr_names().unwrap(), ["second"]);
-    assert_eq!(
-        attributes::ascii_values(&native.attr("second").unwrap()),
-        ["right"]
-    );
+    if retire {
+        assert_eq!(native.attr_names().unwrap(), Vec::<String>::new());
+    } else {
+        assert_eq!(native.attr_names().unwrap(), ["second"]);
+        assert_eq!(
+            attributes::ascii_values(&native.attr("second").unwrap()),
+            ["right"]
+        );
+    }
     assert_eq!(
         native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
         [7, 11, 13, 17]

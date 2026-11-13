@@ -22,28 +22,34 @@ use super::PublishedTree;
 /// recording undo entries, issues pending writes in every buffering mode, applies the engine's
 /// synchronization policy, and releases that collection's undo entries on success. Earlier
 /// journal entries remain available.
-/// After a failure, completed collections remain compacted and subsequent plans are unattempted.
+/// The executor processes borrowed plans in iterator order. After a failure, completed collections
+/// remain compacted and subsequent plans are unattempted.
 ///
 /// # Errors
 ///
 /// Returns [`HeapMutationFailure`] with the completed prefix length, allocation state, and
 /// bounds, read, write, completion, or restoration error. Failed restoration or uncertain
 /// allocation permission prevents further allocation through the engine.
-pub(in crate::edit) fn after_publication(
+pub(in crate::edit) fn after_publication<'plan>(
     published: PublishedTree<'_>,
-    plans: &[GlobalHeapCompaction],
+    plans: impl IntoIterator<Item = &'plan GlobalHeapCompaction>,
 ) -> Result<(), HeapMutationFailure> {
     let end = published.end().get();
     let engine = published.into_engine();
     published_batch(engine, plans, end)
 }
 
-fn published_batch(
+/// Executes borrowed plans in iterator order against the published end.
+///
+/// # Errors
+///
+/// Returns the first [`HeapMutationFailure`] with the completed prefix and restoration state.
+fn published_batch<'plan>(
     engine: &mut WriteEngine,
-    plans: &[GlobalHeapCompaction],
+    plans: impl IntoIterator<Item = &'plan GlobalHeapCompaction>,
     end: u64,
 ) -> Result<(), HeapMutationFailure> {
-    for (completed, plan) in plans.iter().enumerate() {
+    for (completed, plan) in plans.into_iter().enumerate() {
         let result = match engine.context.allocations.before_reference() {
             Ok(()) => {
                 if plan.range().end().get() > end {

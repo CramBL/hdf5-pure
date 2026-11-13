@@ -15,6 +15,7 @@ use hdf5_pure_space::__private::FreeClass;
 
 use super::CollectionContents;
 use super::associations::{MemberAssociations, MemberPresence};
+use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{
     AnalysisPhase, CollectionCandidates, CollectionProvenance, ObjectReferences,
@@ -528,6 +529,40 @@ impl CollectionQualification {
         Ok(())
     }
 
+    /// Returns the complete parent allocation with its qualified source and session.
+    ///
+    /// Prospective absence, publication, and permission to release protected storage require
+    /// separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the restrictions from [`Self::whole_parent`], [`ParentUnavailable::Allocation`]
+    /// for an absent candidate allocation, [`ParentUnavailable::Class`] for an unknown class, or
+    /// [`ParentUnavailable::Qualification`] if candidate observations are unavailable.
+    pub(in crate::edit) fn whole_parent_allocation(
+        &self,
+        address: PhysicalAddress,
+    ) -> Result<QualifiedParentAllocation, ParentUnavailable> {
+        self.whole_parent(address)?;
+        let allocation = self
+            .candidates
+            .collections
+            .get(&address)
+            .ok_or(ParentUnavailable::Allocation)?;
+        let class = allocation.class.ok_or(ParentUnavailable::Class)?;
+        let observations = self
+            .candidates
+            .observations
+            .as_ref()
+            .ok_or(ParentUnavailable::Qualification)?;
+        Ok(QualifiedParentAllocation {
+            source: self.source.clone(),
+            session: observations.session.clone(),
+            range: allocation.range,
+            class,
+        })
+    }
+
     /// Borrows full framing from the original phase for a recorded parent.
     ///
     /// # Errors
@@ -558,6 +593,40 @@ impl CollectionQualification {
         phase: &'a mut AnalysisPhase<'_>,
     ) -> Result<&'a MemberAssociations, Error> {
         phase.member_associations(&self.source)
+    }
+}
+
+/// A complete original parent allocation with qualified source, session, and free-space class.
+///
+/// [`CollectionQualification::whole_parent_allocation`] establishes whole-parent qualification.
+/// The caller establishes prospective absence and publication or storage-release permission
+/// separately.
+pub(in crate::edit) struct QualifiedParentAllocation {
+    source: ReconstructionSource,
+    session: AllocationSession,
+    range: FileRange,
+    class: FreeClass,
+}
+
+impl QualifiedParentAllocation {
+    /// Borrows the original source-phase and object association.
+    pub(in crate::edit) fn source(&self) -> &ReconstructionSource {
+        &self.source
+    }
+
+    /// Borrows the allocation session associated with the original range.
+    pub(in crate::edit) fn session(&self) -> &AllocationSession {
+        &self.session
+    }
+
+    /// Returns the complete original parent allocation range.
+    pub(in crate::edit) fn range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the original allocation's free-space class.
+    pub(in crate::edit) fn class(&self) -> FreeClass {
+        self.class
     }
 }
 
