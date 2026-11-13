@@ -140,6 +140,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^edit_dense_attr::/) |
     test(/^edit_dense_attr_copy::/) |
     test(/^edit_final_links::/) |
+    test(/^edit_global_heap_members::/) |
     test(/^edit_group_copy_links::/) |
     test(/^edit_header_times::/) |
     test(/^edit_reference_repointing::/) |

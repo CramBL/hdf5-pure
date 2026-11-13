@@ -19,6 +19,9 @@ use test_util_hdf5::global_heap_fixture;
 use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
 
+mod layout;
+mod lifetimes;
+
 #[rstest]
 #[case::attribute_removal(Edit::RemoveAttribute)]
 #[case::attribute_replacement(Edit::ReplaceAttribute)]
