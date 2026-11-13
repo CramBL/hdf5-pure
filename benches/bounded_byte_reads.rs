@@ -1,19 +1,29 @@
-//! Measures descriptor parsing and writing, and version 2 dataspace parsing.
+//! Measures metadata decoding and encoding at supported address and length widths.
 //!
-//! Fixture construction and output checks run outside timing. Each timed parsing iteration includes
-//! result destruction. Separate allocation checks measure the output vectors against an allocating
-//! control.
+//! Descriptor benchmarks measure checked construction with writing and writing a reused value.
+//! Symbol-table and File Space Info parsers read unaligned input. The repeated descriptor parser
+//! returns a fixed-size output array.
+//!
+//! Fixture construction and correctness checks run outside timing. Returned values are destroyed in
+//! each timed iteration. Separate allocation checks use an allocating control.
 
 use std::hint;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion};
+use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
-use hdf5_pure_core::StoredAddress;
-use hdf5_pure_format::__private::{Dataspace, DataspaceType, VariableLengthDescriptor};
+use hdf5_pure_core::{
+    DecodedStoredAddress, FileSpaceInfo, FileSpacePageSize, FileSpaceStrategy, StoredAddress,
+};
+use hdf5_pure_format::__private::{
+    self as format, Dataspace, DataspaceType, FormatWidths, SymbolTableMessage,
+    VariableLengthDescriptor,
+};
 use hdf5_pure_format::{LengthWidth, MaxExtent, OffsetWidth};
 use test_util::allocation;
 use test_util::dataspace::{self, Flags, Kind};
+use test_util::file_space_info;
 use test_util::widths::Widths;
 
 #[global_allocator]
@@ -32,6 +42,18 @@ fn main() {
             })
         })
         .collect();
+    let records: Vec<_> = [OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight]
+        .into_iter()
+        .flat_map(|offsets| {
+            [LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight]
+                .into_iter()
+                .map(move |lengths| FileSpaceFixture::new(FormatWidths { offsets, lengths }))
+        })
+        .collect();
+    let symbols =
+        [OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight].map(SymbolTableFixture::new);
+    let sequences = [OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight]
+        .map(DescriptorSequenceFixture::new);
     let mut criterion = Criterion::default()
         .warm_up_time(Duration::from_millis(500))
         .measurement_time(Duration::from_secs(2))
@@ -42,6 +64,15 @@ fn main() {
     for fixture in &dataspaces {
         fixture.time(&mut criterion);
     }
+    for fixture in &records {
+        fixture.time(&mut criterion);
+    }
+    for fixture in &symbols {
+        fixture.time(&mut criterion);
+    }
+    for fixture in &sequences {
+        fixture.time(&mut criterion);
+    }
     criterion.final_summary();
     allocation_control();
     for fixture in &descriptors {
@@ -50,6 +81,21 @@ fn main() {
     for fixture in &dataspaces {
         fixture.measure();
     }
+    for fixture in &records {
+        fixture.measure();
+    }
+    for fixture in &symbols {
+        fixture.measure();
+    }
+    for fixture in &sequences {
+        fixture.measure();
+    }
+    println!(
+        "native_sizes descriptor={} symbol_table={} file_space_info={}",
+        size_of::<VariableLengthDescriptor>(),
+        size_of::<SymbolTableMessage>(),
+        size_of::<FileSpaceInfo>(),
+    );
 }
 
 struct DescriptorFixture {
@@ -100,6 +146,23 @@ impl DescriptorFixture {
                 hint::black_box((&written, &output));
             });
         });
+        group.bench_function(
+            BenchmarkId::new("construct_and_write", self.width.get()),
+            |b| {
+                b.iter(|| {
+                    let descriptor = VariableLengthDescriptor::new(
+                        hint::black_box(self.width),
+                        hint::black_box(self.descriptor.element_count()),
+                        hint::black_box(self.descriptor.collection_address()),
+                        hint::black_box(self.descriptor.object_index()),
+                    );
+                    let written = descriptor.and_then(|descriptor| {
+                        descriptor.write_into(hint::black_box(output.as_mut_slice()))
+                    });
+                    hint::black_box((&written, &output));
+                });
+            },
+        );
         group.finish();
     }
 
@@ -124,6 +187,24 @@ impl DescriptorFixture {
         self.assert_write(written, &output);
         assert_eq!(measured.blocks, 0);
         assert_eq!(measured.bytes, 0);
+        let (written, measured) = allocation::measure(
+            &format!(
+                "bounded_descriptor_construct_and_write_{}",
+                self.width.get()
+            ),
+            || {
+                VariableLengthDescriptor::new(
+                    hint::black_box(self.width),
+                    hint::black_box(self.descriptor.element_count()),
+                    hint::black_box(self.descriptor.collection_address()),
+                    hint::black_box(self.descriptor.object_index()),
+                )
+                .and_then(|descriptor| descriptor.write_into(hint::black_box(&mut output)))
+            },
+        );
+        self.assert_write(written, &output);
+        assert_eq!(measured.blocks, 0);
+        assert_eq!(measured.bytes, 0);
     }
 
     fn assert_parse(
@@ -141,6 +222,245 @@ impl DescriptorFixture {
         assert_eq!(written, Ok(self.raw.len()));
         assert_eq!(&output[..self.raw.len()], self.raw);
         assert!(output[self.raw.len()..].iter().all(|&byte| byte == 0xcc));
+    }
+}
+
+struct FileSpaceFixture {
+    widths: FormatWidths,
+    input: UnalignedInput,
+    raw: Vec<u8>,
+    expected: FileSpaceInfo,
+}
+
+impl FileSpaceFixture {
+    fn new(widths: FormatWidths) -> Self {
+        let raw = file_space_info::non_persistent_version_1(
+            Widths::new(
+                usize::from(widths.offsets.get()),
+                usize::from(widths.lengths.get()),
+            ),
+            file_space_info::PAGE,
+            64,
+            FileSpacePageSize::DEFAULT.get(),
+        );
+        let fixture = Self {
+            widths,
+            input: UnalignedInput::new(&raw),
+            raw,
+            expected: FileSpaceInfoFields {
+                strategy: FileSpaceStrategy::Page,
+                persist: false,
+                threshold: 64,
+                page_size: FileSpacePageSize::DEFAULT,
+                page_end_meta_threshold: 0,
+                eoa_pre_fsm: Some(DecodedStoredAddress::Undefined),
+                manager_addrs: Vec::new(),
+            }
+            .build(),
+        };
+        assert_eq!(
+            format::parse_file_space_info(widths, fixture.input.bytes(fixture.raw.len())),
+            Ok(fixture.expected.clone())
+        );
+        assert_eq!(
+            format::serialize_file_space_info_v1(widths, &fixture.expected),
+            Ok(fixture.raw.clone())
+        );
+        fixture
+    }
+
+    fn time(&self, criterion: &mut Criterion) {
+        let mut group = criterion.benchmark_group("bounded_byte_reads/file_space_info");
+        let input = self.input.bytes(self.raw.len());
+        group.bench_function(self.id("parse_unaligned"), |b| {
+            b.iter(|| {
+                hint::black_box(format::parse_file_space_info(
+                    hint::black_box(self.widths),
+                    hint::black_box(input),
+                ))
+            });
+        });
+        group.bench_function(self.id("serialize"), |b| {
+            b.iter(|| {
+                hint::black_box(format::serialize_file_space_info_v1(
+                    hint::black_box(self.widths),
+                    hint::black_box(&self.expected),
+                ))
+            });
+        });
+        group.finish();
+    }
+
+    fn measure(&self) {
+        let (parsed, measured) = allocation::measure(&self.id("file_space_parse"), || {
+            format::parse_file_space_info(
+                hint::black_box(self.widths),
+                hint::black_box(self.input.bytes(self.raw.len())),
+            )
+        });
+        assert_eq!(parsed, Ok(self.expected.clone()));
+        assert_eq!(measured.blocks, 0);
+        assert_eq!(measured.bytes, 0);
+        let (encoded, measured) = allocation::measure(&self.id("file_space_serialize"), || {
+            format::serialize_file_space_info_v1(
+                hint::black_box(self.widths),
+                hint::black_box(&self.expected),
+            )
+        });
+        assert_eq!(encoded, Ok(self.raw.clone()));
+        assert_eq!(measured.blocks, 1);
+        assert_eq!(measured.bytes, u64::try_from(self.raw.len()).unwrap());
+        assert_eq!(measured.live_bytes, measured.bytes);
+    }
+
+    fn id(&self, operation: &str) -> String {
+        format!(
+            "{operation}/offsets_{}/lengths_{}",
+            self.widths.offsets.get(),
+            self.widths.lengths.get()
+        )
+    }
+}
+
+struct SymbolTableFixture {
+    width: OffsetWidth,
+    input: UnalignedInput,
+    len: usize,
+    expected: SymbolTableMessage,
+}
+
+impl SymbolTableFixture {
+    fn new(width: OffsetWidth) -> Self {
+        let len = usize::from(width.get());
+        let mut raw = 0x1234u64.to_le_bytes()[..len].to_vec();
+        raw.extend_from_slice(&0x5678u64.to_le_bytes()[..len]);
+        let fixture = Self {
+            width,
+            input: UnalignedInput::new(&raw),
+            len: raw.len(),
+            expected: SymbolTableMessage {
+                btree_address: StoredAddress::new(0x1234),
+                local_heap_address: StoredAddress::new(0x5678),
+            },
+        };
+        assert_eq!(
+            SymbolTableMessage::parse_with_offset_width(fixture.input.bytes(fixture.len), width),
+            Ok(fixture.expected.clone())
+        );
+        fixture
+    }
+
+    fn time(&self, criterion: &mut Criterion) {
+        let mut group = criterion.benchmark_group("bounded_byte_reads/symbol_table");
+        let input = self.input.bytes(self.len);
+        group.bench_function(BenchmarkId::new("parse_unaligned", self.width.get()), |b| {
+            b.iter(|| {
+                hint::black_box(SymbolTableMessage::parse_with_offset_width(
+                    hint::black_box(input),
+                    hint::black_box(self.width),
+                ))
+            });
+        });
+        group.finish();
+    }
+
+    fn measure(&self) {
+        let (parsed, measured) =
+            allocation::measure(&format!("symbol_table_parse_{}", self.width.get()), || {
+                SymbolTableMessage::parse_with_offset_width(
+                    hint::black_box(self.input.bytes(self.len)),
+                    hint::black_box(self.width),
+                )
+            });
+        assert_eq!(parsed, Ok(self.expected.clone()));
+        assert_eq!(measured.blocks, 0);
+        assert_eq!(measured.bytes, 0);
+    }
+}
+
+struct DescriptorSequenceFixture {
+    width: OffsetWidth,
+    input: UnalignedInput,
+    len: usize,
+    expected: [VariableLengthDescriptor; 4],
+}
+
+impl DescriptorSequenceFixture {
+    fn new(width: OffsetWidth) -> Self {
+        let descriptor = DescriptorFixture::new(width);
+        let raw = descriptor.raw.repeat(4);
+        let fixture = Self {
+            width,
+            input: UnalignedInput::new(&raw),
+            len: raw.len(),
+            expected: [descriptor.descriptor; 4],
+        };
+        assert_eq!(
+            Self::parse(width, fixture.input.bytes(fixture.len)),
+            Ok(fixture.expected)
+        );
+        fixture
+    }
+
+    fn parse(
+        width: OffsetWidth,
+        raw: &[u8],
+    ) -> Result<[VariableLengthDescriptor; 4], hdf5_pure_format::FormatError> {
+        let (first, consumed) = VariableLengthDescriptor::parse(width, raw)?;
+        let mut values = [first; 4];
+        let mut following = &raw[consumed..];
+        for value in values.iter_mut().skip(1) {
+            let (parsed, consumed) = VariableLengthDescriptor::parse(width, following)?;
+            *value = parsed;
+            following = &following[consumed..];
+        }
+        Ok(values)
+    }
+
+    fn time(&self, criterion: &mut Criterion) {
+        let mut group = criterion.benchmark_group("bounded_byte_reads/descriptor");
+        let input = self.input.bytes(self.len);
+        group.bench_function(
+            BenchmarkId::new("parse_four_unaligned", self.width.get()),
+            |b| {
+                b.iter(|| {
+                    hint::black_box(Self::parse(
+                        hint::black_box(self.width),
+                        hint::black_box(input),
+                    ))
+                });
+            },
+        );
+        group.finish();
+    }
+
+    fn measure(&self) {
+        let (parsed, measured) =
+            allocation::measure(&format!("descriptor_sequence_{}", self.width.get()), || {
+                Self::parse(
+                    hint::black_box(self.width),
+                    hint::black_box(self.input.bytes(self.len)),
+                )
+            });
+        assert_eq!(parsed, Ok(self.expected));
+        assert_eq!(measured.blocks, 0);
+        assert_eq!(measured.bytes, 0);
+    }
+}
+
+#[repr(C, align(8))]
+struct UnalignedInput([u8; 80]);
+
+impl UnalignedInput {
+    fn new(raw: &[u8]) -> Self {
+        let mut input = Self([0xcc; 80]);
+        input.0[1..1 + raw.len()].copy_from_slice(raw);
+        assert_eq!(input.bytes(raw.len()).as_ptr().align_offset(8), 7);
+        input
+    }
+
+    fn bytes(&self, len: usize) -> &[u8] {
+        &self.0[1..1 + len]
     }
 }
 
