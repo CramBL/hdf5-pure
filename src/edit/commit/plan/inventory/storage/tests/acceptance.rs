@@ -367,7 +367,8 @@ fn storage_capture_reuses_original_observations() {
         "{:?}",
         storage.unavailable()
     );
-    assert_eq!(storage.allocations().len(), 2);
+    assert_eq!(storage.allocations().len(), 3);
+    assert!(storage.allocations().iter().any(|allocation| allocation.range == super::range(parent, 4096) && matches!(allocation.origin, StorageOrigin::Parent { address, class: None } if address.get() == parent)));
     assert!(
         storage
             .allocations()

@@ -456,7 +456,7 @@ enum Restriction {
     Session,
 }
 
-fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
+pub(super) fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
     let staged = std::mem::take(&mut engine.staged);
     match PreparedEditInventory::prepare(engine, staged) {
         InventoryPreparation::Tree(prepared) => prepared,

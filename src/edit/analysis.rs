@@ -72,13 +72,6 @@ mod deletions;
     expect(dead_code, reason = "heap member facts do not authorize retirement")
 )]
 pub(in crate::edit) mod heap;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "local ownership facts do not authorize collection retirement"
-    )
-)]
 pub(in crate::edit) mod ownership;
 
 #[cfg_attr(
