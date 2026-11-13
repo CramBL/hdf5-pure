@@ -407,8 +407,7 @@ impl Mcos {
     ///
     /// `string` keeps a dedicated path: its `saveobj` payload is a
     /// self-describing `uint64` blob in the property heap rather than a set of
-    /// named properties, so it is read directly instead of through the property
-    /// tables.
+    /// named properties, so this path decodes it directly.
     pub(crate) fn decode_string(&self, ds: &Dataset) -> Result<MatValue, MatError> {
         let metadata = ds.read_u32().map_err(MatError::Hdf5)?;
         let object_ids = parse_opaque_metadata(&metadata)?.object_ids;
@@ -429,20 +428,20 @@ impl Mcos {
         })
     }
 
-    /// Read the saveobj `uint64` payload for an object id.
+    /// Read the saveobj `uint64` payload of a string object.
     ///
-    /// The string writer lays out one saveobj cell per object directly after the
-    /// reserved prefix, so object id `k` maps to cell
-    /// `MCOS_RESERVED_CELL_PREFIX + (k - 1)`.
-    fn saveobj_payload(&self, ObjectId(object_id): ObjectId) -> Result<Vec<u64>, MatError> {
-        let idx = MCOS_RESERVED_CELL_PREFIX + (object_id.get() - 1).to_usize()?;
-        let cell = self.cells.get(idx).ok_or_else(|| {
-            MatError::Custom(format!(
-                "opaque object id {object_id} maps to MCOS cell {idx}, but the store has {} cells",
-                self.cells.len()
-            ))
-        })?;
-        match cell {
+    /// A string object has one saveobj property, which refers to the heap cell
+    /// that holds the payload. The heap also holds the properties of other
+    /// objects, so the cell does not follow from the object id.
+    fn saveobj_payload(&self, object_id: ObjectId) -> Result<Vec<u64>, MatError> {
+        let props = self.properties(object_id)?;
+        let Some(&PropValue::Heap(index)) = props.first().map(|prop| &prop.value) else {
+            return Err(MatError::Custom(format!(
+                "MCOS string object {} has no saveobj heap property",
+                object_id.0
+            )));
+        };
+        match self.heap_object(index)? {
             Object::Dataset(d) => {
                 // The saveobj payload is always a `uint64` array. Refuse any
                 // other datatype rather than letting `read_u64` widen a narrower
@@ -450,13 +449,15 @@ impl Mcos {
                 let dtype = d.dtype().map_err(MatError::Hdf5)?;
                 if dtype != DType::U64 {
                     return Err(MatError::Custom(format!(
-                        "MCOS saveobj cell {idx} has datatype {dtype}; expected uint64"
+                        "MCOS saveobj heap value {} has datatype {dtype}; expected uint64",
+                        index.0
                     )));
                 }
                 d.read_u64().map_err(MatError::Hdf5)
             }
             Object::Group(_) => Err(MatError::Custom(format!(
-                "MCOS cell {idx} is a group; expected a saveobj dataset"
+                "MCOS saveobj heap value {} is a group; expected a dataset",
+                index.0
             ))),
         }
     }
