@@ -1447,14 +1447,15 @@ pub(crate) struct HeapLocation {
 pub(crate) struct SharedHeapCollections {
     /// The encoded collections before the newest.
     full: Vec<Vec<u8>>,
-    newest: GlobalHeapCollectionWriter,
+    /// The collection [`add`](Self::add) puts strings in, absent before the first string.
+    newest: Option<GlobalHeapCollectionWriter>,
 }
 
 impl SharedHeapCollections {
     pub(crate) fn new() -> Self {
         Self {
             full: Vec::new(),
-            newest: Self::collection(),
+            newest: None,
         }
     }
 
@@ -1465,18 +1466,21 @@ impl SharedHeapCollections {
     /// Returns the errors of [`GlobalHeapCollectionWriter::push`] and
     /// [`GlobalHeapCollectionWriter::finish`].
     pub(crate) fn add(&mut self, object: &[u8]) -> Result<HeapLocation, FormatError> {
-        let index = match self.newest.push(object)? {
-            Some(index) => index,
-            None => {
-                let full = core::mem::replace(&mut self.newest, Self::collection());
-                self.full.push(full.finish()?);
-                self.newest.push(object)?.ok_or_else(|| {
-                    FormatError::Internal(
-                        "an empty global heap collection refused an object".into(),
-                    )
-                })?
+        if let Some(newest) = &mut self.newest {
+            if let Some(index) = newest.push(object)? {
+                return Ok(HeapLocation {
+                    collection: self.full.len(),
+                    index,
+                });
             }
-        };
+        }
+        let mut newest = Self::collection();
+        let index = newest.push(object)?.ok_or_else(|| {
+            FormatError::Internal("an empty global heap collection refused an object".into())
+        })?;
+        if let Some(full) = self.newest.replace(newest) {
+            self.full.push(full.finish()?);
+        }
         Ok(HeapLocation {
             collection: self.full.len(),
             index,
@@ -1490,7 +1494,7 @@ impl SharedHeapCollections {
     /// Returns the errors of [`GlobalHeapCollectionWriter::finish`].
     pub(crate) fn finish(self) -> Result<Vec<Vec<u8>>, FormatError> {
         let Self { mut full, newest } = self;
-        if !newest.is_empty() {
+        if let Some(newest) = newest {
             full.push(newest.finish()?);
         }
         Ok(full)

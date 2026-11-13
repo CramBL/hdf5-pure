@@ -695,12 +695,6 @@ impl GlobalHeapCollectionWriter {
         Ok(Some(index))
     }
 
-    /// Returns `true` if the collection holds no object.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.objects == 0
-    }
-
     /// Returns the encoded collection, with a free space object at index 0 that spans the rest of
     /// it.
     ///
