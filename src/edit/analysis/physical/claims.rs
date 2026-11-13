@@ -87,6 +87,7 @@ impl PhysicalClaims {
     ///
     /// Retains original ranges and origins. Uses a temporary object-identity list and a distinct
     /// collection-address set. Member and reference summaries remain in their existing caches.
+    /// Retains header-derived collection ranges alongside later framing or source-extent errors.
     ///
     /// # Errors
     ///
@@ -201,9 +202,17 @@ impl PhysicalClaims {
                     range: contents.range(),
                     origin: ClaimOrigin::Heap(address),
                 }),
-                Err(error) => claims
-                    .problems
-                    .push(ClaimProblem::Collection { address, error }),
+                Err(error) => {
+                    if let Some(&range) = phase.collection_envelopes.get(&address) {
+                        claims.claims.push(PhysicalClaim {
+                            range,
+                            origin: ClaimOrigin::Heap(address),
+                        });
+                    }
+                    claims
+                        .problems
+                        .push(ClaimProblem::Collection { address, error });
+                }
             }
         }
         Ok(claims)
@@ -273,7 +282,7 @@ pub(in crate::edit) enum ClaimOrigin {
         index: usize,
         kind: FileStorageKind,
     },
-    /// A complete global heap parent, identified by its physical collection address.
+    /// A parsed collection's allocation range, identified by its physical collection address.
     Heap(PhysicalAddress),
     /// Capacity indexed in [`super::PhysicalStorage::metadata_capacity`].
     ///

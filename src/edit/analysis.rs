@@ -105,6 +105,8 @@ pub(super) struct AnalysisPhase<'a> {
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     /// Complete collection ranges, allocated-member framing, and cached parsing failures.
     allocations: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
+    /// Header-derived allocation ranges retained after later framing or source-extent failure.
+    collection_envelopes: BTreeMap<PhysicalAddress, FileRange>,
     /// Count observations, optional header allocation facts, and cached parse failures.
     counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     /// Local allocation ranges and collection outcomes, including cached failures.
@@ -132,6 +134,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references: BTreeMap::new(),
             liveness: None,
             allocations: BTreeMap::new(),
+            collection_envelopes: BTreeMap::new(),
             counts: BTreeMap::new(),
             ownership: BTreeMap::new(),
             physical: None,
@@ -195,6 +198,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references: _,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
@@ -630,6 +634,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
@@ -711,6 +716,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references: _,
             liveness,
             allocations,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,

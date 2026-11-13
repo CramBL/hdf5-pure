@@ -31,6 +31,7 @@ mod admission;
 mod collections;
 mod count_refinement;
 mod counts;
+mod envelopes;
 mod evidence;
 mod failures;
 mod members;

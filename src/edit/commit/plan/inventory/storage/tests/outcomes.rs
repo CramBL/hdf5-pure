@@ -339,6 +339,7 @@ fn later_compaction_failure_keeps_published_values_and_completed_collections(
         engine.image(),
         engine.widths().lengths,
         PhysicalAddress::new(parents[0]),
+        |_| {},
     )
     .unwrap();
     assert_eq!(

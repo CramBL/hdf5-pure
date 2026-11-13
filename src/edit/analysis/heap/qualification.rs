@@ -256,7 +256,9 @@ impl AnalysisPhase<'_> {
         };
         let residual_groups = if matches!(
             &domain,
-            Some(OwnerDomain::Unavailable(DomainUnavailable::Residual(_)))
+            Some(OwnerDomain::Unavailable(
+                DomainUnavailable::Collection(_) | DomainUnavailable::Residual(_)
+            ))
         ) {
             Some(self.residual_group_domain(source)?)
         } else {
@@ -436,6 +438,8 @@ pub(in crate::edit) struct ParentStorage {
 /// owner domain or bounded residual-group evidence. Whole-parent qualification also requires
 /// complete root references and matching allocated members. Source freshness and storage reuse
 /// require separate evidence.
+/// The collector accepts header-backed allocation ranges for damaged collections while
+/// preserving each requested parent's local framing restrictions.
 pub(in crate::edit) struct CollectionQualification {
     source: ReconstructionSource,
     candidates: CollectionCandidates,
@@ -773,4 +777,4 @@ pub(in crate::edit) enum ParentUnavailable {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::edit) mod tests;

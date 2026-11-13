@@ -120,6 +120,7 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
         engine.image(),
         engine.widths().lengths,
         PhysicalAddress::new(parent),
+        |_| {},
     )
     .unwrap();
     assert_eq!(contents.range(), range);
@@ -467,7 +468,8 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
         crate::global_heap::collect_members(
             engine.image(),
             engine.widths().lengths,
-            PhysicalAddress::new(first)
+            PhysicalAddress::new(first),
+            |_| {}
         )
         .unwrap()
         .members()
@@ -480,7 +482,8 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
         crate::global_heap::collect_members(
             engine.image(),
             engine.widths().lengths,
-            PhysicalAddress::new(second)
+            PhysicalAddress::new(second),
+            |_| {}
         )
         .unwrap()
         .members()
@@ -566,7 +569,8 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
             crate::global_heap::collect_members(
                 engine.image(),
                 engine.widths().lengths,
-                PhysicalAddress::new(first)
+                PhysicalAddress::new(first),
+                |_| {}
             )
             .unwrap()
             .members()

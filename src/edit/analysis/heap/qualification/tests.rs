@@ -24,6 +24,8 @@ use crate::error::{Error, FormatError};
 use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
+pub(in crate::edit) mod envelopes;
+
 #[rstest]
 #[case::complete(Restriction::None)]
 #[case::unmatched(Restriction::Unmatched)]

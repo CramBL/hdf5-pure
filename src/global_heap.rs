@@ -202,18 +202,21 @@ pub(crate) fn walk_collection(
 ///
 /// Retains member metadata in physical order without retaining payload bytes. Reads object
 /// headers through the same bounded metadata windows as [`walk_collection`].
+/// Calls `observe` after successful header parsing and geometry checks, before source-extent
+/// and member checks, using the same header read.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`read_collection`], [`HeaderWindow::region`], and
+/// Returns the errors of [`read_collection_observing`], [`HeaderWindow::region`], and
 /// [`GlobalHeapMemberCollector::parse`](hdf5_pure_format::__private::GlobalHeapMemberCollector::parse).
 /// Returns [`FormatError::Internal`] if collection framing is incomplete after parsing.
 pub(crate) fn collect_members(
     source: &(impl Source + ?Sized),
     lengths: LengthWidth,
     address: PhysicalAddress,
+    observe: impl FnOnce(FileRange),
 ) -> Result<GlobalHeapMembers, FormatError> {
-    let collection = read_collection(source, lengths, address)?;
+    let collection = read_collection_observing(source, lengths, address, observe)?;
     let mut window = HeaderWindow::new(collection.range());
     let mut collector = collection.collect_members();
     while let Some(range) = collector.parse_range() {
@@ -235,10 +238,29 @@ fn read_collection(
     lengths: LengthWidth,
     address: PhysicalAddress,
 ) -> Result<GlobalHeapCollection, FormatError> {
+    read_collection_observing(source, lengths, address, |_| {})
+}
+
+/// Reports the parsed header's allocation before checking its complete source extent.
+///
+/// Calls `observe` once after successful header parsing and geometry checks. The observed
+/// allocation may extend beyond the source length.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedSourceEof`] if the declared allocation exceeds the source
+/// length. Returns header geometry, parsing, and source-read errors.
+fn read_collection_observing(
+    source: &(impl Source + ?Sized),
+    lengths: LengthWidth,
+    address: PhysicalAddress,
+    observe: impl FnOnce(FileRange),
+) -> Result<GlobalHeapCollection, FormatError> {
     let locator = GlobalHeapCollectionLocator::new(address, lengths);
     let header_range = locator.parse_range()?;
     let header = read(source, header_range)?;
     let collection = locator.parse(FileRegion::new(header_range, &header)?)?;
+    observe(collection.range());
     let end = collection.range().end().get();
     if end > source.len() {
         return Err(FormatError::UnexpectedSourceEof {
@@ -396,7 +418,7 @@ mod tests {
             walk_collection(&source, lengths, address, |object| walked.push(object)).unwrap();
         let reads = source.metadata_reads.replace(0);
         let bytes = source.metadata_bytes.replace(0);
-        let collected = collect_members(&source, lengths, address).unwrap();
+        let collected = collect_members(&source, lengths, address, |_| {}).unwrap();
         assert_eq!(collected.range(), range);
         assert_eq!(collected.members(), walked);
         assert_eq!(
@@ -440,7 +462,7 @@ mod tests {
             metadata_bytes: Cell::new(0),
             raw_reads: Cell::new(0),
         };
-        let error = collect_members(&source, lengths, PhysicalAddress::new(0))
+        let error = collect_members(&source, lengths, PhysicalAddress::new(0), |_| {})
             .err()
             .unwrap();
         assert_eq!(

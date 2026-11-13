@@ -259,6 +259,7 @@ fn whole_retirement_preserves_parent_extent_and_stored_counts(
         pending.engine.image(),
         pending.engine.widths().lengths,
         PhysicalAddress::new(parent),
+        |_| {},
     )
     .unwrap();
     assert_eq!(members.members().len(), 1);

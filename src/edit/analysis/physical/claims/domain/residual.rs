@@ -8,7 +8,7 @@ use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::{GroupInfo, GroupInfoError, LinkInfoMessage, MetadataSource};
 
-use super::{DomainUnavailable, OwnerDomain};
+use super::DomainUnavailable;
 use crate::access_mode::AccessMode;
 use crate::convert::Narrow;
 use crate::edit::WriteEngine;
@@ -24,9 +24,10 @@ use crate::object_header::{MessageFilter, ObjectHeader};
 impl AnalysisPhase<'_> {
     /// Returns cached residual-group evidence or the outcome that prevents qualification.
     ///
-    /// Requires the strict owner-domain prerequisites other than zero residual content. Retains
-    /// successful and unavailable interpretations in this phase. Checks successful evidence against
-    /// the source phase, allocation session, root, physical size, and recorded end address.
+    /// Requires the heap-domain prerequisites other than zero residual content, accepting
+    /// independently observed collection-header allocation ranges after member framing fails.
+    /// Retains successful and unavailable interpretations in this phase. Checks successful evidence
+    /// against the source phase, allocation session, root, physical size, and recorded end address.
     /// The caller establishes source freshness separately.
     ///
     /// # Errors
@@ -75,12 +76,12 @@ impl AnalysisPhase<'_> {
         source: &ReconstructionSource,
     ) -> Result<ResidualGroups, ResidualUnavailable> {
         match self
-            .supported_owner_domain(source)
+            .heap_domain_restriction(source)
             .map_err(ResidualUnavailable::Source)?
         {
-            OwnerDomain::Unavailable(DomainUnavailable::Residual(_)) => {}
-            OwnerDomain::Unavailable(reason) => return Err(ResidualUnavailable::Domain(reason)),
-            OwnerDomain::Available(_) => {}
+            Some(DomainUnavailable::Residual(_)) => {}
+            Some(reason) => return Err(ResidualUnavailable::Domain(reason)),
+            None => {}
         }
         let intervals = self
             .residual_content(source)
@@ -273,7 +274,7 @@ impl ResidualGroups {
     reason = "the outcome retains the source and framing observations that withhold qualification"
 )]
 pub(in crate::edit) enum ResidualUnavailable {
-    /// A strict owner-domain prerequisite other than residual content is unavailable.
+    /// A heap-domain prerequisite other than residual content is unavailable.
     Domain(DomainUnavailable),
     /// A residual read or parse failure, including an exhausted metadata budget.
     Format(FormatError),
