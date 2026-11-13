@@ -386,6 +386,18 @@ impl OriginalEdits {
             .map_err(EditInputError::Handoff)
     }
 
+    /// Borrows a resolved original source independently of count and domain outcomes.
+    ///
+    /// Returns [`None`] if source resolution failed or qualification found an incompatible
+    /// association.
+    pub(in crate::edit::commit) fn source(&self) -> Option<&ReconstructionSource> {
+        match self {
+            Self::Complete(owners) => Some(owners.source()),
+            Self::Unavailable { source, .. } => source.as_ref().ok(),
+            Self::Association(_) => None,
+        }
+    }
+
     /// Borrows fully qualified facts, or returns [`None`] when qualification failed.
     pub(in crate::edit::commit) fn owners(&self) -> Option<&OriginalOwnerInventory> {
         match self {

@@ -38,7 +38,8 @@ pub(in crate::edit::commit) enum PreparedTreeCounts {
         /// Supported original allocations, moved into the tree before reference screening.
         retirement: Vec<(FileRange, FreeClass)>,
     },
-    /// Incomplete count evidence, with deletion allocations and collection candidates withheld.
+    /// Incomplete count evidence, with deletion allocations withheld from retirement.
+    /// The inventory planner retains independently collected heap candidates.
     Unavailable,
 }
 

@@ -1,3 +1,5 @@
+use core::num::NonZeroU16;
+
 use rstest::rstest;
 use test_util::global_heap;
 use test_util::widths::Widths;
@@ -6,8 +8,10 @@ use test_util_hdf5::file;
 use test_util_hdf5::global_heap::attributes;
 
 use crate::edit::commit::heap;
+use crate::edit::commit::plan::inventory::prospective::ReferencePresence;
 use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
 use crate::edit::test_util as edit_test_util;
+use crate::global_heap::GlobalHeapId;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
 
@@ -100,6 +104,25 @@ fn native_source_members_compact_through_checked_publication(#[case] session: bo
     };
     let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
     assert!(pending.prospective().is_complete());
+    assert_eq!(
+        pending.prospective().member_presence(GlobalHeapId {
+            collection: parent,
+            index: NonZeroU16::new(1).unwrap()
+        }),
+        ReferencePresence::Unreferenced
+    );
+    assert_eq!(
+        pending.prospective().member_presence(GlobalHeapId {
+            collection: parent,
+            index: NonZeroU16::new(2).unwrap()
+        }),
+        ReferencePresence::ObservedLive
+    );
+    assert_eq!(
+        pending.prospective().parent_presence(parent),
+        ReferencePresence::ObservedLive
+    );
+    assert_eq!(pending.member_decisions().physical_members(), 1);
     assert_eq!(pending.member_decisions().plans().len(), 1);
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();

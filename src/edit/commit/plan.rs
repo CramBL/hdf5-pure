@@ -500,7 +500,7 @@ impl WriteEngine {
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
-        if matches!(counts, Some(PreparedTreeCounts::Unavailable)) {
+        if !capture && matches!(counts, Some(PreparedTreeCounts::Unavailable)) {
             collections = CollectionCandidates::default();
         }
         let mut headers = headers;

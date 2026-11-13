@@ -6,6 +6,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCompaction;
 
 use super::prospective::ProspectiveCollections;
+use super::prospective::ReferencePresence;
 use super::storage::{OriginalStorage, StorageOrigin};
 use crate::edit::analysis::CollectionProvenance;
 use crate::edit::analysis::heap::qualification::{
@@ -24,35 +25,31 @@ pub(in crate::edit::commit) struct MemberDecisions {
     parents: BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>>,
     planning: BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>>,
     plans: Vec<GlobalHeapCompaction>,
+    #[cfg(test)]
+    physical_members: usize,
 }
 
 impl MemberDecisions {
     /// Derives removal decisions from original qualification and fresh prospective references.
     ///
-    /// The planner preserves a qualified member or parent if a prospective reference was
-    /// observed, even when reference interpretation is incomplete. Removal requires complete
-    /// interpretation and root applicability. The planner groups removals by parent and preserves
-    /// unobserved members, serialized reference counts, and collection capacity. It requires captured
-    /// framing and an exactly matching protected parent range before constructing a plan.
+    /// The planner groups origins by physical member before looking up prospective presence once
+    /// per identity. It retains each origin's qualification outcome and each original parent
+    /// address, including qualification failures. It preserves a qualified member or parent if a
+    /// prospective reference was observed, even when other observations are incomplete. It requires
+    /// original qualification, complete interpretation, and root applicability for removal.
     ///
-    /// Returns empty decisions if original qualification is unavailable.
+    /// The planner groups removals by parent and preserves unobserved members, serialized reference
+    /// counts, and collection capacity. It requires captured framing and an exactly matching
+    /// protected parent range before constructing a plan.
     pub(super) fn collect(
         original: &OriginalCollections,
         prospective: &ProspectiveCollections,
         storage: &OriginalStorage,
     ) -> Self {
         let mut result = Self::default();
-        let OriginalQualification::Qualified(qualification) = original.qualification() else {
-            return result;
-        };
-        let decision = |live| {
-            if live {
-                MemberDecision::Live
-            } else if prospective.is_complete() {
-                MemberDecision::Remove
-            } else {
-                MemberDecision::Prospective
-            }
+        let qualification = match original.qualification() {
+            OriginalQualification::Qualified(qualification) => Some(qualification),
+            OriginalQualification::Empty | OriginalQualification::Unavailable { .. } => None,
         };
         let protected: BTreeMap<_, _> = storage
             .allocations()
@@ -66,31 +63,38 @@ impl MemberDecisions {
             })
             .collect();
         let mut removed: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
-        for (origin, observations) in qualification.predecessors().into_iter().flatten() {
+        let mut origins_by_member = BTreeMap::<_, Vec<_>>::new();
+        for (origin, observations) in original.predecessors().into_iter().flatten() {
             for &id in observations.objects() {
-                let outcome = qualification.member(origin, id).map(|()| {
-                    decision(
-                        prospective
-                            .references()
-                            .is_some_and(|facts| facts.objects().contains(&id)),
-                    )
-                });
-                if outcome == Ok(MemberDecision::Remove) {
-                    removed.entry(id.collection).or_default().insert(id.index);
-                }
-                result.members.insert((origin.clone(), id), outcome);
+                origins_by_member.entry(id).or_default().push(origin);
             }
         }
-        for &address in qualification.parents().keys() {
+        for (id, origins) in origins_by_member {
+            #[cfg(test)]
+            {
+                result.physical_members += 1;
+            }
+            let decision = MemberDecision::from(prospective.member_presence(id));
+            let mut remove = false;
+            for origin in origins {
+                let outcome = qualification
+                    .ok_or(MemberUnavailable::Qualification)
+                    .and_then(|qualification| qualification.member(origin, id))
+                    .map(|()| decision);
+                remove |= outcome == Ok(MemberDecision::Remove);
+                result.members.insert((origin.clone(), id), outcome);
+            }
+            if remove {
+                removed.entry(id.collection).or_default().insert(id.index);
+            }
+        }
+        for &address in original.addresses() {
             result.parents.insert(
                 address,
-                qualification.whole_parent(address).map(|()| {
-                    decision(
-                        prospective
-                            .references()
-                            .is_some_and(|facts| facts.collections().contains(&address.get())),
-                    )
-                }),
+                qualification
+                    .ok_or(ParentUnavailable::Qualification)
+                    .and_then(|qualification| qualification.whole_parent(address))
+                    .map(|()| MemberDecision::from(prospective.parent_presence(address))),
             );
             let Some(indices) = removed.get(&address) else {
                 continue;
@@ -142,6 +146,12 @@ impl MemberDecisions {
     pub(in crate::edit::commit) fn plans(&self) -> &[GlobalHeapCompaction] {
         &self.plans
     }
+
+    /// Returns the number of distinct physical member identities examined.
+    #[cfg(test)]
+    pub(in crate::edit::commit) fn physical_members(&self) -> usize {
+        self.physical_members
+    }
 }
 
 /// The removal eligibility of an originally qualified member or parent.
@@ -153,6 +163,19 @@ pub(in crate::edit::commit) enum MemberDecision {
     Prospective,
     /// The member or parent is absent from complete prospective references.
     Remove,
+}
+
+/// Maps observed presence to retention and complete absence to removal.
+///
+/// Original qualification is checked separately by [`MemberDecisions::collect`].
+impl From<ReferencePresence> for MemberDecision {
+    fn from(presence: ReferencePresence) -> Self {
+        match presence {
+            ReferencePresence::ObservedLive => Self::Live,
+            ReferencePresence::Unavailable => Self::Prospective,
+            ReferencePresence::Unreferenced => Self::Remove,
+        }
+    }
 }
 
 /// An unmet prerequisite for planning a protected parent compaction.

@@ -12,13 +12,14 @@ use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::heap::ReachableHeapReferences;
 use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::heap::qualification::OriginalQualification;
+use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
 /// Heap-reference observations from the applied tree and translated retained roots.
 ///
 /// Root applicability and reference interpretation are independent outcomes. The caller
 /// establishes original member qualification, storage protection, and mutation permission
-/// separately. Empty original candidate input skips traversal.
+/// separately. The collector skips traversal for empty original candidate input.
 #[derive(Default)]
 pub(in crate::edit::commit) struct ProspectiveCollections {
     root: Option<PhysicalAddress>,
@@ -88,17 +89,62 @@ impl ProspectiveCollections {
                 .is_some_and(ReachableHeapReferences::is_complete)
     }
 
+    /// Returns prospective reference presence for one physical member.
+    pub(in crate::edit::commit) fn member_presence(&self, id: GlobalHeapId) -> ReferencePresence {
+        self.presence(
+            self.references
+                .as_ref()
+                .is_some_and(|references| references.objects().contains(&id)),
+        )
+    }
+
+    /// Returns prospective reference presence for the collection at `address`.
+    pub(in crate::edit::commit) fn parent_presence(
+        &self,
+        address: PhysicalAddress,
+    ) -> ReferencePresence {
+        self.presence(
+            self.references
+                .as_ref()
+                .is_some_and(|references| references.collections().contains(&address.get())),
+        )
+    }
+
+    /// Classifies an observation before considering completeness.
+    fn presence(&self, observed: bool) -> ReferencePresence {
+        if observed {
+            ReferencePresence::ObservedLive
+        } else if self.is_complete() {
+            ReferencePresence::Unreferenced
+        } else {
+            ReferencePresence::Unavailable
+        }
+    }
+
+    /// Adds translated original reference roots after checking count and storage facts.
+    ///
+    /// Checks source identity, allocation session, and placement reconciliation independently of
+    /// owner-domain qualification. Earlier roots remain if a later translation fails. Removal
+    /// permission requires separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProspectiveUnavailable::Original`] for unavailable count or storage facts,
+    /// [`ProspectiveUnavailable::Source`] for a missing or incompatible source association,
+    /// [`ProspectiveUnavailable::Session`] for a different allocation session, or
+    /// [`ProspectiveUnavailable::Dispositions`] for failed reconciliation or translation.
     fn retained_roots(
         engine: &WriteEngine,
         original: &OriginalEdits,
         dispositions: &AppliedDispositions,
         roots: &mut BTreeSet<ObjectId>,
     ) -> Result<(), ProspectiveUnavailable> {
-        let owners = original.owners().ok_or(ProspectiveUnavailable::Original)?;
-        if dispositions.original().source().as_ref().ok() != Some(owners.source()) {
+        let facts = original.facts().ok_or(ProspectiveUnavailable::Original)?;
+        let source = original.source().ok_or(ProspectiveUnavailable::Source)?;
+        if dispositions.original().source().as_ref().ok() != Some(source) {
             return Err(ProspectiveUnavailable::Source);
         }
-        let storage = owners.facts().storage();
+        let storage = facts.storage();
         if !storage.same_session(engine) {
             return Err(ProspectiveUnavailable::Session);
         }
@@ -116,12 +162,26 @@ impl ProspectiveCollections {
     }
 }
 
+/// The observed presence or proven absence of a prospective heap reference.
+///
+/// Observed references are retained even when other root or reference observations are incomplete.
+/// Complete applicable observations are required to prove absence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::edit::commit) enum ReferencePresence {
+    /// A reference was observed in the applied tree or a translated retained root.
+    ObservedLive,
+    /// No reference was observed, and complete root or reference evidence is unavailable.
+    Unavailable,
+    /// No reference was observed in complete, applicable prospective observations.
+    Unreferenced,
+}
+
 /// The reason complete retained-root applicability is unavailable.
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::edit::commit) enum ProspectiveUnavailable {
     /// Original predecessors or actual placements prevent complete identity translation.
     Dispositions(TransitionWithheld),
-    /// Original count and owner qualification is unavailable.
+    /// Original count or storage facts are unavailable.
     Original,
     /// Original storage belongs to another allocation session.
     Session,

@@ -135,6 +135,7 @@ impl AnalysisPhase<'_> {
         if candidates.collections.is_empty() && candidates.observations.is_none() {
             return OriginalCollections {
                 qualification: OriginalQualification::Empty,
+                addresses: BTreeSet::new(),
                 contents: BTreeMap::new(),
             };
         }
@@ -162,7 +163,7 @@ impl AnalysisPhase<'_> {
         if let Some(source) = source
             && self.require_heap_phase(source).is_ok()
         {
-            for address in addresses {
+            for &address in &addresses {
                 self.collection_contents(address).ok();
                 if let Some(framing) = self.allocations.remove(&address) {
                     contents.insert(address, framing);
@@ -180,6 +181,7 @@ impl AnalysisPhase<'_> {
         };
         OriginalCollections {
             qualification,
+            addresses,
             contents,
         }
     }
@@ -309,6 +311,8 @@ impl AnalysisPhase<'_> {
 /// prospective ownership, and permission to mutate or reuse storage require separate evidence.
 pub(in crate::edit) struct OriginalCollections {
     qualification: OriginalQualification,
+    /// Candidate and observed parent addresses retained independently of qualification and framing.
+    addresses: BTreeSet<PhysicalAddress>,
     contents: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
 }
 
@@ -316,6 +320,29 @@ impl OriginalCollections {
     /// Borrows original qualification or the candidates retained after qualification failed.
     pub(in crate::edit) fn qualification(&self) -> &OriginalQualification {
         &self.qualification
+    }
+
+    /// Borrows every candidate or observed physical parent address.
+    ///
+    /// Retains the union independently of qualification and framing outcomes.
+    pub(in crate::edit) fn addresses(&self) -> &BTreeSet<PhysicalAddress> {
+        &self.addresses
+    }
+
+    /// Borrows per-origin reference observations independently of original qualification.
+    ///
+    /// Returns [`None`] if no predecessor observations were captured.
+    pub(in crate::edit) fn predecessors(
+        &self,
+    ) -> Option<&BTreeMap<CollectionProvenance, ObjectReferences>> {
+        match &self.qualification {
+            OriginalQualification::Empty => None,
+            OriginalQualification::Qualified(qualification) => qualification.predecessors(),
+            OriginalQualification::Unavailable { candidates, .. } => candidates
+                .observations
+                .as_ref()
+                .map(|observations| &observations.predecessors),
+        }
     }
 
     /// Borrows captured full framing and framing failures by physical collection address.
@@ -592,6 +619,8 @@ pub(in crate::edit) enum MemberUnavailable {
     Observation,
     /// A local parent allocation restriction.
     Parent(ParentUnavailable),
+    /// Original collection qualification is unavailable.
+    Qualification,
     /// Allocation presence is undetermined after framing failure.
     Unknown,
 }
@@ -611,6 +640,8 @@ pub(in crate::edit) enum ParentUnavailable {
     Framing,
     /// A root-observed index is absent from parsed allocated members.
     MissingMember,
+    /// Original collection qualification is unavailable.
+    Qualification,
     /// The candidate allocation range differs from the parsed parent range.
     Range,
     /// Root topology or reference interpretation is incomplete.
