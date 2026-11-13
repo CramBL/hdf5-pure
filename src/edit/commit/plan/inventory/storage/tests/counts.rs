@@ -373,7 +373,7 @@ fn source_count_exclusions_keep_complete_allocations_without_duplicates(#[case] 
         OriginalStorage::from_test_ranges(&[])
     };
     let pointer = storage.allocations().as_ptr();
-    storage.include_counts(protected).unwrap();
+    storage.include_counts(&engine, protected).unwrap();
     assert_eq!(
         storage.allocations(),
         [StorageAllocation {
@@ -389,7 +389,7 @@ fn source_count_exclusions_keep_complete_allocations_without_duplicates(#[case] 
     }
     let allocation = storage.allocations()[0];
     let mut conflict = OriginalStorage::from_test_ranges(&[allocation.range]);
-    let error = conflict.include_counts(protected).unwrap_err();
+    let error = conflict.include_counts(&engine, protected).unwrap_err();
     let StorageConflict::Overlap {
         allocation: actual,
         range,

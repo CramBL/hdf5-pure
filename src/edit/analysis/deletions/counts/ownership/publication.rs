@@ -238,6 +238,8 @@ impl<'a> CountPublicationBounds<'a> {
     /// Publishes between source-count increases and decreases with `storage` exclusions.
     ///
     /// Adds complete original count-header allocations to `storage`, retaining identical entries.
+    /// Checks count-source associations and refines unobserved intervals while preserving their
+    /// surrounding portions through [`OriginalStorage::include_counts`].
     /// Journals increases before publication and decreases after publication, before calling
     /// `complete`. The publisher applies the supplied storage exclusions even for an empty count
     /// batch. The callback borrows the combined exclusions after publication and count writes
@@ -249,7 +251,8 @@ impl<'a> CountPublicationBounds<'a> {
     /// # Errors
     ///
     /// Returns [`PublicationError::Storage`] if count-header inclusion or publication exclusion
-    /// checks fail, including allocator or retirement overlaps and an end below protected storage.
+    /// checks fail, including incompatible count-source associations, allocator or retirement
+    /// overlaps, and an end below protected storage.
     /// Returns [`PublicationError::Write`] for count-preparation, protection, journal, completion,
     /// or other publication errors.
     pub(in crate::edit) fn with_ordered_counts_excluding<T>(
@@ -264,7 +267,7 @@ impl<'a> CountPublicationBounds<'a> {
             counts,
             retirement,
         } = phase;
-        storage.include_counts(&counts)?;
+        storage.include_counts(engine, &counts)?;
         if counts.updates().is_empty() {
             return engine.publish_pending_tree_excluding(
                 retirement,

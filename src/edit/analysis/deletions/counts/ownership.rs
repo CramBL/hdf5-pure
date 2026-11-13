@@ -289,6 +289,44 @@ impl ProtectedCounts {
         })
     }
 
+    /// Checks the recorded engine associations and an optional source root and phase.
+    ///
+    /// Checks the allocation session, engine root, and publication availability for a nonempty
+    /// batch. If `source` is present, also checks its physical root and phase identity. For an empty
+    /// batch, skips both inputs. Source freshness requires separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountProtectionError::Session`] for a different allocation session,
+    /// [`CountProtectionError::Root`] for a different engine or supplied root, or
+    /// [`CountProtectionError::Phase`] for a supplied source from another phase. Returns
+    /// [`CountProtectionError::Publication`] if allocation publication is unavailable, or
+    /// [`CountProtectionError::Source`] for root-address errors.
+    pub(in crate::edit) fn check_association(
+        &self,
+        engine: &WriteEngine,
+        source: Option<&ReconstructionSource>,
+    ) -> Result<(), CountProtectionError> {
+        let Some(origin) = &self.source else {
+            return Ok(());
+        };
+        origin.reconstructions(engine, [])?;
+        if let Some(source) = source {
+            if origin.root != source.object() {
+                return Err(CountProtectionError::Root {
+                    expected: origin.root,
+                    actual: source.object(),
+                });
+            }
+            if !Arc::ptr_eq(&origin.identity, &source.identity) {
+                return Err(CountProtectionError::Phase {
+                    object: source.object(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the original physical topology root, or `None` for an empty batch.
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.source.as_ref().map(|source| source.root)
@@ -579,11 +617,11 @@ pub(in crate::edit) enum CountProtectionError {
         /// The intersecting reusable range.
         reusable: FileRange,
     },
-    /// A physical superblock root different from the original topology root.
+    /// A physical root different from the original topology root.
     Root {
         /// The original topology root.
         expected: ObjectId,
-        /// The root resolved from the engine's superblock context.
+        /// The root resolved from the engine or supplied in a source association.
         actual: ObjectId,
     },
     /// An engine from a different allocation session.

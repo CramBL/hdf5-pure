@@ -23,7 +23,9 @@ use crate::edit::analysis::heap::qualification::{
 };
 use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::physical::claims::{ClaimOrigin, ClaimProblem};
-use crate::edit::analysis::{AnalysisPhase, ProtectedCounts, ReconstructionSource};
+use crate::edit::analysis::{
+    AnalysisPhase, CountProtectionError, ProtectedCounts, ReconstructionSource,
+};
 use crate::edit::commit::heap;
 use crate::edit::commit::heap::HeapMutationFailure;
 use crate::edit::commit::plan::PreparedTree;
@@ -224,17 +226,26 @@ impl OriginalStorage {
 
     /// Adds complete original count-header allocations in physical address order.
     ///
-    /// Retains an identical allocation with the same owner and header kind once. The caller checks
-    /// count-source applicability separately. Earlier insertions remain if a later range conflicts.
+    /// Checks the batch's engine and source associations with [`ProtectedCounts::check_association`]
+    /// before changing ranges. Replaces intersecting [`StorageOrigin::Unobserved`] intervals with
+    /// checked header allocations, preserving the surrounding unobserved portions. Retains an
+    /// identical allocation with the same owner and header kind once. Earlier insertions remain if
+    /// a later range conflicts.
     ///
     /// # Errors
     ///
-    /// Returns [`StorageConflict::Overlap`] if a count-header allocation overlaps other protected
-    /// storage, including an identical range with a different owner or kind.
+    /// Returns [`StorageConflict::CountAssociation`] if the batch's association check fails.
+    /// Returns [`StorageConflict::Overlap`] if a count-header allocation overlaps recorded owner
+    /// or parent storage, except an identical allocation with the same owner and header kind.
+    /// Returns [`StorageConflict::Source`] if constructing a surrounding unobserved range fails.
     pub(in crate::edit) fn include_counts(
         &mut self,
+        engine: &WriteEngine,
         counts: &ProtectedCounts,
     ) -> Result<(), StorageConflict> {
+        counts
+            .check_association(engine, self.source.as_ref())
+            .map_err(StorageConflict::CountAssociation)?;
         for update in counts.updates() {
             let allocation = StorageAllocation {
                 range: update.allocation().range(),
@@ -243,19 +254,52 @@ impl OriginalStorage {
                     kind: AllocationKind::Header,
                 },
             };
-            match self
+            let start = self
                 .allocations
-                .binary_search_by_key(&allocation.range.start(), |existing| existing.range.start())
+                .partition_point(|existing| existing.range.end() <= allocation.range.start());
+            let end = start
+                + self.allocations[start..]
+                    .partition_point(|existing| existing.range.start() < allocation.range.end());
+            if self.allocations.get(start..end) == Some(&[allocation]) {
+                continue;
+            }
+            if let Some(&existing) = self.allocations[start..end]
+                .iter()
+                .find(|existing| existing.origin != StorageOrigin::Unobserved)
             {
-                Ok(index) if self.allocations[index] == allocation => continue,
-                Ok(_) | Err(_) => {
-                    self.exclude(allocation.range, SpaceClaim::CountHeader)?;
+                return Err(StorageConflict::Overlap {
+                    allocation: existing,
+                    range: allocation.range,
+                    claim: SpaceClaim::CountHeader,
+                });
+            }
+            let mut refined = Vec::new();
+            for &existing in &self.allocations[start..end] {
+                if existing.range.start() < allocation.range.start() {
+                    refined.push(StorageAllocation {
+                        range: FileRange::new(
+                            existing.range.start(),
+                            allocation.range.start().get() - existing.range.start().get(),
+                        )
+                        .map_err(|error| StorageConflict::Source(error.into()))?,
+                        origin: StorageOrigin::Unobserved,
+                    });
                 }
             }
-            let index = self
-                .allocations
-                .partition_point(|existing| existing.range.start() < allocation.range.start());
-            self.allocations.insert(index, allocation);
+            refined.push(allocation);
+            for &existing in &self.allocations[start..end] {
+                if existing.range.end() > allocation.range.end() {
+                    refined.push(StorageAllocation {
+                        range: FileRange::new(
+                            allocation.range.end(),
+                            existing.range.end().get() - allocation.range.end().get(),
+                        )
+                        .map_err(|error| StorageConflict::Source(error.into()))?,
+                        origin: StorageOrigin::Unobserved,
+                    });
+                }
+            }
+            self.allocations.splice(start..end, refined);
         }
         Ok(())
     }
@@ -868,9 +912,11 @@ pub(in crate::edit::commit) enum StorageUnavailable {
     Source,
 }
 
-/// A source-integrity failure or conflict between protected storage and a space request.
+/// A source or association failure, or a conflict involving protected storage.
 #[derive(Debug)]
 pub(in crate::edit) enum StorageConflict {
+    /// An inapplicable count source or unavailable allocation publication.
+    CountAssociation(CountProtectionError),
     /// The proposed end is below the greatest protected range end.
     End {
         proposed: PhysicalAddress,
