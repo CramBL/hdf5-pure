@@ -32,6 +32,7 @@ mod collections;
 mod count_refinement;
 mod counts;
 mod evidence;
+mod failures;
 mod members;
 mod outcomes;
 mod parents;

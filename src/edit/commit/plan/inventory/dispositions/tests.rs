@@ -405,6 +405,24 @@ fn unavailable_original_observations_have_explicit_dispositions(
         applied.dispositions().replacements(),
         Err(&TransitionWithheld::Predecessors)
     );
+    if !topology && !ambiguous {
+        let target = applied.dispositions.original.predecessors[&edited]
+            .source
+            .object();
+        let error = applied.dispositions.into_source_error().unwrap();
+        let Error::InconsistentReferenceCount {
+            address,
+            observed,
+            minimum,
+        } = error
+        else {
+            panic!("unexpected predecessor count error: {error:?}");
+        };
+        assert_eq!(
+            (address, observed, minimum),
+            (target.header_address().get(), 0, 1)
+        );
+    }
 }
 
 #[test]

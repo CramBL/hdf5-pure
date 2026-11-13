@@ -109,7 +109,11 @@ impl PreparedTreeCounts {
         })
     }
 
-    fn input_error(error: EditInputError) -> Error {
+    /// Converts count-input failures with their original source errors and contradiction fields.
+    ///
+    /// Reports count overflow and incomplete copy users as [`Error::EditUnsupported`], and
+    /// incompatible inputs as [`FormatError::Internal`].
+    pub(in crate::edit::commit) fn input_error(error: EditInputError) -> Error {
         match error {
             EditInputError::Copy(error) => error,
             EditInputError::Handoff(CountHandoffError::Source(error))

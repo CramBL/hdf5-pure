@@ -37,6 +37,7 @@ use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 
 mod capture;
+mod outcomes;
 mod parents;
 
 /// Original allocations with optional source-phase and parent observations.
@@ -454,6 +455,35 @@ impl OriginalStorage {
             });
         }
         Ok(())
+    }
+
+    /// Extracts a recorded claims, coverage, or parent storage collection error.
+    ///
+    /// Prioritizes a claims or coverage error over the parent storage collection result.
+    /// Qualification markers and recorded integrity geometry are handled separately.
+    pub(super) fn into_capture_error(self) -> Option<Error> {
+        let Self {
+            source: _,
+            allocations: _,
+            parents,
+            integrity: _,
+            unavailable,
+        } = self;
+        match unavailable {
+            Some(StorageUnavailable::Claims(error) | StorageUnavailable::Coverage(error)) => {
+                Some(error)
+            }
+            None
+            | Some(
+                StorageUnavailable::Dispositions
+                | StorageUnavailable::Object(_)
+                | StorageUnavailable::Owners
+                | StorageUnavailable::Parent { .. }
+                | StorageUnavailable::Parents
+                | StorageUnavailable::Reclamation
+                | StorageUnavailable::Source,
+            ) => parents.err(),
+        }
     }
 
     fn maximum_end(&self) -> PhysicalAddress {

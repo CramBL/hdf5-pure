@@ -123,6 +123,34 @@ impl ReconstructionDispositions {
         &self.source
     }
 
+    /// Extracts the root source error or first predecessor-count error in path order.
+    ///
+    /// Consumes the observations and placement metadata. Converts a count contradiction to
+    /// [`Error::InconsistentReferenceCount`] with its original address and count fields.
+    pub(super) fn into_source_error(self) -> Option<Error> {
+        let Self {
+            source,
+            predecessors,
+            expected: _,
+            placed: _,
+            placement_error: _,
+        } = self;
+        source.err().or_else(|| {
+            predecessors.into_values().find_map(|predecessor| {
+                predecessor.counts.err().map(|error| match error {
+                    CountEvidenceError::Source(error) | CountEvidenceError::Topology(error) => {
+                        Error::from(error)
+                    }
+                    CountEvidenceError::Contradiction(error) => Error::InconsistentReferenceCount {
+                        address: error.object.header_address().get(),
+                        observed: error.observed,
+                        minimum: error.minimum,
+                    },
+                })
+            })
+        })
+    }
+
     fn insert(
         &mut self,
         engine: &WriteEngine,
@@ -316,6 +344,13 @@ impl AppliedDispositions {
         &self,
     ) -> Result<&BTreeMap<ObjectId, ObjectId>, &TransitionWithheld> {
         self.result.as_ref()
+    }
+
+    /// Extracts an original source or count error, consuming the applied observations.
+    ///
+    /// Delegates to [`ReconstructionDispositions::into_source_error`].
+    pub(super) fn into_source_error(self) -> Option<Error> {
+        self.original.into_source_error()
     }
 
     /// Translates a replaced original identity, preserving identities absent from the map.

@@ -27,6 +27,7 @@ use crate::edit::commit::CommitOutcome;
 use crate::edit::commit::PublicationState;
 use crate::edit::commit::heap::HeapMutationFailure;
 use crate::edit::commit::heap::HeapMutationState;
+use crate::edit::commit::plan::inventory::InventoryPreparation;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::image::WriteBuffering;
@@ -181,6 +182,7 @@ fn commit_finalization_preserves_publication_and_allocation_evidence(
 
 #[rstest]
 #[case::unbuffered(Profile::Unbuffered)]
+#[case::inventory_adapter(Profile::Inventory)]
 #[case::session(Profile::Session)]
 #[case::mirrored(Profile::Mirrored)]
 #[case::restoration_barrier(Profile::RestorationBarrier)]
@@ -218,6 +220,7 @@ fn later_compaction_failure_keeps_published_values_and_completed_collections(
         .unwrap();
     let prepared = super::prepare(&mut engine);
     let snapshot = engine.snapshot_free();
+    disk_log::start();
     let applied = prepared.apply(&mut engine).unwrap();
     engine
         .write_inplace_journaled(PhysicalAddress::new(raw), &23_i32.to_le_bytes())
@@ -228,7 +231,6 @@ fn later_compaction_failure_keeps_published_values_and_completed_collections(
         .destination()
         .start()
         .get();
-    disk_log::start();
     let completion = pending.publish_compacting_members().ok().unwrap();
     engine
         .finish_commit(snapshot, completion.into_outcome())
@@ -254,21 +256,30 @@ fn later_compaction_failure_keeps_published_values_and_completed_collections(
         .set_dataset_attr(&ObjectPathBuf::parse("value"), "a", AttrValue::I64(9))
         .unwrap();
     let snapshot = engine.snapshot_free();
-    let applied = super::prepare(&mut engine).apply(&mut engine).unwrap();
-    engine
-        .write_inplace_journaled(PhysicalAddress::new(raw), &23_i32.to_le_bytes())
-        .unwrap();
-    let pending = PendingEditInventory::new(&mut engine, applied);
+    let prepared = super::prepare(&mut engine);
     disk_log::start();
     disk_log::fail_write_after(failed_at, 2);
     let uncertain = matches!(profile, Profile::RestorationBarrier);
     if uncertain {
         disk_log::fail_sync_after(restore_barrier, FailurePoint::Before);
     }
-    let completion = pending.publish_compacting_members().ok().unwrap();
-    let error = engine
-        .finish_commit(snapshot, completion.into_outcome())
-        .unwrap_err();
+    let outcome = if matches!(profile, Profile::Inventory) {
+        engine
+            .write_inplace_journaled(PhysicalAddress::new(raw), &23_i32.to_le_bytes())
+            .unwrap();
+        InventoryPreparation::Tree(prepared).apply(&mut engine)
+    } else {
+        let applied = prepared.apply(&mut engine).unwrap();
+        engine
+            .write_inplace_journaled(PhysicalAddress::new(raw), &23_i32.to_le_bytes())
+            .unwrap();
+        PendingEditInventory::new(&mut engine, applied)
+            .publish_compacting_members()
+            .ok()
+            .unwrap()
+            .into_outcome()
+    };
+    let error = engine.finish_commit(snapshot, outcome).unwrap_err();
     disk_log::finish();
     let Error::HeapCompactionFailed {
         completed,
@@ -434,6 +445,7 @@ enum Outcome {
 
 #[derive(Clone, Copy, Debug)]
 enum Profile {
+    Inventory,
     Mirrored,
     RestorationBarrier,
     Session,

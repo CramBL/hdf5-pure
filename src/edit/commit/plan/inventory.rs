@@ -27,6 +27,7 @@ use crate::object_path::ObjectPathBuf;
 
 pub(in crate::edit::commit) mod dispositions;
 pub(in crate::edit::commit) mod members;
+mod outcomes;
 pub(in crate::edit::commit) mod prospective;
 pub(in crate::edit::commit) mod storage;
 
