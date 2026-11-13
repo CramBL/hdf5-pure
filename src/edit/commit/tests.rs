@@ -14,6 +14,7 @@ use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
 use crate::{DatasetBuilder, Error, File};
 
+mod public_failures;
 mod public_outcomes;
 
 #[rstest]

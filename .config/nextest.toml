@@ -150,6 +150,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^edit::native_crosschecks::/) |
     test(/^edit::analysis::deletions::counts::ownership::publication::tests::write::native_crosschecks::/) |
     test(/^edit::analysis::deletions::counts::ownership::publication::tests::prepare::native_crosschecks::/) |
+    test(/^edit::commit::tests::public_failures::native_crosschecks::/) |
     test(/^edit::commit::heap::tests::native_crosschecks::/) |
     test(/^edit::commit::plan::inventory::session::tests::native_crosschecks::/) |
     test(/^edit::commit::plan::inventory::storage::tests::envelopes::native_crosschecks::/) |
