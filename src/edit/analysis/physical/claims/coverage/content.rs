@@ -95,6 +95,13 @@ impl ResidualContents {
 /// Examination stops at the first nonzero byte or failed read. The remaining suffix can include
 /// bytes fetched in the final read but left unexamined. Source request counts include failed
 /// attempts. OS and device transfers require separate measurement.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) struct ResidualContent {
     range: FileRange,
     zero_prefix: FileRange,
@@ -194,6 +201,7 @@ impl ResidualContent {
     }
 
     /// Returns the prefix established as zero by successful reads.
+    #[cfg(test)]
     pub(in crate::edit) fn zero_prefix(&self) -> FileRange {
         self.zero_prefix
     }
@@ -201,6 +209,7 @@ impl ResidualContent {
     /// Returns the suffix excluded from the zero prefix and nonzero witness.
     ///
     /// Bytes in this suffix can have been fetched in the final read.
+    #[cfg(test)]
     pub(in crate::edit) fn unexamined(&self) -> FileRange {
         self.unexamined
     }
@@ -211,11 +220,13 @@ impl ResidualContent {
     }
 
     /// Returns the number of source read requests, including failed attempts.
+    #[cfg(test)]
     pub(in crate::edit) fn read_calls(&self) -> u64 {
         self.read_calls
     }
 
     /// Returns the total buffer length requested from the source, including failed attempts.
+    #[cfg(test)]
     pub(in crate::edit) fn requested_bytes(&self) -> u64 {
         self.requested_bytes
     }

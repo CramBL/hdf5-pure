@@ -165,6 +165,7 @@ impl ReachableHeapReferences {
     ///
     /// Unsupported content and traversal limits can make the result incomplete without a
     /// recorded error.
+    #[cfg(test)]
     pub(in crate::edit) fn error(&self) -> Option<&Error> {
         self.outcome.as_ref().err()
     }

@@ -39,8 +39,8 @@ One prospective source phase
 Complete commit I/O and buffering
   Metric                         Value
   ---------------------------  -------
-  Source read attempts              60
-  Source requested bytes       138,543
+  Source read attempts             115
+  Source requested bytes       276,222
   Largest source read request   65,536
   Issued write calls                 2
   Issued write bytes             2,096
@@ -50,6 +50,6 @@ Complete commit I/O and buffering
   Flush buffer peak capacity     2,048
   Clean-gap read calls               0
   Clean-gap read bytes               0
-  Explicit buffering copies      2,202
+  Explicit buffering copies      2,228
   Resident mirror bytes        274,294
   Resident mirror capacity     544,492

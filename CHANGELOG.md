@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `File::commit` reclaims obsolete global-heap members after supported edits, preserving surviving member identities and the capacity of partially live collections. Storage is retained when removal cannot be established.
 - `PreparedGlobalHeapCollection` in `hdf5-pure-format` encodes version 1 collections at a checked capacity and length width, preserving supplied member indices, reference counts, physical order, and payloads. It supports explicit free-space records, implied free tails, and full collections ([#1233](https://github.com/CramBL/hdf5-pure/pull/1233)).
 - `VariableLengthDescriptor` in `hdf5-pure-format` parses and encodes variable-length value records at each supported address width, preserving the element count, stored collection address, and full object index ([#1232](https://github.com/CramBL/hdf5-pure/pull/1232)).
 - `DatatypeMessage` in `hdf5-pure-format` parses and encodes atomic, compound, enumeration, variable-length, array, and complex descriptions with retained versions at every node and checked class properties, including disjoint compound member ranges ([#1227](https://github.com/CramBL/hdf5-pure/pull/1227), [#1228](https://github.com/CramBL/hdf5-pure/pull/1228), [#1230](https://github.com/CramBL/hdf5-pure/pull/1230)).

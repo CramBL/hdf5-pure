@@ -5,6 +5,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+#[cfg(test)]
 use core::fmt;
 use std::collections::BTreeMap;
 
@@ -133,8 +134,8 @@ impl<'a> CountPublicationPhase<'a> {
 ///
 /// The engine borrow and original retirement batch are retained through [`CountPublicationPhase`].
 /// The predecessor source root and prospective publication root remain distinct.
-/// The editor consumes the original retirement batch in [`Self::with_publication`] or
-/// [`Self::with_ordered_counts`].
+/// The editor consumes the original retirement batch through [`Self::with_ordered_counts`] or
+/// [`Self::with_ordered_counts_excluding`].
 pub(in crate::edit) struct CountPublicationBounds<'a> {
     phase: CountPublicationPhase<'a>,
     end: PhysicalAddress,
@@ -149,6 +150,7 @@ impl<'a> CountPublicationBounds<'a> {
     /// # Errors
     ///
     /// Returns the errors described by [`CurrentCountUpdates::new`].
+    #[cfg(test)]
     pub(in crate::edit) fn prepare_counts(
         &mut self,
     ) -> Result<CurrentCountUpdates<'_>, CountPreparationError> {
@@ -174,6 +176,7 @@ impl<'a> CountPublicationBounds<'a> {
     /// Returns the publication, reference-update, root-reclamation, or address-resolution error
     /// before calling `complete`. Passes a [`CountCompletionError`] to `complete` if the
     /// post-publication checks fail. Returns the error from `complete` if completion fails.
+    #[cfg(test)]
     pub(in crate::edit) fn with_publication<T>(
         self,
         relocations: BTreeMap<ObjectId, ObjectId>,
@@ -319,26 +322,31 @@ impl<'a> CountPublicationBounds<'a> {
     }
 
     /// Recovers the checked phase for another EOA proposal.
+    #[cfg(test)]
     pub(in crate::edit) fn into_phase(self) -> CountPublicationPhase<'a> {
         self.phase
     }
 
     /// Returns the predecessor topology root, or `None` for an empty count batch.
+    #[cfg(test)]
     pub(in crate::edit) fn original_root(&self) -> Option<ObjectId> {
         self.phase.counts.root()
     }
 
     /// Returns the prospective root associated with the pending retirements.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> PhysicalAddress {
         self.phase.retirement.root
     }
 
     /// Returns the checked physical EOA.
+    #[cfg(test)]
     pub(in crate::edit) fn end(&self) -> PhysicalAddress {
         self.end
     }
 
     /// Borrows original count fields and positive remainders in allocation-address order.
+    #[cfg(test)]
     pub(in crate::edit) fn updates(&self) -> &[ProtectedCount] {
         self.phase.counts.updates()
     }
@@ -372,6 +380,13 @@ impl CountAllocationEnd {
 }
 
 /// A rejected EOA with its unchanged publication phase.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) struct CountEndFailure<'a> {
     /// The original phase, available for another EOA proposal.
     pub(in crate::edit) phase: CountPublicationPhase<'a>,
@@ -381,6 +396,13 @@ pub(in crate::edit) struct CountEndFailure<'a> {
 
 /// An inapplicable source, intersecting retirement, or truncated count allocation.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum CountPublicationError {
     /// An unsuccessful source, publication, or allocator-claim check.
     Protection(CountProtectionError),
@@ -421,6 +443,13 @@ impl From<CountPublicationError> for Error {
 /// Borrows the engine exclusively and the original [`ProtectedCounts`] for the same lifetime.
 /// Retains encoded updates without retaining acquired metadata bytes. Preparation and dropping
 /// this value leave the file and protected counts unchanged.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit) struct CurrentCountUpdates<'source> {
     engine: &'source mut WriteEngine,
     counts: &'source ProtectedCounts,
@@ -456,6 +485,7 @@ impl<'source> CurrentCountUpdates<'source> {
     /// Retains compact update descriptors and releases each acquired metadata range before reading
     /// the next object. Reads complete headers without topology discovery. An empty count batch
     /// requires no allocation or source reads.
+    #[cfg(test)]
     fn new(
         engine: &'source mut WriteEngine,
         counts: &'source ProtectedCounts,
@@ -472,11 +502,13 @@ impl<'source> CurrentCountUpdates<'source> {
     ///
     /// Compares each planned remainder with its original scalar. [`None`] selects every update.
     /// Reads selected headers and returns encoded writes in ascending allocation address order.
-    /// Uses the source and framing checks of [`Self::new`].
+    /// Checks the recorded allocation session before preparing selected fields through
+    /// [`ProtectedCount::prepare_source`].
     ///
     /// # Errors
     ///
-    /// Returns the errors described by [`Self::new`] for the selected updates.
+    /// Returns [`CountPreparationError::Session`] if the allocation session differs, or the errors
+    /// of [`ProtectedCount::prepare_source`] for the selected updates.
     fn select(
         engine: &WriteEngine,
         counts: &ProtectedCounts,
@@ -503,6 +535,7 @@ impl<'source> CurrentCountUpdates<'source> {
     }
 
     /// Borrows each original field with its prepared writes, in allocation-address order.
+    #[cfg(test)]
     pub(in crate::edit) fn updates(
         &self,
     ) -> impl ExactSizeIterator<Item = (&ProtectedCount, &ObjectReferenceCountUpdate)> {
@@ -518,9 +551,17 @@ impl<'source> CurrentCountUpdates<'source> {
 impl ProtectedCount {
     /// Checks current framing and prepares the original field's positive remainder.
     ///
+    /// Reads the complete recorded allocation, checks the current field and allocation against
+    /// their original observations, and prepares the count and checksum update.
+    ///
     /// # Errors
     ///
-    /// Returns the errors described by [`CountPublicationBounds::prepare_counts`].
+    /// Returns [`CountPreparationError::Read`] for an extent or read failure,
+    /// [`CountPreparationError::Range`] for an unexpected metadata range, or
+    /// [`CountPreparationError::Parse`] for header parsing or observation errors. Returns
+    /// [`CountPreparationError::Field`] for changed field classification or geometry,
+    /// [`CountPreparationError::Allocation`] for changed or invalid complete allocation geometry,
+    /// or [`CountPreparationError::Update`] for a changed scalar or encoding failure.
     fn prepare_source(
         &self,
         source: &(impl Source + ?Sized),
@@ -575,6 +616,13 @@ impl ProtectedCount {
 
 /// A source, framing, or encoding failure while preparing a protected count update.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum CountPreparationError {
     /// Missing, changed, or invalid complete allocation geometry after parsing the current header.
     Allocation {
@@ -716,6 +764,13 @@ impl<'counts> CountCompletion<'counts> {
 /// The producer checks the root passed to the publisher and the confirmed EOA. For a nonempty
 /// count batch, it also checks the allocation session, publication availability, and allocator
 /// claims. Source freshness requires separate evidence.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit) struct CountWriteScope<'engine, 'counts> {
     engine: &'engine mut WriteEngine,
     counts: &'counts ProtectedCounts,
@@ -747,6 +802,7 @@ impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
     /// An empty batch requires no allocation or source reads. Retains compact encoded updates
     /// and releases acquired header buffers during preparation. Journal storage and image
     /// buffering are separate costs.
+    #[cfg(test)]
     pub(in crate::edit) fn write_counts(
         self,
     ) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
@@ -780,6 +836,13 @@ impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
 
 /// An incompatible publication root or failed post-publication allocation check.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum CountCompletionError {
     /// An inapplicable session, unavailable publication, conflicting claim, or truncated allocation.
     Protection(CountPublicationError),
@@ -797,11 +860,13 @@ pub(in crate::edit) enum CountCompletionError {
 /// The caller retains the loan through preparation, application, and any retry. After a failed
 /// attempt, retry requires unchanged dependent bytes or successful, ordered restoration.
 /// Acquired header buffers are not retained.
+#[cfg(test)]
 pub(in crate::edit) struct PreparedCountWrites<'engine, 'counts> {
     scope: CountWriteScope<'engine, 'counts>,
     updates: Vec<ObjectReferenceCountUpdate>,
 }
 
+#[cfg(test)]
 impl<'engine, 'counts> PreparedCountWrites<'engine, 'counts> {
     /// Writes encoded updates through the undo journal.
     ///
@@ -815,6 +880,7 @@ impl<'engine, 'counts> PreparedCountWrites<'engine, 'counts> {
     /// [`CountWriteFailure::Uncertain`] and marks allocation publication uncertain if permission
     /// is unavailable or restoration fails. Failed restoration retains both errors in
     /// [`Error::CommitPartiallyApplied`].
+    #[cfg(test)]
     pub(in crate::edit) fn apply(self) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
         let Self { scope, updates } = self;
         if let Err(error) = scope.engine.context.allocations.before_reference() {
@@ -844,6 +910,7 @@ impl<'engine, 'counts> PreparedCountWrites<'engine, 'counts> {
 }
 
 /// A failed count update with its remaining application or retry permission.
+#[cfg(test)]
 pub(in crate::edit) enum CountWriteFailure<'engine, 'counts> {
     /// A preparation failure before count writes.
     Preparation {
@@ -866,6 +933,7 @@ pub(in crate::edit) enum CountWriteFailure<'engine, 'counts> {
     },
 }
 
+#[cfg(test)]
 impl fmt::Debug for CountWriteFailure<'_, '_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (variant, error): (&str, &dyn fmt::Debug) = match self {
@@ -945,6 +1013,7 @@ impl<'a, S: Source + ?Sized> CurrentMetadata<'a, S> {
     ///
     /// Includes capacity outside the acquired range and excludes ownership bookkeeping and
     /// allocations retained separately by the source.
+    #[cfg(test)]
     fn retained_bytes(&self) -> usize {
         self.bytes.retained_bytes()
     }

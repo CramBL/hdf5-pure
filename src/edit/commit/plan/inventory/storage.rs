@@ -376,6 +376,7 @@ impl OriginalStorage {
     /// Borrows a qualification or source-observation failure, independently of recorded ranges.
     ///
     /// Source-observation failures take precedence over qualification failures.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn unavailable(&self) -> Option<&StorageUnavailable> {
         self.unavailable.as_ref()
     }
@@ -385,6 +386,7 @@ impl OriginalStorage {
     /// # Errors
     ///
     /// Returns the recorded error of [`AnalysisPhase::collection_storage`].
+    #[cfg(test)]
     pub(in crate::edit::commit) fn parents(
         &self,
     ) -> Result<&BTreeMap<PhysicalAddress, ParentStorage>, &Error> {
@@ -515,6 +517,7 @@ impl OriginalStorage {
 
 impl PreparedEditInventory {
     /// Borrows original storage evidence associated with these prepared inputs.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn storage(&self) -> &OriginalStorage {
         &self.storage
     }
@@ -708,6 +711,7 @@ impl<'a> PendingEditInventory<'a> {
     /// [`StoragePublicationFailure::Publication`] with the retained observations and error if
     /// count protection, source-count writes, publication, or completion fails. The caller handles
     /// rollback according to publication state.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn publish_with_completion<T>(
         self,
         complete: impl FnOnce(
@@ -736,14 +740,15 @@ impl<'a> PendingEditInventory<'a> {
 
     /// Retains observations and consumed-retirement metadata after publication and completion.
     ///
-    /// Uses the publication and error contract of [`Self::publish_with_completion`].
+    /// Checks placement, source/root/session associations, exclusions, and parent retirement
+    /// before publication. Calls `complete` with retained observations and consumed-retirement
+    /// metadata after publication and ordered count writes succeed.
     ///
     /// # Errors
     ///
     /// Returns [`StoragePublicationFailure::BeforePublication`] if placement, parent preparation,
     /// association, or exclusion checks fail, or [`StoragePublicationFailure::Publication`] if
-    /// publication or
-    /// count protection, source-count writes, or completion fails.
+    /// count protection, source-count writes, publication, or completion fails.
     fn publish_with_observations<T>(
         mut self,
         complete: impl FnOnce(
@@ -850,6 +855,7 @@ impl<'a> PendingEditInventory<'a> {
     }
 
     /// Derives removals from qualified observations and checked session-owned parent evidence.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn member_decisions(&self) -> MemberDecisions {
         let mut decisions =
             MemberDecisions::collect(&self.collections, &self.prospective, &self.storage);
@@ -909,11 +915,13 @@ impl<'a> PendingEditInventory<'a> {
     }
 
     /// Borrows heap references and root-applicability outcomes collected after application.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn prospective(&self) -> &ProspectiveCollections {
         &self.prospective
     }
 
     /// Borrows original candidates, qualification, and framing retained until completion.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
         &self.collections
     }
@@ -923,11 +931,13 @@ impl<'a> PendingEditInventory<'a> {
     /// # Errors
     ///
     /// Returns the first recorded [`StorageConflict`].
+    #[cfg(test)]
     pub(in crate::edit::commit) fn exclusion(&self) -> Result<(), &StorageConflict> {
         self.exclusion.as_ref().copied()
     }
 
     /// Returns the greatest protected range end, or physical address zero for an empty inventory.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn maximum_end(&self) -> PhysicalAddress {
         self.storage.maximum_end()
     }
@@ -937,6 +947,7 @@ impl<'a> PendingEditInventory<'a> {
     /// # Errors
     ///
     /// Returns [`StorageConflict::End`] if `end` is below [`Self::maximum_end`].
+    #[cfg(test)]
     pub(in crate::edit::commit) fn check_end(
         &self,
         end: PhysicalAddress,
@@ -948,6 +959,13 @@ impl<'a> PendingEditInventory<'a> {
 /// Owned observations and mutation outcome after successful protected tree publication.
 ///
 /// The final root and EOA are retained even if heap compaction fails.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit::commit) struct MemberCompletion {
     /// Original qualification and collection framing used for member decisions.
     pub(in crate::edit::commit) collections: OriginalCollections,
@@ -979,6 +997,13 @@ impl MemberCompletion {
 }
 
 /// The inputs or observations retained after a failed constrained tree publication.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit::commit) enum StoragePublicationFailure<'a> {
     /// Publication was rejected with the pending inventory and engine loan intact.
     BeforePublication {
@@ -1033,6 +1058,10 @@ pub(in crate::edit::commit) enum StorageOrigin {
 
 /// A qualification or observation failure recorded during original-storage capture.
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "the outcome retains the original object and parent diagnostic identities"
+)]
 pub(in crate::edit::commit) enum StorageUnavailable {
     /// Physical-claims collection failed.
     Claims(Error),

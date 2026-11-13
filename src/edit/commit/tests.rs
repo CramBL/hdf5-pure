@@ -14,6 +14,8 @@ use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
 use crate::{DatasetBuilder, Error, File};
 
+mod public_outcomes;
+
 #[rstest]
 #[case::increase(2, false, false, 3)]
 #[case::decrease(1, true, false, 2)]

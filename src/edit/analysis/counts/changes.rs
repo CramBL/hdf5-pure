@@ -29,11 +29,13 @@ impl<'plan, 'source> CountChange<'plan, 'source> {
     }
 
     /// Returns the borrowed original facts with their observation class.
+    #[cfg(test)]
     pub(in crate::edit) fn original(&self) -> OriginalCount<'plan, 'source> {
         self.original
     }
 
     /// Returns the final planned declared count.
+    #[cfg(test)]
     pub(in crate::edit) fn remaining(&self) -> u32 {
         self.remaining
     }

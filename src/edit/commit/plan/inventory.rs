@@ -181,16 +181,19 @@ impl PreparedEditInventory {
     }
 
     /// Borrows every original predecessor's classification before placement.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn dispositions(&self) -> &ReconstructionDispositions {
         &self.dispositions
     }
 
     /// Borrows original candidates, qualification, and framing collected before placement.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
         &self.collections
     }
 
     /// Borrows the original observations collected from these prepared inputs.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn original(&self) -> &OriginalEdits {
         &self.original
     }
@@ -219,15 +222,26 @@ pub(super) enum InventoryCapture {
     /// Captures observations when allocation candidates or retained observations are present.
     Candidates,
     /// Omits original-observation capture.
+    #[cfg(test)]
     Omit,
 }
 
 impl InventoryCapture {
+    /// Returns whether to discover original overwrite and deletion candidates.
+    pub(super) fn observes(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Omit => false,
+            _ => true,
+        }
+    }
+
     pub(super) fn includes(self, candidates: &CollectionCandidates) -> bool {
         match self {
             #[cfg(test)]
             Self::Always => true,
             Self::Candidates => !candidates.is_empty(),
+            #[cfg(test)]
             Self::Omit => false,
         }
     }
@@ -250,26 +264,31 @@ pub(in crate::edit::commit) struct AppliedEditInventory {
 
 impl AppliedEditInventory {
     /// Borrows original candidates, qualification, and framing retained through application.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
         &self.collections
     }
 
     /// Borrows original predecessor classifications and the placement reconciliation outcome.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn dispositions(&self) -> &AppliedDispositions {
         &self.dispositions
     }
 
     /// Borrows the placed root, relocations, and retirement inputs before publication.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn tree(&self) -> &AppliedTree {
         &self.tree
     }
 
     /// Borrows the original observations retained through successful application.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn original(&self) -> &OriginalEdits {
         &self.original
     }
 
     /// Returns the placed tree, dropping its paired observations, dispositions, and storage evidence.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn into_tree(self) -> AppliedTree {
         self.tree
     }
@@ -335,6 +354,13 @@ impl OriginalPreparation {
 #[allow(
     clippy::large_enum_variant,
     reason = "unavailable evidence preserves independent count and source observations"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
 )]
 pub(in crate::edit::commit) enum OriginalEdits {
     /// An incompatible association encountered while qualifying the count facts.

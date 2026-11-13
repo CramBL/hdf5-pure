@@ -394,6 +394,13 @@ impl<'a> ParentRelease<'a> {
 
 /// A failed prerequisite for consuming parent retirements and releasing their exclusions.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit::commit) enum ParentPreparationError {
     /// The engine's original root address could not be resolved.
     Address(FormatError),

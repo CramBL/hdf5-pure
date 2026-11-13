@@ -61,6 +61,7 @@ impl<'source> AnalysisPhase<'source> {
     /// # Errors
     ///
     /// Returns the errors of [`CopyUsersUnion::add`]. The accumulated prefix is dropped on error.
+    #[cfg(test)]
     pub(in crate::edit) fn added_copy_users<'copy>(
         &self,
         copies: impl IntoIterator<Item = Option<&'copy PhaseCopyUsers<'copy, 'source>>>,
@@ -210,6 +211,7 @@ impl AddedCopyUsers<'_> {
     }
 
     /// Returns the associated physical root, or `None` for empty counts.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.source.as_ref().map(|source| source.root)
     }

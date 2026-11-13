@@ -398,6 +398,77 @@ enum CandidateFreeEdit {
     Overwrite,
 }
 
+#[rstest]
+#[case::final_numeric_deletion(CandidateFreeNumericEdit::FinalDeletion)]
+#[case::surviving_numeric_alias(CandidateFreeNumericEdit::AliasDeletion)]
+#[case::compact_numeric_overwrite(CandidateFreeNumericEdit::CompactOverwrite)]
+fn candidate_free_edits_add_no_topology_or_payload_discovery(
+    #[case] edit: CandidateFreeNumericEdit,
+) {
+    let path = test_util::temp::temp_path("candidate-free-other-edits.h5");
+    let mut fixture = Fixture::new();
+    let mut records =
+        Form::CompactDataset.messages(&mut fixture, &crate::make_i32_type(), &7_i32.to_le_bytes());
+    records.push(Message::reference_count(
+        if matches!(edit, CandidateFreeNumericEdit::AliasDeletion) {
+            2
+        } else {
+            1
+        },
+    ));
+    let owner = fixture.append_header(records);
+    fixture.link("value", owner);
+    if matches!(edit, CandidateFreeNumericEdit::AliasDeletion) {
+        fixture.link("alias", owner);
+    }
+    fixture.write(&path);
+    let (mut legacy, calls) = edit_test_util::open_counted_engine(&path);
+    edit.stage(&mut legacy);
+    let staged = std::mem::take(&mut legacy.staged);
+    reset_work(&calls);
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(&mut legacy, staged) else {
+        panic!("expected reference-free preparation");
+    };
+    let baseline = work(&calls);
+    assert!(baseline.0 > 0 && baseline.1.0 > 0);
+    assert_eq!(baseline.2, 0);
+    drop(prepared);
+    drop(legacy);
+    let (mut engine, calls) = edit_test_util::open_counted_engine(&path);
+    edit.stage(&mut engine);
+    let staged = std::mem::take(&mut engine.staged);
+    reset_work(&calls);
+    let InventoryPreparation::Direct(prepared) =
+        PreparedEditInventory::prepare(&mut engine, staged)
+    else {
+        panic!("expected candidate-free tree preparation");
+    };
+    assert!(matches!(prepared.plan, CommitPlan::Tree(_)));
+    let checked = work(&calls);
+    assert_eq!((checked.1, checked.2), (baseline.1, baseline.2));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CandidateFreeNumericEdit {
+    AliasDeletion,
+    CompactOverwrite,
+    FinalDeletion,
+}
+
+impl CandidateFreeNumericEdit {
+    fn stage(self, engine: &mut WriteEngine) {
+        if matches!(self, Self::CompactOverwrite) {
+            let mut replacement = DatasetBuilder::new("");
+            replacement.with_i32_data(&[11]);
+            engine
+                .stage_dataset_write(&ObjectPathBuf::parse("value"), replacement)
+                .unwrap();
+        } else {
+            engine.delete(&ObjectPathBuf::parse("value")).unwrap();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Counts {
     Ambiguous,

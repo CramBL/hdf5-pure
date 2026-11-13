@@ -382,6 +382,13 @@ pub(in crate::edit) enum CapacityKind {
 
 /// A failed or unsupported local storage observation.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum StorageProblem {
     /// A failure in address conversion or range arithmetic.
     Address(FormatError),

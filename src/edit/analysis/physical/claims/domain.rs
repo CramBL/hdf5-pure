@@ -250,6 +250,13 @@ impl SupportedOwnerDomain {
 /// [`super::super::PhysicalStorage::problems`], and residual indices refer to
 /// [`super::coverage::content::ResidualContents::intervals`].
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum DomainUnavailable {
     /// A claim whose range or origin differs from its cached allocation observation.
     Authority(usize),

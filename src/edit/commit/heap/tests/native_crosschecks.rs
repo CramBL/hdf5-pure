@@ -7,7 +7,6 @@ use test_util_hdf5::__private::heap_members;
 use test_util_hdf5::file;
 use test_util_hdf5::global_heap::attributes;
 
-use crate::edit::commit::heap;
 use crate::edit::commit::plan::inventory::members::ParentDisposition;
 use crate::edit::commit::plan::inventory::prospective::ReferencePresence;
 use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
@@ -15,6 +14,7 @@ use crate::edit::test_util as edit_test_util;
 use crate::global_heap::GlobalHeapId;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
+use crate::source::BytesSource;
 
 use super::*;
 
@@ -41,12 +41,6 @@ fn native_readers_observe_preserved_records_after_protected_compaction(#[case] s
         b"right"
     );
     let mut engine = edit_test_util::open_engine(&path);
-    engine
-        .remove_group_attr(&ObjectPathBuf::root(), "first")
-        .unwrap();
-    engine.commit().unwrap();
-    drop(engine);
-    let mut engine = edit_test_util::open_engine(&path);
     engine.set_sync_policy(SyncPolicy::OnClose);
     engine
         .set_write_buffering(if session {
@@ -58,8 +52,27 @@ fn native_readers_observe_preserved_records_after_protected_compaction(#[case] s
             WriteBuffering::Unbuffered
         })
         .unwrap();
-    heap::rootless(&mut engine, &[plan]).unwrap();
+    engine
+        .remove_group_attr(&ObjectPathBuf::root(), "first")
+        .unwrap();
+    engine.commit().unwrap();
     drop(engine);
+    let compacted = std::fs::read(&path).unwrap();
+    let collection = crate::global_heap::collect_members(
+        &BytesSource::new(&compacted),
+        LengthWidth::Eight,
+        start,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        collection
+            .members()
+            .iter()
+            .map(|member| member.index().get())
+            .collect::<Vec<_>>(),
+        [2]
+    );
     let native = file::libhdf5_open(&path);
     assert_eq!(native.attr_names().unwrap(), ["second"]);
     assert_eq!(

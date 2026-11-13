@@ -39,6 +39,7 @@ mod edit_free_space;
 #[cfg(not(feature = "fast-deflate"))]
 mod edit_free_space_churn;
 mod edit_free_space_endurance;
+mod edit_global_heap_members;
 mod edit_global_heap_reclaim;
 mod edit_in_place;
 mod edit_link_size;

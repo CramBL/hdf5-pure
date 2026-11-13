@@ -50,37 +50,21 @@ pub(super) use deletions::{
     CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
 };
 
+#[cfg(test)]
 pub(super) use deletions::DeclaredCountChange;
 pub(super) use deletions::PlannedDeletion;
+#[cfg(test)]
 pub(super) use deletions::SourceRemovalPlan;
 pub(super) use deletions::{
     CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
     OriginalOwnerInventory,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "source-count evidence does not authorize allocation retirement"
-    )
-)]
 pub(super) mod counts;
 mod deletions;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "heap member facts do not authorize retirement")
-)]
 pub(in crate::edit) mod heap;
 pub(in crate::edit) mod ownership;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "physical storage facts do not authorize retirement"
-    )
-)]
 pub(in crate::edit) mod physical;
 
 /// Lazy topology, object-count, reference, and storage queries for one source phase.

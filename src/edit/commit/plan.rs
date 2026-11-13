@@ -42,19 +42,8 @@ pub(in crate::edit) use counts::CountProjectionError;
 pub(in crate::edit) use counts::CountProjectionProof;
 pub(super) use counts::PreparedTreeCounts;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "count projections are exercised by private owner tests"
-    )
-)]
 mod counts;
 
-#[expect(
-    dead_code,
-    reason = "prepared edit inventories have no retirement consumer"
-)]
 pub(super) mod inventory;
 
 #[cfg(test)]
@@ -77,6 +66,7 @@ impl PreparedCommit {
     /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
     /// and the preparation error. The planner checks count projections and retirement for tree
     /// plans with deletions or same-file copies. It skips count discovery for in-place-only plans.
+    #[cfg(test)]
     pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
         Self::from_plan(engine.plan_commit(&staged), staged)
     }
@@ -91,6 +81,7 @@ impl PreparedCommit {
         (plan, staged, overwrites)
     }
 
+    #[cfg(test)]
     fn from_plan(plan: Result<CommitPlan, Error>, staged: StagedEdits) -> CommitPreparation {
         match plan {
             Ok(mut plan) => {
@@ -113,6 +104,7 @@ impl PreparedCommit {
     clippy::large_enum_variant,
     reason = "returning rejected staging to the engine requires no heap allocation"
 )]
+#[cfg(test)]
 pub(super) enum CommitPreparation {
     /// A plan paired with the owned inputs needed for application.
     Prepared(PreparedCommit),
@@ -417,6 +409,7 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] if an edit cannot
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
+    #[cfg(test)]
     fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
         self.plan_commit_with_inventory(staged, InventoryCapture::Omit)
             .map(|(plan, _)| plan)
@@ -428,7 +421,7 @@ impl WriteEngine {
     /// numeric in-place plans before count or original-observation discovery. Returns
     /// count-preparation errors before capturing original observations.
     ///
-    /// Unless `capture` is [`InventoryCapture::Omit`], merges candidates from overwritten values,
+    /// With original observation enabled, merges candidates from overwritten values,
     /// replaced or removed attributes, and all physical deletion targets independently of
     /// count-eligible retirement. Collects original observations for tree plans selected by
     /// `capture`. Retains additional count and ownership qualification outcomes in
@@ -438,9 +431,9 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns the planning errors described by [`Self::plan_commit`] and the count-preparation
-    /// errors of [`PreparedTreeCounts::prepare`]. Also returns errors from overwrite-candidate
-    /// discovery, deletion-target binding, or candidate merging.
+    /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] for unsupported or
+    /// conflicting edits, and count-preparation errors from [`PreparedTreeCounts::prepare`].
+    /// Other read, parsing, preparation, candidate-discovery, and merge errors propagate.
     fn plan_commit_with_inventory(
         &mut self,
         staged: &StagedEdits,
@@ -458,7 +451,7 @@ impl WriteEngine {
         self.prepare_value_writes(staged, &mut edits, &mut analysis)?;
         self.prepare_appends(staged, &mut edits, &mut analysis)?;
         self.prepare_dataset_attributes(staged, &mut edits, &mut analysis)?;
-        if !matches!(capture, InventoryCapture::Omit) {
+        if capture.observes() {
             edits
                 .collections
                 .extend(analysis.overwrite_collections(staged)?)?;
@@ -512,12 +505,13 @@ impl WriteEngine {
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
+        #[cfg(test)]
         if matches!(capture, InventoryCapture::Omit)
             && matches!(counts, Some(PreparedTreeCounts::Unavailable))
         {
             collections = CollectionCandidates::default();
         }
-        if !matches!(capture, InventoryCapture::Omit) {
+        if capture.observes() {
             let targets = analysis
                 .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
                 .targets();

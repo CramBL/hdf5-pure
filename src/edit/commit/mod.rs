@@ -10,10 +10,10 @@ use hdf5_pure_space::__private::ReturnedExtents;
 use self::heap::{HeapMutationFailure, HeapMutationState};
 pub(in crate::edit) use self::plan::CountProjectionError;
 pub(in crate::edit) use self::plan::CountProjectionProof;
+use self::plan::inventory::PreparedEditInventory;
 pub(in crate::edit) use self::plan::inventory::storage::{
     OriginalStorage, SpaceClaim, StorageConflict,
 };
-use self::plan::{CommitPreparation, PreparedCommit};
 pub(in crate::edit) use self::publish::PublicationError;
 pub(super) use self::publish::PublishedTree;
 use self::rollback::FreeSnapshot;
@@ -25,13 +25,6 @@ use crate::edit::SyncPolicy;
 use crate::error::Error;
 
 mod apply;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "heap execution is not selected by commit planning"
-    )
-)]
 pub(in crate::edit) mod heap;
 pub(super) mod plan;
 mod publish;
@@ -147,6 +140,7 @@ impl WriteEngine {
     /// With no staged edits, finalizes pending manager changes from immediate tail retirement.
     /// Hard-link deletions and same-file copies use checked count planning. The editor writes
     /// source reference count increases before publication and decreases after publication.
+    /// Qualified heap-member compaction follows completed protected tree publication.
     ///
     /// Rejection during preflight preserves the staged set for retry. Once application
     /// consumes the staged set, a failed attempt discards that work. Writes into reusable
@@ -160,8 +154,10 @@ impl WriteEngine {
     /// After publication, reference patching, source reference count decreases, or optional
     /// root-header reclamation can fail.
     /// The committed tree retains the batch's values, including its in-place overwrites.
-    /// Outside recoverable nonpersistent PAGE publication, the editor discards queued writes and
-    /// marks the session uncertain if an operation fails after attempted publication.
+    /// A checked compaction failure with confirmed restoration preserves publication when
+    /// allocation permission remains available. Other failures after attempted publication mark
+    /// the session uncertain and discard queued writes, except for recoverable nonpersistent PAGE
+    /// publication.
     ///
     /// # Errors
     ///
@@ -171,6 +167,8 @@ impl WriteEngine {
     /// errors propagate from planning, writing, or synchronizing the file.
     /// Returns [`Error::CommitPartiallyApplied`] if restoring prior
     /// values from the undo journal fails, with both the original failure and the restore error.
+    /// Returns [`Error::HeapCompactionFailed`] for a post-publication collection failure, with
+    /// completed progress, restoration and allocation state, and the original cause.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
     /// is uncertain.
     /// Returns [`crate::FormatError::Internal`] if an allocation batch remains provisional.
@@ -308,15 +306,7 @@ impl WriteEngine {
             });
         }
         self.begin_commit(&staged);
-        let prepared = PreparedCommit::prepare(self, staged);
-        match prepared {
-            CommitPreparation::Prepared(prepared) => {
-                CommitOutcome::Applied(self.apply_commit(prepared))
-            }
-            CommitPreparation::Rejected { staged, error } => {
-                CommitOutcome::Rejected { staged, error }
-            }
-        }
+        PreparedEditInventory::prepare(self, staged).apply(self)
     }
 
     /// Clears attempt state and cached append geometry.

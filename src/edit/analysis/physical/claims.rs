@@ -303,6 +303,13 @@ pub(in crate::edit) enum ClaimOrigin {
 /// contain identities for the local allocation and reference caches. Collection-framing failures
 /// are retained with their physical addresses.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum ClaimProblem {
     /// A failure while collecting a referenced collection's complete framing.
     Collection {

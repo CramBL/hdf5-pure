@@ -23,6 +23,13 @@ use crate::object_graph::ObjectId;
 /// establishes original member qualification, storage protection, and mutation permission
 /// separately. The collector skips traversal for empty original candidate input.
 #[derive(Default)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit::commit) struct ProspectiveCollections {
     root: Option<PhysicalAddress>,
     /// The allocation session used for the applied-tree observations.
@@ -92,11 +99,13 @@ impl ProspectiveCollections {
     /// Borrows the distinct physical roots supplied to the reference traversal.
     ///
     /// The set can be partial when retained-root applicability failed.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn roots(&self) -> &BTreeSet<ObjectId> {
         &self.roots
     }
 
     /// Borrows the failure that prevented complete retained-root association.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn unavailable(&self) -> Option<&ProspectiveUnavailable> {
         self.unavailable.as_ref()
     }
@@ -104,6 +113,7 @@ impl ProspectiveCollections {
     /// Borrows decoded heap references and their traversal outcome.
     ///
     /// Returns [`None`] for empty original candidate input.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn references(&self) -> Option<&ReachableHeapReferences> {
         self.references.as_ref()
     }

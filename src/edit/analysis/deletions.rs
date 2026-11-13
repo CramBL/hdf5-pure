@@ -26,20 +26,15 @@ pub(in crate::edit) use counts::{
     CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
 };
 
+#[cfg(test)]
 pub(in crate::edit) use counts::DeclaredCountChange;
+#[cfg(test)]
 pub(in crate::edit) use counts::SourceRemovalPlan;
 pub(in crate::edit) use counts::{
     CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
     OriginalOwnerInventory,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "graph-relative count transitions do not authorize allocation retirement"
-    )
-)]
 mod counts;
 
 /// A leaf name paired with its physical target and any complete-topology edge identity.

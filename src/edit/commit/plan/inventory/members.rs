@@ -229,6 +229,7 @@ impl MemberDecisions {
 
 impl<R> MemberDecisions<R> {
     /// Borrows per-origin member qualification and prospective reference outcomes.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn members(
         &self,
     ) -> &BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>
@@ -237,6 +238,7 @@ impl<R> MemberDecisions<R> {
     }
 
     /// Borrows stronger whole-parent qualification and prospective reference outcomes.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn parents(
         &self,
     ) -> &BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>> {
@@ -244,6 +246,7 @@ impl<R> MemberDecisions<R> {
     }
 
     /// Borrows compaction and whole-parent retirement planning outcomes.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn planning(
         &self,
     ) -> &BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>> {
@@ -292,6 +295,13 @@ impl<R> Default for MemberDecisions<R> {
 /// Range, class, and prospective-root metadata retained after retirement evidence is consumed.
 ///
 /// The caller retains the checked publication batch separately.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit::commit) struct PreparedParentRetirement {
     range: FileRange,
     class: FreeClass,
@@ -310,16 +320,19 @@ impl PreparedParentRetirement {
     }
 
     /// Returns the complete original allocation range.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn range(&self) -> FileRange {
         self.range
     }
 
     /// Returns the original allocation's free-space class.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn class(&self) -> FreeClass {
         self.class
     }
 
     /// Returns the prospective root associated with the prepared retirement.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn root(&self) -> PhysicalAddress {
         self.root
     }
@@ -514,6 +527,10 @@ impl From<ReferencePresence> for MemberDecision {
 
 /// An unmet prerequisite for planning parent compaction or whole-parent retirement.
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "the outcome retains the observations that withheld compaction"
+)]
 pub(in crate::edit::commit) enum CompactionUnavailable {
     /// Complete original collection framing is unavailable.
     Framing,
