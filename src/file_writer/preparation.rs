@@ -43,7 +43,7 @@ use crate::libver::LibVer;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectTarget;
 use crate::shared_message::DatatypeLocation;
-use crate::type_builders::{AttributeSpecs, DatasetBuilder};
+use crate::type_builders::{AttributeSpecs, DatasetBuilder, HeapLocation, SharedHeapCollections};
 use crate::width::FormatWidths;
 use crate::width::OffsetWidth;
 
@@ -89,7 +89,8 @@ pub(super) struct PreparedDataset {
 impl PreparedDataset {
     /// Parses a dataset request and prepares its attributes and storage source.
     ///
-    /// Returns the dataset and the global-heap collections for its variable-length attributes.
+    /// Returns the dataset and where the strings of its variable-length attributes are in
+    /// `attr_heap`.
     /// Provider payloads remain unread. Committed datatype references have zero addresses until
     /// the writer resolves their targets.
     ///
@@ -108,8 +109,11 @@ impl PreparedDataset {
     /// [`FormatError::DatasetProvenanceRequiresData`] for a content hash on a nonempty unallocated
     /// dataset. Propagates name, datatype, fill encoding, storage source, chunk geometry, filter
     /// option, and attribute preparation errors.
-    pub(super) fn prepare(db: DatasetBuilder) -> Result<(Self, Vec<VlPatch>), FormatError> {
-        Self::prepare_with_widths(super::WIDTHS, db)
+    pub(super) fn prepare(
+        db: DatasetBuilder,
+        attr_heap: &mut SharedHeapCollections,
+    ) -> Result<(Self, Vec<VlPatch>), FormatError> {
+        Self::prepare_with_widths(super::WIDTHS, db, attr_heap)
     }
 
     /// Prepares stored element, fill, and attribute bytes at the selected widths.
@@ -126,23 +130,23 @@ impl PreparedDataset {
     pub(super) fn prepare_with_widths(
         widths: FormatWidths,
         mut db: DatasetBuilder,
+        attr_heap: &mut SharedHeapCollections,
     ) -> Result<(Self, Vec<VlPatch>), FormatError> {
         let name = super::link_name(core::mem::take(&mut db.name))?;
         let WholeFileDataset {
             metadata,
             mut storage,
             committed_datatype_targets: attr_committed_datatype_targets,
+            attribute_specs,
         } = DatasetRequest::parse(widths.lengths, db)?.into_whole_file()?;
         let DatasetMetadata {
             dt,
             element_size: canonical_element_size,
             ds: dspace,
             extent: canonical_extent,
-            attrs:
-                AttributeRequest {
-                    messages: mut attrs,
-                    collections,
-                },
+            attrs: AttributeRequest {
+                messages: mut attrs,
+            },
             chunk_options,
             mut fill,
             fill_time,
@@ -194,15 +198,9 @@ impl PreparedDataset {
                 None,
             )?;
         }
-        prepare_attribute_widths(widths, &mut attrs, &collections)?;
+        prepare_attribute_widths(widths, &mut attrs, &[])?;
         let maxshape = dspace.max_dimensions.clone();
-        let patches = collections
-            .into_iter()
-            .map(|(attr_index, collections)| VlPatch {
-                collections,
-                attr_index,
-            })
-            .collect();
+        let patches = VlPatch::add_strings(&attribute_specs, attr_heap)?;
         #[cfg(feature = "provenance")]
         let pending_hash =
             provenance.map(|provenance| PendingHash::reserve(&mut attrs, provenance));
@@ -1258,9 +1256,10 @@ pub(super) struct ChunkedBuilt<'a> {
     pub(super) data: DsData<'a>,
 }
 
-/// Attribute messages, indexed committed datatype targets, and variable-length heap collections.
+/// Attribute messages, indexed committed datatype targets, and where their variable-length strings
+/// are in a [`SharedHeapCollections`].
 ///
-/// Messages have input specification order. Committed datatype targets and heap collections are
+/// Messages have input specification order. Committed datatype targets and heap locations are
 /// indexed by their attribute's position in `messages`.
 pub(super) struct PreparedAttributes {
     pub(super) messages: Vec<AttributeMessage>,
@@ -1269,7 +1268,7 @@ pub(super) struct PreparedAttributes {
 }
 
 impl PreparedAttributes {
-    /// Encodes attribute messages and constructs their global-heap collections.
+    /// Encodes attribute messages and adds their variable-length strings to `attr_heap`.
     ///
     /// The caller resolves committed datatype targets and patches heap addresses after allocation.
     ///
@@ -1278,8 +1277,11 @@ impl PreparedAttributes {
     /// Returns [`FormatError::InvalidAttributeName`] or [`FormatError::AttributeFieldTooLong`]
     /// if an attribute name is invalid or exceeds its encoded width. Propagates errors from
     /// [`AttributeRequest::parse`].
-    pub(super) fn new(specs: &AttributeSpecs) -> Result<Self, FormatError> {
-        Self::with_widths(super::WIDTHS, specs)
+    pub(super) fn new(
+        specs: &AttributeSpecs,
+        attr_heap: &mut SharedHeapCollections,
+    ) -> Result<Self, FormatError> {
+        Self::with_widths(super::WIDTHS, specs, attr_heap)
     }
 
     /// Prepares attributes with variable-length references at `widths.offsets`.
@@ -1291,32 +1293,52 @@ impl PreparedAttributes {
     pub(super) fn with_widths(
         widths: FormatWidths,
         specs: &AttributeSpecs,
+        attr_heap: &mut SharedHeapCollections,
     ) -> Result<Self, FormatError> {
-        let AttributeRequest {
-            mut messages,
-            collections,
-        } = AttributeRequest::parse(specs)?;
-        prepare_attribute_widths(widths, &mut messages, &collections)?;
+        let AttributeRequest { mut messages } = AttributeRequest::parse(specs)?;
+        prepare_attribute_widths(widths, &mut messages, &[])?;
         Ok(Self {
             messages,
             committed_datatype_targets: specs.committed_datatype_targets(),
-            heaps: collections
-                .into_iter()
-                .map(|(attr_index, collections)| VlPatch {
-                    attr_index,
-                    collections,
-                })
-                .collect(),
+            heaps: VlPatch::add_strings(specs, attr_heap)?,
         })
     }
 }
 
-/// Global-heap collections for one variable-length attribute.
+/// Where the strings of one variable-length attribute are in a [`SharedHeapCollections`].
 pub(super) struct VlPatch {
-    /// The attribute's collections, in the order their objects appear.
-    pub(super) collections: Vec<Vec<u8>>,
+    /// The location of each string, in the order of the attribute's references.
+    pub(super) locations: Vec<HeapLocation>,
     /// The index of the attribute whose element references require patching.
     pub(super) attr_index: usize,
+}
+
+impl VlPatch {
+    /// Adds the strings of each variable-length string attribute of `specs` to `attr_heap`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`SharedHeapCollections::add`].
+    fn add_strings(
+        specs: &AttributeSpecs,
+        attr_heap: &mut SharedHeapCollections,
+    ) -> Result<Vec<Self>, FormatError> {
+        specs
+            .iter()
+            .enumerate()
+            .filter_map(|(attr_index, (_, spec))| {
+                spec.var_len_strings().map(|strings| {
+                    Ok(Self {
+                        locations: strings
+                            .iter()
+                            .map(|string| attr_heap.add(string.as_bytes()))
+                            .collect::<Result<_, FormatError>>()?,
+                        attr_index,
+                    })
+                })
+            })
+            .collect()
+    }
 }
 
 /// Checks the creation policy for object and dataset-region references.
@@ -1427,6 +1449,7 @@ mod tests {
     use crate::libver::LibVer;
     use crate::shared_message::DatatypeLocation;
     use crate::type_builders::DatasetBuilder;
+    use crate::type_builders::SharedHeapCollections;
     use crate::width::FormatWidths;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
@@ -1473,7 +1496,12 @@ mod tests {
         } else {
             builder.with_produced_data(crate::make_i32_type(), &[4], 16, 8, provider);
         }
-        let (dataset, heaps) = PreparedDataset::prepare_with_widths(widths, builder).unwrap();
+        let (dataset, heaps) = PreparedDataset::prepare_with_widths(
+            widths,
+            builder,
+            &mut SharedHeapCollections::new(),
+        )
+        .unwrap();
         assert!(heaps.is_empty());
         assert_eq!(dataset.name.as_str(), "values");
         assert_eq!(dataset.ds.dimensions, [4]);
@@ -1553,7 +1581,8 @@ mod tests {
         if unlimited {
             builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
         }
-        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let chunks = dataset.compress_chunks().unwrap();
         let (_, data) = dataset
             .measure_chunked_storage(StoredAddress::new(4096), Some(&chunks))
@@ -1594,7 +1623,8 @@ mod tests {
         builder.set_attr("label", AttrValue::VarLenString("sample".into()));
         builder.set_attr_committed("typed", AttrValue::I32(11), "types/int");
         builder.set_attr("count", AttrValue::I32(9));
-        let (dataset, heaps) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, heaps) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         assert_eq!(
             dataset
                 .attrs
@@ -1615,7 +1645,7 @@ mod tests {
         );
         assert_eq!(heaps.len(), 1);
         assert_eq!(heaps[0].attr_index, 1);
-        assert_eq!(heaps[0].collections.len(), 1);
+        assert_eq!(heaps[0].locations.len(), 1);
     }
 
     #[rstest]
@@ -1624,7 +1654,8 @@ mod tests {
     fn absent_encoded_chunks_report_an_internal_error(#[case] build: bool) {
         let mut builder = DatasetBuilder::new("values");
         builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
-        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let empty = super::super::layout::DataMeasure::new(
             ByteLength::new(0),
             super::super::layout::DataKind::Chunked,
@@ -1673,7 +1704,8 @@ mod tests {
         if filtered {
             builder.with_fletcher32();
         }
-        let (seed, _) = PreparedDataset::prepare(builder).unwrap();
+        let (seed, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let chunks = seed.compress_chunks().unwrap();
         let mut payload = Vec::new();
         chunks.emit_payload(&mut payload).unwrap();
@@ -1717,7 +1749,9 @@ mod tests {
                     reads: Arc::clone(&reads),
                 }),
             );
-            PreparedDataset::prepare(builder).unwrap().0
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new())
+                .unwrap()
+                .0
         } else {
             seed
         };
@@ -1838,7 +1872,8 @@ mod tests {
         if unlimited {
             builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
         }
-        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let chunks = dataset.compress_chunks().unwrap();
         let (_, measured) = dataset
             .measure_chunked_storage(StoredAddress::ZERO, Some(&chunks))
@@ -1926,7 +1961,8 @@ mod tests {
             ],
             Box::new(CountingProvider(Arc::clone(&reads))),
         );
-        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let address = StoredAddress::new(u64::MAX - 16);
         let prepared = dataset.prepare_chunks(address, None).unwrap();
         let records = [
@@ -2007,7 +2043,8 @@ mod tests {
         if unlimited {
             builder.with_maxshape(&[crate::MaxExtent::Unlimited]);
         }
-        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let chunks = dataset.compress_chunks().unwrap();
         let (_, measured) = dataset
             .measure_chunked_storage(StoredAddress::ZERO, Some(&chunks))
@@ -2035,7 +2072,8 @@ mod tests {
     ) {
         let mut builder = DatasetBuilder::new("values");
         builder.with_i32_data(&[1, 2, 3, 4]).with_chunks(&[2]);
-        let (dataset, _) = PreparedDataset::prepare(builder).unwrap();
+        let (dataset, _) =
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new()).unwrap();
         let chunks = dataset.compress_chunks().unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let dataset = if verbatim {
@@ -2057,7 +2095,9 @@ mod tests {
                 ],
                 Box::new(CountingProvider(Arc::clone(&reads))),
             );
-            PreparedDataset::prepare(builder).unwrap().0
+            PreparedDataset::prepare(builder, &mut SharedHeapCollections::new())
+                .unwrap()
+                .0
         } else {
             dataset
         };
@@ -2068,7 +2108,8 @@ mod tests {
         } else {
             other.with_i32_data(&[1, 2, 3, 4, 5, 6]).with_shape(&[6]);
         }
-        let (other, _) = PreparedDataset::prepare(other).unwrap();
+        let (other, _) =
+            PreparedDataset::prepare(other, &mut SharedHeapCollections::new()).unwrap();
         let other_chunks = other.compress_chunks().unwrap();
         let (_, measured) = other
             .measure_chunked_storage(StoredAddress::ZERO, Some(&other_chunks))
@@ -2225,9 +2266,15 @@ mod tests {
             lengths: LengthWidth::Eight,
         };
         let result = if attributes_only {
-            PreparedAttributes::with_widths(widths, &builder.attrs).map(|_| ())
+            PreparedAttributes::with_widths(
+                widths,
+                &builder.attrs,
+                &mut SharedHeapCollections::new(),
+            )
+            .map(|_| ())
         } else {
-            PreparedDataset::prepare_with_widths(widths, builder).map(|_| ())
+            PreparedDataset::prepare_with_widths(widths, builder, &mut SharedHeapCollections::new())
+                .map(|_| ())
         };
         assert_eq!(
             result,
@@ -2273,6 +2320,7 @@ mod tests {
                 lengths: LengthWidth::Eight,
             },
             builder,
+            &mut SharedHeapCollections::new(),
         )
         .err()
         .unwrap();

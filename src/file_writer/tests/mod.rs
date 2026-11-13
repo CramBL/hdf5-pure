@@ -1,4 +1,5 @@
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private as dense_attribute_write;
 use hdf5_pure_format::__private::BTreeV2Header;
 use rstest::rstest;
 
@@ -498,9 +499,9 @@ fn small_paged_collections_can_place_metadata_above_four_gibibytes() {
             .with_persistence(true)
             .with_page_size(FileSpacePageSize::MAX),
     );
-    writer.set_root_attr("first", AttrValue::VarLenString("first-value".into()));
-    writer.set_root_attr("second", AttrValue::VarLenString("second-value".into()));
-    writer.set_root_attr("third", AttrValue::VarLenString("third-value".into()));
+    for name in ["first", "second", "third"] {
+        writer.set_root_attr(name, unshared_string(name));
+    }
     let mut sink = SparseSink {
         position: 0,
         chunks: Vec::new(),
@@ -1055,7 +1056,7 @@ fn dense_link_addresses_exceed_four_gibibytes(#[case] nested: bool) {
         FileSpaceSettings::new(FileSpaceStrategy::Page).with_page_size(FileSpacePageSize::MAX),
     );
     for name in ["first", "second", "third"] {
-        writer.set_root_attr(name, AttrValue::VarLenString(name.into()));
+        writer.set_root_attr(name, unshared_string(name));
     }
     let mut sink = SparseSink {
         position: 0,
@@ -1081,6 +1082,12 @@ fn dense_link_addresses_exceed_four_gibibytes(#[case] nested: bool) {
             .filter(|(position, _)| *position >= 1u64 << 32)
             .all(|(position, bytes)| position + bytes.len().to_u64() <= sink.position)
     );
+}
+
+/// Returns a string attribute value too long to share a global heap collection with another,
+/// so that each takes a collection, and a file space page, of its own.
+fn unshared_string(name: &str) -> AttrValue {
+    AttrValue::VarLenString(format!("{name}-{}", "x".repeat(2_100)))
 }
 
 fn link_writer(

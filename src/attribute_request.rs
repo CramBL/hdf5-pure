@@ -7,15 +7,16 @@ use crate::attribute::AttributeMessage;
 use crate::error::FormatError;
 use crate::type_builders::{self, AttrSpec, AttrValue, AttributeSpecs};
 
-/// Encoded attributes and the heap collections needed by their variable-length values.
+/// Encoded attributes, whose variable-length values hold placeholder heap addresses.
+///
+/// A writer places the strings of those values in global heap collections of its choosing:
+/// [`attribute_collections`] gives each attribute collections of its own.
 pub(crate) struct PreparedAttributes {
     pub(crate) messages: Vec<AttributeMessage>,
-    /// Attribute indices paired with collections awaiting address assignment.
-    pub(crate) collections: Vec<(usize, Vec<Vec<u8>>)>,
 }
 
 impl PreparedAttributes {
-    /// Prepares every attribute message before building its variable-length heap collections.
+    /// Prepares every attribute message.
     ///
     /// # Errors
     ///
@@ -25,21 +26,33 @@ impl PreparedAttributes {
         for (name, spec) in specs {
             messages.push(AttributeName::try_from(name.as_str())?.to_message(spec)?);
         }
-        let collections = specs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (_, spec))| {
-                spec.var_len_strings().map(|strings| {
-                    type_builders::build_global_heap_collections(strings)
-                        .map(|collections| (index, collections))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            messages,
-            collections,
-        })
+        Ok(Self { messages })
     }
+}
+
+/// The index of each variable-length string attribute, paired with the global heap collections
+/// that hold its strings, in the order of its references.
+pub(crate) type AttributeCollections = Vec<(usize, Vec<Vec<u8>>)>;
+
+/// Returns the [`AttributeCollections`] of `specs`, in which each attribute has collections of
+/// its own.
+///
+/// # Errors
+///
+/// Returns the errors of [`type_builders::build_global_heap_collections`].
+pub(crate) fn attribute_collections(
+    specs: &AttributeSpecs,
+) -> Result<AttributeCollections, FormatError> {
+    specs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, spec))| {
+            spec.var_len_strings().map(|strings| {
+                type_builders::build_global_heap_collections(strings)
+                    .map(|collections| (index, collections))
+            })
+        })
+        .collect()
 }
 
 /// A nonempty attribute name without null bytes.

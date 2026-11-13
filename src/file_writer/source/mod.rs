@@ -71,6 +71,8 @@ use crate::type_builders;
 use crate::type_builders::AttributeSpecs;
 use crate::type_builders::DatasetBuilder;
 use crate::type_builders::ObjectRefTarget;
+use crate::type_builders::SharedHeapCollections;
+use crate::width::OffsetWidth;
 use crate::writer::LazyFile;
 use crate::writer::WriteSink;
 
@@ -146,14 +148,15 @@ pub(crate) struct SourceLink<'a> {
 
 /// A prepared object and its variable-length attribute heap collections.
 ///
-/// Dataset element heap collections are held in prepared storage.
+/// The strings of the object's attributes share its collections. Dataset element heap
+/// collections are held in prepared storage.
 pub(crate) struct Object {
     /// Source metadata, absent for an object prepared with fresh defaults.
     inherited: Option<InheritedHeader>,
     kind: Kind,
+    /// Where the strings of each variable-length attribute are in `attr_collections`.
     heaps: Vec<VlPatch>,
-    /// Exclusive collection end indices for the attribute heap patches in `heaps`.
-    heap_ends: Vec<usize>,
+    attr_collections: Vec<Vec<u8>>,
 }
 
 impl Object {
@@ -163,8 +166,13 @@ impl Object {
     ///
     /// Propagates errors from [`PreparedDataset::prepare`].
     pub(crate) fn dataset(builder: DatasetBuilder) -> Result<Self, FormatError> {
-        let (dataset, heaps) = PreparedDataset::prepare(builder)?;
-        Self::new(Kind::Dataset(Box::new(dataset)), heaps)
+        let mut attr_heap = SharedHeapCollections::new();
+        let (dataset, heaps) = PreparedDataset::prepare(builder, &mut attr_heap)?;
+        Ok(Self::new(
+            Kind::Dataset(Box::new(dataset)),
+            heaps,
+            attr_heap.finish()?,
+        ))
     }
 
     /// Prepares a group's attributes, link thresholds, entry estimates, and creation-order policy.
@@ -179,12 +187,13 @@ impl Object {
         group_info: GroupInfo,
         creation_order: LinkCreationPolicy,
     ) -> Result<Self, FormatError> {
+        let mut attr_heap = SharedHeapCollections::new();
         let PreparedAttributes {
             messages,
             committed_datatype_targets,
             heaps,
-        } = PreparedAttributes::new(attributes)?;
-        Self::new(
+        } = PreparedAttributes::new(attributes, &mut attr_heap)?;
+        Ok(Self::new(
             Kind::Group {
                 attributes: messages,
                 group_info,
@@ -192,7 +201,8 @@ impl Object {
                 targets: committed_datatype_targets,
             },
             heaps,
-        )
+            attr_heap.finish()?,
+        ))
     }
 
     /// Prepares a committed datatype with a nonzero element size.
@@ -202,31 +212,16 @@ impl Object {
     /// Propagates errors from [`Datatype::element_size`].
     pub(crate) fn committed(datatype: Datatype) -> Result<Self, FormatError> {
         datatype.element_size()?;
-        Self::new(Kind::Committed(datatype), Vec::new())
+        Ok(Self::new(Kind::Committed(datatype), Vec::new(), Vec::new()))
     }
 
-    /// Constructs an object with an index of its attribute heap collections.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if the total collection count exceeds [`usize::MAX`].
-    fn new(kind: Kind, heaps: Vec<VlPatch>) -> Result<Self, FormatError> {
-        let mut end = 0_usize;
-        let heap_ends = heaps
-            .iter()
-            .map(|patch| {
-                end = end
-                    .checked_add(patch.collections.len())
-                    .ok_or_else(inconsistent)?;
-                Ok(end)
-            })
-            .collect::<Result<_, FormatError>>()?;
-        Ok(Self {
+    fn new(kind: Kind, heaps: Vec<VlPatch>, attr_collections: Vec<Vec<u8>>) -> Self {
+        Self {
             inherited: None,
             kind,
             heaps,
-            heap_ends,
-        })
+            attr_collections,
+        }
     }
 
     /// Attaches source metadata for attributes in their prepared name order.
@@ -472,10 +467,10 @@ impl Object {
         let Self {
             inherited: _,
             kind,
-            heaps,
-            heap_ends: _,
+            heaps: _,
+            attr_collections,
         } = self;
-        heaps.iter().flat_map(|patch| &patch.collections).chain(
+        attr_collections.iter().chain(
             match kind {
                 Kind::Dataset(dataset) => dataset
                     .storage
@@ -495,17 +490,11 @@ impl Object {
         let Self {
             inherited: _,
             kind,
-            heaps,
-            heap_ends,
+            heaps: _,
+            attr_collections,
         } = self;
-        let patch = heap_ends.partition_point(|&end| end <= index);
-        if let Some(heap) = heaps.get(patch) {
-            let start = if patch == 0 {
-                0
-            } else {
-                *heap_ends.get(patch - 1)?
-            };
-            return heap.collections.get(index.checked_sub(start)?);
+        if let Some(collection) = attr_collections.get(index) {
+            return Some(collection);
         }
         let Kind::Dataset(dataset) = kind else {
             return None;
@@ -514,7 +503,7 @@ impl Object {
             .storage
             .vl_string_staging()?
             .collections
-            .get(index.checked_sub(heap_ends.last().copied().unwrap_or(0))?)
+            .get(index - attr_collections.len())
     }
 
     /// Assigns collection addresses to variable-length attribute and dataset references.
@@ -530,32 +519,26 @@ impl Object {
             inherited: _,
             kind,
             heaps,
-            heap_ends: _,
+            attr_collections,
         } = self;
         let addresses: Vec<u64> = spans.iter().map(|span| span.address.get()).collect();
-        let mut cursor = 0;
+        let mut cursor = attr_collections.len();
+        let attr_addresses = addresses.get(..cursor).ok_or_else(inconsistent)?;
         for patch in heaps.iter() {
-            let end = cursor + patch.collections.len();
-            let addresses = addresses.get(cursor..end).ok_or_else(inconsistent)?;
-            match &mut *kind {
-                Kind::Dataset(dataset) => type_builders::patch_vl_refs(
-                    &mut dataset
-                        .attrs
-                        .get_mut(patch.attr_index)
-                        .ok_or_else(inconsistent)?
-                        .raw_data,
-                    addresses,
-                ),
-                Kind::Group { attributes, .. } => type_builders::patch_vl_refs(
-                    &mut attributes
-                        .get_mut(patch.attr_index)
-                        .ok_or_else(inconsistent)?
-                        .raw_data,
-                    addresses,
-                ),
+            let attributes = match &mut *kind {
+                Kind::Dataset(dataset) => &mut dataset.attrs,
+                Kind::Group { attributes, .. } => attributes,
                 Kind::Committed(_) => return Err(inconsistent()),
-            }
-            cursor = end;
+            };
+            type_builders::patch_vl_refs_at(
+                OffsetWidth::Eight,
+                &mut attributes
+                    .get_mut(patch.attr_index)
+                    .ok_or_else(inconsistent)?
+                    .raw_data,
+                attr_addresses,
+                &patch.locations,
+            )?;
         }
         if let Kind::Dataset(dataset) = &mut *kind {
             if let Some(staging) = dataset.storage.take_vl_string_staging() {
@@ -2330,26 +2313,21 @@ mod tests {
     }
 
     #[rstest]
-    #[case::first(0, 0)]
-    #[case::second(1, 1)]
-    #[case::elements(2, 2)]
-    #[case::past_end(3, 3)]
-    fn collection_lookup_preserves_attribute_and_element_order(
-        #[case] index: usize,
-        #[case] selected: usize,
-    ) {
+    #[case::attributes(0)]
+    #[case::elements(1)]
+    #[case::past_end(2)]
+    fn collection_lookup_preserves_attribute_and_element_order(#[case] index: usize) {
         let mut builder = DatasetBuilder::new("values");
         builder.with_vlen_strings(&["element"]);
         builder.set_attr("first", AttrValue::VarLenString("first".into()));
         builder.set_attr("empty", AttrValue::VarLenStringArray(Vec::new()));
         builder.set_attr("second", AttrValue::VarLenString("second".into()));
         let object = Object::dataset(builder).unwrap();
-        let expected = match selected {
-            0 | 1 => object
-                .heaps
-                .get(selected * 2)
-                .and_then(|patch| patch.collections.first()),
-            2 => match &object.kind {
+        // The strings of both attributes share the object's one attribute collection.
+        assert_eq!(object.attr_collections.len(), 1);
+        let expected = match index {
+            0 => object.attr_collections.first(),
+            1 => match &object.kind {
                 super::Kind::Dataset(dataset) => dataset
                     .storage
                     .vl_string_staging()
