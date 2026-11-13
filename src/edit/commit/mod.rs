@@ -7,6 +7,7 @@
 
 use hdf5_pure_space::__private::ReturnedExtents;
 
+use self::heap::{HeapMutationFailure, HeapMutationState};
 pub(in crate::edit) use self::plan::CountProjectionError;
 pub(in crate::edit) use self::plan::CountProjectionProof;
 pub(in crate::edit) use self::plan::inventory::storage::{
@@ -15,6 +16,7 @@ pub(in crate::edit) use self::plan::inventory::storage::{
 use self::plan::{CommitPreparation, PreparedCommit};
 pub(in crate::edit) use self::publish::PublicationError;
 pub(super) use self::publish::PublishedTree;
+use self::rollback::FreeSnapshot;
 pub(super) use self::rollback::scoped::JournalScope;
 use super::WriteEngine;
 use super::staging::StagedEdits;
@@ -66,7 +68,7 @@ impl PublicationState {
     }
 }
 
-/// Distinguishes a rejected plan's staged inputs from consumed application inputs.
+/// A rejected plan, consumed application inputs, or confirmed publication with a compaction result.
 #[allow(
     clippy::large_enum_variant,
     reason = "the rejected staged set returns to the engine without a heap allocation"
@@ -74,6 +76,8 @@ impl PublicationState {
 enum CommitOutcome {
     /// Application consumed the staged inputs, or the staged set was empty.
     Applied(Result<(), Error>),
+    /// Protected tree publication completed, with an independent collection-compaction result.
+    Published(Result<(), HeapMutationFailure>),
     /// Planning failed while the staged inputs remained available for retry.
     Rejected { staged: StagedEdits, error: Error },
 }
@@ -182,6 +186,37 @@ impl WriteEngine {
         self.inplace_undo.clear();
         let staged = std::mem::take(&mut self.staged);
         let outcome = self.commit_inner(staged);
+        self.finish_commit(snapshot, outcome)
+    }
+
+    /// Finalizes an attempt according to its publication outcome and current allocation state.
+    ///
+    /// Stores rejected staging in the engine and rolls back consumed failures before publication.
+    /// Consumed staged inputs remain unavailable for retry after confirmed publication. Preserves
+    /// published values after a collection failure. Keeps aggregate and PAGE publication confirmed
+    /// for a checked [`CommitOutcome::Published`] with successful or restored compaction
+    /// and available allocation publication. Marks allocation state uncertain for other failures
+    /// after attempted publication, except for recoverable nonpersistent PAGE publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operation or allocation-publication error. Returns
+    /// [`Error::HeapCompactionFailed`] for a failed collection operation, with uncertain state if
+    /// allocation permission is unavailable. Returns [`Error::CommitPartiallyApplied`] if
+    /// pre-publication rollback fails.
+    fn finish_commit(
+        &mut self,
+        snapshot: FreeSnapshot,
+        outcome: CommitOutcome,
+    ) -> Result<(), Error> {
+        let completed = matches!(
+            &outcome,
+            CommitOutcome::Published(Ok(()))
+                | CommitOutcome::Published(Err(HeapMutationFailure {
+                    state: HeapMutationState::Restored,
+                    ..
+                }))
+        ) && self.context.allocations.available().is_ok();
         let result = match outcome {
             CommitOutcome::Rejected { staged, error } => {
                 Err(self.rollback_commit(snapshot, staged, error))
@@ -193,15 +228,36 @@ impl WriteEngine {
                 self.staged_generation += 1;
                 result
             }
+            CommitOutcome::Published(mut result) => {
+                let permission = self.context.allocations.available();
+                if permission.is_err() {
+                    if let Err(failure) = &mut result {
+                        failure.state = HeapMutationState::Uncertain;
+                    }
+                }
+                if permission.is_err()
+                    || matches!(
+                        &result,
+                        Err(HeapMutationFailure {
+                            state: HeapMutationState::Uncertain,
+                            ..
+                        })
+                    )
+                {
+                    self.make_allocation_uncertain();
+                }
+                self.staged_generation += 1;
+                result.map_err(Error::from).and(permission)
+            }
         };
         if self.publication.attempted()
             && let Some(aggregation) = &mut self.aggregation
         {
-            aggregation.publication_confirmed = result.is_ok();
+            aggregation.publication_confirmed = result.is_ok() || completed;
         }
         self.inplace_undo.clear();
         if self.fresh_page_boundary.is_some() && self.publication.attempted() {
-            if result.is_ok() {
+            if result.is_ok() || completed {
                 self.publication = PublicationState::Ready;
             } else {
                 // A failed barrier can leave the new root on disk. Pending writes and uncertain
@@ -209,7 +265,11 @@ impl WriteEngine {
                 self.recover_page_publication().ok();
             }
         }
-        if result.is_err() && self.publication.attempted() && self.fresh_page_boundary.is_none() {
+        if result.is_err()
+            && !completed
+            && self.publication.attempted()
+            && self.fresh_page_boundary.is_none()
+        {
             self.make_allocation_uncertain();
         }
         result

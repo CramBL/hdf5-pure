@@ -87,33 +87,20 @@ pub enum Error {
         /// The decoding or source-read failure.
         source: FormatError,
     },
-    /// A [`commit`](crate::File::commit) failed, *and* could not put back a
-    /// value it had already written over - so the file holds part of a batch
-    /// that was rejected.
+    /// Restoration of prior bytes could not be confirmed after an editing error.
     ///
-    /// Every other edit a commit applies lands where nothing reaches it until
-    /// the superblock is repointed, so a commit that stops short of that leaves
-    /// the file exactly as it found it. A same-length value overwrite is the
-    /// exception: it writes straight over the dataset's existing data block,
-    /// which the live root already reaches. A rejected commit therefore replays
-    /// the prior bytes over each such write before returning, and this is what
-    /// it returns instead when that replay itself failed.
+    /// Before publication, the editor attempts to restore prior values overwritten by the failed
+    /// commit. When this error is the source of [`Self::HeapCompactionFailed`], restoration covers
+    /// only the failed collection. The published tree, its in-place values, and completed
+    /// collection compactions remain committed.
     ///
-    /// It is the one rejection after which a caller must **re-read**: the
-    /// datasets the batch overwrote may hold either value.
-    ///
-    /// Both errors are carried because in the shape this is most likely to take
-    /// they say different things: a commit rejected for a reason the caller can
-    /// act on, followed by an I/O failure that prevented the restore. Reporting
-    /// only the second would leave the caller retrying a batch without knowing
-    /// what was wrong with it.
+    /// Both operation and restoration errors are retained. Overwritten bytes may be partially
+    /// restored, or fully restored with an unconfirmed synchronization barrier.
     CommitPartiallyApplied {
-        /// Why the commit was rejected - what a caller must fix before staging
-        /// the batch again.
+        /// The original operation or completion error.
         refusal: Box<Error>,
-        /// The write failure that then prevented the prior values being put
-        /// back. This is the one that proves the file changed, so it is what
-        /// [`source`](std::error::Error::source) reports.
+        /// The restoration write or synchronization error, returned by
+        /// [`source`](std::error::Error::source).
         restore: Box<Error>,
     },
     /// The copy screen could not read a message of an object this commit copies:
@@ -159,6 +146,21 @@ pub enum Error {
     /// [`crate::Group`] handles, or a clone of the [`crate::File`], are still
     /// alive. Drop them and retry.
     HandlesOutstanding,
+    /// Global heap compaction failed after protected tree publication completed.
+    ///
+    /// The tree edits and in-place value overwrites remain published. Completed collections remain
+    /// compacted, and subsequent collection plans were not attempted. The failed collection's
+    /// restoration and allocation state is recorded separately from its cause.
+    HeapCompactionFailed {
+        /// The number of collection plans completed before the failure.
+        completed: usize,
+        /// The failed collection's restoration state and the editor's allocation availability.
+        state: HeapCompactionState,
+        /// The operation error, including [`Self::CommitPartiallyApplied`] if restoration failed.
+        ///
+        /// Also returned by [`std::error::Error::source`].
+        source: Box<Error>,
+    },
     /// An object's declared reference count is below its known minimum.
     InconsistentReferenceCount {
         /// The absolute file offset of the object's header.
@@ -340,6 +342,24 @@ impl fmt::Display for Error {
             Error::AttributeDecode { name, source } => {
                 write!(f, "cannot decode attribute {name:?}: {source}")
             }
+            Error::HeapCompactionFailed {
+                completed,
+                state,
+                source,
+            } => {
+                let state = match state {
+                    HeapCompactionState::Restored => {
+                        "the failed collection is unchanged or restored"
+                    }
+                    HeapCompactionState::Uncertain => {
+                        "restoration or allocation permission is uncertain"
+                    }
+                };
+                write!(
+                    f,
+                    "global heap compaction failed after {completed} completed collections: {source}. {state}"
+                )
+            }
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Format(e) => write!(f, "HDF5 format error: {e}"),
             Error::InconsistentReferenceCount {
@@ -465,8 +485,7 @@ impl fmt::Display for Error {
             ),
             Error::CommitPartiallyApplied { refusal, restore } => write!(
                 f,
-                "a commit refused ({refusal}) could not restore a value it had overwritten \
-                 ({restore}), so the file holds part of the refused batch"
+                "an operation failed ({refusal}) and restoration could not be confirmed ({restore})"
             ),
         }
     }
@@ -482,6 +501,7 @@ impl std::error::Error for Error {
             Error::CopyScreenUnreadable { source, .. } => Some(source),
             Error::PersistedFreeSpace { source, .. } => Some(&**source),
             Error::CommitPartiallyApplied { restore, .. } => Some(&**restore),
+            Error::HeapCompactionFailed { source, .. } => Some(&**source),
             _ => None,
         }
     }
@@ -542,4 +562,20 @@ impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
     }
+}
+
+/// The restoration and allocation state after global heap compaction fails.
+///
+/// Reported by [`Error::HeapCompactionFailed`]. The editor preserves completed collection
+/// compactions in both states.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeapCompactionState {
+    /// The failed collection is unchanged or restored, and allocation permission is available.
+    Restored,
+    /// Restoration or allocation permission could not be confirmed.
+    ///
+    /// Further appends, commits, and explicit synchronization in this editing session return
+    /// [`Error::AllocationPublicationUncertain`].
+    Uncertain,
 }

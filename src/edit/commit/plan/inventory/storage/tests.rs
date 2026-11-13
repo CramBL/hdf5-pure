@@ -33,6 +33,7 @@ mod count_refinement;
 mod counts;
 mod evidence;
 mod members;
+mod outcomes;
 mod parents;
 mod prospective;
 mod publication;

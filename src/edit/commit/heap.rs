@@ -12,6 +12,7 @@ use crate::convert::Narrow;
 use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::error::HeapCompactionState;
 
 use super::JournalScope;
 use super::PublishedTree;
@@ -125,6 +126,25 @@ pub(in crate::edit) struct HeapMutationFailure {
     pub(in crate::edit) state: HeapMutationState,
     /// The operation error, including a restoration error if restoration failed.
     pub(in crate::edit) error: Error,
+}
+
+/// Constructs [`Error::HeapCompactionFailed`] with the original progress, state, and cause.
+impl From<HeapMutationFailure> for Error {
+    fn from(failure: HeapMutationFailure) -> Self {
+        let HeapMutationFailure {
+            completed,
+            state,
+            error,
+        } = failure;
+        Self::HeapCompactionFailed {
+            completed,
+            state: match state {
+                HeapMutationState::Restored => HeapCompactionState::Restored,
+                HeapMutationState::Uncertain => HeapCompactionState::Uncertain,
+            },
+            source: Box::new(error),
+        }
+    }
 }
 
 /// Records allocation availability after a collection operation fails.

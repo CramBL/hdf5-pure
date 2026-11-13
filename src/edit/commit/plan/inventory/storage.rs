@@ -26,6 +26,7 @@ use crate::edit::analysis::physical::claims::{ClaimOrigin, ClaimProblem};
 use crate::edit::analysis::{
     AnalysisPhase, CountProtectionError, ProtectedCounts, ReconstructionSource,
 };
+use crate::edit::commit::CommitOutcome;
 use crate::edit::commit::heap;
 use crate::edit::commit::heap::HeapMutationFailure;
 use crate::edit::commit::plan::PreparedTree;
@@ -909,6 +910,21 @@ pub(in crate::edit::commit) struct MemberCompletion {
     pub(in crate::edit::commit) end: PhysicalAddress,
     /// The compaction result, including the completed prefix and allocation state on failure.
     pub(in crate::edit::commit) mutation: Result<(), HeapMutationFailure>,
+}
+
+impl MemberCompletion {
+    /// Transfers confirmed publication and its compaction result to commit finalization.
+    pub(in crate::edit::commit) fn into_outcome(self) -> CommitOutcome {
+        let Self {
+            collections: _,
+            prospective: _,
+            decisions: _,
+            root: _,
+            end: _,
+            mutation,
+        } = self;
+        CommitOutcome::Published(mutation)
+    }
 }
 
 /// The inputs or observations retained after a failed constrained tree publication.

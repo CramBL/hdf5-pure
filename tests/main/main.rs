@@ -71,6 +71,7 @@ mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;
 mod generic_large;
+mod heap_compaction_errors;
 mod huge_links;
 mod layout_introspection;
 mod legacy;

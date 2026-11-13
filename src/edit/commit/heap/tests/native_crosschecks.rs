@@ -108,6 +108,7 @@ fn native_source_parent_dispositions_survive_checked_publication(
             .remove_group_attr(&ObjectPathBuf::root(), "second")
             .unwrap();
     }
+    let snapshot = engine.snapshot_free();
     let staged = std::mem::take(&mut engine.staged);
     let InventoryPreparation::Tree(prepared) = PreparedEditInventory::prepare(&mut engine, staged)
     else {
@@ -150,7 +151,7 @@ fn native_source_parent_dispositions_survive_checked_publication(
         usize::from(!retire)
     );
     let completion = pending.publish_compacting_members().ok().unwrap();
-    completion.mutation.unwrap();
+    completion.mutation.as_ref().unwrap();
     if retire {
         let ParentDisposition::Retire(retirement) = &completion.decisions.dispositions()[&parent]
         else {
@@ -167,6 +168,9 @@ fn native_source_parent_dispositions_survive_checked_publication(
         );
         assert_eq!(completion.decisions.plans().next().unwrap().retained(), 1);
     }
+    engine
+        .finish_commit(snapshot, completion.into_outcome())
+        .unwrap();
     drop(engine);
     let native = file::libhdf5_open(&path);
     if retire {
