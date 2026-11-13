@@ -55,6 +55,7 @@ pub mod superblock;
 pub mod symbol_table;
 pub mod temp;
 pub mod userblock;
+pub mod variable_length_descriptor;
 pub mod widths;
 
 /// A file under `tests/data`, by its path there: `data("c/1.8/v1_superblock.h5")`.
