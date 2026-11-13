@@ -1476,7 +1476,7 @@ impl SharedHeapCollections {
         }
         let mut newest = Self::collection();
         let index = newest.push(object)?.ok_or_else(|| {
-            FormatError::Internal("an empty global heap collection refused an object".into())
+            FormatError::Internal("an empty global heap collection rejected an object".into())
         })?;
         if let Some(full) = self.newest.replace(newest) {
             self.full.push(full.finish()?);

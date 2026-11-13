@@ -569,7 +569,7 @@ pub fn encode_global_heap_collection(
         GlobalHeapCollectionWriter::with_capacity(length_width, u64::MAX, padded_collection)?;
     for object in objects {
         collection.push(object)?.ok_or_else(|| {
-            FormatError::Internal("a collection without a size limit refused an object".into())
+            FormatError::Internal("a collection without a size limit rejected an object".into())
         })?;
     }
     collection.finish()
@@ -600,7 +600,7 @@ pub fn encode_global_heap_collection(
 pub struct GlobalHeapCollectionWriter {
     length_width: LengthWidth,
     /// The size in bytes, the free space object included, past which [`push`](Self::push)
-    /// refuses a second or later object.
+    /// rejects a second or later object.
     max_size: u64,
     /// The collection header and the objects added so far.
     bytes: Vec<u8>,
