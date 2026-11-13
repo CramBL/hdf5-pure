@@ -110,7 +110,8 @@ fn native_source_parent_dispositions_survive_checked_publication(
     }
     let snapshot = engine.snapshot_free();
     let staged = std::mem::take(&mut engine.staged);
-    let InventoryPreparation::Tree(prepared) = PreparedEditInventory::prepare(&mut engine, staged)
+    let InventoryPreparation::Tree(prepared) =
+        PreparedEditInventory::prepare_observed(&mut engine, staged)
     else {
         panic!("expected checked tree preparation");
     };

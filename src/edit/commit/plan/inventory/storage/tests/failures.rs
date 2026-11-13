@@ -252,7 +252,7 @@ fn inventory_outcome_preserves_consumed_failure_phase(#[case] failure: Failure) 
 
 fn prepare(engine: &mut WriteEngine) -> InventoryPreparation {
     let staged = std::mem::take(&mut engine.staged);
-    PreparedEditInventory::prepare(engine, staged)
+    PreparedEditInventory::prepare_observed(engine, staged)
 }
 
 fn open(path: &Path, failure: Failure) -> WriteEngine {

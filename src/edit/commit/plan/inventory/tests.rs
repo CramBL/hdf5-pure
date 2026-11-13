@@ -26,6 +26,8 @@ use crate::{
     PhysicalAddress,
 };
 
+mod selection;
+
 #[rstest]
 #[case::empty(&[], 0, Some(2), vec![])]
 #[case::deletion(&["type"], 0, Some(2), vec![(2, 1)])]
@@ -57,7 +59,7 @@ fn actual_prepared_inputs_determine_original_counts(
     if original.is_none() {
         let staged = std::mem::take(&mut engine.staged);
         let InventoryPreparation::Rejected { staged, error } =
-            PreparedEditInventory::prepare(&mut engine, staged)
+            PreparedEditInventory::prepare_observed(&mut engine, staged)
         else {
             panic!("expected unprotected count rejection");
         };
@@ -126,7 +128,7 @@ fn actual_deletion_inputs_count_distinct_edges_or_reject_aliased_groups(
     if group_alias {
         let staged = std::mem::take(&mut engine.staged);
         let InventoryPreparation::Rejected { error, .. } =
-            PreparedEditInventory::prepare(&mut engine, staged)
+            PreparedEditInventory::prepare_observed(&mut engine, staged)
         else {
             panic!("expected an aliased group edit to be rejected");
         };
@@ -314,7 +316,7 @@ fn incomplete_copy_inventory_preserves_rejected_staging() {
     let staged = std::mem::take(&mut engine.staged);
     let before = engine.disk_bytes().unwrap();
     let InventoryPreparation::Rejected { staged, error } =
-        PreparedEditInventory::prepare(&mut engine, staged)
+        PreparedEditInventory::prepare_observed(&mut engine, staged)
     else {
         panic!("expected incomplete copy rejection");
     };
@@ -565,10 +567,10 @@ fn original_source(original: &OriginalEdits) -> &ReconstructionSource {
 pub(super) fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    match PreparedEditInventory::prepare(engine, staged) {
+    match PreparedEditInventory::prepare_observed(engine, staged) {
         InventoryPreparation::Tree(prepared) => prepared,
         InventoryPreparation::Rejected { error, .. } => panic!("preparation failed: {error:?}"),
-        InventoryPreparation::InPlace(_) => panic!("expected a tree edit"),
+        InventoryPreparation::Direct(_) => panic!("expected a tree edit"),
     }
 }
 

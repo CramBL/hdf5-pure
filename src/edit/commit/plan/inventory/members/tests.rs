@@ -129,7 +129,8 @@ fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
         .unwrap();
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    let InventoryPreparation::Tree(prepared) = PreparedEditInventory::prepare(engine, staged)
+    let InventoryPreparation::Tree(prepared) =
+        PreparedEditInventory::prepare_observed(engine, staged)
     else {
         panic!("expected inventory preparation");
     };

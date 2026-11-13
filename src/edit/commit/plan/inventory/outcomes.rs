@@ -11,15 +11,16 @@ use crate::error::Error;
 impl InventoryPreparation {
     /// Applies owned inputs and distinguishes rejected staging from consumed commit outcomes.
     ///
-    /// Returns original staging for rejected preparation. Applies tree inputs with storage
-    /// exclusions and checked heap publication. After completed publication, returns
+    /// Returns original staging for rejected preparation. Applies [`Self::Direct`] inputs through
+    /// [`WriteEngine::apply_commit`]. Applies captured tree inputs with storage exclusions and
+    /// checked heap publication. After completed publication, returns
     /// [`CommitOutcome::Published`] with its independent compaction result. Returns
     /// [`CommitOutcome::Applied`] for other consumed outcomes. The finalizer checks the engine's
     /// publication state separately before rollback or completion.
     pub(in crate::edit::commit) fn apply(self, engine: &mut WriteEngine) -> CommitOutcome {
         match self {
             Self::Rejected { staged, error } => CommitOutcome::Rejected { staged, error },
-            Self::InPlace(prepared) => CommitOutcome::Applied(engine.apply_commit(prepared)),
+            Self::Direct(prepared) => CommitOutcome::Applied(engine.apply_commit(prepared)),
             Self::Tree(prepared) => match prepared.apply_excluding(engine) {
                 Ok(pending) => match pending.publish_compacting_members() {
                     Ok(completion) => completion.into_outcome(),

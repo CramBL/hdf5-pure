@@ -10,6 +10,7 @@ use std::vec;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
 
+use self::inventory::InventoryCapture;
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
@@ -178,7 +179,7 @@ struct DatasetEdits {
     inplace_writes: Vec<InPlaceWrite>,
     moving_writes: Vec<DatasetRelocation>,
     write_targets: Vec<ObjectPathBuf>,
-    /// Collection candidates from original dataset attributes.
+    /// Collection candidates from original dataset attributes and overwritten values.
     collections: CollectionCandidates,
 }
 
@@ -225,7 +226,7 @@ pub(super) struct PreparedTree {
     pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
     pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
-    /// Attribute and deletion candidates awaiting reference analysis from the replacement root.
+    /// Attribute, overwrite, and deletion candidates awaiting replacement-root reference analysis.
     pub(super) collection_candidates: CollectionCandidates,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
@@ -417,30 +418,33 @@ impl WriteEngine {
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
     fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
-        self.plan_commit_with_inventory(staged, false)
+        self.plan_commit_with_inventory(staged, InventoryCapture::Omit)
             .map(|(plan, _)| plan)
     }
 
     /// Prepares edits with optional original observations from the same source phase.
     ///
-    /// Prepares counts for deletions or same-file copies independently of `capture`. The planner
-    /// skips count and original-observation discovery for in-place-only plans. It returns
+    /// Prepares counts for deletions or same-file copies independently of `capture`. Returns
+    /// numeric in-place plans before count or original-observation discovery. Returns
     /// count-preparation errors before capturing original observations.
     ///
-    /// With `capture`, collects original observations for tree plans. Retains additional count and
-    /// ownership qualification outcomes in [`inventory::OriginalEdits`] and predecessor outcomes in
+    /// Unless `capture` is [`InventoryCapture::Omit`], merges candidates from overwritten values,
+    /// replaced or removed attributes, and all physical deletion targets independently of
+    /// count-eligible retirement. Collects original observations for tree plans selected by
+    /// `capture`. Retains additional count and ownership qualification outcomes in
+    /// [`inventory::OriginalEdits`] and predecessor outcomes in
     /// [`inventory::dispositions::ReconstructionDispositions`]. Captures original storage
     /// exclusions and reclamation spans with the same tree inputs.
     ///
     /// # Errors
     ///
-    /// Returns the planning errors described by [`Self::plan_commit`], the count-preparation errors
-    /// of [`PreparedTreeCounts::prepare`], and the observation errors of
-    /// [`inventory::OriginalPreparation::collect`].
+    /// Returns the planning errors described by [`Self::plan_commit`] and the count-preparation
+    /// errors of [`PreparedTreeCounts::prepare`]. Also returns errors from overwrite-candidate
+    /// discovery, deletion-target binding, or candidate merging.
     fn plan_commit_with_inventory(
         &mut self,
         staged: &StagedEdits,
-        capture: bool,
+        capture: InventoryCapture,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         self.preflight_narrow_references()?;
@@ -454,13 +458,21 @@ impl WriteEngine {
         self.prepare_value_writes(staged, &mut edits, &mut analysis)?;
         self.prepare_appends(staged, &mut edits, &mut analysis)?;
         self.prepare_dataset_attributes(staged, &mut edits, &mut analysis)?;
+        if !matches!(capture, InventoryCapture::Omit) {
+            edits
+                .collections
+                .extend(analysis.overwrite_collections(staged)?)?;
+        }
         let DatasetEdits {
             inplace_writes,
             moving_writes,
             write_targets,
             mut collections,
         } = edits;
-        if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
+        if moving_writes.is_empty()
+            && staged.scope() == StagedScope::Datasets
+            && collections.is_empty()
+        {
             return Ok((CommitPlan::InPlace(inplace_writes), None));
         }
         let mut moved_headers = moving_writes
@@ -500,9 +512,18 @@ impl WriteEngine {
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
-        if !capture && matches!(counts, Some(PreparedTreeCounts::Unavailable)) {
+        if matches!(capture, InventoryCapture::Omit)
+            && matches!(counts, Some(PreparedTreeCounts::Unavailable))
+        {
             collections = CollectionCandidates::default();
         }
+        if !matches!(capture, InventoryCapture::Omit) {
+            let targets = analysis
+                .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
+                .targets();
+            collections.extend(analysis.deleted_collections(&targets))?;
+        }
+        let capture = capture.includes(&collections);
         let mut headers = headers;
         headers
             .keys
@@ -517,11 +538,9 @@ impl WriteEngine {
             collection_candidates: collections,
             references,
         };
-        let inventory = capture
-            .then(|| {
-                inventory::OriginalPreparation::collect(self, &mut analysis, &mut tree, staged)
-            })
-            .transpose()?;
+        let inventory = capture.then(|| {
+            inventory::OriginalPreparation::collect(self, &mut analysis, &mut tree, staged)
+        });
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
         }

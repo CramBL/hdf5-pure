@@ -12,6 +12,7 @@ use self::dispositions::{AppliedDispositions, ReconstructionDispositions};
 use super::{CommitPlan, Node, OverwritePayloads, PreparedCommit, PreparedTree};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
+use crate::edit::analysis::CollectionCandidates;
 use crate::edit::analysis::counts::{CopyUsersError, CopyUsersUnion};
 use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
@@ -48,17 +49,38 @@ pub(in crate::edit::commit) struct PreparedEditInventory {
 }
 
 impl PreparedEditInventory {
-    /// Prepares staged edits and collects their original observations before placement.
+    /// Prepares staged edits and captures original observations when heap candidates are present.
     ///
-    /// Returns the original staged set on planning failure. In-place-only plans are returned
-    /// without an inventory. The planner prepares counts for deletions and same-file copies.
-    /// Returns the staged set if count preparation fails. Retains additional count or ownership
-    /// qualification outcomes in [`OriginalEdits`].
+    /// Returns the original staged set on planning or count-preparation failure. Returns
+    /// candidate-free tree and in-place plans without an inventory. The planner prepares counts
+    /// for deletions and same-file copies. Retains additional count or ownership qualification
+    /// outcomes in [`OriginalEdits`].
     pub(in crate::edit::commit) fn prepare(
         engine: &mut WriteEngine,
         staged: StagedEdits,
     ) -> InventoryPreparation {
-        match engine.plan_commit_with_inventory(&staged, true) {
+        Self::prepare_with_capture(engine, staged, InventoryCapture::Candidates)
+    }
+
+    /// Captures original observations for every prepared tree plan.
+    ///
+    /// Supports evidence tests independently of candidate discovery. Preserves the numeric
+    /// in-place early return.
+    #[cfg(test)]
+    pub(in crate::edit::commit) fn prepare_observed(
+        engine: &mut WriteEngine,
+        staged: StagedEdits,
+    ) -> InventoryPreparation {
+        Self::prepare_with_capture(engine, staged, InventoryCapture::Always)
+    }
+
+    /// Retains rejected staging and pairs captured observations with their application inputs.
+    fn prepare_with_capture(
+        engine: &mut WriteEngine,
+        staged: StagedEdits,
+        capture: InventoryCapture,
+    ) -> InventoryPreparation {
+        match engine.plan_commit_with_inventory(&staged, capture) {
             Ok((mut plan, original)) => {
                 let (staged, writes) = staged.into_apply();
                 let mut overwrites = OverwritePayloads { writes };
@@ -84,7 +106,7 @@ impl PreparedEditInventory {
                         reclamation,
                         session: engine.context.allocations.session(),
                     }),
-                    None => InventoryPreparation::InPlace(prepared),
+                    None => InventoryPreparation::Direct(prepared),
                 }
             }
             Err(error) => InventoryPreparation::Rejected { staged, error },
@@ -179,12 +201,35 @@ impl PreparedEditInventory {
     reason = "preparation returns its owned inputs without an additional allocation"
 )]
 pub(in crate::edit::commit) enum InventoryPreparation {
-    /// Prepared value writes without a replacement root or original-owner inventory.
-    InPlace(PreparedCommit),
+    /// Prepared in-place or tree edits without captured original-owner inventory.
+    Direct(PreparedCommit),
     /// The original staged set and the planning error.
     Rejected { staged: StagedEdits, error: Error },
     /// Prepared tree edits paired with their original observations.
     Tree(PreparedEditInventory),
+}
+
+/// Selects original-observation capture during commit planning.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum InventoryCapture {
+    /// Captures observations for every tree plan.
+    #[cfg(test)]
+    Always,
+    /// Captures observations when allocation candidates or retained observations are present.
+    Candidates,
+    /// Omits original-observation capture.
+    Omit,
+}
+
+impl InventoryCapture {
+    pub(super) fn includes(self, candidates: &CollectionCandidates) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Always => true,
+            Self::Candidates => !candidates.is_empty(),
+            Self::Omit => false,
+        }
+    }
 }
 
 /// A successfully placed tree paired with its prepared inputs' original observations.
@@ -243,26 +288,16 @@ impl OriginalPreparation {
     ///
     /// Moves deletion spans out of the tree into the captured reclamation input. Storage
     /// exclusions are derived from these same observations and reclamation spans. Moves collection
-    /// candidates and cached framing into the inventory after storage collection. Collects
-    /// candidates from distinct deletion targets independently of count-eligible retirement.
+    /// candidates and cached framing into the inventory after storage collection. Retains source,
+    /// qualification, framing, and reclamation failures as independent outcomes.
     /// When owner qualification is unavailable, withholds generated retirements through
     /// [`storage::OriginalStorage::withhold_unqualified_reclamation`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the binding errors of [`AnalysisPhase::removed_links`] and candidate-merge errors
-    /// of [`crate::edit::analysis::CollectionCandidates::extend`].
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         tree: &mut PreparedTree,
         staged: &StagedEdits,
-    ) -> Result<Self, Error> {
-        let targets = phase
-            .removed_links(tree.groups.values().flat_map(|node| &node.prepared.deletes))?
-            .targets();
-        tree.collection_candidates
-            .extend(phase.deleted_collections(&targets))?;
+    ) -> Self {
         let original = OriginalEdits::collect(engine, phase, tree, staged);
         let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
         let mut reclamation =
@@ -280,13 +315,13 @@ impl OriginalPreparation {
             dispositions.source().as_ref().ok(),
             std::mem::take(&mut tree.collection_candidates),
         );
-        Ok(Self {
+        Self {
             original,
             dispositions,
             storage,
             collections,
             reclamation,
-        })
+        }
     }
 }
 

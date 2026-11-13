@@ -446,12 +446,12 @@ enum Restriction {
 
 pub(super) fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
     let staged = std::mem::take(&mut engine.staged);
-    match PreparedEditInventory::prepare(engine, staged) {
+    match PreparedEditInventory::prepare_observed(engine, staged) {
         InventoryPreparation::Tree(prepared) => prepared,
         InventoryPreparation::Rejected { error, .. } => {
             panic!("unexpected preparation error: {error:?}")
         }
-        InventoryPreparation::InPlace(_) => panic!("expected a tree preparation"),
+        InventoryPreparation::Direct(_) => panic!("expected a tree preparation"),
     }
 }
 

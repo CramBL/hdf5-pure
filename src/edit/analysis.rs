@@ -381,10 +381,6 @@ impl<'a> AnalysisPhase<'a> {
     /// Returns path-resolution errors or [`Error::Format`] for inconsistent candidate evidence.
     /// Header, descriptor, and source failures encountered during value collection are recorded in
     /// the observations.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "overwrite candidates do not authorize retirement")
-    )]
     pub(super) fn overwrite_collections(
         &mut self,
         staged: &StagedEdits,
@@ -1061,6 +1057,17 @@ pub(super) struct CollectionCandidates {
 }
 
 impl CollectionCandidates {
+    /// Returns `true` if allocation candidates and retained observation storage are both absent.
+    ///
+    /// The editor retains observations even when complete allocation framing fails.
+    pub(super) fn is_empty(&self) -> bool {
+        let Self {
+            observations,
+            collections,
+        } = self;
+        collections.is_empty() && observations.is_none()
+    }
+
     /// Merges allocation candidates, reference observations, and incomplete deletion roots.
     ///
     /// Preserves each allocation's range and class. Adopts `other` directly if `self` is empty.

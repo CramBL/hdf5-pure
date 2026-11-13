@@ -517,10 +517,10 @@ fn native_committed_type_edits_retain_actual_copy_and_removal_inputs() {
         .unwrap();
     let staged = mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    let prepared = match PreparedEditInventory::prepare(&mut engine, staged) {
+    let prepared = match PreparedEditInventory::prepare_observed(&mut engine, staged) {
         InventoryPreparation::Tree(prepared) => prepared,
         InventoryPreparation::Rejected { error, .. } => panic!("preparation failed: {error:?}"),
-        InventoryPreparation::InPlace(_) => panic!("expected native tree preparation"),
+        InventoryPreparation::Direct(_) => panic!("expected native tree preparation"),
     };
     let facts = prepared.original().facts().unwrap();
     assert_eq!(facts.counts().changes().len(), 1);
@@ -626,12 +626,12 @@ fn native_committed_type_counts_follow_copy_and_delete_commits(
     if inventory {
         let staged = mem::take(&mut engine.staged);
         engine.begin_commit(&staged);
-        let prepared = match PreparedEditInventory::prepare(&mut engine, staged) {
+        let prepared = match PreparedEditInventory::prepare_observed(&mut engine, staged) {
             InventoryPreparation::Tree(prepared) => prepared,
             InventoryPreparation::Rejected { error, .. } => {
                 panic!("unexpected preparation failure: {error:?}")
             }
-            InventoryPreparation::InPlace(_) => panic!("expected tree preparation"),
+            InventoryPreparation::Direct(_) => panic!("expected tree preparation"),
         };
         let applied = prepared.apply(&mut engine).unwrap();
         engine.publish_tree(applied.into_tree()).unwrap();

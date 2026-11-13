@@ -223,7 +223,7 @@ fn inventory_rejects_count_contradictions_without_consuming_staging(#[case] coun
     engine.delete(&ObjectPathBuf::parse("a")).unwrap();
     let staged = std::mem::take(&mut engine.staged);
     let InventoryPreparation::Rejected { staged, error } =
-        PreparedEditInventory::prepare(&mut engine, staged)
+        PreparedEditInventory::prepare_observed(&mut engine, staged)
     else {
         panic!("expected count rejection");
     };
@@ -285,8 +285,8 @@ fn inventory_keeps_in_place_preparation_lazy() {
         .unwrap();
     let staged = std::mem::take(&mut engine.staged);
     DISCOVERY_WORK.with(|work| work.set((0, 0)));
-    let InventoryPreparation::InPlace(prepared) =
-        PreparedEditInventory::prepare(&mut engine, staged)
+    let InventoryPreparation::Direct(prepared) =
+        PreparedEditInventory::prepare_observed(&mut engine, staged)
     else {
         panic!("expected in-place preparation");
     };

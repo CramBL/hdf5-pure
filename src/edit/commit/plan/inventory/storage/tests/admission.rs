@@ -26,6 +26,7 @@ use crate::edit::commit::plan::CommitPlan;
 use crate::edit::commit::plan::OverwritePayloads;
 use crate::edit::commit::plan::PreparedCommit;
 use crate::edit::commit::plan::ReplacedHeader;
+use crate::edit::commit::plan::inventory::InventoryCapture;
 use crate::edit::commit::plan::inventory::OriginalEdits;
 use crate::edit::commit::plan::inventory::PreparedEditInventory;
 use crate::edit::commit::plan::inventory::dispositions::ReconstructionDispositions;
@@ -240,8 +241,9 @@ fn application_classifies_reclamation_failures(#[case] optional: bool) {
     let mut engine = edit_test_util::open_engine(&path);
     engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
     let staged = std::mem::take(&mut engine.staged);
-    let (CommitPlan::Tree(mut tree), _) =
-        engine.plan_commit_with_inventory(&staged, false).unwrap()
+    let (CommitPlan::Tree(mut tree), _) = engine
+        .plan_commit_with_inventory(&staged, InventoryCapture::Omit)
+        .unwrap()
     else {
         panic!("expected tree preparation");
     };
