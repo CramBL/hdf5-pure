@@ -30,6 +30,7 @@ mod compound_offset_width;
 mod continuation_order;
 mod conversions;
 mod creation_widths;
+mod dataspace;
 mod datatype_array_complex_codec;
 mod datatype_compound_codec;
 mod datatype_enum_codec;

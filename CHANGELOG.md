@@ -23,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed `OwnedLink` serialization discarding stored name-length widths and explicit default fields ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
 
+### Performance
+
+- Reduced decoding time in `Dataspace::parse` for the measured nonzero ranks, with about 0.7 nanoseconds higher latency for rank-zero messages without maximum dimensions ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
+
 ## [0.48.0] - 2026-11-11
 
 `hdf5-pure` is now organized as a workspace, with `hdf5-pure` as the top-level crate. This release ships a feature-complete free space manager that tracks, coalesces, and reuses space from deleted objects, replaced chunks, modified headers, and B-tree indexes across flat and page-allocated files. With support for persisted section lists, aggregate management, and strict validation, in-place editing, appends, and repacking sustain bounded file sizes under continuous write churn. Format coverage expands substantially, adding dense link storage, version 2 B-tree chunk indexes, fractal heap reads, complex datatypes, and paged file editing. Numerous fixes address edge cases in object header decoding, chunk index geometry, free-space recovery, and 32-bit platforms.

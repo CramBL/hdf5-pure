@@ -613,10 +613,6 @@ impl<'a> Fields<'a> {
     /// Returns [`FormatError::UnexpectedEof`] if `count * N` or the range's end exceeds
     /// [`usize::MAX`], or the range is incomplete. Leaves the cursor unchanged on error. The error's
     /// `expected` field is the saturating requested end, and `available` is the original input length.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only unit tests acquire a counted array slice")
-    )]
     pub(crate) fn take_arrays<const N: usize>(
         &mut self,
         count: usize,
