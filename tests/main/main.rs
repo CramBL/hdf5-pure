@@ -47,6 +47,7 @@ mod edit_reference_counts;
 mod edit_reference_repointing;
 mod edit_second_layout;
 mod edit_space_accounting;
+mod edit_storage_errors;
 mod edit_userblock;
 mod edit_userblock_chunked;
 mod edit_userblock_followups;

@@ -13,6 +13,9 @@ use std::string::String;
 use core::fmt;
 
 #[cfg(feature = "std")]
+use hdf5_pure_core::EditStorageConflict;
+
+#[cfg(feature = "std")]
 use crate::address::StoredAddress;
 #[cfg(feature = "std")]
 use crate::free_sections::FreeSectionsError;
@@ -113,6 +116,10 @@ pub enum Error {
         /// The failure the resolve or the parse returned.
         source: FormatError,
     },
+    /// A physical bounds, overlap, or truncation conflict reported through [`EditStorageConflict`].
+    ///
+    /// The conflict is also available through [`std::error::Error::source`].
+    EditStorageConflict(EditStorageConflict),
     /// The file or requested operation is outside the editor's supported formats or storage
     /// structures. The payload describes the unsupported case.
     EditUnsupported(&'static str),
@@ -457,6 +464,7 @@ impl fmt::Display for Error {
             Error::AppendInPlaceUnsupported(reason) => {
                 write!(f, "unsupported in-place append target: {reason}")
             }
+            Error::EditStorageConflict(conflict) => write!(f, "edit storage conflict: {conflict}"),
             Error::EditUnsupported(reason) => {
                 write!(f, "unsupported in-place edit target: {reason}")
             }
@@ -497,6 +505,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Format(e) => Some(e),
+            Error::EditStorageConflict(conflict) => Some(conflict),
             Error::AttributeDecode { source, .. } => Some(source),
             Error::CopyScreenUnreadable { source, .. } => Some(source),
             Error::PersistedFreeSpace { source, .. } => Some(&**source),
@@ -504,6 +513,13 @@ impl std::error::Error for Error {
             Error::HeapCompactionFailed { source, .. } => Some(&**source),
             _ => None,
         }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<EditStorageConflict> for Error {
+    fn from(error: EditStorageConflict) -> Self {
+        Self::EditStorageConflict(error)
     }
 }
 
