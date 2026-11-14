@@ -43,13 +43,6 @@ mod file_space_info;
 mod fill_value;
 mod filter_pipeline;
 mod fixed_array;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only unit tests use the complete fixed-record codec set"
-    )
-)]
 mod fixed_record;
 #[cfg(test)]
 mod fixture;

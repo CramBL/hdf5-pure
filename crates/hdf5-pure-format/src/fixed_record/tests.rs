@@ -124,6 +124,10 @@ where
     assert_eq!(&output[1..1 + bytes.len()], bytes);
     assert_eq!(output[0], 0xcc);
     assert_eq!(&output[1 + bytes.len()..], &vec![0xcc; 31 - bytes.len()]);
+    let mut appended = vec![0xcc];
+    C::append(&mut appended, &expected);
+    assert_eq!(&appended[1..], bytes);
+    assert_eq!(appended[0], 0xcc);
 }
 
 #[test]
@@ -151,6 +155,9 @@ fn named_nested_records_share_field_order_and_size() {
     assert_eq!(write_envelope(&mut output[1..], &expected).unwrap(), 9);
     assert_eq!(&output[1..10], &bytes[1..10]);
     assert_eq!([output[0], output[10]], [0xcc; 2]);
+    let mut appended = vec![0xaa];
+    EnvelopeCodec::append(&mut appended, &expected);
+    assert_eq!(appended, bytes[..10]);
 }
 
 #[inline(never)]

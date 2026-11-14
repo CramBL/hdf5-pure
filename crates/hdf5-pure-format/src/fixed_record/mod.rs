@@ -4,9 +4,10 @@
 //! bounded by their selected widths. Callers decode variable bodies and optional tails outside the
 //! fixed record.
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use hdf5_pure_core::FileSpaceStrategy;
+use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
 
 use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
 use crate::bytes::Fields;
@@ -66,8 +67,16 @@ pub(crate) trait FixedRecord {
                 available,
             });
         };
-        Self::encode(&mut RecordOutput { bytes, pos: 0 }, value);
+        Self::encode(&mut RecordOutput::Slice { bytes, pos: 0 }, value);
         Ok(Self::Wire::SIZE)
+    }
+
+    /// Appends a prepared value's fields in wire order.
+    ///
+    /// Writes exactly [`Self::Wire::SIZE`](FixedWire::SIZE) bytes after the existing output.
+    #[inline]
+    fn append(output: &mut Vec<u8>, value: &Self::Value) {
+        Self::encode(&mut RecordOutput::Append(output), value);
     }
 }
 
@@ -123,27 +132,34 @@ impl<F> RecordValue<F> for F {
     }
 }
 
-/// An encoder's acquired output prefix and next field position.
-pub(crate) struct RecordOutput<'a> {
-    bytes: &'a mut [u8],
-    pos: usize,
+/// An encoder's destination for successive fields in wire order.
+pub(crate) enum RecordOutput<'a> {
+    /// An output vector to which the encoder appends fields.
+    Append(&'a mut Vec<u8>),
+    /// An acquired record prefix and the next field position within it.
+    Slice { bytes: &'a mut [u8], pos: usize },
 }
 
 impl RecordOutput<'_> {
-    /// Writes one field and advances the output position.
+    /// Writes one field after the preceding fields.
     ///
     /// # Panics
     ///
-    /// Panics if the field extends past the prefix.
+    /// Panics if a field extends past an acquired slice prefix.
     #[inline]
     fn array<const N: usize>(&mut self, value: &[u8; N]) {
-        // The writer acquires the complete record prefix before encoding its fields.
-        self.bytes
-            .get_mut(self.pos..)
-            .and_then(|bytes| bytes.first_chunk_mut::<N>())
-            .expect("fixed-record encoders write their declared extent")
-            .copy_from_slice(value);
-        self.pos += N;
+        match self {
+            Self::Append(output) => output.extend_from_slice(value),
+            Self::Slice { bytes, pos } => {
+                // The writer acquires the complete record prefix before encoding its fields.
+                bytes
+                    .get_mut(*pos..)
+                    .and_then(|bytes| bytes.first_chunk_mut::<N>())
+                    .expect("fixed-record encoders write their declared extent")
+                    .copy_from_slice(value);
+                *pos += N;
+            }
+        }
     }
 }
 
@@ -252,8 +268,8 @@ macro_rules! fixed_record {
 pub(crate) use fixed_record;
 
 macro_rules! integer_codecs {
-    ($($codec:ident: $integer:ty, $bytes:literal, $decode:ident, $encode:ident);+ $(;)?) => {
-        $(pub(crate) struct $codec;
+    ($( $(#[$attribute:meta])* $codec:ident: $integer:ty, $bytes:literal, $decode:ident, $encode:ident);+ $(;)?) => {
+        $($(#[$attribute])* pub(crate) struct $codec;
 
         impl FixedRecord for $codec {
             type Wire = [u8; $bytes];
@@ -275,10 +291,14 @@ macro_rules! integer_codecs {
 integer_codecs! {
     U8: u8, 1, from_le_bytes, to_le_bytes;
     U16Le: u16, 2, from_le_bytes, to_le_bytes;
+    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
     U16Be: u16, 2, from_be_bytes, to_be_bytes;
     U32Le: u32, 4, from_le_bytes, to_le_bytes;
+    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
     U32Be: u32, 4, from_be_bytes, to_be_bytes;
+    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
     U64Le: u64, 8, from_le_bytes, to_le_bytes;
+    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
     U64Be: u64, 8, from_be_bytes, to_be_bytes;
 }
 
@@ -602,6 +622,60 @@ impl<L: LengthEncoding> FixedRecord for LengthCodec<L> {
     #[inline]
     fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
         L::encode(output, value)
+    }
+}
+
+/// A little-endian [`FileSpacePageSize`] field at length encoding `L`.
+pub(crate) struct PageSizeCodec<L>(PhantomData<L>);
+
+impl<L: LengthEncoding> FixedRecord for PageSizeCodec<L> {
+    type Wire = L::Wire;
+    type Value = BoundPageSize<L>;
+
+    #[inline]
+    fn decode(wire: &Self::Wire) -> Result<Self::Value, FormatError> {
+        Ok(BoundPageSize {
+            size: FileSpacePageSize::try_from(L::decode(wire))?,
+            encoding: PhantomData,
+        })
+    }
+
+    #[inline]
+    fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+        L::encode(
+            output,
+            &BoundLength {
+                value: value.size.get(),
+                encoding: PhantomData,
+            },
+        )
+    }
+}
+
+/// A [`FileSpacePageSize`] known to fit the length encoding `L`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BoundPageSize<L> {
+    size: FileSpacePageSize,
+    encoding: PhantomData<L>,
+}
+
+impl<L: LengthEncoding> BoundPageSize<L> {
+    /// Creates a page size bounded by `L`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LengthTooLarge`] if the size exceeds [`LengthEncoding::MAX`].
+    pub(crate) fn new(size: FileSpacePageSize) -> Result<Self, FormatError> {
+        BoundLength::<L>::new(size.get())?;
+        Ok(Self {
+            size,
+            encoding: PhantomData,
+        })
+    }
+
+    /// Returns the page size with its range constraints established.
+    pub(crate) const fn get(&self) -> FileSpacePageSize {
+        self.size
     }
 }
 
