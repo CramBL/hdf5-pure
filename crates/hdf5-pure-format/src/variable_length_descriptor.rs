@@ -127,6 +127,7 @@ impl VariableLengthDescriptor {
     /// );
     /// # Ok::<(), FormatError>(())
     /// ```
+    #[inline]
     pub fn new(
         offsets: OffsetWidth,
         element_count: u32,
@@ -162,6 +163,7 @@ impl VariableLengthDescriptor {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`].
     /// The output is unchanged on error.
+    #[inline]
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
         match &self.fields {
             DescriptorValue::Two(fields) => DescriptorCodec::<Offset2>::write(output, fields),
