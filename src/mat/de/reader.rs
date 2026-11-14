@@ -459,7 +459,7 @@ fn read_dataset(
             let raw = ds.read_u32().map_err(MatError::Hdf5)?;
             if let Ok(meta) = mcos_reader::parse_opaque_metadata(&raw) {
                 if !meta.object_ids.is_empty() {
-                    return decode_object_ids(mcos, &meta.object_ids, depth);
+                    return decode_object_ids(mcos, &meta.object_ids, meta.class_id, depth);
                 }
             }
             probed_u32 = Some(raw);
@@ -609,15 +609,31 @@ fn decode_opaque(
         });
     }
 
-    decode_object_ids(mcos, &parsed.object_ids, depth)
+    decode_object_ids(mcos, &parsed.object_ids, parsed.class_id, depth)
 }
 
 /// Decode one or more MCOS object ids (from an opaque parent dataset or an
 /// embedded heap reference) into a value. A single id is the object itself; a
 /// genuine object array becomes a cell of the decoded objects.
-fn decode_object_ids(mcos: &Mcos, object_ids: &[u32], depth: usize) -> Result<MatValue, MatError> {
+///
+/// MATLAB writes object id 0 in some references, for example in the workspace
+/// of an anonymous function. Id 0 has no object record, so it becomes an
+/// object of the metadata's class with no properties.
+fn decode_object_ids(
+    mcos: &Mcos,
+    object_ids: &[u32],
+    class_id: Option<ClassId>,
+    depth: usize,
+) -> Result<MatValue, MatError> {
     let mut values = Vec::with_capacity(object_ids.len());
     for &object_id in object_ids {
+        if object_id == 0 {
+            values.push(MatValue::Opaque {
+                class_name: mcos.class_name(class_id)?,
+                fields: Vec::new(),
+            });
+            continue;
+        }
         values.push(decode_opaque_object(mcos, object_id, depth)?);
     }
     if values.len() == 1 {
