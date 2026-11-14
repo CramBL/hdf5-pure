@@ -14,6 +14,7 @@ use super::prospective::ReferencePresence;
 use super::session::SessionParentRetirement;
 use super::storage::{OriginalStorage, StorageOrigin};
 use crate::edit::allocation::AllocationSession;
+#[cfg(test)]
 use crate::edit::analysis::CollectionProvenance;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::qualification::QualifiedParentAllocation;
@@ -21,6 +22,7 @@ use crate::edit::analysis::heap::qualification::{
     MemberUnavailable, OriginalCollections, OriginalQualification, ParentUnavailable,
 };
 use crate::error::FormatError;
+#[cfg(test)]
 use crate::global_heap::GlobalHeapId;
 
 /// Member and parent removal decisions with one disposition per physical parent.
@@ -29,30 +31,27 @@ use crate::global_heap::GlobalHeapId;
 /// allocation release require separate permission. `R` is [`ParentRetirement`] before consumption
 /// and [`PreparedParentRetirement`] after checked publication preparation.
 pub(in crate::edit::commit) struct MemberDecisions<R = ParentRetirement> {
-    members:
-        BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>,
-    parents: BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>>,
-    planning: BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>>,
     dispositions: BTreeMap<PhysicalAddress, ParentDisposition<R>>,
     #[cfg(test)]
-    physical_members: usize,
+    inspection: MemberInspection,
 }
 
 impl MemberDecisions {
     /// Derives removal decisions from original qualification and fresh prospective references.
     ///
     /// The planner groups origins by physical member before looking up prospective presence once
-    /// per identity. It retains each origin's qualification outcome and each original parent
-    /// address, including qualification failures. It preserves a qualified member or parent if a
-    /// prospective reference was observed, even when other observations are incomplete. It requires
-    /// original qualification, complete interpretation, and root applicability for removal.
+    /// per identity. It retains one disposition per original parent address. It preserves a
+    /// qualified member or parent if a prospective reference was observed, even when other
+    /// observations are incomplete. It requires original qualification, complete interpretation,
+    /// and root applicability for removal.
     ///
     /// The planner groups removals by parent and preserves unobserved members, serialized reference
     /// counts, and collection capacity. It requires captured framing and an exactly matching
     /// protected parent range before constructing a plan. For a wholly unreferenced qualified
     /// parent, it binds complete allocation and absence evidence as a retirement disposition.
-    /// For other parents, it selects compaction or retention. Planning restrictions are
-    /// recorded independently, with the original allocation retained on failure.
+    /// For other parents, it selects compaction or retention, with the original allocation retained
+    /// on planning failure. Records per-origin member and whole-parent qualification outcomes
+    /// and planning restrictions for inspection in test builds.
     pub(super) fn collect(
         original: &OriginalCollections,
         prospective: &ProspectiveCollections,
@@ -84,7 +83,7 @@ impl MemberDecisions {
         for (id, origins) in origins_by_member {
             #[cfg(test)]
             {
-                result.physical_members += 1;
+                result.inspection.physical_members += 1;
             }
             let decision = MemberDecision::from(prospective.member_presence(id));
             let mut remove = false;
@@ -94,7 +93,11 @@ impl MemberDecisions {
                     .and_then(|qualification| qualification.member(origin, id))
                     .map(|()| decision);
                 remove |= outcome == Ok(MemberDecision::Remove);
-                result.members.insert((origin.clone(), id), outcome);
+                #[cfg(test)]
+                result
+                    .inspection
+                    .members
+                    .insert((origin.clone(), id), outcome);
             }
             if remove {
                 removed.entry(id.collection).or_default().insert(id.index);
@@ -105,7 +108,8 @@ impl MemberDecisions {
                 .ok_or(ParentUnavailable::Qualification)
                 .and_then(|qualification| qualification.whole_parent(address))
                 .map(|()| MemberDecision::from(prospective.parent_presence(address)));
-            result.parents.insert(address, parent);
+            #[cfg(test)]
+            result.inspection.parents.insert(address, parent);
             let disposition = if parent == Ok(MemberDecision::Remove) {
                 qualification
                     .ok_or(CompactionUnavailable::Parent(
@@ -151,11 +155,13 @@ impl MemberDecisions {
             };
             match disposition {
                 Ok(disposition) => {
-                    result.planning.insert(address, Ok(()));
+                    #[cfg(test)]
+                    result.inspection.planning.insert(address, Ok(()));
                     result.dispositions.insert(address, disposition);
                 }
-                Err(error) => {
-                    result.planning.insert(address, Err(error));
+                Err(_error) => {
+                    #[cfg(test)]
+                    result.inspection.planning.insert(address, Err(_error));
                     result
                         .dispositions
                         .insert(address, ParentDisposition::Retain);
@@ -167,8 +173,9 @@ impl MemberDecisions {
 
     /// Selects whole-parent retirement for reconciled exclusive session overwrites.
     ///
-    /// Replaces the parent decision, planning outcome, and disposition only after matching
-    /// session evidence with the applied owner replacement and prospective observations.
+    /// Replaces the disposition only after matching session evidence with the applied owner
+    /// replacement and prospective observations. Records the updated parent decision and planning
+    /// outcome for inspection in test builds.
     pub(super) fn include_session_parents(
         &mut self,
         dispositions: &AppliedDispositions,
@@ -176,8 +183,13 @@ impl MemberDecisions {
     ) {
         for (&address, parent) in &dispositions.original().session_parents {
             if let Some(retirement) = parent.retirement(dispositions, prospective) {
-                self.parents.insert(address, Ok(MemberDecision::Remove));
-                self.planning.insert(address, Ok(()));
+                #[cfg(test)]
+                {
+                    self.inspection
+                        .parents
+                        .insert(address, Ok(MemberDecision::Remove));
+                    self.inspection.planning.insert(address, Ok(()));
+                }
                 self.dispositions.insert(
                     address,
                     ParentDisposition::Retire(ParentRetirement::from_session(retirement)),
@@ -188,24 +200,19 @@ impl MemberDecisions {
 
     /// Consumes active retirement evidence through `prepare`, preserving all other decisions.
     ///
-    /// Calls `prepare` once per retiring parent in physical address order. Member and parent
-    /// qualification outcomes, planning diagnostics, and compaction-plan order are retained.
+    /// Calls `prepare` once per retiring parent in physical address order and preserves the order
+    /// of compaction plans. Retains member and parent qualification outcomes and planning
+    /// diagnostics in test builds.
     pub(super) fn map_retirements<R>(
         self,
         mut prepare: impl FnMut(ParentRetirement) -> R,
     ) -> MemberDecisions<R> {
         let Self {
-            members,
-            parents,
-            planning,
             dispositions,
             #[cfg(test)]
-            physical_members,
+            inspection,
         } = self;
         MemberDecisions {
-            members,
-            parents,
-            planning,
             dispositions: dispositions
                 .into_iter()
                 .map(|(address, disposition)| {
@@ -222,7 +229,7 @@ impl MemberDecisions {
                 })
                 .collect(),
             #[cfg(test)]
-            physical_members,
+            inspection,
         }
     }
 }
@@ -234,7 +241,7 @@ impl<R> MemberDecisions<R> {
         &self,
     ) -> &BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>
     {
-        &self.members
+        &self.inspection.members
     }
 
     /// Borrows stronger whole-parent qualification and prospective reference outcomes.
@@ -242,7 +249,7 @@ impl<R> MemberDecisions<R> {
     pub(in crate::edit::commit) fn parents(
         &self,
     ) -> &BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>> {
-        &self.parents
+        &self.inspection.parents
     }
 
     /// Borrows compaction and whole-parent retirement planning outcomes.
@@ -250,7 +257,7 @@ impl<R> MemberDecisions<R> {
     pub(in crate::edit::commit) fn planning(
         &self,
     ) -> &BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>> {
-        &self.planning
+        &self.inspection.planning
     }
 
     /// Borrows the exclusive disposition of each original parent in physical address order.
@@ -275,21 +282,33 @@ impl<R> MemberDecisions<R> {
     /// Returns the number of distinct physical member identities examined.
     #[cfg(test)]
     pub(in crate::edit::commit) fn physical_members(&self) -> usize {
-        self.physical_members
+        self.inspection.physical_members
     }
 }
 
 impl<R> Default for MemberDecisions<R> {
     fn default() -> Self {
         Self {
-            members: BTreeMap::new(),
-            parents: BTreeMap::new(),
-            planning: BTreeMap::new(),
             dispositions: BTreeMap::new(),
             #[cfg(test)]
-            physical_members: 0,
+            inspection: MemberInspection::default(),
         }
     }
+}
+
+/// Stores per-origin member outcomes, parent outcomes, and planning diagnostics for tests.
+#[cfg(test)]
+#[derive(Default)]
+struct MemberInspection {
+    /// Qualification and prospective-reference outcomes keyed by origin and physical member.
+    members:
+        BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>,
+    /// Whole-parent qualification and prospective-reference outcomes keyed by collection address.
+    parents: BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>>,
+    /// Planning outcomes for parents considered for compaction or retirement.
+    planning: BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>>,
+    /// The number of distinct physical member identities examined.
+    physical_members: usize,
 }
 
 /// Range, class, and prospective-root metadata retained after retirement evidence is consumed.
