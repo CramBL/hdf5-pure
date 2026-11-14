@@ -7,15 +7,18 @@
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+#[cfg(test)]
 use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
 
 use crate::edit::analysis::AnalysisPhase;
+#[cfg(test)]
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::CountEvidenceError;
+#[cfg(test)]
 use crate::edit::analysis::counts::ObjectReferenceBound;
 use crate::error::FormatError;
 use crate::object_graph::LinkIndex;
@@ -50,6 +53,7 @@ impl<'topology, 'source> RemovedLinks<'topology, 'source> {
     ///
     /// Returns [`FormatError::Internal`] if a target or its original incoming count is missing,
     /// or if the removals would exceed that count.
+    #[cfg(test)]
     pub(in crate::edit) fn count_plan(
         self,
     ) -> Result<Option<LinkRemovalPlan<'topology, 'source>>, FormatError> {
@@ -77,6 +81,7 @@ impl<'source> AnalysisPhase<'source> {
     /// Returns the contradiction and source errors of [`AnalysisPhase::count_evidence`], or
     /// [`CountEvidenceError::Topology`] for inconsistent deletion, topology, object, or count
     /// associations and checked-decrement failures.
+    #[cfg(test)]
     pub(in crate::edit) fn source_count_plan<'deletion>(
         &mut self,
         deletions: impl IntoIterator<Item = &'deletion PlannedDeletion>,
@@ -108,6 +113,7 @@ impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
     ///
     /// Returns [`FormatError::Internal`] if an explicit target is outside the topology, an
     /// incoming count is missing, or removals exceed the original count.
+    #[cfg(test)]
     fn new(
         topology: &'topology CompleteTopology<'source>,
         edges: Vec<(LinkIndex, ObjectId)>,
@@ -136,6 +142,7 @@ impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
     ///
     /// Returns `None` if `object` is outside the topology. For untouched objects, returns the
     /// original incoming count, or zero if there is no incoming-count entry.
+    #[cfg(test)]
     pub(in crate::edit) fn remaining(&self, object: ObjectId) -> Option<u32> {
         let Self {
             topology,
@@ -154,6 +161,7 @@ impl<'topology, 'source> LinkRemovalPlan<'topology, 'source> {
     }
 
     /// Returns non-root objects that reached zero, once each, in transition order.
+    #[cfg(test)]
     pub(in crate::edit) fn zero_link_objects(
         &self,
     ) -> impl Iterator<Item = ZeroLinkObject<'topology, 'source>> + '_ {
@@ -272,13 +280,16 @@ impl<'topology, 'source, Count> LinkRemovalPlan<'topology, 'source, Count> {
 /// The phase root is excluded. The caller establishes allocation ownership, relevant reference
 /// completeness, absence of incoming links from outside the graph, and publication conditions
 /// before retiring storage.
+#[cfg(test)]
 pub(in crate::edit) struct ZeroLinkObject<'topology, 'source> {
     topology: &'topology CompleteTopology<'source>,
     index: ObjectIndex,
 }
 
+#[cfg(test)]
 impl ZeroLinkObject<'_, '_> {
     /// Returns the physical object-header identity from the matching topology.
+    #[cfg(test)]
     pub(in crate::edit) fn id(&self) -> ObjectId {
         let Self { topology, index } = self;
         topology.graph.object(*index).value.id
@@ -314,6 +325,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
     ///
     /// Returns errors from `query`, or [`CountEvidenceError::Topology`] for inconsistent evidence,
     /// missing incoming counts, or checked-decrement failures.
+    #[cfg(test)]
     fn new(
         removed: RemovedLinks<'topology, 'source>,
         mut query: impl FnMut(ObjectId) -> Result<Option<CountEvidence<'source>>, CountEvidenceError>,
@@ -339,6 +351,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
     /// Returns whether the reconstruction origin has this plan's shared phase identity.
     ///
     /// Object identity, source freshness, and allocation ownership are separate conditions.
+    #[cfg(test)]
     pub(in crate::edit) fn shares_phase(&self, source: &ReconstructionSource) -> bool {
         Arc::ptr_eq(&self.plan.topology.identity, &source.identity)
     }
@@ -347,6 +360,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
     ///
     /// Returns `None` outside the topology. An untouched object without an incoming-count entry
     /// has a count of zero.
+    #[cfg(test)]
     pub(in crate::edit) fn graph_remaining(&self, object: ObjectId) -> Option<u32> {
         let LinkRemovalPlan {
             topology,
@@ -414,6 +428,7 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
     ///
     /// Includes retained subjects with known counts, in topology index order. These numeric
     /// projections require separate source-write and publication permissions.
+    #[cfg(test)]
     pub(in crate::edit) fn changes(
         &self,
     ) -> impl Iterator<Item = DeclaredCountChange<'_, 'source>> {
@@ -468,18 +483,22 @@ impl CountedZeroObject<'_, '_> {
 /// A planned declared net count paired with its unchanged original count bound.
 ///
 /// The projection describes a numeric change independently of permission to write the field.
+#[cfg(test)]
 pub(in crate::edit) struct DeclaredCountChange<'plan, 'source> {
     bound: &'plan ObjectReferenceBound<'source>,
     remaining: u32,
 }
 
+#[cfg(test)]
 impl<'source> DeclaredCountChange<'_, 'source> {
     /// Borrows the original source-bound count and any physical field association.
+    #[cfg(test)]
     pub(in crate::edit) fn bound(&self) -> &ObjectReferenceBound<'source> {
         self.bound
     }
 
     /// Returns the declared count after the planned removals and any supplied additions.
+    #[cfg(test)]
     pub(in crate::edit) fn remaining(&self) -> u32 {
         self.remaining
     }
@@ -537,6 +556,7 @@ impl<'source> SourceCountState<'source> {
     /// # Errors
     ///
     /// Returns [`CountEvidenceError::Topology`] if either known count would underflow.
+    #[cfg(test)]
     fn remove(&mut self) -> Result<bool, CountEvidenceError> {
         let Self {
             evidence: _,

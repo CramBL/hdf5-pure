@@ -24,6 +24,8 @@ use crate::error::{Error, FormatError};
 use crate::global_heap::GlobalHeapId;
 use crate::object_graph::ObjectId;
 
+pub(in crate::edit) mod envelopes;
+
 #[rstest]
 #[case::complete(Restriction::None)]
 #[case::unmatched(Restriction::Unmatched)]
@@ -704,6 +706,11 @@ fn capture_preserves_candidates_qualification_and_owned_framing(#[case] mode: Ca
             before
         );
     }
+    assert_eq!(captured.addresses(), &BTreeSet::from([address]));
+    assert_eq!(
+        captured.predecessors().unwrap()[&origin].objects(),
+        &descriptor
+    );
     drop(phase);
     match captured.qualification() {
         OriginalQualification::Qualified(qualification)

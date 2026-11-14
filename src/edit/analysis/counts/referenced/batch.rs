@@ -69,6 +69,7 @@ impl<'source> ReferencedCounts<'source> {
     ///
     /// Uses [`ReferencedCount::matches`] for nonempty batches. Association equality is separate
     /// from source-content validity.
+    #[cfg(test)]
     pub(in crate::edit) fn matches(&self, phase: &AnalysisPhase<'_>) -> bool {
         self.targets
             .first_key_value()
@@ -76,6 +77,7 @@ impl<'source> ReferencedCounts<'source> {
     }
 
     /// Returns the associated original physical root, or `None` for an empty batch.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.targets
             .first_key_value()
@@ -88,6 +90,7 @@ impl<'source> ReferencedCounts<'source> {
     }
 
     /// Borrows targets in physical object-header address order.
+    #[cfg(test)]
     pub(in crate::edit) fn targets(
         &self,
     ) -> impl Iterator<Item = (ObjectId, &ReferencedTarget<'source>)> {

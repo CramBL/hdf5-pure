@@ -24,6 +24,8 @@ use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
 
+pub mod members;
+
 /// Selects where an object stores elements that refer to global heap objects.
 #[derive(Clone, Copy, Debug)]
 pub enum Form {

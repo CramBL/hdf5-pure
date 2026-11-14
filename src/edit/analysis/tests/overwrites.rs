@@ -41,7 +41,7 @@ use crate::type_builders::{self, DatasetBuilder};
 #[case::compact_deferred(Layout::Compact, true)]
 #[case::contiguous_deferred(Layout::Contiguous, true)]
 #[case::chunked_deferred(Layout::Chunked, true)]
-fn overwrite_candidates_preserve_original_values_before_either_commit_route(
+fn overwrite_candidates_preserve_original_values_before_checked_publication(
     #[case] layout: Layout,
     #[case] deferred: bool,
     #[values(false, true)] values_first: bool,
@@ -315,10 +315,7 @@ fn overwrite_candidates_preserve_original_values_before_either_commit_route(
     assert!(engine.vl_overwrite_heaps.is_empty());
     let root = engine.superblock().root_group_address;
     engine.commit().unwrap();
-    assert_eq!(
-        engine.superblock().root_group_address == root,
-        !matches!(layout, Layout::Compact) && !deferred,
-    );
+    assert_ne!(engine.superblock().root_group_address, root);
     assert_eq!(engine.vl_overwrite_heaps.is_empty(), !deferred);
     drop(engine);
     let file = File::open(&path).unwrap();

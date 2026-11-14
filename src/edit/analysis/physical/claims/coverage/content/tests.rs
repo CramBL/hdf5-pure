@@ -13,6 +13,9 @@ use super::{READ_BUFFER_LEN, ResidualContents, ResidualOutcome};
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, BaseAddress, BaseAddressExt};
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::physical::claims::domain::residual::ResidualUnavailable;
+use crate::edit::analysis::physical::claims::domain::residual::tests as residual_fixture;
+use crate::edit::analysis::physical::claims::domain::residual::tests::Extra;
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
@@ -259,6 +262,42 @@ fn phase_content_queries_skip_numeric_payloads_and_reexamine_changed_bytes(#[cas
         vec![0x5a; 1_048_576]
     );
     reader.close().unwrap();
+}
+
+#[test]
+fn residual_group_qualification_preserves_a_cached_read_failure() {
+    let path = test_util::temp::temp_path("residual-group-read-failure.h5");
+    residual_fixture::fixture(&path, Extra::Keep);
+    let (engine, reads) = edit_test_util::open_counted_engine(&path);
+    let mut phase = AnalysisPhase::new(&engine);
+    let root =
+        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
+    let source = phase.reconstruction_source(&engine, root).unwrap();
+    phase.residual_content(&source).unwrap();
+    let content = phase
+        .claims
+        .as_mut()
+        .unwrap()
+        .coverage
+        .as_mut()
+        .unwrap()
+        .content
+        .as_mut()
+        .unwrap();
+    let interval = content
+        .intervals
+        .iter_mut()
+        .find(|interval| matches!(interval.outcome, ResidualOutcome::NonZero { .. }))
+        .unwrap();
+    interval.outcome =
+        ResidualOutcome::ReadFailed(FormatError::Source("cached residual read failure".into()));
+    reads.store(0, Ordering::Relaxed);
+    let result = phase.residual_group_domain(&source).unwrap();
+    let Err(ResidualUnavailable::Format(FormatError::Source(reason))) = result.as_ref() else {
+        panic!("expected retained source failure");
+    };
+    assert_eq!(reason, "cached residual read failure");
+    assert_eq!(reads.load(Ordering::Relaxed), 0);
 }
 
 fn range(start: u64, length: u64) -> FileRange {

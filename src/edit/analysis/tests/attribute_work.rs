@@ -340,7 +340,6 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
 fn write_fixture(path: &Path, references: bool) -> (u64, u64, u64) {
     let mut fixture = Fixture::new();
     let dead = fixture.collection(&[Object::new(1, b"before")]);
-    let live = fixture.collection(&[Object::new(1, b"live")]);
     let mut messages = vec![link_info()];
     messages.extend(
         (0..ATTRIBUTES).map(|index| super::attributes::attribute(&format!("a{index}"), dead)),
@@ -366,6 +365,7 @@ fn write_fixture(path: &Path, references: bool) -> (u64, u64, u64) {
         global_heap_fixture::hard_link("numeric", numeric),
     ];
     if references {
+        let live = fixture.collection(&[Object::new(1, b"live")]);
         let values = global_heap_fixture::reference(4, live, 1).repeat(REFERENCE_ELEMENTS);
         let messages = Form::ContiguousDataset.messages(
             &mut fixture,
@@ -377,6 +377,7 @@ fn write_fixture(path: &Path, references: bool) -> (u64, u64, u64) {
         prospective.push(global_heap_fixture::hard_link("references", address));
     }
     let root = fixture.append_header(prospective);
+    fixture.link("prospective", root);
     fixture.write(path);
     (dead, owner, root)
 }

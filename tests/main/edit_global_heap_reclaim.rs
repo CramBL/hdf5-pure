@@ -4,11 +4,13 @@ use std::path::Path;
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
 use hdf5_pure::FreeSections;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::PhysicalAddress;
@@ -81,10 +83,21 @@ fn the_collections_of_each_kind_of_reference_are_reclaimed_and_reused_for_raw_da
     let mut fixture = Fixture::new();
     let collections: Vec<u64> = slots
         .iter()
-        .map(|_| fixture.collection(&[Object::new(1, b"alpha"), Object::new(2, b"beta")]))
+        .map(|_| {
+            let objects = if matches!(form, Form::FillValue) {
+                vec![Object::new(1, b"alpha")]
+            } else {
+                vec![Object::new(1, b"alpha"), Object::new(2, b"beta")]
+            };
+            fixture.collection(&objects)
+        })
         .collect();
     let mut element = vec![0; datatype.type_size() as usize];
-    let elements: Vec<u8> = [1, 2]
+    let elements: Vec<u8> = (1..=if matches!(form, Form::FillValue) {
+        1
+    } else {
+        2
+    })
         .into_iter()
         .flat_map(|index| {
             for (&slot, &collection) in slots.iter().zip(&collections) {
@@ -259,9 +272,7 @@ fn deleting_one_of_two_hard_links_keeps_the_collection() {
 #[rstest]
 #[case::object_references(Unreadable::ObjectReferences)]
 #[case::data_past_the_end_of_the_file(Unreadable::DataPastTheEndOfTheFile)]
-fn a_remaining_object_the_analysis_cannot_read_keeps_every_collection(
-    #[case] unreadable: Unreadable,
-) {
+fn remaining_reference_restrictions_preserve_source_collections(#[case] unreadable: Unreadable) {
     let mut fixture = Fixture::new();
     let collection = fixture.collection(&[Object::new(1, b"alpha")]);
     let messages = Form::ContiguousDataset.messages(
@@ -274,17 +285,27 @@ fn a_remaining_object_the_analysis_cannot_read_keeps_every_collection(
     kept_dataset(&mut fixture);
     let path = temp::temp_path("reclaim_incomplete_remaining.h5");
     fixture.write(&path);
+    let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
 
     file.root().delete("x").unwrap();
-    file.commit().unwrap();
+    let result = file.commit();
+    match unreadable {
+        Unreadable::ObjectReferences => result.unwrap(),
+        Unreadable::DataPastTheEndOfTheFile => {
+            assert_source_eof(result.unwrap_err(), u64::try_from(original.len()).unwrap())
+        }
+    }
 
     assert_kept(&file, &minimum_collection(collection));
     file.close().unwrap();
+    if matches!(unreadable, Unreadable::DataPastTheEndOfTheFile) {
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
 }
 
 #[test]
-fn a_deleted_object_the_analysis_cannot_read_keeps_every_collection() {
+fn deleted_object_source_bounds_reject_commit_without_changing_bytes() {
     let mut fixture = Fixture::new();
     let collection = fixture.collection(&[Object::new(1, b"alpha")]);
     let mut messages = Form::CompactAttribute.messages(
@@ -297,13 +318,18 @@ fn a_deleted_object_the_analysis_cannot_read_keeps_every_collection() {
     kept_dataset(&mut fixture);
     let path = temp::temp_path("reclaim_incomplete_deleted.h5");
     fixture.write(&path);
+    let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
 
     file.root().delete("x").unwrap();
-    file.commit().unwrap();
+    assert_source_eof(
+        file.commit().unwrap_err(),
+        u64::try_from(original.len()).unwrap(),
+    );
 
     assert_kept(&file, &minimum_collection(collection));
     file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }
 
 #[test]
@@ -344,15 +370,30 @@ fn an_unreadable_chunk_of_the_deleted_dataset_keeps_every_collection() {
 }
 
 #[rstest]
-#[case::version_2(global_heap::VERSION_OFFSET, &[2])]
-#[case::unaligned_size(global_heap::SIZE_OFFSET, &(global_heap::MIN_COLLECTION_SIZE as u64 + 4).to_le_bytes())]
-fn a_malformed_collection_is_kept_and_a_well_formed_one_reclaimed(
-    #[case] offset: usize,
-    #[case] bytes: &[u8],
+#[case::records(MalformedCollection::Records)]
+#[case::version_2(MalformedCollection::Version)]
+#[case::unaligned_size(MalformedCollection::UnalignedSize)]
+fn malformed_parent_evidence_controls_independent_collection_retirement(
+    #[case] damage: MalformedCollection,
 ) {
     let mut fixture = Fixture::new();
-    let malformed = fixture.collection(&[Object::new(1, b"alpha")]);
-    fixture.image.place(malformed as usize + offset, bytes);
+    let objects = if matches!(damage, MalformedCollection::Records) {
+        vec![Object::new(1, b"alpha"), Object::new(1, b"duplicate")]
+    } else {
+        vec![Object::new(1, b"alpha")]
+    };
+    let malformed = fixture.collection(&objects);
+    match damage {
+        MalformedCollection::Version => fixture.image.place(
+            usize::try_from(malformed).unwrap() + global_heap::VERSION_OFFSET,
+            &[2],
+        ),
+        MalformedCollection::UnalignedSize => fixture.image.place(
+            usize::try_from(malformed).unwrap() + global_heap::SIZE_OFFSET,
+            &(u64::try_from(global_heap::MIN_COLLECTION_SIZE).unwrap() + 4).to_le_bytes(),
+        ),
+        MalformedCollection::Records => {}
+    }
     let well_formed = fixture.collection(&[Object::new(1, b"beta")]);
     let elements = [
         global_heap_fixture::reference(5, malformed, 1),
@@ -368,14 +409,28 @@ fn a_malformed_collection_is_kept_and_a_well_formed_one_reclaimed(
     kept_dataset(&mut fixture);
     let path = temp::temp_path("reclaim_malformed.h5");
     fixture.write(&path);
+    let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
+    let error = file.dataset("x").unwrap().read_string().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("unexpected heap read error: {error:?}");
+    };
+    assert_eq!(error, damage.expected_error(malformed));
 
     file.root().delete("x").unwrap();
     file.commit().unwrap();
 
     assert_kept(&file, &minimum_collection(malformed));
-    assert_reclaimed(&file, &minimum_collection(well_formed));
+    if matches!(damage, MalformedCollection::Records) {
+        assert_reclaimed(&file, &minimum_collection(well_formed));
+    } else {
+        assert_kept(&file, &minimum_collection(well_formed));
+    }
     file.close().unwrap();
+    let after = std::fs::read(&path).unwrap();
+    let start = usize::try_from(malformed).unwrap();
+    let end = start.checked_add(global_heap::MIN_COLLECTION_SIZE).unwrap();
+    assert_eq!(&after[start..end], &original[start..end]);
 }
 
 #[test]
@@ -445,6 +500,29 @@ impl Written {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum MalformedCollection {
+    Records,
+    UnalignedSize,
+    Version,
+}
+
+impl MalformedCollection {
+    fn expected_error(self, address: u64) -> FormatError {
+        match self {
+            Self::Records => FormatError::DuplicateGlobalHeapObjectIndex {
+                collection_address: address,
+                index: 1,
+            },
+            Self::UnalignedSize => FormatError::UnalignedGlobalHeapCollection {
+                collection_address: address,
+                size: u64::try_from(global_heap::MIN_COLLECTION_SIZE).unwrap() + 4,
+            },
+            Self::Version => FormatError::InvalidGlobalHeapVersion(2),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Unreadable {
     DataPastTheEndOfTheFile,
     ObjectReferences,
@@ -469,6 +547,23 @@ impl Unreadable {
         messages.push(Message::new(MessageType::DATA_LAYOUT, &layout));
         messages
     }
+}
+
+fn assert_source_eof(error: Error, available: u64) {
+    let Error::Format(FormatError::UnexpectedSourceEof {
+        expected,
+        available: actual,
+    }) = error
+    else {
+        panic!("unexpected source-bound error: {error:?}");
+    };
+    assert_eq!(
+        expected,
+        PAST_THE_END_OF_THE_FILE
+            .checked_add(u64::try_from(global_heap_fixture::REFERENCE_SIZE).unwrap())
+            .unwrap()
+    );
+    assert_eq!(actual, available);
 }
 
 fn kept_dataset(fixture: &mut Fixture) -> Vec<u8> {

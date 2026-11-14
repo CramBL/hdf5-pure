@@ -8,6 +8,7 @@ use super::{AppendBuilder, FlatDataset, WriteEngine};
 use crate::access_mode::AccessMode;
 use crate::dataset_request::ValueOverwrite;
 use crate::dataspace::MaxExtent;
+use crate::datatype;
 use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::layout_info::FilterId;
@@ -364,6 +365,23 @@ impl StagedEdits {
     /// Returns prepared value replacements with their full paths, in staging order.
     pub(super) fn writes(&self) -> &[(ObjectPathBuf, ValueOverwrite)] {
         &self.writes
+    }
+
+    /// Returns whether staged operations may copy or reuse existing heap references.
+    ///
+    /// Includes copies and address-bearing dataset creations or replacements without staged
+    /// strings.
+    pub(super) fn shares_heap_references(&self) -> bool {
+        !self.copies.is_empty()
+            || !self.cross_copies.is_empty()
+            || self.datasets.iter().any(|(_, dataset)| {
+                dataset.storage.vl_string_staging().is_none()
+                    && datatype::datatype_holds_file_address(&dataset.dt)
+            })
+            || self.writes.iter().any(|(_, values)| {
+                values.vl_string_staging().is_none()
+                    && datatype::datatype_holds_file_address(&values.dt)
+            })
     }
 
     /// Returns committed-dataset appends with their full paths, in staging order.

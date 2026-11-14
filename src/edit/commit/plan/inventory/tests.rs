@@ -11,7 +11,7 @@ use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 use super::storage::StorageOrigin;
 use super::{EditInputError, InventoryPreparation, OriginalEdits, PreparedEditInventory};
 use crate::DatasetBuilder;
-use crate::edit::analysis::physical::claims::domain::{DomainUnavailable, OwnerDomain};
+use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK, PlannedDeletion, ReconstructionSource};
 use crate::edit::commit::plan::{CommitPlan, CommitPreparation, PreparedCommit};
 use crate::edit::staging::StagedEdits;
@@ -25,6 +25,8 @@ use crate::{
     Datatype, DatatypeByteOrder, File, FileBuilder, FixedPointType, FloatingPointType,
     PhysicalAddress,
 };
+
+mod selection;
 
 #[rstest]
 #[case::empty(&[], 0, Some(2), vec![])]
@@ -53,6 +55,23 @@ fn actual_prepared_inputs_determine_original_counts(
                 &ObjectPathBuf::parse(&format!("copy{index}")),
             )
             .unwrap();
+    }
+    if original.is_none() {
+        let staged = std::mem::take(&mut engine.staged);
+        let InventoryPreparation::Rejected { staged, error } =
+            PreparedEditInventory::prepare_observed(&mut engine, staged)
+        else {
+            panic!("expected unprotected count rejection");
+        };
+        assert!(
+            matches!(
+                error,
+                Error::EditUnsupported("the original reference-count updates cannot be protected")
+            ),
+            "{error:?}"
+        );
+        assert_eq!(staged.copies().len(), emissions);
+        return;
     }
     let prepared = prepare(&mut engine);
     let facts = prepared.original().facts().unwrap();
@@ -83,22 +102,6 @@ fn actual_prepared_inputs_determine_original_counts(
         original_source(prepared.original()).object(),
         ObjectId::new(PhysicalAddress::new(Fixture::ROOT))
     );
-    if original.is_none() {
-        let OriginalEdits::Unavailable {
-            domain: Some(Ok(OwnerDomain::Unavailable(DomainUnavailable::ObjectStorage(object)))),
-            ..
-        } = prepared.original()
-        else {
-            panic!("expected unavailable object storage");
-        };
-        let (_, copied) = AnalysisPhase::new(&engine)
-            .topology()
-            .unwrap()
-            .find_link(&ObjectPathBuf::parse("source"))
-            .unwrap();
-        assert_eq!(*object, copied);
-        assert!(prepared.original().owners().is_none());
-    }
 }
 
 #[rstest]
@@ -125,7 +128,7 @@ fn actual_deletion_inputs_count_distinct_edges_or_reject_aliased_groups(
     if group_alias {
         let staged = std::mem::take(&mut engine.staged);
         let InventoryPreparation::Rejected { error, .. } =
-            PreparedEditInventory::prepare(&mut engine, staged)
+            PreparedEditInventory::prepare_observed(&mut engine, staged)
         else {
             panic!("expected an aliased group edit to be rejected");
         };
@@ -292,7 +295,7 @@ fn qualified_original_inputs_stay_with_successful_application(#[case] removal: b
 }
 
 #[test]
-fn incomplete_copy_inventory_keeps_independent_source_qualification() {
+fn incomplete_copy_inventory_preserves_rejected_staging() {
     let path = test_util::temp::temp_path("incomplete-copy.h5");
     let mut fixture = Fixture::new();
     let mut records = Form::CompactDataset.messages(
@@ -310,29 +313,25 @@ fn incomplete_copy_inventory_keeps_independent_source_qualification() {
             &ObjectPathBuf::parse("copy"),
         )
         .unwrap();
-    let prepared = prepare(&mut engine);
-    let OriginalEdits::Unavailable {
-        counts,
-        source,
-        domain,
-    } = prepared.original()
+    let staged = std::mem::take(&mut engine.staged);
+    let before = engine.disk_bytes().unwrap();
+    let InventoryPreparation::Rejected { staged, error } =
+        PreparedEditInventory::prepare_observed(&mut engine, staged)
     else {
-        panic!("expected unavailable copy evidence");
+        panic!("expected incomplete copy rejection");
     };
     assert!(
-        matches!(counts, Err(EditInputError::IncompleteCopy)),
-        "unexpected count outcome"
+        matches!(
+            error,
+            Error::EditUnsupported("the copy's committed-datatype users cannot be established")
+        ),
+        "{error:?}"
     );
     assert_eq!(
-        source.as_ref().unwrap().object(),
-        ObjectId::new(PhysicalAddress::new(Fixture::ROOT))
+        staged.copies(),
+        [(ObjectPathBuf::parse("source"), ObjectPathBuf::parse("copy"))]
     );
-    assert!(
-        matches!(domain, Some(Ok(OwnerDomain::Unavailable(_)))),
-        "unexpected domain outcome"
-    );
-    let applied = prepared.apply(&mut engine).unwrap();
-    engine.publish_tree(applied.into_tree()).unwrap();
+    assert_eq!(engine.disk_bytes().unwrap(), before);
 }
 
 #[test]
@@ -560,17 +559,30 @@ fn original_source(original: &OriginalEdits) -> &ReconstructionSource {
     }
 }
 
-fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
+/// Begins a commit and prepares its staged inputs as a tree inventory.
+///
+/// # Panics
+///
+/// Panics if preparation rejects the staged set or returns an in-place plan.
+pub(super) fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    match PreparedEditInventory::prepare(engine, staged) {
+    match PreparedEditInventory::prepare_observed(engine, staged) {
         InventoryPreparation::Tree(prepared) => prepared,
         InventoryPreparation::Rejected { error, .. } => panic!("preparation failed: {error:?}"),
-        InventoryPreparation::InPlace(_) => panic!("expected a tree edit"),
+        InventoryPreparation::Direct(_) => panic!("expected a tree edit"),
     }
 }
 
-fn fixture(path: &Path, description: Target) -> ObjectId {
+/// Writes a dataset using a committed datatype and returns the datatype's physical identity.
+///
+/// The constructor uses `description` to choose the datatype's count record and hard-link
+/// arrangement.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be written.
+pub(super) fn fixture(path: &Path, description: Target) -> ObjectId {
     let mut fixture = Fixture::new();
     let mut records = vec![Message::new(MessageType::DATATYPE, &datatype::f64_le())];
     records.extend(description.count().map(Message::reference_count));
@@ -613,10 +625,15 @@ fn fixture(path: &Path, description: Target) -> ObjectId {
     ObjectId::new(PhysicalAddress::new(target))
 }
 
-enum Target {
+/// The count record and hard-link arrangement of a committed-datatype fixture.
+pub(super) enum Target {
+    /// A type in a group with two aliases, with stored count two.
     AliasedGroup,
+    /// A type with two direct aliases and stored count three.
     AliasedType,
+    /// A type referenced only by the dataset, without an explicit count record.
     Implicit,
+    /// A named type with the supplied stored count.
     Named(u32),
 }
 

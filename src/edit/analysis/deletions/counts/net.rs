@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
+#[cfg(test)]
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 use hdf5_pure_space::__private::FreeClass;
 
@@ -13,11 +14,13 @@ use super::SourceRemovalPlan;
 use super::added::AddedCountError;
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
+use crate::edit::analysis::counts::CountEvidenceError;
+#[cfg(test)]
+use crate::edit::analysis::counts::HeaderCountAllocation;
 use crate::edit::analysis::counts::added_users::{AddedCopyUsers, CopyUsersError};
 use crate::edit::analysis::counts::balance::{CountArithmeticError, CountBalance};
 use crate::edit::analysis::counts::changes::{CountChange, OriginalCount};
 use crate::edit::analysis::counts::referenced::{ReferencedCountError, ReferencedTarget};
-use crate::edit::analysis::counts::{CountEvidenceError, HeaderCountAllocation};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
@@ -171,6 +174,7 @@ impl<'phase, 'source> NetCountPlan<'phase, 'source> {
     ///
     /// Returns `false` for an empty plan. Object identity, source freshness, and allocation
     /// ownership are separate conditions.
+    #[cfg(test)]
     pub(in crate::edit) fn shares_phase(&self, source: &ReconstructionSource) -> bool {
         self.source
             .as_ref()
@@ -188,6 +192,7 @@ impl<'phase, 'source> NetCountPlan<'phase, 'source> {
     /// by other reference targets in physical object-header address order. The iterator borrows
     /// the plan and yields fixed-size numeric projections. Original typed evidence and phase
     /// association remain with the plan.
+    #[cfg(test)]
     pub(in crate::edit) fn changes(&self) -> impl Iterator<Item = NetCountChange> + '_ {
         self.evidence_changes().map(|change| {
             let remaining = change.remaining();
@@ -215,10 +220,11 @@ impl<'phase, 'source> NetCountPlan<'phase, 'source> {
 
     /// Borrows each represented target's original facts and final declared count once.
     ///
-    /// Uses the ordering and target set of [`Self::changes`], including unchanged counts. Original
-    /// facts are borrowed unchanged with their [`OriginalCount`] class. Iteration requires no source
-    /// reads, topology discovery, count-arithmetic recalculation, or heap allocation. Source
-    /// freshness, ownership, retirement, and publication permissions remain separate requirements.
+    /// Includes unchanged counts. Visits removal-view targets in topology index order, followed by
+    /// other reference targets in physical object-header address order. Borrows original facts with
+    /// their [`OriginalCount`] class. Iteration requires no source reads, topology discovery,
+    /// count-arithmetic recalculation, or heap allocation. Source freshness, ownership, retirement,
+    /// and publication permissions remain separate requirements.
     pub(in crate::edit) fn evidence_changes(
         &self,
     ) -> impl Iterator<Item = CountChange<'_, 'source>> {
@@ -299,6 +305,7 @@ struct ReferencedChange<'source> {
 /// [`NetCountPlan`] retains the typed original evidence and phase association. Source freshness,
 /// allocation ownership, retirement eligibility, and count-write permission require separate
 /// evidence.
+#[cfg(test)]
 pub(in crate::edit) struct NetCountChange {
     object: ObjectId,
     original: u32,
@@ -307,6 +314,7 @@ pub(in crate::edit) struct NetCountChange {
     allocation: Option<HeaderCountAllocation>,
 }
 
+#[cfg(test)]
 impl NetCountChange {
     /// Returns the physical object-header identity of the represented target.
     pub(in crate::edit) fn object(&self) -> ObjectId {
@@ -382,6 +390,13 @@ impl From<FormatError> for NetCountError {
 /// Nonempty plans retain their original phase identity and physical root. Allocation boundaries
 /// and free classes are preserved. Source freshness, reference completeness, admission, and
 /// publication permissions require separate evidence.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains an optional owned phase and root association"
+    )
+)]
 pub(in crate::edit) struct CountStorage {
     session: AllocationSession,
     origin: Option<ReconstructionSource>,
@@ -412,6 +427,7 @@ impl CountStorage {
     ///
     /// Returns `false` without a phase origin. Object identity and source freshness are separate
     /// conditions.
+    #[cfg(test)]
     pub(in crate::edit) fn shares_phase(&self, source: &ReconstructionSource) -> bool {
         self.origin
             .as_ref()
@@ -419,6 +435,7 @@ impl CountStorage {
     }
 
     /// Returns the original physical root, or `None` for an empty plan.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.origin.as_ref().map(ReconstructionSource::object)
     }
@@ -427,6 +444,7 @@ impl CountStorage {
     ///
     /// The allocation set can be incomplete when ownership of other storage is unproven. Original
     /// boundaries and free classes are preserved without sorting or coalescing.
+    #[cfg(test)]
     pub(in crate::edit) fn allocations(&self) -> &[(FileRange, FreeClass)] {
         &self.allocations
     }

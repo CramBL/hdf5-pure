@@ -17,10 +17,15 @@ use test_util::temp::TempPath;
 use test_util::widths::Widths;
 
 use crate::File;
+use crate::FileLocking;
 use crate::Layout;
 use crate::edit::SyncPolicy;
 use crate::edit::retirement::RootRetirement;
+use crate::image::CountingImage;
+use crate::image::FileImage;
+use crate::image::HandleImage;
 use crate::image::WriteBuffering;
+use crate::source::MetadataCacheConfig;
 use crate::writer::FileBuilder;
 
 use super::*;
@@ -35,7 +40,8 @@ fn copies_complete_overlapping_records_and_only_the_free_header(
     #[values(false, true)] session: bool,
     #[values(false, true)] mirror: bool,
 ) {
-    let (_path, mut engine, start, original) = fixture(session, mirror);
+    let peak = Arc::new(AtomicU64::new(0));
+    let (_path, mut engine, start, original) = fixture(session, mirror, Some(peak.clone()));
     let plan = compaction(start, &original, removed);
     let mut expected = original.clone();
     for movement in plan.moves() {
@@ -47,17 +53,14 @@ fn copies_complete_overlapping_records_and_only_the_free_header(
     if let Some(free) = plan.free_space() {
         expected[local(free.header_range(), start)].copy_from_slice(free.bytes());
     }
-    let expected_undo = usize::try_from(
-        plan.moves()
-            .iter()
-            .map(|movement| movement.destination().length())
-            .sum::<u64>(),
-    )
-    .unwrap()
-        + plan.free_space().map_or(0, |free| free.bytes().len());
+    peak.store(0, Ordering::Relaxed);
     disk_log::start();
-    rootless(&mut engine, &[plan]).unwrap();
+    let end = engine.image().len();
+    published_batch(&mut engine, &[plan], end).unwrap();
     let recording = disk_log::finish();
+    let peak = peak.load(Ordering::Relaxed);
+    assert_eq!(peak == 0, removed.is_empty());
+    assert!(peak <= u64::try_from(COPY_BYTES).unwrap());
     let writes = recording
         .events
         .iter()
@@ -79,35 +82,7 @@ fn copies_complete_overlapping_records_and_only_the_free_header(
     let work = engine.image.buffering_work();
     assert_eq!((work.pending_runs, work.pending_bytes), (0, 0));
     assert_eq!(work.mirror_bytes > 0, mirror);
-    let undo_bytes: usize = engine
-        .inplace_undo
-        .iter()
-        .map(|(_, bytes)| bytes.len())
-        .sum();
-    assert_eq!(undo_bytes, expected_undo);
-    assert!(
-        engine
-            .inplace_undo
-            .iter()
-            .all(|(_, bytes)| bytes.len() <= COPY_BYTES)
-    );
-    assert!(
-        engine
-            .inplace_undo
-            .iter()
-            .map(|(_, bytes)| bytes.capacity())
-            .sum::<usize>()
-            >= undo_bytes
-    );
-    engine.undo_inplace_writes().unwrap();
-    engine.image.flush().unwrap();
-    assert_eq!(
-        engine
-            .image()
-            .read_exact_at(start.get(), original.len())
-            .unwrap(),
-        original
-    );
+    assert!(engine.inplace_undo.is_empty());
 }
 
 #[rstest]
@@ -117,12 +92,12 @@ fn copies_complete_overlapping_records_and_only_the_free_header(
 #[case::restore(Failure::Restore)]
 #[case::restore_issue(Failure::RestoreIssue)]
 #[case::restore_sync(Failure::RestoreBarrier)]
-fn failure_restores_parent_and_descriptors_or_seals_uncertainty(
+fn collection_failures_restore_bytes_or_report_restoration_errors(
     #[case] failure: Failure,
     #[values(false, true)] mirror: bool,
 ) {
     let session = matches!(failure, Failure::Issue | Failure::RestoreIssue);
-    let (_path, mut engine, start, original) = fixture(session, mirror);
+    let (_path, mut engine, start, original) = fixture(session, mirror, None);
     if matches!(failure, Failure::Barrier | Failure::RestoreBarrier) {
         engine.set_sync_policy(SyncPolicy::Always);
     }
@@ -131,6 +106,7 @@ fn failure_restores_parent_and_descriptors_or_seals_uncertainty(
         .unwrap();
     engine.write_inplace_journaled(descriptor, &[9; 8]).unwrap();
     let plan = compaction(start, &original, &[1]);
+    let end = engine.image().len();
     disk_log::start();
     match failure {
         Failure::Barrier => disk_log::fail_sync_after(0, FailurePoint::Before),
@@ -140,13 +116,13 @@ fn failure_restores_parent_and_descriptors_or_seals_uncertainty(
         Failure::RestoreIssue => {}
     }
     let result = if matches!(failure, Failure::RestoreIssue) {
-        JournalScope::run_rootless(&mut engine, |journal| {
+        JournalScope::run_issued(&mut engine, |journal| {
             apply(journal, &plan)?;
             disk_log::fail_write_after(0, 2);
             Err(Error::EditUnsupported("heap mutation failed"))
         })
     } else if matches!(failure, Failure::Restore | Failure::RestoreBarrier) {
-        JournalScope::run_rootless(&mut engine, |journal| {
+        JournalScope::run_issued(&mut engine, |journal| {
             let error = apply(journal, &plan).unwrap_err();
             if matches!(failure, Failure::RestoreBarrier) {
                 disk_log::fail_sync_after(0, FailurePoint::Before);
@@ -156,7 +132,7 @@ fn failure_restores_parent_and_descriptors_or_seals_uncertainty(
             Err(error)
         })
     } else {
-        rootless(&mut engine, &[plan])
+        published_batch(&mut engine, &[plan], end).map_err(|failure| failure.error)
     };
     disk_log::finish();
     let error = result.unwrap_err();
@@ -205,17 +181,17 @@ fn failure_restores_parent_and_descriptors_or_seals_uncertainty(
         );
         assert_eq!(
             engine.image().read_exact_at(descriptor.get(), 8).unwrap(),
-            [0; 8]
+            [9; 8]
         );
         assert_eq!(engine.image.buffering_work().pending_bytes, 0);
         engine.context.allocations.available().unwrap();
     }
-    assert!(engine.inplace_undo.is_empty());
+    assert_eq!(engine.inplace_undo.len(), 1);
 }
 
 #[test]
 fn streamed_source_and_undo_reads_have_separate_byte_costs() {
-    let (path, engine, start, original) = fixture(false, false);
+    let (path, engine, start, original) = fixture(false, false, None);
     drop(engine);
     let reads = Arc::new(AtomicU64::new(0));
     let mut engine = WriteEngine::open_bounded_counting(&path, reads.clone()).unwrap();
@@ -231,16 +207,10 @@ fn streamed_source_and_undo_reads_have_separate_byte_costs() {
         .sum::<u64>();
     let header = u64::try_from(plan.free_space().unwrap().bytes().len()).unwrap();
     reads.store(0, Ordering::Relaxed);
-    rootless(&mut engine, &[plan]).unwrap();
+    let end = engine.image().len();
+    published_batch(&mut engine, &[plan], end).unwrap();
     assert_eq!(reads.load(Ordering::Relaxed), moved * 2 + header);
-    assert_eq!(
-        engine
-            .inplace_undo
-            .iter()
-            .map(|(_, bytes)| bytes.len() as u64)
-            .sum::<u64>(),
-        moved + header
-    );
+    assert!(engine.inplace_undo.is_empty());
     assert!(moved > COPY_BYTES as u64);
     assert!(moved + header < original.len() as u64);
     assert_eq!(engine.image.buffering_work().write_bytes, moved + header);
@@ -248,7 +218,7 @@ fn streamed_source_and_undo_reads_have_separate_byte_costs() {
 
 #[test]
 fn source_read_failure_precedes_any_destination_write() {
-    let (path, mut engine, start, original) = fixture(false, false);
+    let (path, mut engine, start, original) = fixture(false, false, None);
     let plan = compaction(start, &original, &[1]);
     std::fs::OpenOptions::new()
         .write(true)
@@ -256,7 +226,11 @@ fn source_read_failure_precedes_any_destination_write() {
         .unwrap()
         .set_len(start.get() + 40)
         .unwrap();
-    let error = rootless(&mut engine, &[plan]).unwrap_err();
+    let end = engine.image().len();
+    let failure = published_batch(&mut engine, &[plan], end).unwrap_err();
+    assert_eq!(failure.completed, 0);
+    assert_eq!(failure.state, HeapMutationState::Restored);
+    let error = failure.error;
     assert!(
         matches!(error, Error::Format(FormatError::Source(_))),
         "{error:?}"
@@ -267,7 +241,7 @@ fn source_read_failure_precedes_any_destination_write() {
 
 #[test]
 fn later_parent_failure_preserves_a_published_prefix_and_the_prior_journal() {
-    let (_path, mut engine, start, original) = fixture(false, false);
+    let (_path, mut engine, start, original) = fixture(false, false, None);
     let plan = compaction(start, &original, &[1]);
     let invalid = compaction(
         start
@@ -323,7 +297,7 @@ fn later_parent_failure_preserves_a_published_prefix_and_the_prior_journal() {
 
 #[test]
 fn lost_postpublication_permission_preserves_bytes_and_records_uncertainty() {
-    let (_path, mut engine, start, original) = fixture(false, false);
+    let (_path, mut engine, start, original) = fixture(false, false, None);
     let plan = compaction(start, &original, &[1]);
     let end = engine.image().len();
     engine.make_allocation_uncertain();
@@ -344,47 +318,19 @@ fn lost_postpublication_permission_preserves_bytes_and_records_uncertainty() {
     assert!(engine.inplace_undo.is_empty());
 }
 
-#[test]
-fn later_rootless_failure_restores_every_parent_before_original_descriptors() {
-    let (_path, mut engine, start, original) = fixture(true, false);
-    let descriptor = start
-        .checked_add(u64::try_from(original.len()).unwrap())
-        .unwrap();
-    engine.write_inplace_journaled(descriptor, &[9; 8]).unwrap();
-    let plans = [
-        compaction(start, &original, &[1]),
-        compaction(descriptor, &original, &[1]),
-    ];
-    let invalid_end = descriptor
-        .checked_add(u64::try_from(original.len()).unwrap())
-        .unwrap()
-        .get();
-    let source_end = engine.image().len();
-    let error = rootless(&mut engine, &plans).unwrap_err();
-    let Error::Format(FormatError::UnexpectedSourceEof {
-        expected,
-        available,
-    }) = error
-    else {
-        panic!("{error:?}")
-    };
-    assert_eq!((expected, available), (invalid_end, source_end));
-    assert_eq!(
-        engine
-            .image()
-            .read_exact_at(start.get(), original.len())
-            .unwrap(),
-        original
-    );
-    assert_eq!(
-        engine.image().read_exact_at(descriptor.get(), 8).unwrap(),
-        [0; 8]
-    );
-    assert!(engine.inplace_undo.is_empty());
-    assert_eq!(engine.image.buffering_work().pending_bytes, 0);
-}
-
-fn fixture(session: bool, mirror: bool) -> (TempPath, WriteEngine, PhysicalAddress, Vec<u8>) {
+/// Writes collection bytes in a dataset and opens it with the selected backend and buffering.
+///
+/// Returns the temporary path, engine, physical payload start, and original heap bytes, in that
+/// order. With `peak`, records image read-request peaks through the counting wrapper.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be constructed, written, inspected, or opened.
+fn fixture(
+    session: bool,
+    mirror: bool,
+    peak: Option<Arc<AtomicU64>>,
+) -> (TempPath, WriteEngine, PhysicalAddress, Vec<u8>) {
     let payload = (0..12_000)
         .map(|n| u8::try_from(n % 251).unwrap())
         .collect::<Vec<_>>();
@@ -418,12 +364,24 @@ fn fixture(session: bool, mirror: bool) -> (TempPath, WriteEngine, PhysicalAddre
         };
         PhysicalAddress::new(start)
     };
-    let mut engine = if mirror {
-        WriteEngine::open_source_only(&path).unwrap()
-    } else {
-        WriteEngine::open_sync_counting(&path, SyncPolicy::OnClose, Arc::new(AtomicU64::new(0)))
-            .unwrap()
-    };
+    let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, len| {
+        let image: Box<dyn FileImage> = if mirror {
+            Box::new(WriteEngine::read_mirror(handle)?)
+        } else {
+            Box::new(HandleImage::new(
+                handle,
+                len,
+                MetadataCacheConfig::disabled(),
+            ))
+        };
+        Ok(match peak {
+            Some(peak) => Box::new(
+                CountingImage::new(image, Arc::default(), Arc::default()).with_read_peak(peak),
+            ),
+            None => image,
+        })
+    })
+    .unwrap();
     engine.set_sync_policy(SyncPolicy::OnClose);
     engine
         .set_write_buffering(if session {

@@ -100,6 +100,13 @@ impl<'source> AnalysisPhase<'source> {
 /// allocation geometry are optional. The engine, root, and phase are retained for association
 /// checks. Source freshness, copy-source applicability, allocation ownership, retirement
 /// eligibility, and count-write permission require separate evidence.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains its source borrow and original phase association"
+    )
+)]
 pub(in crate::edit) struct ReferencedCount<'source> {
     engine: &'source WriteEngine,
     origin: ReconstructionSource,
@@ -115,6 +122,7 @@ impl ReferencedCount<'_> {
     /// Returns whether the engine, phase identity, and any explicit phase root match.
     ///
     /// Association equality is separate from source-content validity.
+    #[cfg(test)]
     pub(in crate::edit) fn matches(&self, phase: &AnalysisPhase<'_>) -> bool {
         let ReconstructionSource {
             identity,
@@ -134,6 +142,7 @@ impl ReferencedCount<'_> {
     }
 
     /// Returns the original physical root associated with this observation.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> ObjectId {
         self.origin.object()
     }

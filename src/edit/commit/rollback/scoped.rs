@@ -4,13 +4,10 @@ use hdf5_pure_core::PhysicalAddress;
 
 use crate::edit::WriteEngine;
 use crate::error::Error;
-use crate::error::FormatError;
 
 /// Borrows the engine exclusively to journal writes and control their completion.
 ///
 /// [`Self::run`] and [`Self::run_issued`] preserve entries before the operation's checkpoint.
-/// [`Self::run_rootless`] retains the whole journal on success and attempts to restore it if
-/// application or completion fails.
 /// The caller establishes publication and allocation permissions.
 pub(in crate::edit) struct JournalScope<'engine> {
     engine: &'engine mut WriteEngine,
@@ -58,36 +55,7 @@ impl<'engine> JournalScope<'engine> {
         let checkpoint = engine.inplace_undo.len();
         let mut scope = Self { engine, checkpoint };
         let result = apply(&mut scope);
-        scope.complete_issued(result, false)
-    }
-
-    /// Retains the whole journal after issuing an unpublished operation's writes.
-    ///
-    /// Uses the completion and restoration rules of [`Self::run_issued`] with a checkpoint of
-    /// zero. Successful completion retains all journal entries for the enclosing commit.
-    /// If `apply` or completion fails, attempts to restore all entries, including those recorded
-    /// before this call.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if publication was attempted. Otherwise returns the
-    /// operation, completion, or restoration errors described by [`Self::run_issued`].
-    pub(in crate::edit) fn run_rootless(
-        engine: &'engine mut WriteEngine,
-        apply: impl FnOnce(&mut Self) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        if engine.publication.attempted() {
-            return Err(FormatError::Internal(
-                "rootless writes follow a publication attempt".into(),
-            )
-            .into());
-        }
-        let mut scope = Self {
-            engine,
-            checkpoint: 0,
-        };
-        let result = apply(&mut scope);
-        scope.complete_issued(result, true)
+        scope.complete_issued(result)
     }
 
     /// Records prior bytes before writing at a physical file position.
@@ -121,7 +89,7 @@ impl<'engine> JournalScope<'engine> {
         self.engine.image().len()
     }
 
-    fn complete_issued(self, result: Result<(), Error>, retain: bool) -> Result<(), Error> {
+    fn complete_issued(self, result: Result<(), Error>) -> Result<(), Error> {
         let Self { engine, checkpoint } = self;
         if engine.inplace_undo.len() == checkpoint {
             return result;
@@ -131,9 +99,7 @@ impl<'engine> JournalScope<'engine> {
             .and_then(|()| engine.barrier());
         match result {
             Ok(()) => {
-                if !retain {
-                    engine.inplace_undo.truncate(checkpoint);
-                }
+                engine.inplace_undo.truncate(checkpoint);
                 Ok(())
             }
             Err(refusal) => {

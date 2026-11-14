@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{ChildLink, PreparedTree};
+use super::session::SessionParent;
+use crate::PhysicalAddress;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::{CountEvidence, CountEvidenceError, ROOT_REFERENCE_COUNT};
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
@@ -22,6 +24,8 @@ use crate::object_path::ObjectPathBuf;
 /// observations independently of each predecessor's classification.
 pub(in crate::edit::commit) struct ReconstructionDispositions {
     source: Result<ReconstructionSource, Error>,
+    /// Complete protected parents captured from exclusive session overwrites.
+    pub(super) session_parents: BTreeMap<PhysicalAddress, SessionParent>,
     predecessors: BTreeMap<ObjectPathBuf, Predecessor>,
     expected: BTreeMap<ObjectPathBuf, Option<ObjectId>>,
     placed: BTreeMap<ObjectPathBuf, ObjectId>,
@@ -47,6 +51,7 @@ impl ReconstructionDispositions {
             });
         let mut result = Self {
             source,
+            session_parents: BTreeMap::new(),
             predecessors: BTreeMap::new(),
             expected: BTreeMap::new(),
             placed: BTreeMap::new(),
@@ -84,6 +89,7 @@ impl ReconstructionDispositions {
     ) {
         let Self {
             source: _,
+            session_parents: _,
             predecessors: _,
             expected,
             placed: placements,
@@ -121,6 +127,35 @@ impl ReconstructionDispositions {
     /// Borrows the original root's phase association or its resolution error.
     pub(in crate::edit::commit) fn source(&self) -> &Result<ReconstructionSource, Error> {
         &self.source
+    }
+
+    /// Extracts the root source error or first predecessor-count error in path order.
+    ///
+    /// Consumes the observations and placement metadata. Converts a count contradiction to
+    /// [`Error::InconsistentReferenceCount`] with its original address and count fields.
+    pub(super) fn into_source_error(self) -> Option<Error> {
+        let Self {
+            source,
+            session_parents: _,
+            predecessors,
+            expected: _,
+            placed: _,
+            placement_error: _,
+        } = self;
+        source.err().or_else(|| {
+            predecessors.into_values().find_map(|predecessor| {
+                predecessor.counts.err().map(|error| match error {
+                    CountEvidenceError::Source(error) | CountEvidenceError::Topology(error) => {
+                        Error::from(error)
+                    }
+                    CountEvidenceError::Contradiction(error) => Error::InconsistentReferenceCount {
+                        address: error.object.header_address().get(),
+                        observed: error.observed,
+                        minimum: error.minimum,
+                    },
+                })
+            })
+        })
     }
 
     fn insert(
@@ -246,6 +281,7 @@ impl ReconstructionDispositions {
     ) -> Result<BTreeMap<ObjectId, ObjectId>, TransitionWithheld> {
         let Self {
             source,
+            session_parents: _,
             predecessors,
             expected,
             placed,
@@ -316,6 +352,13 @@ impl AppliedDispositions {
         &self,
     ) -> Result<&BTreeMap<ObjectId, ObjectId>, &TransitionWithheld> {
         self.result.as_ref()
+    }
+
+    /// Extracts an original source or count error, consuming the applied observations.
+    ///
+    /// Delegates to [`ReconstructionDispositions::into_source_error`].
+    pub(super) fn into_source_error(self) -> Option<Error> {
+        self.original.into_source_error()
     }
 
     /// Translates a replaced original identity, preserving identities absent from the map.

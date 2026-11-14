@@ -107,6 +107,8 @@ impl WriteEngine {
     ///
     /// Consumes captured reclamation spans when supplied. The caller passes spans collected
     /// from this tree's original inputs. Otherwise, collects them before placement.
+    /// With captured spans, defers newly generated heap retirement to captured parent decisions
+    /// and preserves requests inherited before placement.
     ///
     /// # Errors
     ///
@@ -120,6 +122,8 @@ impl WriteEngine {
         mut dispositions: Option<&mut ReconstructionDispositions>,
         reclamation: Option<Vec<(FileRange, FreeClass)>>,
     ) -> Result<AppliedTree, Error> {
+        let captured = reclamation.is_some();
+        let inherited_heaps = self.superseded_heaps.len();
         let PreparedTree {
             counts,
             mut groups,
@@ -331,6 +335,9 @@ impl WriteEngine {
                     .map(|object| relocations.get(&object).copied().unwrap_or(object)),
             )
         });
+        if captured {
+            self.superseded_heaps.truncate(inherited_heaps);
+        }
         to_free.extend(
             self.superseded_heaps
                 .drain(..)

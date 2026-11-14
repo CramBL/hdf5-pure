@@ -160,6 +160,7 @@ impl PhysicalCoverage {
     }
 
     /// Borrows the ordered union of nonempty recorded ranges, including out-of-source claims.
+    #[cfg(test)]
     pub(in crate::edit) fn covered(&self) -> &[FileRange] {
         &self.covered
     }

@@ -405,6 +405,24 @@ fn unavailable_original_observations_have_explicit_dispositions(
         applied.dispositions().replacements(),
         Err(&TransitionWithheld::Predecessors)
     );
+    if !topology && !ambiguous {
+        let target = applied.dispositions.original.predecessors[&edited]
+            .source
+            .object();
+        let error = applied.dispositions.into_source_error().unwrap();
+        let Error::InconsistentReferenceCount {
+            address,
+            observed,
+            minimum,
+        } = error
+        else {
+            panic!("unexpected predecessor count error: {error:?}");
+        };
+        assert_eq!(
+            (address, observed, minimum),
+            (target.header_address().get(), 0, 1)
+        );
+    }
 }
 
 #[test]
@@ -454,6 +472,7 @@ fn a_failure_after_a_group_placement_returns_no_applied_inventory() {
 fn empty_dispositions() -> ReconstructionDispositions {
     ReconstructionDispositions {
         source: Err(Error::StaleHandle),
+        session_parents: BTreeMap::new(),
         predecessors: BTreeMap::new(),
         expected: BTreeMap::new(),
         placed: BTreeMap::new(),
@@ -464,9 +483,9 @@ fn empty_dispositions() -> ReconstructionDispositions {
 fn prepare(engine: &mut WriteEngine) -> PreparedEditInventory {
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    match PreparedEditInventory::prepare(engine, staged) {
+    match PreparedEditInventory::prepare_observed(engine, staged) {
         InventoryPreparation::Tree(prepared) => prepared,
         InventoryPreparation::Rejected { error, .. } => panic!("preparation failed: {error:?}"),
-        InventoryPreparation::InPlace(_) => panic!("expected a tree edit"),
+        InventoryPreparation::Direct(_) => panic!("expected a tree edit"),
     }
 }

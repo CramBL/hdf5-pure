@@ -46,6 +46,13 @@ impl AnalysisPhase<'_> {
 /// Includes collections referenced by root-reachable objects. Topology availability, reference
 /// interpretation, and collection framing are recorded separately. Exclusive ownership and
 /// retirement permission require separate evidence.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains owned phase metadata and an optional root identity"
+    )
+)]
 pub(in crate::edit) struct MemberAssociations {
     source: ReconstructionSource,
     root: Option<ObjectId>,
@@ -132,6 +139,7 @@ impl MemberAssociations {
     }
 
     /// Returns the physical root selected for topology discovery, if its address resolved.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.root
     }
@@ -139,6 +147,7 @@ impl MemberAssociations {
     /// Returns whether `source` has the same phase identity.
     ///
     /// Source freshness and ownership require separate evidence.
+    #[cfg(test)]
     pub(in crate::edit) fn matches_phase(&self, source: &ReconstructionSource) -> bool {
         Arc::ptr_eq(&self.source.identity, &source.identity)
     }
@@ -209,6 +218,7 @@ pub(in crate::edit) struct MemberAssociation {
 
 impl MemberAssociation {
     /// Borrows referring object identities in sorted order, with each object included once.
+    #[cfg(test)]
     pub(in crate::edit) fn referrers(&self) -> &[ObjectId] {
         &self.referrers
     }

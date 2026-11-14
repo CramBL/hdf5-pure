@@ -131,7 +131,7 @@ fn contradictory_original_counts_preserve_staging_before_writes(#[case] original
     engine.begin_commit(&staged);
     disk_log::start();
     let CommitPreparation::Rejected { staged, error } =
-        PreparedCommit::prepare_counted(&mut engine, staged)
+        PreparedCommit::prepare(&mut engine, staged)
     else {
         panic!("expected original count rejection");
     };
@@ -192,8 +192,7 @@ fn count_eligible_allocations_reach_reference_screening(#[case] copied: bool) {
     }
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    let CommitPreparation::Rejected { error, .. } =
-        PreparedCommit::prepare_counted(&mut engine, staged)
+    let CommitPreparation::Rejected { error, .. } = PreparedCommit::prepare(&mut engine, staged)
     else {
         panic!("expected reclaimed reference rejection");
     };
@@ -266,9 +265,7 @@ fn count_aware_value_preparation_skips_topology_discovery() {
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
     DISCOVERY_WORK.with(|work| work.set((0, 0)));
-    let CommitPreparation::Prepared(prepared) =
-        PreparedCommit::prepare_counted(&mut engine, staged)
-    else {
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(&mut engine, staged) else {
         panic!("expected in-place values");
     };
     assert!(matches!(prepared.plan, CommitPlan::InPlace(_)));
@@ -284,8 +281,7 @@ fn count_aware_value_preparation_skips_topology_discovery() {
 fn prepare(engine: &mut WriteEngine) -> PreparedTree {
     let staged = std::mem::take(&mut engine.staged);
     engine.begin_commit(&staged);
-    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare_counted(engine, staged)
-    else {
+    let CommitPreparation::Prepared(prepared) = PreparedCommit::prepare(engine, staged) else {
         panic!("expected count-aware tree preparation");
     };
     let CommitPlan::Tree(tree) = prepared.plan else {

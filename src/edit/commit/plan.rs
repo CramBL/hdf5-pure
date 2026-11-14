@@ -10,6 +10,7 @@ use std::vec;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
 
+use self::inventory::InventoryCapture;
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
@@ -41,19 +42,8 @@ pub(in crate::edit) use counts::CountProjectionError;
 pub(in crate::edit) use counts::CountProjectionProof;
 pub(super) use counts::PreparedTreeCounts;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "count projections are exercised by private owner tests"
-    )
-)]
 mod counts;
 
-#[expect(
-    dead_code,
-    reason = "prepared edit inventories have no retirement consumer"
-)]
 pub(super) mod inventory;
 
 #[cfg(test)]
@@ -70,26 +60,13 @@ pub(super) struct PreparedCommit {
 }
 
 impl PreparedCommit {
-    /// Plans edits with count-eligible retirement and checked replacement count records.
-    ///
-    /// Returns [`CommitPreparation::Rejected`] with the original staged inputs on failure.
-    /// In-place-only plans skip count discovery. Tree plans retain original count outcomes and
-    /// protected source updates.
-    pub(super) fn prepare_counted(
-        engine: &mut WriteEngine,
-        staged: StagedEdits,
-    ) -> CommitPreparation {
-        let plan = engine
-            .plan_commit_inner(&staged, false, true)
-            .map(|(plan, _)| plan);
-        Self::from_plan(plan, staged)
-    }
-
     /// Plans a commit, returning the original staged inputs on rejection.
     ///
     /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs
     /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
-    /// and the preparation error.
+    /// and the preparation error. The planner checks count projections and retirement for tree
+    /// plans with deletions or same-file copies. It skips count discovery for in-place-only plans.
+    #[cfg(test)]
     pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
         Self::from_plan(engine.plan_commit(&staged), staged)
     }
@@ -104,6 +81,7 @@ impl PreparedCommit {
         (plan, staged, overwrites)
     }
 
+    #[cfg(test)]
     fn from_plan(plan: Result<CommitPlan, Error>, staged: StagedEdits) -> CommitPreparation {
         match plan {
             Ok(mut plan) => {
@@ -126,6 +104,7 @@ impl PreparedCommit {
     clippy::large_enum_variant,
     reason = "returning rejected staging to the engine requires no heap allocation"
 )]
+#[cfg(test)]
 pub(super) enum CommitPreparation {
     /// A plan paired with the owned inputs needed for application.
     Prepared(PreparedCommit),
@@ -192,7 +171,7 @@ struct DatasetEdits {
     inplace_writes: Vec<InPlaceWrite>,
     moving_writes: Vec<DatasetRelocation>,
     write_targets: Vec<ObjectPathBuf>,
-    /// Collection candidates from original dataset attributes.
+    /// Collection candidates from original dataset attributes and overwritten values.
     collections: CollectionCandidates,
 }
 
@@ -230,7 +209,8 @@ pub(super) struct GroupHeaders {
 ///
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
-    /// Original count outcomes and checked source updates, absent for ordinary preparation.
+    /// Original count outcomes and checked source updates for deletions or same-file copies.
+    /// Absent for tree plans without either operation.
     pub(super) counts: Option<PreparedTreeCounts>,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
@@ -238,7 +218,7 @@ pub(super) struct PreparedTree {
     pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
     pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
-    /// Attribute and deletion candidates awaiting reference analysis from the replacement root.
+    /// Attribute, overwrite, and deletion candidates awaiting replacement-root reference analysis.
     pub(super) collection_candidates: CollectionCandidates,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
@@ -429,44 +409,35 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] if an edit cannot
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
+    #[cfg(test)]
     fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
-        self.plan_commit_with_inventory(staged, false)
+        self.plan_commit_with_inventory(staged, InventoryCapture::Omit)
             .map(|(plan, _)| plan)
     }
 
     /// Prepares edits with optional original observations from the same source phase.
     ///
-    /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
-    /// passes false. Count and ownership outcomes are retained in [`inventory::OriginalEdits`],
-    /// and predecessor outcomes in [`inventory::dispositions::ReconstructionDispositions`].
-    /// Captures original storage exclusions and reclamation spans with the same tree inputs.
+    /// Prepares counts for deletions or same-file copies independently of `capture`. Returns
+    /// numeric in-place plans before count or original-observation discovery. Returns
+    /// count-preparation errors before capturing original observations.
+    ///
+    /// With original observation enabled, merges candidates from overwritten values,
+    /// replaced or removed attributes, and all physical deletion targets independently of
+    /// count-eligible retirement. Collects original observations for tree plans selected by
+    /// `capture`. Retains additional count and ownership qualification outcomes in
+    /// [`inventory::OriginalEdits`] and predecessor outcomes in
+    /// [`inventory::dispositions::ReconstructionDispositions`]. Captures original storage
+    /// exclusions and reclamation spans with the same tree inputs.
     ///
     /// # Errors
     ///
-    /// Returns the planning errors described by [`Self::plan_commit`].
+    /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] for unsupported or
+    /// conflicting edits, and count-preparation errors from [`PreparedTreeCounts::prepare`].
+    /// Other read, parsing, preparation, candidate-discovery, and merge errors propagate.
     fn plan_commit_with_inventory(
         &mut self,
         staged: &StagedEdits,
-        capture: bool,
-    ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
-        self.plan_commit_inner(staged, capture, false)
-    }
-
-    /// Prepares edits with independent choices for original observations and count projections.
-    ///
-    /// With `counted`, applies local tree-count projections and uses eligible deletion allocations
-    /// for reference screening and retirement. Incomplete count evidence withholds deletion
-    /// allocations and collection candidates. With `capture`, retains original observations from
-    /// the same source phase. In-place-only plans skip both operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Self::plan_commit`] and [`PreparedTreeCounts::prepare`].
-    fn plan_commit_inner(
-        &mut self,
-        staged: &StagedEdits,
-        capture: bool,
-        counted: bool,
+        capture: InventoryCapture,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         self.preflight_narrow_references()?;
@@ -480,13 +451,21 @@ impl WriteEngine {
         self.prepare_value_writes(staged, &mut edits, &mut analysis)?;
         self.prepare_appends(staged, &mut edits, &mut analysis)?;
         self.prepare_dataset_attributes(staged, &mut edits, &mut analysis)?;
+        if capture.observes() {
+            edits
+                .collections
+                .extend(analysis.overwrite_collections(staged)?)?;
+        }
         let DatasetEdits {
             inplace_writes,
             moving_writes,
             write_targets,
             mut collections,
         } = edits;
-        if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
+        if moving_writes.is_empty()
+            && staged.scope() == StagedScope::Datasets
+            && collections.is_empty()
+        {
             return Ok((CommitPlan::InPlace(inplace_writes), None));
         }
         let mut moved_headers = moving_writes
@@ -506,6 +485,7 @@ impl WriteEngine {
                 .iter()
                 .map(|&(_, address)| address.header_address()),
         );
+        let counted = !staged.deletes().is_empty() || !staged.copies().is_empty();
         let mut counts = counted
             .then(|| PreparedTreeCounts::prepare(self, &mut analysis, &mut nodes, staged))
             .transpose()?;
@@ -525,9 +505,19 @@ impl WriteEngine {
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
-        if matches!(counts, Some(PreparedTreeCounts::Unavailable)) {
+        #[cfg(test)]
+        if matches!(capture, InventoryCapture::Omit)
+            && matches!(counts, Some(PreparedTreeCounts::Unavailable))
+        {
             collections = CollectionCandidates::default();
         }
+        if capture.observes() {
+            let targets = analysis
+                .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
+                .targets();
+            collections.extend(analysis.deleted_collections(&targets))?;
+        }
+        let capture = capture.includes(&collections);
         let mut headers = headers;
         headers
             .keys

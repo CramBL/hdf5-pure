@@ -30,6 +30,7 @@ use crate::edit::commit::plan::inventory::OriginalEdits;
 use crate::edit::commit::plan::inventory::dispositions::PlacementError;
 use crate::edit::commit::plan::inventory::dispositions::TransitionWithheld;
 use crate::edit::commit::plan::inventory::prospective::ProspectiveUnavailable;
+use crate::edit::commit::plan::inventory::prospective::ReferencePresence;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -317,10 +318,7 @@ fn unavailable_roots_and_reference_outcomes_remain_independent(#[case] failure: 
             ));
         }
         Unavailable::Content => {
-            assert_eq!(
-                prospective.unavailable(),
-                Some(&ProspectiveUnavailable::Original)
-            );
+            assert_eq!(prospective.unavailable(), None);
             assert!(!references.is_complete());
             assert!(references.error().is_none());
         }
@@ -337,6 +335,24 @@ fn unavailable_roots_and_reference_outcomes_remain_independent(#[case] failure: 
             );
         }
     }
+    assert_eq!(
+        prospective.member_presence(id(parent, 7)),
+        ReferencePresence::ObservedLive
+    );
+    assert_eq!(
+        prospective.parent_presence(PhysicalAddress::new(parent)),
+        ReferencePresence::ObservedLive
+    );
+    let absent = if matches!(failure, Unavailable::Collection) {
+        ReferencePresence::Unreferenced
+    } else {
+        ReferencePresence::Unavailable
+    };
+    assert_eq!(prospective.member_presence(id(parent, 91)), absent);
+    assert_eq!(
+        prospective.parent_presence(PhysicalAddress::new(parent + 1)),
+        absent
+    );
     if !matches!(failure, Unavailable::Collection) {
         assert!(!prospective.is_complete());
     }
@@ -402,6 +418,21 @@ fn prospective_decode_work_is_zero_for_empty_input_and_application_failure(#[cas
         assert!(pending.prospective().roots().is_empty());
         assert!(pending.prospective().unavailable().is_none());
         assert!(!pending.prospective().is_complete());
+        assert_eq!(
+            pending.prospective().member_presence(id(Fixture::ROOT, 7)),
+            ReferencePresence::Unavailable
+        );
+        assert_eq!(
+            pending
+                .prospective()
+                .parent_presence(PhysicalAddress::new(Fixture::ROOT)),
+            ReferencePresence::Unavailable
+        );
+        let decisions = pending.member_decisions();
+        assert_eq!(decisions.physical_members(), 0);
+        assert!(decisions.members().is_empty());
+        assert!(decisions.parents().is_empty());
+        assert!(decisions.plans().next().is_none());
     }
     assert_eq!(COLLECTION_WORK.with(Cell::get), (0, 0));
 }

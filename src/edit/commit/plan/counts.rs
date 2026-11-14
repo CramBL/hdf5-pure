@@ -4,12 +4,17 @@ use std::collections::BTreeMap;
 
 use crate::edit::analysis::CountPreflight;
 use crate::edit::analysis::CountProjectionIdentity;
+#[cfg(test)]
 use crate::edit::analysis::DeclaredCountChange;
+#[cfg(test)]
 use crate::edit::analysis::NetCountPlan;
 use crate::edit::analysis::ReconstructionSource;
+#[cfg(test)]
 use crate::edit::analysis::SourceRemovalPlan;
+use crate::edit::analysis::counts::changes::CountChange;
+#[cfg(test)]
+use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::analysis::counts::changes::owned::OwnedCountChange;
-use crate::edit::analysis::counts::changes::{CountChange, OriginalCount};
 use crate::edit::object_header::reference_count::HeaderCount;
 use crate::edit::object_header::reference_count::HeaderCountError;
 use crate::object_graph::ObjectId;
@@ -31,6 +36,7 @@ pub(super) struct PreparedCounts<'region, Change> {
     disposition: CountDisposition<Change>,
 }
 
+#[cfg(test)]
 impl<'region, 'plan, 'source> PreparedCounts<'region, DeclaredCountChange<'plan, 'source>> {
     /// Matches declared count changes to checked owned replacement records in one batch.
     ///
@@ -46,6 +52,7 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, DeclaredCountChange<'plan,
     /// [`CountProjectionError::Region`] for invalid framing in a matching region, or
     /// [`CountProjectionError::Original`] if a supported local count differs from its original
     /// source-bound count. Every owned record region remains unchanged on failure.
+    #[cfg(test)]
     pub(super) fn new(
         plan: Option<&'plan SourceRemovalPlan<'_, 'source>>,
         groups: impl IntoIterator<Item = &'region mut PreparedGroup>,
@@ -89,6 +96,7 @@ impl<'region, 'plan, 'source> PreparedCounts<'region, CountChange<'plan, 'source
     /// [`CountProjectionError::Region`] for invalid matching framing, or
     /// [`CountProjectionError::Original`] if a supported local count differs from its original
     /// source-bound count.
+    #[cfg(test)]
     pub(super) fn combined(
         plan: &'plan NetCountPlan<'_, 'source>,
         groups: impl IntoIterator<Item = &'region mut PreparedGroup>,

@@ -17,6 +17,7 @@ use crate::edit::analysis::deletions::TopologyIdentity;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
+#[cfg(test)]
 use crate::object_graph::ObjectIndex;
 
 use super::SourceRemovalPlan;
@@ -38,6 +39,7 @@ impl SourceRemovalPlan<'_, '_> {
     /// if a nonempty batch's topology root differs from the engine's root, or
     /// [`CountHandoffError::Source`] for root-address errors or a positive changed count without
     /// an explicit source field.
+    #[cfg(test)]
     pub(in crate::edit) fn surviving_counts(
         &self,
         engine: &WriteEngine,
@@ -129,6 +131,7 @@ impl SurvivingCounts {
     /// Builds indexes for reconstruction identities and surviving allocations. Borrows allocator
     /// lists without cloning them or expanding pages. Uses existing metadata without reading the
     /// source or discovering topology.
+    #[cfg(test)]
     pub(in crate::edit) fn protect<'origin>(
         self,
         engine: &WriteEngine,
@@ -150,6 +153,7 @@ impl SurvivingCounts {
     /// Returns whether this batch is empty or its recorded allocation session matches `engine`.
     ///
     /// Session equality is independent of source freshness.
+    #[cfg(test)]
     pub(in crate::edit) fn same_session(&self, engine: &WriteEngine) -> bool {
         self.source
             .as_ref()
@@ -159,6 +163,7 @@ impl SurvivingCounts {
     /// Returns whether a nonempty batch and `source` share the same phase identity.
     ///
     /// Compares phase identity independently of the physical object.
+    #[cfg(test)]
     pub(in crate::edit) fn shares_phase(&self, source: &ReconstructionSource) -> bool {
         self.source
             .as_ref()
@@ -166,11 +171,13 @@ impl SurvivingCounts {
     }
 
     /// Returns the original physical topology root, or `None` for an empty batch.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.source.as_ref().map(|source| source.root)
     }
 
     /// Borrows known positive count changes in the source plan's topology-index order.
+    #[cfg(test)]
     pub(in crate::edit) fn updates(&self) -> &[SurvivingCount] {
         &self.updates
     }
@@ -188,21 +195,25 @@ pub(in crate::edit) struct SurvivingCount {
 
 impl SurvivingCount {
     /// Returns the physical identity of the original source object.
+    #[cfg(test)]
     pub(in crate::edit) fn object(&self) -> ObjectId {
         self.object
     }
 
     /// Returns the original observed count with its physical field and complete chunk associations.
+    #[cfg(test)]
     pub(in crate::edit) fn field(&self) -> ObjectReferenceCountField {
         self.field
     }
 
     /// Returns the positive planned declared net count.
+    #[cfg(test)]
     pub(in crate::edit) fn count(&self) -> NonZeroU32 {
         self.count
     }
 
     /// Returns the original checked complete header allocation, if available.
+    #[cfg(test)]
     pub(in crate::edit) fn header_allocation(&self) -> Option<HeaderCountAllocation> {
         self.allocation
     }
@@ -289,7 +300,46 @@ impl ProtectedCounts {
         })
     }
 
+    /// Checks the recorded engine associations and an optional source root and phase.
+    ///
+    /// Checks the allocation session, engine root, and publication availability for a nonempty
+    /// batch. If `source` is present, also checks its physical root and phase identity. For an empty
+    /// batch, skips both inputs. Source freshness requires separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountProtectionError::Session`] for a different allocation session,
+    /// [`CountProtectionError::Root`] for a different engine or supplied root, or
+    /// [`CountProtectionError::Phase`] for a supplied source from another phase. Returns
+    /// [`CountProtectionError::Publication`] if allocation publication is unavailable, or
+    /// [`CountProtectionError::Source`] for root-address errors.
+    pub(in crate::edit) fn check_association(
+        &self,
+        engine: &WriteEngine,
+        source: Option<&ReconstructionSource>,
+    ) -> Result<(), CountProtectionError> {
+        let Some(origin) = &self.source else {
+            return Ok(());
+        };
+        origin.reconstructions(engine, [])?;
+        if let Some(source) = source {
+            if origin.root != source.object() {
+                return Err(CountProtectionError::Root {
+                    expected: origin.root,
+                    actual: source.object(),
+                });
+            }
+            if !Arc::ptr_eq(&origin.identity, &source.identity) {
+                return Err(CountProtectionError::Phase {
+                    object: source.object(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the original physical topology root, or `None` for an empty batch.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.source.as_ref().map(|source| source.root)
     }
@@ -456,6 +506,7 @@ pub(in crate::edit) enum CountHandoffError {
     /// A supplied engine different from the plan's borrowed engine.
     Engine,
     /// A nonempty handoff whose topology root differs from the engine's superblock root.
+    #[cfg(test)]
     Root {
         /// The physical root of the removal topology.
         expected: ObjectId,
@@ -463,6 +514,7 @@ pub(in crate::edit) enum CountHandoffError {
         actual: ObjectId,
     },
     /// A root-address error or a positive changed count without an explicit source field.
+    #[cfg(test)]
     Source(FormatError),
 }
 
@@ -525,6 +577,13 @@ impl CountSource {
 
 /// An inapplicable source association, incomplete allocation, or conflicting allocator claim.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum CountProtectionError {
     /// Aggregate spare intersecting a complete original allocation.
     Aggregate {
@@ -579,11 +638,11 @@ pub(in crate::edit) enum CountProtectionError {
         /// The intersecting reusable range.
         reusable: FileRange,
     },
-    /// A physical superblock root different from the original topology root.
+    /// A physical root different from the original topology root.
     Root {
         /// The original topology root.
         expected: ObjectId,
-        /// The root resolved from the engine's superblock context.
+        /// The root resolved from the engine or supplied in a source association.
         actual: ObjectId,
     },
     /// An engine from a different allocation session.

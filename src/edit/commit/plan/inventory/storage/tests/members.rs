@@ -88,9 +88,9 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
         decisions.parents()[&PhysicalAddress::new(parent)],
         Err(ParentUnavailable::Unmatched)
     );
-    assert_eq!(decisions.plans().len(), 1);
-    assert_eq!(decisions.plans()[0].retained(), 2);
-    let range = decisions.plans()[0].range();
+    assert_eq!(decisions.plans().count(), 1);
+    assert_eq!(decisions.plans().next().unwrap().retained(), 2);
+    let range = decisions.plans().next().unwrap().range();
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();
     let OriginalQualification::Qualified(qualification) = completion.collections.qualification()
@@ -120,6 +120,7 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
         engine.image(),
         engine.widths().lengths,
         PhysicalAddress::new(parent),
+        |_| {},
     )
     .unwrap();
     assert_eq!(contents.range(), range);
@@ -193,7 +194,7 @@ fn prospective_references_preserve_observed_members(#[case] retained: bool) {
         decisions.members().values().copied().collect::<Vec<_>>(),
         [Ok(MemberDecision::Live)]
     );
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
     let completion = match pending.publish_compacting_members() {
         Ok(completion) => completion,
         Err(failure) => match *failure {
@@ -235,10 +236,14 @@ fn translated_retained_roots_preserve_their_observed_members(#[case] aliased: bo
         .image()
         .read_exact_at(parent, usize::try_from(owner - parent).unwrap())
         .unwrap();
-    let pending = super::prepare(&mut engine)
-        .apply_excluding(&mut engine)
-        .ok()
-        .unwrap();
+    let mut applied = super::prepare(&mut engine).apply(&mut engine).unwrap();
+    if !aliased {
+        applied.tree.freed.push((
+            super::range(owner, owner_end - owner),
+            FreeClass::Page(PageType::Meta),
+        ));
+    }
+    let pending = PendingEditInventory::new(&mut engine, applied);
     assert!(pending.prospective().is_complete());
     assert!(
         pending
@@ -251,7 +256,7 @@ fn translated_retained_roots_preserve_their_observed_members(#[case] aliased: bo
         decisions.members().values().copied().collect::<Vec<_>>(),
         [Ok(MemberDecision::Live)]
     );
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
     disk_log::start();
     let result = pending.publish_compacting_members();
     let recording = disk_log::finish();
@@ -341,7 +346,7 @@ fn original_and_prospective_restrictions_withhold_compaction(#[case] missing: bo
             Ok(MemberDecision::Prospective)
         }
     );
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
 }
 
 #[test]
@@ -393,7 +398,7 @@ fn incomplete_prospective_interpretation_preserves_a_qualified_parent() {
         decisions.members().values().copied().collect::<Vec<_>>(),
         [Ok(MemberDecision::Prospective)]
     );
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();
     assert!(!completion.prospective.is_complete());
@@ -414,8 +419,8 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batch.h5");
     let mut fixture = Fixture::new();
-    let first = fixture.collection(&[Object::new(7, b"first")]);
-    let second = fixture.collection(&[Object::new(7, b"second")]);
+    let first = fixture.collection(&[Object::new(7, b"first"), Object::new(91, b"retained")]);
+    let second = fixture.collection(&[Object::new(7, b"second"), Object::new(91, b"retained")]);
     let mut messages =
         Form::CompactDataset.messages(&mut fixture, &crate::make_i32_type(), &1_i32.to_le_bytes());
     let mut descriptors = global_heap_fixture::reference(5, first, 7);
@@ -434,9 +439,15 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
         .ok()
         .unwrap();
     let decisions = pending.member_decisions();
-    assert_eq!(decisions.plans().len(), 2);
-    let second_range = decisions.plans()[1].range();
-    let second_header = decisions.plans()[1].free_space().unwrap().header_range();
+    assert_eq!(decisions.plans().count(), 2);
+    let second_range = decisions.plans().nth(1).unwrap().range();
+    let second_header = decisions
+        .plans()
+        .nth(1)
+        .unwrap()
+        .free_space()
+        .unwrap()
+        .header_range();
     disk_log::start();
     let completion = pending.publish_compacting_members().ok().unwrap();
     let recording = disk_log::finish();
@@ -448,27 +459,38 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
             .values()
             .copied()
             .collect::<Vec<_>>(),
-        [Ok(MemberDecision::Remove), Ok(MemberDecision::Remove)]
+        [
+            Err(ParentUnavailable::Unmatched),
+            Err(ParentUnavailable::Unmatched)
+        ]
     );
-    assert!(
+    assert_eq!(
         crate::global_heap::collect_members(
             engine.image(),
             engine.widths().lengths,
-            PhysicalAddress::new(first)
+            PhysicalAddress::new(first),
+            |_| {}
         )
         .unwrap()
         .members()
-        .is_empty()
+        .iter()
+        .map(|member| member.index().get())
+        .collect::<Vec<_>>(),
+        [91]
     );
-    assert!(
+    assert_eq!(
         crate::global_heap::collect_members(
             engine.image(),
             engine.widths().lengths,
-            PhysicalAddress::new(second)
+            PhysicalAddress::new(second),
+            |_| {}
         )
         .unwrap()
         .members()
-        .is_empty()
+        .iter()
+        .map(|member| member.index().get())
+        .collect::<Vec<_>>(),
+        [91]
     );
     if matches!(outcome, Completion::Success) {
         return;
@@ -543,15 +565,19 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
         };
         assert_eq!(error.kind(), ErrorKind::Other);
         assert_eq!(error.to_string(), "injected disk write failure");
-        assert!(
+        assert_eq!(
             crate::global_heap::collect_members(
                 engine.image(),
                 engine.widths().lengths,
-                PhysicalAddress::new(first)
+                PhysicalAddress::new(first),
+                |_| {}
             )
             .unwrap()
             .members()
-            .is_empty()
+            .iter()
+            .map(|member| member.index().get())
+            .collect::<Vec<_>>(),
+            [91]
         );
         assert_eq!(
             engine

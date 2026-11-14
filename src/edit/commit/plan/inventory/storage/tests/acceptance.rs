@@ -292,6 +292,7 @@ fn storage_capture_reuses_original_observations() {
     use crate::edit::analysis::AnalysisPhase;
     use crate::edit::analysis::ownership::OWNERSHIP_READS;
     use crate::edit::analysis::{COLLECTION_ALLOCATIONS, COLLECTION_WORK, DISCOVERY_WORK};
+    use crate::edit::commit::plan::inventory::InventoryCapture;
     use crate::edit::commit::plan::inventory::OriginalEdits;
     use crate::edit::commit::plan::inventory::dispositions::ReconstructionDispositions;
     use crate::edit::commit::plan::inventory::storage::OriginalStorage;
@@ -316,8 +317,9 @@ fn storage_capture_reuses_original_observations() {
     let (mut engine, calls) = edit_test_util::open_counted_engine(&path);
     engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
     let staged = std::mem::take(&mut engine.staged);
-    let (CommitPlan::Tree(mut tree), _) =
-        engine.plan_commit_with_inventory(&staged, false).unwrap()
+    let (CommitPlan::Tree(mut tree), _) = engine
+        .plan_commit_with_inventory(&staged, InventoryCapture::Omit)
+        .unwrap()
     else {
         panic!("expected prepared tree edits");
     };
@@ -367,7 +369,8 @@ fn storage_capture_reuses_original_observations() {
         "{:?}",
         storage.unavailable()
     );
-    assert_eq!(storage.allocations().len(), 2);
+    assert_eq!(storage.allocations().len(), 3);
+    assert!(storage.allocations().iter().any(|allocation| allocation.range == super::range(parent, 4096) && matches!(allocation.origin, StorageOrigin::Parent { address, class: None } if address.get() == parent)));
     assert!(
         storage
             .allocations()

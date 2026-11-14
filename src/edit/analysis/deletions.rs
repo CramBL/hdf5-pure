@@ -26,20 +26,15 @@ pub(in crate::edit) use counts::{
     CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
 };
 
+#[cfg(test)]
 pub(in crate::edit) use counts::DeclaredCountChange;
+#[cfg(test)]
 pub(in crate::edit) use counts::SourceRemovalPlan;
 pub(in crate::edit) use counts::{
     CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
     OriginalOwnerInventory,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "graph-relative count transitions do not authorize allocation retirement"
-    )
-)]
 mod counts;
 
 /// A leaf name paired with its physical target and any complete-topology edge identity.
@@ -144,8 +139,22 @@ impl RemovedLinks<'_, '_> {
         self,
         out: &mut Vec<(FileRange, FreeClass)>,
     ) -> Vec<ObjectId> {
+        let topology = self.topology;
+        let targets = self.targets();
+        if let Some(topology) = topology {
+            for &target in &targets {
+                topology.collect_free_spans(target, 0, out);
+            }
+        }
+        targets
+    }
+
+    /// Returns distinct physical deletion targets in address order.
+    ///
+    /// Includes unresolved targets independently of topology and allocation-retirement eligibility.
+    pub(in crate::edit) fn targets(self) -> Vec<ObjectId> {
         let Self {
-            topology,
+            topology: _,
             edges,
             unresolved,
         } = self;
@@ -156,11 +165,6 @@ impl RemovedLinks<'_, '_> {
             .collect::<Vec<_>>();
         targets.sort_unstable();
         targets.dedup();
-        if let Some(topology) = topology {
-            for &target in &targets {
-                topology.collect_free_spans(target, 0, out);
-            }
-        }
         targets
     }
 }
@@ -219,6 +223,7 @@ impl<'source> AnalysisPhase<'source> {
             value_references: _,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;

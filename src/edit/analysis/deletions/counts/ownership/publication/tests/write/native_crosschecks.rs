@@ -29,10 +29,7 @@ fn native_readers_observe_the_published_count_and_surviving_values(
     );
     let mut engine = edit_test_util::open_engine(&path);
     completion_tests::bounds(&mut engine, vec![], &[removed])
-        .with_publication(BTreeMap::new(), |scope| {
-            scope.unwrap().write_counts().unwrap();
-            Ok(())
-        })
+        .with_ordered_counts(BTreeMap::new(), |_| Ok(()))
         .unwrap();
     drop(engine);
     let native = file::libhdf5_open(&path);

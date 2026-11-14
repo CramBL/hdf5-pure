@@ -92,6 +92,7 @@ impl OwnedCountChange {
     }
 
     /// Returns the original physical count field, or `None` for an implicit count.
+    #[cfg(test)]
     pub(in crate::edit) fn field(&self) -> Option<ObjectReferenceCountField> {
         self.field
     }
@@ -186,6 +187,13 @@ impl OwnedOriginalCount {
 /// Every variant retains the original entry. Allocation ownership, source freshness, and write or
 /// retirement permissions require separate evidence, including for positive explicit counts.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum CountDisposition<'a> {
     /// A changed zero count outside [`OwnedOriginalCount::Ordinary`].
     Retain(&'a OwnedCountChange),

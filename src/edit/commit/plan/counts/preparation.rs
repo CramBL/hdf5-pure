@@ -7,10 +7,12 @@ use hdf5_pure_space::__private::FreeClass;
 
 use super::PreparedCounts;
 use crate::edit::WriteEngine;
+#[cfg(test)]
+use crate::edit::analysis::CountHandoffError;
 use crate::edit::analysis::counts::{CopyUsersError, CountEvidenceError};
 use crate::edit::analysis::{
-    AnalysisPhase, CountHandoffError, CountInventory, CountPreflightError, CountProtectionError,
-    NetCountError, ProtectedCounts,
+    AnalysisPhase, CountInventory, CountPreflightError, CountProtectionError, NetCountError,
+    ProtectedCounts,
 };
 use crate::edit::commit::plan::Node;
 use crate::edit::commit::plan::inventory::{EditInputError, OriginalEdits};
@@ -24,6 +26,13 @@ use crate::object_path::ObjectPathBuf;
 /// The editor applies local count projections before constructing a complete result. Original
 /// source fields remain unchanged. Source freshness and publication permission are separate
 /// requirements.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the owned state retains the checked evidence until its consuming boundary"
+    )
+)]
 pub(in crate::edit::commit) enum PreparedTreeCounts {
     /// Complete numeric count planning with local projections applied.
     Complete {
@@ -38,7 +47,8 @@ pub(in crate::edit::commit) enum PreparedTreeCounts {
         /// Supported original allocations, moved into the tree before reference screening.
         retirement: Vec<(FileRange, FreeClass)>,
     },
-    /// Incomplete count evidence, with deletion allocations and collection candidates withheld.
+    /// Incomplete count evidence, with deletion allocations withheld from retirement.
+    /// The inventory planner retains independently collected heap candidates.
     Unavailable,
 }
 
@@ -108,11 +118,16 @@ impl PreparedTreeCounts {
         })
     }
 
-    fn input_error(error: EditInputError) -> Error {
+    /// Converts count-input failures with their original source errors and contradiction fields.
+    ///
+    /// Reports count overflow and incomplete copy users as [`Error::EditUnsupported`], and
+    /// incompatible inputs as [`FormatError::Internal`].
+    pub(in crate::edit::commit) fn input_error(error: EditInputError) -> Error {
         match error {
             EditInputError::Copy(error) => error,
-            EditInputError::Handoff(CountHandoffError::Source(error))
-            | EditInputError::Users(CopyUsersError::Address(error))
+            #[cfg(test)]
+            EditInputError::Handoff(CountHandoffError::Source(error)) => error.into(),
+            EditInputError::Users(CopyUsersError::Address(error))
             | EditInputError::Counts(NetCountError::Association(CopyUsersError::Address(error))) => {
                 error.into()
             }

@@ -290,6 +290,7 @@ impl CountPreflight {
     }
 
     /// Returns the original physical root, or `None` for an empty inventory.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
         self.inventory.root()
     }
@@ -300,6 +301,7 @@ impl CountPreflight {
     }
 
     /// Borrows the positive source updates and their checked complete allocations.
+    #[cfg(test)]
     pub(in crate::edit) fn protected(&self) -> &ProtectedCounts {
         &self.protected
     }
@@ -360,6 +362,13 @@ struct ProjectionIdentity;
 
 /// Unsupported owned count facts or an inapplicable source-allocation association.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the state retains original observations for failure and qualification diagnostics"
+    )
+)]
 pub(in crate::edit) enum CountPreflightError {
     /// A changed positive implicit count without a matching reconstruction.
     MissingField {
