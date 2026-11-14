@@ -388,6 +388,7 @@ sha2 = { version = "0.11", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
+zerocopy = { version = "=0.8.63", default-features = false, features = ["derive"] }
 heapscope.workspace = true
 insta.workspace = true
 proptest.workspace = true
@@ -417,6 +418,12 @@ name = "width_benchmarks"
 path = "examples/width_benchmarks/main.rs"
 required-features = ["std", "deflate"]
 test = true
+
+# Compare private fixed-record representations with shared semantic values.
+[[example]]
+name = "fixed_record_comparison"
+path = "examples/fixed_record_comparison/main.rs"
+test = false
 
 [[bench]]
 name = "filtered_chunks"
