@@ -80,9 +80,9 @@ fn confirmed_scope_keeps_original_facts_and_consumes_the_original_retirement_car
             usize::try_from(field.range().length()).unwrap(),
         )
         .unwrap();
-    let result = bounds
-        .with_publication(BTreeMap::new(), |scope| {
-            let scope = scope.unwrap();
+    let result = with_unchecked_carrier(bounds, |engine, pending, request| {
+        engine.publish_pending_tree_with_completion(pending, BTreeMap::new(), |published| {
+            let scope = request.into_write_scope(published).unwrap();
             assert_eq!(scope.counts.root(), original_root);
             assert_eq!(scope.root, root);
             assert_eq!(scope.end, end);
@@ -126,7 +126,8 @@ fn confirmed_scope_keeps_original_facts_and_consumes_the_original_retirement_car
             );
             Ok((scope.root, scope.end))
         })
-        .unwrap();
+    })
+    .unwrap();
     assert_eq!(result, (root, end));
     assert_eq!(
         engine
@@ -239,9 +240,9 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
         .unwrap()
         .at_end(proposed_end)
         .unwrap_or_else(|failure| panic!("{:?}", failure.error));
-    let (final_root, confirmed_end) = bounds
-        .with_publication(BTreeMap::new(), |scope| {
-            let scope = scope.unwrap();
+    let (final_root, confirmed_end) = with_unchecked_carrier(bounds, |engine, pending, request| {
+        engine.publish_pending_tree_with_completion(pending, BTreeMap::new(), |published| {
+            let scope = request.into_write_scope(published).unwrap();
             let confirmed_root = scope
                 .engine
                 .addresses()
@@ -293,7 +294,8 @@ fn confirmed_scope_uses_the_adopted_root_and_eoa(#[case] change: PublicationChan
             }
             Ok((scope.root, scope.end))
         })
-        .unwrap();
+    })
+    .unwrap();
     drop(engine);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), confirmed_end.get());
     let file = File::open(&path).unwrap();
@@ -361,7 +363,7 @@ fn a_failed_attempt_cannot_use_an_earlier_same_root_confirmation() {
     let called = Cell::new(false);
     disk_log::start();
     disk_log::fail_sync_after(0, FailurePoint::Before);
-    let result = bounds.with_publication(BTreeMap::new(), |_| {
+    let result = bounds.with_ordered_counts(BTreeMap::new(), |_| {
         called.set(true);
         Ok(())
     });
@@ -551,6 +553,7 @@ fn reclamation_fixture(path: &Path) {
     );
 }
 
+/// Loans the engine and passes the original retirement carrier and completion request to `apply`.
 fn with_unchecked_carrier<T>(
     bounds: CountPublicationBounds<'_>,
     apply: impl for<'scope> FnOnce(
@@ -573,6 +576,13 @@ fn with_unchecked_carrier<T>(
     apply(engine, retirement, request)
 }
 
+/// Prepares protected counts and a replacement root with the selected links removed.
+///
+/// Checks complete count allocations against `retired` and the physical EOA after root placement.
+///
+/// # Panics
+///
+/// Panics if count discovery, protection, root placement, or publication-bounds checks fail.
 pub(super) fn bounds<'engine>(
     engine: &'engine mut WriteEngine,
     retired: Vec<(FileRange, FreeClass)>,
