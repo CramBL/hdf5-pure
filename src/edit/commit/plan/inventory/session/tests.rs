@@ -38,7 +38,7 @@ fn session_parent_retirement_preserves_unrelated_unknown_storage(
 ) {
     let path = test_util::temp::temp_path("session-parent-retirement.h5");
     let (mut engine, other) = fixture(&path, page, mirror);
-    let original = fs::read(&path).unwrap();
+    let original = engine.disk_bytes().unwrap();
     let parent = engine.vl_overwrite_heaps[&ObjectPathBuf::parse("labels")][0];
     stage(&mut engine);
     let snapshot = engine.snapshot_free();
