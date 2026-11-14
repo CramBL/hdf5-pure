@@ -8,6 +8,7 @@ use rstest::rstest;
 use test_util::disk_log::{self, FailurePoint, IoEvent, IoOutcome, Recording};
 use test_util::global_heap::{self, Object};
 use test_util::object_header::Message;
+use test_util::object_header::v2::{Header, Timestamps};
 use test_util::superblock;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
@@ -30,7 +31,7 @@ fn public_heap_preparation_rejection_keeps_the_complete_staged_batch(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rejected.h5");
-    let fixture = Scenario::write(&path, true);
+    let fixture = Scenario::write(&path, true, 1);
     let file = open(&path, backing, buffering, SyncPolicy::OnClose);
     fixture.stage(&file);
     file.root().delete("alias").unwrap();
@@ -107,11 +108,13 @@ impl Scenario {
     /// Writes heap-backed attributes, numeric data, and an aliased owner with a selected count.
     ///
     /// `contradiction` selects a stored owner count of one for two known hard links.
+    /// Writes `timestamp` to the access, modification, change, and birth fields of the `value`
+    /// header.
     ///
     /// # Panics
     ///
     /// Panics if fixture construction, writing, or reading fails.
-    fn write(path: &Path, contradiction: bool) -> Self {
+    fn write(path: &Path, contradiction: bool, timestamp: u32) -> Self {
         let mut fixture = Fixture::new();
         let parents = std::array::from_fn(|_| {
             fixture.collection(&[Object::new(7, b"removed"), Object::new(91, b"retained")])
@@ -130,7 +133,17 @@ impl Scenario {
             &global_heap_fixture::vlen_string(),
             &references,
         ));
-        fixture.object("value", records);
+        let header = Header::new()
+            .timestamps(Timestamps {
+                access: timestamp,
+                modification: timestamp,
+                change: timestamp,
+                birth: timestamp,
+            })
+            .messages(records)
+            .build();
+        let address = u64::try_from(fixture.image.append(&header)).unwrap();
+        fixture.link("value", address);
         let mut records = Form::CompactDataset.messages(
             &mut fixture,
             &crate::make_i32_type(),
@@ -249,6 +262,8 @@ impl Fault {
     /// Executes a control commit, injects the selected failure, and checks public outcomes.
     ///
     /// Checks issued bytes before retry or close, then checks permitted edits and reopened values.
+    /// The control and failing sources have matching parent and owner addresses and image lengths,
+    /// with different fixed header timestamps.
     ///
     /// # Panics
     ///
@@ -258,14 +273,18 @@ impl Fault {
         let directory = tempfile::tempdir().unwrap();
         let control = directory.path().join("control.h5");
         let path = directory.path().join("failure.h5");
-        let fixture = Scenario::write(&control, false);
-        fs::write(&path, &fixture.original).unwrap();
+        let reference = Scenario::write(&control, false, 1);
+        let fixture = Scenario::write(&path, false, 2);
+        assert_eq!(reference.parents, fixture.parents);
+        assert_eq!(reference.owner, fixture.owner);
+        assert_eq!(reference.original.len(), fixture.original.len());
+        assert_ne!(reference.original, fixture.original);
         let file = open(&control, backing, buffering, sync);
-        fixture.stage(&file);
+        reference.stage(&file);
         disk_log::start();
         file.commit().unwrap();
         let control = disk_log::finish();
-        fixture.assert_parents(&file.disk_bytes().unwrap(), 3);
+        reference.assert_parents(&file.disk_bytes().unwrap(), 3);
         let schedule = fault.schedule(&control, &fixture.parents);
         file.close().unwrap();
         let file = open(&path, backing, buffering, sync);
@@ -297,7 +316,7 @@ impl Fault {
         if !fault.uncertain() {
             fixture.assert_allocated(&file);
         }
-        fault.assert_publication(&control, &failed, &fixture.original, &after);
+        fault.assert_publication(&failed, &fixture.original, &after);
         if fault.before() {
             assert_eq!(file.reusable_free_sections().unwrap(), original_free);
         }
@@ -564,14 +583,9 @@ impl Fault {
     /// barrier.
     ///
     /// The superblock interval is established from the independent fixture builder and source
-    /// prefix. Bytes after that interval are compared with the successful prepublication writes.
-    fn assert_publication(
-        self,
-        control: &Recording,
-        failed: &Recording,
-        original: &[u8],
-        after: &[u8],
-    ) {
+    /// prefix. Reconstructs expected bytes after that interval from the failed attempt's completed
+    /// prepublication operations.
+    fn assert_publication(self, failed: &Recording, original: &[u8], after: &[u8]) {
         let superblock = fixture_superblock_size(original);
         let publication = failed
             .events
@@ -586,18 +600,13 @@ impl Fault {
                     .all(|event| !matches!(event, IoEvent::Write { .. } | IoEvent::Resize { .. }))
             );
             let mut retained = original.to_vec();
-            let root = control
-                .events
-                .iter()
-                .position(|event| matches!(event, IoEvent::Write { offset: 0, .. }))
-                .unwrap();
-            for event in &control.events[..root] {
+            for event in &failed.events[..publication] {
                 if let Some(operation) = event.operation() {
-                    control.operations[operation].apply(&mut retained);
+                    failed.operations[operation].apply(&mut retained);
                 }
             }
             assert!(after.len() >= retained.len());
-            let IoEvent::Write { requested, .. } = control.events[root] else {
+            let IoEvent::Write { requested, .. } = failed.events[publication] else {
                 panic!("expected a superblock write");
             };
             assert_eq!(requested, superblock);

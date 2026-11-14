@@ -198,7 +198,7 @@ impl Fault {
         );
         stored.close().unwrap();
         parent.assert_unchanged(&after);
-        fault.assert_publication(&recording, &failed, &original, &after);
+        fault.assert_publication(&failed, &original, &after);
         assert_values(
             &file,
             fault.confirmed(),
