@@ -45,7 +45,10 @@ mod filter_pipeline;
 mod fixed_array;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "only unit tests use fixed-record codecs")
+    expect(
+        dead_code,
+        reason = "only unit tests use the complete fixed-record codec set"
+    )
 )]
 mod fixed_record;
 #[cfg(test)]

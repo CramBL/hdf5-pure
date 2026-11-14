@@ -151,10 +151,6 @@ impl RecordOutput<'_> {
 ///
 /// Supply a [`FixedRecord`] codec for each field, including nested records. The optional value type
 /// implements [`RecordValue`] for construction from the generated semantic fields.
-#[cfg_attr(
-    not(test),
-    expect(unused_macros, reason = "only unit tests declare fixed records")
-)]
 macro_rules! fixed_record {
     (
         $(#[$attribute:meta])*
@@ -253,10 +249,6 @@ macro_rules! fixed_record {
     };
 }
 
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "only unit tests declare fixed records")
-)]
 pub(crate) use fixed_record;
 
 macro_rules! integer_codecs {

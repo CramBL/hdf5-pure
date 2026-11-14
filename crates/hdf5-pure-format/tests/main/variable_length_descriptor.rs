@@ -153,3 +153,39 @@ fn assert_descriptor(count: u32, address: Address, index: u32) {
     );
     assert_eq!(parsed_output, expected);
 }
+
+#[rstest]
+#[case::two(Address::Two(0x1234))]
+#[case::four(Address::Four(0x1234_5678))]
+#[case::eight(Address::Eight(0x1234_5678_9abc_def0))]
+fn variable_length_descriptors_read_and_write_unaligned_buffers(#[case] address: Address) {
+    let offsets = OffsetWidth::try_from(address.width()).unwrap();
+    let expected = address.descriptor(0x1234_5678, 0x90ab_cdef);
+    let mut input = Aligned([0xab; 32]);
+    input.0[1..1 + expected.len()].copy_from_slice(&expected);
+    assert_eq!(input.0[1..].as_ptr().addr() % 8, 1);
+    let (descriptor, consumed) = VariableLengthDescriptor::parse(offsets, &input.0[1..]).unwrap();
+    assert_eq!(consumed, expected.len());
+    assert_eq!(descriptor.element_count(), 0x1234_5678);
+    assert_eq!(
+        descriptor.collection_address(),
+        StoredAddress::new(address.get())
+    );
+    assert_eq!(descriptor.object_index(), 0x90ab_cdef);
+    assert_eq!(descriptor.offset_width(), offsets);
+    let mut output = Aligned([0xcd; 32]);
+    assert_eq!(output.0[1..].as_ptr().addr() % 8, 1);
+    assert_eq!(
+        descriptor.write_into(&mut output.0[1..]).unwrap(),
+        expected.len()
+    );
+    assert_eq!(&output.0[1..1 + expected.len()], expected);
+    assert_eq!(output.0[0], 0xcd);
+    assert_eq!(
+        &output.0[1 + expected.len()..],
+        &vec![0xcd; 31 - expected.len()]
+    );
+}
+
+#[repr(align(8))]
+struct Aligned([u8; 32]);
