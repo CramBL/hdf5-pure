@@ -43,6 +43,11 @@ mod file_space_info;
 mod fill_value;
 mod filter_pipeline;
 mod fixed_array;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only unit tests use fixed-record codecs")
+)]
+mod fixed_record;
 #[cfg(test)]
 mod fixture;
 mod fractal_heap;
