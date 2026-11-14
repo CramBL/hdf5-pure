@@ -10,6 +10,7 @@ use test_util_hdf5::file;
 use test_util_hdf5::file_space::persisted::PersistedStrategy;
 use test_util_hdf5::global_heap::attributes;
 use test_util_hdf5::global_heap_fixture::members::{Buffering, ParentImage};
+use test_util_hdf5::numeric::ByteOrder;
 
 use super::Fault;
 use crate::page_publication_failure::PagePublicationFailure;
@@ -290,7 +291,7 @@ impl Fault {
     }
 }
 
-/// Writes a native source with eight-byte widths, root attributes, and numeric data.
+/// Writes a native source with eight-byte widths, root attributes, and little-endian integers.
 ///
 /// # Panics
 ///
@@ -305,7 +306,7 @@ fn write_source(path: &Path, settings: FileSpaceSettings) {
     );
     native
         .new_dataset_builder()
-        .with_data(&[17_i32])
+        .with_data_as(&[17_i32], ByteOrder::LittleEndian.i32_datatype())
         .create("numbers")
         .unwrap();
     attributes::write_ascii(&native, "first", "removed");
