@@ -32,6 +32,7 @@ mod convert;
 mod data_layout;
 mod dataspace;
 mod datatype;
+mod decode;
 mod dense_attribute_write;
 mod dense_link_write;
 mod error;
@@ -42,6 +43,7 @@ mod file_space_info;
 mod fill_value;
 mod filter_pipeline;
 mod fixed_array;
+mod fixed_record;
 #[cfg(test)]
 mod fixture;
 mod fractal_heap;

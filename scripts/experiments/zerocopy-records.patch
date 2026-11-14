@@ -1,0 +1,287 @@
+diff --git a/crates/hdf5-pure-format/Cargo.toml b/crates/hdf5-pure-format/Cargo.toml
+index 3df9fa82..51933296 100644
+--- a/crates/hdf5-pure-format/Cargo.toml
++++ b/crates/hdf5-pure-format/Cargo.toml
+@@ -18,6 +18,7 @@ checksum = []
+ [dependencies]
+ hdf5-pure-core.workspace = true
+ byteorder.workspace = true
++zerocopy = { version = "=0.8.63", default-features = false, features = ["derive"] }
+ 
+ [dev-dependencies]
+ rstest.workspace = true
+diff --git a/crates/hdf5-pure-format/src/fixed_record/mod.rs b/crates/hdf5-pure-format/src/fixed_record/mod.rs
+index b4c6e93f..12210b80 100644
+--- a/crates/hdf5-pure-format/src/fixed_record/mod.rs
++++ b/crates/hdf5-pure-format/src/fixed_record/mod.rs
+@@ -7,6 +7,9 @@
+ use alloc::vec::Vec;
+ use core::marker::PhantomData;
+ 
++use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
++use zerocopy::byteorder::{LE, U16, U32, U64};
++
+ use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
+ 
+ use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
+@@ -31,6 +34,8 @@ pub(crate) trait FixedRecord {
+     /// Returns a [`FormatError`] if the fields do not satisfy the value's semantic constraints.
+     fn decode(wire: &Self::Wire) -> Result<Self::Value, FormatError>;
+ 
++    fn encode_wire(wire: &mut Self::Wire, value: &Self::Value);
++
+     /// Writes the value's fields in wire order.
+     ///
+     /// Implementations write exactly [`Self::Wire::SIZE`](FixedWire::SIZE) bytes.
+@@ -46,8 +51,8 @@ pub(crate) trait FixedRecord {
+     #[inline]
+     fn read(fields: &mut Fields<'_>) -> Result<Self::Value, FormatError> {
+         let bytes = fields.take_arrays::<1>(Self::Wire::SIZE)?.as_flattened();
+-        let wire = Self::Wire::read(&mut Fields::new(bytes, 0))?;
+-        Self::decode(&wire)
++        let wire = Self::Wire::ref_from_bytes(bytes).map_err(|_| FormatError::Internal("fixed record layout differs from declared size".into()))?;
++        Self::decode(wire)
+     }
+ 
+     /// Writes one prepared value into the output prefix and returns its encoded size.
+@@ -67,7 +72,8 @@ pub(crate) trait FixedRecord {
+                 available,
+             });
+         };
+-        Self::encode(&mut RecordOutput::Slice { bytes, pos: 0 }, value);
++        let wire = Self::Wire::mut_from_bytes(bytes).map_err(|_| FormatError::Internal("fixed record layout differs from declared size".into()))?;
++        Self::encode_wire(wire, value);
+         Ok(Self::Wire::SIZE)
+     }
+ 
+@@ -83,7 +89,7 @@ pub(crate) trait FixedRecord {
+ /// Fixed fields acquired before their semantic interpretation.
+ ///
+ /// The encoded extent is independent of the semantic value's native layout.
+-pub(crate) trait FixedWire: Sized {
++pub(crate) trait FixedWire: Sized + FromBytes + IntoBytes + KnownLayout + Immutable + Unaligned {
+     /// The number of encoded bytes.
+     const SIZE: usize;
+ 
+@@ -209,6 +215,7 @@ macro_rules! fixed_record {
+             core::marker::PhantomData<($(($($parameter,)+),)?)>
+         );
+ 
++        #[derive(zerocopy::FromBytes, zerocopy::IntoBytes, zerocopy::KnownLayout, zerocopy::Immutable, zerocopy::Unaligned)]
+         #[repr(C)]
+         $visibility struct $wire $(<$($parameter: $bound),+>)? {
+             $(pub(crate) $field: <$field_codec as $crate::fixed_record::FixedRecord>::Wire),+
+@@ -251,6 +258,12 @@ macro_rules! fixed_record {
+                     })
+             }
+ 
++            #[inline]
++            fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++                let $fields { $($field),+ } = <Self::Value as $crate::fixed_record::RecordValue<$fields $(<$($parameter),+>)?>>::fields(value);
++                $(<$field_codec as $crate::fixed_record::FixedRecord>::encode_wire(&mut wire.$field, $field);)+
++            }
++
+             #[inline]
+             fn encode(
+                 output: &mut $crate::fixed_record::RecordOutput<'_>,
+@@ -280,6 +293,11 @@ macro_rules! integer_codecs {
+                 Ok(<$integer>::$decode(*wire))
+             }
+ 
++            #[inline]
++            fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++                Self::encode(&mut RecordOutput::Slice { bytes: wire.as_mut_bytes(), pos: 0 }, value);
++            }
++
+             #[inline]
+             fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+                 output.array(&value.$encode())
+@@ -288,18 +306,39 @@ macro_rules! integer_codecs {
+     };
+ }
+ 
+-integer_codecs! {
+-    U8: u8, 1, from_le_bytes, to_le_bytes;
+-    U16Le: u16, 2, from_le_bytes, to_le_bytes;
+-    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
+-    U16Be: u16, 2, from_be_bytes, to_be_bytes;
+-    U32Le: u32, 4, from_le_bytes, to_le_bytes;
+-    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
+-    U32Be: u32, 4, from_be_bytes, to_be_bytes;
+-    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
+-    U64Le: u64, 8, from_le_bytes, to_le_bytes;
+-    #[cfg_attr(not(test), allow(dead_code, reason = "unit tests exercise this primitive codec"))]
+-    U64Be: u64, 8, from_be_bytes, to_be_bytes;
++integer_codecs! { U8: u8, 1, from_le_bytes, to_le_bytes; }
++macro_rules! endian_codecs {
++    ($($codec:ident, $integer:ty, $wire:ty, $n:literal);+) => {$ (
++        #[allow(dead_code, reason = "the experiment retains the primitive codec set")]
++        pub(crate) struct $codec;
++        impl FixedWire for $wire {
++            const SIZE: usize = $n;
++            fn read(fields: &mut Fields<'_>) -> Result<Self, FormatError> {
++                Ok(Self::from(fields.array::<$n>()?))
++            }
++        }
++        impl FixedRecord for $codec {
++            type Wire = $wire;
++            type Value = $integer;
++            #[inline]
++            fn decode(wire: &Self::Wire) -> Result<Self::Value, FormatError> { Ok(wire.get()) }
++            #[inline]
++            fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) { wire.set(*value); }
++            #[inline]
++            fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
++                let wire = <$wire>::new(*value);
++                output.array(wire.as_bytes().first_chunk::<$n>().expect("endian wire size matches its declared extent"));
++            }
++        }
++    )+};
++}
++endian_codecs! {
++    U16Le, u16, zerocopy::byteorder::U16<LE>, 2;
++    U16Be, u16, zerocopy::byteorder::U16<zerocopy::byteorder::BE>, 2;
++    U32Le, u32, zerocopy::byteorder::U32<LE>, 4;
++    U32Be, u32, zerocopy::byteorder::U32<zerocopy::byteorder::BE>, 4;
++    U64Le, u64, zerocopy::byteorder::U64<LE>, 8;
++    U64Be, u64, zerocopy::byteorder::U64<zerocopy::byteorder::BE>, 8
+ }
+ 
+ /// A boolean field decoded from any byte and encoded as zero or one.
+@@ -314,6 +353,11 @@ impl FixedRecord for NonzeroBool {
+         Ok(wire[0] != 0)
+     }
+ 
++    #[inline]
++    fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++        Self::encode(&mut RecordOutput::Slice { bytes: wire.as_mut_bytes(), pos: 0 }, value);
++    }
++
+     #[inline]
+     fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+         output.array(&[u8::from(*value)])
+@@ -339,6 +383,11 @@ macro_rules! closed_enum_codec {
+                 })
+             }
+ 
++            #[inline]
++            fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++                Self::encode(&mut $crate::fixed_record::RecordOutput::Slice { bytes: zerocopy::IntoBytes::as_mut_bytes(wire), pos: 0 }, value);
++            }
++
+             #[inline]
+             fn encode(
+                 output: &mut $crate::fixed_record::RecordOutput<'_>,
+@@ -398,20 +447,20 @@ pub(crate) trait LengthEncoding:
+ }
+ 
+ macro_rules! width_encodings {
+-    ($($offset:ident, $length:ident, $width:ident, $bytes:literal, $integer:ty);+ $(;)?) => {
++    ($($offset:ident, $length:ident, $width:ident, $bytes:literal, $integer:ty, $endian:ty);+ $(;)?) => {
+         $(#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+         pub(crate) struct $offset;
+ 
+         impl private::OffsetEncoding for $offset {}
+ 
+         impl OffsetEncoding for $offset {
+-            type Wire = [u8; $bytes];
++            type Wire = $endian;
+             const WIDTH: OffsetWidth = OffsetWidth::$width;
+             const MAX: u64 = <$integer>::MAX as u64;
+ 
+             #[inline]
+             fn decode(wire: &Self::Wire) -> u64 {
+-                <$integer>::from_le_bytes(*wire) as u64
++                wire.get() as u64
+             }
+ 
+             #[inline]
+@@ -427,13 +476,13 @@ macro_rules! width_encodings {
+         impl private::LengthEncoding for $length {}
+ 
+         impl LengthEncoding for $length {
+-            type Wire = [u8; $bytes];
++            type Wire = $endian;
+             const WIDTH: LengthWidth = LengthWidth::$width;
+             const MAX: u64 = <$integer>::MAX as u64;
+ 
+             #[inline]
+             fn decode(wire: &Self::Wire) -> u64 {
+-                <$integer>::from_le_bytes(*wire) as u64
++                wire.get() as u64
+             }
+ 
+             #[inline]
+@@ -446,9 +495,9 @@ macro_rules! width_encodings {
+ }
+ 
+ width_encodings! {
+-    Offset2, Length2, Two, 2, u16;
+-    Offset4, Length4, Four, 4, u32;
+-    Offset8, Length8, Eight, 8, u64;
++    Offset2, Length2, Two, 2, u16, U16<LE>;
++    Offset4, Length4, Four, 4, u32, U32<LE>;
++    Offset8, Length8, Eight, 8, u64, U64<LE>;
+ }
+ 
+ /// A stored address known to fit the address encoding `O`.
+@@ -501,6 +550,11 @@ impl<O: OffsetEncoding> FixedRecord for StoredAddressCodec<O> {
+         })
+     }
+ 
++    #[inline]
++    fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++        Self::encode(&mut RecordOutput::Slice { bytes: wire.as_mut_bytes(), pos: 0 }, value);
++    }
++
+     #[inline]
+     fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+         O::encode(output, value)
+@@ -566,6 +620,11 @@ impl<O: OffsetEncoding> FixedRecord for DecodedAddressCodec<O> {
+         })
+     }
+ 
++    #[inline]
++    fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++        Self::encode(&mut RecordOutput::Slice { bytes: wire.as_mut_bytes(), pos: 0 }, value);
++    }
++
+     #[inline]
+     fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+         O::encode(output, &value.stored)
+@@ -619,6 +678,11 @@ impl<L: LengthEncoding> FixedRecord for LengthCodec<L> {
+         })
+     }
+ 
++    #[inline]
++    fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++        Self::encode(&mut RecordOutput::Slice { bytes: wire.as_mut_bytes(), pos: 0 }, value);
++    }
++
+     #[inline]
+     fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+         L::encode(output, value)
+@@ -640,6 +704,11 @@ impl<L: LengthEncoding> FixedRecord for PageSizeCodec<L> {
+         })
+     }
+ 
++    #[inline]
++    fn encode_wire(wire: &mut Self::Wire, value: &Self::Value) {
++        Self::encode(&mut RecordOutput::Slice { bytes: wire.as_mut_bytes(), pos: 0 }, value);
++    }
++
+     #[inline]
+     fn encode(output: &mut RecordOutput<'_>, value: &Self::Value) {
+         L::encode(
+diff --git a/crates/hdf5-pure-format/src/lib.rs b/crates/hdf5-pure-format/src/lib.rs
+index e8199d59..74ea0ced 100644
+--- a/crates/hdf5-pure-format/src/lib.rs
++++ b/crates/hdf5-pure-format/src/lib.rs
+@@ -9,6 +9,7 @@
+ //! The project supports `hdf5-pure` as its API entry point. A type that `hdf5-pure` re-exports
+ //! follows the compatibility policy of `hdf5-pure`.
+ 
++#![allow(non_ascii_idents, reason = "zerocopy derives generate Unicode helper identifiers")]
+ #![cfg_attr(test, warn(clippy::tests_outside_test_module))]
+ #![cfg_attr(not(test), no_std)]
+ #![warn(unreachable_pub)]

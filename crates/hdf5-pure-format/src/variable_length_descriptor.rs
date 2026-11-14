@@ -1,10 +1,16 @@
 //! Stored counts and global heap IDs for variable-length strings and sequences.
 
+use core::fmt;
+
 use hdf5_pure_core::StoredAddress;
 
-use crate::bytes;
 use crate::bytes::Fields;
+use crate::decode::Decode;
 use crate::error::FormatError;
+use crate::fixed_record::{
+    self, BoundStoredAddress, FixedRecord, FixedWire, Offset2, Offset4, Offset8, OffsetEncoding,
+    StoredAddressCodec, U32Le,
+};
 use crate::width::OffsetWidth;
 
 /// A variable-length value's stored element count and global heap ID.
@@ -42,12 +48,9 @@ use crate::width::OffsetWidth;
 /// ```
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct VariableLengthDescriptor {
-    element_count: u32,
-    collection_address: StoredAddress,
-    object_index: u32,
-    offsets: OffsetWidth,
+    fields: DescriptorValue,
 }
 
 impl VariableLengthDescriptor {
@@ -78,28 +81,20 @@ impl VariableLengthDescriptor {
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn parse(offsets: OffsetWidth, raw: &[u8]) -> Result<(Self, usize), FormatError> {
-        let size = Self::serialized_size(offsets);
-        bytes::ensure_len(raw, 0, size)?;
         let mut fields = Fields::new(raw, 0);
-        let element_count = fields.u32()?;
-        let collection_address = fields.address(offsets)?;
-        let object_index = fields.u32()?;
-        Ok((
-            Self {
-                element_count,
-                collection_address,
-                object_index,
-                offsets,
-            },
-            size,
-        ))
+        let descriptor = Self::decode(&mut fields, offsets)?;
+        Ok((descriptor, fields.pos()))
     }
 
     /// Returns eight bytes plus the file's address width.
     ///
     /// The file's length width does not affect descriptor size.
     pub fn serialized_size(offsets: OffsetWidth) -> usize {
-        ELEMENT_COUNT_BYTES + usize::from(offsets.get()) + OBJECT_INDEX_BYTES
+        match offsets {
+            OffsetWidth::Two => DescriptorWire::<Offset2>::SIZE,
+            OffsetWidth::Four => DescriptorWire::<Offset4>::SIZE,
+            OffsetWidth::Eight => DescriptorWire::<Offset8>::SIZE,
+        }
     }
 
     /// Creates a descriptor whose stored address fits `offsets` exactly.
@@ -132,23 +127,31 @@ impl VariableLengthDescriptor {
     /// );
     /// # Ok::<(), FormatError>(())
     /// ```
+    #[inline]
     pub fn new(
         offsets: OffsetWidth,
         element_count: u32,
         collection_address: StoredAddress,
         object_index: u32,
     ) -> Result<Self, FormatError> {
-        if collection_address.get() > StoredAddress::undefined(offsets).get() {
-            return Err(FormatError::AddressTooLarge {
-                address: collection_address.get(),
-                offset_size: offsets.get(),
-            });
-        }
         Ok(Self {
-            element_count,
-            collection_address,
-            object_index,
-            offsets,
+            fields: match offsets {
+                OffsetWidth::Two => DescriptorValue::Two(DescriptorFields::new(
+                    element_count,
+                    collection_address,
+                    object_index,
+                )?),
+                OffsetWidth::Four => DescriptorValue::Four(DescriptorFields::new(
+                    element_count,
+                    collection_address,
+                    object_index,
+                )?),
+                OffsetWidth::Eight => DescriptorValue::Eight(DescriptorFields::new(
+                    element_count,
+                    collection_address,
+                    object_index,
+                )?),
+            },
         })
     }
 
@@ -160,51 +163,190 @@ impl VariableLengthDescriptor {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`].
     /// The output is unchanged on error.
+    #[inline]
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
-        let Self {
-            element_count,
-            collection_address,
-            object_index,
-            offsets,
-        } = *self;
-        let size = self.encoded_size();
-        bytes::ensure_len(output, 0, size)?;
-        let index_at = ELEMENT_COUNT_BYTES + usize::from(offsets.get());
-        output[..ELEMENT_COUNT_BYTES].copy_from_slice(&element_count.to_le_bytes());
-        output[ELEMENT_COUNT_BYTES..index_at]
-            .copy_from_slice(&collection_address.get().to_le_bytes()[..usize::from(offsets.get())]);
-        output[index_at..size].copy_from_slice(&object_index.to_le_bytes());
-        Ok(size)
+        match &self.fields {
+            DescriptorValue::Two(fields) => DescriptorCodec::<Offset2>::write(output, fields),
+            DescriptorValue::Four(fields) => DescriptorCodec::<Offset4>::write(output, fields),
+            DescriptorValue::Eight(fields) => DescriptorCodec::<Offset8>::write(output, fields),
+        }
     }
 
     /// Returns the stored number of base elements.
     pub const fn element_count(&self) -> u32 {
-        self.element_count
+        match &self.fields {
+            DescriptorValue::Two(fields) => fields.element_count,
+            DescriptorValue::Four(fields) => fields.element_count,
+            DescriptorValue::Eight(fields) => fields.element_count,
+        }
     }
 
     /// Returns the stored base-relative collection address, including zero or undefined values.
     pub const fn collection_address(&self) -> StoredAddress {
-        self.collection_address
+        match &self.fields {
+            DescriptorValue::Two(fields) => fields.collection_address.get(),
+            DescriptorValue::Four(fields) => fields.collection_address.get(),
+            DescriptorValue::Eight(fields) => fields.collection_address.get(),
+        }
     }
 
     /// Returns the full four-byte index without checking membership in a collection.
     pub const fn object_index(&self) -> u32 {
-        self.object_index
+        match &self.fields {
+            DescriptorValue::Two(fields) => fields.object_index,
+            DescriptorValue::Four(fields) => fields.object_index,
+            DescriptorValue::Eight(fields) => fields.object_index,
+        }
     }
 
     /// Returns the width used to read or write the collection address.
     pub const fn offset_width(&self) -> OffsetWidth {
-        self.offsets
+        match self.fields {
+            DescriptorValue::Two(_) => OffsetWidth::Two,
+            DescriptorValue::Four(_) => OffsetWidth::Four,
+            DescriptorValue::Eight(_) => OffsetWidth::Eight,
+        }
     }
 
     /// Returns the descriptor's size at its stored address width.
     pub fn encoded_size(&self) -> usize {
-        Self::serialized_size(self.offsets)
+        Self::serialized_size(self.offset_width())
     }
 }
 
-// H5T__vlen_disk_write in H5Tvlen.c, HDF5 2.2.0, encodes the count with UINT32ENCODE.
-const ELEMENT_COUNT_BYTES: usize = 4;
+impl<'de> Decode<'de> for VariableLengthDescriptor {
+    type Context = OffsetWidth;
+    type Error = FormatError;
 
+    fn decode(fields: &mut Fields<'de>, offsets: Self::Context) -> Result<Self, Self::Error> {
+        Ok(Self {
+            fields: match offsets {
+                OffsetWidth::Two => DescriptorValue::Two(DescriptorCodec::<Offset2>::read(fields)?),
+                OffsetWidth::Four => {
+                    DescriptorValue::Four(DescriptorCodec::<Offset4>::read(fields)?)
+                }
+                OffsetWidth::Eight => {
+                    DescriptorValue::Eight(DescriptorCodec::<Offset8>::read(fields)?)
+                }
+            },
+        })
+    }
+}
+
+impl fmt::Debug for VariableLengthDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { fields } = self;
+        match fields {
+            DescriptorValue::Eight(fields) => fields.fmt_descriptor(f),
+            DescriptorValue::Four(fields) => fields.fmt_descriptor(f),
+            DescriptorValue::Two(fields) => fields.fmt_descriptor(f),
+        }
+    }
+}
+
+/// A descriptor with its collection address bounded by the selected width.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DescriptorValue {
+    Eight(DescriptorFields<Offset8>),
+    Four(DescriptorFields<Offset4>),
+    Two(DescriptorFields<Offset2>),
+}
+
+// H5T__vlen_disk_write in H5Tvlen.c, HDF5 2.2.0, encodes the count with UINT32ENCODE.
 // The global heap ID index occupies four bytes ("Global Heap", format specification, version 4.0).
-const OBJECT_INDEX_BYTES: usize = 4;
+fixed_record::fixed_record! {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    DescriptorCodec<O: OffsetEncoding> => DescriptorWire for DescriptorFields {
+        element_count: U32Le,
+        collection_address: StoredAddressCodec<O>,
+        object_index: U32Le,
+    }
+}
+
+impl<O: OffsetEncoding> DescriptorFields<O> {
+    /// Creates fields with a collection address bounded by `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if `collection_address` exceeds
+    /// [`OffsetEncoding::MAX`] for `O`.
+    fn new(
+        element_count: u32,
+        collection_address: StoredAddress,
+        object_index: u32,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            element_count,
+            collection_address: BoundStoredAddress::new(collection_address)?,
+            object_index,
+        })
+    }
+
+    fn fmt_descriptor(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            element_count,
+            collection_address,
+            object_index,
+        } = self;
+        f.debug_struct("VariableLengthDescriptor")
+            .field("element_count", element_count)
+            .field("collection_address", &collection_address.get())
+            .field("object_index", object_index)
+            .field("offsets", &O::WIDTH)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::mem;
+
+    use rstest::rstest;
+    use test_util::variable_length_descriptor::Address;
+
+    use super::*;
+    use crate::address::StoredAddressExt;
+
+    #[test]
+    fn descriptor_record_sizes_fit_flat_field_tuples() {
+        assert_eq!(
+            mem::size_of::<DescriptorFields<Offset2>>(),
+            mem::size_of::<(u32, StoredAddress, u32)>()
+        );
+        assert_eq!(
+            mem::size_of::<DescriptorFields<Offset4>>(),
+            mem::size_of::<(u32, StoredAddress, u32)>()
+        );
+        assert_eq!(
+            mem::size_of::<DescriptorFields<Offset8>>(),
+            mem::size_of::<(u32, StoredAddress, u32)>()
+        );
+        assert!(
+            mem::size_of::<VariableLengthDescriptor>()
+                <= mem::size_of::<(u32, StoredAddress, u32, OffsetWidth)>()
+        );
+    }
+
+    #[rstest]
+    #[case::two(Address::Two(0x1234))]
+    #[case::four(Address::Four(0x1234_5678))]
+    #[case::eight(Address::Eight(0x1234_5678_9abc_def0))]
+    fn decoding_advances_from_the_current_position_and_preserves_following_fields(
+        #[case] address: Address,
+    ) {
+        let offsets = OffsetWidth::try_from(address.width()).unwrap();
+        let descriptor = address.descriptor(0, u32::MAX);
+        let mut raw = vec![0xab; 3];
+        raw.extend_from_slice(&descriptor);
+        raw.extend_from_slice(&[0x34, 0x12]);
+        let mut fields = Fields::new(&raw, 3);
+        assert_eq!(
+            VariableLengthDescriptor::decode(&mut fields, offsets).unwrap(),
+            VariableLengthDescriptor::new(offsets, 0, StoredAddress::new(address.get()), u32::MAX)
+                .unwrap()
+        );
+        assert_eq!(fields.pos(), 3 + descriptor.len());
+        assert_eq!(fields.u16().unwrap(), 0x1234);
+        assert_eq!(fields.pos(), raw.len());
+    }
+}

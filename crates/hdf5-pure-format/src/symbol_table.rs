@@ -17,9 +17,13 @@ use hdf5_pure_core::__private::FileRegion;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
+use crate::decode::Decode;
 use crate::error::FormatError;
+use crate::fixed_record;
+use crate::fixed_record::{
+    BoundStoredAddress, FixedRecord, Offset2, Offset4, Offset8, OffsetEncoding, StoredAddressCodec,
+};
 use crate::width::{FormatWidths, OffsetWidth};
 
 /// A symbol table message (type 0x0011), which locates the B-tree and the local heap of a group
@@ -57,19 +61,109 @@ impl SymbolTableMessage {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<SymbolTableMessage, FormatError> {
-        let os = usize::from(offset_width.get());
-        if data.len() < os * 2 {
-            return Err(FormatError::UnexpectedEof {
-                expected: os * 2,
-                available: data.len(),
-            });
+        Self::decode(&mut bytes::Fields::new(data, 0), offset_width)
+    }
+
+    /// Writes both addresses as little-endian integers and returns the number of bytes written.
+    ///
+    /// Each address occupies `offset_width` bytes. Preserves stored address bits, including
+    /// zero and the selected width's all-ones undefined address. Any output suffix remains
+    /// unchanged, and an error leaves the entire output unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if either address exceeds the largest unsigned
+    /// integer representable in `offset_width` bytes, checking the B-tree address first.
+    /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than two addresses.
+    /// Address errors take precedence over destination capacity errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::SymbolTableMessage;
+    /// use hdf5_pure_format::{FormatError, OffsetWidth};
+    ///
+    /// let message = SymbolTableMessage {
+    ///     btree_address: StoredAddress::new(0x1234),
+    ///     local_heap_address: StoredAddress::undefined(OffsetWidth::Two),
+    /// };
+    /// let mut output = [0xaa; 6];
+    /// assert_eq!(message.write_into(&mut output, OffsetWidth::Two)?, 4);
+    /// assert_eq!(output, [0x34, 0x12, 0xff, 0xff, 0xaa, 0xaa]);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn write_into(
+        &self,
+        output: &mut [u8],
+        offset_width: OffsetWidth,
+    ) -> Result<usize, FormatError> {
+        match offset_width {
+            OffsetWidth::Two => self.write_fields::<Offset2>(output),
+            OffsetWidth::Four => self.write_fields::<Offset4>(output),
+            OffsetWidth::Eight => self.write_fields::<Offset8>(output),
         }
-        let btree_address = StoredAddress::new(bytes::read_offset_width(data, 0, offset_width)?);
-        let local_heap_address =
-            StoredAddress::new(bytes::read_offset_width(data, os, offset_width)?);
-        Ok(SymbolTableMessage {
+    }
+
+    fn write_fields<O: OffsetEncoding>(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        SymbolTableCodec::<O>::write(output, &SymbolTableFields::<O>::new(self)?)
+    }
+}
+
+impl<'de> Decode<'de> for SymbolTableMessage {
+    type Context = OffsetWidth;
+    type Error = FormatError;
+
+    fn decode(
+        fields: &mut bytes::Fields<'de>,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, Self::Error> {
+        Ok(match offset_width {
+            OffsetWidth::Two => Self::from(SymbolTableCodec::<Offset2>::read(fields)?),
+            OffsetWidth::Four => Self::from(SymbolTableCodec::<Offset4>::read(fields)?),
+            OffsetWidth::Eight => Self::from(SymbolTableCodec::<Offset8>::read(fields)?),
+        })
+    }
+}
+
+impl<O: OffsetEncoding> From<SymbolTableFields<O>> for SymbolTableMessage {
+    fn from(fields: SymbolTableFields<O>) -> Self {
+        let SymbolTableFields {
             btree_address,
             local_heap_address,
+        } = fields;
+        Self {
+            btree_address: btree_address.get(),
+            local_heap_address: local_heap_address.get(),
+        }
+    }
+}
+
+// "The Symbol Table Message", format specification, version 4.0, defines the two addresses.
+fixed_record::fixed_record! {
+    #[derive(Clone, Copy, Debug)]
+    SymbolTableCodec<O: OffsetEncoding> => SymbolTableWire for SymbolTableFields {
+        btree_address: StoredAddressCodec<O>,
+        local_heap_address: StoredAddressCodec<O>,
+    }
+}
+
+impl<O: OffsetEncoding> SymbolTableFields<O> {
+    /// Copies both addresses after checking that each fits `O`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if either address exceeds
+    /// [`OffsetEncoding::MAX`] for `O`, checking the B-tree address first.
+    fn new(message: &SymbolTableMessage) -> Result<Self, FormatError> {
+        let SymbolTableMessage {
+            btree_address,
+            local_heap_address,
+        } = *message;
+        Ok(Self {
+            btree_address: BoundStoredAddress::new(btree_address)?,
+            local_heap_address: BoundStoredAddress::new(local_heap_address)?,
         })
     }
 }
@@ -301,12 +395,87 @@ const ENTRY_FIXED_LEN: u64 = (4 + ENTRY_RESERVED_LEN + SCRATCH_PAD_LEN) as u64;
 
 #[cfg(test)]
 mod tests {
+    use core::mem;
+
     use rstest::rstest;
+    use test_util::bytes as fixture_bytes;
     use test_util::symbol_table;
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::StoredAddressExt;
     use crate::fixture;
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    #[case::eight(OffsetWidth::Eight)]
+    fn symbol_table_decoding_preserves_cursor_consumption_and_following_fields(
+        #[case] width: OffsetWidth,
+    ) {
+        let mut data = vec![0xaa];
+        fixture_bytes::push_uint(&mut data, 0x1234, usize::from(width.get()));
+        fixture_bytes::push_uint(&mut data, 0x5678, usize::from(width.get()));
+        data.push(0xbb);
+        let mut fields = bytes::Fields::new(&data, 1);
+        assert_eq!(
+            SymbolTableMessage::decode(&mut fields, width).unwrap(),
+            SymbolTableMessage {
+                btree_address: StoredAddress::new(0x1234),
+                local_heap_address: StoredAddress::new(0x5678),
+            }
+        );
+        assert_eq!(fields.pos(), data.len() - 1);
+        assert_eq!(fields.u8().unwrap(), 0xbb);
+    }
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two)]
+    #[case::four(OffsetWidth::Four)]
+    #[case::eight(OffsetWidth::Eight)]
+    fn symbol_table_preparation_retains_owned_width_bound_fields(#[case] width: OffsetWidth) {
+        match width {
+            OffsetWidth::Two => assert_prepared_fields::<Offset2>(),
+            OffsetWidth::Four => assert_prepared_fields::<Offset4>(),
+            OffsetWidth::Eight => assert_prepared_fields::<Offset8>(),
+        }
+    }
+
+    fn assert_prepared_fields<O: OffsetEncoding>() {
+        assert_eq!(
+            mem::size_of::<SymbolTableFields<O>>(),
+            mem::size_of::<SymbolTableMessage>()
+        );
+        assert_eq!(
+            mem::size_of::<SymbolTableWire<O>>(),
+            2 * usize::from(O::WIDTH.get())
+        );
+        assert_eq!(mem::align_of::<SymbolTableWire<O>>(), 1);
+        let mut message = SymbolTableMessage {
+            btree_address: StoredAddress::new(0x1234),
+            local_heap_address: StoredAddress::new(0x5678),
+        };
+        let fields = SymbolTableFields::<O>::new(&message).unwrap();
+        message.btree_address = StoredAddress::new(O::MAX);
+        message.local_heap_address = StoredAddress::new(0);
+        let mut expected = Vec::new();
+        fixture_bytes::push_uint(&mut expected, 0x1234, usize::from(O::WIDTH.get()));
+        fixture_bytes::push_uint(&mut expected, 0x5678, usize::from(O::WIDTH.get()));
+        let mut first = [0xaa; 16];
+        let mut second = [0xbb; 16];
+        let written = SymbolTableCodec::<O>::write(&mut first, &fields).unwrap();
+        assert_eq!(written, expected.len());
+        assert_eq!(&first[..written], expected);
+        assert_eq!(&first[written..], &vec![0xaa; 16 - written]);
+        assert_eq!(
+            SymbolTableCodec::<O>::write(&mut second, &fields).unwrap(),
+            written
+        );
+        assert_eq!(&second[..written], expected);
+        assert_eq!(&second[written..], &vec![0xbb; 16 - written]);
+        assert_eq!(message.btree_address.get(), O::MAX);
+        assert_eq!(message.local_heap_address.get(), 0);
+    }
 
     #[test]
     fn parse_symbol_table_message_offset8() {

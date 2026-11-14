@@ -30,6 +30,7 @@ mod compound_offset_width;
 mod continuation_order;
 mod conversions;
 mod creation_widths;
+mod dataspace;
 mod datatype_array_complex_codec;
 mod datatype_compound_codec;
 mod datatype_enum_codec;
@@ -139,6 +140,7 @@ mod swmr_append;
 mod swmr_refresh;
 mod swmr_successive_readers;
 mod symbol_table_groups;
+mod symbol_table_message;
 mod symbol_table_soft_links;
 #[cfg(feature = "__hdf5-1.10")]
 mod test_util;

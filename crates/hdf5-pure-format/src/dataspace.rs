@@ -6,6 +6,7 @@ use core::ops::Range;
 use hdf5_pure_core::__private::ElementCount;
 
 use crate::bytes;
+use crate::bytes::Fields;
 use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
@@ -130,37 +131,23 @@ impl Dataspace {
             _ => return Err(FormatError::InvalidDataspaceVersion(version)),
         };
 
-        let ls = usize::from(length_width.get());
-        let mut pos = header_size;
-
-        // Read current dimensions
-        let mut dimensions = Vec::with_capacity(rank as usize);
-        for _ in 0..rank {
-            let dim = bytes::read_length_width(data, pos, length_width)?;
-            dimensions.push(dim);
-            pos += ls;
-        }
-
-        let dimension_fields = header_size..pos;
-
-        // Read max dimensions if flags bit 0 is set
+        let mut fields = Fields::new(data, header_size);
+        let dimensions =
+            Self::read_dimensions(&mut fields, rank, length_width, |dimension| dimension)?;
+        let dimension_fields = header_size..fields.pos();
         let max_dimensions = if flags & MAX_DIMENSIONS_FLAG != 0 {
-            let mut max_dims = Vec::with_capacity(rank as usize);
-            for _ in 0..rank {
-                max_dims.push(max_extent_from_length(bytes::read_length_width(
-                    data,
-                    pos,
-                    length_width,
-                )?));
-                pos += ls;
-            }
-            Some(max_dims)
+            Some(Self::read_dimensions(
+                &mut fields,
+                rank,
+                length_width,
+                max_extent_from_length,
+            )?)
         } else {
             None
         };
 
         // A v1 dataspace with flags bit 1 set carries rank × `length_size` bytes
-        // of permutation indices here. Nothing below reads `pos`, so they need
+        // of permutation indices here. Nothing below reads the cursor position, so they need
         // no skipping. This crate does not expose them.
 
         Ok((
@@ -242,6 +229,71 @@ impl Dataspace {
                 .zip(&self.dimensions)
                 .all(|(max, &dim)| max.size() == Some(dim));
         (!fixed_at_current).then_some(max_dims)
+    }
+
+    fn read_dimensions<T>(
+        fields: &mut Fields<'_>,
+        rank: u8,
+        width: LengthWidth,
+        from_length: impl Fn(u64) -> T,
+    ) -> Result<Vec<T>, FormatError> {
+        if rank == 0 {
+            return Ok(Vec::new());
+        }
+        let count = usize::from(rank);
+        let mut dimensions = Vec::with_capacity(count);
+        match width {
+            LengthWidth::Two => dimensions.extend(
+                Self::dimension_arrays::<2>(fields, count)?
+                    .iter()
+                    .map(|&bytes| from_length(u64::from(u16::from_le_bytes(bytes)))),
+            ),
+            LengthWidth::Four => dimensions.extend(
+                Self::dimension_arrays::<4>(fields, count)?
+                    .iter()
+                    .map(|&bytes| from_length(u64::from(u32::from_le_bytes(bytes)))),
+            ),
+            LengthWidth::Eight => dimensions.extend(
+                Self::dimension_arrays::<8>(fields, count)?
+                    .iter()
+                    .map(|&bytes| from_length(u64::from_le_bytes(bytes))),
+            ),
+        }
+        Ok(dimensions)
+    }
+
+    /// Borrows a dimension list before its fields are decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a dimension field is incomplete. The `expected`
+    /// offset is the end of the first incomplete field in the original input.
+    fn dimension_arrays<'a, const N: usize>(
+        fields: &mut Fields<'a>,
+        count: usize,
+    ) -> Result<&'a [[u8; N]], FormatError> {
+        let start = fields.pos();
+        fields
+            .take_arrays(count)
+            .map_err(|error| Self::dimension_array_error::<N>(start, error))
+    }
+
+    /// Reports the end of the first incomplete field for [`FormatError::UnexpectedEof`].
+    ///
+    /// Returns other errors unchanged.
+    #[cold]
+    fn dimension_array_error<const N: usize>(start: usize, error: FormatError) -> FormatError {
+        match error {
+            FormatError::UnexpectedEof { available, .. } => FormatError::UnexpectedEof {
+                expected: start.saturating_add(
+                    (available.saturating_sub(start) / N)
+                        .saturating_add(1)
+                        .saturating_mul(N),
+                ),
+                available,
+            },
+            error => error,
+        }
     }
 }
 
@@ -405,6 +457,209 @@ mod tests {
     use test_util::dataspace;
 
     use super::*;
+
+    #[rstest::rstest]
+    #[case::rank_zero(&[])]
+    #[case::one_dimension(&[0])]
+    #[case::multiple_dimensions(&[3, 5, u64::from(u16::MAX)])]
+    fn dimension_arrays_preserve_values_ranges_and_suffixes(
+        #[case] dimensions: &[u64],
+        #[values(Version::One, Version::Two)] version: Version,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
+        #[values(false, true)] maxima: bool,
+        #[values(false, true)] suffix: bool,
+    ) {
+        let maximum = width::length_width_max(width);
+        let max_dimensions = maxima.then(|| vec![maximum; dimensions.len()]);
+        let mut raw = version.body(dimensions, max_dimensions.as_deref(), width);
+        if matches!(version, Version::One) {
+            raw[3..8].fill(0xa5);
+        }
+        raw[2] |= 0xfc;
+        if suffix {
+            raw.extend_from_slice(&[0xef, 0xbe, 0xad, 0xde]);
+        }
+        let expected = Dataspace {
+            space_type: if matches!(version, Version::One) && dimensions.is_empty() {
+                DataspaceType::Scalar
+            } else {
+                DataspaceType::Simple
+            },
+            rank: u8::try_from(dimensions.len()).unwrap(),
+            dimensions: dimensions.to_vec(),
+            max_dimensions: maxima.then(|| {
+                vec![
+                    if maximum == u64::MAX {
+                        MaxExtent::Unlimited
+                    } else {
+                        MaxExtent::Fixed(maximum)
+                    };
+                    dimensions.len()
+                ]
+            }),
+        };
+        let range = version.header_size()
+            ..version.header_size() + dimensions.len() * usize::from(width.get());
+        assert_eq!(
+            Dataspace::parse_with_dimension_fields(&raw, width).unwrap(),
+            (expected.clone(), range)
+        );
+        assert_eq!(Dataspace::parse(&raw, width.get()).unwrap(), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::two_start(LengthWidth::Two, 0)]
+    #[case::two_partial(LengthWidth::Two, 1)]
+    #[case::four_start(LengthWidth::Four, 0)]
+    #[case::four_one_byte(LengthWidth::Four, 1)]
+    #[case::four_two_bytes(LengthWidth::Four, 2)]
+    #[case::four_three_bytes(LengthWidth::Four, 3)]
+    #[case::eight_start(LengthWidth::Eight, 0)]
+    #[case::eight_one_byte(LengthWidth::Eight, 1)]
+    #[case::eight_two_bytes(LengthWidth::Eight, 2)]
+    #[case::eight_three_bytes(LengthWidth::Eight, 3)]
+    #[case::eight_four_bytes(LengthWidth::Eight, 4)]
+    #[case::eight_five_bytes(LengthWidth::Eight, 5)]
+    #[case::eight_six_bytes(LengthWidth::Eight, 6)]
+    #[case::eight_seven_bytes(LengthWidth::Eight, 7)]
+    fn truncated_dimension_arrays_report_the_first_incomplete_field(
+        #[case] width: LengthWidth,
+        #[case] partial: usize,
+        #[values(Version::One, Version::Two)] version: Version,
+        #[values(0, 1, 2, 3, 4, 5)] complete: usize,
+    ) {
+        let raw = version.body(&[3, 5, 7], Some(&[11, 13, 17]), width);
+        let available = version.header_size() + complete * usize::from(width.get()) + partial;
+        let expected = version.header_size() + (complete + 1) * usize::from(width.get());
+        assert_eq!(
+            Dataspace::parse_with_dimension_fields(&raw[..available], width).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available,
+            }
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::empty_header(&[], 2, FormatError::UnexpectedEof { expected: 4, available: 0 })]
+    #[case::one_header_byte(&[1], 4, FormatError::UnexpectedEof { expected: 4, available: 1 })]
+    #[case::two_header_bytes(&[2, 3], 8, FormatError::UnexpectedEof { expected: 4, available: 2 })]
+    #[case::three_header_bytes(&[1, 3, 0xff], 2, FormatError::UnexpectedEof { expected: 4, available: 3 })]
+    #[case::five_version_one_bytes(&[1, 3, 0xff, 9, 0], 4, FormatError::UnexpectedEof { expected: 8, available: 5 })]
+    #[case::six_version_one_bytes(&[1, 3, 0xff, 9, 0, 0], 8, FormatError::UnexpectedEof { expected: 8, available: 6 })]
+    #[case::seven_version_one_bytes(&[1, 3, 0xff, 9, 0, 0, 0], 2, FormatError::UnexpectedEof { expected: 8, available: 7 })]
+    #[case::empty_invalid_width(&[], 0, FormatError::InvalidLengthSize(0))]
+    #[case::version_and_type_with_invalid_width(&[9, 3, 0xff, 9], 3, FormatError::InvalidLengthSize(3))]
+    #[case::short_before_version(&[9, 3, 0xff], 2, FormatError::UnexpectedEof { expected: 4, available: 3 })]
+    #[case::version_before_type(&[9, 3, 0xff, 9], 4, FormatError::InvalidDataspaceVersion(9))]
+    #[case::version_one_reserved_header(&[1, 3, 0xff, 9], 8, FormatError::UnexpectedEof { expected: 8, available: 4 })]
+    #[case::type_before_dimensions(&[2, 3, 0xff, 9], 2, FormatError::InvalidDataspaceType(9))]
+    fn header_errors_precede_dimension_acquisition(
+        #[case] raw: &[u8],
+        #[case] width: u8,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(Dataspace::parse(raw, width).unwrap_err(), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::scalar(0, DataspaceType::Scalar)]
+    #[case::simple(1, DataspaceType::Simple)]
+    #[case::null(2, DataspaceType::Null)]
+    fn version_two_types_retain_the_stored_dimensions(
+        #[case] type_byte: u8,
+        #[case] space_type: DataspaceType,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
+    ) {
+        let mut raw = Version::Two.body(&[3, 5], None, width);
+        raw[3] = type_byte;
+        assert_eq!(
+            Dataspace::parse(&raw, width.get()).unwrap(),
+            Dataspace {
+                space_type,
+                rank: 2,
+                dimensions: vec![3, 5],
+                max_dimensions: None,
+            }
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::absent(0)]
+    #[case::partial(1)]
+    #[case::complete(3)]
+    fn version_one_permutation_fields_remain_unread(
+        #[case] permutation_fields: usize,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
+        #[values(false, true)] maxima: bool,
+    ) {
+        let max_dimensions = maxima.then_some([7, 9, 11]);
+        let mut raw = Version::One.body(
+            &[3, 5, 7],
+            max_dimensions
+                .as_ref()
+                .map(|dimensions| dimensions.as_slice()),
+            width,
+        );
+        raw[2] |= dataspace::Flags::PERMUTATION.0;
+        raw.resize(
+            raw.len() + permutation_fields * usize::from(width.get()),
+            0xff,
+        );
+        let (parsed, range) = Dataspace::parse_with_dimension_fields(&raw, width).unwrap();
+        assert_eq!(range, 8..8 + 3 * usize::from(width.get()));
+        assert_eq!(
+            parsed,
+            Dataspace {
+                space_type: DataspaceType::Simple,
+                rank: 3,
+                dimensions: vec![3, 5, 7],
+                max_dimensions: maxima.then(|| {
+                    vec![
+                        MaxExtent::Fixed(7),
+                        MaxExtent::Fixed(9),
+                        MaxExtent::Fixed(11),
+                    ]
+                }),
+            }
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Version {
+        One,
+        Two,
+    }
+
+    impl Version {
+        fn body(self, dimensions: &[u64], maxima: Option<&[u64]>, width: LengthWidth) -> Vec<u8> {
+            let rank = u8::try_from(dimensions.len()).unwrap();
+            let widths = test_util::widths::Widths::new(8, usize::from(width.get()));
+            let flags = if maxima.is_some() {
+                dataspace::Flags::MAX_DIMS
+            } else {
+                dataspace::Flags::NONE
+            };
+            match self {
+                Self::One => dataspace::v1_with_widths(rank, flags, dimensions, maxima, widths),
+                Self::Two => dataspace::v2_with_widths(
+                    rank,
+                    flags,
+                    dataspace::Kind::SIMPLE,
+                    dimensions,
+                    maxima,
+                    widths,
+                ),
+            }
+        }
+
+        fn header_size(self) -> usize {
+            match self {
+                Self::One => dataspace::V1_HEADER_LEN,
+                Self::Two => dataspace::V2_HEADER_LEN,
+            }
+        }
+    }
 
     #[rstest::rstest]
     #[case::version_one(true, dataspace::V1_HEADER_LEN)]

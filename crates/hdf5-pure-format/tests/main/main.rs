@@ -21,5 +21,6 @@ mod object_header_allocation;
 mod object_reference_count;
 mod opaque_tags;
 mod prepared_global_heap;
+mod symbol_table_message;
 mod variable_length_descriptor;
 mod width_encoding;

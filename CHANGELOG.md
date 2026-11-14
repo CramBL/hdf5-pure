@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `SymbolTableMessage::write_into` in `hdf5-pure-format` encodes group symbol-table addresses at each supported width, preserving stored address bits and leaving the destination unchanged on error ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `PreparedGlobalHeapCollection` in `hdf5-pure-format` encodes version 1 collections at a checked capacity and length width, preserving supplied member indices, reference counts, physical order, and payloads. It supports explicit free-space records, implied free tails, and full collections ([#1233](https://github.com/CramBL/hdf5-pure/pull/1233)).
 - `VariableLengthDescriptor` in `hdf5-pure-format` parses and encodes variable-length value records at each supported address width, preserving the element count, stored collection address, and full object index ([#1232](https://github.com/CramBL/hdf5-pure/pull/1232)).
 - `DatatypeMessage` in `hdf5-pure-format` parses and encodes atomic, compound, enumeration, variable-length, array, and complex descriptions with retained versions at every node and checked class properties, including disjoint compound member ranges ([#1227](https://github.com/CramBL/hdf5-pure/pull/1227), [#1228](https://github.com/CramBL/hdf5-pure/pull/1228), [#1230](https://github.com/CramBL/hdf5-pure/pull/1230)).
@@ -22,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed `File::commit` reporting a format error for edits of groups with well-formed user-defined links ([#1216](https://github.com/CramBL/hdf5-pure/pull/1216)).
 - Fixed `OwnedLink` serialization discarding stored name-length widths and explicit default fields ([#1215](https://github.com/CramBL/hdf5-pure/pull/1215)).
 - Fixed `mat::from_file` and related deserialization rejecting MATLAB R2022b v7.3 files that hold objects ([#1003](https://github.com/CramBL/hdf5-pure/pull/1003)).
+
+### Performance
+
+- Reduced decoding time in `Dataspace::parse` with bulk dimension reads and an early return for empty dimension lists ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 
 ## [0.48.0] - 2026-11-11
 

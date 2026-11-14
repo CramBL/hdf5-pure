@@ -3,8 +3,8 @@ use hdf5_pure::CompoundType;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
-    AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
-    MaxExtent,
+    AttrValue, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File, FileBuilder,
+    FixedPointType, FormatError, MaxExtent,
 };
 use test_util_hdf5::dataset::InvalidGeometryCase;
 use test_util_hdf5::{dataset, fixtures};
@@ -300,6 +300,50 @@ fn padded_compound_decodes_without_using_tuple_layout() {
     let ds = file.dataset("padded").unwrap();
     assert_eq!(ds.read_raw().unwrap(), raw);
     assert_eq!(ds.read_compound::<(i8, u64, f32)>().unwrap(), values);
+}
+
+#[rstest::rstest]
+#[case::big_then_little(
+    DatatypeByteOrder::BigEndian,
+    DatatypeByteOrder::LittleEndian,
+    &[0xcc, 0xcc, 0x12, 0x34, 0xcc, 0x78, 0x56, 0x34, 0x12, 0xcc, 0xcc, 0xcc, 0xbc, 0x9a, 0xcc, 0xcc],
+)]
+#[case::little_then_big(
+    DatatypeByteOrder::LittleEndian,
+    DatatypeByteOrder::BigEndian,
+    &[0xcc, 0xcc, 0x34, 0x12, 0xcc, 0x12, 0x34, 0x56, 0x78, 0xcc, 0xcc, 0xcc, 0x9a, 0xbc, 0xcc, 0xcc],
+)]
+fn nested_compound_decoding_uses_member_orders_and_offsets(
+    #[case] first: DatatypeByteOrder,
+    #[case] second: DatatypeByteOrder,
+    #[case] raw: &[u8],
+) {
+    let inner = CompoundTypeBuilder::with_size(8)
+        .field(
+            "0",
+            1,
+            Datatype::FixedPoint(FixedPointType::new(2, first, false, 0, 16).unwrap()),
+        )
+        .field(
+            "1",
+            4,
+            Datatype::FixedPoint(FixedPointType::new(4, second, false, 0, 32).unwrap()),
+        )
+        .build()
+        .unwrap();
+    let datatype = CompoundTypeBuilder::with_size(16)
+        .field("0", 1, inner)
+        .field(
+            "1",
+            12,
+            Datatype::FixedPoint(FixedPointType::new(2, second, false, 0, 16).unwrap()),
+        )
+        .build()
+        .unwrap();
+    assert_eq!(
+        <((u16, u32), u16) as CompoundType>::decode(&datatype, raw).unwrap(),
+        ((0x1234, 0x1234_5678), 0x9abc),
+    );
 }
 
 #[test]
