@@ -26,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
-- Reduced decoding time in `Dataspace::parse` for the measured nonzero ranks, with about 0.7 nanoseconds higher latency for rank-zero messages without maximum dimensions ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
+- Reduced decoding time in `Dataspace::parse` with bulk dimension reads and an early return for empty dimension lists ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 
 ## [0.48.0] - 2026-11-11
 

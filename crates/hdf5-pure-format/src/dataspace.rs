@@ -237,6 +237,9 @@ impl Dataspace {
         width: LengthWidth,
         from_length: impl Fn(u64) -> T,
     ) -> Result<Vec<T>, FormatError> {
+        if rank == 0 {
+            return Ok(Vec::new());
+        }
         let count = usize::from(rank);
         let mut dimensions = Vec::with_capacity(count);
         match width {
@@ -270,7 +273,17 @@ impl Dataspace {
         count: usize,
     ) -> Result<&'a [[u8; N]], FormatError> {
         let start = fields.pos();
-        fields.take_arrays(count).map_err(|error| match error {
+        fields
+            .take_arrays(count)
+            .map_err(|error| Self::dimension_array_error::<N>(start, error))
+    }
+
+    /// Reports the end of the first incomplete field for [`FormatError::UnexpectedEof`].
+    ///
+    /// Returns other errors unchanged.
+    #[cold]
+    fn dimension_array_error<const N: usize>(start: usize, error: FormatError) -> FormatError {
+        match error {
             FormatError::UnexpectedEof { available, .. } => FormatError::UnexpectedEof {
                 expected: start.saturating_add(
                     (available.saturating_sub(start) / N)
@@ -280,7 +293,7 @@ impl Dataspace {
                 available,
             },
             error => error,
-        })
+        }
     }
 }
 
@@ -454,6 +467,7 @@ mod tests {
         #[values(Version::One, Version::Two)] version: Version,
         #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
         #[values(false, true)] maxima: bool,
+        #[values(false, true)] suffix: bool,
     ) {
         let maximum = width::length_width_max(width);
         let max_dimensions = maxima.then(|| vec![maximum; dimensions.len()]);
@@ -462,7 +476,9 @@ mod tests {
             raw[3..8].fill(0xa5);
         }
         raw[2] |= 0xfc;
-        raw.extend_from_slice(&[0xef, 0xbe, 0xad, 0xde]);
+        if suffix {
+            raw.extend_from_slice(&[0xef, 0xbe, 0xad, 0xde]);
+        }
         let expected = Dataspace {
             space_type: if matches!(version, Version::One) && dimensions.is_empty() {
                 DataspaceType::Scalar
