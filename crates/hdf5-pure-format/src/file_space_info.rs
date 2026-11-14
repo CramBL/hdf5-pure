@@ -274,13 +274,14 @@ fn serialize_prefix<O: OffsetEncoding, L: LengthEncoding>(
     info: &FileSpaceInfo,
 ) -> Result<Vec<u8>, FormatError> {
     let prefix = FileSpacePrefixFields::<O, L>::new(info)?;
-    let mut managers =
-        [BoundDecodedAddress::<O>::new(DecodedStoredAddress::Undefined)?; NUM_FILE_FSM_MANAGERS];
+    let mut prepared;
     let managers = if info.persist {
-        for (output, &address) in managers.iter_mut().zip(&info.manager_addrs) {
+        prepared = [BoundDecodedAddress::<O>::new(DecodedStoredAddress::Undefined)?;
+            NUM_FILE_FSM_MANAGERS];
+        for (output, &address) in prepared.iter_mut().zip(&info.manager_addrs) {
             *output = BoundDecodedAddress::new(address)?;
         }
-        managers.as_slice()
+        prepared.as_slice()
     } else {
         &[]
     };
