@@ -6,6 +6,7 @@ use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::bytes::ByteCursor;
 use crate::bytes::UnexpectedEof;
+use crate::codec::Encode;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -177,19 +178,54 @@ impl VariableLengthDescriptor {
     /// The output is unchanged on error.
     #[inline]
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
-        Ok(self.write_fields(output)?)
+        Ok(self.encode_into(output)?)
+    }
+
+    /// Returns the stored number of base elements.
+    pub const fn element_count(&self) -> u32 {
+        self.element_count
+    }
+
+    /// Returns the stored base-relative collection address, including zero or undefined values.
+    pub const fn collection_address(&self) -> StoredAddress {
+        self.collection_address
+    }
+
+    /// Returns the full four-byte index without checking membership in a collection.
+    pub const fn object_index(&self) -> u32 {
+        self.object_index
+    }
+
+    /// Returns the width used to read or write the collection address.
+    pub const fn offset_width(&self) -> OffsetWidth {
+        self.offsets
+    }
+
+    /// Returns the descriptor's size at its stored address width.
+    pub fn encoded_size(&self) -> usize {
+        self.encoded_len()
+    }
+}
+
+impl Encode for VariableLengthDescriptor {
+    type Error = UnexpectedEof;
+
+    /// Returns eight bytes plus the retained address width.
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        Self::serialized_size(self.offsets)
     }
 
     /// Acquires the complete destination and each field before writing the descriptor.
     ///
-    /// Preserves the output suffix and returns the bytes written.
+    /// Writes little-endian fields, preserves the output suffix, and returns the bytes written.
     ///
     /// # Errors
     ///
     /// Returns [`bytes::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`],
     /// leaving the entire output unchanged.
     #[inline]
-    fn write_fields(&self, output: &mut [u8]) -> Result<usize, UnexpectedEof> {
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
         let available = output.len();
         let Self {
             element_count,
@@ -281,32 +317,7 @@ impl VariableLengthDescriptor {
                 *index_bytes = object_index.to_le_bytes();
             }
         }
-        Ok(self.encoded_size())
-    }
-
-    /// Returns the stored number of base elements.
-    pub const fn element_count(&self) -> u32 {
-        self.element_count
-    }
-
-    /// Returns the stored base-relative collection address, including zero or undefined values.
-    pub const fn collection_address(&self) -> StoredAddress {
-        self.collection_address
-    }
-
-    /// Returns the full four-byte index without checking membership in a collection.
-    pub const fn object_index(&self) -> u32 {
-        self.object_index
-    }
-
-    /// Returns the width used to read or write the collection address.
-    pub const fn offset_width(&self) -> OffsetWidth {
-        self.offsets
-    }
-
-    /// Returns the descriptor's size at its stored address width.
-    pub fn encoded_size(&self) -> usize {
-        Self::serialized_size(self.offsets)
+        Ok(self.encoded_len())
     }
 }
 
@@ -360,9 +371,10 @@ mod tests {
             prop_assert_eq!(value, VariableLengthDescriptor::new(offsets, count, StoredAddress::new(address.get()), index).unwrap());
             let mut output = [prefix.as_slice(), vec![fill; available].as_slice(), suffix.as_slice()].concat();
             let original = output.clone();
-            let written = value.write_into(&mut output[prefix.len()..prefix.len() + available]);
+            prop_assert_eq!(value.encoded_len(), expected.len());
+            let written = value.encode_into(&mut output[prefix.len()..prefix.len() + available]);
             if available < expected.len() {
-                prop_assert_eq!(written, Err(FormatError::UnexpectedEof { expected: expected.len(), available }));
+                prop_assert_eq!(written, Err(UnexpectedEof { expected: expected.len(), available }));
                 prop_assert_eq!(output, original);
             } else {
                 prop_assert_eq!(written.unwrap(), expected.len());
