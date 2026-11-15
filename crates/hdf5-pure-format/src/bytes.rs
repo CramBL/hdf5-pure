@@ -779,6 +779,34 @@ impl<'a> ByteCursor<'a> {
         *remaining = rest;
         Ok(array)
     }
+
+    /// Borrows `count` consecutive `N`-byte arrays and advances the cursor.
+    ///
+    /// The returned slice remains valid for the original input's lifetime, including after
+    /// subsequent cursor operations. `N` must be greater than zero. A zero count succeeds at any
+    /// position through the input's end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnexpectedEof`] if `count * N` or the range's end exceeds [`usize::MAX`], or the
+    /// range is incomplete. Leaves the cursor unchanged on error.
+    #[inline]
+    pub(crate) fn take_arrays<const N: usize>(
+        &mut self,
+        count: usize,
+    ) -> Result<&'a [[u8; N]], UnexpectedEof> {
+        const { assert!(N > 0) };
+        let Some(len) = count.checked_mul(N) else {
+            return Err(UnexpectedEof {
+                expected: usize::MAX,
+                available: self.input_len,
+            });
+        };
+        let bytes = self.take(len)?;
+        // The acquired byte count is a multiple of N, so there is no remainder.
+        let (arrays, _) = bytes.as_chunks::<N>();
+        Ok(arrays)
+    }
 }
 
 #[cfg(test)]
@@ -794,13 +822,13 @@ mod tests {
         let data = [0xaa, 1, 2, 3, 4, 5, 6, 7];
         let mut cursor = ByteCursor::with_position(&data, 1).unwrap();
         let first: &[u8; 2] = cursor.take_array().unwrap();
-        let second: &[u8; 4] = cursor.take_array().unwrap();
+        let second: &[[u8; 2]] = cursor.take_arrays(2).unwrap();
         assert_eq!(cursor.u8().unwrap(), 7);
         assert_eq!(cursor.position(), data.len());
         assert_eq!(first, &[1, 2]);
-        assert_eq!(second, &[3, 4, 5, 6]);
+        assert_eq!(second, &[[3, 4], [5, 6]]);
         assert_eq!(first.as_ptr(), data[1..].as_ptr());
-        assert_eq!(second.as_ptr(), data[3..].as_ptr());
+        assert_eq!(second.as_ptr().cast::<u8>(), data[3..].as_ptr());
 
         let mut output = [0; 7];
         let mut cursor = ByteCursorMut::new(&mut output);
@@ -904,8 +932,19 @@ mod tests {
         }
         if len == 0 {
             assert_eq!(cursor.take_array::<0>().unwrap(), &[]);
+            assert!(cursor.take_arrays::<2>(0).unwrap().is_empty());
             assert_eq!(cursor.array::<0>().unwrap(), []);
             assert_eq!(array_at_mut::<0>(&mut output, position).unwrap(), &[]);
+            assert_eq!(cursor.position(), position);
+        }
+        if len == usize::MAX {
+            assert_eq!(
+                cursor.take_arrays::<2>(usize::MAX / 2 + 1).unwrap_err(),
+                UnexpectedEof {
+                    expected: usize::MAX,
+                    available: data.len()
+                }
+            );
             assert_eq!(cursor.position(), position);
         }
     }
@@ -992,6 +1031,30 @@ mod tests {
             prop_assert_eq!(cursor.position(), position);
             prop_assert_eq!(array_at_mut::<N>(&mut output, position).unwrap_err(), error);
             prop_assert_eq!(output, data);
+        }
+        let position = origin % (data.len() + 1);
+        let available = (data.len() - position) / N;
+        let count = if succeeds {
+            requested % (available + 1)
+        } else {
+            available + 1 + requested % 128
+        };
+        let mut cursor = ByteCursor::with_position(data, position).unwrap();
+        if succeeds {
+            let arrays = cursor.take_arrays::<N>(count).unwrap();
+            prop_assert_eq!(arrays.len(), count);
+            prop_assert_eq!(arrays.as_flattened(), &data[position..position + count * N]);
+            prop_assert_eq!(arrays.as_ptr().cast::<u8>(), data[position..].as_ptr());
+            prop_assert_eq!(cursor.position(), position + count * N);
+        } else {
+            prop_assert_eq!(
+                cursor.take_arrays::<N>(count).unwrap_err(),
+                UnexpectedEof {
+                    expected: position + count * N,
+                    available: data.len()
+                }
+            );
+            prop_assert_eq!(cursor.position(), position);
         }
         Ok(())
     }
