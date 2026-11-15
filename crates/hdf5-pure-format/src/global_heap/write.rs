@@ -8,9 +8,9 @@ use super::GCOL_RESERVED_LEN;
 use super::GCOL_SIGNATURE;
 use super::GCOL_VERSION;
 use super::GLOBAL_HEAP_MAX_OBJECTS;
+use super::GLOBAL_HEAP_MIN_COLLECTION_SIZE;
 use super::GlobalHeapCollectionError;
 use super::IndexSet;
-use super::MIN_COLLECTION_SIZE;
 use super::OBJECT_RESERVED_LEN;
 use crate::bytes;
 use crate::convert::Narrow;
@@ -306,14 +306,15 @@ impl<'a> PreparedGlobalHeapCollection<'a> {
         })?;
         let capacity = match capacity {
             Capacity::Derived => super::aligned_collection_size(
-                super::add_collection_size(used, header)?.max(MIN_COLLECTION_SIZE.to_u64()),
+                super::add_collection_size(used, header)?
+                    .max(GLOBAL_HEAP_MIN_COLLECTION_SIZE.to_u64()),
             )?,
             Capacity::Exact(capacity) => capacity,
         };
-        if capacity < MIN_COLLECTION_SIZE.to_u64() {
+        if capacity < GLOBAL_HEAP_MIN_COLLECTION_SIZE.to_u64() {
             return Err(FormatError::GlobalHeapCapacityTooSmall {
                 capacity,
-                minimum: MIN_COLLECTION_SIZE.to_u64(),
+                minimum: GLOBAL_HEAP_MIN_COLLECTION_SIZE.to_u64(),
             });
         }
         if !capacity.is_multiple_of(ALIGNMENT.to_u64()) {

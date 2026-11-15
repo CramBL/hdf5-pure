@@ -107,7 +107,7 @@ impl GlobalHeapCollectionLocator {
         }
         fields.array::<GCOL_RESERVED_LEN>()?;
         let size = fields.length(lengths)?;
-        if size < MIN_COLLECTION_SIZE as u64 {
+        if size < GLOBAL_HEAP_MIN_COLLECTION_SIZE as u64 {
             return Err(FormatError::GlobalHeapCollectionTooSmall {
                 collection_address: address.get(),
                 size,
@@ -555,6 +555,127 @@ pub fn encode_global_heap_collection(
         .map_err(GlobalHeapCollectionError::from)
 }
 
+/// A global heap collection that a writer adds objects to one at a time, up to a size limit.
+///
+/// [`finish`](Self::finish) encodes the collection as [`encode_global_heap_collection`] does. The
+/// size limit lets a writer share collections across objects. libhdf5 creates a collection of
+/// [`GLOBAL_HEAP_MIN_COLLECTION_SIZE`] bytes, or of the size one larger object needs, and creates
+/// another once an object does not fit the free space of the collections it tracks (`H5HG_insert`
+/// in `H5HG.c` and `H5F_cwfs_find_free_heap` in `H5Fcwfs.c`, HDF5 2.2.0). Unlike libhdf5,
+/// [`push`](Self::push) always leaves room for the header of the free space object.
+///
+/// # Examples
+///
+/// ```
+/// # use hdf5_pure_format::__private::GlobalHeapCollectionError;
+/// # use hdf5_pure_format::__private::GlobalHeapCollectionWriter;
+/// # use hdf5_pure_format::__private::LengthWidth;
+/// let mut collection = GlobalHeapCollectionWriter::new(LengthWidth::Eight, 64);
+/// assert_eq!(collection.push(b"alpha")?.map(|index| index.get()), Some(1));
+/// // A second object would take the collection past 64 bytes.
+/// assert_eq!(collection.push(b"beta")?, None);
+/// assert_eq!(collection.finish()?.len(), 4096);
+/// # Ok::<(), GlobalHeapCollectionError>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct GlobalHeapCollectionWriter {
+    length_width: LengthWidth,
+    /// The size in bytes, the free space object included, past which [`push`](Self::push)
+    /// rejects a second or later object.
+    max_size: u64,
+    /// The size in bytes of the collection header and the objects added so far.
+    size: u64,
+    /// The bytes of the objects added so far, one after another.
+    payloads: Vec<u8>,
+    /// The end of each object added so far in `payloads`.
+    ends: Vec<usize>,
+}
+
+impl GlobalHeapCollectionWriter {
+    /// Returns an empty collection with length fields `length_width` bytes wide, which holds
+    /// objects while its size stays at most `max_size` bytes.
+    #[must_use]
+    pub fn new(length_width: LengthWidth, max_size: u64) -> Self {
+        Self {
+            length_width,
+            max_size,
+            size: header_len(length_width),
+            payloads: Vec::new(),
+            ends: Vec::new(),
+        }
+    }
+
+    /// Adds `object` at the next index, from 1, and returns that index.
+    ///
+    /// An empty collection takes any one object, so an object larger than the size limit gets a
+    /// collection of its own. Each object stores a reference count of 1.
+    ///
+    /// Returns `Ok(None)`, and adds nothing, if the collection already holds
+    /// [`GLOBAL_HEAP_MAX_OBJECTS`] objects or if `object` would take it past its size limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GlobalHeapCollectionError::Format`] if the size of the collection exceeds
+    /// [`u64::MAX`], or if growing the object buffers fails.
+    pub fn push(&mut self, object: &[u8]) -> Result<Option<NonZeroU16>, GlobalHeapCollectionError> {
+        let Some(index) = u16::try_from(self.ends.len() + 1)
+            .ok()
+            .and_then(NonZeroU16::new)
+        else {
+            return Ok(None);
+        };
+        let header_len = header_len(self.length_width);
+        let size = add_collection_size(
+            add_collection_size(self.size, header_len)?,
+            aligned_collection_size(object.len().to_u64())?,
+        )?;
+        // The free space object, which `finish` appends, takes at least a header.
+        if !self.ends.is_empty() && add_collection_size(size, header_len)? > self.max_size {
+            return Ok(None);
+        }
+        self.payloads.try_reserve(object.len()).map_err(|source| {
+            FormatError::AllocationFailed {
+                values: object.len(),
+                source,
+            }
+        })?;
+        self.ends
+            .try_reserve(1)
+            .map_err(|source| FormatError::AllocationFailed { values: 1, source })?;
+        self.payloads.extend_from_slice(object);
+        self.ends.push(self.payloads.len());
+        self.size = size;
+        Ok(Some(index))
+    }
+
+    /// Returns the encoded collection, with a free space object at index 0 that spans the rest of
+    /// it.
+    ///
+    /// A collection smaller than [`GLOBAL_HEAP_MIN_COLLECTION_SIZE`] bytes is padded to that size.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`encode_global_heap_collection`], and
+    /// [`GlobalHeapCollectionError::Format`] if reserving the list of objects fails.
+    pub fn finish(self) -> Result<Vec<u8>, GlobalHeapCollectionError> {
+        let mut objects = Vec::new();
+        objects
+            .try_reserve_exact(self.ends.len())
+            .map_err(|source| FormatError::AllocationFailed {
+                values: self.ends.len(),
+                source,
+            })?;
+        let mut start = 0;
+        for &end in &self.ends {
+            // `push` appends each end after the bytes it ends, so the ends increase up to
+            // `payloads.len()`.
+            objects.push(&self.payloads[start..end]);
+            start = end;
+        }
+        encode_global_heap_collection(self.length_width, &objects)
+    }
+}
+
 /// An error encoding a global heap collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GlobalHeapCollectionError {
@@ -655,9 +776,14 @@ const INDEX_WORDS: usize = (u16::MAX as usize + 1) / 64;
 // this many bytes, `H5HG_ALIGNMENT` in the C library (`H5HGpkg.h`, HDF5 2.2.0).
 const ALIGNMENT: usize = 8;
 
-// The minimum collection size "Global Heap" of the format specification, version 4.0, defines,
-// and `H5HG_MINSIZE` in the C library (`H5HGpkg.h`, HDF5 2.2.0).
-const MIN_COLLECTION_SIZE: usize = 4096;
+/// The minimum size in bytes of a global heap collection, 4096.
+///
+/// "Global Heap" of the [format specification, version 4.0][spec] defines the minimum, and
+/// libhdf5 calls it `H5HG_MINSIZE` (`H5HGpkg.h`, HDF5 2.2.0). libhdf5 writes a collection of
+/// this size unless one object needs more.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+pub const GLOBAL_HEAP_MIN_COLLECTION_SIZE: usize = 4096;
 
 #[cfg(test)]
 mod tests {
@@ -668,7 +794,7 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case::padded_to_the_minimum(&[b"alpha".as_slice(), b"".as_slice()], MIN_COLLECTION_SIZE)]
+    #[case::padded_to_the_minimum(&[b"alpha".as_slice(), b"".as_slice()], GLOBAL_HEAP_MIN_COLLECTION_SIZE)]
     #[case::past_the_minimum(&[[7u8; 5000].as_slice()], 5048)]
     fn an_encoded_collection_parses_back_to_its_objects(
         #[case] objects: &[&[u8]],
