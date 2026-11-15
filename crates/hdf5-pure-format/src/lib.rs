@@ -28,6 +28,7 @@ mod bytes;
 mod checksum;
 mod chunk_record;
 mod chunked_geometry;
+mod codec;
 mod convert;
 mod data_layout;
 mod dataspace;

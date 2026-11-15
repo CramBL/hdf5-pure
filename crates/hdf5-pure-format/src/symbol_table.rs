@@ -20,6 +20,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::bytes::UnexpectedEof;
+use crate::codec::Decode;
 use crate::error::FormatError;
 use crate::width::{FormatWidths, OffsetWidth};
 
@@ -54,16 +55,12 @@ impl SymbolTableMessage {
     /// # Errors
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than two addresses.
+    #[inline]
     pub fn parse_with_offset_width(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<SymbolTableMessage, FormatError> {
-        let mut cursor = bytes::ByteCursor::new(data);
-        Ok(match offset_width {
-            OffsetWidth::Two => Self::read_fields(cursor.take_array::<4>()?, offset_width)?,
-            OffsetWidth::Four => Self::read_fields(cursor.take_array::<8>()?, offset_width)?,
-            OffsetWidth::Eight => Self::read_fields(cursor.take_array::<16>()?, offset_width)?,
-        })
+        Self::decode(data, offset_width)
     }
 
     /// Writes both addresses as little-endian integers and returns the number of bytes written.
@@ -133,6 +130,27 @@ impl SymbolTableMessage {
                 btree_address: StoredAddress::new(u64::from_le_bytes(*cursor.take_array()?)),
                 local_heap_address: StoredAddress::new(u64::from_le_bytes(*cursor.take_array()?)),
             },
+        })
+    }
+}
+
+impl<'input> Decode<'input> for SymbolTableMessage {
+    type Context = OffsetWidth;
+    type Error = FormatError;
+
+    /// Reads the B-tree and local heap addresses from one complete little-endian record.
+    ///
+    /// Reads two addresses at `offsets` bytes each. Leaves any input suffix unexamined.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the record is incomplete, relative to `input`.
+    fn decode(input: &'input [u8], offsets: OffsetWidth) -> Result<Self, Self::Error> {
+        let mut cursor = bytes::ByteCursor::new(input);
+        Ok(match offsets {
+            OffsetWidth::Two => Self::read_fields(cursor.take_array::<4>()?, offsets)?,
+            OffsetWidth::Four => Self::read_fields(cursor.take_array::<8>()?, offsets)?,
+            OffsetWidth::Eight => Self::read_fields(cursor.take_array::<16>()?, offsets)?,
         })
     }
 }

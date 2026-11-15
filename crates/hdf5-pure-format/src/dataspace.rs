@@ -8,6 +8,7 @@ use hdf5_pure_core::__private::ElementCount;
 
 use crate::bytes;
 use crate::bytes::ByteCursor;
+use crate::codec::Decode;
 use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
@@ -54,11 +55,12 @@ impl Dataspace {
     /// Returns [`FormatError::InvalidDataspaceVersion`] if the version is unsupported,
     /// [`FormatError::InvalidDataspaceType`] if a version 2 type byte is invalid, or
     /// [`FormatError::UnexpectedEof`] if the message ends within a field.
+    #[inline]
     pub fn parse_with_length_width(
         data: &[u8],
         length_width: LengthWidth,
     ) -> Result<Dataspace, FormatError> {
-        Self::parse_with_dimension_fields(data, length_width).map(|(dataspace, _)| dataspace)
+        Self::decode(data, length_width)
     }
 
     /// Parses a dataspace and returns the byte range of its current dimension fields.
@@ -101,61 +103,7 @@ impl Dataspace {
         data: &[u8],
         length_width: LengthWidth,
     ) -> Result<(Dataspace, Range<usize>), FormatError> {
-        let mut cursor = ByteCursor::new(data);
-        let [version, rank, flags, fourth] = cursor.array::<V2_HEADER_SIZE>()?;
-
-        let (space_type, header_size) = match version {
-            VERSION_ONE => {
-                // v1: byte 3 is reserved, then 4 reserved bytes
-                cursor.take_array::<{ V1_HEADER_SIZE - V2_HEADER_SIZE }>()?;
-                let st = if rank == 0 {
-                    DataspaceType::Scalar
-                } else {
-                    DataspaceType::Simple
-                };
-                (st, V1_HEADER_SIZE)
-            }
-            VERSION_TWO => {
-                // v2: byte 3 is type
-                let type_byte = fourth;
-                let st = match type_byte {
-                    TYPE_SCALAR => DataspaceType::Scalar,
-                    TYPE_SIMPLE => DataspaceType::Simple,
-                    TYPE_NULL => DataspaceType::Null,
-                    _ => return Err(FormatError::InvalidDataspaceType(type_byte)),
-                };
-                (st, V2_HEADER_SIZE)
-            }
-            _ => return Err(FormatError::InvalidDataspaceVersion(version)),
-        };
-
-        let dimensions =
-            Self::read_dimensions(&mut cursor, rank, length_width, |dimension| dimension)?;
-        let dimension_fields = header_size..cursor.position();
-        let max_dimensions = if flags & MAX_DIMENSIONS_FLAG != 0 {
-            Some(Self::read_dimensions(
-                &mut cursor,
-                rank,
-                length_width,
-                max_extent_from_length,
-            )?)
-        } else {
-            None
-        };
-
-        // A v1 dataspace with flags bit 1 set carries rank × `length_size` bytes
-        // of permutation indices here. Nothing below reads the cursor position, so they need
-        // no skipping. This crate does not expose them.
-
-        Ok((
-            Dataspace {
-                space_type,
-                rank,
-                dimensions,
-                max_dimensions,
-            },
-            dimension_fields,
-        ))
+        Self::decode_with_dimension_fields(data, length_width)
     }
 
     /// Serializes a version 2 dataspace message with `length_size`-byte dimensions.
@@ -226,6 +174,77 @@ impl Dataspace {
                 .zip(&self.dimensions)
                 .all(|(max, &dim)| max.size() == Some(dim));
         (!fixed_at_current).then_some(max_dims)
+    }
+
+    /// Reads a dataspace and locates the bytes of its current dimensions.
+    ///
+    /// Returns a range relative to `data`, excluding maximum dimensions. Leaves version 1
+    /// permutation fields and any remaining suffix unexamined.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidDataspaceVersion`] if the version is unsupported,
+    /// [`FormatError::InvalidDataspaceType`] if a version 2 type byte is invalid, or
+    /// [`FormatError::UnexpectedEof`] if a required field is incomplete, relative to `data`.
+    fn decode_with_dimension_fields(
+        data: &[u8],
+        length_width: LengthWidth,
+    ) -> Result<(Self, Range<usize>), FormatError> {
+        let mut cursor = ByteCursor::new(data);
+        let [version, rank, flags, fourth] = cursor.array::<V2_HEADER_SIZE>()?;
+
+        let (space_type, header_size) = match version {
+            VERSION_ONE => {
+                // v1: byte 3 is reserved, then 4 reserved bytes
+                cursor.take_array::<{ V1_HEADER_SIZE - V2_HEADER_SIZE }>()?;
+                let st = if rank == 0 {
+                    DataspaceType::Scalar
+                } else {
+                    DataspaceType::Simple
+                };
+                (st, V1_HEADER_SIZE)
+            }
+            VERSION_TWO => {
+                // v2: byte 3 is type
+                let type_byte = fourth;
+                let st = match type_byte {
+                    TYPE_SCALAR => DataspaceType::Scalar,
+                    TYPE_SIMPLE => DataspaceType::Simple,
+                    TYPE_NULL => DataspaceType::Null,
+                    _ => return Err(FormatError::InvalidDataspaceType(type_byte)),
+                };
+                (st, V2_HEADER_SIZE)
+            }
+            _ => return Err(FormatError::InvalidDataspaceVersion(version)),
+        };
+
+        let dimensions =
+            Self::read_dimensions(&mut cursor, rank, length_width, |dimension| dimension)?;
+        let dimension_fields = header_size..cursor.position();
+        let max_dimensions = if flags & MAX_DIMENSIONS_FLAG != 0 {
+            Some(Self::read_dimensions(
+                &mut cursor,
+                rank,
+                length_width,
+                max_extent_from_length,
+            )?)
+        } else {
+            None
+        };
+
+        // A v1 dataspace with flags bit 1 set carries rank × `length_size` bytes
+        // of permutation indices here. Nothing below reads the cursor position, so they need
+        // no skipping. This crate does not expose them.
+
+        Ok((
+            Dataspace {
+                space_type,
+                rank,
+                dimensions,
+                max_dimensions,
+            },
+            dimension_fields,
+        ))
     }
 
     /// Reads little-endian dimension fields and converts each length.
@@ -316,6 +335,23 @@ impl Dataspace {
             ),
             available: error.available,
         }
+    }
+}
+
+impl<'input> Decode<'input> for Dataspace {
+    type Context = LengthWidth;
+    type Error = FormatError;
+
+    /// Reads current and optional maximum dimensions from a version 1 or 2 message.
+    ///
+    /// Interprets dimension fields as little-endian integers. Leaves version 1 permutation
+    /// fields and any input suffix unexamined.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::decode_with_dimension_fields`].
+    fn decode(input: &'input [u8], lengths: LengthWidth) -> Result<Self, Self::Error> {
+        Self::decode_with_dimension_fields(input, lengths).map(|(dataspace, _)| dataspace)
     }
 }
 
@@ -542,7 +578,7 @@ mod tests {
         for available in version.header_size()..raw.len() {
             let complete = (available - version.header_size()) / size;
             assert_eq!(
-                Dataspace::parse_with_dimension_fields(&raw[..available], width).unwrap_err(),
+                Dataspace::decode(&raw[..available], width).unwrap_err(),
                 FormatError::UnexpectedEof {
                     expected: version.header_size() + (complete + 1) * size,
                     available,
@@ -585,7 +621,7 @@ mod tests {
         let mut raw = Version::Two.body(&[3, 5], None, width);
         raw[3] = type_byte;
         assert_eq!(
-            Dataspace::parse(&raw, width.get()).unwrap(),
+            Dataspace::decode(&raw, width).unwrap(),
             Dataspace {
                 space_type,
                 rank: 2,
@@ -707,7 +743,7 @@ mod tests {
         );
         assert_eq!(fields, start..start + 2 * usize::from(lengths.get()));
         bytes::write_length_at(&mut encoded, fields.start, 6, lengths).unwrap();
-        let changed = Dataspace::parse_with_length_width(&encoded, lengths).unwrap();
+        let changed = Dataspace::decode(&encoded, lengths).unwrap();
         assert_eq!(changed.dimensions, [6, 5]);
         assert_eq!(changed.max_dimensions, parsed.max_dimensions);
     }
@@ -735,7 +771,7 @@ mod tests {
     #[test]
     fn scalar_v1() {
         let data = build_v1_dataspace(0, 0, &[], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Scalar);
         assert_eq!(ds.rank, 0);
         assert!(ds.dimensions.is_empty());
@@ -746,7 +782,7 @@ mod tests {
     #[test]
     fn null_v2() {
         let data = build_v2_dataspace(0, 0, 2, &[], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Null);
         assert_eq!(ds.num_elements(), ElementCount::new(0));
     }
@@ -754,7 +790,7 @@ mod tests {
     #[test]
     fn simple_1d() {
         let data = build_v1_dataspace(1, 0, &[5], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Simple);
         assert_eq!(ds.rank, 1);
         assert_eq!(ds.dimensions, vec![5]);
@@ -765,7 +801,7 @@ mod tests {
     #[test]
     fn simple_2d() {
         let data = build_v1_dataspace(2, 0, &[3, 4], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.rank, 2);
         assert_eq!(ds.dimensions, vec![3, 4]);
         assert_eq!(ds.num_elements(), ElementCount::new(12));
@@ -774,7 +810,7 @@ mod tests {
     #[test]
     fn simple_3d_with_max_dims_unlimited() {
         let data = build_v1_dataspace(3, 0x01, &[2, 3, 4], Some(&[10, u64::MAX, 100]));
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.rank, 3);
         assert_eq!(ds.dimensions, vec![2, 3, 4]);
         let md = ds.max_dimensions.clone().unwrap();
@@ -808,7 +844,7 @@ mod tests {
             dimensions,
             None,
         );
-        let dataspace = Dataspace::parse(&data, 8).unwrap();
+        let dataspace = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(dataspace.space_type, DataspaceType::Simple);
         assert_eq!(dataspace.num_elements(), ElementCount::new(expected));
     }
@@ -819,14 +855,14 @@ mod tests {
         // u64::MAX. `num_elements()` must saturate on overflow, so the
         // callers can reject the impossibly large count as an error.
         let data = build_v1_dataspace(3, 0, &[1 << 40, 1 << 40, 1 << 40], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.num_elements(), ElementCount::new(u64::MAX));
     }
 
     #[test]
     fn v2_simple() {
         let data = build_v2_dataspace(1, 0, 1, &[7], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Simple);
         assert_eq!(ds.dimensions, vec![7]);
     }
@@ -834,7 +870,7 @@ mod tests {
     #[test]
     fn v2_scalar() {
         let data = build_v2_dataspace(0, 0, 0, &[], None);
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Scalar);
         assert_eq!(ds.num_elements(), ElementCount::new(1));
     }
@@ -848,14 +884,14 @@ mod tests {
         buf.push(0); // reserved
         buf.extend_from_slice(&[0u8; 4]); // reserved(4)
         buf.extend_from_slice(&10u32.to_le_bytes()); // dim with length_size=4
-        let ds = Dataspace::parse(&buf, 4).unwrap();
+        let ds = Dataspace::decode(&buf, LengthWidth::Four).unwrap();
         assert_eq!(ds.dimensions, vec![10]);
     }
 
     #[test]
     fn truncated_data_error() {
         let data = [1u8, 2]; // too short
-        let err = Dataspace::parse(&data, 8).unwrap_err();
+        let err = Dataspace::decode(&data, LengthWidth::Eight).unwrap_err();
         assert_eq!(
             err,
             FormatError::UnexpectedEof {
@@ -868,28 +904,28 @@ mod tests {
     #[test]
     fn invalid_version_error() {
         let data = [5u8, 0, 0, 0, 0, 0, 0, 0];
-        let err = Dataspace::parse(&data, 8).unwrap_err();
+        let err = Dataspace::decode(&data, LengthWidth::Eight).unwrap_err();
         assert_eq!(err, FormatError::InvalidDataspaceVersion(5));
     }
 
     #[test]
     fn invalid_v2_type_error() {
         let data = build_v2_dataspace(0, 0, 5, &[], None);
-        let err = Dataspace::parse(&data, 8).unwrap_err();
+        let err = Dataspace::decode(&data, LengthWidth::Eight).unwrap_err();
         assert_eq!(err, FormatError::InvalidDataspaceType(5));
     }
 
     #[test]
     fn v1_with_max_dims() {
         let data = build_v1_dataspace(1, 0x01, &[5], Some(&[10]));
-        let ds = Dataspace::parse(&data, 8).unwrap();
+        let ds = Dataspace::decode(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.max_dimensions, Some(vec![MaxExtent::Fixed(10)]));
     }
 
     #[test]
     fn all_ones_max_dimension_is_unlimited_only_at_eight_bytes() {
         let eight = build_v1_dataspace(1, 0x01, &[5], Some(&[u64::MAX]));
-        let ds = Dataspace::parse(&eight, 8).unwrap();
+        let ds = Dataspace::decode(&eight, LengthWidth::Eight).unwrap();
         assert_eq!(ds.max_dimensions, Some(vec![MaxExtent::Unlimited]));
 
         // Four bytes cannot hold `H5S_UNLIMITED`: the C library zero-extends
@@ -899,7 +935,7 @@ mod tests {
         four.extend_from_slice(&[0u8; 4]);
         four.extend_from_slice(&5u32.to_le_bytes());
         four.extend_from_slice(&u32::MAX.to_le_bytes());
-        let ds = Dataspace::parse(&four, 4).unwrap();
+        let ds = Dataspace::decode(&four, LengthWidth::Four).unwrap();
         assert_eq!(
             ds.max_dimensions,
             Some(vec![MaxExtent::Fixed(u64::from(u32::MAX))])
@@ -918,7 +954,7 @@ mod tests {
         assert_eq!(bytes[..4], [2, 2, 0x01, 1]);
         assert_eq!(bytes[20..28], u64::MAX.to_le_bytes());
         assert_eq!(bytes[28..36], 6u64.to_le_bytes());
-        assert_eq!(Dataspace::parse(&bytes, 8).unwrap(), ds);
+        assert_eq!(Dataspace::decode(&bytes, LengthWidth::Eight).unwrap(), ds);
     }
 
     #[test]
