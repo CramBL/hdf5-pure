@@ -31,7 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
-- Reduced decoding time for higher-rank dimension lists in `Dataspace::parse` with bulk reads ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
+- Reduced dimension-list decoding time in `Dataspace::parse` for nonempty shapes ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `parse_file_space_info` in `hdf5-pure-format` allocates persistent manager lists once ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 
 ## [0.48.0] - 2026-11-11

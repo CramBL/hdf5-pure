@@ -268,6 +268,17 @@ impl Dataspace {
         Ok(match width {
             LengthWidth::Two => {
                 let arrays = Self::dimension_arrays::<2>(cursor, count)?;
+                if let [bytes] = arrays {
+                    return Ok(Vec::from([from_length(u64::from(u16::from_le_bytes(
+                        *bytes,
+                    )))]));
+                }
+                if let [first, second] = arrays {
+                    return Ok(Vec::from([
+                        from_length(u64::from(u16::from_le_bytes(*first))),
+                        from_length(u64::from(u16::from_le_bytes(*second))),
+                    ]));
+                }
                 let mut dimensions = Vec::with_capacity(count);
                 dimensions.extend(
                     arrays
@@ -278,6 +289,17 @@ impl Dataspace {
             }
             LengthWidth::Four => {
                 let arrays = Self::dimension_arrays::<4>(cursor, count)?;
+                if let [bytes] = arrays {
+                    return Ok(Vec::from([from_length(u64::from(u32::from_le_bytes(
+                        *bytes,
+                    )))]));
+                }
+                if let [first, second] = arrays {
+                    return Ok(Vec::from([
+                        from_length(u64::from(u32::from_le_bytes(*first))),
+                        from_length(u64::from(u32::from_le_bytes(*second))),
+                    ]));
+                }
                 let mut dimensions = Vec::with_capacity(count);
                 dimensions.extend(
                     arrays
@@ -288,6 +310,15 @@ impl Dataspace {
             }
             LengthWidth::Eight => {
                 let arrays = Self::dimension_arrays::<8>(cursor, count)?;
+                if let [bytes] = arrays {
+                    return Ok(Vec::from([from_length(u64::from_le_bytes(*bytes))]));
+                }
+                if let [first, second] = arrays {
+                    return Ok(Vec::from([
+                        from_length(u64::from_le_bytes(*first)),
+                        from_length(u64::from_le_bytes(*second)),
+                    ]));
+                }
                 let mut dimensions = Vec::with_capacity(count);
                 dimensions.extend(
                     arrays
@@ -519,6 +550,7 @@ mod tests {
     #[rstest::rstest]
     #[case::empty(&[])]
     #[case::zero_dimension(&[0])]
+    #[case::two_dimensions(&[3, 5])]
     #[case::three_dimensions(&[3, 5, u64::from(u16::MAX)])]
     fn dimension_arrays_preserve_values_ranges_and_suffixes(
         #[case] dimensions: &[u64],
