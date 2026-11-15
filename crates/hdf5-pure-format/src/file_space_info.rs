@@ -125,7 +125,7 @@ pub fn parse_file_space_info(
     widths: FormatWidths,
     data: &[u8],
 ) -> Result<FileSpaceInfo, FormatError> {
-    match bytes::Fields::new(data, 0).u8()? {
+    match bytes::ByteCursor::new(data).u8()? {
         VERSION_0 => parse_version_0(widths, data),
         VERSION_1 => parse_version_1(widths, data),
         version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
@@ -139,9 +139,9 @@ fn parse_version_0(
 ) -> Result<FileSpaceInfo, FormatError> {
     let head_len = 2 + usize::from(lengths.get());
     bytes::ensure_len(data, 0, head_len)?;
-    let mut fields = bytes::Fields::new(data, 1);
-    let strategy_code = fields.u8()?;
-    let threshold = fields.length(lengths)?;
+    let mut cursor = bytes::ByteCursor::with_position(data, 1)?;
+    let strategy_code = cursor.u8()?;
+    let threshold = cursor.length(lengths)?;
     let defaults = FileSpaceInfoFields {
         strategy: FileSpaceStrategy::FsmAggr,
         persist: false,
@@ -159,7 +159,7 @@ fn parse_version_0(
                 VERSION_0_MANAGERS * usize::from(offsets.get()),
             )?;
             let manager_addrs = (0..VERSION_0_MANAGERS)
-                .map(|_| fields.decoded_address(offsets))
+                .map(|_| cursor.decoded_address(offsets).map_err(FormatError::from))
                 .collect::<Result<Vec<DecodedStoredAddress>, FormatError>>()?;
             FileSpaceInfoFields {
                 persist: true,
@@ -196,20 +196,24 @@ fn parse_version_1(
             expected: fixed,
             available: data.len(),
         })?;
-    let mut fields = bytes::Fields::new(head, 1);
-    let strategy = strategy_from_code(fields.u8()?)?;
-    let persist = fields.u8()? != 0;
-    let threshold = fields.length(lengths)?;
-    let page_size = FileSpacePageSize::try_from(fields.length(lengths)?)?;
-    let page_end_meta_threshold = fields.u16()?;
-    let eoa_pre_fsm = Some(fields.decoded_address(offsets)?);
+    let mut cursor = bytes::ByteCursor::with_position(head, 1)?;
+    let strategy = strategy_from_code(cursor.u8()?)?;
+    let persist = cursor.u8()? != 0;
+    let threshold = cursor.length(lengths)?;
+    let page_size = FileSpacePageSize::try_from(cursor.length(lengths)?)?;
+    let page_end_meta_threshold = cursor.u16()?;
+    let eoa_pre_fsm = Some(cursor.decoded_address(offsets)?);
 
     let manager_addrs = if persist {
         let expected_managers_len = NUM_FILE_FSM_MANAGERS * usize::from(offsets.get());
         bytes::ensure_len(managers, 0, expected_managers_len)?;
-        let mut mgr_fields = bytes::Fields::new(managers, 0);
+        let mut mgr_cursor = bytes::ByteCursor::new(managers);
         (0..NUM_FILE_FSM_MANAGERS)
-            .map(|_| mgr_fields.decoded_address(offsets))
+            .map(|_| {
+                mgr_cursor
+                    .decoded_address(offsets)
+                    .map_err(FormatError::from)
+            })
             .collect::<Result<Vec<DecodedStoredAddress>, FormatError>>()?
     } else {
         Vec::new()

@@ -217,11 +217,11 @@ impl FilteredHugeObjectLocation {
         lengths: LengthWidth,
         filter_count: usize,
     ) -> Result<Self, FormatError> {
-        let mut fields = bytes::Fields::new(bytes, 0);
-        let address = fields.address(offsets)?;
-        let encoded_size = fields.length(lengths)?;
-        let filter_mask = fields.u32()?;
-        let decoded_size = fields.length(lengths)?;
+        let mut cursor = bytes::ByteCursor::new(bytes);
+        let address = cursor.address(offsets)?;
+        let encoded_size = cursor.length(lengths)?;
+        let filter_mask = cursor.u32()?;
+        let decoded_size = cursor.length(lengths)?;
         if address.get() >= StoredAddress::undefined(offsets).get()
             || filter_count > u32::BITS as usize
             || (filter_count < u32::BITS as usize && filter_mask >> filter_count != 0)
@@ -364,34 +364,34 @@ impl FractalHeapHeader {
                 expected: frame.encoded_len(),
                 available: data.len(),
             })?;
-        let mut fields = bytes::Fields::new(data, 0);
-        fields.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()?;
-        fields.u8()?;
-        let heap_id_length = fields.u16()?;
-        let filter_encoded_len = fields.u16()?;
-        let flags = fields.u8()?;
-        let max_managed_object_size = fields.u32()?;
-        let next_huge_object_id = fields.length(lengths)?;
-        let btree_huge_objects_address = fields.address(offsets)?;
-        let free_space_in_managed_blocks = fields.length(lengths)?;
-        let managed_block_free_space_manager_address = fields.address(offsets)?;
-        let managed_space = fields.length(lengths)?;
-        let allocated_managed_space = fields.length(lengths)?;
-        let direct_block_allocation_iterator_offset = fields.length(lengths)?;
-        let managed_objects_count = fields.length(lengths)?;
-        let huge_objects_size = fields.length(lengths)?;
-        let huge_objects_count = fields.length(lengths)?;
-        let tiny_objects_size = fields.length(lengths)?;
-        let tiny_objects_count = fields.length(lengths)?;
-        let table_width = fields.u16()?;
-        let starting_block_size = fields.length(lengths)?;
-        let max_direct_block_size = fields.length(lengths)?;
-        let max_heap_size = fields.u16()?;
-        let start_root_rows = fields.u16()?;
-        let root_block_address = fields.address(offsets)?;
-        let current_rows_in_root_indirect_block = fields.u16()?;
+        let mut cursor = bytes::ByteCursor::new(data);
+        cursor.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()?;
+        cursor.u8()?;
+        let heap_id_length = cursor.u16()?;
+        let filter_encoded_len = cursor.u16()?;
+        let flags = cursor.u8()?;
+        let max_managed_object_size = cursor.u32()?;
+        let next_huge_object_id = cursor.length(lengths)?;
+        let btree_huge_objects_address = cursor.address(offsets)?;
+        let free_space_in_managed_blocks = cursor.length(lengths)?;
+        let managed_block_free_space_manager_address = cursor.address(offsets)?;
+        let managed_space = cursor.length(lengths)?;
+        let allocated_managed_space = cursor.length(lengths)?;
+        let direct_block_allocation_iterator_offset = cursor.length(lengths)?;
+        let managed_objects_count = cursor.length(lengths)?;
+        let huge_objects_size = cursor.length(lengths)?;
+        let huge_objects_count = cursor.length(lengths)?;
+        let tiny_objects_size = cursor.length(lengths)?;
+        let tiny_objects_count = cursor.length(lengths)?;
+        let table_width = cursor.u16()?;
+        let starting_block_size = cursor.length(lengths)?;
+        let max_direct_block_size = cursor.length(lengths)?;
+        let max_heap_size = cursor.u16()?;
+        let start_root_rows = cursor.u16()?;
+        let root_block_address = cursor.address(offsets)?;
+        let current_rows_in_root_indirect_block = cursor.u16()?;
         let filtering =
-            FractalHeapFiltering::parse(data, lengths, fields.pos(), filter_encoded_len)?;
+            FractalHeapFiltering::parse(data, lengths, cursor.position(), filter_encoded_len)?;
         let (payload, checksum) = data.split_last_chunk::<FRACTAL_HEAP_CHECKSUM_LEN>().ok_or(
             FormatError::UnexpectedEof {
                 expected: FRACTAL_HEAP_CHECKSUM_LEN,
@@ -1041,21 +1041,22 @@ impl FractalHeapFiltering {
         if encoded_len == 0 {
             return Ok(Self::Unfiltered);
         }
-        let mut fields = bytes::Fields::new(data, offset);
-        let root_direct_block_size = fields.length(lengths)?;
-        let root_filter_mask = fields.u32()?;
-        let end = fields.pos().checked_add(usize::from(encoded_len)).ok_or(
-            FormatError::UnexpectedEof {
+        let mut cursor = bytes::ByteCursor::with_position(data, offset)?;
+        let root_direct_block_size = cursor.length(lengths)?;
+        let root_filter_mask = cursor.u32()?;
+        let end = cursor
+            .position()
+            .checked_add(usize::from(encoded_len))
+            .ok_or(FormatError::UnexpectedEof {
                 expected: usize::MAX,
                 available: data.len(),
-            },
-        )?;
-        let pipeline_bytes = data
-            .get(fields.pos()..end)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: end,
-                available: data.len(),
             })?;
+        let pipeline_bytes =
+            data.get(cursor.position()..end)
+                .ok_or(FormatError::UnexpectedEof {
+                    expected: end,
+                    available: data.len(),
+                })?;
         Ok(Self::Filtered {
             root_direct_block_size,
             root_filter_mask,
@@ -1268,16 +1269,16 @@ impl FractalHeapHeaderFrame {
         offsets: OffsetWidth,
         lengths: LengthWidth,
     ) -> Result<Self, FormatError> {
-        let mut fields = bytes::Fields::new(bytes, 0);
-        if fields.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()? != FRACTAL_HEAP_SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(bytes);
+        if cursor.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()? != FRACTAL_HEAP_SIGNATURE {
             return Err(FormatError::InvalidFractalHeapSignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != FRACTAL_HEAP_VERSION {
             return Err(FormatError::InvalidFractalHeapVersion(version));
         }
-        fields.u16()?;
-        let filter_encoded_len = fields.u16()?;
+        cursor.u16()?;
+        let filter_encoded_len = cursor.u16()?;
         let overflow = || FormatError::Internal("fractal heap header length exceeds u64".into());
         let length_fields_len = FRACTAL_HEAP_HEADER_LENGTH_FIELDS
             .checked_mul(u64::from(lengths.get()))
@@ -1526,7 +1527,7 @@ impl FractalHeapIdLayout {
             if filter_count.is_some_and(|count| count > u32::BITS as usize) {
                 return Err(FormatError::InvalidFractalHeapGeometry);
             }
-            let key = bytes::Fields::new(payload, 0).uint(key_width)?;
+            let key = bytes::ByteCursor::new(payload).uint(key_width)?;
             if !crate::width::length_width_holds(lengths, key) {
                 return Err(FormatError::ValueTooLargeForRepresentation {
                     value: key,
@@ -1643,14 +1644,14 @@ impl ManagedHeapIdLayout {
     }
 
     fn parse(&self, payload: &[u8]) -> Result<FractalHeapIdKind<'static>, FormatError> {
-        let mut fields = bytes::Fields::new(payload, 0);
-        let heap_offset = fields.uint(self.offset_bytes)?;
+        let mut cursor = bytes::ByteCursor::new(payload);
+        let heap_offset = cursor.uint(self.offset_bytes)?;
         if !fits_bits(heap_offset, self.offset_bits) {
             return Err(FormatError::InvalidFractalHeapGeometry);
         }
         Ok(FractalHeapIdKind::Managed {
             heap_offset,
-            object_length: fields.uint(self.length_bytes)?,
+            object_length: cursor.uint(self.length_bytes)?,
         })
     }
 }

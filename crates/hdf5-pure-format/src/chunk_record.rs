@@ -413,8 +413,8 @@ impl ElementEncoding {
         element: &[u8],
         chunk_byte_size: u64,
     ) -> Result<Option<ChunkRecord>, FormatError> {
-        let mut fields = bytes::Fields::new(element, 0);
-        let DecodedStoredAddress::Defined(address) = fields.decoded_address(self.offsets)? else {
+        let mut cursor = bytes::ByteCursor::new(element);
+        let DecodedStoredAddress::Defined(address) = cursor.decoded_address(self.offsets)? else {
             return Ok(None);
         };
         Ok(Some(match self.client {
@@ -425,8 +425,8 @@ impl ElementEncoding {
             },
             ArrayClient::FilteredChunks { chunk_size_len } => ChunkRecord {
                 address,
-                stored_size: fields.uint(usize::from(chunk_size_len))?,
-                filter_mask: fields.u32()?,
+                stored_size: cursor.uint(usize::from(chunk_size_len))?,
+                filter_mask: cursor.u32()?,
             },
         }))
     }

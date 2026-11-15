@@ -158,16 +158,16 @@ impl SymbolTableNodeLocator {
             group_leaf_node_k,
         } = *self;
         let range = self.parse_range()?;
-        let mut fields = bytes::Fields::new(region.subregion(range)?.bytes(), 0);
-        if fields.array::<{ NODE_SIGNATURE.len() }>()? != NODE_SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(region.subregion(range)?.bytes());
+        if cursor.array::<{ NODE_SIGNATURE.len() }>()? != NODE_SIGNATURE {
             return Err(FormatError::InvalidSymbolTableNodeSignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != NODE_VERSION {
             return Err(FormatError::InvalidSymbolTableNodeVersion(version));
         }
-        fields.u8()?;
-        let symbols = fields.u16()?;
+        cursor.u8()?;
+        let symbols = cursor.u16()?;
         if let Some(capacity) = group_leaf_node_k.map(|k| 2 * u32::from(k.get()))
             && u32::from(symbols) > capacity
         {
@@ -224,14 +224,14 @@ impl SymbolTableEntriesRef {
             widths,
             symbols,
         } = *self;
-        let mut fields = bytes::Fields::new(region.subregion(range)?.bytes(), 0);
+        let mut cursor = bytes::ByteCursor::new(region.subregion(range)?.bytes());
         let mut entries = Vec::with_capacity(usize::from(symbols));
         for _ in 0..symbols {
-            let link_name_offset = fields.length(widths.lengths)?;
-            let object_header_address = fields.address(widths.offsets)?;
-            let cache_type = fields.u32()?;
-            fields.array::<ENTRY_RESERVED_LEN>()?;
-            let scratch_pad = fields.array::<SCRATCH_PAD_LEN>()?;
+            let link_name_offset = cursor.length(widths.lengths)?;
+            let object_header_address = cursor.address(widths.offsets)?;
+            let cache_type = cursor.u32()?;
+            cursor.array::<ENTRY_RESERVED_LEN>()?;
+            let scratch_pad = cursor.array::<SCRATCH_PAD_LEN>()?;
             entries.push(SymbolTableEntry {
                 link_name_offset,
                 object_header_address,
