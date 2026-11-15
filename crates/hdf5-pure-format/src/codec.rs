@@ -6,6 +6,13 @@
 /// handling. Successful decoding can leave input bytes unexamined. The caller receives the decoded
 /// value without a separate byte count. A decoded value can contain references with the input
 /// lifetime `'input`.
+///
+/// See the implementations for [`SymbolTableMessage`], [`Dataspace`], and [`FileSpaceInfo`] for
+/// message framing policies.
+///
+/// [`SymbolTableMessage`]: crate::symbol_table::SymbolTableMessage
+/// [`Dataspace`]: crate::dataspace::Dataspace
+/// [`FileSpaceInfo`]: crate::FileSpaceInfo
 pub(crate) trait Decode<'input>: Sized {
     /// The field widths or other information required to interpret the input.
     type Context;
