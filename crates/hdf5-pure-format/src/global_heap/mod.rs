@@ -97,16 +97,16 @@ impl GlobalHeapCollectionLocator {
     /// [`u64::MAX`].
     pub fn parse(&self, region: FileRegion<'_>) -> Result<GlobalHeapCollection, FormatError> {
         let Self { address, lengths } = *self;
-        let mut fields = bytes::Fields::new(region.subregion(self.parse_range()?)?.bytes(), 0);
-        if fields.array::<{ GCOL_SIGNATURE.len() }>()? != GCOL_SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(region.subregion(self.parse_range()?)?.bytes());
+        if cursor.array::<{ GCOL_SIGNATURE.len() }>()? != GCOL_SIGNATURE {
             return Err(FormatError::InvalidGlobalHeapSignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != GCOL_VERSION {
             return Err(FormatError::InvalidGlobalHeapVersion(version));
         }
-        fields.array::<GCOL_RESERVED_LEN>()?;
-        let size = fields.length(lengths)?;
+        cursor.array::<GCOL_RESERVED_LEN>()?;
+        let size = cursor.length(lengths)?;
         if size < GLOBAL_HEAP_MIN_COLLECTION_SIZE as u64 {
             return Err(FormatError::GlobalHeapCollectionTooSmall {
                 collection_address: address.get(),
@@ -268,11 +268,11 @@ impl GlobalHeapObjectHeader {
             collection_end,
         };
         let header_len = header_len(collection.lengths);
-        let mut fields = bytes::Fields::new(header.bytes(), 0);
-        let index = fields.u16()?;
-        let reference_count = fields.u16()?;
-        fields.array::<OBJECT_RESERVED_LEN>()?;
-        let size = fields.length(collection.lengths)?;
+        let mut cursor = bytes::ByteCursor::new(header.bytes());
+        let index = cursor.u16()?;
+        let reference_count = cursor.u16()?;
+        cursor.array::<OBJECT_RESERVED_LEN>()?;
+        let size = cursor.length(collection.lengths)?;
         let remaining = collection.remaining(range.start())?;
         let Some(index) = NonZeroU16::new(index) else {
             if size != remaining {

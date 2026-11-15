@@ -83,9 +83,13 @@ impl LinkMessageV1 {
             return Err(LinkStorageError::Flags(flags).into());
         }
         let name = LinkName::with_width(prefix.name.to_vec(), prefix.name_width)?;
-        let mut fields = bytes::Fields::new(data, prefix.target_pos);
+        let mut cursor =
+            bytes::ByteCursor::with_position(data, prefix.target_pos).map_err(FormatError::from)?;
         let (target, end) = if prefix.link_type_code == HARD_LINK {
-            let object_header_address = match fields.decoded_address(offset_width)? {
+            let object_header_address = match cursor
+                .decoded_address(offset_width)
+                .map_err(FormatError::from)?
+            {
                 DecodedStoredAddress::Defined(address) => address,
                 DecodedStoredAddress::Undefined => {
                     return Err(LinkStorageError::UndefinedAddress.into());
@@ -96,7 +100,7 @@ impl LinkMessageV1 {
                     object_header_address,
                     explicit_type: prefix.has_link_type,
                 },
-                fields.pos(),
+                cursor.position(),
             )
         } else {
             if !matches!(
@@ -105,10 +109,8 @@ impl LinkMessageV1 {
             ) {
                 return Err(FormatError::InvalidLinkType(prefix.link_type_code).into());
             }
-            let len = usize::from(fields.u16()?);
-            let pos = fields.pos();
-            bytes::ensure_len(data, pos, len)?;
-            let value = &data[pos..pos + len];
+            let len = usize::from(cursor.u16().map_err(FormatError::from)?);
+            let value = cursor.take(len).map_err(FormatError::from)?;
             let target = match prefix.link_type_code {
                 SOFT_LINK => LinkTargetV1::Soft {
                     target_path: value.to_vec(),
@@ -119,7 +121,7 @@ impl LinkMessageV1 {
                     value: UserLinkValue::new(value.to_vec())?,
                 },
             };
-            (target, pos + len)
+            (target, cursor.position())
         };
         let link = Self::new(
             name,

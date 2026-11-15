@@ -538,6 +538,7 @@ version = "0.48.0"
 dependencies = [
  "byteorder",
  "hdf5-pure-core",
+ "proptest",
  "rstest",
  "test-util",
 ]

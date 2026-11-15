@@ -187,8 +187,8 @@ impl FreeSpaceManagerHeaderFrame {
                 expected: header_len(widths),
                 available: data.len(),
             })?;
-        let mut fields = bytes::Fields::new(block, 0);
-        let signature = fields.array::<{ FSHD_SIGNATURE.len() }>()?;
+        let mut cursor = bytes::ByteCursor::new(block);
+        let signature = cursor.array::<{ FSHD_SIGNATURE.len() }>()?;
         if &signature != FSHD_SIGNATURE {
             return Err(FormatError::InvalidFreeSpaceManager(format!(
                 "the header signature is b\"{}\", not b\"{}\"",
@@ -197,28 +197,29 @@ impl FreeSpaceManagerHeaderFrame {
             )));
         }
         checksum::verify_trailing(block)?;
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != FSHD_VERSION {
             return Err(FormatError::UnsupportedVersion(version));
         }
-        let client_id = fields.u8()?;
-        let total_space = fields.length(lengths)?;
-        let total_sections = fields.length(lengths)?;
-        let serialized_sections = fields.length(lengths)?;
-        let unserialized_sections = fields.length(lengths)?;
-        let section_classes = fields.u16()?;
-        let (shrink_percent, expand_percent) = (fields.u16()?, fields.u16()?);
-        let bits = fields.u16()?;
+        let client_id = cursor.u8()?;
+        let total_space = cursor.length(lengths)?;
+        let total_sections = cursor.length(lengths)?;
+        let serialized_sections = cursor.length(lengths)?;
+        let unserialized_sections = cursor.length(lengths)?;
+        let section_classes = cursor.u16()?;
+        let (shrink_percent, expand_percent) = (cursor.u16()?, cursor.u16()?);
+        let bits = cursor.u16()?;
         let addr_space_bits = AddressSpaceBits::new(bits).ok_or_else(|| {
             FormatError::InvalidFreeSpaceManager(format!(
                 "an address space of {bits} bits is not 1 to 64 bits wide"
             ))
         })?;
-        let max_section_size = fields.length(lengths)?;
-        let section_list_addr = crate::width::decode_stored_address(offsets, block, fields.pos())?;
-        fields.address(offsets)?;
-        let section_list_used = fields.length(lengths)?;
-        let section_list_allocated = fields.length(lengths)?;
+        let max_section_size = cursor.length(lengths)?;
+        let section_list_addr =
+            crate::width::decode_stored_address(offsets, block, cursor.position())?;
+        cursor.address(offsets)?;
+        let section_list_used = cursor.length(lengths)?;
+        let section_list_allocated = cursor.length(lengths)?;
         if section_list_used > section_list_allocated {
             return Err(FormatError::InvalidFreeSpaceManager(format!(
                 "the section list uses {section_list_used} bytes, more than the {section_list_allocated} bytes \
@@ -1494,8 +1495,8 @@ fn parse_section_list_prefix(
             available: list.len(),
         });
     }
-    let mut fields = bytes::Fields::new(list, 0);
-    let signature = fields.array::<{ FSSE_SIGNATURE.len() }>()?;
+    let mut cursor = bytes::ByteCursor::new(list);
+    let signature = cursor.array::<{ FSSE_SIGNATURE.len() }>()?;
     if &signature != FSSE_SIGNATURE {
         return Err(FormatError::InvalidFreeSpaceManager(format!(
             "the section list signature is b\"{}\", not b\"{}\"",
@@ -1504,11 +1505,11 @@ fn parse_section_list_prefix(
         )));
     }
     checksum::verify_trailing(list)?;
-    let version = fields.u8()?;
+    let version = cursor.u8()?;
     if version != FSSE_VERSION {
         return Err(FormatError::UnsupportedVersion(version));
     }
-    let owner_addr = match crate::width::decode_stored_address(offsets, list, fields.pos())? {
+    let owner_addr = match crate::width::decode_stored_address(offsets, list, cursor.position())? {
         DecodedStoredAddress::Defined(addr) => addr,
         DecodedStoredAddress::Undefined => StoredAddress::undefined(offsets),
     };

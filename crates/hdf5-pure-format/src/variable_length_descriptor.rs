@@ -3,7 +3,7 @@
 use hdf5_pure_core::StoredAddress;
 
 use crate::bytes;
-use crate::bytes::Fields;
+use crate::bytes::ByteCursor;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -80,10 +80,10 @@ impl VariableLengthDescriptor {
     pub fn parse(offsets: OffsetWidth, raw: &[u8]) -> Result<(Self, usize), FormatError> {
         let size = Self::serialized_size(offsets);
         bytes::ensure_len(raw, 0, size)?;
-        let mut fields = Fields::new(raw, 0);
-        let element_count = fields.u32()?;
-        let collection_address = fields.address(offsets)?;
-        let object_index = fields.u32()?;
+        let mut cursor = ByteCursor::new(raw);
+        let element_count = cursor.u32()?;
+        let collection_address = cursor.address(offsets)?;
+        let object_index = cursor.u32()?;
         Ok((
             Self {
                 element_count,

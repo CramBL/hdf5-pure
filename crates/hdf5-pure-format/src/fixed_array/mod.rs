@@ -98,19 +98,19 @@ impl FixedArrayHeaderLocator {
         } = *self;
         let range = self.parse_range()?;
         let bytes = region.subregion(range)?.bytes();
-        let mut fields = bytes::Fields::new(bytes, 0);
-        if fields.array::<{ HEADER_SIGNATURE.len() }>()? != HEADER_SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(bytes);
+        if cursor.array::<{ HEADER_SIGNATURE.len() }>()? != HEADER_SIGNATURE {
             return Err(FormatError::InvalidFixedArraySignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != VERSION {
             return Err(FormatError::InvalidFixedArrayVersion(version));
         }
-        let client_id = fields.u8()?;
-        let entry_size = fields.u8()?;
-        let page_bits = fields.u8()?;
-        let entries = fields.length(widths.lengths)?;
-        let data_block = fields.decoded_address(widths.offsets)?;
+        let client_id = cursor.u8()?;
+        let entry_size = cursor.u8()?;
+        let page_bits = cursor.u8()?;
+        let entries = cursor.length(widths.lengths)?;
+        let data_block = cursor.decoded_address(widths.offsets)?;
         checksum::verify_trailing(bytes)?;
 
         let encoding = element_encoding(widths.offsets, client_id, entry_size)?;
@@ -372,15 +372,15 @@ impl FixedArrayDataBlockRef {
             geometry,
             ..
         } = *self;
-        let mut fields = bytes::Fields::new(region.subregion(self.prefix_range()?)?.bytes(), 0);
-        if fields.array::<{ DATA_BLOCK_SIGNATURE.len() }>()? != DATA_BLOCK_SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(region.subregion(self.prefix_range()?)?.bytes());
+        if cursor.array::<{ DATA_BLOCK_SIGNATURE.len() }>()? != DATA_BLOCK_SIGNATURE {
             return Err(FormatError::InvalidFixedArraySignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != VERSION {
             return Err(FormatError::InvalidFixedArrayVersion(version));
         }
-        let client_id = fields.u8()?;
+        let client_id = cursor.u8()?;
         let expected_client = geometry.encoding.client().id();
         if client_id != expected_client {
             return Err(FormatError::InvalidFixedArrayBlockClient {
@@ -388,7 +388,7 @@ impl FixedArrayDataBlockRef {
                 actual: client_id,
             });
         }
-        let owner = base.resolve(fields.address(geometry.encoding.offsets())?)?;
+        let owner = base.resolve(cursor.address(geometry.encoding.offsets())?)?;
         if owner != header {
             return Err(FormatError::InvalidFixedArrayBlockOwner {
                 expected: header.get(),

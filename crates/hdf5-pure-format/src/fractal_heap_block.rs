@@ -236,15 +236,15 @@ impl FractalHeapBlockLayout {
         signature: &[u8; 4],
         heap_offset: u64,
     ) -> Result<(), FormatError> {
-        let mut fields = bytes::Fields::new(block, 0);
-        if fields.array::<4>()? != *signature {
+        let mut cursor = bytes::ByteCursor::new(block);
+        if cursor.array::<4>()? != *signature {
             return Err(FormatError::InvalidFractalHeapSignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != VERSION {
             return Err(FormatError::InvalidFractalHeapVersion(version));
         }
-        let owner = fields.address(self.layout.offset_width())?;
+        let owner = cursor.address(self.layout.offset_width())?;
         if owner != self.owner {
             return Err(FormatError::InvalidFractalHeapBlockOwner {
                 expected: self.owner.get(),
@@ -253,7 +253,7 @@ impl FractalHeapBlockLayout {
         }
         let mut offset = 0u64;
         for shift in 0..self.layout.block_offset_size() {
-            offset |= u64::from(fields.u8()?) << (shift * 8);
+            offset |= u64::from(cursor.u8()?) << (shift * 8);
         }
         if offset != heap_offset {
             return Err(FormatError::InvalidFractalHeapBlockOffset {
@@ -502,7 +502,10 @@ impl FractalHeapDirectBlockRef<'_> {
         self.parse_prefix(region)?;
         let prefix = region.subregion(self.object_prefix_range()?)?.bytes();
         let stored_checksum = if self.block.heap.checksummed {
-            Some(bytes::Fields::new(prefix, self.block.heap.prefix_len()).u32()?)
+            Some(u32::from_le_bytes(*bytes::array_at(
+                prefix,
+                self.block.heap.prefix_len(),
+            )?))
         } else {
             None
         };
@@ -929,8 +932,9 @@ impl<'heap, 'bytes> FractalHeapIndirectBlockView<'heap, 'bytes> {
         let pos = heap.prefix_len() + entry * offset_size + entry.min(direct_count) * filter_size;
         let address = crate::width::decode_stored_address(layout.offset_width(), self.bytes, pos)?;
         let filtered = if direct && filter_size != 0 {
-            let mut fields = bytes::Fields::new(self.bytes, pos + offset_size);
-            Some((fields.length(layout.length_width())?, fields.u32()?))
+            let mut cursor =
+                bytes::ByteCursor::with_position(self.bytes, pos.saturating_add(offset_size))?;
+            Some((cursor.length(layout.length_width())?, cursor.u32()?))
         } else {
             None
         };

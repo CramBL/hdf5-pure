@@ -20,6 +20,7 @@ hdf5-pure-core.workspace = true
 byteorder.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 rstest.workspace = true
 test-util.workspace = true
 

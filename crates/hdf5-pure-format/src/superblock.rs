@@ -280,24 +280,24 @@ impl SuperblockRef {
     pub fn parse(&self, region: FileRegion<'_>) -> Result<(Superblock, FormatWidths), FormatError> {
         let Self { range } = *self;
         let held = region.subregion(range)?;
-        let mut fields = bytes::Fields::new(held.bytes(), 0);
-        let candidate = SuperblockCandidateFields::read(&mut fields)?;
+        let mut cursor = bytes::ByteCursor::new(held.bytes());
+        let candidate = SuperblockCandidateFields::read(&mut cursor)?;
         let required = FileRange::new(range.start(), candidate.encoded_len().to_u64())?;
         let bytes = held.subregion(required)?.bytes();
         let superblock = match candidate.version {
             SuperblockVersion::Zero | SuperblockVersion::One => {
-                candidate.read_v0_or_v1(&mut fields)?
+                candidate.read_v0_or_v1(&mut cursor)?
             }
             SuperblockVersion::Two | SuperblockVersion::Three => {
                 checksum::verify_trailing(bytes)?;
-                candidate.read_v2_or_v3(&mut fields)?
+                candidate.read_v2_or_v3(&mut cursor)?
             }
         };
-        if fields.pos() != bytes.len() {
+        if cursor.position() != bytes.len() {
             return Err(FormatError::Internal(format!(
                 "the version {} superblock reader consumed {} of its {} bytes",
                 candidate.version.get(),
-                fields.pos(),
+                cursor.position(),
                 bytes.len()
             )));
         }
@@ -320,19 +320,19 @@ struct SuperblockCandidateFields {
 
 impl SuperblockCandidateFields {
     fn parse(bytes: &[u8]) -> Result<Self, FormatError> {
-        Self::read(&mut bytes::Fields::new(bytes, 0))
+        Self::read(&mut bytes::ByteCursor::new(bytes))
     }
 
-    fn read(fields: &mut bytes::Fields<'_>) -> Result<Self, FormatError> {
-        if fields.array::<{ HDF5_SIGNATURE.len() }>()? != HDF5_SIGNATURE {
+    fn read(cursor: &mut bytes::ByteCursor<'_>) -> Result<Self, FormatError> {
+        if cursor.array::<{ HDF5_SIGNATURE.len() }>()? != HDF5_SIGNATURE {
             return Err(FormatError::SignatureNotFound);
         }
-        let version = SuperblockVersion::try_from(fields.u8()?)?;
+        let version = SuperblockVersion::try_from(cursor.u8()?)?;
         if matches!(version, SuperblockVersion::Zero | SuperblockVersion::One) {
-            fields.array::<V0_V1_VERSION_FIELDS_LEN>()?;
+            cursor.array::<V0_V1_VERSION_FIELDS_LEN>()?;
         }
-        let offset_size = fields.u8()?;
-        let length_size = fields.u8()?;
+        let offset_size = cursor.u8()?;
+        let length_size = cursor.u8()?;
         Ok(Self {
             version,
             widths: FormatWidths::from_sizes(offset_size, length_size)?,
@@ -355,32 +355,32 @@ impl SuperblockCandidateFields {
         }
     }
 
-    fn read_v0_or_v1(self, fields: &mut bytes::Fields<'_>) -> Result<Superblock, FormatError> {
+    fn read_v0_or_v1(self, cursor: &mut bytes::ByteCursor<'_>) -> Result<Superblock, FormatError> {
         let Self { version, widths } = self;
         let FormatWidths { offsets, lengths } = widths;
-        fields.u8()?;
-        let group_leaf_node_k = fields.u16()?;
+        cursor.u8()?;
+        let group_leaf_node_k = cursor.u16()?;
         if group_leaf_node_k == 0 {
             return Err(FormatError::InvalidGroupLeafNodeK);
         }
-        let group_internal_node_k = fields.u16()?;
+        let group_internal_node_k = cursor.u16()?;
         let status =
-            SuperblockStatus::new(version, __private::superblock_status_flags(fields.u32()?))?;
+            SuperblockStatus::new(version, __private::superblock_status_flags(cursor.u32()?))?;
         let indexed_storage_internal_node_k = match version {
             SuperblockVersion::One => {
-                let k = fields.u16()?;
-                fields.u16()?;
+                let k = cursor.u16()?;
+                cursor.u16()?;
                 Some(k)
             }
             SuperblockVersion::Zero | SuperblockVersion::Two | SuperblockVersion::Three => None,
         };
-        let base_address = BaseAddress::new(fields.offset(offsets)?);
-        let free_space_address = fields.address(offsets)?;
-        let eof_address = fields.offset(offsets)?;
-        let driver_info_address = fields.address(offsets)?;
-        fields.length(lengths)?;
-        let root_group_address = fields.address(offsets)?;
-        fields.array::<ROOT_ENTRY_TAIL_LEN>()?;
+        let base_address = BaseAddress::new(cursor.offset(offsets)?);
+        let free_space_address = cursor.address(offsets)?;
+        let eof_address = cursor.offset(offsets)?;
+        let driver_info_address = cursor.address(offsets)?;
+        cursor.length(lengths)?;
+        let root_group_address = cursor.address(offsets)?;
+        cursor.array::<ROOT_ENTRY_TAIL_LEN>()?;
         Ok(SuperblockFields {
             status,
             offset_size: offsets,
@@ -399,18 +399,18 @@ impl SuperblockCandidateFields {
         .build())
     }
 
-    fn read_v2_or_v3(self, fields: &mut bytes::Fields<'_>) -> Result<Superblock, FormatError> {
+    fn read_v2_or_v3(self, cursor: &mut bytes::ByteCursor<'_>) -> Result<Superblock, FormatError> {
         let Self { version, widths } = self;
         let FormatWidths { offsets, lengths } = widths;
         let status = SuperblockStatus::new(
             version,
-            __private::superblock_status_flags(u32::from(fields.u8()?)),
+            __private::superblock_status_flags(u32::from(cursor.u8()?)),
         )?;
-        let base_address = BaseAddress::new(fields.offset(offsets)?);
-        let superblock_extension_address = fields.address(offsets)?;
-        let eof_address = fields.offset(offsets)?;
-        let root_group_address = fields.address(offsets)?;
-        let checksum = fields.u32()?;
+        let base_address = BaseAddress::new(cursor.offset(offsets)?);
+        let superblock_extension_address = cursor.address(offsets)?;
+        let eof_address = cursor.offset(offsets)?;
+        let root_group_address = cursor.address(offsets)?;
+        let checksum = cursor.u32()?;
         Ok(SuperblockFields {
             status,
             offset_size: offsets,

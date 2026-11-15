@@ -1,29 +1,8 @@
-//! Bounds-checked reads of the little-endian fields HDF5 writes on disk.
+//! Borrowed byte regions and little-endian metadata fields.
 //!
-//! Every format module parses the same handful of shapes: check that `needed`
-//! bytes are available at `offset`, then read a 2/4/8-byte file address, a
-//! 2/4/8-byte length, or a 1/2/4/8-byte variable-width integer.
-//!
-//! Three distinctions are worth keeping, because they are the ones the copies
-//! actually disagreed on:
-//!
-//! * The offset and length wrappers report different errors for unsupported raw widths. That
-//!   error identifies the on-disk field the width came from ("size of offsets" against "size of
-//!   lengths"), so a malformed file is reported against the field that is wrong.
-//! * [`read_uint_width`] is **not** an address read. Object header and link
-//!   messages store a width in a two-bit flag field, where 1 is a legal value.
-//!   A file address is 2, 4, or 8 and a 1 there is malformed. Giving the two
-//!   cases separate names keeps a caller from widening its own accepted set by
-//!   reaching for the wrong helper.
-//! * The bound is checked without `offset + needed` ever overflowing. `offset`
-//!   is file-derived, so on a 32-bit target that sum can wrap and admit a read
-//!   past the end of the buffer (issue #140).
-//!
-//! Production parsing uses the `_width` functions with validated [`OffsetWidth`] or
-//! [`LengthWidth`] values. Test-only helpers also exercise the raw `u8` forms to verify
-//! malformed-width handling.
-//!
-//! Reads are from an in-memory slice.
+//! Readers acquire input spans through [`ByteCursor`] and report incomplete spans with
+//! [`UnexpectedEof`]. Scalar readers decode little-endian integers at validated address, length,
+//! or flag-field widths. Compatibility helpers report [`FormatError`].
 
 use alloc::vec::Vec;
 
@@ -36,6 +15,42 @@ use crate::width;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 use crate::width::UintWidth;
+
+/// A byte span that cannot be acquired in full.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UnexpectedEof {
+    /// The span's end in the original buffer, saturated at [`usize::MAX`].
+    pub(crate) expected: usize,
+    /// The length of the original buffer.
+    pub(crate) available: usize,
+}
+
+impl UnexpectedEof {
+    /// Computes an EOF report from the unread suffix and requested byte count.
+    ///
+    /// Saturates the span's end at [`usize::MAX`].
+    #[cold]
+    fn for_suffix(available: usize, remaining: usize, needed: usize) -> Self {
+        Self {
+            expected: available.saturating_sub(remaining).saturating_add(needed),
+            available,
+        }
+    }
+}
+
+impl From<UnexpectedEof> for FormatError {
+    fn from(
+        UnexpectedEof {
+            expected,
+            available,
+        }: UnexpectedEof,
+    ) -> Self {
+        Self::UnexpectedEof {
+            expected,
+            available,
+        }
+    }
+}
 
 /// Checks that `needed` bytes are readable at `offset`.
 ///
@@ -53,47 +68,6 @@ pub fn ensure_len(data: &[u8], offset: usize, needed: usize) -> Result<(), Forma
             expected: offset.saturating_add(needed),
             available: data.len(),
         }),
-    }
-}
-
-/// Reads a little-endian unsigned integer of `width` bytes at `pos`.
-///
-/// Each caller restricts `width` to 1, 2, 4 or 8 before the call.
-///
-/// A match over fixed-size arrays reads each width. A loop whose trip count is the runtime `width` keeps its per-byte
-/// bounds check and a live panic edge  -  LLVM cannot use the `ensure_len` that
-/// ran immediately above, because the index is not a constant  -  so an 8-byte
-/// address costs eight loads and eight branches. Each arm here hands
-/// `from_le_bytes` a constant-length array, which compiles to one load.
-#[inline]
-fn read_le(data: &[u8], pos: usize, width: u8) -> u64 {
-    match width {
-        1 => u64::from(data[pos]),
-        2 => u64::from(u16::from_le_bytes([data[pos], data[pos + 1]])),
-        4 => u64::from(u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ])),
-        8 => u64::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]),
-        // Unreachable: every caller takes its width parsed into an
-        // `OffsetWidth`, a `LengthWidth` or a `UintWidth`. Not
-        // `unreachable!()`, which would turn a later caller's omitted check into
-        // a panic inside a parser.
-        _ => {
-            debug_assert!(false, "width validated by the caller");
-            0
-        }
     }
 }
 
@@ -118,8 +92,11 @@ pub(crate) fn read_offset(data: &[u8], pos: usize, offset_size: u8) -> Result<u6
 /// Returns [`FormatError::UnexpectedEof`] if fewer than `width` bytes remain at `pos`.
 #[inline]
 pub fn read_offset_width(data: &[u8], pos: usize, width: OffsetWidth) -> Result<u64, FormatError> {
-    ensure_len(data, pos, usize::from(width.get()))?;
-    Ok(read_le(data, pos, width.get()))
+    Ok(match width {
+        OffsetWidth::Two => u64::from(u16::from_le_bytes(*array_at(data, pos)?)),
+        OffsetWidth::Four => u64::from(u32::from_le_bytes(*array_at(data, pos)?)),
+        OffsetWidth::Eight => u64::from_le_bytes(*array_at(data, pos)?),
+    })
 }
 
 /// Reads a length of `length_size` bytes at `pos`.
@@ -147,8 +124,11 @@ pub(crate) fn read_length_width(
     pos: usize,
     width: LengthWidth,
 ) -> Result<u64, FormatError> {
-    ensure_len(data, pos, usize::from(width.get()))?;
-    Ok(read_le(data, pos, width.get()))
+    Ok(match width {
+        LengthWidth::Two => u64::from(u16::from_le_bytes(*array_at(data, pos)?)),
+        LengthWidth::Four => u64::from(u32::from_le_bytes(*array_at(data, pos)?)),
+        LengthWidth::Eight => u64::from_le_bytes(*array_at(data, pos)?),
+    })
 }
 
 /// Reads an unsigned integer of `width` bytes at `pos`.
@@ -167,8 +147,12 @@ pub(crate) fn read_uint_width(
     pos: usize,
     width: UintWidth,
 ) -> Result<u64, FormatError> {
-    ensure_len(data, pos, usize::from(width.get()))?;
-    Ok(read_le(data, pos, width.get()))
+    Ok(match width {
+        UintWidth::One => u64::from(u8::from_le_bytes(*array_at(data, pos)?)),
+        UintWidth::Two => u64::from(u16::from_le_bytes(*array_at(data, pos)?)),
+        UintWidth::Four => u64::from(u32::from_le_bytes(*array_at(data, pos)?)),
+        UintWidth::Eight => u64::from_le_bytes(*array_at(data, pos)?),
+    })
 }
 
 /// Reads a file address of `offset_size` bytes at `pos`, as `None` when the file
@@ -260,9 +244,15 @@ pub fn write_stored_address_at(
             offset_size: width.get(),
         });
     }
-    let len = usize::from(width.get());
-    ensure_len(buf, pos, len)?;
-    buf[pos..pos + len].copy_from_slice(&addr.get().to_le_bytes()[..len]);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the address fits the width or is the all-ones undefined sentinel"
+    )]
+    match width {
+        OffsetWidth::Two => *array_at_mut::<2>(buf, pos)? = (addr.get() as u16).to_le_bytes(),
+        OffsetWidth::Four => *array_at_mut::<4>(buf, pos)? = (addr.get() as u32).to_le_bytes(),
+        OffsetWidth::Eight => *array_at_mut::<8>(buf, pos)? = addr.get().to_le_bytes(),
+    }
     #[cfg(test)]
     crate::field_observations::offset(width);
     Ok(())
@@ -297,13 +287,19 @@ pub(crate) fn try_write_decoded_address(
     addr: DecodedStoredAddress,
     width: OffsetWidth,
 ) -> Result<(), FormatError> {
-    match addr {
-        DecodedStoredAddress::Undefined => {
-            write_offset(buf, StoredAddress::undefined(width).get(), width);
-            Ok(())
-        }
-        DecodedStoredAddress::Defined(addr) => try_write_defined_offset(buf, addr.get(), width),
+    let stored = addr.to_stored(width)?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the converted address fits the selected width"
+    )]
+    match width {
+        OffsetWidth::Two => buf.extend_from_slice(&(stored.get() as u16).to_le_bytes()),
+        OffsetWidth::Four => buf.extend_from_slice(&(stored.get() as u32).to_le_bytes()),
+        OffsetWidth::Eight => buf.extend_from_slice(&stored.get().to_le_bytes()),
     }
+    #[cfg(test)]
+    crate::field_observations::offset(width);
+    Ok(())
 }
 
 /// Appends `val` as a defined little-endian address at `width`.
@@ -318,9 +314,11 @@ pub(crate) fn try_write_defined_offset(
     val: u64,
     width: OffsetWidth,
 ) -> Result<(), FormatError> {
-    require_defined_offset(val, width)?;
-    write_offset(buf, val, width);
-    Ok(())
+    try_write_decoded_address(
+        buf,
+        DecodedStoredAddress::Defined(StoredAddress::new(val)),
+        width,
+    )
 }
 
 /// Checks whether `val` is a defined address at `width`.
@@ -330,20 +328,9 @@ pub(crate) fn try_write_defined_offset(
 /// Returns [`FormatError::AddressTooLarge`] if `val` exceeds `width`, or
 /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
 pub(crate) fn require_defined_offset(val: u64, width: OffsetWidth) -> Result<(), FormatError> {
-    let undefined = width::offset_width_max(width);
-    if val > undefined {
-        return Err(FormatError::AddressTooLarge {
-            address: val,
-            offset_size: width.get(),
-        });
-    }
-    if val == undefined {
-        return Err(FormatError::DefinedAddressIsUndefined {
-            address: val,
-            offset_size: width.get(),
-        });
-    }
-    Ok(())
+    DecodedStoredAddress::Defined(StoredAddress::new(val))
+        .to_stored(width)
+        .map(|_| ())
 }
 
 /// Appends the length `val` to `buf` as a little-endian field of `width` bytes, as
@@ -380,7 +367,7 @@ pub(crate) fn require_length(val: u64, width: LengthWidth) -> Result<(), FormatE
 
 /// Writes a little-endian length into `buf` at `pos`, preserving surrounding bytes.
 ///
-/// Checks that `value` fits `width` and the output range fits `buf` before writing.
+/// Checks that `value` fits `width` before checking the output range.
 ///
 /// # Errors
 ///
@@ -403,10 +390,23 @@ pub fn write_length_at(
     value: u64,
     width: LengthWidth,
 ) -> Result<(), FormatError> {
-    require_length(value, width)?;
-    let length = usize::from(width.get());
-    ensure_len(buf, pos, length)?;
-    buf[pos..pos + length].copy_from_slice(&value.to_le_bytes()[..length]);
+    match width {
+        LengthWidth::Two => {
+            let value = u16::try_from(value).map_err(|_error| FormatError::LengthTooLarge {
+                length: value,
+                length_size: width.get(),
+            })?;
+            *array_at_mut::<2>(buf, pos)? = value.to_le_bytes();
+        }
+        LengthWidth::Four => {
+            let value = u32::try_from(value).map_err(|_error| FormatError::LengthTooLarge {
+                length: value,
+                length_size: width.get(),
+            })?;
+            *array_at_mut::<4>(buf, pos)? = value.to_le_bytes();
+        }
+        LengthWidth::Eight => *array_at_mut::<8>(buf, pos)? = value.to_le_bytes(),
+    }
     #[cfg(test)]
     crate::field_observations::length(width);
     Ok(())
@@ -463,68 +463,185 @@ pub(crate) fn write_length(buf: &mut Vec<u8>, val: u64, width: LengthWidth) {
     crate::field_observations::length(width);
 }
 
-/// A cursor over the little-endian fields of a block.
+/// Borrows an input array at `position`.
 ///
-/// Each method reads the field at the cursor and moves the cursor past it, so a parser reads a
-/// block with one call per field, in the order the block stores them. A read of a field that runs past
-/// the end of the block returns [`FormatError::UnexpectedEof`] and leaves the cursor in place.
-pub(crate) struct Fields<'a> {
-    data: &'a [u8],
-    pos: usize,
+/// A zero-length array succeeds at any position through the input's end.
+///
+/// # Errors
+///
+/// Returns [`UnexpectedEof`] if the array is incomplete or its end exceeds [`usize::MAX`].
+/// Reports `position.saturating_add(N)` in `expected` and the input length in `available`,
+/// including when `position` exceeds the input length.
+pub(crate) fn array_at<const N: usize>(
+    data: &[u8],
+    position: usize,
+) -> Result<&[u8; N], UnexpectedEof> {
+    data.get(position..)
+        .and_then(<[u8]>::first_chunk::<N>)
+        .ok_or_else(|| UnexpectedEof {
+            expected: position.saturating_add(N),
+            available: data.len(),
+        })
 }
 
-impl<'a> Fields<'a> {
-    /// Returns a cursor at byte `pos` of the block `data`.
-    pub(crate) fn new(data: &'a [u8], pos: usize) -> Self {
-        Self { data, pos }
+/// Borrows an output array at `position`.
+///
+/// A zero-length array succeeds at any position through the buffer's end.
+///
+/// # Errors
+///
+/// Returns [`UnexpectedEof`] if the array is incomplete or its end exceeds [`usize::MAX`].
+#[inline]
+pub(crate) fn array_at_mut<const N: usize>(
+    data: &mut [u8],
+    position: usize,
+) -> Result<&mut [u8; N], UnexpectedEof> {
+    let available = data.len();
+    data.get_mut(position..)
+        .and_then(<[u8]>::first_chunk_mut::<N>)
+        .ok_or_else(|| UnexpectedEof {
+            expected: position.saturating_add(N),
+            available,
+        })
+}
+
+/// A byte cursor with little-endian scalar readers.
+///
+/// Successful reads advance past the acquired bytes. Failed reads leave the cursor unchanged.
+/// Acquired spans borrow the original input and remain usable after subsequent cursor operations.
+/// Positions and EOF offsets are relative to the original input, including for a cursor
+/// constructed with [`Self::with_position`].
+#[derive(Clone, Copy)]
+pub(crate) struct ByteCursor<'a> {
+    remaining: &'a [u8],
+    input_len: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    /// Returns a cursor at the start of `data`.
+    pub(crate) fn new(data: &'a [u8]) -> Self {
+        Self {
+            remaining: data,
+            input_len: data.len(),
+        }
     }
 
-    /// Returns the offset in the block of the next field.
-    pub(crate) fn pos(&self) -> usize {
-        self.pos
+    /// Returns a cursor at `position`, including at the end of `data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnexpectedEof`] if `position` exceeds the input length, with `expected` set to
+    /// `position` and `available` set to the input length.
+    pub(crate) fn with_position(data: &'a [u8], position: usize) -> Result<Self, UnexpectedEof> {
+        let Some((_, remaining)) = data.split_at_checked(position) else {
+            return Err(UnexpectedEof {
+                expected: position,
+                available: data.len(),
+            });
+        };
+        Ok(Self {
+            remaining,
+            input_len: data.len(),
+        })
     }
 
-    pub(crate) fn u8(&mut self) -> Result<u8, FormatError> {
+    /// Returns the offset of the next byte in the original input.
+    pub(crate) fn position(&self) -> usize {
+        // Every constructor and mutation retains a suffix of the original input.
+        // This subtraction is exact for every constructible cursor.
+        let Self {
+            remaining,
+            input_len,
+        } = self;
+        input_len.saturating_sub(remaining.len())
+    }
+
+    /// Borrows the unread suffix for the original input's lifetime.
+    pub(crate) fn remaining(&self) -> &'a [u8] {
+        self.remaining
+    }
+
+    /// Borrows the next `len` bytes and advances the cursor.
+    ///
+    /// An empty span succeeds at any position through the input's end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnexpectedEof`] if the span is incomplete or its end exceeds [`usize::MAX`].
+    pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], UnexpectedEof> {
+        let Self {
+            remaining,
+            input_len,
+        } = self;
+        let Some((bytes, rest)) = remaining.split_at_checked(len) else {
+            return Err(UnexpectedEof::for_suffix(*input_len, remaining.len(), len));
+        };
+        *remaining = rest;
+        Ok(bytes)
+    }
+
+    pub(crate) fn u8(&mut self) -> Result<u8, UnexpectedEof> {
         let [value] = self.array()?;
         Ok(value)
     }
 
-    pub(crate) fn u16(&mut self) -> Result<u16, FormatError> {
-        Ok(u16::from_le_bytes(self.array()?))
+    pub(crate) fn u16(&mut self) -> Result<u16, UnexpectedEof> {
+        Ok(u16::from_le_bytes(*self.take_array()?))
     }
 
-    pub(crate) fn u32(&mut self) -> Result<u32, FormatError> {
-        Ok(u32::from_le_bytes(self.array()?))
+    pub(crate) fn u32(&mut self) -> Result<u32, UnexpectedEof> {
+        Ok(u32::from_le_bytes(*self.take_array()?))
+    }
+
+    /// Reads an eight-byte little-endian integer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::take_array`].
+    pub(crate) fn u64(&mut self) -> Result<u64, UnexpectedEof> {
+        Ok(u64::from_le_bytes(*self.take_array()?))
     }
 
     /// Reads a length of `width` bytes.
-    pub(crate) fn length(&mut self, width: LengthWidth) -> Result<u64, FormatError> {
-        let value = read_length_width(self.data, self.pos, width)?;
-        self.pos += usize::from(width.get());
-        Ok(value)
+    pub(crate) fn length(&mut self, width: LengthWidth) -> Result<u64, UnexpectedEof> {
+        match width {
+            LengthWidth::Two => self.u16().map(u64::from),
+            LengthWidth::Four => self.u32().map(u64::from),
+            LengthWidth::Eight => self.u64(),
+        }
     }
 
     /// Reads an absolute address of `width` bytes, such as the superblock's base address or its
     /// end-of-file address.
-    pub(crate) fn offset(&mut self, width: OffsetWidth) -> Result<u64, FormatError> {
-        let value = read_offset_width(self.data, self.pos, width)?;
-        self.pos += usize::from(width.get());
-        Ok(value)
+    #[inline]
+    pub(crate) fn offset(&mut self, width: OffsetWidth) -> Result<u64, UnexpectedEof> {
+        Ok(match width {
+            OffsetWidth::Two => u64::from(u16::from_le_bytes(*self.take_array()?)),
+            OffsetWidth::Four => u64::from(u32::from_le_bytes(*self.take_array()?)),
+            OffsetWidth::Eight => u64::from_le_bytes(*self.take_array()?),
+        })
     }
 
     /// Reads a file address of `width` bytes.
-    pub(crate) fn address(&mut self, width: OffsetWidth) -> Result<StoredAddress, FormatError> {
-        self.offset(width).map(StoredAddress::new)
+    pub(crate) fn address(&mut self, width: OffsetWidth) -> Result<StoredAddress, UnexpectedEof> {
+        Ok(StoredAddress::new(match width {
+            OffsetWidth::Two => u64::from(u16::from_le_bytes(*self.take_array()?)),
+            OffsetWidth::Four => u64::from(u32::from_le_bytes(*self.take_array()?)),
+            OffsetWidth::Eight => u64::from_le_bytes(*self.take_array()?),
+        }))
     }
 
     /// Reads a file address of `width` bytes, decoded as [`DecodedStoredAddress`].
     pub(crate) fn decoded_address(
         &mut self,
         width: OffsetWidth,
-    ) -> Result<DecodedStoredAddress, FormatError> {
-        let value = width::decode_stored_address(width, self.data, self.pos)?;
-        self.pos += usize::from(width.get());
-        Ok(value)
+    ) -> Result<DecodedStoredAddress, UnexpectedEof> {
+        let address = self.address(width)?;
+        Ok(if address.is_undefined(width) {
+            DecodedStoredAddress::Undefined
+        } else {
+            DecodedStoredAddress::Defined(address)
+        })
     }
 
     /// Reads an unsigned integer of `len` bytes, such as the chunk size of a filtered chunk
@@ -532,23 +649,21 @@ impl<'a> Fields<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if the block holds `len` bytes at the cursor and `len`
-    /// is more than 8.
+    /// Returns [`FormatError::UnexpectedEof`] if fewer than `len` bytes remain at the cursor, or
+    /// [`FormatError::Internal`] if `len` is more than 8 and those bytes are available.
     pub(crate) fn uint(&mut self, len: usize) -> Result<u64, FormatError> {
-        let bytes = self
-            .data
-            .get(self.pos..)
-            .and_then(|rest| rest.get(..len))
-            .ok_or(FormatError::UnexpectedEof {
-                expected: self.pos.saturating_add(len),
-                available: self.data.len(),
-            })?;
+        let mut trial = *self;
+        let bytes = trial.take(len)?;
         let mut value = [0; 8];
-        value
-            .get_mut(..len)
-            .ok_or_else(|| FormatError::Internal("an integer field is wider than 8 bytes".into()))?
-            .copy_from_slice(bytes);
-        self.pos += len;
+        if len > value.len() {
+            return Err(FormatError::Internal(
+                "an integer field is wider than 8 bytes".into(),
+            ));
+        }
+        for (destination, source) in value.iter_mut().zip(bytes) {
+            *destination = *source;
+        }
+        *self = trial;
         Ok(u64::from_le_bytes(value))
     }
 
@@ -562,36 +677,238 @@ impl<'a> Fields<'a> {
     /// [`FormatError::OffsetOverflow`] if its end exceeds [`u64::MAX`], and
     /// [`FormatError::ValueTooLargeForPlatform`] if its end exceeds [`usize::MAX`].
     pub(crate) fn slice(&mut self, len: usize) -> Result<&'a [u8], FormatError> {
-        let Self { data, pos } = self;
-        let range = convert::slice_range(pos.to_u64(), len.to_u64())?;
-        let end = range.end;
-        let bytes = data.get(range).ok_or(FormatError::UnexpectedEof {
-            expected: end,
-            available: data.len(),
-        })?;
-        *pos = end;
-        Ok(bytes)
+        convert::slice_range(self.position().to_u64(), len.to_u64())?;
+        Ok(self.take(len)?)
     }
 
-    /// Reads the next `N` bytes.
-    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
-        let value = self
-            .data
-            .get(self.pos..)
-            .and_then(|rest| rest.first_chunk::<N>())
-            .copied()
-            .ok_or(FormatError::UnexpectedEof {
-                expected: self.pos.saturating_add(N),
-                available: self.data.len(),
-            })?;
-        self.pos += N;
-        Ok(value)
+    /// Copies the next `N` bytes and advances the cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::take_array`].
+    #[inline]
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], UnexpectedEof> {
+        self.take_array().copied()
+    }
+
+    /// Borrows the next `N` bytes and advances the cursor.
+    ///
+    /// The returned reference remains valid for the original input's lifetime, including after
+    /// subsequent cursor operations. A zero-length read succeeds at any position through the
+    /// input's end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnexpectedEof`] if the range is incomplete or its end exceeds [`usize::MAX`].
+    /// Leaves the cursor unchanged on error.
+    #[inline]
+    pub(crate) fn take_array<const N: usize>(&mut self) -> Result<&'a [u8; N], UnexpectedEof> {
+        let Self {
+            remaining,
+            input_len,
+        } = self;
+        let Some((array, rest)) = remaining.split_first_chunk::<N>() else {
+            return Err(UnexpectedEof::for_suffix(*input_len, remaining.len(), N));
+        };
+        *remaining = rest;
+        Ok(array)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+    use proptest::test_runner::FileFailurePersistence;
+    use proptest::test_runner::TestCaseResult;
+
     use super::*;
+
+    #[test]
+    fn acquired_arrays_borrow_the_original_bytes_across_cursor_operations() {
+        let data = [0xaa, 1, 2, 3, 4, 5, 6, 7];
+        let mut cursor = ByteCursor::with_position(&data, 1).unwrap();
+        let first: &[u8; 2] = cursor.take_array().unwrap();
+        let second: &[u8; 4] = cursor.take_array().unwrap();
+        assert_eq!(cursor.u8().unwrap(), 7);
+        assert_eq!(cursor.position(), data.len());
+        assert_eq!(first, &[1, 2]);
+        assert_eq!(second, &[3, 4, 5, 6]);
+        assert_eq!(first.as_ptr(), data[1..].as_ptr());
+        assert_eq!(second.as_ptr(), data[3..].as_ptr());
+    }
+
+    #[rstest::rstest]
+    #[case::empty_prefix(0, 0, true)]
+    #[case::empty_end(6, 0, true)]
+    #[case::empty_past_end(7, 0, false)]
+    #[case::empty_largest_position(usize::MAX, 0, false)]
+    #[case::exact_end(2, 4, true)]
+    #[case::short(3, 4, false)]
+    #[case::end_overflow(usize::MAX, 2, false)]
+    #[case::largest_length(1, usize::MAX, false)]
+    fn acquisition_boundaries_preserve_failed_state(
+        #[case] position: usize,
+        #[case] len: usize,
+        #[case] succeeds: bool,
+    ) {
+        let data = [1, 2, 3, 4, 5, 6];
+        let cursor = ByteCursor::with_position(&data, position);
+        let mut output = data;
+        let error = UnexpectedEof {
+            expected: position.saturating_add(len),
+            available: data.len(),
+        };
+        if position > data.len() {
+            assert_eq!(
+                cursor.err().unwrap(),
+                UnexpectedEof {
+                    expected: position,
+                    available: data.len(),
+                }
+            );
+            let array_error = UnexpectedEof {
+                expected: position.saturating_add(2),
+                available: data.len(),
+            };
+            assert_eq!(array_at::<2>(&data, position).unwrap_err(), array_error);
+            for (offsets, lengths, uint) in [
+                (OffsetWidth::Two, LengthWidth::Two, UintWidth::Two),
+                (OffsetWidth::Four, LengthWidth::Four, UintWidth::Four),
+                (OffsetWidth::Eight, LengthWidth::Eight, UintWidth::Eight),
+            ] {
+                let error = FormatError::UnexpectedEof {
+                    expected: position.saturating_add(usize::from(offsets.get())),
+                    available: data.len(),
+                };
+                assert_eq!(
+                    read_offset_width(&data, position, offsets).unwrap_err(),
+                    error
+                );
+                assert_eq!(
+                    read_length_width(&data, position, lengths).unwrap_err(),
+                    error
+                );
+                assert_eq!(read_uint_width(&data, position, uint).unwrap_err(), error);
+            }
+            assert_eq!(
+                read_uint_width(&data, position, UintWidth::One).unwrap_err(),
+                FormatError::UnexpectedEof {
+                    expected: position.saturating_add(1),
+                    available: data.len(),
+                }
+            );
+            assert_eq!(
+                array_at_mut::<2>(&mut output, position).unwrap_err(),
+                array_error
+            );
+            if len == 0 {
+                assert_eq!(array_at::<0>(&data, position).unwrap_err(), error);
+                assert_eq!(array_at_mut::<0>(&mut output, position).unwrap_err(), error);
+            }
+            assert_eq!(output, data);
+            return;
+        }
+        let mut cursor = cursor.unwrap();
+        if succeeds {
+            assert_eq!(cursor.take(len).unwrap(), &data[position..position + len]);
+            assert_eq!(cursor.position(), position + len);
+        } else {
+            assert_eq!(cursor.take(len).unwrap_err(), error);
+            assert_eq!(cursor.position(), position);
+        }
+        if len == 0 {
+            assert_eq!(cursor.take_array::<0>().unwrap(), &[]);
+            assert_eq!(cursor.array::<0>().unwrap(), []);
+            assert_eq!(array_at_mut::<0>(&mut output, position).unwrap(), &[]);
+            assert_eq!(cursor.position(), position);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"), "/tests/proptest-regressions/bytes.txt"
+            )))),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn acquired_bytes_follow_requested_bounds(
+            data in proptest::collection::vec(any::<u8>(), 8..128),
+            origin in any::<usize>(),
+            requested in any::<usize>(),
+            succeeds in any::<bool>(),
+            width in proptest::sample::select(vec![LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight]),
+        ) {
+            let position = origin % (data.len() + 1);
+            let remaining = data.len() - position;
+            let len = if succeeds {
+                requested % (remaining + 1)
+            } else {
+                remaining + 1 + requested % 128
+            };
+            let mut cursor = ByteCursor::with_position(&data, position).unwrap();
+            if succeeds {
+                let bytes = cursor.take(len).unwrap();
+                prop_assert_eq!(bytes, &data[position..position + len]);
+                prop_assert_eq!(bytes.as_ptr(), data[position..].as_ptr());
+                prop_assert_eq!(cursor.position(), position + len);
+                prop_assert_eq!(cursor.remaining(), &data[position + len..]);
+            } else {
+                let error = UnexpectedEof { expected: position + len, available: data.len() };
+                prop_assert_eq!(cursor.take(len).unwrap_err(), error);
+                prop_assert_eq!(cursor.position(), position);
+                prop_assert_eq!(cursor.remaining(), &data[position..]);
+            }
+            match width {
+                LengthWidth::Two => assert_array_bounds::<2>(&data, origin, requested, succeeds)?,
+                LengthWidth::Four => assert_array_bounds::<4>(&data, origin, requested, succeeds)?,
+                LengthWidth::Eight => assert_array_bounds::<8>(&data, origin, requested, succeeds)?,
+            }
+        }
+    }
+
+    fn assert_array_bounds<const N: usize>(
+        data: &[u8],
+        origin: usize,
+        requested: usize,
+        succeeds: bool,
+    ) -> TestCaseResult {
+        let position = if succeeds {
+            origin % (data.len() - N + 1)
+        } else {
+            data.len() - N + 1 + origin % N
+        };
+        let mut cursor = ByteCursor::with_position(data, position).unwrap();
+        let mut output = data.to_vec();
+        if succeeds {
+            let array = cursor.take_array::<N>().unwrap();
+            prop_assert_eq!(cursor.array::<0>().unwrap(), []);
+            prop_assert_eq!(array.as_slice(), &data[position..position + N]);
+            prop_assert_eq!(array.as_ptr(), data[position..].as_ptr());
+            prop_assert_eq!(cursor.position(), position + N);
+            let copied = ByteCursor::with_position(data, position)
+                .unwrap()
+                .array::<N>()
+                .unwrap();
+            prop_assert_eq!(copied, *array);
+            array_at_mut::<N>(&mut output, position).unwrap().fill(0xaa);
+            let mut expected = data.to_vec();
+            expected[position..position + N].fill(0xaa);
+            prop_assert_eq!(output, expected);
+        } else {
+            let error = UnexpectedEof {
+                expected: position + N,
+                available: data.len(),
+            };
+            prop_assert_eq!(cursor.take_array::<N>().unwrap_err(), error);
+            prop_assert_eq!(cursor.position(), position);
+            prop_assert_eq!(array_at_mut::<N>(&mut output, position).unwrap_err(), error);
+            prop_assert_eq!(output, data);
+        }
+        Ok(())
+    }
 
     #[rstest::rstest]
     #[case::two(LengthWidth::Two, u64::from(u16::MAX), &[0xff, 0xff])]
@@ -612,6 +929,8 @@ mod tests {
     #[rstest::rstest]
     #[case::two_overflow(LengthWidth::Two, 65_536, 1, FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
     #[case::four_overflow(LengthWidth::Four, 4_294_967_296, 1, FormatError::LengthTooLarge { length: 4_294_967_296, length_size: 4 })]
+    #[case::two_overflow_before_capacity(LengthWidth::Two, 65_536, usize::MAX, FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
+    #[case::four_overflow_before_capacity(LengthWidth::Four, 4_294_967_296, usize::MAX, FormatError::LengthTooLarge { length: 4_294_967_296, length_size: 4 })]
     #[case::short(LengthWidth::Eight, 1, 3, FormatError::UnexpectedEof { expected: 11, available: 10 })]
     #[case::offset_overflow(LengthWidth::Two, 1, usize::MAX, FormatError::UnexpectedEof { expected: usize::MAX, available: 10 })]
     fn length_field_failures_preserve_the_buffer(
@@ -732,9 +1051,7 @@ mod tests {
         assert_eq!(read_offset(&data, 0, 8).unwrap(), 0x8877_6655_4433_2211);
         assert_eq!(read_length(&data, 0, 4).unwrap(), 0x4433_2211);
         assert_eq!(read_uint_width(&data, 0, UintWidth::One).unwrap(), 0x11);
-        // Reading at a non-zero position uses that position's bytes, not the
-        // buffer's first ones  -  a `read_le` that ignored `pos` would still pass
-        // every assertion above.
+        // The field starts two bytes after the buffer's beginning.
         assert_eq!(read_offset(&data, 2, 2).unwrap(), 0x4433);
     }
 
@@ -1024,32 +1341,53 @@ mod tests {
     #[case::eight(8, 0x8877_6655_4433_2211)]
     fn an_integer_field_reads_little_endian_at_its_width(#[case] len: usize, #[case] value: u64) {
         let data = [0xAA, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let mut fields = Fields::new(&data, 1);
-        assert_eq!(fields.uint(len).unwrap(), value);
-        assert_eq!(fields.pos(), 1 + len);
+        let mut cursor = ByteCursor::with_position(&data, 1).unwrap();
+        assert_eq!(cursor.uint(len).unwrap(), value);
+        assert_eq!(cursor.position(), 1 + len);
     }
 
     #[test]
     fn an_integer_field_past_the_block_is_an_error() {
         let data = [0x11, 0x22, 0x33];
-        let mut fields = Fields::new(&data, 1);
-        assert_eq!(
-            fields.uint(3).unwrap_err(),
-            FormatError::UnexpectedEof {
-                expected: 4,
-                available: 3,
-            }
-        );
-        assert_eq!(fields.pos(), 1);
+        let mut cursor = ByteCursor::with_position(&data, 1).unwrap();
+        for len in [3, 9] {
+            assert_eq!(
+                cursor.uint(len).unwrap_err(),
+                FormatError::UnexpectedEof {
+                    expected: 1 + len,
+                    available: 3,
+                }
+            );
+            assert_eq!(cursor.position(), 1);
+        }
     }
 
     #[test]
     fn an_integer_field_wider_than_8_bytes_is_an_internal_error() {
-        let data = [0; 9];
-        let err = Fields::new(&data, 0).uint(9).unwrap_err();
+        let data = [0; 10];
+        let mut cursor = ByteCursor::with_position(&data, 1).unwrap();
+        let err = cursor.uint(9).unwrap_err();
         let FormatError::Internal(message) = &err else {
             panic!("expected Internal, got {err:?}");
         };
         assert_eq!(message, "an integer field is wider than 8 bytes");
+        assert_eq!(cursor.position(), 1);
+    }
+
+    #[rstest::rstest]
+    #[case::eof(2, 2, FormatError::UnexpectedEof { expected: 4, available: 3 })]
+    #[case::end_overflow(1, usize::MAX, if usize::BITS == 64 {
+        FormatError::OffsetOverflow { offset: 1, length: u64::MAX }
+    } else {
+        FormatError::ValueTooLargeForPlatform { value: 0x1_0000_0000, target: "usize" }
+    })]
+    fn slice_errors_preserve_conversion_precedence_and_position(
+        #[case] position: usize,
+        #[case] len: usize,
+        #[case] error: FormatError,
+    ) {
+        let mut cursor = ByteCursor::with_position(&[1, 2, 3], position).unwrap();
+        assert_eq!(cursor.slice(len).unwrap_err(), error);
+        assert_eq!(cursor.position(), position);
     }
 }
