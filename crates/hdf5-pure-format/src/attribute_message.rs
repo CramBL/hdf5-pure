@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use hdf5_pure_core::__private::ElementSize;
 
 use crate::bytes;
+use crate::codec::Decode;
 use crate::convert::Narrow;
 use crate::dataspace::Dataspace;
 use crate::datatype;
@@ -788,9 +789,9 @@ fn decode_dataspace(
 ) -> Result<Dataspace, FormatError> {
     if flags & FLAG_SHARED_DATASPACE != 0 {
         let body = resolver.resolve(field, MessageType::DATASPACE)?;
-        Dataspace::parse_with_length_width(&body, length_width)
+        Dataspace::decode(&body, length_width)
     } else {
-        Dataspace::parse_with_length_width(field, length_width)
+        Dataspace::decode(field, length_width)
     }
 }
 
