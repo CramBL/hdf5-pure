@@ -19,6 +19,9 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
+use crate::bytes::UnexpectedEof;
+use crate::codec::Decode;
+use crate::codec::Encode;
 use crate::error::FormatError;
 use crate::width::{FormatWidths, OffsetWidth};
 
@@ -29,7 +32,7 @@ use crate::width::{FormatWidths, OffsetWidth};
 /// 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_stmgroup
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SymbolTableMessage {
     /// The address of the group's version 1 B-tree, of node type 0.
     pub btree_address: StoredAddress,
@@ -53,24 +56,195 @@ impl SymbolTableMessage {
     /// # Errors
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than two addresses.
+    #[inline]
     pub fn parse_with_offset_width(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<SymbolTableMessage, FormatError> {
-        let os = usize::from(offset_width.get());
-        if data.len() < os * 2 {
-            return Err(FormatError::UnexpectedEof {
-                expected: os * 2,
-                available: data.len(),
-            });
-        }
-        let btree_address = StoredAddress::new(bytes::read_offset_width(data, 0, offset_width)?);
-        let local_heap_address =
-            StoredAddress::new(bytes::read_offset_width(data, os, offset_width)?);
-        Ok(SymbolTableMessage {
+        Self::decode(data, offset_width)
+    }
+
+    /// Writes both addresses as little-endian integers and returns the number of bytes written.
+    ///
+    /// Each address occupies `offset_width` bytes. Preserves stored address bits, including
+    /// zero and the selected width's all-ones undefined address. Any output suffix remains
+    /// unchanged, and an error leaves the entire output unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if either address exceeds the largest unsigned
+    /// integer representable in `offset_width` bytes, checking the B-tree address first.
+    /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than two addresses.
+    /// Address errors take precedence over destination capacity errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::SymbolTableMessage;
+    /// use hdf5_pure_format::{FormatError, OffsetWidth};
+    ///
+    /// let message = SymbolTableMessage {
+    ///     btree_address: StoredAddress::new(0x1234),
+    ///     local_heap_address: StoredAddress::undefined(OffsetWidth::Two),
+    /// };
+    /// let mut output = [0xaa; 6];
+    /// assert_eq!(message.write_into(&mut output, OffsetWidth::Two)?, 4);
+    /// assert_eq!(output, [0x34, 0x12, 0xff, 0xff, 0xaa, 0xaa]);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn write_into(
+        &self,
+        output: &mut [u8],
+        offset_width: OffsetWidth,
+    ) -> Result<usize, FormatError> {
+        Ok(PreparedSymbolTable::new(self, offset_width)?.encode_into(output)?)
+    }
+
+    /// Reads the B-tree and local heap addresses in wire order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bytes::UnexpectedEof`] if an address is incomplete, relative to `record`.
+    #[inline]
+    fn read_fields(record: &[u8], offsets: OffsetWidth) -> Result<Self, UnexpectedEof> {
+        let mut cursor = bytes::ByteCursor::new(record);
+        Ok(match offsets {
+            OffsetWidth::Two => Self {
+                btree_address: StoredAddress::new(u64::from(u16::from_le_bytes(
+                    *cursor.take_array()?,
+                ))),
+                local_heap_address: StoredAddress::new(u64::from(u16::from_le_bytes(
+                    *cursor.take_array()?,
+                ))),
+            },
+            OffsetWidth::Four => Self {
+                btree_address: StoredAddress::new(u64::from(u32::from_le_bytes(
+                    *cursor.take_array()?,
+                ))),
+                local_heap_address: StoredAddress::new(u64::from(u32::from_le_bytes(
+                    *cursor.take_array()?,
+                ))),
+            },
+            OffsetWidth::Eight => Self {
+                btree_address: StoredAddress::new(u64::from_le_bytes(*cursor.take_array()?)),
+                local_heap_address: StoredAddress::new(u64::from_le_bytes(*cursor.take_array()?)),
+            },
+        })
+    }
+}
+
+impl<'input> Decode<'input> for SymbolTableMessage {
+    type Context = OffsetWidth;
+    type Error = FormatError;
+
+    /// Reads the B-tree and local heap addresses from one complete little-endian record.
+    ///
+    /// Reads two addresses at `offsets` bytes each. Leaves any input suffix unexamined.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the record is incomplete, relative to `input`.
+    fn decode(input: &'input [u8], offsets: OffsetWidth) -> Result<Self, Self::Error> {
+        let mut cursor = bytes::ByteCursor::new(input);
+        Ok(match offsets {
+            OffsetWidth::Two => Self::read_fields(cursor.take_array::<4>()?, offsets)?,
+            OffsetWidth::Four => Self::read_fields(cursor.take_array::<8>()?, offsets)?,
+            OffsetWidth::Eight => Self::read_fields(cursor.take_array::<16>()?, offsets)?,
+        })
+    }
+}
+
+/// A borrowed message whose stored addresses fit the selected width.
+///
+/// The encoder reads the checked addresses through an immutable borrow.
+/// A caller can encode the borrowed message repeatedly.
+struct PreparedSymbolTable<'a> {
+    message: &'a SymbolTableMessage,
+    offsets: OffsetWidth,
+}
+
+impl<'a> PreparedSymbolTable<'a> {
+    /// Borrows a message after checking both addresses against `offsets`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if either address exceeds the width, checking the
+    /// B-tree address first.
+    fn new(message: &'a SymbolTableMessage, offsets: OffsetWidth) -> Result<Self, FormatError> {
+        let SymbolTableMessage {
             btree_address,
             local_heap_address,
-        })
+        } = message;
+        let undefined = StoredAddress::undefined(offsets);
+        for address in [*btree_address, *local_heap_address] {
+            if address > undefined {
+                return Err(FormatError::AddressTooLarge {
+                    address: address.get(),
+                    offset_size: offsets.get(),
+                });
+            }
+        }
+        Ok(Self { message, offsets })
+    }
+}
+
+impl Encode for PreparedSymbolTable<'_> {
+    type Error = UnexpectedEof;
+
+    /// Returns twice the retained address width.
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        2 * usize::from(self.offsets.get())
+    }
+
+    /// Acquires both address destinations before writing at the checked width.
+    ///
+    /// Writes little-endian addresses, preserves the output suffix, and returns the bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bytes::UnexpectedEof`] if `output` is shorter than two addresses, leaving
+    /// the entire output unchanged.
+    #[inline]
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let Self { message, offsets } = *self;
+        let SymbolTableMessage {
+            btree_address,
+            local_heap_address,
+        } = *message;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "both addresses fit the width retained by the prepared message"
+        )]
+        match offsets {
+            OffsetWidth::Two => {
+                let record = bytes::ByteCursorMut::new(output).take_array::<4>()?;
+                let mut cursor = bytes::ByteCursorMut::new(record);
+                let btree_bytes = cursor.take_array::<2>()?;
+                let heap_bytes = cursor.take_array::<2>()?;
+                *btree_bytes = (btree_address.get() as u16).to_le_bytes();
+                *heap_bytes = (local_heap_address.get() as u16).to_le_bytes();
+            }
+            OffsetWidth::Four => {
+                let record = bytes::ByteCursorMut::new(output).take_array::<8>()?;
+                let mut cursor = bytes::ByteCursorMut::new(record);
+                let btree_bytes = cursor.take_array::<4>()?;
+                let heap_bytes = cursor.take_array::<4>()?;
+                *btree_bytes = (btree_address.get() as u32).to_le_bytes();
+                *heap_bytes = (local_heap_address.get() as u32).to_le_bytes();
+            }
+            OffsetWidth::Eight => {
+                let record = bytes::ByteCursorMut::new(output).take_array::<16>()?;
+                let mut cursor = bytes::ByteCursorMut::new(record);
+                let btree_bytes = cursor.take_array::<8>()?;
+                let heap_bytes = cursor.take_array::<8>()?;
+                *btree_bytes = btree_address.get().to_le_bytes();
+                *heap_bytes = local_heap_address.get().to_le_bytes();
+            }
+        }
+        Ok(self.encoded_len())
     }
 }
 
@@ -306,26 +480,48 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::StoredAddressExt;
     use crate::fixture;
 
-    #[test]
-    fn parse_symbol_table_message_offset8() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&0x1000u64.to_le_bytes()); // btree
-        data.extend_from_slice(&0x2000u64.to_le_bytes()); // heap
-        let msg = SymbolTableMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.btree_address, StoredAddress::new(0x1000));
-        assert_eq!(msg.local_heap_address, StoredAddress::new(0x2000));
-    }
-
-    #[test]
-    fn parse_symbol_table_message_offset4() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&0x800u32.to_le_bytes());
-        data.extend_from_slice(&0x900u32.to_le_bytes());
-        let msg = SymbolTableMessage::parse(&data, 4).unwrap();
-        assert_eq!(msg.btree_address, StoredAddress::new(0x800));
-        assert_eq!(msg.local_heap_address, StoredAddress::new(0x900));
+    #[rstest]
+    #[case::two(OffsetWidth::Two, &[0x34, 0x12, 0xff, 0xff])]
+    #[case::four(OffsetWidth::Four, &[0x34, 0x12, 0, 0, 0xff, 0xff, 0xff, 0xff])]
+    #[case::eight(OffsetWidth::Eight, &[0x34, 0x12, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]
+    fn prepared_symbol_tables_encode_after_failure_and_repeated_success(
+        #[case] offsets: OffsetWidth,
+        #[case] expected: &[u8],
+    ) {
+        let message = SymbolTableMessage {
+            btree_address: StoredAddress::new(0x1234),
+            local_heap_address: StoredAddress::undefined(offsets),
+        };
+        let prepared = PreparedSymbolTable::new(&message, offsets).unwrap();
+        let length = prepared.encoded_len();
+        assert_eq!(length, expected.len());
+        let mut output = [0xab; 18];
+        assert_eq!(
+            prepared.encode_into(&mut output[1..length]).unwrap_err(),
+            UnexpectedEof {
+                expected: expected.len(),
+                available: length - 1,
+            },
+        );
+        assert_eq!(output, [0xab; 18]);
+        assert_eq!(
+            prepared.encode_into(&mut output[1..]).unwrap(),
+            expected.len()
+        );
+        let mut expected_output = [0xab; 18];
+        expected_output[1..length + 1].copy_from_slice(expected);
+        assert_eq!(output, expected_output);
+        let mut repeated_output = [0xcd; 18];
+        assert_eq!(
+            prepared.encode_into(&mut repeated_output[1..]).unwrap(),
+            expected.len(),
+        );
+        let mut repeated_expected = [0xcd; 18];
+        repeated_expected[1..length + 1].copy_from_slice(expected);
+        assert_eq!(repeated_output, repeated_expected);
     }
 
     fn locator(widths: Widths, base: u64, address: u64, k: Option<u16>) -> SymbolTableNodeLocator {
