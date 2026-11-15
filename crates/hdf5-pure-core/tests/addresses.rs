@@ -1,9 +1,16 @@
+use hdf5_pure_core::DecodedStoredAddress;
 use hdf5_pure_core::{FormatError, OffsetWidth, PhysicalAddress, StoredAddress};
 
 #[test]
 fn public_addresses_keep_their_coordinate_types() {
     let stored: StoredAddress = StoredAddress::undefined(OffsetWidth::Eight);
     assert_eq!(stored.get(), u64::MAX);
+    assert_eq!(
+        DecodedStoredAddress::Undefined
+            .to_stored(OffsetWidth::Eight)
+            .unwrap(),
+        stored,
+    );
     let physical: PhysicalAddress = PhysicalAddress::new(512).checked_add(32).unwrap();
     assert_eq!(physical.get(), 544);
     assert_eq!(
