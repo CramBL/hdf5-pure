@@ -1,4 +1,5 @@
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private as dense_attribute_write;
 use hdf5_pure_format::__private::BTreeV2Header;
 use rstest::rstest;
 

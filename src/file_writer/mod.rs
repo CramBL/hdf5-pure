@@ -14,14 +14,12 @@ use std::collections::HashMap;
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileSpaceSettingsExt;
 use hdf5_pure_core::__private::SuperblockFields;
-pub(crate) use hdf5_pure_format::__private as dense_attribute_write;
 #[cfg(test)]
 use hdf5_pure_format::__private::DENSE_ATTR_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::DenseAttrBlob;
 pub(crate) use hdf5_pure_format::__private::DenseAttrCreationOrder;
 use hdf5_pure_format::__private::DenseAttrFixup;
 use hdf5_pure_format::__private::DenseAttrPlan;
-use hdf5_pure_format::__private::DenseAttrReference;
 use hdf5_pure_format::__private::DenseLinkImage;
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
@@ -62,7 +60,6 @@ use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_policy::AttributePolicy;
 use crate::attribute_policy::AttributeStorage;
-use crate::bytes;
 use crate::chunked_write::ByteSink;
 use crate::chunked_write::CompressedChunkSet;
 use crate::convert::Narrow;
@@ -94,7 +91,6 @@ use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
     self, AttrSpec, AttributeSpecs, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder,
 };
-use crate::vl_data::VlElement;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -579,55 +575,24 @@ pub(crate) fn make_link(name: &str, addr: StoredAddress) -> LinkMessage {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::Internal`] if a prepared attribute or collection reference is absent,
-/// a committed datatype is inline, a collection offset overflows, or a payload changes length.
-/// Propagates address errors from [`PreparedDenseAttrs::finalize`] and reference-read errors.
+/// Returns [`FormatError::Internal`] if a prepared attribute is absent, a committed datatype is
+/// inline, or a payload changes length. Propagates address and reference-read errors from
+/// [`PreparedDenseAttrs::finalize`].
 pub(crate) fn finalize_dense_attrs(
     prepared: PreparedDenseAttrs,
     attrs: &[AttributeMessage],
 ) -> Result<DenseAttrPlan, FormatError> {
-    let widths = prepared.widths();
     let attribute = |index: usize| {
         attrs.get(index).ok_or_else(|| {
             FormatError::Internal("a prepared dense attribute is absent during finalization".into())
         })
     };
     prepared.finalize(
-        |reference| match reference {
-            DenseAttrReference::CommittedDatatype { attribute: index } => {
-                match attribute(index)?.datatype_location {
-                    DatatypeLocation::Committed(address) => Ok(address),
-                    DatatypeLocation::Inline => Err(FormatError::Internal(
-                        "a prepared committed attribute has an inline datatype".into(),
-                    )),
-                }
-            }
-            DenseAttrReference::GlobalHeap {
-                attribute: index,
-                collection,
-            } => {
-                let offset = collection
-                    .checked_mul(dense_attribute_write::GLOBAL_HEAP_MAX_OBJECTS)
-                    .and_then(|element| {
-                        element.checked_mul(VlElement::serialized_size(widths.offsets))
-                    })
-                    .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
-                    .ok_or_else(|| {
-                        FormatError::Internal(
-                            "a prepared attribute collection offset overflows".into(),
-                        )
-                    })?;
-                // `H5T__vlen_disk_write` writes the sequence length before the heap address
-                // (`H5Tvlen.c`, HDF5 2.2.0).
-                bytes::read_offset_width(&attribute(index)?.raw_data, offset, widths.offsets)
-                    .map(StoredAddress::new)
-                    .map_err(|error| match error {
-                        FormatError::UnexpectedEof { .. } => FormatError::Internal(
-                            "a prepared attribute collection reference is absent".into(),
-                        ),
-                        error => error,
-                    })
-            }
+        |index| match attribute(index)?.datatype_location {
+            DatatypeLocation::Committed(address) => Ok(address),
+            DatatypeLocation::Inline => Err(FormatError::Internal(
+                "a prepared committed attribute has an inline datatype".into(),
+            )),
         },
         |index| Ok(attribute(index)?.raw_data.as_slice()),
     )

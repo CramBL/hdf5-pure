@@ -114,7 +114,6 @@ pub use crate::dense_attribute_write::DenseAttrCreationOrder;
 pub use crate::dense_attribute_write::DenseAttrFixup;
 pub use crate::dense_attribute_write::DenseAttrPlacement;
 pub use crate::dense_attribute_write::DenseAttrPlan;
-pub use crate::dense_attribute_write::DenseAttrReference;
 pub use crate::dense_attribute_write::PreparedDenseAttrs;
 pub use crate::dense_attribute_write::build_dense_attrs;
 pub use crate::dense_attribute_write::dense_attrs_plan;
