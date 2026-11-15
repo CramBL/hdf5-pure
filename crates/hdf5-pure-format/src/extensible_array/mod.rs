@@ -98,28 +98,28 @@ impl ExtensibleArrayHeaderLocator {
         } = *self;
         let range = self.parse_range()?;
         let bytes = region.subregion(range)?.bytes();
-        let mut fields = bytes::Fields::new(bytes, 0);
-        if fields.array::<{ HEADER_SIGNATURE.len() }>()? != HEADER_SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(bytes);
+        if cursor.array::<{ HEADER_SIGNATURE.len() }>()? != HEADER_SIGNATURE {
             return Err(FormatError::InvalidExtensibleArraySignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != VERSION {
             return Err(FormatError::InvalidExtensibleArrayVersion(version));
         }
-        let client_id = fields.u8()?;
-        let element_size = fields.u8()?;
-        let max_index_bits = fields.u8()?;
-        let index_block_elements = fields.u8()?;
-        let data_block_min_elements = fields.u8()?;
-        let super_block_min_data_blocks = fields.u8()?;
-        let page_bits = fields.u8()?;
+        let client_id = cursor.u8()?;
+        let element_size = cursor.u8()?;
+        let max_index_bits = cursor.u8()?;
+        let index_block_elements = cursor.u8()?;
+        let data_block_min_elements = cursor.u8()?;
+        let super_block_min_data_blocks = cursor.u8()?;
+        let page_bits = cursor.u8()?;
         for _ in 0..STATISTICS_BEFORE_MAX_INDEX_SET {
-            fields.length(widths.lengths)?;
+            cursor.length(widths.lengths)?;
         }
-        let max_index_set = fields.length(widths.lengths)?;
+        let max_index_set = cursor.length(widths.lengths)?;
         // The number of elements, the last statistic.
-        fields.length(widths.lengths)?;
-        let index_block_address = fields.address(widths.offsets)?;
+        cursor.length(widths.lengths)?;
+        let index_block_address = cursor.address(widths.offsets)?;
         checksum::verify_trailing(bytes)?;
 
         let encoding = ElementEncoding::new(widths.offsets, client_id, element_size).map_err(
@@ -248,9 +248,9 @@ impl ExtensibleArrayBlockFraming {
             offset,
         } = *self;
         let prefix = region.subregion(self.prefix_range()?)?;
-        let mut fields = owner.parse_prefix(prefix.bytes(), signature)?;
+        let mut cursor = owner.parse_prefix(prefix.bytes(), signature)?;
         let (expected, alternate) = offset;
-        owner.parse_block_offset(&mut fields, expected, alternate)?;
+        owner.parse_block_offset(&mut cursor, expected, alternate)?;
         Ok(())
     }
 
@@ -361,10 +361,10 @@ impl ExtensibleArrayIndexBlockRef {
     ) -> Result<ExtensibleArrayIndexBlock<'a>, FormatError> {
         let Self { owner, range } = *self;
         let bytes = region.subregion(range)?.bytes();
-        let fields = owner.parse_prefix(bytes, INDEX_BLOCK_SIGNATURE)?;
+        let cursor = owner.parse_prefix(bytes, INDEX_BLOCK_SIGNATURE)?;
         checksum::verify_trailing(bytes)?;
         let layout = owner.layout;
-        let (elements, addresses) = body(bytes, fields.pos())?
+        let (elements, addresses) = body(bytes, cursor.position())?
             .split_at_checked(
                 layout
                     .elements_len(u64::from(layout.inline_elements))?
@@ -554,10 +554,10 @@ impl ExtensibleArraySuperBlockRef {
             super_block,
         } = *self;
         let bytes = region.subregion(range)?.bytes();
-        let mut fields = owner.parse_prefix(bytes, SUPER_BLOCK_SIGNATURE)?;
-        owner.parse_block_offset(&mut fields, super_block.offset, None)?;
+        let mut cursor = owner.parse_prefix(bytes, SUPER_BLOCK_SIGNATURE)?;
+        owner.parse_block_offset(&mut cursor, super_block.offset, None)?;
         checksum::verify_trailing(bytes)?;
-        let (bitmap, data_blocks) = body(bytes, fields.pos())?
+        let (bitmap, data_blocks) = body(bytes, cursor.position())?
             .split_at_checked(owner.layout.bitmap_len(super_block)?.to_usize()?)
             .ok_or_else(|| internal("super block ends inside its page-init bitmap"))?;
         Ok(ExtensibleArraySuperBlock {
@@ -731,19 +731,19 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
             ..
         } = *self;
         let bytes = region.subregion(parse_range)?.bytes();
-        let mut fields = owner.parse_prefix(bytes, DATA_BLOCK_SIGNATURE)?;
+        let mut cursor = owner.parse_prefix(bytes, DATA_BLOCK_SIGNATURE)?;
         // For a data block the index block holds the address of, `H5EA__lookup_elmt` (`H5EA.c`,
         // HDF5 1.10.11 to 2.2.0) stores the offset of its super block plus its ordinal among those
         // data blocks times its element count, which differs from its position from super block 1
         // on.
-        owner.parse_block_offset(&mut fields, block.offset, block.libhdf5_offset)?;
+        owner.parse_block_offset(&mut cursor, block.offset, block.libhdf5_offset)?;
         checksum::verify_trailing(bytes)?;
         Ok(match self.pages()? {
             Some(pages) => ExtensibleArrayDataBlock::Pages(pages),
             None => {
                 ExtensibleArrayDataBlock::Elements(ExtensibleArrayElements::below_max_index_set(
                     owner,
-                    body(bytes, fields.pos())?,
+                    body(bytes, cursor.position())?,
                     owner.layout.first_slot(block.offset)?,
                 ))
             }
@@ -999,7 +999,7 @@ impl Owner {
             .chunks_exact(usize::from(offsets.get()))
             .map(move |field| {
                 Ok(
-                    match bytes::Fields::new(field, 0).decoded_address(offsets)? {
+                    match bytes::ByteCursor::new(field).decoded_address(offsets)? {
                         DecodedStoredAddress::Defined(address) => Some(self.resolve(address)?),
                         DecodedStoredAddress::Undefined => None,
                     },
@@ -1008,21 +1008,21 @@ impl Owner {
     }
 
     /// Parses the signature, the version, the client ID, and the header address of a block, and
-    /// returns the fields that follow them.
+    /// returns a cursor after those fields.
     fn parse_prefix<'a, const N: usize>(
         self,
         bytes: &'a [u8],
         signature: [u8; N],
-    ) -> Result<bytes::Fields<'a>, FormatError> {
-        let mut fields = bytes::Fields::new(bytes, 0);
-        if fields.array::<N>()? != signature {
+    ) -> Result<bytes::ByteCursor<'a>, FormatError> {
+        let mut cursor = bytes::ByteCursor::new(bytes);
+        if cursor.array::<N>()? != signature {
             return Err(FormatError::InvalidExtensibleArraySignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != VERSION {
             return Err(FormatError::InvalidExtensibleArrayVersion(version));
         }
-        let client_id = fields.u8()?;
+        let client_id = cursor.u8()?;
         let expected = self.layout.encoding.client().id();
         if client_id != expected {
             return Err(FormatError::InvalidExtensibleArrayBlockClient {
@@ -1030,14 +1030,14 @@ impl Owner {
                 actual: client_id,
             });
         }
-        let owner = self.resolve(fields.address(self.layout.encoding.offsets())?)?;
+        let owner = self.resolve(cursor.address(self.layout.encoding.offsets())?)?;
         if owner != self.header {
             return Err(FormatError::InvalidExtensibleArrayBlockOwner {
                 expected: self.header.get(),
                 actual: owner.get(),
             });
         }
-        Ok(fields)
+        Ok(cursor)
     }
 
     fn holds_set_slots(self, offset: u64) -> bool {
@@ -1050,11 +1050,11 @@ impl Owner {
     /// `libhdf5`.
     fn parse_block_offset(
         self,
-        fields: &mut bytes::Fields<'_>,
+        cursor: &mut bytes::ByteCursor<'_>,
         expected: u64,
         libhdf5: Option<u64>,
     ) -> Result<(), FormatError> {
-        let actual = fields.uint(usize::from(self.layout.block_offset_len))?;
+        let actual = cursor.uint(usize::from(self.layout.block_offset_len))?;
         if actual != expected && Some(actual) != libhdf5 {
             return Err(FormatError::InvalidExtensibleArrayBlockOffset { expected, actual });
         }
@@ -1338,14 +1338,14 @@ impl ExtensibleArrayCreationParameters {
     /// [`FormatError::InvalidExtensibleArrayGeometry`] if the fields are outside the supported
     /// block and page geometry.
     pub fn parse(data: &[u8]) -> Result<Self, FormatError> {
-        let mut fields = bytes::Fields::new(data, 0);
+        let mut cursor = bytes::ByteCursor::new(data);
         let [
             max_index_bits,
             inline_elements,
             min_data_blocks,
             min_elements,
             page_bits,
-        ] = fields.array()?;
+        ] = cursor.array()?;
         if !(1..=MAX_INDEX_BITS).contains(&max_index_bits)
             || !min_elements.is_power_of_two()
             || !min_data_blocks.is_power_of_two()
