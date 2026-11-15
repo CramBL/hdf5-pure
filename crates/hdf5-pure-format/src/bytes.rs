@@ -26,6 +26,15 @@ pub(crate) struct UnexpectedEof {
 }
 
 impl UnexpectedEof {
+    /// Creates an EOF report relative to the original buffer.
+    #[cold]
+    pub(crate) fn new(expected: usize, available: usize) -> Self {
+        Self {
+            expected,
+            available,
+        }
+    }
+
     /// Computes an EOF report from the unread suffix and requested byte count.
     ///
     /// Saturates the span's end at [`usize::MAX`].
@@ -505,6 +514,63 @@ pub(crate) fn array_at_mut<const N: usize>(
         })
 }
 
+/// A byte cursor that lends disjoint mutable arrays.
+///
+/// Acquired arrays borrow the original output and remain usable after subsequent cursor
+/// operations. Positions and EOF offsets are relative to the original output.
+pub(crate) struct ByteCursorMut<'a> {
+    remaining: &'a mut [u8],
+    output_len: usize,
+}
+
+impl<'a> ByteCursorMut<'a> {
+    /// Returns a cursor at the start of `output`.
+    pub(crate) fn new(output: &'a mut [u8]) -> Self {
+        let output_len = output.len();
+        Self {
+            remaining: output,
+            output_len,
+        }
+    }
+
+    /// Returns the offset of the next byte in the original output.
+    #[cfg(test)]
+    pub(crate) fn position(&self) -> usize {
+        let Self {
+            remaining,
+            output_len,
+        } = self;
+        output_len.saturating_sub(remaining.len())
+    }
+
+    /// Borrows the next `N` bytes mutably and advances the cursor.
+    ///
+    /// A zero-length array succeeds, including at the output's end. Acquisition leaves the
+    /// output bytes unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnexpectedEof`] if the array is incomplete, leaving the cursor unchanged.
+    /// Reports the saturating requested end and the original output length.
+    #[inline]
+    pub(crate) fn take_array<const N: usize>(&mut self) -> Result<&'a mut [u8; N], UnexpectedEof> {
+        let Self {
+            remaining,
+            output_len,
+        } = self;
+        let available = *output_len;
+        let remaining_len = remaining.len();
+        if remaining_len < N {
+            return Err(UnexpectedEof::for_suffix(available, remaining_len, N));
+        }
+        let Some((array, rest)) = core::mem::take(remaining).split_first_chunk_mut::<N>() else {
+            return Err(UnexpectedEof::for_suffix(available, remaining_len, N));
+        };
+        *remaining = rest;
+        Ok(array)
+    }
+}
+
 /// A byte cursor with little-endian scalar readers.
 ///
 /// Successful reads advance past the acquired bytes. Failed reads leave the cursor unchanged.
@@ -730,6 +796,26 @@ mod tests {
         assert_eq!(second, &[3, 4, 5, 6]);
         assert_eq!(first.as_ptr(), data[1..].as_ptr());
         assert_eq!(second.as_ptr(), data[3..].as_ptr());
+
+        let mut output = [0; 7];
+        let mut cursor = ByteCursorMut::new(&mut output);
+        assert_eq!(cursor.take_array::<0>().unwrap(), &mut []);
+        assert_eq!(cursor.position(), 0);
+        let first = cursor.take_array::<2>().unwrap();
+        let second = cursor.take_array::<4>().unwrap();
+        assert_eq!(
+            cursor.take_array::<2>().unwrap_err(),
+            UnexpectedEof {
+                expected: 8,
+                available: 7,
+            }
+        );
+        assert_eq!(cursor.position(), 6);
+        assert_eq!(first, &[0; 2]);
+        assert_eq!(second, &[0; 4]);
+        *first = [1, 2];
+        *second = [3, 4, 5, 6];
+        assert_eq!(output, [1, 2, 3, 4, 5, 6, 0]);
     }
 
     #[rstest::rstest]
