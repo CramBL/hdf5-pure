@@ -21,6 +21,7 @@ use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::bytes::UnexpectedEof;
 use crate::codec::Decode;
+use crate::codec::Encode;
 use crate::error::FormatError;
 use crate::width::{FormatWidths, OffsetWidth};
 
@@ -98,7 +99,7 @@ impl SymbolTableMessage {
         output: &mut [u8],
         offset_width: OffsetWidth,
     ) -> Result<usize, FormatError> {
-        Ok(PreparedSymbolTable::new(self, offset_width)?.write_into(output)?)
+        Ok(PreparedSymbolTable::new(self, offset_width)?.encode_into(output)?)
     }
 
     /// Reads the B-tree and local heap addresses in wire order.
@@ -158,6 +159,7 @@ impl<'input> Decode<'input> for SymbolTableMessage {
 /// A borrowed message whose stored addresses fit the selected width.
 ///
 /// The encoder reads the checked addresses through an immutable borrow.
+/// A caller can encode the borrowed message repeatedly.
 struct PreparedSymbolTable<'a> {
     message: &'a SymbolTableMessage,
     offsets: OffsetWidth,
@@ -186,19 +188,28 @@ impl<'a> PreparedSymbolTable<'a> {
         }
         Ok(Self { message, offsets })
     }
+}
+
+impl Encode for PreparedSymbolTable<'_> {
+    type Error = UnexpectedEof;
+
+    /// Returns twice the retained address width.
+    #[inline]
+    fn encoded_len(&self) -> usize {
+        2 * usize::from(self.offsets.get())
+    }
 
     /// Acquires both address destinations before writing at the checked width.
     ///
-    /// Preserves the output suffix and returns the bytes written.
+    /// Writes little-endian addresses, preserves the output suffix, and returns the bytes written.
     ///
     /// # Errors
     ///
     /// Returns [`bytes::UnexpectedEof`] if `output` is shorter than two addresses, leaving
     /// the entire output unchanged.
     #[inline]
-    fn write_into(self, output: &mut [u8]) -> Result<usize, UnexpectedEof> {
-        let available = output.len();
-        let Self { message, offsets } = self;
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let Self { message, offsets } = *self;
         let SymbolTableMessage {
             btree_address,
             local_heap_address,
@@ -210,57 +221,30 @@ impl<'a> PreparedSymbolTable<'a> {
         match offsets {
             OffsetWidth::Two => {
                 let record = bytes::ByteCursorMut::new(output).take_array::<4>()?;
-                let Some((btree_bytes, rest)) = record.split_first_chunk_mut::<2>() else {
-                    return Err(UnexpectedEof::new(
-                        2 * usize::from(offsets.get()),
-                        available,
-                    ));
-                };
-                let Some(heap_bytes) = rest.first_chunk_mut::<2>() else {
-                    return Err(UnexpectedEof::new(
-                        2 * usize::from(offsets.get()),
-                        available,
-                    ));
-                };
+                let mut cursor = bytes::ByteCursorMut::new(record);
+                let btree_bytes = cursor.take_array::<2>()?;
+                let heap_bytes = cursor.take_array::<2>()?;
                 *btree_bytes = (btree_address.get() as u16).to_le_bytes();
                 *heap_bytes = (local_heap_address.get() as u16).to_le_bytes();
             }
             OffsetWidth::Four => {
                 let record = bytes::ByteCursorMut::new(output).take_array::<8>()?;
-                let Some((btree_bytes, rest)) = record.split_first_chunk_mut::<4>() else {
-                    return Err(UnexpectedEof::new(
-                        2 * usize::from(offsets.get()),
-                        available,
-                    ));
-                };
-                let Some(heap_bytes) = rest.first_chunk_mut::<4>() else {
-                    return Err(UnexpectedEof::new(
-                        2 * usize::from(offsets.get()),
-                        available,
-                    ));
-                };
+                let mut cursor = bytes::ByteCursorMut::new(record);
+                let btree_bytes = cursor.take_array::<4>()?;
+                let heap_bytes = cursor.take_array::<4>()?;
                 *btree_bytes = (btree_address.get() as u32).to_le_bytes();
                 *heap_bytes = (local_heap_address.get() as u32).to_le_bytes();
             }
             OffsetWidth::Eight => {
                 let record = bytes::ByteCursorMut::new(output).take_array::<16>()?;
-                let Some((btree_bytes, rest)) = record.split_first_chunk_mut::<8>() else {
-                    return Err(UnexpectedEof::new(
-                        2 * usize::from(offsets.get()),
-                        available,
-                    ));
-                };
-                let Some(heap_bytes) = rest.first_chunk_mut::<8>() else {
-                    return Err(UnexpectedEof::new(
-                        2 * usize::from(offsets.get()),
-                        available,
-                    ));
-                };
+                let mut cursor = bytes::ByteCursorMut::new(record);
+                let btree_bytes = cursor.take_array::<8>()?;
+                let heap_bytes = cursor.take_array::<8>()?;
                 *btree_bytes = btree_address.get().to_le_bytes();
                 *heap_bytes = local_heap_address.get().to_le_bytes();
             }
         }
-        Ok(2 * usize::from(offsets.get()))
+        Ok(self.encoded_len())
     }
 }
 
@@ -498,6 +482,47 @@ mod tests {
     use super::*;
     use crate::address::StoredAddressExt;
     use crate::fixture;
+
+    #[rstest]
+    #[case::two(OffsetWidth::Two, &[0x34, 0x12, 0xff, 0xff])]
+    #[case::four(OffsetWidth::Four, &[0x34, 0x12, 0, 0, 0xff, 0xff, 0xff, 0xff])]
+    #[case::eight(OffsetWidth::Eight, &[0x34, 0x12, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]
+    fn prepared_symbol_tables_encode_after_failure_and_repeated_success(
+        #[case] offsets: OffsetWidth,
+        #[case] expected: &[u8],
+    ) {
+        let message = SymbolTableMessage {
+            btree_address: StoredAddress::new(0x1234),
+            local_heap_address: StoredAddress::undefined(offsets),
+        };
+        let prepared = PreparedSymbolTable::new(&message, offsets).unwrap();
+        let length = prepared.encoded_len();
+        assert_eq!(length, expected.len());
+        let mut output = [0xab; 18];
+        assert_eq!(
+            prepared.encode_into(&mut output[1..length]).unwrap_err(),
+            UnexpectedEof {
+                expected: expected.len(),
+                available: length - 1,
+            },
+        );
+        assert_eq!(output, [0xab; 18]);
+        assert_eq!(
+            prepared.encode_into(&mut output[1..]).unwrap(),
+            expected.len()
+        );
+        let mut expected_output = [0xab; 18];
+        expected_output[1..length + 1].copy_from_slice(expected);
+        assert_eq!(output, expected_output);
+        let mut repeated_output = [0xcd; 18];
+        assert_eq!(
+            prepared.encode_into(&mut repeated_output[1..]).unwrap(),
+            expected.len(),
+        );
+        let mut repeated_expected = [0xcd; 18];
+        repeated_expected[1..length + 1].copy_from_slice(expected);
+        assert_eq!(repeated_output, repeated_expected);
+    }
 
     fn locator(widths: Widths, base: u64, address: u64, k: Option<u16>) -> SymbolTableNodeLocator {
         SymbolTableNodeLocator::new(
