@@ -2,8 +2,10 @@
 
 use hdf5_pure_core::StoredAddress;
 
+use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::bytes::ByteCursor;
+use crate::bytes::UnexpectedEof;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -78,21 +80,33 @@ impl VariableLengthDescriptor {
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn parse(offsets: OffsetWidth, raw: &[u8]) -> Result<(Self, usize), FormatError> {
-        let size = Self::serialized_size(offsets);
-        bytes::ensure_len(raw, 0, size)?;
         let mut cursor = ByteCursor::new(raw);
-        let element_count = cursor.u32()?;
-        let collection_address = cursor.address(offsets)?;
-        let object_index = cursor.u32()?;
-        Ok((
-            Self {
-                element_count,
-                collection_address,
-                object_index,
-                offsets,
-            },
-            size,
-        ))
+        let descriptor = match offsets {
+            OffsetWidth::Two => Self::read_fields(cursor.take_array::<10>()?, offsets)?,
+            OffsetWidth::Four => Self::read_fields(cursor.take_array::<12>()?, offsets)?,
+            OffsetWidth::Eight => Self::read_fields(cursor.take_array::<16>()?, offsets)?,
+        };
+        Ok((descriptor, cursor.position()))
+    }
+
+    /// Reads the count, stored address, and index in wire order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bytes::UnexpectedEof`] if a field is incomplete, relative to `record`.
+    #[inline]
+    fn read_fields(record: &[u8], offsets: OffsetWidth) -> Result<Self, UnexpectedEof> {
+        let mut cursor = ByteCursor::new(record);
+        Ok(Self {
+            element_count: u32::from_le_bytes(*cursor.take_array()?),
+            collection_address: StoredAddress::new(match offsets {
+                OffsetWidth::Two => u64::from(u16::from_le_bytes(*cursor.take_array()?)),
+                OffsetWidth::Four => u64::from(u32::from_le_bytes(*cursor.take_array()?)),
+                OffsetWidth::Eight => u64::from_le_bytes(*cursor.take_array()?),
+            }),
+            object_index: u32::from_le_bytes(*cursor.take_array()?),
+            offsets,
+        })
     }
 
     /// Returns eight bytes plus the file's address width.
@@ -132,13 +146,14 @@ impl VariableLengthDescriptor {
     /// );
     /// # Ok::<(), FormatError>(())
     /// ```
+    #[inline]
     pub fn new(
         offsets: OffsetWidth,
         element_count: u32,
         collection_address: StoredAddress,
         object_index: u32,
     ) -> Result<Self, FormatError> {
-        if collection_address.get() > StoredAddress::undefined(offsets).get() {
+        if collection_address > StoredAddress::undefined(offsets) {
             return Err(FormatError::AddressTooLarge {
                 address: collection_address.get(),
                 offset_size: offsets.get(),
@@ -160,21 +175,113 @@ impl VariableLengthDescriptor {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`].
     /// The output is unchanged on error.
+    #[inline]
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        Ok(self.write_fields(output)?)
+    }
+
+    /// Acquires the complete destination and each field before writing the descriptor.
+    ///
+    /// Preserves the output suffix and returns the bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bytes::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`],
+    /// leaving the entire output unchanged.
+    #[inline]
+    fn write_fields(&self, output: &mut [u8]) -> Result<usize, UnexpectedEof> {
+        let available = output.len();
         let Self {
             element_count,
             collection_address,
             object_index,
             offsets,
         } = *self;
-        let size = self.encoded_size();
-        bytes::ensure_len(output, 0, size)?;
-        let index_at = ELEMENT_COUNT_BYTES + usize::from(offsets.get());
-        output[..ELEMENT_COUNT_BYTES].copy_from_slice(&element_count.to_le_bytes());
-        output[ELEMENT_COUNT_BYTES..index_at]
-            .copy_from_slice(&collection_address.get().to_le_bytes()[..usize::from(offsets.get())]);
-        output[index_at..size].copy_from_slice(&object_index.to_le_bytes());
-        Ok(size)
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the address fits the width retained by the descriptor"
+        )]
+        match offsets {
+            OffsetWidth::Two => {
+                let record = bytes::ByteCursorMut::new(output).take_array::<10>()?;
+                let Some((count_bytes, rest)) =
+                    record.split_first_chunk_mut::<ELEMENT_COUNT_BYTES>()
+                else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                let Some((address_bytes, rest)) = rest.split_first_chunk_mut::<2>() else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                let Some(index_bytes) = rest.first_chunk_mut::<OBJECT_INDEX_BYTES>() else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                *count_bytes = element_count.to_le_bytes();
+                *address_bytes = (collection_address.get() as u16).to_le_bytes();
+                *index_bytes = object_index.to_le_bytes();
+            }
+            OffsetWidth::Four => {
+                let record = bytes::ByteCursorMut::new(output).take_array::<12>()?;
+                let Some((count_bytes, rest)) =
+                    record.split_first_chunk_mut::<ELEMENT_COUNT_BYTES>()
+                else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                let Some((address_bytes, rest)) = rest.split_first_chunk_mut::<4>() else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                let Some(index_bytes) = rest.first_chunk_mut::<OBJECT_INDEX_BYTES>() else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                *count_bytes = element_count.to_le_bytes();
+                *address_bytes = (collection_address.get() as u32).to_le_bytes();
+                *index_bytes = object_index.to_le_bytes();
+            }
+            OffsetWidth::Eight => {
+                let record = bytes::ByteCursorMut::new(output).take_array::<16>()?;
+                let Some((count_bytes, rest)) =
+                    record.split_first_chunk_mut::<ELEMENT_COUNT_BYTES>()
+                else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                let Some((address_bytes, rest)) = rest.split_first_chunk_mut::<8>() else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                let Some(index_bytes) = rest.first_chunk_mut::<OBJECT_INDEX_BYTES>() else {
+                    return Err(UnexpectedEof::new(
+                        Self::serialized_size(offsets),
+                        available,
+                    ));
+                };
+                *count_bytes = element_count.to_le_bytes();
+                *address_bytes = collection_address.get().to_le_bytes();
+                *index_bytes = object_index.to_le_bytes();
+            }
+        }
+        Ok(self.encoded_size())
     }
 
     /// Returns the stored number of base elements.
@@ -203,8 +310,9 @@ impl VariableLengthDescriptor {
     }
 }
 
-// H5T__vlen_disk_write in H5Tvlen.c, HDF5 2.2.0, encodes the count with UINT32ENCODE.
+// `H5T__vlen_disk_write` in `H5Tvlen.c`, HDF5 2.2.0, encodes the count with `UINT32ENCODE`.
 const ELEMENT_COUNT_BYTES: usize = 4;
 
-// The global heap ID index occupies four bytes ("Global Heap", format specification, version 4.0).
+// `H5VL__native_blob_put` in `H5VLnative_blob.c`, HDF5 2.2.0, encodes the object index with
+// `UINT32ENCODE`.
 const OBJECT_INDEX_BYTES: usize = 4;
