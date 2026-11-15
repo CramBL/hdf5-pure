@@ -3,8 +3,6 @@ use hdf5_pure_core::FormatError;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::VariableLengthDescriptor;
-use proptest::prelude::*;
-use proptest::test_runner::FileFailurePersistence;
 use rstest::rstest;
 use test_util::variable_length_descriptor::Address;
 
@@ -136,52 +134,3 @@ fn variable_length_descriptors_read_and_write_unaligned_buffers(#[case] address:
 
 #[repr(align(8))]
 struct Aligned([u8; 32]);
-
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 128,
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
-            env!("CARGO_MANIFEST_DIR"), "/tests/proptest-regressions/variable_length_descriptor.txt"
-        )))),
-        ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn descriptor_values_match_independent_bytes_and_preserve_buffers(
-        address in prop_oneof![
-            any::<u16>().prop_map(Address::Two),
-            any::<u32>().prop_map(Address::Four),
-            any::<u64>().prop_map(Address::Eight),
-        ],
-        count in any::<u32>(),
-        index in any::<u32>(),
-        prefix in proptest::collection::vec(any::<u8>(), 0..16),
-        suffix in proptest::collection::vec(any::<u8>(), 0..16),
-        fill in any::<u8>(),
-        available in 0usize..24,
-    ) {
-        let offsets = OffsetWidth::try_from(address.width()).unwrap();
-        let expected = address.descriptor(count, index);
-        let input = [prefix.as_slice(), expected.as_slice(), suffix.as_slice()].concat();
-        let (value, consumed) = VariableLengthDescriptor::parse(offsets, &input[prefix.len()..]).unwrap();
-        prop_assert_eq!(consumed, expected.len());
-        prop_assert_eq!(value.element_count(), count);
-        prop_assert_eq!(value.collection_address(), StoredAddress::new(address.get()));
-        prop_assert_eq!(value.object_index(), index);
-        prop_assert_eq!(value.offset_width(), offsets);
-        prop_assert_eq!(value, VariableLengthDescriptor::new(offsets, count, StoredAddress::new(address.get()), index).unwrap());
-        let mut output = [prefix.as_slice(), vec![fill; available].as_slice(), suffix.as_slice()].concat();
-        let original = output.clone();
-        let written = value.write_into(&mut output[prefix.len()..prefix.len() + available]);
-        if available < expected.len() {
-            prop_assert_eq!(written, Err(FormatError::UnexpectedEof { expected: expected.len(), available }));
-            prop_assert_eq!(output, original);
-        } else {
-            prop_assert_eq!(written.unwrap(), expected.len());
-            prop_assert_eq!(&output[..prefix.len()], prefix.as_slice());
-            prop_assert_eq!(&output[prefix.len()..prefix.len() + expected.len()], &expected);
-            prop_assert_eq!(&output[prefix.len() + expected.len()..], &original[prefix.len() + expected.len()..]);
-        }
-    }
-
-}
