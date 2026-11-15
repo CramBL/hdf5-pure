@@ -197,9 +197,9 @@ impl PreparedDataset {
             .chunk_options
             .validate_partial_edge_filtering(self.metadata.ds.max_dimensions.as_deref())?;
         Ok(WholeFileDataset {
-            committed_datatype_targets: self.attribute_specs.committed_datatype_targets(),
             metadata: self.metadata,
             storage: self.storage,
+            attribute_specs: self.attribute_specs,
         })
     }
 
@@ -301,7 +301,7 @@ impl PreparedDataset {
         let Self {
             metadata,
             storage,
-            attribute_specs: _,
+            attribute_specs,
         } = self;
         let storage = match storage {
             PreparedStorage::Elements(elements) => elements,
@@ -338,7 +338,17 @@ impl PreparedDataset {
                 "a dataset or attribute naming a committed (shared) datatype cannot be added in place; write the file with FileBuilder instead",
             ));
         }
-        Ok(InPlaceDataset { metadata, storage })
+        Ok(InPlaceDataset {
+            vl_attrs: attribute_specs
+                .var_len_strings()
+                .map(|(index, strings)| {
+                    crate::type_builders::build_global_heap_collections(strings)
+                        .map(|collections| (index, collections))
+                })
+                .collect::<Result<_, _>>()?,
+            metadata,
+            storage,
+        })
     }
 }
 
@@ -368,8 +378,9 @@ pub(crate) struct DatasetMetadata {
 pub(crate) struct WholeFileDataset {
     pub(crate) metadata: DatasetMetadata,
     pub(crate) storage: PreparedStorage,
-    /// Attribute indices paired with committed datatype targets awaiting address resolution.
-    pub(crate) committed_datatype_targets: Vec<(usize, ObjectTarget)>,
+    /// The attributes as requested, whose committed datatypes and variable-length strings the
+    /// writer places.
+    pub(crate) attribute_specs: AttributeSpecs,
 }
 
 /// A creation request with inline datatypes and storage without providers.
@@ -377,6 +388,8 @@ pub(crate) struct WholeFileDataset {
 pub(crate) struct InPlaceDataset {
     pub(crate) metadata: DatasetMetadata,
     pub(crate) storage: PreparedElements,
+    /// Attribute collections awaiting placement.
+    pub(crate) vl_attrs: Vec<(usize, Vec<Vec<u8>>)>,
 }
 
 /// Replacement values without creation options, pending compatibility with an existing dataset.

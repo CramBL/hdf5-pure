@@ -7,15 +7,15 @@ use crate::attribute::AttributeMessage;
 use crate::error::FormatError;
 use crate::type_builders::{self, AttrSpec, AttrValue, AttributeSpecs};
 
-/// Encoded attributes and the heap collections needed by their variable-length values.
+/// Encoded attributes, whose variable-length values hold placeholder heap addresses.
+///
+/// A writer places the strings of those values in global heap collections of its choosing.
 pub(crate) struct PreparedAttributes {
     pub(crate) messages: Vec<AttributeMessage>,
-    /// Attribute indices paired with collections awaiting address assignment.
-    pub(crate) collections: Vec<(usize, Vec<Vec<u8>>)>,
 }
 
 impl PreparedAttributes {
-    /// Prepares every attribute message before building its variable-length heap collections.
+    /// Prepares every attribute message.
     ///
     /// # Errors
     ///
@@ -25,20 +25,7 @@ impl PreparedAttributes {
         for (name, spec) in specs {
             messages.push(AttributeName::try_from(name.as_str())?.to_message(spec)?);
         }
-        let collections = specs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (_, spec))| {
-                spec.var_len_strings().map(|strings| {
-                    type_builders::build_global_heap_collections(strings)
-                        .map(|collections| (index, collections))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            messages,
-            collections,
-        })
+        Ok(Self { messages })
     }
 }
 

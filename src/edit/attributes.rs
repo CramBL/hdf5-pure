@@ -662,7 +662,7 @@ fn prepare_attribute_value(
     if let Some(collections) = &collections {
         crate::file_writer::validate_collections(widths, collections)?;
     }
-    crate::file_writer::prepare_attribute_widths(widths, core::slice::from_mut(&mut message), &[])?;
+    crate::file_writer::prepare_attribute_widths(widths, core::slice::from_mut(&mut message))?;
     Ok(PreparedAttributeValue {
         attribute: PreparedAttributeMessage::with_widths(widths, message)?,
         collections,

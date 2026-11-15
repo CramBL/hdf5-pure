@@ -163,6 +163,40 @@ fn the_c_library_reads_every_variant_as_a_variable_length_string() {
     assert_pure_reads_the_cases(&f.dataset("d").unwrap().attrs().unwrap(), 0, "dataset");
 }
 
+/// The strings of every variable-length attribute share the file's global heap
+/// collections. Past one collection's 4,096 bytes they continue in the next,
+/// which can start within an attribute: libhdf5 resolves each reference on both
+/// sides of that boundary to its own string.
+#[test]
+fn libhdf5_reads_string_attributes_that_share_heap_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.h5");
+    let mut b = FileBuilder::new();
+    let expected = test_util_hdf5::file_builder::set_string_attrs(&mut b, 2, 100);
+    b.write(&path).unwrap();
+    // 600 strings of 24 bytes each, header included, fill 169 to a collection.
+    assert_eq!(
+        test_util::global_heap::collection_starts(&std::fs::read(&path).unwrap()).len(),
+        4
+    );
+
+    let c = hdf5::File::open(&path).unwrap();
+    for (owner, name, value) in &expected {
+        let attr = match *owner {
+            "/" => c.attr(name),
+            "g" => c.group("g").unwrap().attr(name),
+            _ => c.dataset(owner).unwrap().attr(name),
+        }
+        .unwrap();
+        let got: Vec<VarLenUnicode> = attr.read_raw().unwrap();
+        assert_eq!(
+            got.iter().map(VarLenUnicode::as_str).collect::<Vec<_>>(),
+            *value,
+            "{owner} {name}"
+        );
+    }
+}
+
 /// MATLAB's shape and the standard one carry the same text over the same
 /// element bytes, and differ in the datatype alone — which is the whole reason
 /// the standard one needed a variant of its own rather than a fix to the

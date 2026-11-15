@@ -2132,18 +2132,19 @@ pub(super) fn flatten_dataset(
     db: DatasetBuilder,
     name: LinkNameBuf,
 ) -> Result<FlatDataset, Error> {
-    let InPlaceDataset { metadata, storage } =
-        PreparedDataset::parse(widths.lengths, db)?.into_in_place()?;
+    let InPlaceDataset {
+        metadata,
+        storage,
+        vl_attrs,
+    } = PreparedDataset::parse(widths.lengths, db)?.into_in_place()?;
     let DatasetMetadata {
         dt,
         element_size: canonical_element_size,
         ds,
         extent: canonical_extent,
-        attrs:
-            PreparedAttributes {
-                messages: mut attrs,
-                collections: vl_attrs,
-            },
+        attrs: PreparedAttributes {
+            messages: mut attrs,
+        },
         chunk_options,
         mut fill,
         fill_time,
@@ -2165,7 +2166,10 @@ pub(super) fn flatten_dataset(
     if let Some(fill) = &mut fill {
         fill.narrow_variable_length(&dt, widths.offsets)?;
     }
-    file_writer::prepare_attribute_widths(widths, &mut attrs, &vl_attrs)?;
+    for (_, collections) in &vl_attrs {
+        file_writer::validate_collections(widths, collections)?;
+    }
+    file_writer::prepare_attribute_widths(widths, &mut attrs)?;
     let maxshape = ds.max_dimensions.clone();
     let fill_time = fill_time.unwrap_or_default();
     if chunk_options.is_chunked() || maxshape.is_some() {
