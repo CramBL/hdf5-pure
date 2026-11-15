@@ -123,12 +123,20 @@ impl<'input> Decode<'input> for FileSpaceInfo {
     /// [`FormatError::UnsupportedFileSpaceInfoVersion`] if the version is not 0 or 1, and the
     /// semantic errors of [`parse_version_0`] and [`parse_version_1`]. Prefix errors are relative
     /// to `input`. EOF coordinates for version 1 manager addresses are relative to their list.
+    #[inline]
     fn decode(input: &'input [u8], widths: FormatWidths) -> Result<Self, Self::Error> {
-        match bytes::ByteCursor::new(input).u8()? {
-            VERSION_0 => parse_version_0(widths, input),
-            VERSION_1 => parse_version_1(widths, input),
-            version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
-        }
+        decode_file_space_info(widths, input)
+    }
+}
+
+fn decode_file_space_info(
+    widths: FormatWidths,
+    input: &[u8],
+) -> Result<FileSpaceInfo, FormatError> {
+    match bytes::ByteCursor::new(input).u8()? {
+        VERSION_0 => parse_version_0(widths, input),
+        VERSION_1 => parse_version_1(widths, input),
+        version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
     }
 }
 
