@@ -20,6 +20,7 @@ use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
+use crate::codec::Decode;
 use crate::error::FormatError;
 use crate::width;
 use crate::width::FormatWidths;
@@ -99,14 +100,35 @@ pub fn normalize_file_space_info_to_v1(info: &FileSpaceInfo, eoa: StoredAddress)
 /// [`FormatError::InvalidFileSpacePageSize`] if a version 1 page size is outside 512 bytes to 1 GiB.
 /// EOF coordinates refer to the original body, except for a version 1 manager list, whose
 /// coordinates refer to the start of that list.
+#[inline]
 pub fn parse_file_space_info(
     widths: FormatWidths,
     data: &[u8],
 ) -> Result<FileSpaceInfo, FormatError> {
-    match bytes::ByteCursor::new(data).u8()? {
-        VERSION_0 => parse_version_0(widths, data),
-        VERSION_1 => parse_version_1(widths, data),
-        version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
+    FileSpaceInfo::decode(data, widths)
+}
+
+impl<'input> Decode<'input> for FileSpaceInfo {
+    type Context = FormatWidths;
+    type Error = FormatError;
+
+    /// Reads the version-specific fields and optional free-space manager addresses.
+    ///
+    /// Reads little-endian lengths and addresses at the independent widths in `widths`.
+    /// Leaves any input suffix unexamined.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete,
+    /// [`FormatError::UnsupportedFileSpaceInfoVersion`] if the version is not 0 or 1, and the
+    /// semantic errors of [`parse_version_0`] and [`parse_version_1`]. Prefix errors are relative
+    /// to `input`. EOF coordinates for version 1 manager addresses are relative to their list.
+    fn decode(input: &'input [u8], widths: FormatWidths) -> Result<Self, Self::Error> {
+        match bytes::ByteCursor::new(input).u8()? {
+            VERSION_0 => parse_version_0(widths, input),
+            VERSION_1 => parse_version_1(widths, input),
+            version => Err(FormatError::UnsupportedFileSpaceInfoVersion(version)),
+        }
     }
 }
 
@@ -511,7 +533,7 @@ mod tests {
         #[case] version: u8,
     ) {
         assert_eq!(
-            parse_file_space_info(widths(8, 8), body),
+            FileSpaceInfo::decode(body, widths(8, 8)),
             Err(FormatError::UnsupportedFileSpaceInfoVersion(version))
         );
     }
@@ -575,7 +597,7 @@ mod tests {
         ]
         .concat();
 
-        assert_eq!(parse_file_space_info(widths(8, 8), &body), Ok(expected));
+        assert_eq!(FileSpaceInfo::decode(&body, widths(8, 8)), Ok(expected));
     }
 
     #[test]
@@ -629,7 +651,7 @@ mod tests {
         ];
 
         assert_eq!(
-            parse_file_space_info(widths(2, 4), &body),
+            FileSpaceInfo::decode(&body, widths(2, 4)),
             Ok(FileSpaceInfoFields {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: true,
@@ -658,7 +680,7 @@ mod tests {
         ];
 
         assert_eq!(
-            parse_file_space_info(widths(8, 8), &body),
+            FileSpaceInfo::decode(&body, widths(8, 8)),
             Ok(version_0_raw(
                 FileSpaceStrategy::FsmAggr,
                 false,
@@ -677,7 +699,7 @@ mod tests {
         #[case] expected: usize,
     ) {
         assert_eq!(
-            parse_file_space_info(widths(8, 8), &body),
+            FileSpaceInfo::decode(&body, widths(8, 8)),
             Err(FormatError::UnexpectedEof {
                 expected,
                 available: body.len(),
@@ -692,7 +714,7 @@ mod tests {
         let body = [[0x00, strategy].as_slice(), &64u64.to_le_bytes()].concat();
 
         assert_eq!(
-            parse_file_space_info(widths(8, 8), &body),
+            FileSpaceInfo::decode(&body, widths(8, 8)),
             Err(FormatError::InvalidFileSpaceStrategy(strategy))
         );
     }
@@ -704,7 +726,7 @@ mod tests {
                 .unwrap();
         bytes[1] = 4;
         assert_eq!(
-            parse_file_space_info(widths(8, 8), &bytes),
+            FileSpaceInfo::decode(&bytes, widths(8, 8)),
             Err(FormatError::InvalidFileSpaceStrategy(4))
         );
     }
@@ -721,7 +743,7 @@ mod tests {
         assert_eq!(
             (
                 bytes[11..19].to_vec(),
-                parse_file_space_info(widths(8, 8), &bytes)
+                FileSpaceInfo::decode(&bytes, widths(8, 8))
             ),
             (page_size.to_le_bytes().to_vec(), Ok(info))
         );
@@ -739,7 +761,7 @@ mod tests {
         bytes[11..19].copy_from_slice(&page_size.to_le_bytes());
 
         assert_eq!(
-            parse_file_space_info(widths(8, 8), &bytes),
+            FileSpaceInfo::decode(&bytes, widths(8, 8)),
             Err(FormatError::InvalidFileSpacePageSize(page_size))
         );
     }
@@ -762,7 +784,7 @@ mod tests {
         .unwrap();
         bytes.truncate(bytes.len() - 8);
         assert_eq!(
-            parse_file_space_info(widths(8, 8), &bytes),
+            FileSpaceInfo::decode(&bytes, widths(8, 8)),
             Err(FormatError::UnexpectedEof {
                 expected: 12 * 8,
                 available: 11 * 8,
@@ -917,7 +939,7 @@ mod tests {
         unaligned.0[1..1 + body.len()].copy_from_slice(&body);
         assert_eq!(unaligned.0[1..].as_ptr().addr() % 8, 1);
         assert_eq!(
-            parse_file_space_info(widths, &unaligned.0[1..body.len() + 3]),
+            FileSpaceInfo::decode(&unaligned.0[1..body.len() + 3], widths),
             Ok(expected.clone())
         );
         body[2] = u8::from(persist);
@@ -946,7 +968,7 @@ mod tests {
         );
         for available in 1..body.len() {
             assert_eq!(
-                parse_file_space_info(widths(offset_size, length_size), &body[..available]),
+                FileSpaceInfo::decode(&body[..available], widths(offset_size, length_size)),
                 Err(FormatError::UnexpectedEof {
                     expected: body.len(),
                     available
@@ -1000,13 +1022,13 @@ mod tests {
             .map(|index| DecodedStoredAddress::Defined(StoredAddress::new(index as u64)))
             .collect();
         assert_eq!(
-            parse_file_space_info(widths(offset_size, length_size), &body),
+            FileSpaceInfo::decode(&body, widths(offset_size, length_size)),
             Ok(expected)
         );
         for available in prefix_len..body.len() {
             let origin = if version == VERSION_0 { 0 } else { prefix_len };
             assert_eq!(
-                parse_file_space_info(widths(offset_size, length_size), &body[..available]),
+                FileSpaceInfo::decode(&body[..available], widths(offset_size, length_size)),
                 Err(FormatError::UnexpectedEof {
                     expected: body.len() - origin,
                     available: available - origin,
@@ -1031,7 +1053,7 @@ mod tests {
             page_size,
         );
         body[2] = 0xff;
-        assert_eq!(parse_file_space_info(widths(8, 8), &body), Err(expected));
+        assert_eq!(FileSpaceInfo::decode(&body, widths(8, 8)), Err(expected));
     }
 
     #[rstest]
@@ -1113,7 +1135,7 @@ mod tests {
             let expected = reference_version_1(widths, &info);
             prop_assert_eq!(&serialize_file_space_info_v1(widths, &info).unwrap(), &expected);
             let input = [prefix.as_slice(), expected.as_slice(), suffix.as_slice()].concat();
-            prop_assert_eq!(parse_file_space_info(widths, &input[prefix.len()..]).unwrap(), info);
+            prop_assert_eq!(FileSpaceInfo::decode(&input[prefix.len()..], widths).unwrap(), info);
         }
 
 
