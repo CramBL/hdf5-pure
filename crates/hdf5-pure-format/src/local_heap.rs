@@ -87,19 +87,19 @@ impl LocalHeapLocator {
             base,
             address: _,
         } = *self;
-        let mut fields = bytes::Fields::new(region.subregion(self.parse_range()?)?.bytes(), 0);
-        if fields.array::<{ SIGNATURE.len() }>()? != SIGNATURE {
+        let mut cursor = bytes::ByteCursor::new(region.subregion(self.parse_range()?)?.bytes());
+        if cursor.array::<{ SIGNATURE.len() }>()? != SIGNATURE {
             return Err(FormatError::InvalidLocalHeapSignature);
         }
-        let version = fields.u8()?;
+        let version = cursor.u8()?;
         if version != VERSION {
             return Err(FormatError::InvalidLocalHeapVersion(version));
         }
-        fields.array::<RESERVED_LEN>()?;
-        let data_segment_size = fields.length(widths.lengths)?;
-        fields.length(widths.lengths)?;
+        cursor.array::<RESERVED_LEN>()?;
+        let data_segment_size = cursor.length(widths.lengths)?;
+        cursor.length(widths.lengths)?;
         let DecodedStoredAddress::Defined(data_segment_address) =
-            fields.decoded_address(widths.offsets)?
+            cursor.decoded_address(widths.offsets)?
         else {
             return Err(FormatError::UndefinedLocalHeapDataSegment);
         };

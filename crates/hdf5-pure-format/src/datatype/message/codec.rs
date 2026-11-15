@@ -18,7 +18,7 @@ use super::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder,
 };
-use crate::bytes::Fields;
+use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::datatype::{
     self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
@@ -157,8 +157,8 @@ impl DatatypeMessage {
         if depth >= MAX_MESSAGE_DEPTH {
             return Err(FormatError::NestingDepthExceeded);
         }
-        let mut fields = Fields::new(data, position);
-        let header = Header::parse(&mut fields, context)?;
+        let mut cursor = ByteCursor::with_position(data, position)?;
+        let header = Header::parse(&mut cursor, context)?;
         let (properties, consumed) = match header.class {
             FIXED_POINT_CLASS => {
                 header.reserved(FIXED_RESERVED)?;
@@ -166,14 +166,14 @@ impl DatatypeMessage {
                     header.size,
                     binary_order(header.flags[0]),
                     header.flags[0] & SIGNED_BIT != 0,
-                    fields.u16()?,
-                    fields.u16()?,
+                    cursor.u16()?,
+                    cursor.u16()?,
                 )?
                 .with_padding(
                     header.flags[0] & LOW_PADDING_BIT != 0,
                     header.flags[0] & HIGH_PADDING_BIT != 0,
                 );
-                (DatatypeProperties::FixedPoint(datatype), fields.pos())
+                (DatatypeProperties::FixedPoint(datatype), cursor.position())
             }
             FLOATING_POINT_CLASS => {
                 let order = FloatingPointByteOrder::parse(header.version, header.flags)
@@ -193,20 +193,23 @@ impl DatatypeMessage {
                     order.order(),
                     normalization,
                     header.flags[1],
-                    fields.u16()?,
-                    fields.u16()?,
-                    fields.u8()?,
-                    fields.u8()?,
-                    fields.u8()?,
-                    fields.u8()?,
-                    fields.u32()?,
+                    cursor.u16()?,
+                    cursor.u16()?,
+                    cursor.u8()?,
+                    cursor.u8()?,
+                    cursor.u8()?,
+                    cursor.u8()?,
+                    cursor.u32()?,
                 )?
                 .with_padding(
                     header.flags[0] & LOW_PADDING_BIT != 0,
                     header.flags[0] & HIGH_PADDING_BIT != 0,
                     header.flags[0] & FLOAT_INTERNAL_PADDING_BIT != 0,
                 );
-                (DatatypeProperties::FloatingPoint(datatype), fields.pos())
+                (
+                    DatatypeProperties::FloatingPoint(datatype),
+                    cursor.position(),
+                )
             }
             TIME_CLASS => {
                 header.reserved(TIME_RESERVED)?;
@@ -214,9 +217,9 @@ impl DatatypeMessage {
                     DatatypeProperties::Time(TimeType::new(
                         header.size,
                         binary_order(header.flags[0]),
-                        fields.u16()?,
+                        cursor.u16()?,
                     )?),
-                    fields.pos(),
+                    cursor.position(),
                 )
             }
             STRING_CLASS => {
@@ -229,7 +232,7 @@ impl DatatypeMessage {
                         )?,
                         charset: datatype::parse_charset(header.flags[0] >> STRING_CHARSET_SHIFT)?,
                     },
-                    fields.pos(),
+                    cursor.position(),
                 )
             }
             BIT_FIELD_CLASS => {
@@ -237,27 +240,27 @@ impl DatatypeMessage {
                 let datatype = BitFieldType::new(
                     header.size,
                     binary_order(header.flags[0]),
-                    fields.u16()?,
-                    fields.u16()?,
+                    cursor.u16()?,
+                    cursor.u16()?,
                 )?
                 .with_padding(
                     header.flags[0] & LOW_PADDING_BIT != 0,
                     header.flags[0] & HIGH_PADDING_BIT != 0,
                 );
-                (DatatypeProperties::BitField(datatype), fields.pos())
+                (DatatypeProperties::BitField(datatype), cursor.position())
             }
             OPAQUE_CLASS => {
                 let reserved = u16::from_le_bytes([header.flags[1], header.flags[2]]);
                 if reserved != 0 {
                     return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
                 }
-                let tag = OpaqueTagWire::parse(header.flags[0], &data[fields.pos()..])?;
+                let tag = OpaqueTagWire::parse(header.flags[0], &data[cursor.position()..])?;
                 (
                     DatatypeProperties::Opaque {
                         size: header.size,
                         tag: tag.logical.to_vec(),
                     },
-                    fields.pos() + usize::from(tag.encoded_len),
+                    cursor.position() + usize::from(tag.encoded_len),
                 )
             }
             COMPOUND_CLASS => {
@@ -267,25 +270,25 @@ impl DatatypeMessage {
                 let mut members = Vec::new();
                 let mut layout = CompoundLayout::new(header.size);
                 for _ in 0..count {
-                    let (name, end) = member_name(data, COMPOUND_CLASS, fields.pos())?;
-                    fields = Fields::new(data, end);
-                    let offset = fields.uint(offset_bytes)?;
+                    let (name, end) = member_name(data, COMPOUND_CLASS, cursor.position())?;
+                    cursor = ByteCursor::with_position(data, end)?;
+                    let offset = cursor.uint(offset_bytes)?;
                     let Parsed {
                         message: datatype,
                         end,
                         size: field_size,
-                    } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
+                    } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
                     let index = members.len();
                     members.push(DatatypeMessageMember::new(name, offset, datatype)?);
                     layout.insert(&members, index, field_size)?;
-                    fields = Fields::new(data, end);
+                    cursor = ByteCursor::with_position(data, end)?;
                 }
                 (
                     DatatypeProperties::Compound {
                         size: header.size,
                         members,
                     },
-                    fields.pos(),
+                    cursor.position(),
                 )
             }
             ENUMERATION_CLASS => {
@@ -294,7 +297,7 @@ impl DatatypeMessage {
                     message: base_type,
                     end,
                     size: base_size,
-                } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
+                } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
                 if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
                     return Err(FormatError::EnumBaseNotInteger);
                 }
@@ -304,12 +307,12 @@ impl DatatypeMessage {
                         base_size,
                     });
                 }
-                fields = Fields::new(data, end);
+                cursor = ByteCursor::with_position(data, end)?;
                 let mut names = Vec::new();
                 for _ in 0..count {
-                    let (name, end) = member_name(data, ENUMERATION_CLASS, fields.pos())?;
+                    let (name, end) = member_name(data, ENUMERATION_CLASS, cursor.position())?;
                     names.push(name);
-                    fields = Fields::new(data, end);
+                    cursor = ByteCursor::with_position(data, end)?;
                 }
                 let value_size = base_size.to_usize()?;
                 let members = names
@@ -317,7 +320,7 @@ impl DatatypeMessage {
                     .map(|name| {
                         Ok(__private::enum_member(
                             name,
-                            fields.slice(value_size)?.to_vec(),
+                            cursor.slice(value_size)?.to_vec(),
                         ))
                     })
                     .collect::<Result<Vec<_>, FormatError>>()?;
@@ -326,7 +329,7 @@ impl DatatypeMessage {
                         base_type: Box::new(base_type),
                         members,
                     },
-                    fields.pos(),
+                    cursor.position(),
                 )
             }
             VARIABLE_LENGTH_CLASS => {
@@ -336,7 +339,7 @@ impl DatatypeMessage {
                     message: base_type,
                     end: consumed,
                     size: _,
-                } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
+                } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
                 let base_type = Box::new(base_type);
                 let properties = match metadata {
                     VariableLengthMetadata::Sequence => {
@@ -357,15 +360,15 @@ impl DatatypeMessage {
                     .version
                     .for_class(ARRAY_CLASS, DatatypeVersion::Three)?;
                 header.reserved(ARRAY_RESERVED)?;
-                let rank = fields.u8()?;
+                let rank = cursor.u8()?;
                 let dimensions = (0..rank)
-                    .map(|_| fields.u32())
+                    .map(|_| cursor.u32())
                     .collect::<Result<Vec<_>, _>>()?;
                 let Parsed {
                     message: base_type,
                     end,
                     size: base_size,
-                } = Self::parse_at(data, Context::Description, fields.pos(), depth + 1)?;
+                } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
                 let expected = datatype::array_type_size(base_size, &dimensions)?;
                 if header.size != expected {
                     return Err(FormatError::InvalidDatatypeSize {
@@ -399,7 +402,7 @@ impl DatatypeMessage {
                     message: parent,
                     end,
                     size: _,
-                } = Self::parse_at(data, Context::ComplexParent, fields.pos(), depth + 1)?;
+                } = Self::parse_at(data, Context::ComplexParent, cursor.position(), depth + 1)?;
                 let DatatypeProperties::FloatingPoint(component) = parent.properties() else {
                     return Err(FormatError::Internal(
                         "a checked complex parent is not floating point".into(),
@@ -1398,8 +1401,8 @@ impl Header {
     /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`.
     /// In [`Context::ComplexParent`], returns [`FormatError::InvalidComplexParent`] for a
     /// non-floating class and [`FormatError::InvalidDatatypeVersion`] for an unsupported version.
-    fn parse(fields: &mut Fields<'_>, context: Context) -> Result<Self, FormatError> {
-        let class_and_version = fields.u8()?;
+    fn parse(cursor: &mut ByteCursor<'_>, context: Context) -> Result<Self, FormatError> {
+        let class_and_version = cursor.u8()?;
         let class = class_and_version & DATATYPE_CLASS_MASK;
         if context == Context::ComplexParent && class != FLOATING_POINT_CLASS {
             return Err(FormatError::InvalidComplexParent { class });
@@ -1412,8 +1415,8 @@ impl Header {
         Ok(Self {
             class,
             version,
-            flags: fields.array()?,
-            size: fields.u32()?,
+            flags: cursor.array()?,
+            size: cursor.u32()?,
         })
     }
 

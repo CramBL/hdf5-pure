@@ -1023,9 +1023,9 @@ impl BTreeV2ChunkRecordContext {
                 ));
             }
             pos += self.stored_size_width;
-            let mut fields = bytes::Fields::new(&record.data, pos);
-            let filter_mask = fields.u32()?;
-            pos = fields.pos();
+            let mut cursor = bytes::ByteCursor::with_position(&record.data, pos)?;
+            let filter_mask = cursor.u32()?;
+            pos = cursor.position();
             (stored_size, filter_mask)
         } else {
             (self.fixed_chunk_size.get(), 0)
@@ -1660,9 +1660,9 @@ impl HugeObjectRecordDecoder {
                 )?)
             }
             HugeObjectRecordEncoding::Indirect | HugeObjectRecordEncoding::Direct => {
-                let mut fields = bytes::Fields::new(data, 0);
-                let address = fields.address(offsets)?;
-                let length = fields.length(lengths)?;
+                let mut cursor = bytes::ByteCursor::new(data);
+                let address = cursor.address(offsets)?;
+                let length = cursor.length(lengths)?;
                 if address.get() >= StoredAddress::undefined(offsets).get() || length == 0 {
                     return Err(FormatError::InvalidFractalHeapGeometry);
                 }
@@ -1677,7 +1677,7 @@ impl HugeObjectRecordDecoder {
                     HugeObjectTrackerRecord::Indirect(HugeObjectRecord {
                         address,
                         length,
-                        id: fields.length(lengths)?,
+                        id: cursor.length(lengths)?,
                     })
                 } else {
                     HugeObjectTrackerRecord::Direct(HugeObjectDirectRecord { address, length })
@@ -1817,11 +1817,11 @@ impl<'a> DenseAttributeRecord<'a> {
             expected: id_len,
             available: data.len(),
         })?;
-        let mut fields = bytes::Fields::new(data, id_len);
+        let mut cursor = bytes::ByteCursor::with_position(data, id_len)?;
         Ok(Self {
             heap_id,
-            flags: MessageFlags::new(fields.u8()?),
-            creation_order: fields.u32()?,
+            flags: MessageFlags::new(cursor.u8()?),
+            creation_order: cursor.u32()?,
         })
     }
 

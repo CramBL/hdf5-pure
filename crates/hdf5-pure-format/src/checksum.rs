@@ -213,7 +213,7 @@ pub(crate) fn verify_zeroed(
     block: &[u8],
     checksum_at: usize,
 ) -> Result<(), crate::error::FormatError> {
-    let stored = crate::bytes::Fields::new(block, checksum_at).u32()?;
+    let stored = u32::from_le_bytes(*crate::bytes::array_at(block, checksum_at)?);
     #[cfg(feature = "checksum")]
     {
         let computed = hashlittle_zeroed::<true>(block, 0, checksum_at);
@@ -244,7 +244,7 @@ pub(crate) fn verify_zeroed_required(
     block: &[u8],
     checksum_at: usize,
 ) -> Result<(), crate::error::FormatError> {
-    let stored = crate::bytes::Fields::new(block, checksum_at).u32()?;
+    let stored = u32::from_le_bytes(*crate::bytes::array_at(block, checksum_at)?);
     let computed = hashlittle_zeroed::<true>(block, 0, checksum_at);
     if stored != computed {
         return Err(crate::error::FormatError::ChecksumMismatch {
