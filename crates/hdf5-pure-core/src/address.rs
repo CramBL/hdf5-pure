@@ -88,6 +88,62 @@ pub enum DecodedStoredAddress {
     Undefined,
 }
 
+impl DecodedStoredAddress {
+    /// Returns the stored address bits for a field of `width` bytes.
+    ///
+    /// For [`Self::Undefined`], returns [`StoredAddress::undefined`] at `width`. For
+    /// [`Self::Defined`], returns the address unchanged. Callers retain `width` separately from
+    /// the returned [`StoredAddress`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds the range of
+    /// `width`, or [`FormatError::DefinedAddressIsUndefined`] if it equals that width's
+    /// undefined marker.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{DecodedStoredAddress, FormatError, OffsetWidth};
+    ///
+    /// let marker = DecodedStoredAddress::Undefined.to_stored(OffsetWidth::Two)?;
+    /// assert_eq!(marker.get(), 0xffff);
+    ///
+    /// let defined = DecodedStoredAddress::Defined(marker);
+    /// assert_eq!(defined.to_stored(OffsetWidth::Four)?, marker);
+    /// assert_eq!(
+    ///     defined.to_stored(OffsetWidth::Two).unwrap_err(),
+    ///     FormatError::DefinedAddressIsUndefined {
+    ///         address: 0xffff,
+    ///         offset_size: 2,
+    ///     },
+    /// );
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    #[inline]
+    pub fn to_stored(self, width: OffsetWidth) -> Result<StoredAddress, FormatError> {
+        let undefined = StoredAddress::undefined(width);
+        match self {
+            Self::Undefined => Ok(undefined),
+            Self::Defined(address) => {
+                if address > undefined {
+                    return Err(FormatError::AddressTooLarge {
+                        address: address.get(),
+                        offset_size: width.get(),
+                    });
+                }
+                if address == undefined {
+                    return Err(FormatError::DefinedAddressIsUndefined {
+                        address: address.get(),
+                        offset_size: width.get(),
+                    });
+                }
+                Ok(address)
+            }
+        }
+    }
+}
+
 /// An absolute address used as the base for stored HDF5 addresses.
 ///
 /// [`Superblock::base_address`](crate::Superblock::base_address) holds the encoded Base Address.
@@ -576,6 +632,41 @@ mod tests {
             StoredAddress::new(u64::MAX).is_undefined(width),
             width == OffsetWidth::Eight,
         );
+        assert_eq!(
+            DecodedStoredAddress::Undefined.to_stored(width),
+            Ok(StoredAddress::new(sentinel)),
+        );
+        assert_eq!(
+            DecodedStoredAddress::Defined(StoredAddress::new(0)).to_stored(width),
+            Ok(StoredAddress::new(0)),
+        );
+        assert_eq!(
+            DecodedStoredAddress::Defined(StoredAddress::new(sentinel - 1)).to_stored(width),
+            Ok(StoredAddress::new(sentinel - 1)),
+        );
+        assert_eq!(
+            DecodedStoredAddress::Defined(StoredAddress::new(sentinel)).to_stored(width),
+            Err(FormatError::DefinedAddressIsUndefined {
+                address: sentinel,
+                offset_size: width.get(),
+            }),
+        );
+        if width != OffsetWidth::Eight {
+            assert_eq!(
+                DecodedStoredAddress::Defined(StoredAddress::new(sentinel + 1)).to_stored(width),
+                Err(FormatError::AddressTooLarge {
+                    address: sentinel + 1,
+                    offset_size: width.get(),
+                }),
+            );
+            assert_eq!(
+                DecodedStoredAddress::Defined(StoredAddress::new(u64::MAX)).to_stored(width),
+                Err(FormatError::AddressTooLarge {
+                    address: u64::MAX,
+                    offset_size: width.get(),
+                }),
+            );
+        }
     }
 
     #[rstest]
