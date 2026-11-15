@@ -496,7 +496,7 @@ fn dense_attribute_huge_totals_fit_the_selected_length_width(
 #[case::empty_variable_value(0)]
 #[case::managed(2)]
 #[case::huge(5_000)]
-#[case::multiple_collections(format_boundary::GLOBAL_HEAP_MAX_OBJECTS + 1)]
+#[case::multiple_collections(4)]
 fn finalization_retains_geometry_and_encodes_resolved_references(#[case] references: usize) {
     let mut attrs = vec![
         variable_attribute("vl", references),
@@ -523,37 +523,33 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
     let info = prepared
         .attr_info_message(StoredAddress::new(0x8000))
         .unwrap();
+    // Collections shared with other attributes hold the strings at any object index.
+    let mut resolved = attrs[0].raw_data.clone();
+    for (index, reference) in resolved.as_chunks_mut::<16>().0.iter_mut().enumerate() {
+        let address = 0x1000 + (index / 3) as u64 * 0x1000;
+        reference[4..12].copy_from_slice(&address.to_le_bytes());
+        reference[12..].copy_from_slice(&(index as u32 % 3 + 5).to_le_bytes());
+    }
     let mut observed = Vec::new();
     let ready = prepared
         .finalize(
-            |reference| {
-                observed.push(reference);
-                Ok(match reference {
-                    DenseAttrReference::CommittedDatatype { attribute: 0 } => {
-                        StoredAddress::new(0x3456)
-                    }
-                    DenseAttrReference::GlobalHeap {
-                        attribute: 0,
-                        collection,
-                    } => StoredAddress::new(0x1000 + collection as u64 * 0x1000),
-                    _ => panic!("unexpected reference {reference:?}"),
+            |attribute| {
+                observed.push(attribute);
+                Ok(match attribute {
+                    0 => StoredAddress::new(0x3456),
+                    _ => panic!("unexpected committed datatype of attribute {attribute}"),
                 })
             },
             |attribute| {
-                assert_eq!(attribute, 1);
-                Ok(payload.as_slice())
+                Ok(match attribute {
+                    0 => resolved.as_slice(),
+                    1 => payload.as_slice(),
+                    _ => panic!("unexpected payload {attribute}"),
+                })
             },
         )
         .unwrap();
-    let collections = references.div_ceil(format_boundary::GLOBAL_HEAP_MAX_OBJECTS);
-    let mut expected_references = (0..collections)
-        .map(|collection| DenseAttrReference::GlobalHeap {
-            attribute: 0,
-            collection,
-        })
-        .collect::<Vec<_>>();
-    expected_references.push(DenseAttrReference::CommittedDatatype { attribute: 0 });
-    assert_eq!(observed, expected_references);
+    assert_eq!(observed, [0]);
     assert_eq!(geometry(&ready), retained);
     assert_eq!(ready.blob_len(), reserved);
     assert_eq!(
@@ -561,16 +557,7 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
         info
     );
     attrs[0].datatype_location = DatatypeLocation::Committed(StoredAddress::new(0x3456));
-    for (index, reference) in attrs[0]
-        .raw_data
-        .as_chunks_mut::<16>()
-        .0
-        .iter_mut()
-        .enumerate()
-    {
-        let address = 0x1000 + (index / format_boundary::GLOBAL_HEAP_MAX_OBJECTS) as u64 * 0x1000;
-        reference[4..12].copy_from_slice(&address.to_le_bytes());
-    }
+    attrs[0].raw_data = resolved;
     attrs[1].raw_data.copy_from_slice(&payload);
     assert_eq!(
         ready
@@ -655,18 +642,10 @@ fn preparation_rejects_overlapping_fixups(#[case] fixups: [DenseAttrFixup; 2]) {
     );
 }
 
-#[rstest]
-#[case::partial_reference(true)]
-#[case::wrong_object_index(false)]
-fn preparation_rejects_incoherent_global_heap_references(#[case] partial: bool) {
+#[test]
+fn preparation_rejects_partial_global_heap_references() {
     let mut attr = variable_attribute("a", 1);
-    let expected = if partial {
-        attr.raw_data.pop().unwrap();
-        "a global heap fixup requires whole variable-length attribute references"
-    } else {
-        attr.raw_data[12..16].copy_from_slice(&0u32.to_le_bytes());
-        "a global heap fixup requires consecutive collection object indexes"
-    };
+    attr.raw_data.pop().unwrap();
     assert_eq!(
         PreparedDenseAttrs::new(
             &[attr],
@@ -675,7 +654,32 @@ fn preparation_rejects_incoherent_global_heap_references(#[case] partial: bool) 
         )
         .err()
         .unwrap(),
-        FormatError::Internal(expected.into())
+        FormatError::Internal(
+            "a global heap fixup requires whole variable-length attribute references".into()
+        )
+    );
+}
+
+#[test]
+fn finalization_rejects_global_heap_length_changes() {
+    let attr = variable_attribute("a", 1);
+    let mut longer = attr.raw_data.clone();
+    longer.extend_from_slice(&attr.raw_data);
+    let prepared = PreparedDenseAttrs::new(
+        &[attr],
+        DenseAttrCreationOrder::Untracked,
+        [DenseAttrFixup::GlobalHeap { attribute: 0 }],
+    )
+    .unwrap();
+    assert_eq!(
+        prepared
+            .finalize(
+                |reference| panic!("unexpected reference {reference:?}"),
+                |_| Ok(longer.as_slice())
+            )
+            .err()
+            .unwrap(),
+        FormatError::Internal("a dense attribute fixup changes its prepared length".into())
     );
 }
 
@@ -698,7 +702,7 @@ fn finalization_rejects_payload_length_changes(#[case] len: usize) {
             )
             .err()
             .unwrap(),
-        FormatError::Internal("a dense attribute payload fixup changes its prepared length".into())
+        FormatError::Internal("a dense attribute fixup changes its prepared length".into())
     );
 }
 
@@ -708,13 +712,15 @@ fn finalization_rejects_payload_length_changes(#[case] len: usize) {
 fn finalization_rejects_undefined_reference_addresses(#[case] fixup: DenseAttrFixup) {
     let mut attr = variable_attribute("a", 1);
     attr.datatype_location = DatatypeLocation::Committed(StoredAddress::ZERO);
+    let mut undefined = attr.raw_data.clone();
+    undefined[4..12].copy_from_slice(&u64::MAX.to_le_bytes());
     let prepared =
         PreparedDenseAttrs::new(&[attr], DenseAttrCreationOrder::Untracked, [fixup]).unwrap();
     assert_eq!(
         prepared
             .finalize(
                 |_| Ok(StoredAddress::undefined(OffsetWidth::Eight)),
-                |attribute| panic!("unexpected payload {attribute}")
+                |_| Ok(undefined.as_slice())
             )
             .err()
             .unwrap(),
