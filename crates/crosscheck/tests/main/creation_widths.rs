@@ -749,7 +749,10 @@ fn dense_variable_length_attributes_resolve_every_collection(
         .with_length_width(lengths);
     builder.set_attr("labels", AttrValue::VarLenStringArray(values));
     let bytes = builder.finish().unwrap();
-    assert_eq!(test_util::global_heap::collection_starts(&bytes).len(), 2);
+    // A 4096-byte collection holds its 16-byte header, a 16-byte free space object and 254
+    // empty strings of 16 bytes each, so 65,536 strings take 259 collections. The last holds
+    // 4, with room for the 24-byte "tail".
+    assert_eq!(test_util::global_heap::collection_starts(&bytes).len(), 259);
     std::fs::write(&path, bytes).unwrap();
     let file = hdf5::File::open(&path).unwrap();
     assert_eq!(
