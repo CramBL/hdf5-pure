@@ -7,7 +7,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::FillTime;
@@ -116,11 +116,23 @@ impl<'a> FillPattern<'a> {
     /// `len` is a whole number of elements at every call site; a trailing
     /// partial element would simply be filled with the pattern's prefix rather
     /// than misaligned or panicking.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::UnreadableFillValue`] for the unknown pattern, and
+    /// [`FormatError::AllocationFailed`] if reserving `len` bytes fails. A file of a few bytes
+    /// can declare unallocated storage of any size.
     pub(crate) fn buffer(self, len: usize) -> Result<Vec<u8>, FormatError> {
         if self.unknown {
             return Err(FormatError::UnreadableFillValue);
         }
-        let mut buf = vec![0u8; len];
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(len)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: len,
+                source,
+            })?;
+        buf.resize(len, 0);
         self.apply(&mut buf)?;
         Ok(buf)
     }
