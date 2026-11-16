@@ -504,6 +504,29 @@ fn schemas_read_as_fill_without_element_storage(
     }
 }
 
+/// Reading unallocated storage returns an error when its fill buffer cannot be allocated. The
+/// declared size is one byte over `isize::MAX`, the largest allocation Rust permits, and still
+/// fits in `usize` on every target.
+#[rstest]
+#[case::contiguous(false)]
+#[case::chunked(true)]
+fn reads_return_an_error_when_the_fill_buffer_allocation_fails(#[case] chunked: bool) {
+    let len = (isize::MAX as u64 + 1) / 4;
+    let mut builder = FileBuilder::new();
+    let dataset = builder
+        .create_dataset("schema")
+        .with_unallocated_storage(hdf5_pure::make_i32_type(), &[len]);
+    if chunked {
+        dataset.with_chunks(&[1 << 20]);
+    }
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let err = file.dataset("schema").unwrap().read_raw().unwrap_err();
+    let Error::Format(FormatError::AllocationFailed { values, .. }) = &err else {
+        panic!("expected AllocationFailed, got {err:?}");
+    };
+    assert_eq!(*values, usize::try_from(len * 4).unwrap());
+}
+
 #[rstest]
 #[case::before_data(true, &[1, 2, 3])]
 #[case::after_data(false, &[1, 2, 3])]
