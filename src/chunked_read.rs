@@ -75,7 +75,11 @@ use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
 #[cfg(any(doc, test))]
 use crate::source::Source;
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "std",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use crate::source::SourceMetadata;
 use crate::source::StoredBytes;
 use crate::source::StoredMetadata;
