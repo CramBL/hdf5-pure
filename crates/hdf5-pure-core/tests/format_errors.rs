@@ -1,7 +1,25 @@
 use hdf5_pure_core::__private;
+use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::Datatype;
+use hdf5_pure_core::EditStorageConflict;
 use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
+use hdf5_pure_core::PhysicalAddress;
+
+#[rstest::rstest]
+#[case::bounds(EditStorageConflict::Bounds { range: storage_range(4_294_967_600, 16), end: PhysicalAddress::new(4_294_967_608) }, "range 4294967600..4294967616 extends past 4294967608")]
+#[case::overlap(EditStorageConflict::Overlap { first: storage_range(4_294_967_600, 16), second: storage_range(4_294_967_608, 16) }, "ranges 4294967600..4294967616 and 4294967608..4294967624 overlap")]
+#[case::truncation(EditStorageConflict::Truncation { proposed: PhysicalAddress::new(4_294_967_600), required: PhysicalAddress::new(4_294_967_616) }, "proposed end 4294967600 precedes required end 4294967616")]
+fn edit_storage_diagnostics_preserve_physical_geometry(
+    #[case] error: EditStorageConflict,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}
+
+fn storage_range(start: u64, length: u64) -> AddressRange<PhysicalAddress> {
+    AddressRange::new(PhysicalAddress::new(start), length).unwrap()
+}
 
 #[rstest::rstest]
 #[case::decoded_size_limit(

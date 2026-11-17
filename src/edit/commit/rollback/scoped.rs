@@ -4,13 +4,12 @@ use hdf5_pure_core::PhysicalAddress;
 
 use crate::edit::WriteEngine;
 use crate::error::Error;
+#[cfg(test)]
 use crate::error::FormatError;
 
 /// Borrows the engine exclusively to journal writes and control their completion.
 ///
 /// [`Self::run`] and [`Self::run_issued`] preserve entries before the operation's checkpoint.
-/// [`Self::run_rootless`] retains the whole journal on success and attempts to restore it if
-/// application or completion fails.
 /// The caller establishes publication and allocation permissions.
 pub(in crate::edit) struct JournalScope<'engine> {
     engine: &'engine mut WriteEngine,
@@ -72,6 +71,7 @@ impl<'engine> JournalScope<'engine> {
     ///
     /// Returns [`FormatError::Internal`] if publication was attempted. Otherwise returns the
     /// operation, completion, or restoration errors described by [`Self::run_issued`].
+    #[cfg(test)]
     pub(in crate::edit) fn run_rootless(
         engine: &'engine mut WriteEngine,
         apply: impl FnOnce(&mut Self) -> Result<(), Error>,

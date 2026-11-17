@@ -311,6 +311,250 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
     );
 }
 
+#[test]
+fn replacing_a_native_root_attribute_preserves_the_aliased_root_and_its_heap() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("aliased-root-attribute.h5");
+    let original = "retained by the root alias";
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(true, u64::MAX)))
+            .create(&path)
+            .unwrap();
+        file.new_attr::<VarLenUnicode>()
+            .create("label")
+            .unwrap()
+            .write_scalar(&original.parse::<VarLenUnicode>().unwrap())
+            .unwrap();
+        file.link_hard("/", "root_alias").unwrap();
+        file.new_dataset::<i32>()
+            .shape([1])
+            .create("keep")
+            .unwrap()
+            .write_raw(&[42])
+            .unwrap();
+        file.close().unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
+    assert_eq!(
+        (info.strategy, info.persist, info.threshold),
+        (FileSpaceStrategy::FsmAggr, true, u64::MAX)
+    );
+    assert_eq!(file.reusable_free_sections().unwrap().section_count(), 0);
+    let superblock = file.superblock();
+    let old_root = file.resolve_address(superblock.root_group_address).unwrap();
+    let mut retained = storage::header_extents(&file, &before, old_root);
+    assert!(
+        retained
+            .iter()
+            .all(|extent| extent.end().get() < superblock.eof_address)
+    );
+    let header = ObjectHeader::parse_with_base_and_widths(
+        &before,
+        AccessMode::ReadOnly,
+        usize::try_from(old_root.get()).unwrap(),
+        FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        },
+        superblock.base_address,
+    )
+    .unwrap();
+    assert!(
+        header
+            .messages
+            .iter()
+            .any(|msg| msg.msg_type == MessageType::ATTRIBUTE)
+    );
+    let starts = test_util::global_heap::collection_starts(&before);
+    let [heap] = starts.as_slice() else {
+        panic!("expected one collection, got {starts:?}");
+    };
+    let heap_at = usize::try_from(*heap).unwrap();
+    let heap_len = test_util::bytes::uint_at(
+        &before,
+        heap_at + 8,
+        usize::from(superblock.length_size.get()),
+    );
+    retained.push(AddressRange::new(PhysicalAddress::new(*heap), heap_len).unwrap());
+    assert_eq!(
+        file.root().attrs().unwrap()["label"],
+        AttrValue::VarLenString(original.into())
+    );
+
+    file.root().set_attr("label", AttrValue::I64(7)).unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    storage::assert_unavailable(&file, &retained);
+    file.close().unwrap();
+
+    let after = std::fs::read(&path).unwrap();
+    let heap_end = heap_at + usize::try_from(heap_len).unwrap();
+    assert_eq!(after[heap_at..heap_end], before[heap_at..heap_end]);
+    let file = File::open(&path).unwrap();
+    assert_ne!(
+        file.resolve_address(file.superblock().root_group_address)
+            .unwrap(),
+        old_root
+    );
+    assert_eq!(
+        storage::root_object_address(&file, &after, "root_alias"),
+        old_root
+    );
+    assert_eq!(file.root().attrs().unwrap()["label"], AttrValue::I64(7));
+    assert_eq!(
+        file.group("root_alias").unwrap().attrs().unwrap()["label"],
+        AttrValue::VarLenString(original.into())
+    );
+    assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [42]);
+    storage::assert_unavailable(&file, &retained);
+    file.close().unwrap();
+
+    let file = hdf5::File::open(&path).unwrap();
+    assert_eq!(file.attr("label").unwrap().read_scalar::<i64>().unwrap(), 7);
+    assert_eq!(file.group("/").unwrap().loc_info().unwrap().num_links, 1);
+    let alias = file.group("root_alias").unwrap();
+    assert_eq!(alias.loc_info().unwrap().num_links, 2);
+    assert_eq!(
+        alias
+            .attr("label")
+            .unwrap()
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .as_str(),
+        original
+    );
+    assert_eq!(
+        alias.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        [42]
+    );
+    assert_eq!(
+        file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        [42]
+    );
+    drop(alias);
+    file.close().unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RootContent {
+    Numeric,
+    RootString,
+    DatasetString,
+}
+
+#[rstest]
+#[case::candidate_free(RootContent::Numeric)]
+#[case::root_string(RootContent::RootString)]
+#[case::dataset_string(RootContent::DatasetString)]
+fn deleting_a_native_root_self_link_preserves_live_values_and_heap_bytes(
+    #[case] content: RootContent,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("delete-root-self-link.h5");
+    let original = "retained string";
+    let native = test_util_hdf5::file::libhdf5_create_v110(&path);
+    native.link_hard("/", "self").unwrap();
+    native
+        .new_dataset::<i32>()
+        .shape([2])
+        .create("data")
+        .unwrap()
+        .write_raw(&[17, 31])
+        .unwrap();
+    match content {
+        RootContent::Numeric => {}
+        RootContent::RootString => native
+            .new_attr::<VarLenUnicode>()
+            .create("label")
+            .unwrap()
+            .write_scalar(&original.parse::<VarLenUnicode>().unwrap())
+            .unwrap(),
+        RootContent::DatasetString => native
+            .new_dataset::<VarLenUnicode>()
+            .shape([1])
+            .create("text")
+            .unwrap()
+            .write_raw(&[original.parse::<VarLenUnicode>().unwrap()])
+            .unwrap(),
+    }
+    assert_eq!(native.loc_info_by_name("/").unwrap().num_links, 2);
+    native.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let collections = test_util::global_heap::collection_ranges(&before, Widths::EIGHT);
+    assert_eq!(
+        collections.len(),
+        usize::from(!matches!(content, RootContent::Numeric))
+    );
+
+    let properties = FileAccessProperties::new().with_memory_strategy(memory);
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    file.root().delete("self").unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    file.close().unwrap();
+
+    let after = std::fs::read(&path).unwrap();
+    for collection in collections {
+        let bytes =
+            usize::try_from(collection.start).unwrap()..usize::try_from(collection.end).unwrap();
+        assert_eq!(after[bytes.clone()], before[bytes]);
+    }
+    let file = File::open(&path).unwrap();
+    assert!(file.root().groups().unwrap().is_empty());
+    assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [17, 31]);
+    match content {
+        RootContent::Numeric => {}
+        RootContent::RootString => assert_eq!(
+            file.root().attrs().unwrap()["label"],
+            AttrValue::VarLenString(original.into())
+        ),
+        RootContent::DatasetString => {
+            assert_eq!(
+                file.dataset("text").unwrap().read_string().unwrap(),
+                [original]
+            );
+        }
+    }
+    file.close().unwrap();
+
+    let native = hdf5::File::open(&path).unwrap();
+    assert_eq!(native.loc_info_by_name("/").unwrap().num_links, 1);
+    assert!(!native.link_exists("self"));
+    assert_eq!(
+        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        [17, 31]
+    );
+    match content {
+        RootContent::Numeric => {}
+        RootContent::RootString => assert_eq!(
+            native
+                .attr("label")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            original
+        ),
+        RootContent::DatasetString => {
+            let text = native
+                .dataset("text")
+                .unwrap()
+                .read_raw::<VarLenUnicode>()
+                .unwrap();
+            assert_eq!(
+                text.iter().map(VarLenUnicode::as_str).collect::<Vec<_>>(),
+                [original]
+            );
+        }
+    }
+    native.close().unwrap();
+}
+
 #[rstest]
 #[case::attribute_17(false, false, 512, 0, 17, 512, false)]
 #[case::attribute_18(false, false, 512, 0, 18, 512, true)]

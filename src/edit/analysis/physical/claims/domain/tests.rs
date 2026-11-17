@@ -88,7 +88,7 @@ fn owner_domain_preserves_independent_incomplete_outcomes(#[case] failure: Failu
         Failure::Topology => claims.problems.push(ClaimProblem::Topology),
         Failure::References => claims.problems.push(ClaimProblem::References(object)),
         Failure::Storage => claims.problems.push(ClaimProblem::ObjectStorage(object)),
-        Failure::File => claims.problems.push(ClaimProblem::File(0)),
+        Failure::File => claims.problems.push(ClaimProblem::File),
         Failure::Collection => claims.problems.push(ClaimProblem::Collection {
             address: PhysicalAddress::new(collection),
             error: FormatError::Source("injected collection framing failure".into()),
@@ -107,12 +107,12 @@ fn owner_domain_preserves_independent_incomplete_outcomes(#[case] failure: Failu
         panic!("expected unavailable owner domain");
     };
     match (&failure, &reason) {
-        (Failure::Topology, DomainUnavailable::Topology)
+        (Failure::File, DomainUnavailable::File)
+        | (Failure::Topology, DomainUnavailable::Topology)
         | (Failure::MissingSource, DomainUnavailable::MissingSource)
         | (Failure::Root, DomainUnavailable::Root) => {}
         (Failure::References, DomainUnavailable::References(found))
         | (Failure::Storage, DomainUnavailable::ObjectStorage(found)) => assert_eq!(*found, object),
-        (Failure::File, DomainUnavailable::File(index)) => assert_eq!(*index, 0),
         (Failure::Collection, DomainUnavailable::Collection(address)) => {
             assert_eq!(address.get(), collection)
         }
@@ -149,22 +149,10 @@ fn owner_domain_requires_settled_reference_publication(#[case] uncertain: bool) 
     }
     let mut phase = AnalysisPhase::new(&engine);
     let source = root_source(&mut phase, &engine);
-    let OwnerDomain::Unavailable(DomainUnavailable::Publication(error)) =
-        phase.supported_owner_domain(&source).unwrap()
-    else {
-        panic!("expected unavailable allocation publication");
-    };
-    if uncertain {
-        assert!(
-            matches!(error, Error::AllocationPublicationUncertain),
-            "{error:?}"
-        );
-    } else {
-        assert!(
-            matches!(error, Error::Format(FormatError::Internal(ref message)) if message == "reference publication precedes allocation ownership publication"),
-            "{error:?}"
-        );
-    }
+    assert!(matches!(
+        phase.supported_owner_domain(&source).unwrap(),
+        OwnerDomain::Unavailable(DomainUnavailable::Publication)
+    ));
 }
 
 #[rstest]

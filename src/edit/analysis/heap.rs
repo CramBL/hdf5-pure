@@ -92,12 +92,22 @@ impl AnalysisPhase<'_> {
         &mut self,
         address: PhysicalAddress,
     ) -> Result<&CollectionContents, FormatError> {
+        let envelopes = &mut self.collection_envelopes;
         self.allocations
             .entry(address)
             .or_insert_with(|| {
                 #[cfg(test)]
                 super::COLLECTION_ALLOCATIONS.with(|count| count.set(count.get() + 1));
-                CollectionContents::read(self.engine, address)
+                let mut envelope = None;
+                let contents = CollectionContents::read(self.engine, address, |range| {
+                    envelope = Some(range);
+                });
+                if contents.is_err()
+                    && let Some(range) = envelope
+                {
+                    envelopes.insert(address, range);
+                }
+                contents
             })
             .as_ref()
             .map_err(Clone::clone)
@@ -229,9 +239,17 @@ impl CollectionContents {
     ///
     /// Returns the errors of [`global_heap::collect_members`], including its source-extent check
     /// for the complete allocation.
-    fn read(engine: &WriteEngine, address: PhysicalAddress) -> Result<Self, FormatError> {
-        let framing =
-            global_heap::collect_members(engine.image(), engine.widths().lengths, address)?;
+    fn read(
+        engine: &WriteEngine,
+        address: PhysicalAddress,
+        observe: impl FnOnce(FileRange),
+    ) -> Result<Self, FormatError> {
+        let framing = global_heap::collect_members(
+            engine.image(),
+            engine.widths().lengths,
+            address,
+            observe,
+        )?;
         Ok(Self { framing })
     }
 

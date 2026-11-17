@@ -208,7 +208,7 @@ fn partial_claim_collection_preserves_independent_ranges(#[case] input: Input) {
         }
         Input::File => {
             assert!(
-                matches!(claims.problems(), [ClaimProblem::File(0)]),
+                matches!(claims.problems(), [ClaimProblem::File]),
                 "{:?}",
                 claims.problems()
             );

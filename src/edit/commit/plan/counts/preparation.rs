@@ -7,10 +7,12 @@ use hdf5_pure_space::__private::FreeClass;
 
 use super::PreparedCounts;
 use crate::edit::WriteEngine;
+#[cfg(test)]
+use crate::edit::analysis::CountInventory;
 use crate::edit::analysis::counts::{CopyUsersError, CountEvidenceError};
 use crate::edit::analysis::{
-    AnalysisPhase, CountHandoffError, CountInventory, CountPreflightError, CountProtectionError,
-    NetCountError, ProtectedCounts,
+    AnalysisPhase, CountHandoffError, CountPreflightError, CountProtectionError, NetCountError,
+    OriginalOwnerFacts, ProtectedCounts,
 };
 use crate::edit::commit::plan::Node;
 use crate::edit::commit::plan::inventory::{EditInputError, OriginalEdits};
@@ -28,32 +30,75 @@ pub(in crate::edit::commit) enum PreparedTreeCounts {
     /// Complete numeric count planning with local projections applied.
     Complete {
         /// Original count changes retained after local projection.
+        #[cfg(test)]
         inventory: CountInventory,
         /// Checked updates to count fields outside reconstructed objects.
         protected: ProtectedCounts,
         /// Original objects retained for collection-reference analysis.
         retained_roots: Vec<ObjectId>,
         /// Ordinary non-root objects with zero graph and declared count remainders.
+        #[cfg(test)]
         eligible_owners: Vec<ObjectId>,
         /// Supported original allocations, moved into the tree before reference screening.
+        #[cfg(test)]
         retirement: Vec<(FileRange, FreeClass)>,
     },
+    /// Checked updates paired with original facts retained by captured application.
+    Captured(ProtectedCounts),
     /// Incomplete count evidence, with deletion allocations and collection candidates withheld.
     Unavailable,
 }
 
 impl PreparedTreeCounts {
-    /// Derives original retirement eligibility and updates checked replacement count records.
-    ///
-    /// Retains protected source updates and reference roots independently of supported allocation
-    /// coverage. Returns [`Self::Unavailable`] for incomplete count evidence. Leaves original source
-    /// fields unchanged.
+    pub(in crate::edit::commit) fn input_error(error: EditInputError) -> Error {
+        match error {
+            EditInputError::Copy(error) => error,
+            EditInputError::Handoff(CountHandoffError::Source(error))
+            | EditInputError::Users(CopyUsersError::Address(error))
+            | EditInputError::Counts(NetCountError::Association(CopyUsersError::Address(error))) => {
+                error.into()
+            }
+            EditInputError::Counts(NetCountError::Evidence(CountEvidenceError::Contradiction(
+                error,
+            ))) => Error::InconsistentReferenceCount {
+                address: error.object.header_address().get(),
+                observed: error.observed,
+                minimum: error.minimum,
+            },
+            EditInputError::Counts(NetCountError::Evidence(
+                CountEvidenceError::Source(error) | CountEvidenceError::Topology(error),
+            )) => error.into(),
+            EditInputError::Counts(NetCountError::Arithmetic(_))
+            | EditInputError::Users(CopyUsersError::Overflow) => {
+                Error::EditUnsupported("the planned reference count does not fit its stored field")
+            }
+            EditInputError::IncompleteCopy => {
+                Error::EditUnsupported("the copy's committed-datatype users cannot be established")
+            }
+            error => {
+                FormatError::Internal(format!("invalid count preparation inputs: {error:?}")).into()
+            }
+        }
+    }
+}
+
+/// Joint original facts and source permissions after matching local projection completes.
+pub(in crate::edit::commit::plan) enum CountedPreparation {
+    /// Complete checked inputs from one source phase and allocation session.
+    Complete {
+        original: OriginalOwnerFacts,
+        protected: ProtectedCounts,
+    },
+    /// Incomplete count evidence, with count-derived retirement withheld.
+    Unavailable,
+}
+
+impl CountedPreparation {
+    /// Prepares original facts and applies their checked local projections once.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InconsistentReferenceCount`] for a proven original contradiction,
-    /// [`Error::EditUnsupported`] for unsupported count or copy preparation, or the source,
-    /// publication, or internal projection error.
+    /// Returns original contradictions, count overflow, invalid associations, or projection errors.
     pub(in crate::edit::commit::plan) fn prepare(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
@@ -63,7 +108,7 @@ impl PreparedTreeCounts {
         let facts = match OriginalEdits::count_inputs(engine, phase, groups, staged) {
             Ok(facts) => facts,
             Err(EditInputError::IncompleteCounts) => return Ok(Self::Unavailable),
-            Err(error) => return Err(Self::input_error(error)),
+            Err(error) => return Err(PreparedTreeCounts::input_error(error)),
         };
         let preflight = facts
             .preflight(
@@ -97,47 +142,61 @@ impl PreparedTreeCounts {
         let (facts, protected) = preflight.into_parts(proof).map_err(|error| {
             FormatError::Internal(format!("invalid count projection proof: {error:?}"))
         })?;
-        let (inventory, storage, eligible_owners) = facts.into_parts();
-        let (retirement, retained_roots) = storage.into_parts();
         Ok(Self::Complete {
-            inventory,
+            original: facts,
             protected,
-            retained_roots,
-            eligible_owners,
-            retirement,
         })
     }
 
-    fn input_error(error: EditInputError) -> Error {
-        match error {
-            EditInputError::Copy(error) => error,
-            EditInputError::Handoff(CountHandoffError::Source(error))
-            | EditInputError::Users(CopyUsersError::Address(error))
-            | EditInputError::Counts(NetCountError::Association(CopyUsersError::Address(error))) => {
-                error.into()
+    /// Separates application updates from original facts only after selecting the route.
+    pub(in crate::edit::commit::plan) fn into_tree(self, capture: bool) -> TreeCountInputs {
+        match self {
+            Self::Complete {
+                original,
+                protected,
+            } if capture => {
+                let retirement = original.storage().allocations().to_vec();
+                TreeCountInputs {
+                    counts: PreparedTreeCounts::Captured(protected),
+                    original: Some(Ok(original)),
+                    retirement,
+                }
             }
-            EditInputError::Counts(NetCountError::Evidence(CountEvidenceError::Contradiction(
-                error,
-            ))) => Error::InconsistentReferenceCount {
-                address: error.object.header_address().get(),
-                observed: error.observed,
-                minimum: error.minimum,
+            Self::Complete {
+                original,
+                protected,
+            } => {
+                let (_inventory, storage, _eligible_owners) = original.into_parts();
+                let (retirement, retained_roots) = storage.into_parts();
+                TreeCountInputs {
+                    counts: PreparedTreeCounts::Complete {
+                        #[cfg(test)]
+                        inventory: _inventory,
+                        protected,
+                        retained_roots,
+                        #[cfg(test)]
+                        eligible_owners: _eligible_owners,
+                        #[cfg(test)]
+                        retirement: Vec::new(),
+                    },
+                    original: None,
+                    retirement,
+                }
+            }
+            Self::Unavailable => TreeCountInputs {
+                counts: PreparedTreeCounts::Unavailable,
+                original: capture.then_some(Err(EditInputError::IncompleteCounts)),
+                retirement: Vec::new(),
             },
-            EditInputError::Counts(NetCountError::Evidence(
-                CountEvidenceError::Source(error) | CountEvidenceError::Topology(error),
-            )) => error.into(),
-            EditInputError::Counts(NetCountError::Arithmetic(_))
-            | EditInputError::Users(CopyUsersError::Overflow) => {
-                Error::EditUnsupported("the planned reference count does not fit its stored field")
-            }
-            EditInputError::IncompleteCopy => {
-                Error::EditUnsupported("the copy's committed-datatype users cannot be established")
-            }
-            error => {
-                FormatError::Internal(format!("invalid count preparation inputs: {error:?}")).into()
-            }
         }
     }
+}
+
+/// Count application, captured facts, and complete retirement allocations for one selected route.
+pub(in crate::edit::commit::plan) struct TreeCountInputs {
+    pub(in crate::edit::commit::plan) counts: PreparedTreeCounts,
+    pub(in crate::edit::commit::plan) original: Option<Result<OriginalOwnerFacts, EditInputError>>,
+    pub(in crate::edit::commit::plan) retirement: Vec<(FileRange, FreeClass)>,
 }
 
 #[cfg(test)]

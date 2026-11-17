@@ -9,7 +9,7 @@ use test_util::object_header::{Message, MessageFlags, MessageType};
 use test_util::superblock;
 use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
-use crate::{File, FileAccessProperties, FileLocking, MemoryStrategy};
+use crate::{AttrValue, File, FileAccessProperties, FileLocking, MemoryStrategy};
 
 mod batch;
 mod page;
@@ -70,16 +70,44 @@ struct CountFile {
     target: u64,
     original: u32,
     removed: Range<u64>,
+    heap: Option<u64>,
 }
 
 impl CountFile {
     fn write(path: &Path, original: u32, extra_alias: bool) -> Self {
-        let (targets, removed) = write_count_users(path, &[type_header(original)], extra_alias);
+        Self::with_contents(path, original, extra_alias, CountContents::Numeric)
+    }
+
+    fn with_contents(
+        path: &Path,
+        original: u32,
+        extra_alias: bool,
+        contents: CountContents,
+    ) -> Self {
+        let (targets, removed) =
+            write_count_users_with_contents(path, &[type_header(original)], extra_alias, contents);
         Self {
             target: targets[0],
             original,
             removed,
+            heap: matches!(contents, CountContents::HeapBearing).then(|| {
+                test_util::global_heap::collection_starts(&std::fs::read(path).unwrap())[0]
+            }),
         }
+    }
+
+    fn stage(&self, file: &File, copies: usize, extra_alias: bool, remove_source: bool) {
+        stage(file, copies, extra_alias, remove_source);
+        if self.heap.is_some() {
+            file.dataset("heap")
+                .unwrap()
+                .set_attr("a", AttrValue::I64(9))
+                .unwrap();
+        }
+    }
+
+    fn assert_values(&self, file: &File, copies: usize, remove_source: bool) {
+        assert_values_with_heap(file, copies, remove_source, self.heap.is_some());
     }
 
     fn assert_header(&self, bytes: &[u8], count: u32) {
@@ -108,6 +136,26 @@ impl CountFile {
         if let Some(update) = update {
             assert_eq!(update < publication, count > self.original);
         }
+        if let Some(heap) = self.heap {
+            let compact = writes.iter().position(|operation| {
+                matches!(operation,
+                    DiskOp::Write { offset, .. } if *offset >= heap && *offset < heap + 4_096
+                )
+            });
+            if let Some(compact) = compact {
+                assert!(compact > publication);
+                if let Some(update) = update {
+                    assert!(update < compact);
+                }
+            } else {
+                let parent = usize::try_from(heap).unwrap();
+                assert_eq!(
+                    &after[parent..parent + 4_096],
+                    &before[parent..parent + 4_096]
+                );
+            }
+        }
+
         let mut replay = before.to_vec();
         for (index, operation) in writes.iter().enumerate() {
             if index == publication {
@@ -140,6 +188,21 @@ fn write_count_users(
     headers: &[Vec<u8>],
     extra_alias: bool,
 ) -> (Vec<u64>, Range<u64>) {
+    write_count_users_with_contents(path, headers, extra_alias, CountContents::Numeric)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CountContents {
+    Numeric,
+    HeapBearing,
+}
+
+fn write_count_users_with_contents(
+    path: &Path,
+    headers: &[Vec<u8>],
+    extra_alias: bool,
+    contents: CountContents,
+) -> (Vec<u64>, Range<u64>) {
     let mut fixture = Fixture::new();
     let mut targets = Vec::new();
     for (index, header) in headers.iter().enumerate() {
@@ -158,8 +221,27 @@ fn write_count_users(
         &vec![7_i32.to_le_bytes(); 1_024].concat(),
     );
     fixture.object("dead", messages);
+    if matches!(contents, CountContents::HeapBearing) {
+        append_heap_owner(&mut fixture);
+    }
     fixture.write(path);
     (targets, removed..removed + 4_096)
+}
+
+fn append_heap_owner(fixture: &mut Fixture) {
+    use test_util::global_heap::Object;
+    let parent = fixture.collection(&[Object::new(1, b"obsolete"), Object::new(2, b"survivor")]);
+    let mut messages = Form::CompactDataset.messages(
+        fixture,
+        &test_util_hdf5::global_heap_fixture::vlen_string(),
+        &test_util_hdf5::global_heap_fixture::reference(8, parent, 2),
+    );
+    messages.extend(Form::CompactAttribute.messages(
+        fixture,
+        &test_util_hdf5::global_heap_fixture::vlen_string(),
+        &test_util_hdf5::global_heap_fixture::reference(8, parent, 1),
+    ));
+    fixture.object("heap", messages);
 }
 
 fn append_count_user(fixture: &mut Fixture, header: &[u8], index: usize, extra_alias: bool) -> u64 {
@@ -213,6 +295,10 @@ fn stage(file: &File, copies: usize, extra_alias: bool, remove_source: bool) {
 }
 
 fn assert_values(file: &File, copies: usize, remove_source: bool) {
+    assert_values_with_heap(file, copies, remove_source, false);
+}
+
+fn assert_values_with_heap(file: &File, copies: usize, remove_source: bool, heap: bool) {
     let mut names = file.root().datasets().unwrap();
     names.sort();
     let mut expected = (0..copies)
@@ -222,7 +308,16 @@ fn assert_values(file: &File, copies: usize, remove_source: bool) {
         expected.push("source".into());
     }
     expected.push("value".into());
+    if heap {
+        expected.push("heap".into());
+    }
+    expected.sort();
     assert_eq!(names, expected);
+    if heap {
+        let heap = file.dataset("heap").unwrap();
+        assert_eq!(heap.read_string().unwrap(), ["survivor"]);
+        assert_eq!(heap.attrs().unwrap()["a"], AttrValue::I64(9));
+    }
     assert!(file.root().named_datatypes().unwrap().is_empty());
     for index in 0..copies {
         assert_eq!(

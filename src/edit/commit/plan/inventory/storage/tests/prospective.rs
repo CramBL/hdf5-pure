@@ -17,7 +17,6 @@ use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
 
 use super::super::PendingEditInventory;
-use super::super::StorageApplyFailure;
 use crate::AttrValue;
 use crate::DatasetBuilder;
 use crate::edit::allocation::AllocationPublication;
@@ -317,10 +316,7 @@ fn unavailable_roots_and_reference_outcomes_remain_independent(#[case] failure: 
             ));
         }
         Unavailable::Content => {
-            assert_eq!(
-                prospective.unavailable(),
-                Some(&ProspectiveUnavailable::Original)
-            );
+            assert_eq!(prospective.unavailable(), None);
             assert!(!references.is_complete());
             assert!(references.error().is_none());
         }
@@ -389,7 +385,7 @@ fn prospective_decode_work_is_zero_for_empty_input_and_application_failure(#[cas
         disk_log::fail_write_after(0, 0);
         let failure = prepared.apply_excluding(&mut engine).err().unwrap();
         let recording = disk_log::finish();
-        let StorageApplyFailure::Application(Error::Io(error)) = failure else {
+        let Error::Io(error) = failure else {
             panic!("expected application I/O failure");
         };
         assert_eq!(error.kind(), ErrorKind::Other);

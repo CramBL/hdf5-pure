@@ -366,6 +366,23 @@ impl StagedEdits {
         &self.writes
     }
 
+    /// Returns whether staged operations may copy or reuse existing heap references.
+    ///
+    /// Includes copies and address-bearing dataset creations or replacements without staged
+    /// strings.
+    pub(super) fn shares_heap_references(&self) -> bool {
+        !self.copies.is_empty()
+            || !self.cross_copies.is_empty()
+            || self.datasets.iter().any(|(_, dataset)| {
+                dataset.storage.vl_string_staging().is_none()
+                    && crate::datatype::datatype_holds_file_address(&dataset.dt)
+            })
+            || self.writes.iter().any(|(_, values)| {
+                values.vl_string_staging().is_none()
+                    && crate::datatype::datatype_holds_file_address(&values.dt)
+            })
+    }
+
     /// Returns committed-dataset appends with their full paths, in staging order.
     pub(super) fn appends(&self) -> &[(ObjectPathBuf, AppendBuilder)] {
         &self.appends

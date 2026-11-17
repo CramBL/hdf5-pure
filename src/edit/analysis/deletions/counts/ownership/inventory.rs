@@ -1,5 +1,6 @@
 //! Complete owned count inventories, source preflight, and positive explicit subsets.
 
+use core::num::NonZeroU32;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -8,8 +9,9 @@ use super::ProtectedCounts;
 use super::{CountHandoffError, CountSource, SurvivingCount, SurvivingCounts};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
+use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::owned::{
-    CountDisposition, OwnedCountChange, UnresolvedCount,
+    CountDisposition, OwnedCountChange, OwnedOriginalCount, UnresolvedCount,
 };
 use crate::edit::analysis::{NetCountPlan, ReconstructionSource};
 use crate::edit::commit::CountProjectionError;
@@ -41,6 +43,7 @@ impl NetCountPlan<'_, '_> {
         Ok(CountInventory {
             session: engine.context.allocations.session(),
             origin,
+            projected_root: None,
             changes: self
                 .evidence_changes()
                 .map(|change| change.detach())
@@ -58,6 +61,7 @@ pub(in crate::edit) struct CountInventory {
     session: AllocationSession,
     origin: Option<ReconstructionSource>,
     changes: Vec<OwnedCountChange>,
+    projected_root: Option<ProjectedRoot>,
 }
 
 impl CountInventory {
@@ -91,6 +95,7 @@ impl CountInventory {
             session,
             origin,
             changes,
+            projected_root: _,
         } = &self;
         if !session.same(&engine.context.allocations.session()) {
             return Err(CountPreflightError::Protection(
@@ -175,6 +180,7 @@ impl CountInventory {
             session,
             origin,
             changes,
+            projected_root,
         } = self;
         let surviving = origin
             .as_ref()
@@ -216,9 +222,30 @@ impl CountInventory {
                 session,
                 origin,
                 changes,
+                projected_root,
             },
             surviving,
         }
+    }
+
+    /// Returns whether a completed root projection permits replacement under the supplied facts.
+    ///
+    /// Requires the same allocation session, root source phase, and original count observation.
+    /// Source freshness, placement correspondence, and storage protection remain separate checks.
+    pub(in crate::edit) fn permits_root_replacement(
+        &self,
+        engine: &WriteEngine,
+        source: &ReconstructionSource,
+        original: u32,
+        incoming: u32,
+    ) -> bool {
+        self.same_session(engine)
+            && self.root() == Some(source.object())
+            && self.shares_phase(source)
+            && self
+                .projected_root
+                .as_ref()
+                .is_some_and(|root| root.original.get() == original && root.incoming == incoming)
     }
 
     /// Returns whether the recorded allocation session matches `engine`, even for empty input.
@@ -330,12 +357,49 @@ impl CountPreflight {
             return Err(CountProjectionError::Preflight);
         }
         let Self {
-            inventory,
+            mut inventory,
             protected,
-            reconstructed: _,
+            reconstructed,
             projection: _,
         } = self;
+        inventory.projected_root = ProjectedRoot::from_projection(&inventory, &reconstructed);
         Ok((inventory, protected))
+    }
+}
+
+/// A reconstructed root projected to its sole superblock reference.
+///
+/// Construction requires matching local projection completion, complete removal of the original
+/// incoming links, and an original count equal to those links plus the superblock reference.
+/// The enclosing inventory retains the source phase, root, and allocation session.
+struct ProjectedRoot {
+    original: NonZeroU32,
+    incoming: u32,
+}
+
+impl ProjectedRoot {
+    fn from_projection(
+        inventory: &CountInventory,
+        reconstructed: &BTreeSet<ObjectId>,
+    ) -> Option<Self> {
+        let root = inventory.root()?;
+        if !reconstructed.contains(&root) {
+            return None;
+        }
+        let change = inventory
+            .changes
+            .iter()
+            .find(|change| change.object() == root)?;
+        let OwnedOriginalCount::Retained { original, incoming } = change.original() else {
+            return None;
+        };
+        if incoming == 0
+            || incoming.checked_add(ROOT_REFERENCE_COUNT) != Some(original.get())
+            || change.remaining() != ROOT_REFERENCE_COUNT
+        {
+            return None;
+        }
+        Some(Self { original, incoming })
     }
 }
 
