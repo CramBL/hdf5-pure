@@ -340,25 +340,9 @@ impl<'a> ReservationBatch<'a> {
         }
     }
 
-    /// Restores unused free space and returns the final indexed-work counts.
-    pub fn finish(mut self) -> ReservationWork {
+    /// Restores unused free space to its owning lists.
+    pub fn finish(mut self) {
         self.restore();
-        self.work()
-    }
-
-    /// Returns indexed-work counts accumulated so far.
-    ///
-    /// Scalar and disabled paths report zero. Restoration is counted when the batch finishes.
-    pub fn work(&self) -> ReservationWork {
-        match &self.state {
-            ReservationState::Disabled | ReservationState::Scalar(_) => ReservationWork::default(),
-            ReservationState::Flat { free, threshold: _ } => free.work(),
-            ReservationState::Paged {
-                meta,
-                raw,
-                page_size: _,
-            } => meta.work().combine(raw.work()),
-        }
     }
 
     fn restore(&mut self) {
@@ -395,41 +379,4 @@ enum ReservationState<'a> {
         page_size: FileSpacePageSize,
     },
     Scalar(&'a mut SessionSpace),
-}
-
-/// Saturating operation counts for the indexed paths of a reservation batch.
-///
-/// Counts describe address-map operations and best-fit queries, excluding lookup-index
-/// maintenance, ordered-map comparisons, and scalar-path work.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ReservationWork {
-    /// Original extents inserted during index construction.
-    pub indexed_extents: u64,
-    /// Best-fit queries, including unsuccessful queries and PAGE fallback queries.
-    pub lookups: u64,
-    /// Extents removed from the address map and lookup indexes.
-    pub removed_extents: u64,
-    /// Extents inserted during construction, splitting, and remainder merging.
-    pub inserted_extents: u64,
-    /// Remaining extents copied back into the owning free lists.
-    pub restored_extents: u64,
-}
-
-impl ReservationWork {
-    fn combine(self, other: Self) -> Self {
-        let Self {
-            indexed_extents,
-            lookups,
-            removed_extents,
-            inserted_extents,
-            restored_extents,
-        } = self;
-        Self {
-            indexed_extents: indexed_extents.saturating_add(other.indexed_extents),
-            lookups: lookups.saturating_add(other.lookups),
-            removed_extents: removed_extents.saturating_add(other.removed_extents),
-            inserted_extents: inserted_extents.saturating_add(other.inserted_extents),
-            restored_extents: restored_extents.saturating_add(other.restored_extents),
-        }
-    }
 }

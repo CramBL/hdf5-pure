@@ -3,8 +3,6 @@ use std::io::ErrorKind;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use hdf5_pure_space::__private::ReservationWork;
 use hdf5_pure_space::__private::{ManagerKind, PageType, SessionSpace};
 use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -129,7 +127,6 @@ fn preferred_reuse_preserves_ties_and_builds_only_the_needed_batch(
     assert_eq!(choice, expected_choice);
     assert_eq!(calls.get(), u8::from(choice == ReservationChoice::Fallback));
     assert_eq!(plan.end(), PhysicalAddress::new(end));
-    assert_eq!(plan.work().indexed_extents, indexed);
     match choice {
         ReservationChoice::Preferred => {
             assert_eq!(plan.reservations().len(), 1);
@@ -157,9 +154,7 @@ fn preferred_reuse_preserves_ties_and_builds_only_the_needed_batch(
             plan.write_next(&[23; 16]).unwrap();
         }
     }
-    let work = plan.finish().unwrap();
-    assert_eq!(work.indexed_extents, indexed);
-    assert_eq!(work.restored_extents, if indexed == 0 { 0 } else { 2 });
+    plan.finish().unwrap();
     assert_eq!(engine.image.len(), end);
     for (offset, bytes) in offsets
         .iter()
@@ -340,7 +335,6 @@ fn preferred_scalar_paths_avoid_batch_storage(#[case] reuse: bool, #[case] appen
             ReservationChoice::Fallback
         }
     );
-    assert_eq!(plan.work(), ReservationWork::default());
     assert_eq!(plan.reservations().len(), usize::from(reuse || append));
     assert_eq!(cost.blocks, u64::from(append));
     assert_eq!(
@@ -389,8 +383,6 @@ fn preferred_prefix_and_suffix_retain_complete_ownership(#[case] fail: bool) {
             (start + 144, PageType::Meta)
         ]
     );
-    assert_eq!(plan.work().indexed_extents, 2);
-    assert_eq!(plan.work().restored_extents, 2);
     if fail {
         test_util::disk_log::fail_write_after(2, 3);
     }

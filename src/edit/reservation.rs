@@ -4,7 +4,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{FileSpacePageSize, PhysicalAddress};
 use hdf5_pure_space::__private::{
     Extent, PageTransition, PageType, ReservationBatch, ReservationPlacement, ReservationRequest,
-    ReservationWork, ReusableReservation,
+    ReusableReservation,
 };
 
 use crate::address::{AddressContext, StoredAddress};
@@ -30,7 +30,6 @@ pub(super) struct ReservationPlan<'a> {
     failed: bool,
     end: PhysicalAddress,
     unresolved: Option<ReusableReservation>,
-    work: ReservationWork,
 }
 
 impl<'a> ReservationPlan<'a> {
@@ -78,7 +77,7 @@ impl<'a> ReservationPlan<'a> {
                 super::observations::record_allocation_probe();
                 let reservation = batch.reserve(preferred.reservation());
                 #[cfg(test)]
-                super::observations::record_width_reservations(1, batch.work(), 0);
+                super::observations::record_width_reservations(1, 0);
                 batch.finish();
                 if let Some(reservation) = reservation {
                     plan.reservations.push(Self::reused(
@@ -116,7 +115,6 @@ impl<'a> ReservationPlan<'a> {
             next: 0,
             failed: false,
             unresolved: None,
-            work: ReservationWork::default(),
         }
     }
 
@@ -162,7 +160,6 @@ impl<'a> ReservationPlan<'a> {
             failed,
             end: _,
             unresolved: _,
-            work: _,
         } = self;
         let reservation = &reservations.as_slice()[*next];
         let PlannedReservation {
@@ -197,13 +194,13 @@ impl<'a> ReservationPlan<'a> {
         }
     }
 
-    /// Completes an emitted plan and returns its indexed-work counts.
+    /// Completes a plan after every allocation has been written.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if a write failed or any allocation remains unresolved or
     /// unwritten. Returns [`FormatError::TruncatedFile`] if the image excludes planned capacity.
-    pub(super) fn finish(self) -> Result<ReservationWork, Error> {
+    pub(super) fn finish(self) -> Result<(), Error> {
         let Self {
             engine,
             reservations,
@@ -211,7 +208,6 @@ impl<'a> ReservationPlan<'a> {
             failed,
             end,
             unresolved,
-            work,
         } = self;
         if failed || next != reservations.as_slice().len() || unresolved.is_some() {
             return Err(
@@ -225,7 +221,7 @@ impl<'a> ReservationPlan<'a> {
             }
             .into());
         }
-        Ok(work)
+        Ok(())
     }
 
     /// Returns the successfully planned allocations in request order.
@@ -246,11 +242,6 @@ impl<'a> ReservationPlan<'a> {
     #[cfg(test)]
     pub(super) fn end(&self) -> PhysicalAddress {
         self.end
-    }
-
-    #[cfg(test)]
-    pub(super) fn work(&self) -> ReservationWork {
-        self.work
     }
 
     #[cfg(test)]
@@ -319,7 +310,6 @@ impl<'a> ReservationPlan<'a> {
             failed: _,
             end,
             unresolved,
-            work,
         } = self;
         engine.context.allocations.available()?;
         if engine.publication == PublicationState::Uncertain {
@@ -369,13 +359,12 @@ impl<'a> ReservationPlan<'a> {
             reservations.push(planned);
             Ok(())
         });
-        *work = batch.finish();
+        batch.finish();
         #[cfg(test)]
         {
-            super::observations::record_reservations(requests_len, *work);
+            super::observations::record_reservations(requests_len);
             super::observations::record_width_reservations(
                 requests_len,
-                *work,
                 end.get().saturating_sub(original_eoa.get()),
             );
         }

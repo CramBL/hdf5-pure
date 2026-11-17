@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use hdf5_pure_core::__private::ByteLength;
-use hdf5_pure_space::__private::ReservationWork;
 use rstest::rstest;
 use test_util::allocation;
 use test_util_hdf5::file_space::chunk_holes;
@@ -155,17 +154,8 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
         preferred_probes,
         raw_capacity_scans,
         scalar_requests,
-        batch_builds,
         requests,
-        reservations,
     } = observed;
-    let ReservationWork {
-        indexed_extents,
-        lookups,
-        removed_extents,
-        inserted_extents,
-        restored_extents,
-    } = reservations;
     assert_eq!(chunks, count as u64);
     assert_eq!(filtered_chunks, 0);
     assert_eq!(prepared_bytes, payload as u64);
@@ -176,14 +166,6 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
     assert_eq!(preferred_probes, 1);
     assert_eq!(raw_capacity_scans, u64::from(paged));
     eprintln!("complete operation {observed:?}");
-    assert_eq!(batch_builds, if paged { 2 } else { 1 });
-    assert!(indexed_extents <= available.len() as u64 * if paged { 2 } else { 1 } + 32);
-    assert!(lookups >= count as u64);
-    assert!(lookups <= requests * if paged { 2 } else { 1 });
-    assert!(removed_extents >= count as u64);
-    assert!(removed_extents <= requests * 2);
-    assert!(inserted_extents <= indexed_extents + requests * 2);
-    assert!(restored_extents <= indexed_extents + requests);
     assert!(requests <= count as u64 + 32);
     assert!(scalar_requests <= 16);
     let metadata_budget =
@@ -316,9 +298,7 @@ fn creation_uses_scalar_reservations_for_small_and_contiguous_storage(
         preferred_probes,
         raw_capacity_scans,
         scalar_requests: _,
-        batch_builds,
         requests: _,
-        reservations,
     } = work;
     assert_eq!(chunks, count as u64);
     assert_eq!(prepared_bytes, expected.len() as u64);
@@ -326,8 +306,6 @@ fn creation_uses_scalar_reservations_for_small_and_contiguous_storage(
     assert_eq!(index_encodings, u64::from(count > 1));
     assert_eq!(preferred_probes, u64::from(reuse && count > 1));
     assert_eq!(raw_capacity_scans, 0);
-    assert_eq!(batch_builds, 0);
-    assert_eq!(reservations, ReservationWork::default());
     eprintln!("count={count} reuse={reuse} operation={work:?} heap={measured}");
     drop(engine);
     let reopened = File::open(&path).unwrap();
@@ -353,7 +331,6 @@ fn fragmented_creation_cycles_bound_work_and_publish_once_per_commit(
     let mut expected = (0..64).collect::<Vec<i32>>();
     for cycle in 0..3 {
         let mut engine = test_util::open_engine(&path);
-        let available = engine.space.reusable_sections().count() as u64;
         let initial_size = engine.image.len();
         let before = engine.image.buffering_work();
         let mut created = DatasetBuilder::new("replacement");
@@ -375,12 +352,6 @@ fn fragmented_creation_cycles_bound_work_and_publish_once_per_commit(
         let work = observations::creation_work();
         assert_eq!(work.chunks, 17);
         assert_eq!(work.index_encodings, 2);
-        assert!(work.batch_builds <= 3);
-        assert!(work.reservations.indexed_extents <= available * 3 + 64);
-        assert!(work.reservations.lookups <= work.requests * 2);
-        assert!(
-            work.reservations.restored_extents <= work.reservations.indexed_extents + work.requests
-        );
         assert_eq!(
             engine.image.issued_write_order()[before.write_calls as usize..]
                 .iter()

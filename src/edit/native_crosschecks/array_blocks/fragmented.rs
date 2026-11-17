@@ -329,14 +329,6 @@ fn creation_preserves_sparse_slots_variable_filters_and_reuse_policy(
     assert_eq!(work.prepared_bytes, payload);
     assert_eq!(work.index_encodings, 1);
     assert_eq!(work.preferred_probes, u64::from(!transient));
-    if transient {
-        assert!(work.batch_builds <= 1);
-    } else {
-        assert_eq!(
-            work.batch_builds,
-            if matches!(input, Input::Page) { 2 } else { 1 }
-        );
-    }
     assert!(
         available
             .iter()

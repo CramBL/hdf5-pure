@@ -3,8 +3,7 @@ use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy, FormatError, StoredAddress};
 use hdf5_pure_space::__private::{
-    AllocationClass, Extent, FreeClass, ManagerKind, PageType, ReservationRequest, ReservationWork,
-    SessionSpace,
+    AllocationClass, Extent, FreeClass, ManagerKind, PageType, ReservationRequest, SessionSpace,
 };
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
@@ -30,14 +29,12 @@ fn batch_preserves_flat_best_fit_ties_and_successful_prefix(#[case] count: usize
     assert_eq!(second.extent(), extent(120, 20));
     let third = batch.reserve(request(40, PageType::Raw)).unwrap();
     assert_eq!(third.extent(), extent(10, 40));
-    let work = batch.finish();
+    batch.finish();
     assert_eq!(
         space.reusable_sections().collect::<Vec<_>>(),
         [extent(95, 5)]
     );
     assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(5));
-    assert_eq!(work.indexed_extents, if count > 1 { 3 } else { 0 });
-    assert_eq!(work.restored_extents, if count > 1 { 1 } else { 0 });
     let (returned, class, page_type) = first.into_parts();
     space.return_allocation_with_page_type(returned, class, page_type);
     assert_eq!(
@@ -241,7 +238,7 @@ fn contiguous_batches_preserve_the_scalar_fast_path(#[case] initial: &[(u64, u64
         allocation.as_ref().map(|allocation| allocation.extent()),
         initial.first().map(|_| extent(100, 10))
     );
-    assert_eq!(batch.finish(), ReservationWork::default());
+    batch.finish();
     assert_eq!(
         space.reusable_sections().collect::<Vec<_>>(),
         if initial.is_empty() {
@@ -257,17 +254,14 @@ fn disabled_batch_preserves_the_empty_fast_path() {
     let mut space = SessionSpace::Disabled;
     let mut batch = space.reservation_batch(10);
     assert_eq!(batch.reserve(request(1, PageType::Raw)), None);
-    assert_eq!(batch.finish(), ReservationWork::default());
+    batch.finish();
     assert_eq!(space.reusable_bytes().unwrap(), ByteLength::new(0));
 }
 
 #[rstest]
 #[case::equal_sizes(128, 8)]
 #[case::fragmented(4096, 16)]
-fn batch_builds_indexes_once_and_restores_only_remaining_extents(
-    #[case] count: u64,
-    #[case] size: u64,
-) {
+fn batch_restores_only_unallocated_extents(#[case] count: u64, #[case] size: u64) {
     let mut space = SessionSpace::from_persisted(
         Some(FileSpaceStrategy::FsmAggr),
         ByteLength::new(1),
@@ -283,15 +277,16 @@ fn batch_builds_indexes_once_and_restores_only_remaining_extents(
             extent((i / (64 / size)) * 128 + (i % (64 / size)) * size, size)
         );
     }
-    let work = batch.finish();
-    assert_eq!(work.indexed_extents, count);
-    assert_eq!(work.lookups, 128);
-    assert_eq!(work.removed_extents, 128);
-    assert_eq!(work.inserted_extents, count + 128 - 128 / (64 / size));
-    assert_eq!(work.restored_extents, count - 128 / (64 / size));
+    batch.finish();
     assert_eq!(
         space.reusable_bytes().unwrap(),
         ByteLength::new(count * 64 - 128 * size)
+    );
+    assert_eq!(
+        space.reusable_sections().collect::<Vec<_>>(),
+        (128 / (64 / size)..count)
+            .map(|i| extent(i * 128, 64))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -334,9 +329,7 @@ fn page_batch_indexes_a_large_run_without_expanding_pages() {
         batch.reserve(request(1, PageType::Raw)).unwrap().extent(),
         extent(12288, 1)
     );
-    let work = batch.finish();
-    assert_eq!(work.indexed_extents, 1);
-    assert_eq!(work.restored_extents, 2);
+    batch.finish();
     assert_eq!(
         space.admitted_snapshot().sections().collect::<Vec<_>>(),
         [
@@ -427,7 +420,9 @@ fn aggregate_returns_keep_current_threshold_admission_inside_a_batch(
 #[rstest]
 #[case::empty(&[])]
 #[case::single(&[(10, 8)])]
-fn returning_batches_keep_one_index_as_free_space_grows(#[case] initial: &[(u64, u64)]) {
+fn returning_batches_preserve_added_space_and_allocation_remainders(
+    #[case] initial: &[(u64, u64)],
+) {
     let mut space = flat(initial);
     let mut batch = space.reservation_batch_with_returns(3);
     assert!(batch.release_aggregate(StoredAddress::new(1000), extent(100, 32)));
@@ -436,17 +431,7 @@ fn returning_batches_keep_one_index_as_free_space_grows(#[case] initial: &[(u64,
         batch.reserve(request(16, PageType::Raw)).unwrap().extent(),
         extent(100, 16)
     );
-    let work = batch.finish();
-    assert_eq!(work.indexed_extents, u64::try_from(initial.len()).unwrap());
-    assert_eq!(
-        work.inserted_extents,
-        u64::try_from(initial.len()).unwrap() + 3
-    );
-    assert_eq!(work.removed_extents, 1);
-    assert_eq!(
-        work.restored_extents,
-        u64::try_from(initial.len()).unwrap() + 2
-    );
+    batch.finish();
     assert_eq!(
         space.reusable_sections().collect::<Vec<_>>(),
         initial
@@ -579,7 +564,7 @@ fn block_reservations_keep_alignment_remainders_and_compact_runs(
         assert_eq!(reservation.class(), AllocationClass::Metadata);
         assert_eq!(reservation.page_type(), page_type);
     }
-    let work = batch.finish();
+    batch.finish();
     assert_eq!(
         space.reusable_sections().collect::<Vec<_>>(),
         remaining
@@ -591,9 +576,6 @@ fn block_reservations_keep_alignment_remainders_and_compact_runs(
         space.reusable_bytes().unwrap(),
         ByteLength::new(available - expected.map_or(0, |_| size))
     );
-    assert_eq!(work.indexed_extents, u64::from(count > 1));
-    assert!(work.inserted_extents <= 3, "{work:?}");
-    assert!(work.lookups <= 2, "{work:?}");
 }
 
 #[rstest]

@@ -158,7 +158,7 @@ fn deferred_reservations_keep_owned_ranges_disjoint_before_emission(
             PhysicalAddress::new(start + offsets[index])
         );
     }
-    assert_eq!(plan.finish().unwrap().indexed_extents, 0);
+    plan.finish().unwrap();
     assert_eq!(engine.image.len(), start + capacity);
     for (index, (request, offset)) in requests.iter().zip(offsets).enumerate() {
         assert_eq!(
@@ -199,11 +199,8 @@ fn later_reservation_failure_retains_the_successful_prefix() {
     );
     assert!(plan.unresolved().is_none());
     assert_eq!(plan.end(), PhysicalAddress::new(end));
-    assert_eq!(plan.work().indexed_extents, 2);
     plan.write_next(&[17; 64]).unwrap();
-    let work = plan.finish().unwrap();
-    assert_eq!(work.indexed_extents, 2);
-    assert_eq!(work.restored_extents, 2);
+    plan.finish().unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         [extent(start + 64, 64), extent(start + 256, 128)]
@@ -331,7 +328,6 @@ fn aggregate_spare_admission_is_available_to_later_batch_requests(
             start + 500
         }
     );
-    assert_eq!(plan.work().indexed_extents, if seed { 2 } else { 1 });
     plan.write_next(&[7; 149]).unwrap();
     plan.write_next(&vec![11; if seed { 148 } else { 48 }])
         .unwrap();

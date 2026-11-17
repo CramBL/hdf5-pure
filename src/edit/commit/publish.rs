@@ -11,8 +11,6 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
 use hdf5_pure_space::__private as free_space;
-#[cfg(test)]
-use hdf5_pure_space::__private::ReservationWork;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;
 use hdf5_pure_space::__private::{
@@ -840,7 +838,6 @@ impl WriteEngine {
         #[cfg(test)]
         observations::record_width_reservations(
             1,
-            ReservationWork::default(),
             final_eof.get().saturating_sub(self.image.len()),
         );
         // The extension and manager blocks remain unreferenced until superblock publication.
@@ -1196,7 +1193,7 @@ impl WriteEngine {
                 let mut batch = self.space.reservation_batch(1);
                 observations::record_allocation_probe();
                 let reserved = batch.reserve(tail.reservation_request());
-                observations::record_width_reservations(1, batch.work(), 0);
+                observations::record_width_reservations(1, 0);
                 reserved
             };
             #[cfg(not(test))]
@@ -1214,7 +1211,6 @@ impl WriteEngine {
             #[cfg(test)]
             observations::record_width_reservations(
                 1,
-                ReservationWork::default(),
                 final_eof.get().saturating_sub(self.image.len()),
             );
             self.begin_page(PageType::Meta)?;
