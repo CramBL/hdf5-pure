@@ -308,10 +308,7 @@ pub(in crate::edit) fn open_counted_engine_with_bytes(
 /// # Panics
 ///
 /// Panics if the fixture cannot be opened for editing.
-pub(in crate::edit) fn open_observed_engine(
-    path: &Path,
-    reads: Arc<Mutex<Vec<FileRange>>>,
-) -> WriteEngine {
+pub(crate) fn open_observed_engine(path: &Path, reads: Arc<Mutex<Vec<FileRange>>>) -> WriteEngine {
     WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
         Ok(Box::new(
             CountingImage::new(
