@@ -24,6 +24,10 @@ const GROUP_LIMIT: usize = 64;
 #[case::exceeded_byte_limit(Residual::Bytes(Boundary::Exceeded))]
 #[case::exact_group_limit(Residual::Groups(Boundary::Exact))]
 #[case::exceeded_group_limit(Residual::Groups(Boundary::Exceeded))]
+#[case::group_chain(Residual::Links(GroupLinks::Chain))]
+#[case::group_cycle(Residual::Links(GroupLinks::Cycle))]
+#[case::cycle_to_removed_owner(Residual::Links(GroupLinks::CycleToRemovedOwner))]
+#[case::group_interior(Residual::Links(GroupLinks::Interior))]
 fn residual_group_limits_and_refusals_preserve_public_editing(
     #[case] residual: Residual,
     #[values(false, true)] reconstruct: bool,
@@ -33,6 +37,7 @@ fn residual_group_limits_and_refusals_preserve_public_editing(
     let source = ResidualSource::write(&path, residual);
     let before = fs::read(&path).unwrap();
     source.assert_layout(&before, residual);
+    let keeps_old_keeper = !reconstruct || !residual.reaches_removed_owner();
     let file = File::open_rw_with_options(
         &path,
         FileAccessProperties::new().with_memory_strategy(memory),
@@ -63,8 +68,11 @@ fn residual_group_limits_and_refusals_preserve_public_editing(
         residual.retires_parent()
     );
     assert_excluded(&file, &source.residual);
-    if !reconstruct || !matches!(residual, Residual::Gone) {
+    if keeps_old_keeper {
         assert_excluded(&file, &source.keeper);
+    }
+    if residual.reaches_removed_owner() {
+        assert_excluded(&file, &source.removed);
     }
     if !residual.retires_parent() {
         assert_excluded(&file, &bytes_range(parent.clone()));
@@ -73,8 +81,11 @@ fn residual_group_limits_and_refusals_preserve_public_editing(
     file.commit().unwrap();
     assert!(!file.has_staged_edits());
     assert_excluded(&file, &source.residual);
-    if !reconstruct || !matches!(residual, Residual::Gone) {
+    if keeps_old_keeper {
         assert_excluded(&file, &source.keeper);
+    }
+    if residual.reaches_removed_owner() {
+        assert_excluded(&file, &source.removed);
     }
     if !residual.retires_parent() {
         assert_excluded(&file, &bytes_range(parent.clone()));
@@ -85,10 +96,16 @@ fn residual_group_limits_and_refusals_preserve_public_editing(
         &after[source.residual.clone()],
         &before[source.residual.clone()]
     );
-    if !reconstruct || !matches!(residual, Residual::Gone) {
+    if keeps_old_keeper {
         assert_eq!(
             &after[source.keeper.clone()],
             &before[source.keeper.clone()]
+        );
+    }
+    if residual.reaches_removed_owner() {
+        assert_eq!(
+            &after[source.removed.clone()],
+            &before[source.removed.clone()]
         );
     }
     if !residual.retires_parent() {
@@ -134,19 +151,66 @@ enum Residual {
     Unresolved,
     Bytes(Boundary),
     Groups(Boundary),
+    Links(GroupLinks),
 }
 
 impl Residual {
+    fn reaches_removed_owner(self) -> bool {
+        matches!(
+            self,
+            Self::Gone | Self::Links(GroupLinks::CycleToRemovedOwner)
+        )
+    }
+
     fn retires_parent(self) -> bool {
         matches!(
             self,
-            Self::Keep | Self::Bytes(Boundary::Exact) | Self::Groups(Boundary::Exact)
+            Self::Keep
+                | Self::Bytes(Boundary::Exact)
+                | Self::Groups(Boundary::Exact)
+                | Self::Links(GroupLinks::Chain | GroupLinks::Cycle)
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GroupLinks {
+    Chain,
+    Cycle,
+    CycleToRemovedOwner,
+    Interior,
+}
+
+impl GroupLinks {
+    fn encode(self, start: usize, owner: u64) -> (Vec<u8>, usize) {
+        let group = |links: &[Message]| {
+            v2::Header::new()
+                .messages(group_info::compact_messages(links))
+                .build()
+        };
+        let first_length = group(&[global_heap_fixture::hard_link("next", 0)]).len();
+        let second_address = u64::try_from(start + first_length).unwrap();
+        let target = match self {
+            Self::Chain | Self::Cycle | Self::CycleToRemovedOwner => second_address,
+            Self::Interior => second_address + 1,
+        };
+        let mut bytes = group(&[global_heap_fixture::hard_link("next", target)]);
+        assert_eq!(bytes.len(), first_length);
+        let mut links = vec![global_heap_fixture::hard_link("child", owner)];
+        if matches!(self, Self::Cycle | Self::CycleToRemovedOwner) {
+            links.push(global_heap_fixture::hard_link(
+                "back",
+                u64::try_from(start).unwrap(),
+            ));
+        }
+        bytes.extend(group(&links));
+        (bytes, first_length)
     }
 }
 
 struct ResidualSource {
     parent: u64,
+    removed: Range<usize>,
     keeper: Range<usize>,
     residual: Range<usize>,
     group_length: usize,
@@ -162,6 +226,7 @@ impl ResidualSource {
             &global_heap_fixture::reference(7, parent, 7),
         );
         let gone = source.append_header(messages);
+        let removed = usize::try_from(gone).unwrap()..source.image.as_bytes().len();
         source.link("gone", gone);
         let messages = Form::CompactDataset.messages(
             &mut source,
@@ -172,13 +237,13 @@ impl ResidualSource {
         let keeper = usize::try_from(keep).unwrap()..source.image.as_bytes().len();
         source.link("keep", keep);
         let target = match residual {
-            Residual::Gone => gone,
+            Residual::Gone | Residual::Links(GroupLinks::CycleToRemovedOwner) => gone,
             Residual::Unresolved => u64::MAX - 1,
             _ => keep,
         };
         let mut messages =
             group_info::compact_messages(&[global_heap_fixture::hard_link("child", target)]);
-        let group_length = v2::Header::new().messages(messages.clone()).build().len();
+        let mut group_length = v2::Header::new().messages(messages.clone()).build().len();
         if matches!(residual, Residual::Unsupported) {
             messages.push(Message::new(MessageType(0x7f), &[]));
         }
@@ -193,6 +258,7 @@ impl ResidualSource {
             }
             Residual::Bytes(boundary) => bytes.resize(boundary.value(BYTE_LIMIT), 0),
             Residual::Groups(boundary) => bytes = bytes.repeat(boundary.value(GROUP_LIMIT)),
+            Residual::Links(links) => (bytes, group_length) = links.encode(keeper.end, target),
             _ => {}
         }
         let start = source.image.append(&bytes);
@@ -200,6 +266,7 @@ impl ResidualSource {
         source.write(path);
         Self {
             parent,
+            removed,
             keeper,
             residual: range,
             group_length,
@@ -221,6 +288,10 @@ impl ResidualSource {
                 assert_eq!(chunks.len(), boundary.value(GROUP_LIMIT));
                 assert!(chunks.all(|chunk| chunk == &stored[..self.group_length]));
                 assert!(chunks.remainder().is_empty());
+            }
+            Residual::Links(_) => {
+                assert_eq!(&stored[..4], b"OHDR");
+                assert_eq!(&stored[self.group_length..self.group_length + 4], b"OHDR");
             }
             _ => {}
         }
