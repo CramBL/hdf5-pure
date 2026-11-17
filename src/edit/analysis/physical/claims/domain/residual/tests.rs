@@ -85,7 +85,7 @@ use crate::object_graph::ObjectId;
 #[case::unknown_message(Shape::Unknown, false)]
 #[case::malformed_header(Shape::Malformed, false)]
 #[case::legacy_header(Shape::Legacy, false)]
-#[case::residual_target(Shape::SelfLink, false)]
+#[case::self_link(Shape::SelfLink, true)]
 #[case::unresolved_target(Shape::Unresolved, false)]
 fn residual_groups_preserve_original_descendants_within_limits(
     #[case] shape: Shape,
@@ -113,7 +113,12 @@ fn residual_groups_preserve_original_descendants_within_limits(
             .build(),
         Shape::Malformed => b"OHDR\x02".to_vec(),
         Shape::Legacy => v1::Header::new().messages(records(branch)).build(),
-        Shape::SelfLink => encoded(residual),
+        Shape::SelfLink => Header::new()
+            .messages(compact_messages(&[
+                hard_link("branch", branch),
+                hard_link("self", residual),
+            ]))
+            .build(),
         Shape::Unresolved => encoded(residual + 1),
     };
     fixture.image.append(&bytes);
