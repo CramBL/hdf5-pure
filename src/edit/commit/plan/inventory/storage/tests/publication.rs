@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use hdf5_pure_core::__private::{ByteLength, FileRange};
-use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_core::{EditStorageConflict, PhysicalAddress};
 use hdf5_pure_space::__private::{
     AllocationClass, Extent, FreeClass, ManagerKind, ReturnedExtents, SessionSpace,
 };
@@ -13,8 +13,7 @@ use rstest::rstest;
 use test_util::disk_log::{self, DiskOp, FailurePoint, IoEvent, IoOutcome, Recording};
 
 use super::super::{
-    OriginalStorage, PendingEditInventory, SpaceClaim, StorageApplyFailure, StorageConflict,
-    StoragePublicationFailure, StoragePublicationRejection, StorageUnavailable,
+    OriginalStorage, PendingEditInventory, SpaceClaim, StorageConflict, StorageUnavailable,
 };
 use crate::edit::commit::plan::inventory::AppliedEditInventory;
 use crate::edit::commit::plan::inventory::dispositions::{PlacementError, TransitionWithheld};
@@ -77,7 +76,7 @@ fn owned_publication_preserves_original_storage_until_actual_completion(
             Ok(())
         });
     if let Err(error) = result {
-        panic_failure(*error);
+        panic!("unexpected publication failure: {error:?}");
     }
     let recording = disk_log::finish();
     let publications = recording
@@ -105,13 +104,12 @@ fn owned_publication_preserves_original_storage_until_actual_completion(
 }
 
 #[test]
-fn publication_rechecks_current_claims_and_retains_the_authentic_pending_batch() {
+fn publication_rechecks_current_claims_before_writing() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("current.h5");
     let mut engine = fixture(&path, Strategy::PagePersistent, false);
     let pending = apply(&mut engine);
     let allocation = pending.storage.allocations()[0];
-    let retired = pending.pending.batch.entries().to_vec();
     let extent = Extent::new(
         pending
             .engine
@@ -134,23 +132,19 @@ fn publication_rechecks_current_claims_and_retains_the_authentic_pending_batch()
         })
         .err()
         .unwrap();
-    let StoragePublicationFailure::BeforePublication { pending, reason } = *failure else {
-        panic!("expected a retained pending batch")
+    let Error::EditStorageConflict(EditStorageConflict::Overlap { first, second }) = failure else {
+        panic!("expected an overlapping allocator claim");
     };
-    assert!(
-        matches!(reason, StoragePublicationRejection::Exclusion),
-        "{reason:?}"
+    assert_eq!(
+        (first, second),
+        (allocation.range.range(), allocation.range.range())
     );
-    assert!(
-        matches!(pending.exclusion(), Err(StorageConflict::Overlap { allocation: actual, .. }) if *actual == allocation)
-    );
-    assert_eq!(pending.pending.batch.entries(), retired);
-    assert_eq!(pending.engine.disk_bytes().unwrap(), bytes);
+    assert_eq!(engine.disk_bytes().unwrap(), bytes);
     assert!(disk_log::finish().events.is_empty());
 }
 
 #[test]
-fn publication_retains_pending_inputs_when_placement_reconciliation_is_incomplete() {
+fn incomplete_placement_reconciliation_prevents_publication() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("placement.h5");
     let mut engine = fixture(&path, Strategy::Flat, false);
@@ -165,8 +159,7 @@ fn publication_retains_pending_inputs_when_placement_reconciliation_is_incomplet
         pending.dispositions.replacements().unwrap_err(),
         &TransitionWithheld::Placement(PlacementError::Source(ObjectPathBuf::root()))
     );
-    let root = pending.pending.root;
-    let entries = pending.pending.batch.entries().to_vec();
+    let root = pending.engine.superblock().root_group_address;
     let bytes = pending.engine.disk_bytes().unwrap();
     disk_log::start();
     let failure = pending
@@ -175,16 +168,15 @@ fn publication_retains_pending_inputs_when_placement_reconciliation_is_incomplet
         })
         .err()
         .unwrap();
-    let StoragePublicationFailure::BeforePublication { pending, reason } = *failure else {
-        panic!("expected retained pending inputs")
+    let Error::EditUnsupported(reason) = failure else {
+        panic!("expected publication to reject incomplete placement");
     };
-    assert!(
-        matches!(reason, StoragePublicationRejection::Placement),
-        "{reason:?}"
+    assert_eq!(
+        reason,
+        "original predecessor replacement cannot be established"
     );
-    assert_eq!(pending.pending.root, root);
-    assert_eq!(pending.pending.batch.entries(), entries);
-    assert_eq!(pending.engine.disk_bytes().unwrap(), bytes);
+    assert_eq!(engine.superblock().root_group_address, root);
+    assert_eq!(engine.disk_bytes().unwrap(), bytes);
     assert!(disk_log::finish().events.is_empty());
 }
 
@@ -324,7 +316,7 @@ fn aggregate_surrender_rejects_protected_spare_before_ownership_changes() {
 #[case::tail_recycle(Failure::TailRecycle)]
 #[case::root_copy(Failure::RootCopy)]
 #[case::truncation(Failure::Truncation)]
-fn publication_failure_retains_original_facts_without_completion(#[case] failure: Failure) {
+fn publication_failure_preserves_protected_bytes_without_completion(#[case] failure: Failure) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("failure.h5");
     let strategy = match failure {
@@ -345,7 +337,7 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
     let pending = apply(&mut engine);
     disk_log::start();
     if let Err(error) = pending.publish_with_completion(|_, _, _, _, _, _| Ok(())) {
-        panic_failure(*error);
+        panic!("unexpected publication failure: {error:?}");
     }
     let recording = disk_log::finish();
     let writes = recording
@@ -379,7 +371,6 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
     fs::write(&path, initial).unwrap();
     let mut engine = stage(&path);
     let pending = apply(&mut engine);
-    let requested = pending.pending.root;
     let protected = preserved(pending.engine, &pending.storage);
     let called = Cell::new(false);
     disk_log::start();
@@ -393,19 +384,8 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
         Ok(())
     });
     let recording = disk_log::finish();
-    let StoragePublicationFailure::Publication {
-        original,
-        dispositions,
-        storage,
-        collections: _,
-        prospective: _,
-        error,
-    } = *result.err().unwrap()
-    else {
-        panic!("expected publication failure")
-    };
-    let PublicationError::Write(Error::Io(error)) = error else {
-        panic!("expected injected I/O failure, got {error:?}")
+    let Err(Error::Io(error)) = result else {
+        panic!("expected an injected publication I/O failure");
     };
     assert_eq!(error.kind(), ErrorKind::Other);
     assert_eq!(
@@ -417,12 +397,22 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
         }
     );
     assert!(!called.get());
-    assert!(original.facts().unwrap().counts().changes().is_empty());
-    assert_eq!(
-        dispositions.replacements().unwrap(),
-        &BTreeMap::from([(ObjectId::new(old_root), ObjectId::new(requested))])
-    );
-    assert_eq!(preserved(&engine, &storage), protected);
+    let reusable = engine.reusable_free_sections().unwrap();
+    for (address, expected) in protected {
+        let end = address.get() + u64::try_from(expected.len()).unwrap();
+        assert!(
+            reusable.sections().iter().all(|section| {
+                section.end_address() <= address || section.address().get() >= end
+            })
+        );
+        assert_eq!(
+            engine
+                .image()
+                .read_exact_at(address.get(), expected.len())
+                .unwrap(),
+            expected
+        );
+    }
     assert_eq!(
         engine.publication,
         match failure {
@@ -441,13 +431,6 @@ fn publication_failure_retains_original_facts_without_completion(#[case] failure
             }
         )));
     }
-    storage
-        .exclude_publication(
-            &engine,
-            &ReturnedExtents::default(),
-            TailPlacement::Anywhere,
-        )
-        .unwrap();
 }
 
 #[test]
@@ -625,16 +608,7 @@ fn constrained_reference_update_failure_prevents_completion_after_root_publicati
 }
 
 fn apply(engine: &mut WriteEngine) -> PendingEditInventory<'_> {
-    match super::prepare(engine).apply_excluding(engine) {
-        Ok(pending) => pending,
-        Err(StorageApplyFailure::BeforePlacement { prepared, error }) => panic!(
-            "unexpected application rejection: {error:?}, {:?}",
-            prepared.storage().unavailable()
-        ),
-        Err(StorageApplyFailure::Application(error)) => {
-            panic!("unexpected application error: {error:?}")
-        }
-    }
+    super::prepare(engine).apply_excluding(engine).unwrap()
 }
 
 fn fixture(path: &Path, strategy: Strategy, references: bool) -> WriteEngine {
@@ -739,17 +713,6 @@ fn assert_intermediate_bounds(recording: &Recording, maximum: PhysicalAddress) {
         .collect::<Vec<_>>();
     assert!(!ends.is_empty());
     assert!(ends.iter().all(|end| *end >= maximum.get()), "{ends:?}");
-}
-
-fn panic_failure(failure: StoragePublicationFailure<'_>) -> ! {
-    match failure {
-        StoragePublicationFailure::BeforePublication { reason, .. } => {
-            panic!("unexpected prepublication rejection: {reason:?}")
-        }
-        StoragePublicationFailure::Publication { error, .. } => {
-            panic!("unexpected publication error: {error:?}")
-        }
-    }
 }
 
 #[derive(Clone, Copy)]

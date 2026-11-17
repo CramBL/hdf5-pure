@@ -4,13 +4,18 @@ use std::path::Path;
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileLocking;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
 use hdf5_pure::FreeSections;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PhysicalAddress;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
@@ -21,6 +26,7 @@ use test_util::global_heap::Object;
 use test_util::group_info;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType;
+use test_util::object_header::v2;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
@@ -28,6 +34,331 @@ use test_util_hdf5::global_heap_fixture;
 use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
 use test_util_hdf5::paged;
+
+#[rstest]
+fn damaged_collection_does_not_release_a_residual_groups_predecessor(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let mut fixture = Fixture::new();
+    let damaged = fixture.collection(&[Object::new(7, b"broken")]);
+    fixture.image.place(
+        usize::try_from(damaged).unwrap() + global_heap::VERSION_OFFSET,
+        &[2],
+    );
+    let victim = fixture.collection(&[Object::new(7, b"removed")]);
+    for (name, parent, length) in [("damaged", damaged, 6), ("victim", victim, 7)] {
+        let messages = Form::CompactDataset.messages(
+            &mut fixture,
+            &global_heap_fixture::vlen_string(),
+            &global_heap_fixture::reference(length, parent, 7),
+        );
+        fixture.object(name, messages);
+    }
+    let messages = Form::CompactDataset.messages(
+        &mut fixture,
+        &hdf5_pure::make_i32_type(),
+        &17_i32.to_le_bytes(),
+    );
+    let keeper = fixture.append_header(messages);
+    fixture.link("keeper", keeper);
+    let header_end = u64::try_from(fixture.image.as_bytes().len()).unwrap();
+    let group = v2::Header::new()
+        .messages(group_info::compact_messages(&[
+            global_heap_fixture::hard_link("child", keeper),
+        ]))
+        .build();
+    let residual = u64::try_from(fixture.image.append(&group)).unwrap();
+    let residual_end = u64::try_from(fixture.image.as_bytes().len()).unwrap();
+    assert_eq!(header_end, residual);
+    let damaged_end = damaged + u64::try_from(global_heap::MIN_COLLECTION_SIZE).unwrap();
+    let protected = [
+        damaged..damaged_end,
+        keeper..header_end,
+        residual..residual_end,
+    ];
+    let path = temp::temp_path("damaged-collection-residual-keeper.h5");
+    fixture.write(&path);
+
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Disabled)
+            .with_memory_strategy(memory),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &before[usize::try_from(residual).unwrap()..usize::try_from(residual_end).unwrap()],
+        group
+    );
+    assert!(matches!(
+        file.dataset("damaged").unwrap().read_string(),
+        Err(Error::Format(FormatError::InvalidGlobalHeapVersion(2)))
+    ));
+    assert_eq!(
+        file.dataset("victim").unwrap().read_string().unwrap(),
+        ["removed"]
+    );
+    assert_eq!(file.dataset("keeper").unwrap().read_i32().unwrap(), [17]);
+
+    file.root().delete("victim").unwrap();
+    file.dataset("keeper")
+        .unwrap()
+        .set_attr("a", AttrValue::I64(9))
+        .unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    let after = std::fs::read(&path).unwrap();
+    for range in &protected {
+        assert_kept(&file, range);
+        let bytes = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+        assert_eq!(&after[bytes.clone()], &before[bytes]);
+    }
+
+    let raw = [31; 256];
+    file.root()
+        .create_dataset("added", |dataset| {
+            dataset.with_u8_data(&raw);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    let placed = file_space::contiguous_extent(&file, "added");
+    for range in &protected {
+        assert_kept(&file, range);
+        assert!(placed.end <= range.start || range.end <= placed.start);
+    }
+    file.close().unwrap();
+    let after = std::fs::read(&path).unwrap();
+    for range in protected {
+        let bytes = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+        assert_eq!(&after[bytes.clone()], &before[bytes]);
+    }
+    let file = File::open(&path).unwrap();
+    let mut datasets = file.root().datasets().unwrap();
+    datasets.sort();
+    assert_eq!(datasets, ["added", "damaged", "keeper"]);
+    assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), raw);
+    assert!(matches!(
+        file.dataset("damaged").unwrap().read_string(),
+        Err(Error::Format(FormatError::InvalidGlobalHeapVersion(2)))
+    ));
+    let keeper = file.dataset("keeper").unwrap();
+    assert_eq!(keeper.read_i32().unwrap(), [17]);
+    assert_eq!(keeper.attrs().unwrap()["a"], AttrValue::I64(9));
+}
+
+#[rstest]
+fn partial_append_retires_the_original_tail_with_complete_release_evidence(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let source = partial_append_source();
+    let path = temp::temp_path("captured-partial-append.h5");
+    source.fixture.write(&path);
+    let before = std::fs::read(&path).unwrap();
+    let file = append_to_partial_chunk(&path, memory, &before, &source.tail);
+
+    let protected = [minimum_collection(source.neighbor)];
+    assert_protected_bytes(&file, &path, &before, &protected);
+    assert_reclaimed(&file, &source.tail);
+
+    let file = append_followup_dataset(file, &path, &before, &protected);
+    assert_eq!(
+        file.dataset("neighbor").unwrap().read_string().unwrap(),
+        ["nearby"]
+    );
+}
+
+#[rstest]
+fn partial_append_preserves_the_original_tail_when_release_evidence_is_unavailable(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let mut source = partial_append_source();
+    source.fixture.image.place(
+        usize::try_from(source.neighbor).unwrap() + global_heap::VERSION_OFFSET,
+        &[2],
+    );
+    let keeper = source.keeper;
+    let group = v2::Header::new()
+        .messages(group_info::compact_messages(&[
+            global_heap_fixture::hard_link("child", keeper.start),
+        ]))
+        .build();
+    let residual = u64::try_from(source.fixture.image.append(&group)).unwrap();
+    let residual_end = u64::try_from(source.fixture.image.as_bytes().len()).unwrap();
+    let path = temp::temp_path("captured-partial-append.h5");
+    source.fixture.write(&path);
+    let before = std::fs::read(&path).unwrap();
+    let file = append_to_partial_chunk(&path, memory, &before, &source.tail);
+
+    let protected = [
+        minimum_collection(source.neighbor),
+        keeper,
+        residual..residual_end,
+        source.tail,
+    ];
+    assert_protected_bytes(&file, &path, &before, &protected);
+
+    let file = append_followup_dataset(file, &path, &before, &protected);
+    assert!(matches!(
+        file.dataset("neighbor").unwrap().read_string(),
+        Err(Error::Format(FormatError::InvalidGlobalHeapVersion(2)))
+    ));
+}
+
+struct PartialAppendSource {
+    fixture: Fixture,
+    neighbor: u64,
+    keeper: Range<u64>,
+    tail: Range<u64>,
+}
+
+fn partial_append_source() -> PartialAppendSource {
+    let mut fixture = Fixture::new();
+    let neighbor = fixture.collection(&[Object::new(7, b"nearby")]);
+    let retired_heap = fixture.collection(&[Object::new(7, b"removed")]);
+    for (name, parent, length) in [("neighbor", neighbor, 6), ("victim", retired_heap, 7)] {
+        let messages = Form::CompactDataset.messages(
+            &mut fixture,
+            &global_heap_fixture::vlen_string(),
+            &global_heap_fixture::reference(length, parent, 7),
+        );
+        fixture.object(name, messages);
+    }
+
+    let original_chunk = [17_i32, 18, 0, 0].map(i32::to_le_bytes).concat();
+    let tail = u64::try_from(fixture.image.append(&original_chunk)).unwrap();
+    let tail_end = tail + u64::try_from(original_chunk.len()).unwrap();
+    let messages = Form::CompactDataset.messages(
+        &mut fixture,
+        &hdf5_pure::make_i32_type(),
+        &23_i32.to_le_bytes(),
+    );
+    fixture.object("anchor", messages);
+    let mut messages = global_heap_fixture::dataset_messages(
+        &hdf5_pure::make_i32_type(),
+        &dataspace::v2(
+            1,
+            dataspace::Flags::MAX_DIMS,
+            dataspace::Kind::SIMPLE,
+            &[2],
+            Some(&[4]),
+        ),
+    );
+    messages.push(Message::new(
+        MessageType::DATA_LAYOUT,
+        &data_layout::single_chunk(Widths::EIGHT, None, Some(tail)),
+    ));
+    let keeper = fixture.append_header(messages);
+    fixture.link("keeper", keeper);
+    let keeper_end = u64::try_from(fixture.image.as_bytes().len()).unwrap();
+    PartialAppendSource {
+        fixture,
+        neighbor,
+        keeper: keeper..keeper_end,
+        tail: tail..tail_end,
+    }
+}
+
+fn append_to_partial_chunk(
+    path: &Path,
+    memory: MemoryStrategy,
+    before: &[u8],
+    original_tail: &Range<u64>,
+) -> File {
+    let tail = original_tail.start;
+    let tail_end = original_tail.end;
+    let file = File::open_rw_with_options(
+        path,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Disabled)
+            .with_memory_strategy(memory),
+    )
+    .unwrap();
+    let original_chunk = [17_i32, 18, 0, 0].map(i32::to_le_bytes).concat();
+    assert_eq!(&before[tail as usize..tail_end as usize], original_chunk);
+    let [original]: [Range<u64>; 1] = file_space::raw_extents(&file, "keeper").try_into().unwrap();
+    assert_eq!(original, tail..tail_end);
+    assert_eq!(
+        file.dataset("keeper").unwrap().read_i32().unwrap(),
+        [17, 18]
+    );
+    assert_eq!(
+        file.dataset("victim").unwrap().read_string().unwrap(),
+        ["removed"]
+    );
+
+    file.root().delete("victim").unwrap();
+    file.dataset("keeper")
+        .unwrap()
+        .append_staged(|append| {
+            append.append_i32(&[19]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    let [placed]: [Range<u64>; 1] = file_space::raw_extents(&file, "keeper").try_into().unwrap();
+    assert!(placed.end <= tail || tail_end <= placed.start);
+    let after = std::fs::read(path).unwrap();
+    let replacement = [17_i32, 18, 19, 0].map(i32::to_le_bytes).concat();
+    assert_eq!(
+        &after[placed.start as usize..placed.end as usize],
+        replacement
+    );
+    file
+}
+
+fn assert_protected_bytes(file: &File, path: &Path, before: &[u8], protected: &[Range<u64>]) {
+    let after = std::fs::read(path).unwrap();
+    for range in protected {
+        assert_kept(file, range);
+        let bytes = range.start as usize..range.end as usize;
+        assert_eq!(&after[bytes.clone()], &before[bytes]);
+    }
+}
+
+fn append_followup_dataset(
+    file: File,
+    path: &Path,
+    before: &[u8],
+    protected: &[Range<u64>],
+) -> File {
+    let raw = [31_u8; 16];
+    file.root()
+        .create_dataset("added", |dataset| {
+            dataset.with_u8_data(&raw);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let added = file_space::contiguous_extent(&file, "added");
+    for range in protected {
+        assert_kept(&file, range);
+        assert!(added.end <= range.start || range.end <= added.start);
+    }
+    file.close().unwrap();
+    let after = std::fs::read(path).unwrap();
+    for range in protected {
+        let bytes = range.start as usize..range.end as usize;
+        assert_eq!(&after[bytes.clone()], &before[bytes]);
+    }
+
+    let file = File::open(path).unwrap();
+    assert_eq!(
+        file.dataset("keeper").unwrap().read_i32().unwrap(),
+        [17, 18, 19]
+    );
+    assert_eq!(file.dataset("anchor").unwrap().read_i32().unwrap(), [23]);
+    assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), raw);
+    assert!(
+        !file
+            .root()
+            .datasets()
+            .unwrap()
+            .iter()
+            .any(|name| name == "victim")
+    );
+    file
+}
 
 #[rstest]
 #[case::contiguous_dataset(Written::Contiguous)]
@@ -79,13 +410,18 @@ fn the_collections_of_each_kind_of_reference_are_reclaimed_and_reused_for_raw_da
     #[case] slots: &[usize],
 ) {
     let mut fixture = Fixture::new();
+    let count = if matches!(form, Form::FillValue) {
+        1
+    } else {
+        2
+    };
+    let objects = [Object::new(1, b"alpha"), Object::new(2, b"beta")];
     let collections: Vec<u64> = slots
         .iter()
-        .map(|_| fixture.collection(&[Object::new(1, b"alpha"), Object::new(2, b"beta")]))
+        .map(|_| fixture.collection(&objects[..count]))
         .collect();
     let mut element = vec![0; datatype.type_size() as usize];
-    let elements: Vec<u8> = [1, 2]
-        .into_iter()
+    let elements: Vec<u8> = (1..=u32::try_from(count).unwrap())
         .flat_map(|index| {
             for (&slot, &collection) in slots.iter().zip(&collections) {
                 element[slot..slot + global_heap_fixture::REFERENCE_SIZE]
@@ -315,12 +651,8 @@ fn deleting_one_of_two_hard_links_keeps_the_collection() {
     );
 }
 
-#[rstest]
-#[case::object_references(Unreadable::ObjectReferences)]
-#[case::data_past_the_end_of_the_file(Unreadable::DataPastTheEndOfTheFile)]
-fn a_remaining_object_the_analysis_cannot_read_keeps_every_collection(
-    #[case] unreadable: Unreadable,
-) {
+#[test]
+fn a_detached_group_keeps_a_deleted_groups_descendant_allocations() {
     let mut fixture = Fixture::new();
     let collection = fixture.collection(&[Object::new(1, b"alpha")]);
     let messages = Form::ContiguousDataset.messages(
@@ -328,9 +660,49 @@ fn a_remaining_object_the_analysis_cannot_read_keeps_every_collection(
         &global_heap_fixture::vlen_string(),
         &global_heap_fixture::reference(5, collection, 1),
     );
-    fixture.object("x", messages);
-    fixture.object("unreadable", unreadable.messages());
-    kept_dataset(&mut fixture);
+    let dataset = fixture.append_header(messages);
+    let child = fixture.append_header(group_info::compact_messages(&[
+        global_heap_fixture::hard_link("strings", dataset),
+    ]));
+    let group = fixture.append_header(group_info::compact_messages(&[
+        global_heap_fixture::hard_link("child", child),
+    ]));
+    fixture.link("g", group);
+    fixture.append_header(group_info::compact_messages(&[
+        global_heap_fixture::hard_link("original", group),
+    ]));
+    let end = fixture.image.as_bytes().len();
+    let kept = kept_dataset(&mut fixture);
+    let path = temp::temp_path("reclaim_detached_group.h5");
+    fixture.write(&path);
+    let before = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("g/child/strings")
+            .unwrap()
+            .read_string()
+            .unwrap(),
+        ["alpha"]
+    );
+
+    file.root().delete("g").unwrap();
+    file.commit().unwrap();
+
+    // These allocations are contiguous in the fixture, from the heap through the detached header.
+    assert_kept(&file, &(collection..u64::try_from(end).unwrap()));
+    file.close().unwrap();
+    let range = usize::try_from(collection).unwrap()..end;
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(&after[range.clone()], &before[range]);
+    let file = File::open(&path).unwrap();
+    assert!(file.root().groups().unwrap().is_empty());
+    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), kept);
+    file.close().unwrap();
+}
+
+#[test]
+fn remaining_object_references_preserve_the_source_collection() {
+    let (fixture, collection) = remaining_references_source(Unreadable::ObjectReferences);
     let path = temp::temp_path("reclaim_incomplete_remaining.h5");
     fixture.write(&path);
     let file = File::open_rw(&path).unwrap();
@@ -343,7 +715,40 @@ fn a_remaining_object_the_analysis_cannot_read_keeps_every_collection(
 }
 
 #[test]
-fn a_deleted_object_the_analysis_cannot_read_keeps_every_collection() {
+fn remaining_data_past_source_eof_rejects_commit_without_changing_bytes() {
+    let (fixture, collection) = remaining_references_source(Unreadable::DataPastTheEndOfTheFile);
+    let path = temp::temp_path("reclaim_incomplete_remaining.h5");
+    fixture.write(&path);
+    let original = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+
+    file.root().delete("x").unwrap();
+    assert_source_eof(
+        file.commit().unwrap_err(),
+        u64::try_from(original.len()).unwrap(),
+    );
+
+    assert_kept(&file, &minimum_collection(collection));
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+fn remaining_references_source(unreadable: Unreadable) -> (Fixture, u64) {
+    let mut fixture = Fixture::new();
+    let collection = fixture.collection(&[Object::new(1, b"alpha")]);
+    let messages = Form::ContiguousDataset.messages(
+        &mut fixture,
+        &global_heap_fixture::vlen_string(),
+        &global_heap_fixture::reference(5, collection, 1),
+    );
+    fixture.object("x", messages);
+    fixture.object("unreadable", unreadable.messages());
+    kept_dataset(&mut fixture);
+    (fixture, collection)
+}
+
+#[test]
+fn deleted_object_source_bounds_reject_commit_without_changing_bytes() {
     let mut fixture = Fixture::new();
     let collection = fixture.collection(&[Object::new(1, b"alpha")]);
     let mut messages = Form::CompactAttribute.messages(
@@ -356,13 +761,18 @@ fn a_deleted_object_the_analysis_cannot_read_keeps_every_collection() {
     kept_dataset(&mut fixture);
     let path = temp::temp_path("reclaim_incomplete_deleted.h5");
     fixture.write(&path);
+    let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
 
     file.root().delete("x").unwrap();
-    file.commit().unwrap();
+    assert_source_eof(
+        file.commit().unwrap_err(),
+        u64::try_from(original.len()).unwrap(),
+    );
 
     assert_kept(&file, &minimum_collection(collection));
     file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }
 
 #[test]
@@ -405,10 +815,7 @@ fn an_unreadable_chunk_of_the_deleted_dataset_keeps_every_collection() {
 #[rstest]
 #[case::version_2(global_heap::VERSION_OFFSET, &[2])]
 #[case::unaligned_size(global_heap::SIZE_OFFSET, &(global_heap::MIN_COLLECTION_SIZE as u64 + 4).to_le_bytes())]
-fn a_malformed_collection_is_kept_and_a_well_formed_one_reclaimed(
-    #[case] offset: usize,
-    #[case] bytes: &[u8],
-) {
+fn unsupported_parent_geometry_keeps_both_collections(#[case] offset: usize, #[case] bytes: &[u8]) {
     let mut fixture = Fixture::new();
     let malformed = fixture.collection(&[Object::new(1, b"alpha")]);
     fixture.image.place(malformed as usize + offset, bytes);
@@ -427,14 +834,39 @@ fn a_malformed_collection_is_kept_and_a_well_formed_one_reclaimed(
     kept_dataset(&mut fixture);
     let path = temp::temp_path("reclaim_malformed.h5");
     fixture.write(&path);
+    let before = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
+    let Error::Format(error) = file.dataset("x").unwrap().read_string().unwrap_err() else {
+        panic!("expected a malformed heap error");
+    };
+    assert_eq!(
+        error,
+        if offset == global_heap::VERSION_OFFSET {
+            FormatError::InvalidGlobalHeapVersion(2)
+        } else {
+            FormatError::UnalignedGlobalHeapCollection {
+                collection_address: malformed,
+                size: global_heap::MIN_COLLECTION_SIZE as u64 + 4,
+            }
+        },
+    );
 
     file.root().delete("x").unwrap();
     file.commit().unwrap();
 
-    assert_kept(&file, &minimum_collection(malformed));
-    assert_reclaimed(&file, &minimum_collection(well_formed));
+    let ranges = [
+        minimum_collection(malformed),
+        minimum_collection(well_formed),
+    ];
+    for range in &ranges {
+        assert_kept(&file, range);
+    }
     file.close().unwrap();
+    let after = std::fs::read(&path).unwrap();
+    for range in ranges {
+        let range = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+        assert_eq!(&after[range.clone()], &before[range]);
+    }
 }
 
 #[test]
@@ -554,6 +986,23 @@ impl Unreadable {
         messages.push(Message::new(MessageType::DATA_LAYOUT, &layout));
         messages
     }
+}
+
+fn assert_source_eof(error: Error, available: u64) {
+    let Error::Format(FormatError::UnexpectedSourceEof {
+        expected,
+        available: actual,
+    }) = error
+    else {
+        panic!("unexpected source-bound error: {error:?}");
+    };
+    assert_eq!(
+        expected,
+        PAST_THE_END_OF_THE_FILE
+            .checked_add(u64::try_from(global_heap_fixture::REFERENCE_SIZE).unwrap())
+            .unwrap()
+    );
+    assert_eq!(actual, available);
 }
 
 fn kept_dataset(fixture: &mut Fixture) -> Vec<u8> {

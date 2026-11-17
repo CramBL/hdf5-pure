@@ -5,7 +5,6 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_space::__private::{FreeClass, PageType};
 use rstest::rstest;
 use test_util::disk_log;
 use test_util::disk_log::IoEvent;
@@ -13,19 +12,14 @@ use test_util::global_heap::Object;
 use test_util::object_header::Message;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
-use super::super::{
-    PendingEditInventory, SpaceClaim, StorageConflict, StorageOrigin, StoragePublicationFailure,
-    StoragePublicationRejection,
-};
+use super::super::PendingEditInventory;
 use crate::AttrValue;
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationPublication;
 use crate::edit::analysis::heap::qualification::{
     MemberUnavailable, OriginalQualification, ParentUnavailable,
 };
-use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::analysis::{COLLECTION_WORK, CollectionContent, CollectionProvenance};
-use crate::edit::commit::PublicationError;
 use crate::edit::commit::heap::HeapMutationState;
 use crate::edit::commit::plan::inventory::members::MemberDecision;
 use crate::edit::test_util as edit_test_util;
@@ -88,9 +82,11 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
         decisions.parents()[&PhysicalAddress::new(parent)],
         Err(ParentUnavailable::Unmatched)
     );
-    assert_eq!(decisions.plans().len(), 1);
-    assert_eq!(decisions.plans()[0].retained(), 2);
-    let range = decisions.plans()[0].range();
+    let mut plans = decisions.plans();
+    let plan = plans.next().unwrap();
+    assert_eq!(plan.retained(), 2);
+    let range = plan.range();
+    assert!(plans.next().is_none());
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();
     let OriginalQualification::Qualified(qualification) = completion.collections.qualification()
@@ -120,6 +116,7 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
         engine.image(),
         engine.widths().lengths,
         PhysicalAddress::new(parent),
+        |_| {},
     )
     .unwrap();
     assert_eq!(contents.range(), range);
@@ -193,18 +190,8 @@ fn prospective_references_preserve_observed_members(#[case] retained: bool) {
         decisions.members().values().copied().collect::<Vec<_>>(),
         [Ok(MemberDecision::Live)]
     );
-    assert!(decisions.plans().is_empty());
-    let completion = match pending.publish_compacting_members() {
-        Ok(completion) => completion,
-        Err(failure) => match *failure {
-            StoragePublicationFailure::BeforePublication { reason, .. } => {
-                panic!("unexpected publication rejection: {reason:?}")
-            }
-            StoragePublicationFailure::Publication { error, .. } => {
-                panic!("unexpected publication failure: {error:?}")
-            }
-        },
-    };
+    assert!(decisions.plans().next().is_none());
+    let completion = pending.publish_compacting_members().unwrap();
     completion.mutation.unwrap();
 }
 
@@ -233,7 +220,7 @@ fn translated_retained_roots_preserve_their_observed_members(#[case] aliased: bo
     engine.delete(&ObjectPathBuf::parse("remove")).unwrap();
     let original = engine
         .image()
-        .read_exact_at(parent, usize::try_from(owner - parent).unwrap())
+        .read_exact_at(parent, usize::try_from(owner_end - parent).unwrap())
         .unwrap();
     let pending = super::prepare(&mut engine)
         .apply_excluding(&mut engine)
@@ -251,51 +238,29 @@ fn translated_retained_roots_preserve_their_observed_members(#[case] aliased: bo
         decisions.members().values().copied().collect::<Vec<_>>(),
         [Ok(MemberDecision::Live)]
     );
-    assert!(decisions.plans().is_empty());
-    disk_log::start();
-    let result = pending.publish_compacting_members();
-    let recording = disk_log::finish();
-    if aliased {
-        result.ok().unwrap().mutation.unwrap();
-    } else {
-        let StoragePublicationFailure::BeforePublication {
-            pending,
-            reason: StoragePublicationRejection::Exclusion,
-        } = *result.err().unwrap()
-        else {
-            panic!("expected protected retained-owner rejection");
-        };
-        let Err(StorageConflict::Overlap {
-            allocation,
-            range,
-            claim,
-        }) = pending.exclusion()
-        else {
-            panic!("expected protected header overlap");
-        };
-        assert_eq!(allocation.range, super::range(owner, owner_end - owner));
-        assert_eq!(*range, allocation.range);
-        assert_eq!(
-            allocation.origin,
-            StorageOrigin::Owner {
-                object: ObjectId::new(PhysicalAddress::new(owner)),
-                kind: AllocationKind::Header,
-            }
-        );
-        assert_eq!(
-            *claim,
-            SpaceClaim::Retirement(FreeClass::Page(PageType::Meta))
-        );
-        assert!(recording.events.is_empty());
-        assert_eq!(
-            pending
-                .engine
-                .image()
-                .read_exact_at(parent, original.len())
-                .unwrap(),
-            original
-        );
-    }
+    assert!(decisions.plans().next().is_none());
+    pending
+        .publish_compacting_members()
+        .unwrap()
+        .mutation
+        .unwrap();
+    assert!(
+        engine
+            .reusable_free_sections()
+            .unwrap()
+            .sections()
+            .iter()
+            .all(|section| {
+                section.end_address().get() <= parent || section.address().get() >= owner_end
+            })
+    );
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(parent, original.len())
+            .unwrap(),
+        original
+    );
 }
 
 #[rstest]
@@ -341,7 +306,7 @@ fn original_and_prospective_restrictions_withhold_compaction(#[case] missing: bo
             Ok(MemberDecision::Prospective)
         }
     );
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
 }
 
 #[test]
@@ -393,7 +358,7 @@ fn incomplete_prospective_interpretation_preserves_a_qualified_parent() {
         decisions.members().values().copied().collect::<Vec<_>>(),
         [Ok(MemberDecision::Prospective)]
     );
-    assert!(decisions.plans().is_empty());
+    assert!(decisions.plans().next().is_none());
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();
     assert!(!completion.prospective.is_complete());
@@ -414,10 +379,12 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batch.h5");
     let mut fixture = Fixture::new();
-    let first = fixture.collection(&[Object::new(7, b"first")]);
-    let second = fixture.collection(&[Object::new(7, b"second")]);
+    let first = fixture.collection(&[Object::new(7, b"first"), Object::new(8, b"keep one")]);
+    let second = fixture.collection(&[Object::new(7, b"second"), Object::new(8, b"keep two")]);
+    let mut live = global_heap_fixture::reference(8, first, 8);
+    live.extend(global_heap_fixture::reference(8, second, 8));
     let mut messages =
-        Form::CompactDataset.messages(&mut fixture, &crate::make_i32_type(), &1_i32.to_le_bytes());
+        Form::CompactDataset.messages(&mut fixture, &global_heap_fixture::vlen_string(), &live);
     let mut descriptors = global_heap_fixture::reference(5, first, 7);
     descriptors.extend(global_heap_fixture::reference(6, second, 7));
     messages.extend(Form::CompactAttribute.messages(
@@ -434,9 +401,13 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
         .ok()
         .unwrap();
     let decisions = pending.member_decisions();
-    assert_eq!(decisions.plans().len(), 2);
-    let second_range = decisions.plans()[1].range();
-    let second_header = decisions.plans()[1].free_space().unwrap().header_range();
+    let mut plans = decisions.plans();
+    assert_eq!(plans.next().unwrap().range().start().get(), first);
+    let second_plan = plans.next().unwrap();
+    let second_range = second_plan.range();
+    let second_header = second_plan.free_space().unwrap().header_range();
+    assert_eq!(second_range.start().get(), second);
+    assert!(plans.next().is_none());
     disk_log::start();
     let completion = pending.publish_compacting_members().ok().unwrap();
     let recording = disk_log::finish();
@@ -448,28 +419,10 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
             .values()
             .copied()
             .collect::<Vec<_>>(),
-        [Ok(MemberDecision::Remove), Ok(MemberDecision::Remove)]
+        [Ok(MemberDecision::Live), Ok(MemberDecision::Live)]
     );
-    assert!(
-        crate::global_heap::collect_members(
-            engine.image(),
-            engine.widths().lengths,
-            PhysicalAddress::new(first)
-        )
-        .unwrap()
-        .members()
-        .is_empty()
-    );
-    assert!(
-        crate::global_heap::collect_members(
-            engine.image(),
-            engine.widths().lengths,
-            PhysicalAddress::new(second)
-        )
-        .unwrap()
-        .members()
-        .is_empty()
-    );
+    assert_retained_member(&engine, first, b"keep one");
+    assert_retained_member(&engine, second, b"keep two");
     if matches!(outcome, Completion::Success) {
         return;
     }
@@ -509,11 +462,7 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
     let result = pending.publish_compacting_members();
     let recording = disk_log::finish();
     if matches!(outcome, Completion::PublicationFailure) {
-        let StoragePublicationFailure::Publication {
-            error: PublicationError::Write(Error::Io(error)),
-            ..
-        } = *result.err().unwrap()
-        else {
+        let Err(Error::Io(error)) = result else {
             panic!("expected publication I/O failure");
         };
         assert_eq!(error.kind(), ErrorKind::Other);
@@ -543,16 +492,7 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
         };
         assert_eq!(error.kind(), ErrorKind::Other);
         assert_eq!(error.to_string(), "injected disk write failure");
-        assert!(
-            crate::global_heap::collect_members(
-                engine.image(),
-                engine.widths().lengths,
-                PhysicalAddress::new(first)
-            )
-            .unwrap()
-            .members()
-            .is_empty()
-        );
+        assert_retained_member(&engine, first, b"keep one");
         assert_eq!(
             engine
                 .image()
@@ -561,6 +501,31 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
             original
         );
     }
+}
+
+fn assert_retained_member(engine: &WriteEngine, parent: u64, payload: &[u8]) {
+    let contents = crate::global_heap::collect_members(
+        engine.image(),
+        engine.widths().lengths,
+        PhysicalAddress::new(parent),
+        |_| {},
+    )
+    .unwrap();
+    let [member] = contents.members() else {
+        panic!("expected exactly one retained member");
+    };
+    assert_eq!(member.index().get(), 8);
+    let range = member.payload().range();
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(
+                range.start().get(),
+                usize::try_from(range.length()).unwrap()
+            )
+            .unwrap(),
+        payload
+    );
 }
 
 fn stage(path: &Path) -> WriteEngine {

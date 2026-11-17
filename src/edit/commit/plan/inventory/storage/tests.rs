@@ -10,8 +10,8 @@ use test_util::object_header::{Message, MessageType};
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::{
-    PendingEditInventory, SpaceClaim, StorageAllocation, StorageApplyError, StorageApplyFailure,
-    StorageConflict, StorageOrigin, StorageUnavailable,
+    PendingEditInventory, SpaceClaim, StorageAllocation, StorageConflict, StorageOrigin,
+    StorageUnavailable,
 };
 use crate::chunked_read::{ChunkInfo, StoredChunkSize};
 use crate::edit::WriteEngine;
@@ -21,11 +21,14 @@ use crate::edit::analysis::ownership::AllocationKind;
 use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
 use crate::edit::retirement::{ChunkAllocation, RootRetirement};
 use crate::edit::test_util as edit_test_util;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
-use crate::{AttrValue, FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress};
+use crate::{
+    AttrValue, EditStorageConflict, FileBuilder, FileSpacePageSize, FileSpaceStrategy,
+    PhysicalAddress,
+};
 
 mod acceptance;
 mod collections;
@@ -87,15 +90,7 @@ fn empty_counts_protect_original_payloads_even_for_reconstructed_owners(#[case] 
         });
     }
     assert_eq!(prepared.storage().allocations(), expected);
-    let pending = match prepared.apply_excluding(&mut engine) {
-        Ok(pending) => pending,
-        Err(StorageApplyFailure::BeforePlacement { error, .. }) => {
-            panic!("unexpected preplacement failure: {error:?}")
-        }
-        Err(StorageApplyFailure::Application(error)) => {
-            panic!("unexpected application error: {error:?}")
-        }
-    };
+    let pending = prepared.apply_excluding(&mut engine).unwrap();
     pending.exclusion().unwrap();
     assert_eq!(
         pending.maximum_end(),
@@ -154,26 +149,15 @@ fn allocator_exclusion_precedes_actual_placement(#[case] conflict: bool) {
     let before = engine.disk_bytes().unwrap();
     let result = prepared.apply_excluding(&mut engine);
     if conflict {
-        let StorageApplyFailure::BeforePlacement { prepared, error } = result.err().unwrap() else {
-            panic!("expected a preplacement failure");
+        let Err(Error::EditStorageConflict(EditStorageConflict::Overlap { first, second })) =
+            result
+        else {
+            panic!("expected a preplacement conflict");
         };
-        assert!(
-            matches!(error, StorageApplyError::Conflict(StorageConflict::Overlap {
-            allocation: actual, range, claim: SpaceClaim::Reusable,
-        }) if actual == allocation && range == free)
-        );
-        assert_eq!(prepared.storage().allocations()[0], allocation);
+        assert_eq!((first, second), (allocation.range.range(), free.range()));
         assert_eq!(engine.disk_bytes().unwrap(), before);
     } else {
-        let pending = match result {
-            Ok(pending) => pending,
-            Err(StorageApplyFailure::BeforePlacement { error, .. }) => {
-                panic!("unexpected preplacement failure: {error:?}")
-            }
-            Err(StorageApplyFailure::Application(error)) => {
-                panic!("unexpected application error: {error:?}")
-            }
-        };
+        let pending = result.unwrap();
         pending.exclusion().unwrap();
         let (_, placed) = AnalysisPhase::prospective(pending.engine, pending.pending.root)
             .topology()
@@ -332,7 +316,7 @@ fn failure_after_placement_preserves_application_error_ownership() {
     disk_log::fail_write_after(1, 0);
     let failure = prepared.apply_excluding(&mut engine).err().unwrap();
     let recording = disk_log::finish();
-    let StorageApplyFailure::Application(Error::Io(error)) = failure else {
+    let Error::Io(error) = failure else {
         panic!("expected the application I/O failure");
     };
     assert_eq!(error.kind(), ErrorKind::Other);
@@ -359,21 +343,22 @@ fn failure_after_placement_preserves_application_error_ownership() {
 #[case::different_root(Restriction::Root)]
 #[case::incomplete_geometry(Restriction::Geometry)]
 #[case::excess_root_count(Restriction::Excess)]
-fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: Restriction) {
+fn incomplete_storage_and_mismatched_associations_have_distinct_outcomes(
+    #[case] mode: Restriction,
+) {
     let path = test_util::temp::temp_path("retained-unavailable.h5");
     let mut fixture = if matches!(mode, Restriction::Excess) {
         Fixture::new().with_root_reference_count(NonZeroU32::new(2).unwrap())
     } else {
         Fixture::new()
     };
-    fixture.object(
-        "owner",
-        if matches!(mode, Restriction::Geometry) {
-            vec![Message::new(MessageType(0x7f), &[])]
-        } else {
-            vec![]
-        },
-    );
+    let owner = fixture.append_header(if matches!(mode, Restriction::Geometry) {
+        vec![Message::new(MessageType(0x7f), &[])]
+    } else {
+        vec![]
+    });
+    let owner_end = u64::try_from(fixture.image.as_bytes().len()).unwrap();
+    fixture.link("owner", owner);
     fixture.write(&path);
     let mut engine = edit_test_util::open_engine(&path);
     engine.create_group(&ObjectPathBuf::parse("first")).unwrap();
@@ -404,35 +389,57 @@ fn unavailable_or_mismatched_original_storage_withholds_placement(#[case] mode: 
         _ => {}
     }
     let before = engine.disk_bytes().unwrap();
-    let StorageApplyFailure::BeforePlacement { prepared, error } =
-        prepared.apply_excluding(&mut engine).err().unwrap()
-    else {
-        panic!("expected a preplacement failure");
-    };
-    match mode {
-        Restriction::Phase => assert!(matches!(error, StorageApplyError::Phase), "{:?}", error),
-        Restriction::Session => assert!(matches!(error, StorageApplyError::Session), "{error:?}"),
-        Restriction::Root => assert!(matches!(error, StorageApplyError::Root), "{error:?}"),
-        Restriction::Geometry | Restriction::Excess => {
-            assert!(
-                matches!(error, StorageApplyError::Unavailable),
-                "{:?}",
-                error
-            );
-            let original = prepared;
-            assert!(!original.storage().allocations().is_empty());
-            assert!(
-                matches!(
-                    original.storage().unavailable(),
-                    Some(StorageUnavailable::Owners)
-                ) && matches!(mode, Restriction::Geometry)
-                    || matches!(
-                        original.storage().unavailable(),
-                        Some(StorageUnavailable::Dispositions)
-                    ) && matches!(mode, Restriction::Excess)
-            );
+    if matches!(mode, Restriction::Geometry | Restriction::Excess) {
+        assert!(!prepared.storage().allocations().is_empty());
+        let observed = prepared.storage().unavailable();
+        match mode {
+            Restriction::Geometry => assert!(matches!(observed, Some(StorageUnavailable::Owners))),
+            Restriction::Excess => {
+                assert!(matches!(observed, Some(StorageUnavailable::Dispositions)));
+            }
+            other => panic!("unexpected storage qualification case: {other:?}"),
         }
+        let original_root = engine.superblock().root_group_address;
+        let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
+        disk_log::start();
+        let result = pending.publish_compacting_members();
+        let recording = disk_log::finish();
+        match mode {
+            Restriction::Geometry => {
+                result.unwrap().mutation.unwrap();
+                assert_ne!(engine.superblock().root_group_address, original_root);
+            }
+            Restriction::Excess => {
+                assert!(matches!(
+                    result,
+                    Err(Error::EditUnsupported(
+                        "original predecessor replacement cannot be established"
+                    ))
+                ));
+                assert_eq!(engine.superblock().root_group_address, original_root);
+                assert!(recording.events.is_empty());
+            }
+            other => panic!("unexpected storage publication case: {other:?}"),
+        }
+        let owner_range = usize::try_from(owner).unwrap()..usize::try_from(owner_end).unwrap();
+        assert_eq!(
+            engine.disk_bytes().unwrap()[owner_range.clone()],
+            before[owner_range]
+        );
+        return;
     }
+
+    let expected = match mode {
+        Restriction::Phase => "incompatible prepared storage association: Phase",
+        Restriction::Session => "incompatible prepared storage association: Session",
+        Restriction::Root => "incompatible prepared storage association: Root",
+        other => panic!("unexpected storage association case: {other:?}"),
+    };
+    let failure = prepared.apply_excluding(&mut engine).err().unwrap();
+    let Error::Format(actual) = failure else {
+        panic!("expected an incompatible prepared storage association");
+    };
+    assert_eq!(actual, FormatError::Internal(expected.into()));
     assert_eq!(engine.disk_bytes().unwrap(), before);
 }
 

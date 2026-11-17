@@ -39,8 +39,8 @@ One prospective source phase
 Complete commit I/O and buffering
   Metric                         Value
   ---------------------------  -------
-  Source read attempts              60
-  Source requested bytes       138,543
+  Source read attempts             103
+  Source requested bytes       275,536
   Largest source read request   65,536
   Issued write calls                 2
   Issued write bytes             2,096

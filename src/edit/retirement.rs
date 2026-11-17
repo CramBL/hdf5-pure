@@ -118,6 +118,55 @@ pub(super) struct ProvenRetirementBatch {
 }
 
 impl ProvenRetirementBatch {
+    /// Builds a new batch including complete `parents` allocations within `end`.
+    ///
+    /// The caller establishes ownership and retirement eligibility for added allocations. Sorts
+    /// ranges by physical start and removes exact range/class duplicates, preserving adjacent
+    /// allocation boundaries. The original batch remains unchanged on success or error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetirementMergeError::Empty`] for a zero-length allocation,
+    /// [`RetirementMergeError::Bounds`] for an allocation beyond `end`,
+    /// [`RetirementMergeError::Class`] for identical ranges with different classes, or
+    /// [`RetirementMergeError::Overlap`] for distinct overlapping ranges.
+    pub(super) fn including(
+        &self,
+        parents: &[(FileRange, FreeClass)],
+        end: PhysicalAddress,
+    ) -> Result<Self, RetirementMergeError> {
+        let mut spans = self.spans.clone();
+        spans.extend_from_slice(parents);
+        for &(range, _) in &spans {
+            if range.length() == 0 {
+                return Err(RetirementMergeError::Empty(range.start()));
+            }
+            if range.end() > end {
+                return Err(RetirementMergeError::Bounds { range, end });
+            }
+        }
+        spans.sort_unstable_by_key(|(range, _)| range.start());
+        let mut previous = None;
+        for &(second, second_class) in &spans {
+            let Some((first, first_class)) = previous.replace((second, second_class)) else {
+                continue;
+            };
+            if first == second {
+                if first_class != second_class {
+                    return Err(RetirementMergeError::Class {
+                        range: first,
+                        first: first_class,
+                        second: second_class,
+                    });
+                }
+            } else if first.overlaps(second) {
+                return Err(RetirementMergeError::Overlap { first, second });
+            }
+        }
+        spans.dedup();
+        Ok(Self { spans })
+    }
+
     /// Borrows complete physical allocation ranges with their original free-space classes.
     ///
     /// Preserves each allocation boundary without conversion or coalescing.
@@ -154,6 +203,36 @@ impl ProvenRetirementBatch {
     }
 }
 
+/// An invalid complete-allocation boundary or class in a merged retirement batch.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum RetirementMergeError {
+    /// An allocation extends beyond the permitted physical end.
+    Bounds {
+        /// The complete allocation range.
+        range: FileRange,
+        /// The maximum permitted physical end.
+        end: PhysicalAddress,
+    },
+    /// Identical allocation ranges have different free-space classes.
+    Class {
+        /// The range assigned conflicting classes.
+        range: FileRange,
+        /// One class assigned to the range.
+        first: FreeClass,
+        /// The other class assigned to the range.
+        second: FreeClass,
+    },
+    /// An allocation has zero length at this physical address.
+    Empty(PhysicalAddress),
+    /// Distinct allocation ranges overlap.
+    Overlap {
+        /// The earlier range in the address-sorted scan.
+        first: FileRange,
+        /// The next overlapping range in the scan.
+        second: FileRange,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
@@ -166,7 +245,10 @@ mod tests {
     use rstest::rstest;
     use test_util::disk_log;
 
-    use super::{ChunkAllocation, RootRetirement};
+    use super::ChunkAllocation;
+    use super::ProvenRetirementBatch;
+    use super::RetirementMergeError;
+    use super::RootRetirement;
     use crate::access_mode::AccessMode;
     use crate::address::{
         AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
@@ -185,6 +267,54 @@ mod tests {
         AppendBuilder, DeflateLevel, File, FileBuilder, FileSpaceSettings, FileSpaceStrategy,
         MaxExtent,
     };
+
+    #[rstest]
+    #[case::adjacent(120, 20, FreeClass::Page(PageType::Raw), None)]
+    #[case::duplicate(100, 20, FreeClass::Page(PageType::Meta), None)]
+    #[case::empty(
+        120,
+        0,
+        FreeClass::Page(PageType::Raw),
+        Some(RetirementMergeError::Empty(PhysicalAddress::new(120)))
+    )]
+    #[case::bounds(190, 20, FreeClass::Page(PageType::Raw), Some(RetirementMergeError::Bounds { range: FileRange::new(PhysicalAddress::new(190), 20).unwrap(), end: PhysicalAddress::new(200) }))]
+    #[case::overlap(110, 20, FreeClass::Page(PageType::Raw), Some(RetirementMergeError::Overlap { first: FileRange::new(PhysicalAddress::new(100), 20).unwrap(), second: FileRange::new(PhysicalAddress::new(110), 20).unwrap() }))]
+    #[case::class(100, 20, FreeClass::Page(PageType::Raw), Some(RetirementMergeError::Class { range: FileRange::new(PhysicalAddress::new(100), 20).unwrap(), first: FreeClass::Page(PageType::Meta), second: FreeClass::Page(PageType::Raw) }))]
+    fn additional_retirements_preserve_complete_disjoint_allocations(
+        #[case] start: u64,
+        #[case] length: u64,
+        #[case] class: FreeClass,
+        #[case] expected: Option<RetirementMergeError>,
+    ) {
+        let original = (
+            FileRange::new(PhysicalAddress::new(100), 20).unwrap(),
+            FreeClass::Page(PageType::Meta),
+        );
+        let batch = ProvenRetirementBatch {
+            spans: vec![original],
+        };
+        let added = (
+            FileRange::new(PhysicalAddress::new(start), length).unwrap(),
+            class,
+        );
+        match (
+            batch.including(&[added], PhysicalAddress::new(200)),
+            expected,
+        ) {
+            (Ok(result), None) => {
+                let expected = if added == original {
+                    vec![original]
+                } else {
+                    vec![original, added]
+                };
+                assert_eq!(result.entries(), expected);
+            }
+            (Err(actual), Some(expected)) => assert_eq!(actual, expected),
+            (Err(error), None) => panic!("unexpected merge error: {error:?}"),
+            (Ok(_), Some(expected)) => panic!("expected merge error: {expected:?}"),
+        }
+        assert_eq!(batch.entries(), [original]);
+    }
 
     #[rstest]
     #[case::zero_base(0)]

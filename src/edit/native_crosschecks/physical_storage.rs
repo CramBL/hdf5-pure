@@ -46,7 +46,7 @@ fn native_file_storage_matches_framing_and_owned_manager_capacity(#[case] paged:
     let mut phase = AnalysisPhase::new(&engine);
     let source = phase.reconstruction_source(&engine, object).unwrap();
     let facts = phase.physical_storage(&source).unwrap();
-    assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+    assert!(facts.is_complete());
     assert_eq!(
         facts.physical_size(),
         u64::try_from(original.len()).unwrap()

@@ -3,7 +3,7 @@
 //! The caller establishes source freshness, permission to remove the selected members, and
 //! protection of each collection's full allocation from reuse. Plans must describe distinct
 //! collections in the engine's current image. [`after_publication`] requires association with
-//! the completed publication. [`rootless`] preserves undo for the enclosing commit.
+//! the completed publication.
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::GlobalHeapCompaction;
@@ -12,6 +12,7 @@ use crate::convert::Narrow;
 use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::error::HeapCompactionState;
 
 use super::JournalScope;
 use super::PublishedTree;
@@ -29,21 +30,21 @@ use super::PublishedTree;
 /// Returns [`HeapMutationFailure`] with the completed prefix length, allocation state, and
 /// bounds, read, write, completion, or restoration error. Failed restoration or uncertain
 /// allocation permission prevents further allocation through the engine.
-pub(in crate::edit) fn after_publication(
+pub(in crate::edit) fn after_publication<'plan>(
     published: PublishedTree<'_>,
-    plans: &[GlobalHeapCompaction],
+    plans: impl IntoIterator<Item = &'plan GlobalHeapCompaction>,
 ) -> Result<(), HeapMutationFailure> {
     let end = published.end().get();
     let engine = published.into_engine();
     published_batch(engine, plans, end)
 }
 
-fn published_batch(
+fn published_batch<'plan>(
     engine: &mut WriteEngine,
-    plans: &[GlobalHeapCompaction],
+    plans: impl IntoIterator<Item = &'plan GlobalHeapCompaction>,
     end: u64,
 ) -> Result<(), HeapMutationFailure> {
-    for (completed, plan) in plans.iter().enumerate() {
+    for (completed, plan) in plans.into_iter().enumerate() {
         let result = match engine.context.allocations.before_reference() {
             Ok(()) => {
                 if plan.range().end().get() > end {
@@ -97,6 +98,7 @@ fn published_batch(
 /// or [`FormatError::Internal`] if allocations are provisional or publication was attempted.
 /// Returns bounds, read, write, or completion errors. Returns [`Error::CommitPartiallyApplied`]
 /// with both errors if restoration fails, and marks allocation state uncertain.
+#[cfg(test)]
 pub(in crate::edit) fn rootless(
     engine: &mut WriteEngine,
     plans: &[GlobalHeapCompaction],
@@ -119,6 +121,19 @@ pub(in crate::edit) struct HeapMutationFailure {
     pub(in crate::edit) state: HeapMutationState,
     /// The operation error, including a restoration error if restoration failed.
     pub(in crate::edit) error: Error,
+}
+
+impl From<HeapMutationFailure> for Error {
+    fn from(failure: HeapMutationFailure) -> Self {
+        Self::HeapCompactionFailed {
+            completed: failure.completed,
+            state: match failure.state {
+                HeapMutationState::Restored => HeapCompactionState::Restored,
+                HeapMutationState::Uncertain => HeapCompactionState::Uncertain,
+            },
+            source: Box::new(failure.error),
+        }
+    }
 }
 
 /// Records allocation availability after a collection operation fails.

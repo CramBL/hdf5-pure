@@ -1,6 +1,6 @@
 //! File framing and recorded capacity for one source phase.
 //!
-//! Local ranges and problems are retained independently of topology and heap-reference facts.
+//! Local storage ranges and their completeness are independent of topology and references.
 //! The caller establishes source freshness, allocation ownership, and retirement permission
 //! separately.
 
@@ -13,9 +13,7 @@ use hdf5_pure_space::__private::{AllocationClass, Extent, FreeClass, RetainedKin
 use super::AnalysisPhase;
 use super::ReconstructionSource;
 use crate::access_mode::AccessMode;
-use crate::address::StoredAddress;
 use crate::edit::WriteEngine;
-use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_space_info::FileSpaceInfo;
 use crate::free_space_manager;
@@ -30,8 +28,8 @@ pub(in crate::edit) mod claims;
 impl AnalysisPhase<'_> {
     /// Collects local file framing and recorded capacity once in this source phase.
     ///
-    /// Requires a reconstruction source from the same phase. Records read and support failures
-    /// in [`PhysicalStorage::problems`]. Source freshness remains the caller's responsibility.
+    /// Requires a reconstruction source from the same phase. The result retains known ranges
+    /// even when local storage discovery is incomplete. The caller checks source freshness.
     ///
     /// # Errors
     ///
@@ -70,7 +68,7 @@ pub(in crate::edit) struct PhysicalStorage {
     metadata_capacity: Vec<FileRange>,
     /// Reusable sections, retained PAGE ranges, and unused aggregate capacity.
     non_live: Vec<CapacityRange>,
-    problems: Vec<StorageProblem>,
+    complete: bool,
 }
 
 impl PhysicalStorage {
@@ -82,7 +80,7 @@ impl PhysicalStorage {
             file: Vec::new(),
             metadata_capacity: Vec::new(),
             non_live: Vec::new(),
-            problems: Vec::new(),
+            complete: true,
         };
         storage.read_file(engine);
         storage.read_metadata_capacity(engine);
@@ -114,20 +112,17 @@ impl PhysicalStorage {
         &self.non_live
     }
 
-    /// Returns local failures and unsupported storage observations.
-    pub(in crate::edit) fn problems(&self) -> &[StorageProblem] {
-        &self.problems
+    /// Returns whether all local storage observations were supported and complete.
+    pub(in crate::edit) fn is_complete(&self) -> bool {
+        self.complete
     }
 
     /// Reads framing and manager allocations, retaining earlier ranges on a later failure.
     fn read_file(&mut self, engine: &WriteEngine) {
         let (located, range) = match superblock::read_with_range(&engine.image()) {
             Ok(parsed) => parsed,
-            Err(error) => {
-                self.problems.push(StorageProblem::Framing {
-                    kind: FileStorageKind::Superblock,
-                    error,
-                });
+            Err(_) => {
+                self.complete = false;
                 return;
             }
         };
@@ -137,7 +132,7 @@ impl PhysicalStorage {
                     range,
                     kind: FileStorageKind::Userblock,
                 }),
-                Err(error) => self.problems.push(StorageProblem::Address(error)),
+                Err(_) => self.complete = false,
             }
         }
         self.file.push(FileStorageRange {
@@ -154,7 +149,7 @@ impl PhysicalStorage {
             || located.superblock.superblock_extension_address
                 != current.superblock_extension_address
         {
-            self.problems.push(StorageProblem::Context);
+            self.complete = false;
             return;
         }
         for address in [
@@ -165,8 +160,7 @@ impl PhysicalStorage {
         .flatten()
         {
             if !address.is_undefined(engine.widths().offsets) {
-                self.problems
-                    .push(StorageProblem::LegacyAllocation(address));
+                self.complete = false;
             }
         }
         let Some(extension) = current
@@ -177,8 +171,8 @@ impl PhysicalStorage {
         };
         let extension = match engine.addresses().resolve(extension) {
             Ok(address) => address,
-            Err(error) => {
-                self.problems.push(StorageProblem::Address(error));
+            Err(_) => {
+                self.complete = false;
                 return;
             }
         };
@@ -199,19 +193,15 @@ impl PhysicalStorage {
             }));
         let header = match parsed {
             Ok(header) => header,
-            Err(error) => {
-                self.problems.push(StorageProblem::Framing {
-                    kind: FileStorageKind::Extension,
-                    error,
-                });
+            Err(_) => {
+                self.complete = false;
                 return;
             }
         };
         let mut info = None;
         for message in header.messages {
             if message.flags.is_shared() {
-                self.problems
-                    .push(StorageProblem::ExtensionMessage(message.msg_type));
+                self.complete = false;
                 continue;
             }
             match message.msg_type {
@@ -224,21 +214,18 @@ impl PhysicalStorage {
                 MessageType::NIL
                 | MessageType::OBJECT_HEADER_CONTINUATION
                 | MessageType::B_TREE_K_VALUES => {}
-                kind => self.problems.push(StorageProblem::ExtensionMessage(kind)),
+                _ => self.complete = false,
             }
         }
         if let Some(info) = info {
             match info {
                 Ok(info) => self.read_managers(engine, info),
-                Err(error) => self.problems.push(StorageProblem::Framing {
-                    kind: FileStorageKind::Extension,
-                    error,
-                }),
+                Err(_) => self.complete = false,
             }
         }
     }
 
-    /// Reads complete persistent-manager allocations and records any read or framing failure.
+    /// Reads complete persistent-manager allocations and marks failed discovery incomplete.
     fn read_managers(&mut self, engine: &WriteEngine, info: FileSpaceInfo) {
         if !info.persist {
             return;
@@ -255,10 +242,7 @@ impl PhysicalStorage {
                     range,
                     kind: FileStorageKind::Manager,
                 })),
-            Err(error) => self.problems.push(StorageProblem::Framing {
-                kind: FileStorageKind::Manager,
-                error,
-            }),
+            Err(_) => self.complete = false,
         }
     }
 
@@ -268,19 +252,19 @@ impl PhysicalStorage {
             for extent in &persist.old_blocks {
                 match Self::resolve(engine, *extent) {
                     Ok(range) => self.metadata_capacity.push(range),
-                    Err(error) => self.problems.push(StorageProblem::Address(error)),
+                    Err(_) => self.complete = false,
                 }
             }
         }
-        if let Err(error) = engine.context.allocations.available() {
-            self.problems.push(StorageProblem::Publication(error));
+        if engine.context.allocations.available().is_err() {
+            self.complete = false;
         }
     }
 
     /// Records reusable sections, retained PAGE extents, and aggregate spare.
     ///
-    /// Traverses allocator records without source reads or page expansion. Records address
-    /// conversion failures and continues with the other ranges.
+    /// Traverses allocator records without source reads or page expansion. When address conversion
+    /// fails, marks the result incomplete and continues collecting the other ranges.
     fn read_non_live(&mut self, engine: &WriteEngine) {
         let page = engine.space.is_paged();
         for (extent, class) in engine.space.admitted_snapshot().sections() {
@@ -303,11 +287,11 @@ impl PhysicalStorage {
         }
     }
 
-    /// Records one physical range with its category or an address-conversion problem.
+    /// Records a checked physical range and its category or marks the result incomplete.
     fn record_capacity(&mut self, engine: &WriteEngine, extent: Extent, kind: CapacityKind) {
         match Self::resolve(engine, extent) {
             Ok(range) => self.non_live.push(CapacityRange { range, kind }),
-            Err(error) => self.problems.push(StorageProblem::Address(error)),
+            Err(_) => self.complete = false,
         }
     }
 
@@ -378,26 +362,6 @@ pub(in crate::edit) enum CapacityKind {
     Retained(RetainedKind),
     /// An admitted reusable section with its recorded free class.
     Reusable(FreeClass),
-}
-
-/// A failed or unsupported local storage observation.
-#[derive(Debug)]
-pub(in crate::edit) enum StorageProblem {
-    /// A failure in address conversion or range arithmetic.
-    Address(FormatError),
-    /// A parsed superblock inconsistent with the session's source context.
-    Context,
-    /// A shared or unsupported extension message, including a repeated File Space Info message.
-    ExtensionMessage(MessageType),
-    /// A failure in reading or parsing one kind of file storage.
-    Framing {
-        kind: FileStorageKind,
-        error: FormatError,
-    },
-    /// A legacy free-space or driver-info address without collected allocation geometry.
-    LegacyAllocation(StoredAddress),
-    /// An unavailable allocation-publication state.
-    Publication(Error),
 }
 
 #[cfg(test)]
