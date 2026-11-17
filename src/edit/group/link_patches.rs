@@ -19,8 +19,6 @@ pub(in crate::edit) struct LinkPatches<'a> {
     region: &'a mut OhRegion,
     fields: PatchFields,
     framing_error: Option<Error>,
-    #[cfg(test)]
-    visited: usize,
 }
 
 impl<'a> LinkPatches<'a> {
@@ -39,13 +37,11 @@ impl<'a> LinkPatches<'a> {
                 region,
                 fields: PatchFields::Empty,
                 framing_error: None,
-                #[cfg(test)]
-                visited: 0,
             };
         };
         let Some(second) = names.next() else {
             let mut field = PatchField::Missing;
-            let (framing_error, _visited) = Self::prepare(
+            let framing_error = Self::prepare(
                 region,
                 &[(LossyName(first.as_bytes()), 0)],
                 core::slice::from_mut(&mut field),
@@ -54,8 +50,6 @@ impl<'a> LinkPatches<'a> {
                 region,
                 fields: PatchFields::One(Some(field)),
                 framing_error,
-                #[cfg(test)]
-                visited: _visited,
             };
         };
         let mut requests: Vec<_> = core::iter::once(first)
@@ -66,29 +60,26 @@ impl<'a> LinkPatches<'a> {
             .collect();
         requests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut fields = vec![PatchField::Missing; requests.len()];
-        let (framing_error, _visited) = Self::prepare(region, &requests, &mut fields);
+        let framing_error = Self::prepare(region, &requests, &mut fields);
         Self {
             region,
             fields: PatchFields::Many(fields.into_iter()),
             framing_error,
-            #[cfg(test)]
-            visited: _visited,
         }
     }
 
-    /// Resolves sorted requests to fields in their original order and counts visited records.
+    /// Resolves sorted requests to fields in their original order.
     ///
-    /// Returns the first record-framing error alongside the visit count. Unparseable Link
-    /// bodies are skipped. Each request resolves to the first matching parsed link.
+    /// Returns the first record-framing error. Unparseable link bodies are skipped.
+    /// Each request resolves to the first matching parsed link.
     fn prepare(
         region: &OhRegion,
         requests: &[(LossyName<'_>, usize)],
         fields: &mut [PatchField],
-    ) -> (Option<Error>, usize) {
+    ) -> Option<Error> {
         let mut remaining = fields.len();
         let mut framing_error = None;
         let mut start = 0;
-        let mut visited = 0;
         while remaining != 0 {
             let (kind, body, end) = match region.next_message(start) {
                 Ok(Some(record)) => record,
@@ -98,7 +89,6 @@ impl<'a> LinkPatches<'a> {
                     break;
                 }
             };
-            visited += 1;
             if kind == MessageType::LINK
                 && let Ok(name) =
                     LinkMessage::parsed_name_bytes(&region[body..end], region.widths().offsets)
@@ -131,7 +121,7 @@ impl<'a> LinkPatches<'a> {
             }
             start = end;
         }
-        (framing_error, visited)
+        framing_error
     }
 
     /// Writes `address` to the next requested link, consuming the request even on failure.
@@ -149,8 +139,6 @@ impl<'a> LinkPatches<'a> {
             region,
             fields,
             framing_error,
-            #[cfg(test)]
-                visited: _,
         } = self;
         let offsets = region.widths().offsets;
         match fields.next() {

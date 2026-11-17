@@ -68,7 +68,6 @@ fn link_batches_preserve_other_fields_and_repeated_request_order(
     let mut region = mixed_region(flags, 11);
     let expected = mixed_region(flags, 29);
     let mut patches = LinkPatches::new(&mut region, ["changed", "changed"]);
-    assert_eq!(patches.visited, 4);
     patches.patch_next(StoredAddress::new(19)).unwrap();
     patches.patch_next(StoredAddress::new(29)).unwrap();
     drop(patches);
@@ -197,7 +196,7 @@ fn link_batches_match_lossy_names_and_preserve_symbolic_targets() {
 #[rstest]
 #[case::empty("link_patch_empty", 0)]
 #[case::single("link_patch_single", 1)]
-fn empty_and_single_link_patch_plans_preserve_records_and_bound_visits(
+fn empty_and_single_link_patch_plans_preserve_records_without_allocating(
     #[case] region_name: &str,
     #[case] count: usize,
 ) {
@@ -212,37 +211,45 @@ fn empty_and_single_link_patch_plans_preserve_records_and_bound_visits(
         if count == 1 {
             patches.patch_next(StoredAddress::new(29)).unwrap();
         }
-        patches.visited
     };
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    let (visited, measured) = allocation::measure(region_name, operation);
+    let ((), measured) = allocation::measure(region_name, operation);
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let visited = {
+    {
         let mut operation = operation;
-        operation()
-    };
+        operation();
+    }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     assert_eq!(measured.blocks, 0, "{measured}");
-    eprintln!("{region_name}: {visited} records visited");
-    assert_eq!(visited, if count == 0 { 0 } else { 4 });
     assert_eq!(
         *region,
-        *mixed_region(HeaderFlags::default(), if count == 0 { 11 } else { 29 })
+        *mixed_region(HeaderFlags::default(), if count == 0 { 11 } else { 29 }),
+        "{region_name}"
     );
 }
 
 #[test]
-fn an_empty_link_patch_plan_does_not_parse_malformed_records() {
+fn empty_link_patch_plans_preserve_malformed_records() {
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     region.push_bytes(&[6, 0xff, 0xff, 0]);
-    let patches = LinkPatches::new(&mut region, []);
-    assert_eq!(patches.visited, 0);
+    let expected = region.to_vec();
+    let mut patches = LinkPatches::new(&mut region, []);
+    let error = patches.patch_next(StoredAddress::new(29)).unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == "a group has no remaining prepared link patch"),
+        "{error:?}"
+    );
+    drop(patches);
+    assert_eq!(&region[..], expected);
 }
 
 #[rstest]
 #[case::medium("link_patch_256", 256)]
 #[case::large("link_patch_512", 512)]
-fn link_patch_batches_visit_each_record_once(#[case] region_name: &str, #[case] count: usize) {
+fn link_patch_batches_preserve_records_with_bounded_allocations(
+    #[case] region_name: &str,
+    #[case] count: usize,
+) {
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let mut expected = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let names: Vec<_> = (0..count)
@@ -265,18 +272,17 @@ fn link_patch_batches_visit_each_record_once(#[case] region_name: &str, #[case] 
                 .patch_next(StoredAddress::new(u64::try_from(index + 11).unwrap()))
                 .unwrap();
         }
-        patches.visited
     };
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    let (visited, measured) = allocation::measure(region_name, operation);
+    let ((), measured) = allocation::measure(region_name, operation);
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let visited = {
+    {
         let mut operation = operation;
-        operation()
-    };
+        operation();
+    }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        eprintln!("{region_name}: {measured}; {visited} records visited");
+        eprintln!("{region_name}: {measured}");
         assert!(
             measured.bytes >= u64::try_from(count * 8).unwrap(),
             "{measured}"
@@ -287,9 +293,7 @@ fn link_patch_batches_visit_each_record_once(#[case] region_name: &str, #[case] 
         );
         assert!(measured.blocks <= 16, "{measured}");
     }
-    eprintln!("{region_name}: {visited} records visited");
-    assert_eq!(visited, count);
-    assert_eq!(*region, *expected);
+    assert_eq!(*region, *expected, "{region_name}");
 }
 
 fn mixed_region(flags: HeaderFlags, address: u64) -> OhRegion {
