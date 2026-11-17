@@ -32,9 +32,14 @@ fn preparation_reads_counts_from_native_headers(
     native.close().unwrap();
     let mut engine = edit_test_util::open_engine(&path);
     let before = engine.disk_bytes().unwrap();
-    let mut bounds = super::publication_bounds(&mut engine, &[], &[name]);
-    let prepared = bounds.prepare_counts().unwrap();
-    let (original, update) = prepared.updates().next().unwrap();
+    let bounds = super::publication_bounds(&mut engine, &[], &[name]);
+    let prepared = bounds
+        .phase
+        .counts
+        .current_updates(bounds.phase.engine, None)
+        .unwrap();
+    let original = &bounds.updates()[0];
+    let update = &prepared[0];
     assert_eq!(original.field().value(), count);
     assert_eq!(original.count().get(), count - 1);
     let range = original.allocation().range();
@@ -58,5 +63,5 @@ fn preparation_reads_counts_from_native_headers(
             &test_util::checksum::lookup3(&patched[..footer]).to_le_bytes()
         );
     }
-    assert_eq!(prepared.engine.disk_bytes().unwrap(), before);
+    assert_eq!(bounds.phase.engine.disk_bytes().unwrap(), before);
 }

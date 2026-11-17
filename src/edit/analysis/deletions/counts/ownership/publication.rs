@@ -141,25 +141,6 @@ pub(in crate::edit) struct CountPublicationBounds<'a> {
 }
 
 impl<'a> CountPublicationBounds<'a> {
-    /// Prepares every protected count update after parsing the current complete headers.
-    ///
-    /// Uses [`CurrentCountUpdates::new`] and borrows these bounds exclusively. Retains the original
-    /// retirement batch and EOA. Leaves the bounds and file bytes unchanged on error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors described by [`CurrentCountUpdates::new`].
-    pub(in crate::edit) fn prepare_counts(
-        &mut self,
-    ) -> Result<CurrentCountUpdates<'_>, CountPreparationError> {
-        let CountPublicationPhase {
-            engine,
-            counts,
-            retirement: _,
-        } = &mut self.phase;
-        CurrentCountUpdates::new(engine, counts)
-    }
-
     /// Publishes the associated tree with its original retirements before calling `complete`.
     ///
     /// Calls `complete` after stored-reference updates, root reclamation, and requested truncation
@@ -225,7 +206,7 @@ impl<'a> CountPublicationBounds<'a> {
             return engine.publish_pending_tree_with_completion(retirement, relocations, complete);
         }
         let storage = OriginalStorage::from_counts(&counts);
-        let increases = CurrentCountUpdates::select(engine, &counts, Some(Ordering::Greater))?;
+        let increases = counts.current_updates(engine, Some(Ordering::Greater))?;
         for update in &increases {
             for (range, bytes) in update.writes() {
                 engine.write_inplace_journaled(range.start(), bytes)?;
@@ -248,9 +229,10 @@ impl<'a> CountPublicationBounds<'a> {
                         )
                         .into(),
                     })?;
-                let decreases =
-                    CurrentCountUpdates::select(scope.engine, scope.counts, Some(Ordering::Less))
-                        .map_err(Error::from)?;
+                let decreases = scope
+                    .counts
+                    .current_updates(scope.engine, Some(Ordering::Less))
+                    .map_err(Error::from)?;
                 let result = JournalScope::run(scope.engine, |journal| {
                     for update in &decreases {
                         for (range, bytes) in update.writes() {
@@ -371,81 +353,51 @@ impl From<CountPublicationError> for Error {
     }
 }
 
-/// Count and checksum writes paired with their original protected fields.
-///
-/// Borrows the engine exclusively and the original [`ProtectedCounts`] for the same lifetime.
-/// Retains encoded updates without retaining acquired metadata bytes. Preparation and dropping
-/// this value leave the file and protected counts unchanged.
-pub(in crate::edit) struct CurrentCountUpdates<'source> {
-    engine: &'source mut WriteEngine,
-    counts: &'source ProtectedCounts,
-    updates: Vec<ObjectReferenceCountUpdate>,
-}
-
-impl<'source> CurrentCountUpdates<'source> {
-    /// Prepares count and checksum writes from the current complete headers.
+impl ProtectedCounts {
+    /// Prepares current count and checksum writes selected by their direction of change.
     ///
-    /// Checks the recorded allocation session before allocating or reading a nonempty batch.
-    /// Checks each field's physical range, containing chunk, header flags, and complete allocation
-    /// against the original observation. Checks the original scalar before preparing the positive
-    /// remainder and any checksum with [`ObjectReferenceCountField::update`]. Unrelated current
-    /// chunk bytes are included in the checksum calculation.
+    /// Compares planned remainders with original scalars. `None` selects every update. Returns
+    /// encoded writes in allocation-address order without retaining acquired metadata bytes.
+    /// Preparation leaves the source and protected counts unchanged.
     ///
-    /// Preserves the original source association when the engine has a different root. Source
-    /// freshness, current allocation ownership, retirement exclusions, and permission to publish
-    /// require separate evidence. The caller must keep the source contents stable during
-    /// preparation and until applying the writes.
+    /// Checks the allocation session before allocating or reading a nonempty batch. Checks each
+    /// field's physical range, containing chunk, flags, and complete allocation against the
+    /// original observation. Checks the original scalar before preparing the positive remainder
+    /// and checksum with [`ObjectReferenceCountField::update`]. Unrelated current chunk bytes
+    /// are included in the checksum calculation.
+    ///
+    /// Preserves the source association when the engine has a different root. Source freshness,
+    /// current allocation ownership, retirement exclusions, and publication require separate
+    /// evidence. The caller keeps dependent contents stable until applying the returned writes.
     ///
     /// # Errors
     ///
-    /// Returns [`CountPreparationError::Session`] if the engine's allocation session differs from
-    /// the recorded session. Returns [`CountPreparationError::Read`] if acquiring a protected
-    /// allocation fails, or [`CountPreparationError::Range`] if the source returns metadata for a
-    /// different range. Returns [`CountPreparationError::Parse`] for header parsing or observation
-    /// errors, [`CountPreparationError::Field`] for changed count classification or field geometry,
-    /// [`CountPreparationError::Allocation`] for changed or invalid complete allocation geometry,
-    /// or [`CountPreparationError::Update`] for a changed scalar or count-encoding error.
+    /// Returns [`CountPreparationError::Session`] if the allocation session differs. Returns
+    /// [`CountPreparationError::Read`] if acquiring a protected allocation fails, or
+    /// [`CountPreparationError::Range`] for metadata associated with another range. Returns
+    /// [`CountPreparationError::Parse`] for parsing or observation errors,
+    /// [`CountPreparationError::Field`] for changed count classification or field geometry,
+    /// [`CountPreparationError::Allocation`] for changed complete allocation geometry, or
+    /// [`CountPreparationError::Update`] for a changed scalar or count-encoding error.
     ///
     /// # Performance
     ///
-    /// Retains compact update descriptors and releases each acquired metadata range before reading
-    /// the next object. Reads complete headers without topology discovery. An empty count batch
-    /// requires no allocation or source reads.
-    fn new(
-        engine: &'source mut WriteEngine,
-        counts: &'source ProtectedCounts,
-    ) -> Result<Self, CountPreparationError> {
-        let updates = Self::select(engine, counts, None)?;
-        Ok(Self {
-            engine,
-            counts,
-            updates,
-        })
-    }
-
-    /// Prepares writes from current headers selected by the planned count's ordering.
-    ///
-    /// Compares each planned remainder with its original scalar. [`None`] selects every update.
-    /// Reads selected headers and returns encoded writes in ascending allocation address order.
-    /// Uses the source and framing checks of [`Self::new`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors described by [`Self::new`] for the selected updates.
-    fn select(
+    /// Reads selected complete headers without topology discovery, releasing each acquired range
+    /// before reading the next object. An empty batch requires no allocation or source reads.
+    fn current_updates(
+        &self,
         engine: &WriteEngine,
-        counts: &ProtectedCounts,
         order: Option<Ordering>,
     ) -> Result<Vec<ObjectReferenceCountUpdate>, CountPreparationError> {
-        if counts
+        if self
             .source
             .as_ref()
             .is_some_and(|source| !source.session.same(&engine.context.allocations.session()))
         {
             return Err(CountPreparationError::Session);
         }
-        let mut updates = Vec::with_capacity(counts.updates().len());
-        for original in counts.updates().iter().filter(|update| {
+        let mut updates = Vec::with_capacity(self.updates().len());
+        for original in self.updates().iter().filter(|update| {
             order.is_none_or(|order| update.count().get().cmp(&update.field().value()) == order)
         }) {
             updates.push(original.prepare_source(
@@ -456,18 +408,6 @@ impl<'source> CurrentCountUpdates<'source> {
         }
         Ok(updates)
     }
-
-    /// Borrows each original field with its prepared writes, in allocation-address order.
-    pub(in crate::edit) fn updates(
-        &self,
-    ) -> impl ExactSizeIterator<Item = (&ProtectedCount, &ObjectReferenceCountUpdate)> {
-        let Self {
-            engine: _,
-            counts,
-            updates,
-        } = self;
-        counts.updates().iter().zip(updates)
-    }
 }
 
 impl ProtectedCount {
@@ -475,7 +415,7 @@ impl ProtectedCount {
     ///
     /// # Errors
     ///
-    /// Returns the errors described by [`CountPublicationBounds::prepare_counts`].
+    /// Returns the errors described by [`ProtectedCounts::current_updates`].
     fn prepare_source(
         &self,
         source: &(impl Source + ?Sized),
@@ -712,12 +652,8 @@ impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
             self.engine.make_allocation_uncertain();
             return Err(Box::new(CountWriteFailure::Uncertain { error }));
         }
-        let updates = match CurrentCountUpdates::new(&mut *self.engine, self.counts) {
-            Ok(CurrentCountUpdates {
-                engine: _,
-                counts: _,
-                updates,
-            }) => updates,
+        let updates = match self.counts.current_updates(self.engine, None) {
+            Ok(updates) => updates,
             Err(error) => {
                 return Err(Box::new(CountWriteFailure::Preparation {
                     scope: self,
