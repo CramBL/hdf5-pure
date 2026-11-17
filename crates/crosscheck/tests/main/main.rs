@@ -55,6 +55,7 @@ mod edit_final_links;
 mod edit_global_heap_reclaim;
 mod edit_group_copy_links;
 mod edit_header_times;
+mod edit_reference_counts;
 mod edit_reference_repointing;
 mod edit_second_layout;
 mod edit_userblock;
