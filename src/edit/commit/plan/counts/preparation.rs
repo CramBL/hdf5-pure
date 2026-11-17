@@ -65,8 +65,7 @@ impl PreparedTreeCounts {
             Err(EditInputError::IncompleteCounts) => return Ok(Self::Unavailable),
             Err(error) => return Err(Self::input_error(error)),
         };
-        let (counts, storage, eligible_owners) = facts.into_parts();
-        let preflight = counts
+        let preflight = facts
             .preflight(
                 engine,
                 groups.values().flat_map(|node| {
@@ -87,7 +86,7 @@ impl PreparedTreeCounts {
                 ),
             })?;
         let (_, proof) = PreparedCounts::owned(
-            &preflight,
+            preflight.counts(),
             groups.values_mut().map(|node| &mut node.prepared),
         )
         .map_err(|error| {
@@ -95,9 +94,10 @@ impl PreparedTreeCounts {
         })?
         .apply()
         .map_err(|error| FormatError::Internal(format!("invalid local count update: {error:?}")))?;
-        let (inventory, protected) = preflight.into_parts(proof).map_err(|error| {
+        let (facts, protected) = preflight.into_parts(proof).map_err(|error| {
             FormatError::Internal(format!("invalid count projection proof: {error:?}"))
         })?;
+        let (inventory, storage, eligible_owners) = facts.into_parts();
         let (retirement, retained_roots) = storage.into_parts();
         Ok(Self::Complete {
             inventory,
