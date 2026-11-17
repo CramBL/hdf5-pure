@@ -231,7 +231,7 @@ impl Prefix {
 }
 
 #[derive(Clone, Copy)]
-enum Schedule {
+pub(super) enum Schedule {
     Synchronize { event: usize, point: FailurePoint },
     Write { event: usize, prefix: usize },
 }
@@ -281,7 +281,7 @@ impl Schedule {
         }
     }
 
-    fn inject(self, recording: &Recording) {
+    pub(super) fn inject(self, recording: &Recording) {
         let event = self.event();
         match self {
             Self::Synchronize { point, .. } => disk_log::fail_sync_after(
@@ -301,7 +301,7 @@ impl Schedule {
         }
     }
 
-    fn assert_failed(self, control: &Recording, failed: &Recording) {
+    pub(super) fn assert_failed(self, control: &Recording, failed: &Recording) {
         let event = self.event();
         assert_eq!(
             failed
@@ -342,13 +342,13 @@ impl Schedule {
         }
     }
 
-    fn event(self) -> usize {
+    pub(super) fn event(self) -> usize {
         match self {
             Self::Synchronize { event, .. } | Self::Write { event, .. } => event,
         }
     }
 
-    fn message(self) -> &'static str {
+    pub(super) fn message(self) -> &'static str {
         match self {
             Self::Synchronize { .. } => "injected disk synchronization failure",
             Self::Write { .. } => "injected disk write failure",
