@@ -541,3 +541,389 @@ fn attribute(messages: &mut Vec<Message>, name: &str, parent: u64, index: u32, l
 fn overlaps(first: &Range<u64>, second: &Range<u64>) -> bool {
     first.start < second.end && second.start < first.end
 }
+
+#[rstest]
+#[case::dataset(Lifetime::Dataset(LastReference::Kept))]
+#[case::attribute(Lifetime::Attribute(LastReference::Kept))]
+#[case::fill(Lifetime::Fill(LastReference::Kept))]
+#[case::empty(Lifetime::Empty(LastReference::Kept))]
+fn heap_member_survives_a_remaining_reference(
+    #[case] lifetime: Lifetime,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("shared-member.h5");
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let file = open_lifetime(&path, lifetime, memory);
+
+    file.root().delete("value").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.assert_parent_unchanged(&path);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+#[rstest]
+#[case::dataset(Lifetime::Dataset(LastReference::Removed))]
+#[case::fill(Lifetime::Fill(LastReference::Removed))]
+#[case::alias(Lifetime::Alias(LastReference::Removed))]
+#[case::empty(Lifetime::Empty(LastReference::Removed))]
+fn deleting_the_final_dataset_link_compacts_the_member(
+    #[case] lifetime: Lifetime,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("final-dataset-link.h5");
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let file = open_lifetime(&path, lifetime, memory);
+
+    file.root().delete("value").unwrap();
+    file.root().delete("share").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.parent.assert_compacted(&path);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+#[rstest]
+fn removing_the_final_attribute_reference_compacts_the_member(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("final-attribute-reference.h5");
+    let lifetime = Lifetime::Attribute(LastReference::Removed);
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let file = open_lifetime(&path, lifetime, memory);
+
+    file.root().delete("value").unwrap();
+    file.dataset("share").unwrap().remove_attr("a").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.parent.assert_compacted(&path);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+#[rstest]
+#[case::surviving_alias(Lifetime::Alias(LastReference::Kept))]
+#[case::anonymous_owner(Lifetime::Anonymous)]
+fn decreasing_a_protected_owner_count_keeps_the_heap_member(
+    #[case] lifetime: Lifetime,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("protected-count.h5");
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let mut expected = fs::read(&path).unwrap();
+    let file = open_lifetime(&path, lifetime, memory);
+    test_util::object_header::v2::replace_message(
+        &mut expected,
+        usize::try_from(fixture.owner).unwrap(),
+        MessageType::OBJECT_REFERENCE_COUNT,
+        &Message::reference_count(1).data,
+    );
+
+    file.root().delete("value").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.assert_parent_unchanged(&path);
+    fixture.assert_protected_bytes(&path, &expected);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+#[rstest]
+fn a_detached_owner_keeps_the_heap_member(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("detached-owner.h5");
+    let lifetime = Lifetime::Detached;
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let before = fs::read(&path).unwrap();
+    let file = open_lifetime(&path, lifetime, memory);
+
+    file.root().delete("value").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.assert_parent_unchanged(&path);
+    fixture.assert_protected_bytes(&path, &before);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+#[rstest]
+fn a_deleted_committed_type_keeps_its_heap_member(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("committed-owner.h5");
+    let lifetime = Lifetime::Committed;
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let before = fs::read(&path).unwrap();
+    let file = open_lifetime(&path, lifetime, memory);
+    assert_eq!(file.root().named_datatype_references("type").unwrap(), 1);
+
+    file.root().delete("value").unwrap();
+    file.root().delete("type").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.assert_parent_unchanged(&path);
+    fixture.assert_protected_bytes(&path, &before);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+#[rstest]
+fn compaction_keeps_an_unobserved_member(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("unobserved-member.h5");
+    let lifetime = Lifetime::Unobserved;
+    let fixture = LifetimeFixture::write(&path, lifetime);
+    let file = open_lifetime(&path, lifetime, memory);
+
+    file.root().delete("value").unwrap();
+    fixture.commit_lifetime(&file, lifetime);
+    file.close().unwrap();
+
+    fixture.parent.assert_compacted(&path);
+    lifetime.assert_values(&File::open(&path).unwrap());
+}
+
+fn open_lifetime(path: &Path, lifetime: Lifetime, memory: MemoryStrategy) -> File {
+    let file = File::open_rw_with_options(
+        path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    assert_eq!(
+        file.dataset("value").unwrap().read_string().unwrap(),
+        [lifetime.value()]
+    );
+    file
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LastReference {
+    Kept,
+    Removed,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Lifetime {
+    Dataset(LastReference),
+    Attribute(LastReference),
+    Fill(LastReference),
+    Alias(LastReference),
+    Empty(LastReference),
+    Unobserved,
+    Anonymous,
+    Detached,
+    Committed,
+}
+
+impl Lifetime {
+    fn value(self) -> &'static str {
+        if matches!(self, Self::Empty(_)) {
+            ""
+        } else {
+            "shared"
+        }
+    }
+
+    fn final_reference(self) -> bool {
+        matches!(
+            self,
+            Self::Dataset(LastReference::Removed)
+                | Self::Attribute(LastReference::Removed)
+                | Self::Fill(LastReference::Removed)
+                | Self::Alias(LastReference::Removed)
+                | Self::Empty(LastReference::Removed)
+                | Self::Unobserved
+        )
+    }
+
+    fn assert_values(self, file: &File) {
+        assert_eq!(
+            file.dataset("keep").unwrap().read_string().unwrap(),
+            ["keep!"]
+        );
+        let mut names = file.root().datasets().unwrap();
+        names.sort();
+        match self {
+            Self::Attribute(last) => {
+                assert_eq!(names, ["keep", "share"]);
+                let dataset = file.dataset("share").unwrap();
+                assert_eq!(dataset.read_i32().unwrap(), [17]);
+                let attributes = dataset.attrs().unwrap();
+                match last {
+                    LastReference::Kept => assert_eq!(
+                        attributes.get("a"),
+                        Some(&AttrValue::VarLenAsciiStringArray(vec!["shared".into()]))
+                    ),
+                    LastReference::Removed => assert!(attributes.is_empty()),
+                }
+            }
+            Self::Dataset(LastReference::Kept)
+            | Self::Fill(LastReference::Kept)
+            | Self::Alias(LastReference::Kept)
+            | Self::Empty(LastReference::Kept) => {
+                assert_eq!(names, ["keep", "share"]);
+                assert_eq!(
+                    file.dataset("share").unwrap().read_string().unwrap(),
+                    [self.value()]
+                );
+            }
+            _ => assert_eq!(names, ["keep"]),
+        }
+        assert!(file.root().named_datatypes().unwrap().is_empty());
+    }
+}
+
+struct LifetimeFixture {
+    parent: Parent,
+    owner: u64,
+    protected: Vec<Range<u64>>,
+}
+
+impl LifetimeFixture {
+    fn commit_lifetime(&self, file: &File, lifetime: Lifetime) {
+        file.commit().unwrap();
+        assert!(!file.has_staged_edits());
+        let free = file.reusable_free_sections().unwrap();
+        let parent = self.parent.address
+            ..self.parent.address + u64::try_from(self.parent.original.len()).unwrap();
+        for range in std::iter::once(&parent).chain(&self.protected) {
+            assert!(
+                free.sections().iter().all(|section| {
+                    section.end_address().get() <= range.start
+                        || range.end <= section.address().get()
+                }),
+                "live allocation {range:?} overlaps {free:?}"
+            );
+        }
+        lifetime.assert_values(file);
+    }
+
+    fn assert_parent_unchanged(&self, path: &Path) {
+        let after = fs::read(path).unwrap();
+        let start = usize::try_from(self.parent.address).unwrap();
+        assert_eq!(
+            &after[start..start + self.parent.original.len()],
+            self.parent.original
+        );
+    }
+
+    fn assert_protected_bytes(&self, path: &Path, expected: &[u8]) {
+        let after = fs::read(path).unwrap();
+        for range in &self.protected {
+            let range = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+            assert_eq!(&after[range.clone()], &expected[range]);
+        }
+    }
+
+    fn write(path: &Path, lifetime: Lifetime) -> Self {
+        let mut fixture = Fixture::new();
+        let mut objects = vec![
+            Object::new(7, b"shared"),
+            Object {
+                index: 91,
+                reference_count: 0,
+                data: b"keep!",
+            },
+        ];
+        if matches!(lifetime, Lifetime::Unobserved) {
+            objects.push(Object {
+                index: 400,
+                reference_count: 0,
+                data: b"unobserved",
+            });
+        }
+        let retained: &[u16] = match lifetime {
+            Lifetime::Unobserved => &[91, 400],
+            _ if lifetime.final_reference() => &[91],
+            _ => &[7, 91],
+        };
+        let parent = Parent::append(&mut fixture, &objects, retained);
+        let datatype = global_heap_fixture::vlen_string();
+        let reference = global_heap_fixture::reference(
+            if matches!(lifetime, Lifetime::Empty(_)) {
+                0
+            } else {
+                6
+            },
+            parent.address,
+            7,
+        );
+        let mut messages = Form::CompactDataset.messages(&mut fixture, &datatype, &reference);
+        messages.push(Message::reference_count(
+            if matches!(lifetime, Lifetime::Alias(_) | Lifetime::Anonymous) {
+                2
+            } else {
+                1
+            },
+        ));
+        let owner = fixture.append_header(messages);
+        let owner_end = u64::try_from(fixture.image.as_bytes().len()).unwrap();
+        fixture.link("value", owner);
+        let mut protected = Vec::new();
+        match lifetime {
+            Lifetime::Alias(last) => {
+                fixture.link("share", owner);
+                if matches!(last, LastReference::Kept) {
+                    protected.push(owner..owner_end);
+                }
+            }
+            Lifetime::Anonymous => protected.push(owner..owner_end),
+            Lifetime::Unobserved => {}
+            Lifetime::Detached => {
+                let messages = Form::CompactDataset.messages(&mut fixture, &datatype, &reference);
+                let header = fixture.append_header(messages);
+                protected.push(header..u64::try_from(fixture.image.as_bytes().len()).unwrap());
+            }
+            Lifetime::Committed => {
+                let mut messages =
+                    Form::CompactAttribute.messages(&mut fixture, &datatype, &reference);
+                messages.push(Message::new(
+                    MessageType::DATATYPE,
+                    &test_util::datatype::f64_le(),
+                ));
+                messages.push(Message::reference_count(1));
+                let header = fixture.append_header(messages);
+                protected.push(header..u64::try_from(fixture.image.as_bytes().len()).unwrap());
+                fixture.link("type", header);
+            }
+            Lifetime::Attribute(_) => {
+                let mut messages = Form::CompactDataset.messages(
+                    &mut fixture,
+                    &hdf5_pure::make_i32_type(),
+                    &17_i32.to_le_bytes(),
+                );
+                messages.extend(Form::CompactAttribute.messages(
+                    &mut fixture,
+                    &datatype,
+                    &reference,
+                ));
+                fixture.object("share", messages);
+            }
+            Lifetime::Dataset(_) | Lifetime::Fill(_) | Lifetime::Empty(_) => {
+                let form = if matches!(lifetime, Lifetime::Fill(_)) {
+                    Form::FillValue
+                } else {
+                    Form::CompactDataset
+                };
+                let messages = form.messages(&mut fixture, &datatype, &reference);
+                fixture.object("share", messages);
+            }
+        }
+        let messages = Form::CompactDataset.messages(
+            &mut fixture,
+            &datatype,
+            &global_heap_fixture::reference(5, parent.address, 91),
+        );
+        fixture.object("keep", messages);
+        fixture.write(path);
+        Self {
+            parent,
+            owner,
+            protected,
+        }
+    }
+}
