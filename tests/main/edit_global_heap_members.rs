@@ -1,13 +1,15 @@
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
 
-use hdf5_pure::{AttrValue, File, FileAccessProperties, MemoryStrategy, SyncPolicy};
+use hdf5_pure::{AttrValue, File, FileAccessProperties, FileLocking, MemoryStrategy, SyncPolicy};
 use rstest::rstest;
 use test_util::attribute::Attribute;
 use test_util::dataspace;
 use test_util::global_heap::{self, Object};
 use test_util::object_header::{Message, MessageType};
 use test_util::widths::Widths;
+use test_util_hdf5::file_space;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 const HEADER: usize = 16;
@@ -306,4 +308,236 @@ impl Parent {
         assert_eq!(after, self.expected);
         assert_eq!(&after[..HEADER], &self.original[..HEADER]);
     }
+}
+
+#[rstest]
+#[case::minimum_capacity(4_096)]
+#[case::larger_capacity(8_192)]
+fn whole_parent_reuse_preserves_compacted_and_untouched_neighbors(
+    #[case] capacity: usize,
+    #[values(1, 3)] count: usize,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("whole-parent-reuse.h5");
+    let fixture = ReclamationFixture::write(&path, capacity, count);
+    let before = fs::read(&path).unwrap();
+    fixture.assert_source(&before);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(memory)
+            .with_locking(FileLocking::Disabled),
+    )
+    .unwrap();
+    let mut owner = file.dataset("owner").unwrap();
+    assert_eq!(owner.read_i32().unwrap(), [17]);
+    assert_eq!(owner.attrs().unwrap().len(), 1);
+    for index in 0..count {
+        let mut dataset = file.dataset(&format!("remove_{index}")).unwrap();
+        assert_eq!(dataset.attrs().unwrap().len(), 2);
+        dataset.remove_attr("first").unwrap();
+        dataset.remove_attr("last").unwrap();
+    }
+    owner.remove_attr("partial").unwrap();
+    drop(owner);
+    file.commit().unwrap();
+    let free = file.reusable_free_sections().unwrap();
+    for range in &fixture.retired {
+        assert!(
+            free.sections().iter().any(|section| {
+                section.address().get() <= range.start && range.end <= section.end_address().get()
+            }),
+            "whole parent {range:?} was not released: {free:?}"
+        );
+    }
+    fixture.assert_excluded(&file);
+    assert!(file.dataset("owner").unwrap().attrs().unwrap().is_empty());
+    assert_eq!(
+        file.dataset("partial").unwrap().read_string().unwrap(),
+        ["survive"]
+    );
+    fixture.assert_neighbors(&path);
+
+    for index in 0..count {
+        let values = vec![u8::try_from(index + 1).unwrap(); capacity];
+        file.root()
+            .create_dataset(&format!("raw_{index}"), |dataset| {
+                dataset.with_u8_data(&values);
+            })
+            .unwrap();
+    }
+    file.commit().unwrap();
+    let raw: Vec<_> = (0..count)
+        .map(|index| file_space::contiguous_extent(&file, &format!("raw_{index}")))
+        .collect();
+    for range in &fixture.retired {
+        assert!(
+            raw.iter().any(|placed| overlaps(placed, range)),
+            "released parent {range:?} was not reused by {raw:?}"
+        );
+    }
+    for placed in &raw {
+        assert_eq!(placed.end - placed.start, u64::try_from(capacity).unwrap());
+        assert!(!overlaps(placed, &fixture.partial_range()));
+        assert!(!overlaps(placed, &fixture.untouched_range()));
+    }
+    fixture.assert_excluded(&file);
+    file.close().unwrap();
+    fixture.assert_neighbors(&path);
+    let file = File::open(&path).unwrap();
+    for index in 0..count {
+        assert_eq!(
+            file.dataset(&format!("raw_{index}"))
+                .unwrap()
+                .read_u8()
+                .unwrap(),
+            vec![u8::try_from(index + 1).unwrap(); capacity]
+        );
+        let owner = file.dataset(&format!("remove_{index}")).unwrap();
+        assert_eq!(owner.read_i32().unwrap(), [17]);
+        assert!(owner.attrs().unwrap().is_empty());
+    }
+    assert_eq!(file.dataset("owner").unwrap().read_i32().unwrap(), [17]);
+    assert!(file.dataset("owner").unwrap().attrs().unwrap().is_empty());
+    assert_eq!(
+        file.dataset("partial").unwrap().read_string().unwrap(),
+        ["survive"]
+    );
+    assert_eq!(
+        file.dataset("untouched").unwrap().read_string().unwrap(),
+        ["untouched"]
+    );
+}
+
+struct ReclamationFixture {
+    retired: Vec<Range<u64>>,
+    partial: Parent,
+    untouched: Parent,
+}
+
+impl ReclamationFixture {
+    fn write(path: &Path, capacity: usize, count: usize) -> Self {
+        let mut fixture = Fixture::new();
+        let mut messages = Form::CompactDataset.messages(
+            &mut fixture,
+            &hdf5_pure::make_i32_type(),
+            &17_i32.to_le_bytes(),
+        );
+        let mut retired = Vec::new();
+        for index in 0..count {
+            let bytes = global_heap::collection_of_size(
+                &[Object::new(41, b"first"), Object::new(99, b"last")],
+                Widths::EIGHT,
+                capacity,
+            );
+            let address = u64::try_from(fixture.image.append(&bytes)).unwrap();
+            retired.push(address..address + u64::try_from(capacity).unwrap());
+            let mut owner = Form::CompactDataset.messages(
+                &mut fixture,
+                &hdf5_pure::make_i32_type(),
+                &17_i32.to_le_bytes(),
+            );
+            attribute(&mut owner, "first", address, 41, 5);
+            attribute(&mut owner, "last", address, 99, 4);
+            fixture.object(&format!("remove_{index}"), owner);
+        }
+        let partial = Parent::append(
+            &mut fixture,
+            &[Object::new(7, b"remove"), Object::new(91, b"survive")],
+            &[91],
+        );
+        attribute(&mut messages, "partial", partial.address, 7, 6);
+        let untouched = Parent::append(&mut fixture, &[Object::new(400, b"untouched")], &[400]);
+        fixture.object("owner", messages);
+        for (name, parent, member, length) in [
+            ("partial", partial.address, 91, 7),
+            ("untouched", untouched.address, 400, 9),
+        ] {
+            let messages = Form::ContiguousDataset.messages(
+                &mut fixture,
+                &global_heap_fixture::vlen_string(),
+                &global_heap_fixture::reference(length, parent, member),
+            );
+            fixture.object(name, messages);
+        }
+        fixture.write(path);
+        Self {
+            retired,
+            partial,
+            untouched,
+        }
+    }
+
+    fn assert_source(&self, bytes: &[u8]) {
+        for range in &self.retired {
+            let start = usize::try_from(range.start).unwrap();
+            assert_eq!(&bytes[start..start + 4], b"GCOL");
+            assert_eq!(
+                &bytes[start + 8..start + 16],
+                &(range.end - range.start).to_le_bytes()
+            );
+            assert_eq!(&bytes[start + 16..start + 18], &41_u16.to_le_bytes());
+            assert_eq!(&bytes[start + 18..start + 20], &1_u16.to_le_bytes());
+            assert_eq!(&bytes[start + 32..start + 37], b"first");
+            assert_eq!(&bytes[start + 40..start + 42], &99_u16.to_le_bytes());
+            assert_eq!(&bytes[start + 42..start + 44], &1_u16.to_le_bytes());
+            assert_eq!(&bytes[start + 56..start + 60], b"last");
+        }
+        for parent in [&self.partial, &self.untouched] {
+            let start = usize::try_from(parent.address).unwrap();
+            assert_eq!(
+                &bytes[start..start + parent.original.len()],
+                parent.original
+            );
+        }
+    }
+
+    fn assert_neighbors(&self, path: &Path) {
+        self.partial.assert_compacted(path);
+        let bytes = fs::read(path).unwrap();
+        let start = usize::try_from(self.untouched.address).unwrap();
+        assert_eq!(
+            &bytes[start..start + self.untouched.original.len()],
+            self.untouched.original
+        );
+    }
+
+    fn assert_excluded(&self, file: &File) {
+        let free = file.reusable_free_sections().unwrap();
+        for protected in [self.partial_range(), self.untouched_range()] {
+            assert!(
+                free.sections().iter().all(|section| {
+                    section.end_address().get() <= protected.start
+                        || protected.end <= section.address().get()
+                }),
+                "live parent {protected:?} overlaps reusable space {free:?}"
+            );
+        }
+    }
+
+    fn partial_range(&self) -> Range<u64> {
+        self.partial.address
+            ..self.partial.address + u64::try_from(self.partial.original.len()).unwrap()
+    }
+
+    fn untouched_range(&self) -> Range<u64> {
+        self.untouched.address
+            ..self.untouched.address + u64::try_from(self.untouched.original.len()).unwrap()
+    }
+}
+
+fn attribute(messages: &mut Vec<Message>, name: &str, parent: u64, index: u32, length: u32) {
+    let attribute = Attribute::new(
+        name,
+        &hdf5_pure_format::__private::serialize_datatype(&global_heap_fixture::vlen_string())
+            .unwrap(),
+        &dataspace::scalar(),
+        &global_heap_fixture::reference(length, parent, index),
+    )
+    .build();
+    messages.push(Message::new(MessageType::ATTRIBUTE, &attribute));
+}
+
+fn overlaps(first: &Range<u64>, second: &Range<u64>) -> bool {
+    first.start < second.end && second.start < first.end
 }
