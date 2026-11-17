@@ -11,6 +11,8 @@ use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
 use crate::{File, FileAccessProperties, FileLocking, MemoryStrategy};
 
+mod prepublication;
+
 #[rstest]
 #[case::increase(2, false, false, 3)]
 #[case::decrease(1, true, false, 2)]
