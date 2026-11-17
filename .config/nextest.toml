@@ -142,6 +142,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^edit_final_links::/) |
     test(/^edit_group_copy_links::/) |
     test(/^edit_header_times::/) |
+    test(/^edit_reference_counts::/) |
     test(/^edit_reference_repointing::/) |
     test(/^edit_userblock::/) |
     test(/^width_workload::/)
