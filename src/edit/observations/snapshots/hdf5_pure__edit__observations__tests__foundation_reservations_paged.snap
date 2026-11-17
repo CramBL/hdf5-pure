@@ -17,15 +17,6 @@ Reservations
            8,192             8,192                48              48  Meta
           12,288            12,288                80              32  Raw
 
-Reservation work
-  Metric            Count
-  ----------------  -----
-  Indexed extents       0
-  Lookups               6
-  Removed extents       0
-  Inserted extents      0
-  Restored extents      0
-
 Free sections
   Stored address  Bytes  Class
   --------------  -----  -----

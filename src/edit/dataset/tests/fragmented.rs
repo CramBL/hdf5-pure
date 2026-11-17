@@ -380,7 +380,6 @@ fn metadata_only_page_space_keeps_one_compound_payload_request() {
         plan.reservations()[0].encoding_dependency(),
         EncodingDependency::Independent
     );
-    assert_eq!(plan.work().indexed_extents, 0);
     drop(plan);
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),

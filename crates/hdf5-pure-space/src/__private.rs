@@ -39,6 +39,5 @@ pub use crate::snapshot::RetainedExtent;
 pub use crate::snapshot::RetainedKind;
 
 pub use crate::reservation::{
-    ReservationBatch, ReservationPlacement, ReservationRequest, ReservationWork,
-    ReusableReservation,
+    ReservationBatch, ReservationPlacement, ReservationRequest, ReusableReservation,
 };

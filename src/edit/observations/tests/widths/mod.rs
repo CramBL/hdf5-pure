@@ -201,13 +201,6 @@ fn run(widths: FormatWidths, strategy: FileSpaceStrategy, mixed: bool, holes: us
             "{work:?}"
         );
         assert!(
-            work.indexed_extents
-                <= 8 * u64::try_from(fragments + usize::try_from(work.reservations).unwrap() + 8)
-                    .unwrap(),
-            "{work:?}"
-        );
-        assert!(work.lookups <= 3 * work.reservations, "{work:?}");
-        assert!(
             work.reused_blocks > 0 && work.reused_block_bytes > 0,
             "{work:?}"
         );

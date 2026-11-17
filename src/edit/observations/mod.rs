@@ -3,8 +3,6 @@
 
 use core::cell::Cell;
 
-use hdf5_pure_space::__private::ReservationWork;
-
 /// Recorded planning, encoding, and allocation work for one test thread.
 ///
 /// Reservation totals include normal batches, preferred lookups, and direct manager reservations.
@@ -39,10 +37,6 @@ pub(crate) struct WidthWork {
     pub(crate) reused_blocks: u64,
     /// Complete allocation bytes in the recorded reused blocks.
     pub(crate) reused_block_bytes: u64,
-    /// Indexed extents reported by the recorded reservation groups.
-    pub(crate) indexed_extents: u64,
-    /// Indexed lookups reported by the recorded reservation groups.
-    pub(crate) lookups: u64,
 }
 
 std::thread_local! {
@@ -99,15 +93,13 @@ pub(crate) fn record_manager_encoding(bytes: usize) {
     });
 }
 
-/// Records block requests, indexed batch work, and checked extension capacity.
-pub(super) fn record_width_reservations(requests: usize, batch: ReservationWork, appended: u64) {
+/// Records block requests and checked extension capacity.
+pub(super) fn record_width_reservations(requests: usize, appended: u64) {
     WIDTH_WORK.with(|observed| {
         let mut work = observed.get();
         work.reservation_batches += 1;
         work.reservations += requests as u64;
         work.appended_capacity += appended;
-        work.indexed_extents += batch.indexed_extents;
-        work.lookups += batch.lookups;
         observed.set(work);
     });
 }
@@ -177,8 +169,7 @@ pub(super) fn reset_zeros() {
 /// can be recorded before placement or encoding fails.
 ///
 /// The caller measures live and peak allocations, buffering, source reads, mirror storage, and
-/// issued writes separately. Indexed reservation work excludes scalar searches and other costs
-/// described by [`ReservationWork`].
+/// issued writes separately.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CreationWork {
     /// Successfully prepared chunks.
@@ -201,12 +192,8 @@ pub(crate) struct CreationWork {
     pub(crate) raw_capacity_scans: u64,
     /// Recorded reservation batches with one request.
     pub(crate) scalar_requests: u64,
-    /// Recorded reservation batches that indexed at least one free extent.
-    pub(crate) batch_builds: u64,
     /// Sum of request counts supplied to recorded reservation batches.
     pub(crate) requests: u64,
-    /// Accumulated indexed work from recorded reservation batches.
-    pub(crate) reservations: ReservationWork,
 }
 
 std::thread_local! {
@@ -276,28 +263,14 @@ pub(super) fn record_raw_capacity_scan() {
     });
 }
 
-/// Adds a reservation batch's request count and indexed work to the current thread's totals.
+/// Adds a reservation batch's request count to the current thread's totals.
 ///
 /// The caller passes the full submitted request count, including requests after a failed prefix.
-/// The indexed work includes restoration performed when finishing the batch.
-pub(super) fn record_reservations(requests: usize, counted: ReservationWork) {
-    let ReservationWork {
-        indexed_extents,
-        lookups,
-        removed_extents,
-        inserted_extents,
-        restored_extents,
-    } = counted;
+pub(super) fn record_reservations(requests: usize) {
     CREATION.with(|observed| {
         let mut work = observed.get();
         work.requests += requests as u64;
         work.scalar_requests += u64::from(requests == 1);
-        work.batch_builds += u64::from(indexed_extents > 0);
-        work.reservations.indexed_extents += indexed_extents;
-        work.reservations.lookups += lookups;
-        work.reservations.removed_extents += removed_extents;
-        work.reservations.inserted_extents += inserted_extents;
-        work.reservations.restored_extents += restored_extents;
         observed.set(work);
     });
 }

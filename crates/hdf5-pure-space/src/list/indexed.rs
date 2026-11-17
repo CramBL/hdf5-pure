@@ -13,7 +13,7 @@ use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
 use super::FreeList;
 use crate::admission::TrackedSpace;
 use crate::extent::Extent;
-use crate::reservation::{ReservationRequest, ReservationWork};
+use crate::reservation::ReservationRequest;
 
 /// A borrowed free list with address, size, and PAGE placement indexes.
 ///
@@ -29,7 +29,6 @@ pub(crate) struct IndexedFreeList<'a> {
     blocks: Option<Box<BlockIndex>>,
     buffer: Vec<Extent>,
     total_bytes: ByteLength,
-    work: ReservationWork,
     restored: bool,
 }
 
@@ -47,12 +46,10 @@ impl<'a> IndexedFreeList<'a> {
             blocks: None,
             buffer: Vec::new(),
             total_bytes,
-            work: ReservationWork::default(),
             restored: false,
         };
         for extent in buffer.drain(..) {
             indexed.insert(extent);
-            indexed.work.indexed_extents = indexed.work.indexed_extents.saturating_add(1);
         }
         indexed.buffer = buffer;
         indexed
@@ -60,7 +57,6 @@ impl<'a> IndexedFreeList<'a> {
 
     /// Reserves a prefix of the smallest sufficient extent, retaining any remainder.
     pub(crate) fn allocate(&mut self, size: NonZeroByteLength) -> Option<Extent> {
-        self.work.lookups = self.work.lookups.saturating_add(1);
         let &(_, start) = self
             .sizes
             .range((size.length(), StoredAddress::new(0))..)
@@ -88,7 +84,6 @@ impl<'a> IndexedFreeList<'a> {
         request: ReservationRequest,
         page_size: FileSpacePageSize,
     ) -> Option<Extent> {
-        self.work.lookups = self.work.lookups.saturating_add(1);
         let blocks = self.blocks.get_or_insert_with(|| {
             let mut blocks = BlockIndex::new(page_size);
             for &extent in self.regions.values() {
@@ -125,7 +120,6 @@ impl<'a> IndexedFreeList<'a> {
     ///
     /// Panics in debug builds if `size` is not a multiple of the configured alignment.
     pub(crate) fn allocate_whole_units(&mut self, size: NonZeroByteLength) -> Option<Extent> {
-        self.work.lookups = self.work.lookups.saturating_add(1);
         let alignment = self.alignment?;
         debug_assert_eq!(size.get() % alignment.get(), 0);
         let &(_, start) = self
@@ -201,12 +195,10 @@ impl<'a> IndexedFreeList<'a> {
             blocks,
             buffer,
             total_bytes,
-            work,
             restored,
         } = self;
         for extent in mem::take(regions).into_values() {
             buffer.push(extent);
-            work.restored_extents = work.restored_extents.saturating_add(1);
         }
         *restored = true;
         owner.regions = mem::take(buffer);
@@ -214,11 +206,6 @@ impl<'a> IndexedFreeList<'a> {
         sizes.clear();
         interiors.clear();
         *blocks = None;
-    }
-
-    /// Returns operation counts accumulated by this index.
-    pub(crate) fn work(&self) -> ReservationWork {
-        self.work
     }
 
     fn insert(&mut self, extent: Extent) {
@@ -231,7 +218,6 @@ impl<'a> IndexedFreeList<'a> {
             blocks,
             buffer: _,
             total_bytes: _,
-            work,
             restored: _,
         } = self;
         if let Some(blocks) = blocks {
@@ -244,7 +230,6 @@ impl<'a> IndexedFreeList<'a> {
         {
             interiors.insert((interior.len(), extent.start()));
         }
-        work.inserted_extents = work.inserted_extents.saturating_add(1);
     }
 
     fn remove(&mut self, start: StoredAddress) -> Extent {
@@ -257,7 +242,6 @@ impl<'a> IndexedFreeList<'a> {
             blocks,
             buffer: _,
             total_bytes: _,
-            work,
             restored: _,
         } = self;
         // Every start in either lookup index has an entry in the address map.
@@ -271,7 +255,6 @@ impl<'a> IndexedFreeList<'a> {
         {
             interiors.remove(&(interior.len(), start));
         }
-        work.removed_extents = work.removed_extents.saturating_add(1);
         extent
     }
 }

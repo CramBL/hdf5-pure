@@ -2,7 +2,7 @@ use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{
-    AllocationClass, Extent, PageType, ReservationRequest, ReservationWork, SessionSpace,
+    AllocationClass, Extent, PageType, ReservationRequest, SessionSpace,
 };
 use rstest::rstest;
 use test_util::snapshot::text::{Report, Value};
@@ -128,7 +128,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         let local = usize::try_from(at).unwrap();
         expected[local..local + bytes.len()].copy_from_slice(&bytes);
     }
-    let work = plan.finish().unwrap();
+    plan.finish().unwrap();
     assert_eq!(engine.image.len(), end);
     assert_eq!(
         engine.image().read_exact_at(0, expected.len()).unwrap(),
@@ -139,10 +139,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
             engine.space.reusable_sections().collect::<Vec<_>>(),
             [extent(start + 112, 16), extent(start + 336, 48)]
         );
-        assert_eq!(work.indexed_extents, 2);
         assert_eq!(engine.space.reusable_bytes().unwrap(), ByteLength::new(64));
-    } else {
-        assert_eq!(work.indexed_extents, 0);
     }
     engine.image.flush().unwrap();
     let after = engine.image.buffering_work();
@@ -233,24 +230,6 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
                     Value::text(format!("{page:?}")),
                 ]
             }),
-    );
-    let ReservationWork {
-        indexed_extents,
-        lookups,
-        removed_extents,
-        inserted_extents,
-        restored_extents,
-    } = work;
-    report.metrics(
-        "Reservation work",
-        "Count",
-        [
-            ("Indexed extents", indexed_extents),
-            ("Lookups", lookups),
-            ("Removed extents", removed_extents),
-            ("Inserted extents", inserted_extents),
-            ("Restored extents", restored_extents),
-        ],
     );
     report.table(
         "Free sections",
