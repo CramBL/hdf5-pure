@@ -293,6 +293,31 @@ impl ProtectedCounts {
         self.source.as_ref().map(|source| source.root)
     }
 
+    pub(in crate::edit) fn check_association(
+        &self,
+        engine: &WriteEngine,
+        source: Option<&ReconstructionSource>,
+    ) -> Result<(), CountProtectionError> {
+        let Some(origin) = &self.source else {
+            return Ok(());
+        };
+        origin.reconstructions(engine, [])?;
+        if let Some(source) = source {
+            if origin.root != source.object() {
+                return Err(CountProtectionError::Root {
+                    expected: origin.root,
+                    actual: source.object(),
+                });
+            }
+            if !Arc::ptr_eq(&origin.identity, &source.identity) {
+                return Err(CountProtectionError::Phase {
+                    object: source.object(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Borrows positive count changes in complete-allocation address order.
     pub(in crate::edit) fn updates(&self) -> &[ProtectedCount] {
         &self.updates

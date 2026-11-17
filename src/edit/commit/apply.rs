@@ -120,6 +120,7 @@ impl WriteEngine {
         mut dispositions: Option<&mut ReconstructionDispositions>,
         reclamation: Option<Vec<(FileRange, FreeClass)>>,
     ) -> Result<AppliedTree, Error> {
+        let inherited_heaps = reclamation.as_ref().map(|_| self.superseded_heaps.len());
         let PreparedTree {
             counts,
             mut groups,
@@ -318,6 +319,7 @@ impl WriteEngine {
                 retained_roots,
                 ..
             }) => (Some(protected), retained_roots),
+            Some(PreparedTreeCounts::Captured(protected)) => (Some(protected), Vec::new()),
             Some(PreparedTreeCounts::Unavailable) | None => (None, Vec::new()),
         };
         let mut prospective = AnalysisPhase::prospective(self, new_root.header_address());
@@ -331,6 +333,11 @@ impl WriteEngine {
                     .map(|object| relocations.get(&object).copied().unwrap_or(object)),
             )
         });
+        if let Some(inherited) = inherited_heaps {
+            // Captured parent decisions own retirement of heaps superseded by this application.
+            // Preserve requests inherited from earlier operations in the session.
+            self.superseded_heaps.truncate(inherited);
+        }
         to_free.extend(
             self.superseded_heaps
                 .drain(..)

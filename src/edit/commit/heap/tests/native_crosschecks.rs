@@ -39,7 +39,18 @@ fn native_readers_observe_preserved_records_after_protected_compaction(#[case] s
     engine
         .remove_group_attr(&ObjectPathBuf::root(), "first")
         .unwrap();
-    engine.commit().unwrap();
+    let staged = std::mem::take(&mut engine.staged);
+    let InventoryPreparation::Tree(prepared) = PreparedEditInventory::prepare(&mut engine, staged)
+    else {
+        panic!("expected checked tree preparation");
+    };
+    prepared
+        .apply_excluding(&mut engine)
+        .ok()
+        .unwrap()
+        .publish_with_completion(|_, _, _, _, _, _| Ok(()))
+        .ok()
+        .unwrap();
     drop(engine);
     let mut engine = edit_test_util::open_engine(&path);
     engine.set_sync_policy(SyncPolicy::OnClose);
@@ -100,11 +111,14 @@ fn native_source_members_compact_through_checked_publication(#[case] session: bo
     };
     let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
     assert!(pending.prospective().is_complete());
-    assert_eq!(pending.member_decisions().plans().len(), 1);
+    assert_eq!(pending.member_decisions().plans().count(), 1);
     let completion = pending.publish_compacting_members().ok().unwrap();
     completion.mutation.unwrap();
-    assert_eq!(completion.decisions.plans()[0].range().start(), parent);
-    assert_eq!(completion.decisions.plans()[0].retained(), 1);
+    let mut plans = completion.decisions.plans();
+    let plan = plans.next().unwrap();
+    assert_eq!(plan.range().start(), parent);
+    assert_eq!(plan.retained(), 1);
+    assert!(plans.next().is_none());
     drop(engine);
     let native = file::libhdf5_open(&path);
     assert_eq!(native.attr_names().unwrap(), ["second"]);

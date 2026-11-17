@@ -251,7 +251,7 @@ fn invalid_predecessor_associations_are_withheld(#[case] wrong_phase: bool) {
         .unwrap()
         .prepared
         .replaces = Some(ReplacedHeader::Header(child_source));
-    let dispositions = ReconstructionDispositions::collect(&engine, &mut phase, tree);
+    let dispositions = ReconstructionDispositions::collect(&engine, &mut phase, tree, None);
     assert_eq!(
         dispositions.predecessors()[&ObjectPathBuf::parse("g")].disposition,
         Disposition::Withhold(if wrong_phase {
@@ -454,6 +454,7 @@ fn a_failure_after_a_group_placement_returns_no_applied_inventory() {
 fn empty_dispositions() -> ReconstructionDispositions {
     ReconstructionDispositions {
         source: Err(Error::StaleHandle),
+        session_parents: BTreeMap::new(),
         predecessors: BTreeMap::new(),
         expected: BTreeMap::new(),
         placed: BTreeMap::new(),

@@ -205,6 +205,9 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
             .remove_group_attr(&ObjectPathBuf::parse("owner"), name)
             .unwrap();
     }
+    let parent_at = range.start().get();
+    let parent_len = usize::try_from(range.length()).unwrap();
+    let parent_bytes = engine.image().read_exact_at(parent_at, parent_len).unwrap();
     let before = engine.image.buffering_work();
     peak.store(0, Ordering::Relaxed);
     calls.store(0, Ordering::Relaxed);
@@ -235,10 +238,18 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
         after.mirror_bytes > 0,
         matches!(memory, MemoryStrategy::Mirrored)
     );
-    assert!(engine.reusable_ranges().any(|free| {
-        let free = free.unwrap();
-        free.start() <= range.start() && range.end() <= free.end()
-    }));
+    if references {
+        assert!(engine.reusable_ranges().any(|free| {
+            let free = free.unwrap();
+            free.start() <= range.start() && range.end() <= free.end()
+        }));
+    } else {
+        assert!(
+            engine
+                .reusable_ranges()
+                .all(|free| !free.unwrap().overlaps(range))
+        );
+    }
     let mut report = Report::new();
     report.table(
         "Configuration",
@@ -325,6 +336,12 @@ fn attribute_candidates_share_liveness_and_keep_resource_costs_separate(
             ("Resident mirror capacity", after.mirror_capacity),
         ],
     );
+    if !references {
+        assert_eq!(
+            engine.image().read_exact_at(parent_at, parent_len).unwrap(),
+            parent_bytes
+        );
+    }
     drop(engine);
     if references {
         insta::assert_snapshot!(snapshot, report.finish());
@@ -376,6 +393,7 @@ fn write_fixture(path: &Path, references: bool) -> (u64, u64, u64) {
         fixture.link("references", address);
         prospective.push(global_heap_fixture::hard_link("references", address));
     }
+    // The separate reference scan starts at this detached root.
     let root = fixture.append_header(prospective);
     fixture.write(path);
     (dead, owner, root)

@@ -16,6 +16,8 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::object_graph::ObjectId;
 
+pub(in crate::edit) mod residual;
+
 impl AnalysisPhase<'_> {
     /// Qualifies the original root's reachable objects against the source's physical storage.
     ///
@@ -34,10 +36,8 @@ impl AnalysisPhase<'_> {
         source: &ReconstructionSource,
     ) -> Result<OwnerDomain, Error> {
         self.physical_claims(source)?;
-        if let Err(error) = self.engine.context.allocations.before_reference() {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Publication(
-                error,
-            )));
+        if self.engine.context.allocations.before_reference().is_err() {
+            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Publication));
         }
         let Ok(original) = ObjectId::resolve(
             self.engine.addresses(),
@@ -197,8 +197,7 @@ impl SupportedOwnerDomain {
 
 /// An unmet prerequisite for a supported source object-header domain.
 ///
-/// Claim indices refer to [`PhysicalClaims::claims`]. File-problem indices refer to
-/// [`super::super::PhysicalStorage::problems`], and residual indices refer to
+/// Claim indices refer to [`PhysicalClaims::claims`]. Residual indices refer to
 /// [`super::coverage::content::ResidualContents::intervals`].
 #[derive(Debug)]
 pub(in crate::edit) enum DomainUnavailable {
@@ -212,14 +211,14 @@ pub(in crate::edit) enum DomainUnavailable {
     Collection(PhysicalAddress),
     /// The two claim indices of an incompatible overlap.
     Conflict([usize; 2]),
-    /// The index of a file-storage problem.
-    File(usize),
+    /// Incomplete file storage discovery.
+    File,
     /// A recorded end address beyond the source image length.
     MissingSource,
     /// An object with incomplete local allocation discovery.
     ObjectStorage(ObjectId),
     /// An allocation-publication failure that prevents qualification.
-    Publication(Error),
+    Publication,
     /// An object with incomplete reference interpretation.
     References(ObjectId),
     /// An interval with a nonzero witness or incomplete content examination.
@@ -234,7 +233,7 @@ impl From<&ClaimProblem> for DomainUnavailable {
     fn from(problem: &ClaimProblem) -> Self {
         match problem {
             ClaimProblem::Collection { address, .. } => Self::Collection(*address),
-            ClaimProblem::File(index) => Self::File(*index),
+            ClaimProblem::File => Self::File,
             ClaimProblem::ObjectStorage(object) => Self::ObjectStorage(*object),
             ClaimProblem::References(object) => Self::References(*object),
             ClaimProblem::Topology => Self::Topology,

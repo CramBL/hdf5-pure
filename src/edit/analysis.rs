@@ -44,11 +44,11 @@ use super::reclaim::{self, MAX_LINK_WALK_DEPTH};
 use super::staging::StagedEdits;
 use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
+#[cfg(test)]
+pub(super) use deletions::CountInventory;
 pub(super) use deletions::CountPreflight;
 pub(super) use deletions::CountProjectionIdentity;
-pub(super) use deletions::{
-    CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
-};
+pub(super) use deletions::{CountPreflightError, CountProtectionError, ProtectedCounts};
 
 pub(super) use deletions::DeclaredCountChange;
 pub(super) use deletions::PlannedDeletion;
@@ -72,13 +72,6 @@ mod deletions;
     expect(dead_code, reason = "heap member facts do not authorize retirement")
 )]
 pub(in crate::edit) mod heap;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "local ownership facts do not authorize collection retirement"
-    )
-)]
 pub(in crate::edit) mod ownership;
 
 #[cfg_attr(
@@ -112,6 +105,8 @@ pub(super) struct AnalysisPhase<'a> {
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     /// Complete collection ranges, allocated-member framing, and cached parsing failures.
     allocations: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
+    /// Header-backed envelopes retained even when complete member parsing fails.
+    collection_envelopes: BTreeMap<PhysicalAddress, FileRange>,
     /// Count observations, optional header allocation facts, and cached parse failures.
     counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     /// Local allocation ranges and collection outcomes, including cached failures.
@@ -139,6 +134,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references: BTreeMap::new(),
             liveness: None,
             allocations: BTreeMap::new(),
+            collection_envelopes: BTreeMap::new(),
             counts: BTreeMap::new(),
             ownership: BTreeMap::new(),
             physical: None,
@@ -202,6 +198,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references: _,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
@@ -388,10 +385,6 @@ impl<'a> AnalysisPhase<'a> {
     /// Returns path-resolution errors or [`Error::Format`] for inconsistent candidate evidence.
     /// Header, descriptor, and source failures encountered during value collection are recorded in
     /// the observations.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "overwrite candidates do not authorize retirement")
-    )]
     pub(super) fn overwrite_collections(
         &mut self,
         staged: &StagedEdits,
@@ -641,6 +634,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
@@ -722,6 +716,7 @@ impl<'a> AnalysisPhase<'a> {
             value_references: _,
             liveness,
             allocations,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
@@ -1068,6 +1063,19 @@ pub(super) struct CollectionCandidates {
 }
 
 impl CollectionCandidates {
+    /// Returns whether original storage protection is needed for an identified heap parent.
+    ///
+    /// Incomplete observations without any decoded parent remain distinct from absent references.
+    /// They are retained when merged with identified candidates, but alone authorize no heap work.
+    pub(super) fn has_known_parents(&self) -> bool {
+        !self.collections.is_empty()
+            || self.observations.as_ref().is_some_and(|facts| {
+                facts.predecessors.values().any(|references| {
+                    !references.collections.is_empty() || !references.objects.is_empty()
+                })
+            })
+    }
+
     /// Merges allocation candidates, reference observations, and incomplete deletion roots.
     ///
     /// Preserves each allocation's range and class. Adopts `other` directly if `self` is empty.

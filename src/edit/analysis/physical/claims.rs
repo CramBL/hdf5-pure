@@ -76,6 +76,8 @@ pub(in crate::edit) struct PhysicalClaims {
     problems: Vec<ClaimProblem>,
     /// Coverage derived lazily from the original claims and recorded bounds.
     coverage: Option<PhysicalCoverage>,
+    /// Cached interpretation of nonzero residual storage.
+    residual_groups: Option<Arc<Option<domain::residual::ResidualGroups>>>,
 }
 
 impl PhysicalClaims {
@@ -107,6 +109,7 @@ impl PhysicalClaims {
             claims: Vec::new(),
             problems: Vec::new(),
             coverage: None,
+            residual_groups: None,
         };
         let physical = phase.physical_storage(source)?;
         claims
@@ -149,9 +152,9 @@ impl PhysicalClaims {
                     },
                 }),
         );
-        claims
-            .problems
-            .extend((0..physical.problems().len()).map(ClaimProblem::File));
+        if !physical.is_complete() {
+            claims.problems.push(ClaimProblem::File);
+        }
         let objects = match phase.topology() {
             Some(topology) => topology.indices.keys().copied().collect::<Vec<_>>(),
             None => {
@@ -196,9 +199,17 @@ impl PhysicalClaims {
                     range: contents.range(),
                     origin: ClaimOrigin::Heap(address),
                 }),
-                Err(error) => claims
-                    .problems
-                    .push(ClaimProblem::Collection { address, error }),
+                Err(error) => {
+                    if let Some(&range) = phase.collection_envelopes.get(&address) {
+                        claims.claims.push(PhysicalClaim {
+                            range,
+                            origin: ClaimOrigin::Heap(address),
+                        });
+                    }
+                    claims
+                        .problems
+                        .push(ClaimProblem::Collection { address, error });
+                }
             }
         }
         Ok(claims)
@@ -285,9 +296,8 @@ pub(in crate::edit) enum ClaimOrigin {
 
 /// A failed or incomplete component of physical claim collection.
 ///
-/// File problems contain indices into [`super::PhysicalStorage::problems`]. Object problems
-/// contain identities for the local allocation and reference caches. Collection-framing failures
-/// are retained with their physical addresses.
+/// Object problems identify local allocation and reference caches. Collection framing failures
+/// retain their physical addresses.
 #[derive(Debug)]
 pub(in crate::edit) enum ClaimProblem {
     /// A failure while collecting a referenced collection's complete framing.
@@ -295,8 +305,8 @@ pub(in crate::edit) enum ClaimProblem {
         address: PhysicalAddress,
         error: FormatError,
     },
-    /// The index of a problem in [`super::PhysicalStorage::problems`].
-    File(usize),
+    /// Incomplete file storage discovery.
+    File,
     /// Incomplete local allocation discovery for this object.
     ObjectStorage(ObjectId),
     /// Incomplete reference interpretation for this object's content.

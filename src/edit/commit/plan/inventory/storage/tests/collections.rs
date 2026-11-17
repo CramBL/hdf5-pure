@@ -7,21 +7,17 @@ use test_util::disk_log;
 use test_util::global_heap::Object;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
-use super::super::{
-    PendingEditInventory, StorageApplyError, StorageApplyFailure, StorageConflict,
-    StoragePublicationFailure, StoragePublicationRejection,
-};
-use crate::AttrValue;
+use super::super::{PendingEditInventory, StorageConflict};
 use crate::edit::allocation::AllocationPublication;
 use crate::edit::analysis::heap::qualification::{OriginalCollections, OriginalQualification};
 use crate::edit::analysis::{CollectionContent, CollectionProvenance};
-use crate::edit::commit::PublicationError;
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::global_heap::GlobalHeapId;
 use crate::image::WriteBuffering;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
+use crate::{AttrValue, EditStorageConflict};
 
 #[rstest]
 #[case::completion(Outcome::Complete)]
@@ -57,13 +53,15 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
     let members = check(prepared.collections(), owner, id);
     if matches!(outcome, Outcome::PreplacementFailure) {
         engine.context.allocations = AllocationPublication::new();
-        let StorageApplyFailure::BeforePlacement { prepared, error } =
-            prepared.apply_excluding(&mut engine).err().unwrap()
-        else {
-            panic!("expected preplacement failure");
+        let before = engine.disk_bytes().unwrap();
+        let Err(Error::Format(error)) = prepared.apply_excluding(&mut engine) else {
+            panic!("expected preplacement association failure");
         };
-        assert!(matches!(error, StorageApplyError::Session), "{error:?}");
-        assert_eq!(check(prepared.collections(), owner, id), members);
+        assert_eq!(
+            error,
+            FormatError::Internal("incompatible prepared storage association: Session".into())
+        );
+        assert_eq!(engine.disk_bytes().unwrap(), before);
         return;
     }
     if matches!(outcome, Outcome::ApplicationFailure) {
@@ -74,7 +72,7 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
         disk_log::fail_write_after(1, 0);
         let failure = prepared.apply_excluding(&mut engine).err().unwrap();
         let recording = disk_log::finish();
-        let StorageApplyFailure::Application(Error::Io(error)) = failure else {
+        let Error::Io(error) = failure else {
             panic!("expected application I/O failure");
         };
         assert_eq!(error.kind(), ErrorKind::Other);
@@ -122,11 +120,10 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
             .unwrap(),
         )
         .unwrap();
+    let required = pending.maximum_end();
+    let proposed = PhysicalAddress::new(0);
     if matches!(outcome, Outcome::Rejected) {
-        pending.exclusion = Err(StorageConflict::End {
-            proposed: PhysicalAddress::new(0),
-            required: pending.maximum_end(),
-        });
+        pending.exclusion = Err(StorageConflict::End { proposed, required });
     }
     pending
         .engine
@@ -164,45 +161,37 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
             };
         }
         Outcome::Rejected => {
-            let StoragePublicationFailure::BeforePublication {
-                pending,
-                reason: StoragePublicationRejection::Exclusion,
-            } = *result.err().unwrap()
+            let Err(Error::EditStorageConflict(EditStorageConflict::Truncation {
+                proposed: actual,
+                required: minimum,
+            })) = result
             else {
                 panic!("expected rejected publication");
             };
-            assert_eq!(check(pending.collections(), owner, id), members);
+            assert_eq!((actual, minimum), (proposed, required));
             assert!(recording.events.is_empty());
         }
-        Outcome::PublicationFailure | Outcome::CompletionFailure => {
-            let StoragePublicationFailure::Publication {
-                collections,
-                prospective,
-                error,
-                ..
-            } = *result.err().unwrap()
-            else {
-                panic!("expected publication or completion failure");
+        Outcome::PublicationFailure => {
+            let Err(Error::Io(error)) = result else {
+                panic!("expected publication I/O failure");
             };
-            assert_eq!(check(&collections, owner, id), members);
-            assert!(prospective.is_complete());
-            assert!(prospective.references().unwrap().objects().is_empty());
-            match error {
-                PublicationError::Write(Error::Io(error))
-                    if matches!(outcome, Outcome::PublicationFailure) =>
-                {
-                    assert_eq!(error.kind(), ErrorKind::Other);
-                    assert_eq!(error.to_string(), "injected disk write failure");
-                }
-                PublicationError::Write(Error::Format(error))
-                    if matches!(outcome, Outcome::CompletionFailure) =>
-                {
-                    assert_eq!(error, FormatError::Internal("completion failure".into()));
-                }
-                other => panic!("unexpected publication error: {other:?}"),
-            }
+            assert_eq!(error.kind(), ErrorKind::Other);
+            assert_eq!(error.to_string(), "injected disk write failure");
+        }
+        Outcome::CompletionFailure => {
+            let Err(Error::Format(error)) = result else {
+                panic!("expected completion failure");
+            };
+            assert_eq!(error, FormatError::Internal("completion failure".into()));
         }
     }
+    assert_eq!(
+        engine
+            .image()
+            .read_exact_at(id.collection.get(), original_bytes.len())
+            .unwrap(),
+        original_bytes
+    );
 }
 
 fn check(collections: &OriginalCollections, owner: ObjectId, id: GlobalHeapId) -> Vec<(u16, u16)> {

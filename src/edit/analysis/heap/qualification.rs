@@ -15,7 +15,11 @@ use hdf5_pure_space::__private::FreeClass;
 
 use super::CollectionContents;
 use super::associations::{MemberAssociations, MemberPresence};
+use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
+use crate::edit::analysis::physical::claims::domain::{
+    DomainUnavailable, residual::ResidualGroups,
+};
 use crate::edit::analysis::{
     AnalysisPhase, CollectionCandidates, CollectionProvenance, ObjectReferences,
     ReconstructionSource,
@@ -77,7 +81,12 @@ impl AnalysisPhase<'_> {
                 let original = candidates
                     .collections
                     .get(&address)
-                    .map(|allocation| (allocation.range, allocation.class));
+                    .map(|allocation| (allocation.range, allocation.class))
+                    .or_else(|| {
+                        self.collection_envelopes
+                            .get(&address)
+                            .map(|&range| (range, None))
+                    });
                 let allocation = match (&framing, original) {
                     (Err(_), _) => Err(ParentUnavailable::Framing),
                     (_, None) => Err(ParentUnavailable::Allocation),
@@ -118,6 +127,7 @@ impl AnalysisPhase<'_> {
             source: source.clone(),
             candidates,
             domain: checks.domain,
+            residual_groups: checks.residual_groups,
             parents: checks.parents,
         })
     }
@@ -174,6 +184,7 @@ impl AnalysisPhase<'_> {
                 source,
                 candidates,
                 domain: checks.domain,
+                residual_groups: checks.residual_groups,
                 parents: checks.parents,
             }),
             Err(error) => OriginalQualification::Unavailable { candidates, error },
@@ -232,6 +243,14 @@ impl AnalysisPhase<'_> {
             None
         } else {
             Some(self.supported_owner_domain(source)?)
+        };
+        let residual_groups = if matches!(
+            &domain,
+            Some(OwnerDomain::Unavailable(DomainUnavailable::Residual(_)))
+        ) {
+            Some(self.residual_group_domain(source)?)
+        } else {
+            None
         };
         let mut qualified = BTreeMap::new();
         for (address, mut members) in parents {
@@ -298,6 +317,7 @@ impl AnalysisPhase<'_> {
         }
         Ok(CollectionChecks {
             domain,
+            residual_groups,
             parents: qualified,
         })
     }
@@ -313,9 +333,32 @@ pub(in crate::edit) struct OriginalCollections {
 }
 
 impl OriginalCollections {
+    /// Borrows bounded residual roots captured with successful collection qualification.
+    pub(in crate::edit) fn residual_groups(&self) -> Option<&ResidualGroups> {
+        match &self.qualification {
+            OriginalQualification::Qualified(qualification) => qualification.residual_groups(),
+            _ => None,
+        }
+    }
+
     /// Borrows original qualification or the candidates retained after qualification failed.
     pub(in crate::edit) fn qualification(&self) -> &OriginalQualification {
         &self.qualification
+    }
+
+    /// Borrows original predecessor references independently of qualification success.
+    pub(in crate::edit) fn predecessors(
+        &self,
+    ) -> Option<&BTreeMap<CollectionProvenance, ObjectReferences>> {
+        let candidates = match &self.qualification {
+            OriginalQualification::Empty => return None,
+            OriginalQualification::Qualified(qualification) => &qualification.candidates,
+            OriginalQualification::Unavailable { candidates, .. } => candidates,
+        };
+        candidates
+            .observations
+            .as_ref()
+            .map(|facts| &facts.predecessors)
     }
 
     /// Borrows captured full framing and framing failures by physical collection address.
@@ -349,6 +392,7 @@ pub(in crate::edit) enum OriginalCollectionError {
 
 struct CollectionChecks {
     domain: Option<OwnerDomain>,
+    residual_groups: Option<Arc<Option<ResidualGroups>>>,
     parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
 
@@ -375,10 +419,21 @@ pub(in crate::edit) struct CollectionQualification {
     source: ReconstructionSource,
     candidates: CollectionCandidates,
     domain: Option<OwnerDomain>,
+    residual_groups: Option<Arc<Option<ResidualGroups>>>,
     parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
 
 impl CollectionQualification {
+    /// Borrows the associated bounded residual interpretation, if all intervals were admitted.
+    pub(in crate::edit) fn residual_groups(&self) -> Option<&ResidualGroups> {
+        self.residual_groups.as_ref()?.as_ref().as_ref()
+    }
+
+    /// Borrows the original source association used for qualification.
+    pub(in crate::edit) fn source(&self) -> &ReconstructionSource {
+        &self.source
+    }
+
     /// Borrows the common source-domain outcome, or returns [`None`] for empty default input.
     pub(in crate::edit) fn domain(&self) -> Option<&OwnerDomain> {
         self.domain.as_ref()
@@ -473,7 +528,9 @@ impl CollectionQualification {
             _ => return Err(MemberUnavailable::Unknown),
         }
         parent.allocation.map_err(MemberUnavailable::Parent)?;
-        if !matches!(self.domain, Some(OwnerDomain::Available(_))) {
+        if !matches!(self.domain, Some(OwnerDomain::Available(_)))
+            && self.residual_groups().is_none()
+        {
             return Err(MemberUnavailable::Domain);
         }
         Ok(())
@@ -495,7 +552,9 @@ impl CollectionQualification {
             .get(&address)
             .ok_or(ParentUnavailable::Allocation)?
             .whole?;
-        if !matches!(self.domain, Some(OwnerDomain::Available(_))) {
+        if !matches!(self.domain, Some(OwnerDomain::Available(_)))
+            && self.residual_groups().is_none()
+        {
             return Err(ParentUnavailable::Domain);
         }
         Ok(())
@@ -531,6 +590,73 @@ impl CollectionQualification {
         phase: &'a mut AnalysisPhase<'_>,
     ) -> Result<&'a MemberAssociations, Error> {
         phase.member_associations(&self.source)
+    }
+    /// Returns the complete parent allocation with its qualified source and session.
+    ///
+    /// Prospective absence, publication, and permission to release protected storage require
+    /// separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the restrictions from [`Self::whole_parent`], [`ParentUnavailable::Allocation`]
+    /// for an absent candidate allocation, [`ParentUnavailable::Class`] for an unknown class, or
+    /// [`ParentUnavailable::Allocation`] if candidate observations are unavailable.
+    pub(in crate::edit) fn whole_parent_allocation(
+        &self,
+        address: PhysicalAddress,
+    ) -> Result<QualifiedParentAllocation, ParentUnavailable> {
+        self.whole_parent(address)?;
+        let allocation = self
+            .candidates
+            .collections
+            .get(&address)
+            .ok_or(ParentUnavailable::Allocation)?;
+        let class = allocation.class.ok_or(ParentUnavailable::Class)?;
+        let observations = self
+            .candidates
+            .observations
+            .as_ref()
+            .ok_or(ParentUnavailable::Allocation)?;
+        Ok(QualifiedParentAllocation {
+            source: self.source.clone(),
+            session: observations.session.clone(),
+            range: allocation.range,
+            class,
+        })
+    }
+}
+
+/// A complete original parent allocation with qualified source, session, and free-space class.
+///
+/// [`CollectionQualification::whole_parent_allocation`] establishes whole-parent qualification.
+/// The caller establishes prospective absence and publication or storage-release permission
+/// separately.
+pub(in crate::edit) struct QualifiedParentAllocation {
+    source: ReconstructionSource,
+    session: AllocationSession,
+    range: FileRange,
+    class: FreeClass,
+}
+
+impl QualifiedParentAllocation {
+    /// Borrows the original source-phase and object association.
+    pub(in crate::edit) fn source(&self) -> &ReconstructionSource {
+        &self.source
+    }
+
+    /// Borrows the allocation session associated with the original range.
+    pub(in crate::edit) fn session(&self) -> &AllocationSession {
+        &self.session
+    }
+
+    /// Returns the complete original parent allocation range.
+    pub(in crate::edit) fn range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the original allocation's free-space class.
+    pub(in crate::edit) fn class(&self) -> FreeClass {
+        self.class
     }
 }
 
