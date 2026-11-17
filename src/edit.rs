@@ -395,6 +395,8 @@ mod staging;
 mod tail_recycling;
 #[cfg(test)]
 mod test_util;
+#[cfg(test)]
+pub(crate) use test_util::open_observed_engine;
 
 pub use self::append::{AppendBuilder, AppendOptions, LossyTailReencoding};
 pub(crate) use self::append::{AppendGeometry, AppendTarget, LocatedState};
