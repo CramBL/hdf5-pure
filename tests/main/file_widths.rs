@@ -526,7 +526,6 @@ fn builders_reject_an_unlimited_dimension_whose_size_exceeds_the_length_width(
 #[case::two_committed(LengthWidth::Two, 1024, true)]
 #[case::two_staged(LengthWidth::Two, 1024, false)]
 #[case::four_committed(LengthWidth::Four, 1 << 20, true)]
-#[case::four_staged(LengthWidth::Four, 1 << 20, false)]
 fn appends_reach_the_length_width_maximum_of_an_unlimited_dimension(
     #[case] lengths: LengthWidth,
     #[case] chunk: u64,
@@ -553,22 +552,6 @@ fn appends_reach_the_length_width_maximum_of_an_unlimited_dimension(
         file.commit().unwrap();
     }
     let mut dataset = file.dataset("d").unwrap();
-    if !committed && maximum > u64::try_from(isize::MAX).unwrap() {
-        let error = dataset
-            .append_staged(|append| {
-                append.append(&[1_u8, 2]);
-            })
-            .unwrap_err();
-        assert!(
-            matches!(error, Error::Format(FormatError::ValueTooLargeForPlatform { value, target: "staged dataset buffer" }) if value == maximum),
-            "{error:?}"
-        );
-        assert_eq!(dataset.shape().unwrap(), [maximum - 2]);
-        drop(dataset);
-        file.root().delete("d").unwrap();
-        file.close().unwrap();
-        return;
-    }
     let error = if committed {
         dataset.append(&[1_u8, 2]).unwrap();
         assert_eq!(dataset.shape().unwrap(), [maximum]);
@@ -608,6 +591,64 @@ fn appends_reach_the_length_width_maximum_of_an_unlimited_dimension(
     let dataset = reopened.dataset("d").unwrap();
     assert_eq!(dataset.shape().unwrap(), [maximum]);
     assert_eq!(dataset.maxshape().unwrap(), None);
+    assert_eq!(dataset.read_u8_region(&[0], &[2]).unwrap(), [0, 0]);
+    assert_eq!(
+        dataset.read_u8_region(&[maximum - 3], &[3]).unwrap(),
+        [0, 1, 2]
+    );
+    drop(dataset);
+    reopened.close().unwrap();
+}
+
+#[test]
+fn staged_appends_reject_growth_past_the_four_byte_length_limit() {
+    let maximum = u64::from(u32::MAX);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("staged-at-limit.h5");
+    let file = File::create_with_options(
+        &path,
+        FileCreateProperties::new().with_length_width(LengthWidth::Four),
+        FileAccessProperties::new(),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("d", |dataset| {
+            dataset
+                .with_unallocated_storage(hdf5_pure::make_u8_type(), &[maximum])
+                .with_chunks(&[1 << 20])
+                .with_maxshape(&[MaxExtent::Unlimited]);
+        })
+        .unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let error = dataset
+        .append_staged(|append| {
+            append.append(&[3_u8]);
+        })
+        .unwrap_err();
+    let Error::AppendUnsupported(reason) = error else {
+        panic!("expected a staged maximum-shape refusal, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "appending would grow the staged dataset past its maximum shape"
+    );
+    assert_eq!(dataset.shape().unwrap(), [maximum]);
+    assert!(file.has_staged_edits());
+    drop(dataset);
+    file.commit().unwrap();
+    file.close().unwrap();
+    let stored_bytes = std::fs::metadata(&path).unwrap().len();
+    assert!(stored_bytes < 1 << 20, "{stored_bytes}");
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(reopened.superblock().length_size.get(), 4);
+    let dataset = reopened.dataset("d").unwrap();
+    assert_eq!(dataset.shape().unwrap(), [maximum]);
+    assert_eq!(dataset.maxshape().unwrap(), None);
+    assert_eq!(dataset.read_u8_region(&[0], &[2]).unwrap(), [0, 0]);
+    assert_eq!(
+        dataset.read_u8_region(&[maximum - 3], &[3]).unwrap(),
+        [0, 0, 0]
+    );
     drop(dataset);
     reopened.close().unwrap();
 }
