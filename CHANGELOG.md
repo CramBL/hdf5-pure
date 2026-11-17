@@ -9,8 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `File::commit` reclaims obsolete global-heap members while preserving live member identities,
-  payloads and parent capacity. Incomplete ownership or reference evidence retains the affected
-  storage. Compaction failures report the completed collection prefix and restoration state ([#1253](https://github.com/CramBL/hdf5-pure/pull/1253)).
+  payloads and parent capacity. Checked allocation envelopes preserve damaged collections while
+  allowing reclamation in healthy neighbors ([#1259](https://github.com/CramBL/hdf5-pure/pull/1259)).
+  Incomplete ownership or reference evidence retains
+  the affected storage. Compaction failures report the completed collection prefix and restoration state ([#1253](https://github.com/CramBL/hdf5-pure/pull/1253)).
 
 - `DecodedStoredAddress::to_stored` in `hdf5-pure-core` converts decoded addresses to stored bits at a selected address width, rejecting oversized defined addresses and collisions with the undefined marker ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `SymbolTableMessage::write_into` in `hdf5-pure-format` encodes group symbol-table addresses at each supported width, preserving stored address bits and leaving the destination unchanged on error ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
