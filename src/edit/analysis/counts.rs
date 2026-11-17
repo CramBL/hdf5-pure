@@ -204,7 +204,7 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
             allocation,
         };
         Ok(Some(match subject {
-            Some(subject) => CountEvidence::Ordinary(OrdinaryObjectCount { bound, subject }),
+            Some(_) => CountEvidence::Ordinary(OrdinaryObjectCount { bound }),
             None => CountEvidence::Retained(bound),
         }))
     }
@@ -255,14 +255,6 @@ impl<'source> CountEvidence<'source> {
 /// retirement eligibility require separate evidence.
 pub(in crate::edit) struct OrdinaryObjectCount<'source> {
     bound: ObjectReferenceBound<'source>,
-    subject: OrdinaryCountSubject,
-}
-
-impl OrdinaryObjectCount<'_> {
-    /// Returns the recognized header shape used to classify this count.
-    pub(in crate::edit) fn subject(&self) -> OrdinaryCountSubject {
-        self.subject
-    }
 }
 
 /// A positive declared count at least as large as the reference minimum in one topology.

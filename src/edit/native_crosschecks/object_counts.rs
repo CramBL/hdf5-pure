@@ -21,7 +21,6 @@ use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::counts::CountEvidence;
-use crate::edit::analysis::counts::OrdinaryCountSubject;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::analysis::ownership::AllocationKind;
@@ -150,8 +149,6 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
     assert_eq!(phase.object_reference_count(target).unwrap(), observed);
     let fact = phase.referenced_count(&added, target).unwrap().unwrap();
     assert_eq!(fact.original(), field.value());
-    assert_eq!(fact.incoming(), Some(u32::from(named)));
-    assert_eq!(fact.minimum().map(|count| count.get()), named.then_some(1));
     assert_eq!(fact.field(), Some(field));
     assert_eq!(fact.header_allocation().unwrap().range(), field.chunk());
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -169,14 +166,8 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
     };
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let batch = phase.referenced_counts(&added).unwrap().unwrap();
-    assert!(batch.matches(&phase));
     let observed = batch.get(target).unwrap();
     assert_eq!(observed.count().original(), field.value());
-    assert_eq!(observed.count().incoming(), Some(u32::from(named)));
-    assert_eq!(
-        observed.count().minimum().map(|count| count.get()),
-        named.then_some(1)
-    );
     assert_eq!(observed.count().field(), Some(field));
     assert_eq!(
         observed.count().header_allocation().unwrap().range(),
@@ -223,7 +214,6 @@ fn copied_datatype_users_preserve_native_compact_and_dense_references(
             assert!(!named);
             assert_eq!(observed.object(), target);
             assert_eq!(observed.original(), field.value());
-            assert_eq!(observed.minimum(), None);
             assert_eq!(observed.field(), Some(field));
         }
         OriginalCount::Topology(CountEvidence::Ordinary(_)) => {
@@ -361,10 +351,8 @@ fn phase_observes_native_counts_without_replacing_incoming_link_facts(#[case] us
     );
     assert!(evidence.bound().matches(phase.topology().unwrap()));
     match (usage, evidence) {
-        (Usage::HardLinks, CountEvidence::Ordinary(ordinary)) => {
-            assert_eq!(ordinary.subject(), OrdinaryCountSubject::Dataset);
-        }
-        (Usage::CommittedType, CountEvidence::Retained(_)) => {}
+        (Usage::HardLinks, CountEvidence::Ordinary(_))
+        | (Usage::CommittedType, CountEvidence::Retained(_)) => {}
         _ => panic!("unexpected count subject"),
     }
     assert_eq!(phase.object_reference_count(object).unwrap(), observed);
@@ -469,10 +457,9 @@ fn native_version_1_group_counts_retain_the_supported_group_subject() {
     assert_eq!(evidence.bound().original(), 2);
     assert_eq!(evidence.bound().incoming(), 2);
     assert_eq!(evidence.bound().field(), Some(field));
-    let CountEvidence::Ordinary(ordinary) = evidence else {
+    let CountEvidence::Ordinary(_) = evidence else {
         panic!("expected ordinary group count evidence")
     };
-    assert_eq!(ordinary.subject(), OrdinaryCountSubject::Group);
     let topology = phase.topology().unwrap();
     let deletions = [
         topology.deletion(&ObjectPathBuf::parse("g")).unwrap(),

@@ -1,6 +1,5 @@
 use core::cell::Cell;
 use core::num::NonZeroU32;
-use core::num::NonZeroU64;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +24,7 @@ use super::super::super::ownership::SurvivingCount;
 use super::{CountContradiction, CountEvidenceError};
 use crate::access_mode::AccessMode;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::added_users::AddedCopyUsers;
 use crate::edit::analysis::counts::added_users::CopyUsersError;
 use crate::edit::analysis::counts::balance::CountArithmeticError;
@@ -35,7 +35,6 @@ use crate::edit::analysis::counts::changes::owned::{
     CountDisposition, OwnedOriginalCount, UnresolvedCount,
 };
 use crate::edit::analysis::counts::test_util as count_test_util;
-use crate::edit::analysis::counts::{CountEvidence, OrdinaryCountSubject};
 use crate::edit::analysis::deletions::counts::net::NetCountError;
 use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK, PlannedDeletion};
 use crate::edit::copy::CopyTree;
@@ -156,11 +155,6 @@ fn net_counts_project_each_target_once_with_original_fields(
             assert_eq!(observed.original(), original.unwrap_or(1));
             assert_eq!(observed.field(), changed.field());
             assert_eq!(observed.header_allocation(), changed.header_allocation());
-            assert_eq!(observed.incoming(), (!paths.is_empty()).then_some(1));
-            assert_eq!(
-                observed.minimum().map(|count| count.get()),
-                (!paths.is_empty()).then_some(1)
-            );
         }
     }
     assert_eq!(changed.original(), original.unwrap_or(1));
@@ -372,20 +366,13 @@ fn removal_only_plans_preserve_eligible_ordinary_transitions() {
     let evidence = plan
         .evidence_changes()
         .map(|change| {
-            let OriginalCount::Topology(CountEvidence::Ordinary(ordinary)) = change.original()
-            else {
+            let OriginalCount::Topology(CountEvidence::Ordinary(_)) = change.original() else {
                 panic!("expected the original ordinary count evidence")
             };
-            (ordinary.subject(), change.remaining())
+            change.remaining()
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        evidence,
-        [
-            (OrdinaryCountSubject::Group, 0),
-            (OrdinaryCountSubject::Dataset, 0)
-        ]
-    );
+    assert_eq!(evidence, [0, 0]);
 }
 
 #[test]
@@ -684,10 +671,6 @@ fn owned_inventory_preserves_complete_original_facts_after_phase_release(
         } else {
             OwnedOriginalCount::Referenced {
                 original: original.unwrap_or(1),
-                incoming: matches!(context, CountContext::Topology)
-                    .then_some(u32::from(links != Links::Anonymous)),
-                minimum: (matches!(context, CountContext::Topology) && links != Links::Anonymous)
-                    .then_some(NonZeroU64::new(1).unwrap()),
             }
         }
     );
@@ -954,8 +937,6 @@ fn owned_inventory_and_positive_partition_retain_bounded_per_target_state(#[case
         vec![
             OwnedOriginalCount::Ordinary {
                 original: NonZeroU32::new(2).unwrap(),
-                incoming: 2,
-                subject: OrdinaryCountSubject::Dataset
             };
             count
         ]

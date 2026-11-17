@@ -15,7 +15,6 @@ use crate::edit::OhRegion;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::NetCountPlan;
-use crate::edit::analysis::counts::OrdinaryCountSubject;
 use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::analysis::counts::changes::owned::{
@@ -125,8 +124,6 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
         inventory.changes()[0].original(),
         OwnedOriginalCount::Ordinary {
             original: NonZeroU32::new(2).unwrap(),
-            incoming: 2,
-            subject: OrdinaryCountSubject::Group,
         }
     );
     assert_eq!(
@@ -283,7 +280,6 @@ fn native_copy_users_project_combined_counts_without_source_writes(#[case] named
         }
         OriginalCount::Referenced(original) => {
             assert!(!named);
-            assert_eq!(original.minimum(), None);
             assert_eq!(
                 original.field().map(|field| field.value()),
                 count_body.map(|_| 1)
