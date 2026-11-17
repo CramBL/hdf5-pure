@@ -1,10 +1,13 @@
 use std::path::Path;
 
-use hdf5_pure::{Datatype, Error, File, FileAccessProperties, FixedPointType, MemoryStrategy};
+use hdf5_pure::{
+    Datatype, Error, File, FileAccessProperties, FileLocking, FixedPointType, MemoryStrategy,
+};
 use rstest::rstest;
 use test_util::datatype;
 use test_util::global_heap::Object;
 use test_util::object_header::Message;
+use test_util::object_header::MessageFlags;
 use test_util::object_header::MessageType;
 use test_util::object_header::v2;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
@@ -108,6 +111,124 @@ fn public_count_contradictions_preserve_bytes_and_staged_retry(#[case] original:
     assert_eq!(file.dataset("b").unwrap().read_i32().unwrap(), [7; 1_024]);
     drop(file);
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::overflow(CopyCountBoundary::Overflow)]
+#[case::cancelled_addition(CopyCountBoundary::Cancelled)]
+#[case::original_contradiction(CopyCountBoundary::Contradiction)]
+fn committed_type_copies_check_original_links_before_final_net_counts(
+    #[case] boundary: CopyCountBoundary,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("public-copy-count-boundaries.h5");
+    let original = match boundary {
+        CopyCountBoundary::Contradiction => 1,
+        CopyCountBoundary::Cancelled | CopyCountBoundary::Overflow => u32::MAX,
+    };
+    let (target, header) = committed_type_user(&path, original);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Disabled)
+            .with_memory_strategy(memory),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let free = file.reusable_free_sections().unwrap();
+    let start = usize::try_from(target).unwrap();
+    let extent = start..start + header.len();
+    assert_eq!(&before[extent.clone()], header);
+    let mut names = file.root().named_datatypes().unwrap();
+    names.sort();
+    assert_eq!(names, ["alias", "type"]);
+    assert_eq!(
+        file.root().named_datatype_references("type").unwrap(),
+        original
+    );
+    assert_eq!(file.dataset("source").unwrap().read_f64().unwrap(), [17.0]);
+
+    file.copy("source", "copy").unwrap();
+    if !matches!(boundary, CopyCountBoundary::Overflow) {
+        file.root().delete("alias").unwrap();
+    }
+    let committed = matches!(boundary, CopyCountBoundary::Cancelled);
+    if committed {
+        file.commit().unwrap();
+        assert!(!file.has_staged_edits());
+        assert_eq!(&std::fs::read(&path).unwrap()[extent], header);
+        assert_eq!(
+            file.root().named_datatype_references("type").unwrap(),
+            u32::MAX
+        );
+        let sections = file.reusable_free_sections().unwrap();
+        assert!(sections.sections().iter().all(|section| {
+            section.end_address().get() <= target
+                || section.address().get() >= target + header.len() as u64
+        }));
+        file.close().unwrap();
+    } else {
+        for _ in 0..2 {
+            let error = file.commit().unwrap_err();
+            match (boundary, &error) {
+                (CopyCountBoundary::Overflow, Error::EditUnsupported(reason)) => assert_eq!(
+                    *reason,
+                    "the planned reference count does not fit its stored field"
+                ),
+                (
+                    CopyCountBoundary::Contradiction,
+                    Error::InconsistentReferenceCount {
+                        address,
+                        observed,
+                        minimum,
+                    },
+                ) => assert_eq!((*address, *observed, *minimum), (target, 1, 2)),
+                _ => panic!("unexpected copy count error: {error:?}"),
+            }
+            assert!(file.has_staged_edits());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(file.reusable_free_sections().unwrap(), free);
+        }
+        drop(file);
+    }
+
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.root().named_datatype_references("type").unwrap(),
+        original
+    );
+    let mut names = file.root().named_datatypes().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        if committed {
+            vec!["type"]
+        } else {
+            vec!["alias", "type"]
+        }
+    );
+    let mut names = file.root().datasets().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        if committed {
+            vec!["copy", "source"]
+        } else {
+            vec!["source"]
+        }
+    );
+    assert_eq!(file.dataset("source").unwrap().read_f64().unwrap(), [17.0]);
+    if committed {
+        assert_eq!(file.dataset("copy").unwrap().read_f64().unwrap(), [17.0]);
+    }
+    file.close().unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CopyCountBoundary {
+    Cancelled,
+    Contradiction,
+    Overflow,
 }
 
 #[rstest]
@@ -256,4 +377,33 @@ fn aliases(path: &Path, count: u32, ambiguous: bool) -> (u64, u64, usize) {
     fixture.object("survivor", survivor);
     fixture.write(path);
     (raw, header, length)
+}
+
+fn committed_type_user(path: &Path, count: u32) -> (u64, Vec<u8>) {
+    let mut fixture = Fixture::new();
+    let header = v2::Header::new()
+        .messages([
+            Message::reference_count(count),
+            Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+        ])
+        .build();
+    let target = fixture.image.append(&header) as u64;
+    fixture.link("type", target);
+    fixture.link("alias", target);
+    let mut messages = Form::CompactDataset.messages(
+        &mut fixture,
+        &hdf5_pure::make_f64_type(),
+        &17_f64.to_le_bytes(),
+    );
+    *messages
+        .iter_mut()
+        .find(|message| message.msg_type == MessageType::DATATYPE)
+        .unwrap() = Message::new(
+        MessageType::DATATYPE,
+        &datatype::committed_reference(target),
+    )
+    .with_flags(MessageFlags::SHARED);
+    fixture.object("source", messages);
+    fixture.write(path);
+    (target, header)
 }
