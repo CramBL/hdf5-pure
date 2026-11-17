@@ -35,58 +35,13 @@ impl AnalysisPhase<'_> {
         &mut self,
         source: &ReconstructionSource,
     ) -> Result<OwnerDomain, Error> {
-        self.physical_claims(source)?;
-        if self.engine.context.allocations.before_reference().is_err() {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Publication));
+        if let Some(reason) = self.domain_restriction(source, CollectionFraming::Complete)? {
+            return Ok(OwnerDomain::Unavailable(reason));
         }
-        let Ok(original) = ObjectId::resolve(
+        let original = ObjectId::resolve(
             self.engine.addresses(),
             self.engine.superblock().root_group_address,
-        ) else {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Root));
-        };
-        let claims = self.physical_claims(source)?;
-        if claims.root() != Some(original) {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Root));
-        }
-        if let Some(index) = claims.problems().first().map(DomainUnavailable::from) {
-            return Ok(OwnerDomain::Unavailable(index));
-        }
-        let claims = self
-            .claims
-            .as_ref()
-            .ok_or_else(|| FormatError::Internal("physical claims were not retained".into()))?;
-        if let Some(index) = self.unavailable_exclusion(claims)? {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Authority(
-                index,
-            )));
-        }
-        let coverage = self.physical_coverage(source)?;
-        if let Some(pair) = coverage.conflict() {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Conflict(pair)));
-        }
-        if let Some(&index) = coverage.beyond_source().first() {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::BeyondSource(
-                index,
-            )));
-        }
-        if let Some(&index) = coverage.beyond_eoa().first() {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::BeyondEoa(
-                index,
-            )));
-        }
-        let claims = self.physical_claims(source)?;
-        if claims.logical_eoa() > claims.physical_size() {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::MissingSource));
-        }
-        let contents = self.residual_content(source)?;
-        if let Some(index) = contents
-            .intervals()
-            .iter()
-            .position(|interval| !matches!(interval.outcome(), ResidualOutcome::AllZero))
-        {
-            return Ok(OwnerDomain::Unavailable(DomainUnavailable::Residual(index)));
-        }
+        )?;
         let session = self.engine.context.allocations.session();
         let claims = self.physical_claims(source)?;
         Ok(OwnerDomain::Available(SupportedOwnerDomain {
@@ -101,6 +56,89 @@ impl AnalysisPhase<'_> {
         }))
     }
 
+    /// Qualifies heap allocations using complete cached envelopes for damaged neighbors.
+    ///
+    /// Preserves all other ownership, publication, overlap, bounds and residual requirements.
+    /// A damaged collection's member failure supplies no permission to alter that collection.
+    /// The caller must retain this permission with its checked source qualification and require
+    /// complete framing separately for each collection selected for reclamation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the query and cache errors of [`Self::supported_owner_domain`].
+    pub(in crate::edit) fn heap_envelope_domain(
+        &mut self,
+        source: &ReconstructionSource,
+    ) -> Result<Option<HeapEnvelopeDomain>, Error> {
+        Ok(self
+            .domain_restriction(source, CollectionFraming::Envelope)?
+            .is_none()
+            .then_some(HeapEnvelopeDomain { _private: () }))
+    }
+
+    fn domain_restriction(
+        &mut self,
+        source: &ReconstructionSource,
+        framing: CollectionFraming,
+    ) -> Result<Option<DomainUnavailable>, Error> {
+        self.physical_claims(source)?;
+        if self.engine.context.allocations.before_reference().is_err() {
+            return Ok(Some(DomainUnavailable::Publication));
+        }
+        let Ok(original) = ObjectId::resolve(
+            self.engine.addresses(),
+            self.engine.superblock().root_group_address,
+        ) else {
+            return Ok(Some(DomainUnavailable::Root));
+        };
+        let claims = self
+            .claims
+            .as_ref()
+            .ok_or_else(|| FormatError::Internal("physical claims were not retained".into()))?;
+        if claims.root() != Some(original) {
+            return Ok(Some(DomainUnavailable::Root));
+        }
+        if let Some(index) = claims.problems().iter().find(|problem| {
+            !matches!((framing, problem),
+                (CollectionFraming::Envelope, ClaimProblem::Collection { address, .. })
+                    if self.allocations.get(address).is_some_and(Result::is_err)
+                        && self.collection_envelopes.get(address).is_some_and(|&range| {
+                            claims.claims().iter().any(|claim| {
+                                claim.range() == range && matches!(claim.origin(), ClaimOrigin::Heap(found) if found == *address)
+                            })
+                        })
+            )
+        }).map(DomainUnavailable::from) {
+            return Ok(Some(index));
+        }
+        if let Some(index) = self.unavailable_exclusion(claims, framing)? {
+            return Ok(Some(DomainUnavailable::Authority(index)));
+        }
+        let coverage = self.physical_coverage(source)?;
+        if let Some(pair) = coverage.conflict() {
+            return Ok(Some(DomainUnavailable::Conflict(pair)));
+        }
+        if let Some(&index) = coverage.beyond_source().first() {
+            return Ok(Some(DomainUnavailable::BeyondSource(index)));
+        }
+        if let Some(&index) = coverage.beyond_eoa().first() {
+            return Ok(Some(DomainUnavailable::BeyondEoa(index)));
+        }
+        let claims = self.physical_claims(source)?;
+        if claims.logical_eoa() > claims.physical_size() {
+            return Ok(Some(DomainUnavailable::MissingSource));
+        }
+        let contents = self.residual_content(source)?;
+        if let Some(index) = contents
+            .intervals()
+            .iter()
+            .position(|interval| !matches!(interval.outcome(), ResidualOutcome::AllZero))
+        {
+            return Ok(Some(DomainUnavailable::Residual(index)));
+        }
+        Ok(None)
+    }
+
     /// Returns the index of the first claim unsupported by its cached allocation observation.
     ///
     /// Requires each object's claims to be contiguous and ordered as its cached allocations.
@@ -108,7 +146,11 @@ impl AnalysisPhase<'_> {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if the physical-storage cache is absent.
-    fn unavailable_exclusion(&self, claims: &PhysicalClaims) -> Result<Option<usize>, FormatError> {
+    fn unavailable_exclusion(
+        &self,
+        claims: &PhysicalClaims,
+        framing: CollectionFraming,
+    ) -> Result<Option<usize>, FormatError> {
         let physical = self
             .physical
             .as_ref()
@@ -150,15 +192,33 @@ impl AnalysisPhase<'_> {
                         allocation_index += 1;
                         matches
                     }
-                    ClaimOrigin::Heap(address) => self
-                        .allocations
-                        .get(&address)
-                        .and_then(|contents| contents.as_ref().ok())
-                        .is_some_and(|contents| contents.range() == range),
+                    ClaimOrigin::Heap(address) => {
+                        self.allocations
+                            .get(&address)
+                            .and_then(|contents| contents.as_ref().ok())
+                            .is_some_and(|contents| contents.range() == range)
+                            || matches!(framing, CollectionFraming::Envelope)
+                                && self.allocations.get(&address).is_some_and(Result::is_err)
+                                && self.collection_envelopes.get(&address) == Some(&range)
+                    }
                 };
                 (!authoritative).then_some(index)
             }))
     }
+}
+
+#[derive(Clone, Copy)]
+enum CollectionFraming {
+    Complete,
+    Envelope,
+}
+
+/// Permission to qualify individually framed collections beside bounded damaged collections.
+///
+/// Construction checks the associated phase's complete physical coverage. This permission does
+/// not establish member framing or count-publication eligibility.
+pub(in crate::edit) struct HeapEnvelopeDomain {
+    _private: (),
 }
 
 /// The result of qualifying a source phase's supported allocated object-header domain.

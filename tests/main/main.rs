@@ -41,6 +41,7 @@ mod edit_free_space_churn;
 mod edit_free_space_endurance;
 mod edit_global_heap_dense;
 mod edit_global_heap_members;
+mod edit_global_heap_neighbors;
 mod edit_global_heap_reclaim;
 mod edit_global_heap_retention;
 mod edit_in_place;

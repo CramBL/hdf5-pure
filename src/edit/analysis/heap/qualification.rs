@@ -16,10 +16,10 @@ use hdf5_pure_space::__private::FreeClass;
 use super::CollectionContents;
 use super::associations::{MemberAssociations, MemberPresence};
 use crate::edit::allocation::AllocationSession;
-use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::physical::claims::domain::{
     DomainUnavailable, residual::ResidualGroups,
 };
+use crate::edit::analysis::physical::claims::domain::{HeapEnvelopeDomain, OwnerDomain};
 use crate::edit::analysis::{
     AnalysisPhase, CollectionCandidates, CollectionProvenance, ObjectReferences,
     ReconstructionSource,
@@ -127,6 +127,7 @@ impl AnalysisPhase<'_> {
             source: source.clone(),
             candidates,
             domain: checks.domain,
+            heap_envelopes: checks.heap_envelopes,
             residual_groups: checks.residual_groups,
             parents: checks.parents,
         })
@@ -184,6 +185,7 @@ impl AnalysisPhase<'_> {
                 source,
                 candidates,
                 domain: checks.domain,
+                heap_envelopes: checks.heap_envelopes,
                 residual_groups: checks.residual_groups,
                 parents: checks.parents,
             }),
@@ -243,6 +245,14 @@ impl AnalysisPhase<'_> {
             None
         } else {
             Some(self.supported_owner_domain(source)?)
+        };
+        let heap_envelopes = if matches!(
+            &domain,
+            Some(OwnerDomain::Unavailable(DomainUnavailable::Collection(_)))
+        ) {
+            self.heap_envelope_domain(source)?
+        } else {
+            None
         };
         let residual_groups = if matches!(
             &domain,
@@ -317,6 +327,7 @@ impl AnalysisPhase<'_> {
         }
         Ok(CollectionChecks {
             domain,
+            heap_envelopes,
             residual_groups,
             parents: qualified,
         })
@@ -392,6 +403,7 @@ pub(in crate::edit) enum OriginalCollectionError {
 
 struct CollectionChecks {
     domain: Option<OwnerDomain>,
+    heap_envelopes: Option<HeapEnvelopeDomain>,
     residual_groups: Option<Arc<Option<ResidualGroups>>>,
     parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
@@ -419,6 +431,7 @@ pub(in crate::edit) struct CollectionQualification {
     source: ReconstructionSource,
     candidates: CollectionCandidates,
     domain: Option<OwnerDomain>,
+    heap_envelopes: Option<HeapEnvelopeDomain>,
     residual_groups: Option<Arc<Option<ResidualGroups>>>,
     parents: BTreeMap<PhysicalAddress, ParentQualification>,
 }
@@ -529,6 +542,7 @@ impl CollectionQualification {
         }
         parent.allocation.map_err(MemberUnavailable::Parent)?;
         if !matches!(self.domain, Some(OwnerDomain::Available(_)))
+            && self.heap_envelopes.is_none()
             && self.residual_groups().is_none()
         {
             return Err(MemberUnavailable::Domain);
@@ -553,6 +567,7 @@ impl CollectionQualification {
             .ok_or(ParentUnavailable::Allocation)?
             .whole?;
         if !matches!(self.domain, Some(OwnerDomain::Available(_)))
+            && self.heap_envelopes.is_none()
             && self.residual_groups().is_none()
         {
             return Err(ParentUnavailable::Domain);
