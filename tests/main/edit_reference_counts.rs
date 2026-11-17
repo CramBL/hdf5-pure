@@ -126,7 +126,8 @@ fn committed_type_copies_check_original_links_before_final_net_counts(
         CopyCountBoundary::Contradiction => 1,
         CopyCountBoundary::Cancelled | CopyCountBoundary::Overflow => u32::MAX,
     };
-    let (target, header) = committed_type_user(&path, original);
+    let (fixture, target, header) = committed_type_user(original);
+    fixture.write(&path);
     let file = File::open_rw_with_options(
         &path,
         FileAccessProperties::new()
@@ -220,6 +221,74 @@ fn committed_type_copies_check_original_links_before_final_net_counts(
     assert_eq!(file.dataset("source").unwrap().read_f64().unwrap(), [17.0]);
     if committed {
         assert_eq!(file.dataset("copy").unwrap().read_f64().unwrap(), [17.0]);
+    }
+    file.close().unwrap();
+}
+
+#[rstest]
+fn public_commits_project_root_counts_and_update_retained_type_users_together(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("joint-root-and-source-counts.h5");
+    let (fixture, target, original) = committed_type_user(3);
+    let mut fixture = fixture.with_root_reference_count(core::num::NonZeroU32::new(2).unwrap());
+    fixture.link("self", Fixture::ROOT);
+    fixture.write(&path);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Disabled)
+            .with_memory_strategy(memory),
+    )
+    .unwrap();
+    assert_eq!(file.root().groups().unwrap(), ["self"]);
+    assert_eq!(file.root().named_datatype_references("type").unwrap(), 3);
+    file.root().delete("self").unwrap();
+    file.copy("source", "copy").unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    assert!(file.root().groups().unwrap().is_empty());
+    assert_eq!(file.root().named_datatype_references("type").unwrap(), 4);
+    let bytes = std::fs::read(&path).unwrap();
+    let mut expected = original.clone();
+    v2::replace_message(
+        &mut expected,
+        0,
+        MessageType::OBJECT_REFERENCE_COUNT,
+        &Message::reference_count(4).data,
+    );
+    let start = usize::try_from(target).unwrap();
+    assert_eq!(&bytes[start..start + original.len()], expected);
+    assert!(
+        file.reusable_free_sections()
+            .unwrap()
+            .sections()
+            .iter()
+            .all(|section| section.end_address().get() <= target
+                || section.address().get() >= target + original.len() as u64)
+    );
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    let root = usize::try_from(file.superblock().root_group_address.get()).unwrap();
+    let mut expected = bytes.clone();
+    v2::replace_message(
+        &mut expected,
+        root,
+        MessageType::OBJECT_REFERENCE_COUNT,
+        &Message::reference_count(1).data,
+    );
+    assert_eq!(bytes, expected);
+    assert!(file.root().groups().unwrap().is_empty());
+    let mut names = file.root().named_datatypes().unwrap();
+    names.sort();
+    assert_eq!(names, ["alias", "type"]);
+    assert_eq!(file.root().named_datatype_references("type").unwrap(), 4);
+    let mut names = file.root().datasets().unwrap();
+    names.sort();
+    assert_eq!(names, ["copy", "source"]);
+    for name in ["copy", "source"] {
+        assert_eq!(file.dataset(name).unwrap().read_f64().unwrap(), [17.0]);
     }
     file.close().unwrap();
 }
@@ -379,7 +448,7 @@ fn aliases(path: &Path, count: u32, ambiguous: bool) -> (u64, u64, usize) {
     (raw, header, length)
 }
 
-fn committed_type_user(path: &Path, count: u32) -> (u64, Vec<u8>) {
+fn committed_type_user(count: u32) -> (Fixture, u64, Vec<u8>) {
     let mut fixture = Fixture::new();
     let header = v2::Header::new()
         .messages([
@@ -404,6 +473,5 @@ fn committed_type_user(path: &Path, count: u32) -> (u64, Vec<u8>) {
     )
     .with_flags(MessageFlags::SHARED);
     fixture.object("source", messages);
-    fixture.write(path);
-    (target, header)
+    (fixture, target, header)
 }
