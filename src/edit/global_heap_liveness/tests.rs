@@ -1,4 +1,7 @@
 use alloc::collections::BTreeSet;
+use core::num::NonZeroU16;
+
+use hdf5_pure_core::PhysicalAddress;
 
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
@@ -18,8 +21,10 @@ use crate::VariableLengthType;
 use crate::attribute::AttributeMessage;
 use crate::dataspace::Dataspace;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::ObjectReferences;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
+use crate::global_heap::GlobalHeapId;
 use crate::link_info::LinkInfoMessage;
 use crate::width::{LengthWidth, OffsetWidth};
 
@@ -139,6 +144,39 @@ fn parsed_attributes_return_descriptor_errors(#[case] raw: Vec<u8>, #[case] expe
             expected
         );
         assert_eq!(referenced, BTreeSet::from([7]));
+    });
+}
+
+#[rstest]
+#[case::strings(global_heap_fixture::vlen_string())]
+#[case::sequences(global_heap_fixture::vlen_sequence())]
+fn parsed_attributes_keep_zero_count_member_identities(
+    #[case] datatype: Datatype,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    #[values(UserblockSize::NONE, UserblockSize::MIN)] base: UserblockSize,
+) {
+    let widths = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+    let raw = global_heap::reference(0, 4096, u32::from(u16::MAX), widths);
+    let attribute = parsed_attribute(datatype, 1, raw);
+    with_width_engine(base, widths, |engine| {
+        let mut referenced = ObjectReferences::default();
+        assert!(
+            engine
+                .collect_parsed_attribute_collections(&attribute, &mut referenced)
+                .unwrap()
+        );
+        assert_eq!(
+            referenced.collections(),
+            &BTreeSet::from([base.get() + 4096])
+        );
+        assert_eq!(
+            referenced.objects(),
+            &BTreeSet::from([GlobalHeapId {
+                collection: PhysicalAddress::new(base.get() + 4096),
+                index: NonZeroU16::new(u16::MAX).unwrap(),
+            }])
+        );
     });
 }
 

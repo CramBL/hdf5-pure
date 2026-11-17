@@ -5,6 +5,7 @@ use rstest::rstest;
 use test_util_hdf5::__private::array_index;
 use test_util_hdf5::__private::creation_holes;
 use test_util_hdf5::__private::creation_holes::HoleLayout;
+use test_util_hdf5::__private::fragmented_creation;
 use test_util_hdf5::file;
 use test_util_hdf5::file_space::persisted::PersistedStrategy;
 use test_util_hdf5::file_space_oracle;
@@ -20,7 +21,7 @@ use crate::PartialEdgeFiltering;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::dataspace::MaxExtent;
-use crate::edit::dataset::tests::lifecycle;
+use crate::edit::dataset::test_util::lifecycle;
 use crate::edit::test_util;
 
 #[rstest]
@@ -178,7 +179,7 @@ fn native_aliases_preserve_fragmented_allocations_until_the_last_removal(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("aliased-fragments.h5");
-    let expected = lifecycle::created_fixture(&path, strategy, extensible);
+    let expected = fragmented_creation::write(&path, strategy, extensible);
     creation_holes::add_hard_link(&path, "replacement", "alias");
     let live = lifecycle::owned_ranges(&path, "alias");
     let file = File::open_rw_with_options(

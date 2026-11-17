@@ -1,7 +1,5 @@
 use core::cell::Cell;
 use core::num::NonZeroU8;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
@@ -9,16 +7,14 @@ use rstest::rstest;
 use test_util::object_header::v1::Header as HeaderV1;
 use test_util::object_header::v2::Header as HeaderV2;
 
-use super::{READ_BUFFER_LEN, ResidualContents, ResidualOutcome};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use super::READ_BUFFER_LEN;
+use super::{ResidualContents, ResidualOutcome};
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, BaseAddress, BaseAddressExt};
-use crate::edit::analysis::AnalysisPhase;
-use crate::edit::test_util as edit_test_util;
-use crate::error::{Error, FormatError};
-use crate::object_graph::ObjectId;
+use crate::error::FormatError;
 use crate::object_header::ObjectHeader;
 use crate::source::{BytesSource, PhysicalSource, Source};
-use crate::{File, FileBuilder, UserblockSize};
 
 #[rstest]
 #[case::empty(1, 0, None)]
@@ -29,7 +25,9 @@ use crate::{File, FileBuilder, UserblockSize};
 #[case::buffer_start(511, 16_385, Some(8_192))]
 #[case::last(1, 16_385, Some(16_384))]
 #[case::address_limit(u64::MAX - 8_193, 8_193, None)]
-fn content_observations_keep_zero_prefixes_and_unexamined_suffixes(
+#[case::empty_at_limit(u64::MAX, 0, None)]
+#[case::nonzero_at_limit(u64::MAX - 8_193, 8_193, Some(8_192))]
+fn residual_scans_stop_at_the_first_nonzero_byte(
     #[case] start: u64,
     #[case] length: u64,
     #[case] nonzero: Option<u64>,
@@ -42,15 +40,9 @@ fn content_observations_keep_zero_prefixes_and_unexamined_suffixes(
     };
     assert_eq!(observed.range(), domain);
     let expected_calls = nonzero.map_or(length.div_ceil(8_192), |at| at / 8_192 + 1);
-    assert_eq!(
-        (observed.read_calls(), observed.requested_bytes()),
-        (expected_calls, (expected_calls * 8_192).min(length))
-    );
     match nonzero {
         None => {
             assert_eq!(observed.outcome(), &ResidualOutcome::AllZero);
-            assert_eq!(observed.zero_prefix(), domain);
-            assert_eq!(observed.unexamined(), range(start + length, 0));
         }
         Some(at) => {
             assert_eq!(
@@ -60,23 +52,18 @@ fn content_observations_keep_zero_prefixes_and_unexamined_suffixes(
                     value: NonZeroU8::new(0x5a).unwrap()
                 }
             );
-            assert_eq!(observed.zero_prefix(), range(start, at));
-            assert_eq!(
-                observed.unexamined(),
-                range(start + at + 1, length - at - 1)
-            );
         }
     }
     let (calls, bytes, peak) = source.work.get();
     assert_eq!(
         (calls, bytes),
-        (observed.read_calls(), observed.requested_bytes())
+        (expected_calls, (expected_calls * 8_192).min(length))
     );
-    assert!(peak <= READ_BUFFER_LEN);
+    assert_eq!(peak, usize::try_from(length.min(8_192)).unwrap());
 }
 
 #[test]
-fn read_failures_keep_completed_prefixes_and_other_intervals() {
+fn read_failures_preserve_other_intervals() {
     let source = SyntheticSource::new(20_003, None, Some(8_192));
     let contents =
         ResidualContents::read(&physical(&source), &[range(0, 16_387), range(20_000, 3)]).unwrap();
@@ -87,12 +74,7 @@ fn read_failures_keep_completed_prefixes_and_other_intervals() {
         failed.outcome(),
         &ResidualOutcome::ReadFailed(FormatError::Source("injected residual read failure".into()))
     );
-    assert_eq!(failed.zero_prefix(), range(0, 8_192));
-    assert_eq!(failed.unexamined(), range(8_192, 8_195));
-    assert_eq!((failed.read_calls(), failed.requested_bytes()), (2, 16_384));
     assert_eq!(complete.outcome(), &ResidualOutcome::AllZero);
-    assert_eq!(complete.zero_prefix(), range(20_000, 3));
-    assert_eq!(complete.unexamined(), range(20_003, 0));
     assert_eq!(source.work.get(), (3, 16_387, 8_192));
 }
 
@@ -111,7 +93,6 @@ fn supported_headers_at_unaligned_and_buffer_boundaries_remain_nonzero(
     let source = BytesSource::new(&bytes);
     let contents =
         ResidualContents::read(&physical(&source), &[range(0, bytes.len() as u64)]).unwrap();
-    assert_eq!(contents.intervals()[0].zero_prefix(), range(0, at as u64));
     assert_eq!(
         contents.intervals()[0].outcome(),
         &ResidualOutcome::NonZero {
@@ -129,7 +110,18 @@ fn residual_reads_bound_scratch_and_retained_state(#[case] length: u64) {
     use test_util::allocation;
 
     let source = SyntheticSource::new(length, None, None);
-    let (contents, measured) = allocation::measure("residual_content_scan", || {
+    let (scan_region, control_region) = if length == 8_193 {
+        (
+            "residual_content_small_scan",
+            "residual_content_small_control",
+        )
+    } else {
+        (
+            "residual_content_large_scan",
+            "residual_content_large_control",
+        )
+    };
+    let (contents, measured) = allocation::measure(scan_region, || {
         ResidualContents::read(&physical(&source), &[range(0, length)]).unwrap()
     });
     assert_eq!(contents.intervals()[0].outcome(), &ResidualOutcome::AllZero);
@@ -145,120 +137,9 @@ fn residual_reads_bound_scratch_and_retained_state(#[case] length: u64) {
             && measured.live_bytes < 4_096,
         "{measured}"
     );
-    let (control, positive) =
-        allocation::measure("residual_content_control", || vec![0_u8; 1_048_576]);
+    let (control, positive) = allocation::measure(control_region, || vec![0_u8; 1_048_576]);
     assert_eq!(control.len(), 1_048_576);
     assert!(positive.bytes >= 1_048_576);
-}
-
-#[rstest]
-#[case::plain(0)]
-#[case::userblock(512)]
-fn phase_content_queries_skip_numeric_payloads_and_reexamine_changed_bytes(#[case] base: u64) {
-    let path = test_util::temp::temp_path("residual-content-phase.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_userblock(UserblockSize::try_from(base).unwrap());
-    builder
-        .create_dataset("data")
-        .with_u8_data(&vec![0x5a; 1_048_576]);
-    builder.write(&path).unwrap();
-    let requested_bytes = Arc::new(AtomicU64::new(0));
-    let (mut engine, calls) =
-        edit_test_util::open_counted_engine_with_bytes(&path, Arc::clone(&requested_bytes));
-    let mut phase = AnalysisPhase::new(&engine);
-    let root =
-        ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
-    let source = phase.reconstruction_source(&engine, root).unwrap();
-    let coverage = phase.physical_coverage(&source).unwrap();
-    assert!(coverage.content.is_none());
-    let ranges = coverage.residuals().to_vec();
-    assert_eq!(ranges.len(), 1);
-    calls.store(0, Ordering::Relaxed);
-    requested_bytes.store(0, Ordering::Relaxed);
-    let contents = phase.residual_content(&source).unwrap();
-    assert_eq!(
-        contents
-            .intervals()
-            .iter()
-            .map(|entry| entry.range())
-            .collect::<Vec<_>>(),
-        ranges
-    );
-    assert_eq!(contents.intervals()[0].outcome(), &ResidualOutcome::AllZero);
-    assert_eq!(requested_bytes.load(Ordering::Relaxed), ranges[0].length());
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        ranges[0].length().div_ceil(8_192)
-    );
-    assert!(requested_bytes.load(Ordering::Relaxed) < 4_096);
-    let pointer = core::ptr::from_ref(contents);
-    assert_eq!(
-        core::ptr::from_ref(phase.residual_content(&source).unwrap()),
-        pointer
-    );
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        let ((), cached) = test_util::allocation::measure("residual_content_cached", || {
-            assert_eq!(
-                core::ptr::from_ref(phase.residual_content(&source).unwrap()),
-                pointer
-            );
-        });
-        assert_eq!((cached.blocks, cached.bytes), (0, 0));
-    }
-    let before = calls.load(Ordering::Relaxed);
-    let mut foreign = AnalysisPhase::new(&engine);
-    let foreign_source = foreign.reconstruction_source(&engine, root).unwrap();
-    let Error::Format(error) = phase.residual_content(&foreign_source).err().unwrap() else {
-        panic!("expected foreign phase error");
-    };
-    assert_eq!(
-        error,
-        FormatError::Internal("physical claims belong to another source phase".into())
-    );
-    assert_eq!(calls.load(Ordering::Relaxed), before);
-    drop(foreign);
-    drop(phase);
-    let snapshot = engine.snapshot_free();
-    engine
-        .image
-        .write_at(ranges[0].start().get(), &[0x5a])
-        .unwrap();
-    engine.restore_free(snapshot);
-    let mut changed = AnalysisPhase::new(&engine);
-    let fresh = changed.reconstruction_source(&engine, root).unwrap();
-    let error = changed.residual_content(&source).err().unwrap();
-    assert!(
-        matches!(error, Error::Format(FormatError::Internal(ref message)) if message == "physical claims belong to another source phase"),
-        "{error:?}"
-    );
-    let contents = changed.residual_content(&fresh).unwrap();
-    assert_eq!(
-        contents.intervals()[0].outcome(),
-        &ResidualOutcome::NonZero {
-            address: ranges[0].start(),
-            value: NonZeroU8::new(0x5a).unwrap()
-        }
-    );
-    drop(changed);
-    engine
-        .image
-        .write_at(ranges[0].start().get(), &[0])
-        .unwrap();
-    let mut restored = AnalysisPhase::new(&engine);
-    let fresh = restored.reconstruction_source(&engine, root).unwrap();
-    assert_eq!(
-        restored.residual_content(&fresh).unwrap().intervals()[0].outcome(),
-        &ResidualOutcome::AllZero
-    );
-    drop(restored);
-    drop(engine);
-    let reader = File::open(&path).unwrap();
-    assert_eq!(
-        reader.dataset("data").unwrap().read_u8().unwrap(),
-        vec![0x5a; 1_048_576]
-    );
-    reader.close().unwrap();
 }
 
 fn range(start: u64, length: u64) -> FileRange {

@@ -5,20 +5,19 @@
 
 use core::num::NonZeroU16;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use crate::PhysicalAddress;
 use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
 use crate::error::{Error, FormatError};
 use crate::global_heap::GlobalHeapId;
-use crate::object_graph::ObjectId;
 
 impl AnalysisPhase<'_> {
     /// Returns cached member associations for this phase's root topology.
     ///
     /// Discovers topology on the first query and reuses cached object references and collection
-    /// framing. Retains partial reference identities and framing failures independently. Uses the
-    /// phase root and requires a `source` from this phase. Source consistency,
+    /// framing. Retains decoded member identities after incomplete interpretation and records
+    /// framing status independently. Uses the phase root and requires a `source` from this phase.
+    /// Source consistency,
     /// local allocation ownership, and physical coverage require separate evidence.
     ///
     /// # Errors
@@ -41,24 +40,22 @@ impl AnalysisPhase<'_> {
     }
 }
 
-/// Observed global heap members and their referring objects in one phase's root topology.
+/// Observed global heap members and framing outcomes for one phase's root topology.
 ///
 /// Includes collections referenced by root-reachable objects. Topology availability, reference
 /// interpretation, and collection framing are recorded separately. Exclusive ownership and
 /// retirement permission require separate evidence.
 pub(in crate::edit) struct MemberAssociations {
-    source: ReconstructionSource,
-    root: Option<ObjectId>,
     topology_available: bool,
-    incomplete_references: Vec<ObjectId>,
+    incomplete_references: bool,
     collections: BTreeMap<PhysicalAddress, CollectionAssociations>,
 }
 
 impl MemberAssociations {
     /// Collects reference identities from root-reachable objects and compares member framing.
     ///
-    /// Reuses the phase's topology, reference, and collection caches. Retains distinct referring
-    /// objects per member and sorts allocated indices absent from the observed references.
+    /// Reuses the phase's topology, reference, and collection caches. Stores member presence and
+    /// flags for incomplete references, unmatched allocated indices, and framing failures.
     ///
     /// # Errors
     ///
@@ -69,17 +66,9 @@ impl MemberAssociations {
         source: &ReconstructionSource,
     ) -> Result<Self, Error> {
         let engine = phase.engine;
-        let root = phase.root.or_else(|| {
-            ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).ok()
-        });
         let mut associations = Self {
-            source: ReconstructionSource {
-                identity: Arc::clone(&source.identity),
-                object: source.object(),
-            },
-            root,
             topology_available: false,
-            incomplete_references: Vec::new(),
+            incomplete_references: false,
             collections: BTreeMap::new(),
         };
         let objects = match phase.topology() {
@@ -93,21 +82,16 @@ impl MemberAssociations {
             let origin = phase.reconstruction_source(engine, object)?;
             let references = phase.heap_reference_facts(&origin)?;
             if !references.is_complete() {
-                associations.incomplete_references.push(object);
+                associations.incomplete_references = true;
             }
             for &GlobalHeapId { collection, index } in references.objects() {
-                associations
+                let MemberAssociation { presence: _ } = associations
                     .collections
                     .entry(collection)
                     .or_insert_with(CollectionAssociations::new)
                     .observed
                     .entry(index)
-                    .or_insert_with(|| MemberAssociation {
-                        referrers: Vec::new(),
-                        presence: MemberPresence::Unknown,
-                    })
-                    .referrers
-                    .push(object);
+                    .or_insert_with(MemberAssociation::new);
             }
         }
         for (&address, collection) in &mut associations.collections {
@@ -120,27 +104,14 @@ impl MemberAssociations {
                         if let Some(observed) = collection.observed.get_mut(&member.index()) {
                             observed.presence = MemberPresence::Allocated;
                         } else {
-                            collection.unmatched.push(member.index());
+                            collection.unmatched = true;
                         }
                     }
-                    collection.unmatched.sort_unstable();
                 }
-                Err(error) => collection.error = Some(error),
+                Err(error) => collection.record_failure(error),
             }
         }
         Ok(associations)
-    }
-
-    /// Returns the physical root selected for topology discovery, if its address resolved.
-    pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
-        self.root
-    }
-
-    /// Returns whether `source` has the same phase identity.
-    ///
-    /// Source freshness and ownership require separate evidence.
-    pub(in crate::edit) fn matches_phase(&self, source: &ReconstructionSource) -> bool {
-        Arc::ptr_eq(&self.source.identity, &source.identity)
     }
 
     /// Returns whether root-reachable hard-link topology was completely discovered.
@@ -148,11 +119,9 @@ impl MemberAssociations {
         self.topology_available
     }
 
-    /// Borrows sorted object identities with incomplete reference interpretation.
-    ///
-    /// Partial decoded identities are retained in [`Self::collections`].
-    pub(in crate::edit) fn incomplete_references(&self) -> &[ObjectId] {
-        &self.incomplete_references
+    /// Returns whether reference interpretation was incomplete for any visited object.
+    pub(in crate::edit) fn has_incomplete_references(&self) -> bool {
+        self.incomplete_references
     }
 
     /// Borrows observed collections keyed by physical address.
@@ -163,54 +132,58 @@ impl MemberAssociations {
     }
 }
 
-/// Observed member indices and an independent framing outcome for one collection.
+/// Observed member indices and collection framing status.
 ///
 /// Allocated indices are compared with observed references only after successful framing.
 /// Reference completeness and logical ownership require separate evidence.
 pub(in crate::edit) struct CollectionAssociations {
     observed: BTreeMap<NonZeroU16, MemberAssociation>,
-    unmatched: Vec<NonZeroU16>,
-    error: Option<FormatError>,
+    unmatched: bool,
+
+    framing_failed: bool,
 }
 
 impl CollectionAssociations {
     fn new() -> Self {
         Self {
             observed: BTreeMap::new(),
-            unmatched: Vec::new(),
-            error: None,
+            unmatched: false,
+
+            framing_failed: false,
         }
     }
 
-    /// Borrows descriptor member indices with their referring objects and allocation presence.
+    /// Borrows decoded member indices and their allocation presence.
     pub(in crate::edit) fn observed(&self) -> &BTreeMap<NonZeroU16, MemberAssociation> {
         &self.observed
     }
 
-    /// Borrows sorted allocated member indices absent from the observed reference set.
-    ///
-    /// Returns an empty slice after framing failure. Use [`Self::error`] to distinguish that
-    /// outcome from a successful comparison.
-    pub(in crate::edit) fn unmatched(&self) -> &[NonZeroU16] {
-        &self.unmatched
+    /// Returns whether collection framing failed.
+    pub(in crate::edit) fn framing_failed(&self) -> bool {
+        self.framing_failed
     }
 
-    /// Borrows the collection framing failure, if any.
-    pub(in crate::edit) fn error(&self) -> Option<&FormatError> {
-        self.error.as_ref()
+    /// Returns whether framing found an allocated index absent from observed references.
+    pub(in crate::edit) fn has_unmatched(&self) -> bool {
+        self.unmatched
+    }
+
+    /// Marks collection framing as failed.
+    fn record_failure(&mut self, _error: FormatError) {
+        self.framing_failed = true;
     }
 }
 
-/// Distinct referring objects and parsed allocation presence for one observed member.
+/// Allocation presence for one observed member.
 pub(in crate::edit) struct MemberAssociation {
-    referrers: Vec<ObjectId>,
     presence: MemberPresence,
 }
 
 impl MemberAssociation {
-    /// Borrows referring object identities in sorted order, with each object included once.
-    pub(in crate::edit) fn referrers(&self) -> &[ObjectId] {
-        &self.referrers
+    fn new() -> Self {
+        Self {
+            presence: MemberPresence::Unknown,
+        }
     }
 
     /// Returns allocation presence as established by collection framing.
@@ -229,6 +202,3 @@ pub(in crate::edit) enum MemberPresence {
     /// Collection framing failed, so allocation presence is undetermined.
     Unknown,
 }
-
-#[cfg(test)]
-mod tests;

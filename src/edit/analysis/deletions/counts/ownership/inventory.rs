@@ -1,5 +1,6 @@
 //! Complete owned count inventories, source preflight, and positive explicit subsets.
 
+use core::num::NonZeroU32;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -8,8 +9,9 @@ use super::ProtectedCounts;
 use super::{CountHandoffError, CountSource, SurvivingCount, SurvivingCounts};
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
+use crate::edit::analysis::counts::ROOT_REFERENCE_COUNT;
 use crate::edit::analysis::counts::changes::owned::{
-    CountDisposition, OwnedCountChange, UnresolvedCount,
+    CountDisposition, OwnedCountChange, OwnedOriginalCount, UnresolvedCount,
 };
 use crate::edit::analysis::{NetCountPlan, ReconstructionSource};
 use crate::edit::commit::CountProjectionError;
@@ -45,6 +47,7 @@ impl NetCountPlan<'_, '_> {
                 .evidence_changes()
                 .map(|change| change.detach())
                 .collect(),
+            projected_root: None,
         })
     }
 }
@@ -58,6 +61,7 @@ pub(in crate::edit) struct CountInventory {
     session: AllocationSession,
     origin: Option<ReconstructionSource>,
     changes: Vec<OwnedCountChange>,
+    projected_root: Option<ProjectedRoot>,
 }
 
 impl CountInventory {
@@ -91,6 +95,7 @@ impl CountInventory {
             session,
             origin,
             changes,
+            projected_root: _,
         } = &self;
         if !session.same(&engine.context.allocations.session()) {
             return Err(CountPreflightError::Protection(
@@ -118,14 +123,12 @@ impl CountInventory {
         };
         for change in changes {
             if change.original().value() == 0 {
-                return Err(CountPreflightError::OriginalZero {
-                    object: change.object(),
-                });
+                return Err(CountPreflightError::OriginalZero);
             }
             match change.disposition() {
-                CountDisposition::Retain(_)
+                CountDisposition::Retain
                 | CountDisposition::Surviving { .. }
-                | CountDisposition::Unchanged(_)
+                | CountDisposition::Unchanged
                 | CountDisposition::Unresolved {
                     reason: UnresolvedCount::Zero,
                     ..
@@ -134,11 +137,7 @@ impl CountInventory {
                     change,
                     reason: UnresolvedCount::MissingField,
                 } if !replaced.contains(&change.object()) => {
-                    return Err(CountPreflightError::MissingField {
-                        object: change.object(),
-                        original: change.original().value(),
-                        remaining: change.remaining(),
-                    });
+                    return Err(CountPreflightError::MissingField);
                 }
                 CountDisposition::Unresolved { .. } => {}
             }
@@ -175,6 +174,7 @@ impl CountInventory {
             session,
             origin,
             changes,
+            projected_root,
         } = self;
         let surviving = origin
             .as_ref()
@@ -216,9 +216,30 @@ impl CountInventory {
                 session,
                 origin,
                 changes,
+                projected_root,
             },
             surviving,
         }
+    }
+
+    /// Returns whether a completed root projection permits replacement under the supplied facts.
+    ///
+    /// Requires the same allocation session, root source phase, and original count observation.
+    /// Source freshness, placement correspondence, and storage protection remain separate checks.
+    pub(in crate::edit) fn permits_root_replacement(
+        &self,
+        engine: &WriteEngine,
+        source: &ReconstructionSource,
+        original: u32,
+        incoming: u32,
+    ) -> bool {
+        self.same_session(engine)
+            && self.root() == Some(source.object())
+            && self.shares_phase(source)
+            && self
+                .projected_root
+                .as_ref()
+                .is_some_and(|root| root.original.get() == original && root.incoming == incoming)
     }
 
     /// Returns whether the recorded allocation session matches `engine`, even for empty input.
@@ -289,19 +310,9 @@ impl CountPreflight {
         self.inventory.shares_phase(source)
     }
 
-    /// Returns the original physical root, or `None` for an empty inventory.
-    pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
-        self.inventory.root()
-    }
-
     /// Borrows every original count entry in the inventory's established order.
     pub(in crate::edit) fn changes(&self) -> &[OwnedCountChange] {
         self.inventory.changes()
-    }
-
-    /// Borrows the positive source updates and their checked complete allocations.
-    pub(in crate::edit) fn protected(&self) -> &ProtectedCounts {
-        &self.protected
     }
 
     /// Returns whether `object` was supplied in the checked reconstruction set.
@@ -316,7 +327,9 @@ impl CountPreflight {
 
     /// Returns the original inventory and protected source batch after matching local projection.
     ///
-    /// The identity allocation and protected updates are absent for empty or entirely unchanged work.
+    /// Retains checked root-replacement evidence when the reconstructed root has only its
+    /// superblock reference after local projection. The identity allocation and protected updates
+    /// are absent for empty or entirely unchanged work.
     ///
     /// # Errors
     ///
@@ -330,12 +343,49 @@ impl CountPreflight {
             return Err(CountProjectionError::Preflight);
         }
         let Self {
-            inventory,
+            mut inventory,
             protected,
-            reconstructed: _,
+            reconstructed,
             projection: _,
         } = self;
+        inventory.projected_root = ProjectedRoot::from_projection(&inventory, &reconstructed);
         Ok((inventory, protected))
+    }
+}
+
+/// A reconstructed root projected to its sole superblock reference.
+///
+/// Construction requires matching local projection completion, complete removal of the original
+/// incoming links, and an original count equal to those links plus the superblock reference.
+/// The enclosing inventory retains the source phase, root, and allocation session.
+struct ProjectedRoot {
+    original: NonZeroU32,
+    incoming: u32,
+}
+
+impl ProjectedRoot {
+    fn from_projection(
+        inventory: &CountInventory,
+        reconstructed: &BTreeSet<ObjectId>,
+    ) -> Option<Self> {
+        let root = inventory.root()?;
+        if !reconstructed.contains(&root) {
+            return None;
+        }
+        let change = inventory
+            .changes
+            .iter()
+            .find(|change| change.object() == root)?;
+        let OwnedOriginalCount::Retained { original, incoming } = change.original() else {
+            return None;
+        };
+        if incoming == 0
+            || incoming.checked_add(ROOT_REFERENCE_COUNT) != Some(original.get())
+            || change.remaining() != ROOT_REFERENCE_COUNT
+        {
+            return None;
+        }
+        Some(Self { original, incoming })
     }
 }
 
@@ -362,22 +412,9 @@ struct ProjectionIdentity;
 #[derive(Debug)]
 pub(in crate::edit) enum CountPreflightError {
     /// A changed positive implicit count without a matching reconstruction.
-    MissingField {
-        /// The physical identity of the original target.
-        object: ObjectId,
-        /// The original implicit count.
-        original: u32,
-        /// The planned positive count.
-        remaining: u32,
-    },
+    MissingField,
     /// An unsupported original zero, independently of any known reference minimum.
-    OriginalZero {
-        /// The physical identity of the original target.
-        object: ObjectId,
-    },
+    OriginalZero,
     /// A source, reconstruction, publication, or allocator-protection failure.
     Protection(CountProtectionError),
 }
-
-#[cfg(test)]
-mod tests;

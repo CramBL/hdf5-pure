@@ -77,6 +77,8 @@ mod extensible_array;
 #[path = "allocation_bounds/free_space.rs"]
 mod free_space;
 
+#[path = "allocation_bounds/commit.rs"]
+mod commit;
 #[path = "allocation_bounds/global_heap.rs"]
 mod global_heap;
 

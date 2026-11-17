@@ -709,3 +709,103 @@ impl Fixture {
         pieces
     }
 }
+
+#[rstest]
+#[case::group(CandidateFreeEdit::Group)]
+#[case::numeric_overwrite(CandidateFreeEdit::Overwrite)]
+#[case::numeric_attribute(CandidateFreeEdit::Attribute)]
+fn public_candidate_free_commits_bound_image_reads(#[case] edit: CandidateFreeEdit) {
+    let path = temp::temp_path("public-candidate-free-reads.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("value").with_i32_data(&[7]);
+    builder.write(&path).unwrap();
+    let bytes = Arc::new(AtomicU64::new(0));
+    let calls = Arc::new(AtomicU64::new(0));
+    let opening =
+        WriteEngine::open_prepared_counting(&path, Arc::clone(&bytes), Arc::clone(&calls)).unwrap();
+    let file = File {
+        inner: Arc::new(
+            FileInner::from_opening_session(
+                opening,
+                properties(MemoryStrategy::Bounded).with_page_buffer_size(0),
+            )
+            .unwrap(),
+        ),
+    };
+    match edit {
+        CandidateFreeEdit::Group => {
+            file.root().create_group("added").unwrap();
+        }
+        CandidateFreeEdit::Overwrite => file
+            .dataset("value")
+            .unwrap()
+            .write_staged(|builder| {
+                builder.with_i32_data(&[11]);
+            })
+            .unwrap(),
+        CandidateFreeEdit::Attribute => file
+            .dataset("value")
+            .unwrap()
+            .set_attr("a", AttrValue::I64(9))
+            .unwrap(),
+    }
+    bytes.store(0, Ordering::Relaxed);
+    calls.store(0, Ordering::Relaxed);
+    file.commit().unwrap();
+    let observed = (calls.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
+    assert!(observed.0 > 0 && observed.0 <= 128, "{observed:?}");
+    assert!(observed.1 > 0 && observed.1 <= 32_768, "{observed:?}");
+    assert_eq!(
+        file.dataset("value").unwrap().read_i32().unwrap(),
+        [if matches!(edit, CandidateFreeEdit::Overwrite) {
+            11
+        } else {
+            7
+        }]
+    );
+    if matches!(edit, CandidateFreeEdit::Group) {
+        assert_eq!(file.root().groups().unwrap(), ["added"]);
+    }
+    if matches!(edit, CandidateFreeEdit::Attribute) {
+        assert_eq!(
+            file.dataset("value").unwrap().attrs().unwrap()["a"],
+            AttrValue::I64(9)
+        );
+    }
+    file.close().unwrap();
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("value").with_i32_data(&[7]);
+    builder.set_attr("heap", AttrValue::VarLenAsciiString("before".into()));
+    builder.write(&path).unwrap();
+    let opening =
+        WriteEngine::open_prepared_counting(&path, Arc::clone(&bytes), Arc::clone(&calls)).unwrap();
+    let control = File {
+        inner: Arc::new(
+            FileInner::from_opening_session(
+                opening,
+                properties(MemoryStrategy::Bounded).with_page_buffer_size(0),
+            )
+            .unwrap(),
+        ),
+    };
+    control.root().remove_attr("heap").unwrap();
+    bytes.store(0, Ordering::Relaxed);
+    calls.store(0, Ordering::Relaxed);
+    control.commit().unwrap();
+    let measured = (calls.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
+    assert!(measured.0 > 0 && measured.1 >= 4_096, "{measured:?}");
+    assert!(
+        measured.0 > observed.0,
+        "candidate-free {observed:?}, heap-bearing {measured:?}"
+    );
+    assert!(control.root().attrs().unwrap().is_empty());
+    assert_eq!(control.dataset("value").unwrap().read_i32().unwrap(), [7]);
+    control.close().unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CandidateFreeEdit {
+    Attribute,
+    Group,
+    Overwrite,
+}

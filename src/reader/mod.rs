@@ -3275,13 +3275,17 @@ impl File {
 
     /// Applies staged edits and publishes pending free-space manager changes.
     ///
-    /// Staged edits are applied as one transaction. Immediate [`Dataset::append`] calls publish
+    /// Staged edits are applied as one batch. Immediate [`Dataset::append`] calls publish
     /// their elements during the call. With no staged edits, the editor can publish manager changes
     /// pending from retired append allocations, including replacements that leave EOF unchanged.
     /// For hard-link deletions and same-file copies, updates supported reference counts and
     /// reclaims a deleted object's supported storage when the remaining hard-link and declared
-    /// counts are both zero. The editor retains affected storage when count or ownership evidence
-    /// is incomplete.
+    /// counts are both zero.
+    ///
+    /// Reclaims qualified obsolete global-heap members after supported deletions, attribute
+    /// changes, and value overwrites. Partially live collections keep their capacity and surviving
+    /// member identities. Retains unobserved members and storage whose removal cannot be
+    /// established.
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
     /// [`Error::ReadOnly`].
@@ -3308,23 +3312,22 @@ impl File {
     /// [`Error::NotCommitted`] for anything needing
     /// bytes, and a refused commit leaves it doing so.
     ///
-    /// The commit is durable when it returns, under the default
+    /// A successful commit is durable when it returns, under the default
     /// [`SyncPolicy::Always`]; under
     /// [`SyncPolicy::OnClose`] it has reached the operating system and waits for
     /// a [`sync`](Self::sync).
     ///
-    /// **A commit refused before it publishes leaves every dataset reading what
-    /// it read before.** Almost everything such a commit writes lands where
-    /// nothing reaches it until the commit's linearization point; the one edit
-    /// that does not is a same-length [`Dataset::write`], which overwrites the
-    /// dataset's existing block, and the refusal writes those bytes back on its
-    /// way out. A refusal raised before the first write keeps the staged batch
-    /// too, so it can be corrected and committed again (issue #316).
+    /// On an application failure before a publication attempt, the editor attempts to restore prior
+    /// dataset values and allocator state. On preparation failure, retains the staged batch for
+    /// correction and retry. The editor consumes the batch when application begins, including
+    /// when a later phase fails.
     /// Non-persistent PAGE sessions relocate value replacements and retain the original
     /// allocations, using only the superblock for publication.
     ///
     /// # Errors
     ///
+    /// Returns [`Error::EditStorageConflict`] for checked allocation bounds, overlap, or truncation
+    /// conflicts.
     /// Returns [`Error::InconsistentReferenceCount`] before applying staged edits if an original
     /// declared count is below its known reference minimum. The staged batch remains available.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
@@ -3343,13 +3346,18 @@ impl File {
     /// pending, and recovery that changes the root refreshes handles as described by
     /// [`sync`](Self::sync).
     ///
-    /// Two failures do not carry that promise, and both call for **re-reading**
-    /// the datasets the batch named rather than for a retry:
+    /// Returns [`Error::CommitPartiallyApplied`] if undo restoration fails. Bytes overwritten by
+    /// the failed operation may be partially restored.
     ///
-    /// - [`Error::CommitPartiallyApplied`], where the restore itself failed, so
-    ///   a dataset may hold either value.
-    /// - An error while updating stored object references, decreasing source reference counts,
-    ///   or reclaiming the root header after publication. The batch's values remain committed.
+    /// Returns [`Error::HeapCompactionFailed`] if collection compaction fails after publication.
+    /// The batch's tree edits and in-place values remain published. Completed collections stay
+    /// compacted, and later collection plans are unattempted. With
+    /// [`crate::HeapCompactionState::Restored`], the failed collection is unchanged or restored and
+    /// further editing is available. With [`crate::HeapCompactionState::Uncertain`], close and
+    /// reopen before editing again.
+    ///
+    /// Errors while updating stored object references, decreasing source reference counts, or
+    /// reclaiming the root header after publication also preserve the batch's committed values.
     pub fn commit(&self) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| session.commit())
     }

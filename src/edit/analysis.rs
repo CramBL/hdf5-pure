@@ -1,7 +1,5 @@
 //! Phase-scoped topology, object counts, collection references, and allocation facts.
 
-#[cfg(test)]
-use core::cell::Cell;
 use core::iter;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -9,9 +7,6 @@ use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_format::__private::ObjectReferenceCount;
-#[cfg(doc)]
-use hdf5_pure_format::__private::ObjectReferenceCountObserver;
 use hdf5_pure_space::__private::FreeClass;
 
 use crate::access_mode::AccessMode;
@@ -28,7 +23,6 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 
 use self::counts::CountObservation;
-use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
 use self::heap::CollectionContents;
 use self::heap::HeapReferenceError;
@@ -36,6 +30,7 @@ use self::heap::associations::MemberAssociations;
 use self::ownership::ObjectOwnership;
 use self::physical::PhysicalStorage;
 use self::physical::claims::PhysicalClaims;
+
 use super::allocation::AllocationSession;
 use super::attributes::AttributePredecessors;
 use super::global_heap_liveness::DatasetReferenceScope;
@@ -50,44 +45,16 @@ pub(super) use deletions::{
     CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
 };
 
-pub(super) use deletions::DeclaredCountChange;
 pub(super) use deletions::PlannedDeletion;
-pub(super) use deletions::SourceRemovalPlan;
 pub(super) use deletions::{
-    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
-    OriginalOwnerInventory,
+    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerFacts, OriginalOwnerInventory,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "source-count evidence does not authorize allocation retirement"
-    )
-)]
 pub(super) mod counts;
 mod deletions;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "heap member facts do not authorize retirement")
-)]
 pub(in crate::edit) mod heap;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "local ownership facts do not authorize collection retirement"
-    )
-)]
 pub(in crate::edit) mod ownership;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "physical storage facts do not authorize retirement"
-    )
-)]
 pub(in crate::edit) mod physical;
 
 /// Lazy topology, object-count, reference, and storage queries for one source phase.
@@ -112,6 +79,8 @@ pub(super) struct AnalysisPhase<'a> {
     liveness: Option<Result<GlobalHeapLiveness, Error>>,
     /// Complete collection ranges, allocated-member framing, and cached parsing failures.
     allocations: BTreeMap<PhysicalAddress, Result<CollectionContents, FormatError>>,
+    /// Header-derived allocation ranges retained after later framing or source-extent failure.
+    collection_envelopes: BTreeMap<PhysicalAddress, FileRange>,
     /// Count observations, optional header allocation facts, and cached parse failures.
     counts: BTreeMap<ObjectId, Result<CountObservation, FormatError>>,
     /// Local allocation ranges and collection outcomes, including cached failures.
@@ -122,8 +91,6 @@ pub(super) struct AnalysisPhase<'a> {
     claims: Option<PhysicalClaims>,
     /// Root-scoped member associations and independent reference and framing outcomes.
     associations: Option<MemberAssociations>,
-    #[cfg(test)]
-    candidate_lookups: u64,
 }
 
 impl<'a> AnalysisPhase<'a> {
@@ -139,13 +106,12 @@ impl<'a> AnalysisPhase<'a> {
             value_references: BTreeMap::new(),
             liveness: None,
             allocations: BTreeMap::new(),
+            collection_envelopes: BTreeMap::new(),
             counts: BTreeMap::new(),
             ownership: BTreeMap::new(),
             physical: None,
             claims: None,
             associations: None,
-            #[cfg(test)]
-            candidate_lookups: 0,
         }
     }
 
@@ -176,8 +142,7 @@ impl<'a> AnalysisPhase<'a> {
                 "a reconstructed header belongs to another source engine".into(),
             ));
         }
-        #[cfg(test)]
-        RECONSTRUCTION_WORK.with(|work| work.set(work.get() + 1));
+
         Ok(ReconstructionSource {
             identity: Arc::clone(
                 self.identity
@@ -202,13 +167,12 @@ impl<'a> AnalysisPhase<'a> {
             value_references: _,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
             claims: _,
             associations: _,
-            #[cfg(test)]
-                candidate_lookups: _,
         } = self;
         topology
             .get_or_insert_with(|| {
@@ -229,33 +193,6 @@ impl<'a> AnalysisPhase<'a> {
                 CompleteTopology::discover_cached(engine, root, *budget, links, identity).ok()
             })
             .as_ref()
-    }
-
-    /// Returns a cached count observation at the object's physical header address.
-    ///
-    /// Parses the complete header on the first query, retaining no message bodies. Caches
-    /// successful classifications and failures for subsequent queries in this source phase.
-    /// Produces a count observation only after the parser and all chunk observations succeed.
-    /// Topology, reference completeness, and allocation facts remain independent. The caller
-    /// establishes count authority separately before retirement.
-    ///
-    /// # Errors
-    ///
-    /// Returns parsing and source-read errors from
-    /// [`ObjectHeader::parse_from_source_with_chunk_observer`], or observation errors from
-    /// [`ObjectReferenceCountObserver::observe`] and [`ObjectReferenceCountObserver::finish`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "count observations do not authorize allocation retirement"
-        )
-    )]
-    pub(super) fn object_reference_count(
-        &mut self,
-        object: ObjectId,
-    ) -> Result<ObjectReferenceCount, FormatError> {
-        CountQueries::new(self.engine, &mut self.counts, None).observation(object)
     }
 
     /// Returns collection references reachable from the objects identified by `roots`.
@@ -285,8 +222,8 @@ impl<'a> AnalysisPhase<'a> {
     ///
     /// Associates retained observations with this phase's shared identity. Retains decoded member
     /// identities and interpretation outcomes by original object. If discovery fails or is
-    /// incomplete, records the supplied deletion roots and excludes all allocations. Otherwise,
-    /// includes each collection whose complete allocation can be parsed.
+    /// incomplete, retains phase-associated observation storage and excludes all allocations.
+    /// Otherwise, includes each collection whose complete allocation can be parsed.
     pub(super) fn deleted_collections(&mut self, deleted: &[ObjectId]) -> CollectionCandidates {
         if deleted.is_empty() {
             return CollectionCandidates::default();
@@ -309,12 +246,12 @@ impl<'a> AnalysisPhase<'a> {
             return candidates;
         }
         if matches!(complete, Ok(true)) {
-            for (origin, references) in &predecessors {
+            for references in predecessors.values() {
                 for &address in &references.collections {
                     if let Ok(allocation) =
                         self.collection_allocation(PhysicalAddress::new(address))
                     {
-                        let Ok(()) = candidates.insert(allocation, [origin.clone()]) else {
+                        let Ok(()) = candidates.insert(allocation) else {
                             return CollectionCandidates::default();
                         };
                     }
@@ -325,11 +262,7 @@ impl<'a> AnalysisPhase<'a> {
             return CollectionCandidates::default();
         };
         observations.predecessors = predecessors;
-        if !matches!(complete, Ok(true)) {
-            observations
-                .incomplete_deletions
-                .extend(deleted.iter().copied());
-        }
+
         candidates
     }
 
@@ -365,7 +298,7 @@ impl<'a> AnalysisPhase<'a> {
                     if let Ok(allocation) =
                         self.collection_allocation(PhysicalAddress::new(address))
                     {
-                        candidates.insert(allocation, [origin.clone()])?;
+                        candidates.insert(allocation)?;
                     }
                 }
             }
@@ -388,10 +321,6 @@ impl<'a> AnalysisPhase<'a> {
     /// Returns path-resolution errors or [`Error::Format`] for inconsistent candidate evidence.
     /// Header, descriptor, and source failures encountered during value collection are recorded in
     /// the observations.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "overwrite candidates do not authorize retirement")
-    )]
     pub(super) fn overwrite_collections(
         &mut self,
         staged: &StagedEdits,
@@ -445,7 +374,7 @@ impl<'a> AnalysisPhase<'a> {
                     if let Ok(allocation) =
                         self.collection_allocation(PhysicalAddress::new(address))
                     {
-                        candidates.insert(allocation, [origin.clone()])?;
+                        candidates.insert(allocation)?;
                     }
                 }
             }
@@ -548,15 +477,8 @@ impl<'a> AnalysisPhase<'a> {
         collections
             .into_values()
             .filter_map(|candidate| {
-                let CollectionCandidate {
-                    range,
-                    class,
-                    origins: _,
-                } = candidate;
-                #[cfg(test)]
-                {
-                    self.candidate_lookups = self.candidate_lookups.saturating_add(1);
-                }
+                let CollectionCandidate { range, class } = candidate;
+
                 if referenced_collections.contains(&range.start().get()) {
                     return None;
                 }
@@ -641,13 +563,12 @@ impl<'a> AnalysisPhase<'a> {
             value_references,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             counts: _,
             ownership: _,
             physical: _,
             claims: _,
             associations: _,
-            #[cfg(test)]
-                candidate_lookups: _,
         } = self;
         let has_topology = topology
             .as_ref()
@@ -670,11 +591,6 @@ impl<'a> AnalysisPhase<'a> {
                         links.insert(object, ObjectLinks::read(engine, &header)?);
                     }
                     if let Entry::Vacant(entry) = references.entry(object) {
-                        #[cfg(test)]
-                        COLLECTION_WORK.with(|work| {
-                            let (links, references) = work.get();
-                            work.set((links, references + 1));
-                        });
                         let mut facts = ObjectReferences::default();
                         let mut values = value_references.remove(&object);
                         let outcome = engine.collect_cached_object_collections(
@@ -707,67 +623,6 @@ impl<'a> AnalysisPhase<'a> {
         references.get(&object).ok_or_else(|| {
             FormatError::Internal("object reference facts were not recorded".into()).into()
         })
-    }
-    /// Returns retained summary sizes and candidate-membership query counts.
-    #[cfg(test)]
-    fn work(&self) -> AnalysisWork {
-        let Self {
-            engine: _,
-            identity: _,
-            topology,
-            budget: _,
-            root: _,
-            links,
-            references,
-            value_references: _,
-            liveness,
-            allocations,
-            counts: _,
-            ownership: _,
-            physical: _,
-            claims: _,
-            associations: _,
-            candidate_lookups,
-        } = self;
-        let topology = topology.as_ref().and_then(Option::as_ref);
-        let objects = topology.map_or(0, |topology| topology.indices.len() as u64);
-        let edges = topology.map_or(0, |topology| {
-            topology
-                .indices
-                .values()
-                .map(|&index| topology.graph.object(index).links.len() as u64)
-                .sum()
-        });
-        let link_name_bytes = topology.map_or(0, |topology| {
-            topology
-                .indices
-                .values()
-                .map(|&index| {
-                    topology
-                        .graph
-                        .object(index)
-                        .value
-                        .names
-                        .keys()
-                        .map(|name| name.len() as u64)
-                        .sum::<u64>()
-                })
-                .sum()
-        });
-        AnalysisWork {
-            topology_objects: objects,
-            topology_edges: edges,
-            link_name_bytes,
-            cached_link_objects: links.len() as u64,
-            reference_objects: references.len() as u64,
-            collection_references: references
-                .values()
-                .map(|references| references.collections.len() as u64)
-                .sum(),
-            allocation_results: allocations.len() as u64,
-            liveness_results: u64::from(liveness.is_some()),
-            candidate_lookups: *candidate_lookups,
-        }
     }
 }
 
@@ -857,18 +712,8 @@ impl<'a> CompleteTopology<'a> {
         cached: &mut BTreeMap<ObjectId, ObjectLinks>,
         identity: Arc<deletions::TopologyIdentity>,
     ) -> Result<Self, Error> {
-        #[cfg(test)]
-        DISCOVERY_WORK.with(|work| {
-            let (passes, objects) = work.get();
-            work.set((passes + 1, objects));
-        });
         let mut incoming = HashMap::new();
         let (graph, indices) = ObjectGraph::discover_indexed(budget, root, |id| {
-            #[cfg(test)]
-            DISCOVERY_WORK.with(|work| {
-                let (passes, objects) = work.get();
-                work.set((passes, objects + 1));
-            });
             let ObjectLinks {
                 links,
                 topology_error,
@@ -993,11 +838,6 @@ struct ObjectLinks {
 
 impl ObjectLinks {
     fn read(engine: &WriteEngine, header: &ObjectHeader) -> Result<Self, Error> {
-        #[cfg(test)]
-        COLLECTION_WORK.with(|work| {
-            let (links, references) = work.get();
-            work.set((links + 1, references));
-        });
         let mut links = Vec::new();
         let mut topology_error = None;
         if group_v2::is_group(header) {
@@ -1056,9 +896,10 @@ pub(in crate::edit) struct ObjectReferences {
 /// records the session without a phase identity or predecessor observations.
 ///
 /// The editor retains complete allocation ranges and their original classes separately from
-/// descriptor identities, interpretation outcomes, and incomplete deletion roots. The caller
-/// establishes source freshness, member presence, allocation ownership, and retirement permission
-/// separately. An absent observation is not evidence of reference absence.
+/// decoded predecessor references and their completeness. Retains observation storage for
+/// incomplete discovery, including when no member IDs or allocations were recovered.
+/// The caller establishes source freshness, member presence, allocation ownership, and retirement
+/// permission separately. An absent observation is not evidence of reference absence.
 #[derive(Default)]
 pub(super) struct CollectionCandidates {
     /// Lazily allocated session, optional source-phase identity, and reference observations.
@@ -1068,15 +909,29 @@ pub(super) struct CollectionCandidates {
 }
 
 impl CollectionCandidates {
-    /// Merges allocation candidates, reference observations, and incomplete deletion roots.
+    /// Returns `true` if allocation candidates and retained observation storage are both absent.
+    ///
+    /// The editor retains observations even when complete allocation framing fails.
+    pub(super) fn is_empty(&self) -> bool {
+        let Self {
+            observations,
+            collections,
+        } = self;
+        collections.is_empty() && observations.is_none()
+    }
+
+    /// Merges admitted allocations and phase-associated predecessor observations.
     ///
     /// Preserves each allocation's range and class. Adopts `other` directly if `self` is empty.
+    /// Otherwise, adopts `other`'s phase identity when present and `self`'s identity is absent.
+    /// Merges allocations in physical address order. Merges predecessor observations only after
+    /// every allocation succeeds.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if the sessions or recorded source phases differ, before
-    /// merging allocations or observations. Also returns the errors of [`Self::insert`]. Entries
-    /// merged before an allocation error remain in `self`.
+    /// merging allocations or observations. Also returns the errors of [`Self::merge_candidate`].
+    /// Entries merged and a phase identity adopted before an allocation error remain in `self`.
     pub(super) fn extend(&mut self, other: Self) -> Result<(), FormatError> {
         if self.observations.is_none() {
             debug_assert!(self.collections.is_empty());
@@ -1095,75 +950,70 @@ impl CollectionCandidates {
             session,
             identity,
             predecessors,
-            incomplete_deletions,
         } = *observations;
         self.require_identity(session.clone(), identity.as_ref())?;
-        for CollectionCandidate {
-            range,
-            class,
-            origins,
-        } in collections.into_values()
-        {
-            self.insert(
-                CollectionAllocation {
-                    session: session.clone(),
-                    range,
-                    class,
-                },
-                origins,
-            )?;
+        for candidate in collections.into_values() {
+            self.merge_candidate(candidate)?;
         }
         let observations = self.require_session(session)?;
         for (origin, references) in predecessors {
             observations.observe(origin, references);
         }
-        observations
-            .incomplete_deletions
-            .extend(incomplete_deletions);
+
         Ok(())
     }
 
-    /// Merges origins for one complete allocation, preserving its original range and class.
+    /// Admits one complete allocation.
+    ///
+    /// Checks the allocation's session before merging its range and class. The caller records
+    /// decoded predecessor references separately through [`Self::observe`].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if `origins` is empty, the allocation belongs to another
-    /// session, or an existing candidate at the same address has a different length or class.
-    pub(super) fn insert(
-        &mut self,
-        allocation: CollectionAllocation,
-        origins: impl IntoIterator<Item = CollectionProvenance>,
-    ) -> Result<(), FormatError> {
-        let mut origins = origins.into_iter();
-        let first = origins.next().ok_or_else(|| {
-            FormatError::Internal("collection candidate has no provenance".into())
-        })?;
+    /// Returns [`FormatError::Internal`] if the allocation belongs to another session.
+    /// Also returns the errors of [`Self::merge_candidate`].
+    pub(super) fn insert(&mut self, allocation: CollectionAllocation) -> Result<(), FormatError> {
         let CollectionAllocation {
             session,
             range,
             class,
         } = allocation;
         self.require_session(session)?;
-        let candidate =
-            self.collections
-                .entry(range.start())
-                .or_insert_with(|| CollectionCandidate {
-                    range,
-                    class,
-                    origins: BTreeSet::new(),
-                });
-        if candidate.range != range {
-            return Err(FormatError::Internal(
-                "collection candidates have conflicting allocation lengths".into(),
-            ));
+        let candidate = CollectionCandidate { range, class };
+        self.merge_candidate(candidate)?;
+
+        Ok(())
+    }
+
+    /// Merges an admitted allocation by physical start, preserving its range and class.
+    ///
+    /// The caller establishes session compatibility before this merge. An existing entry remains
+    /// unchanged on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the existing allocation has a different length or
+    /// class. Checks length before class.
+    fn merge_candidate(&mut self, candidate: CollectionCandidate) -> Result<(), FormatError> {
+        match self.collections.entry(candidate.range.start()) {
+            Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            Entry::Occupied(entry) => {
+                let CollectionCandidate { range, class } = candidate;
+                let prior = entry.into_mut();
+                if prior.range != range {
+                    return Err(FormatError::Internal(
+                        "collection candidates have conflicting allocation lengths".into(),
+                    ));
+                }
+                if prior.class != class {
+                    return Err(FormatError::Internal(
+                        "collection candidates have conflicting allocation classes".into(),
+                    ));
+                }
+            }
         }
-        if candidate.class != class {
-            return Err(FormatError::Internal(
-                "collection candidates have conflicting allocation classes".into(),
-            ));
-        }
-        candidate.origins.insert(first);
-        candidate.origins.extend(origins);
         Ok(())
     }
 
@@ -1253,7 +1103,6 @@ impl CollectionCandidates {
                 session,
                 identity: None,
                 predecessors: BTreeMap::new(),
-                incomplete_deletions: BTreeSet::new(),
             })
         });
         if observations.identity.is_none() {
@@ -1263,18 +1112,16 @@ impl CollectionCandidates {
     }
 }
 
-/// Descriptor observations and incomplete deletion scopes, bound to their original source phase.
+/// Session and optional phase association with decoded predecessor references.
 ///
 /// For allocation-only candidates, the editor records a session without a phase identity or
-/// observations.
+/// predecessor observations.
 struct CandidateObservations {
     session: AllocationSession,
     /// The original phase's shared identity, absent for allocation-only candidates.
     identity: Option<Arc<deletions::TopologyIdentity>>,
     /// Decoded identities and interpretation outcomes, keyed by original object and content scope.
     predecessors: BTreeMap<CollectionProvenance, ObjectReferences>,
-    /// Supplied deletion roots whose descendant traversal failed or was incomplete.
-    incomplete_deletions: BTreeSet<ObjectId>,
 }
 
 impl CandidateObservations {
@@ -1312,18 +1159,17 @@ pub(super) struct CollectionAllocation {
     class: Option<FreeClass>,
 }
 
-/// One complete collection allocation with its original class and recorded origins.
+/// One complete collection allocation with its optional original class.
 struct CollectionCandidate {
     range: FileRange,
     /// The original allocation class, or [`None`] if stored-address conversion failed.
     class: Option<FreeClass>,
-    origins: BTreeSet<CollectionProvenance>,
 }
 
 /// The original object and content scope associated with an allocation or observation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct CollectionProvenance {
-    /// The object from which the allocation or reference summary was collected.
+    /// The object used to label the allocation or decoded reference observation.
     pub(super) object: ObjectId,
     /// The part of the original object examined for references.
     pub(super) content: CollectionContent,
@@ -1339,38 +1185,3 @@ pub(super) enum CollectionContent {
     /// All supported object content, including attributes and fill values.
     Object,
 }
-
-/// Retained phase summaries and candidate-membership query counts.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AnalysisWork {
-    /// Objects in complete topology.
-    topology_objects: u64,
-    /// Hard-link edges in complete topology.
-    topology_edges: u64,
-    /// Bytes in the topology's indexed link names.
-    link_name_bytes: u64,
-    /// Entries in the separate object-link cache.
-    cached_link_objects: u64,
-    /// Cached object-reference summaries.
-    reference_objects: u64,
-    /// Collection addresses summed across cached object-reference summaries.
-    collection_references: u64,
-    /// Cached collection-allocation results, including errors.
-    allocation_results: u64,
-    /// Cached root reference results, either zero or one.
-    liveness_results: u64,
-    /// Candidate-membership queries against a complete reference set.
-    candidate_lookups: u64,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    pub(in crate::edit) static DISCOVERY_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
-    pub(in crate::edit) static RECONSTRUCTION_WORK: Cell<usize> = const { Cell::new(0) };
-    pub(in crate::edit) static COLLECTION_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    pub(in crate::edit) static COLLECTION_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
-}
-
-#[cfg(test)]
-mod tests;

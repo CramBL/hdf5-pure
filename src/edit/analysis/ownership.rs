@@ -68,8 +68,6 @@ impl ObjectOwnership {
     /// checked header allocations if body geometry is invalid. Retains independently collected
     /// body ranges after other body failures when their geometry is valid.
     fn read(engine: &WriteEngine, object: ObjectId) -> Self {
-        #[cfg(test)]
-        OWNERSHIP_READS.with(|reads| reads.set(reads.get() + 1));
         let (header, mut allocations) = match ObjectAllocation::read_header(engine, object) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -241,11 +239,3 @@ pub(in crate::edit) enum AllocationKind {
     /// Indexes, heaps, and other metadata outside the object header.
     Metadata,
 }
-
-#[cfg(test)]
-std::thread_local! {
-    pub(in crate::edit) static OWNERSHIP_READS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-mod tests;

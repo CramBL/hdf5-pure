@@ -12,6 +12,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use rstest::rstest;
+use test_util::__private::durability::FaultSchedule;
 use test_util::allocation_oracle;
 use test_util::allocation_oracle::AllocationKind;
 use test_util::allocation_oracle::Context;
@@ -393,22 +394,15 @@ fn run_failure(fault: FaultSpec, policy: SyncPolicy, buffered: bool, filtered: b
     fs::write(&path, &workload.base).unwrap();
     let mut engine = open(&path, policy, buffered);
     disk_log::start();
-    match fault {
-        FaultSpec::Synchronize(_, point) => disk_log::fail_sync_after(
-            workload.events[..event]
-                .iter()
-                .filter(|event| matches!(event, IoEvent::Synchronize { .. }))
-                .count(),
-            point,
-        ),
-        FaultSpec::Write(_, _) => disk_log::fail_write_after(
-            workload.events[..event]
-                .iter()
-                .filter(|event| matches!(event, IoEvent::Write { .. }))
-                .count(),
-            prefix.unwrap(),
-        ),
-    }
+    let schedule = match fault {
+        FaultSpec::Synchronize(_, point) => {
+            FaultSchedule::synchronize_events(&workload.events, event, point)
+        }
+        FaultSpec::Write(_, _) => {
+            FaultSchedule::write_events(&workload.events, event, prefix.unwrap())
+        }
+    };
+    schedule.inject();
     let error = append(&mut engine).unwrap_err();
     let Error::Io(error) = error else {
         panic!("{fault:?}/{buffered}: expected injected I/O, got {error:?}")
@@ -424,52 +418,12 @@ fn run_failure(fault: FaultSpec, policy: SyncPolicy, buffered: bool, filtered: b
     );
     disk_log::clear_failures();
     let failed = disk_log::finish();
-    assert_eq!(&failed.events[..event], &workload.events[..event]);
-    assert_eq!(
-        failed.events[event].outcome(),
-        IoOutcome::Failed(ErrorKind::Other)
-    );
+    schedule.assert_failed(&failed);
     assert!(
         failed.events[event + 1..]
             .iter()
             .all(|event| matches!(event, IoEvent::Resize { .. }))
     );
-    match fault {
-        FaultSpec::Write(_, _) => {
-            let IoEvent::Write {
-                offset,
-                requested,
-                written,
-                ..
-            } = failed.events[event]
-            else {
-                panic!("the failed event is a write")
-            };
-            let IoEvent::Write {
-                offset: expected_offset,
-                requested: expected_length,
-                ..
-            } = workload.events[event]
-            else {
-                panic!("the control event is a write")
-            };
-            assert_eq!((offset, requested), (expected_offset, expected_length));
-            assert_eq!(written, prefix.unwrap().min(requested));
-        }
-        FaultSpec::Synchronize(_, _) => {
-            let IoEvent::Synchronize { kind, .. } = failed.events[event] else {
-                panic!("the failed event is a synchronization")
-            };
-            let IoEvent::Synchronize {
-                kind: expected_kind,
-                ..
-            } = workload.events[event]
-            else {
-                panic!("the control event is a synchronization")
-            };
-            assert_eq!(kind, expected_kind);
-        }
-    }
     let interrupted = engine.disk_bytes().unwrap();
     let mut replay = workload.base.clone();
     for operation in &failed.operations {

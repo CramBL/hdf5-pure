@@ -14,8 +14,8 @@ use test_util::disk_log;
 use test_util::disk_log::IoEvent;
 use test_util::disk_log::IoOutcome;
 
+use super::test_util::{Creation, CreationAccess};
 use crate::AttrValue;
-use crate::DeflateLevel;
 use crate::File;
 use crate::FileAccessProperties;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -25,6 +25,7 @@ use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::FillTime;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::MemoryStrategy;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::PersistedFreeSpacePolicy;
@@ -66,7 +67,7 @@ use crate::writer::FileBuilder;
 
 mod contiguous;
 mod fragmented;
-pub(in crate::edit) mod lifecycle;
+mod lifecycle;
 mod providers;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod resources;
@@ -416,106 +417,6 @@ fn page_creation_emits_retained_chunks_without_an_aggregate_payload_buffer(#[cas
         copied.live_bytes >= u64::try_from(raw.len()).unwrap(),
         "{copied:?}"
     );
-}
-
-#[derive(Clone, Copy)]
-pub(in crate::edit) enum Creation {
-    Extensible(usize),
-    Fixed(usize),
-    FixedSparse,
-    Pending,
-    Rotated(u64),
-    Unallocated,
-}
-
-impl Creation {
-    pub(in crate::edit) fn configure(self, builder: &mut DatasetBuilder, filtered: bool) {
-        if matches!(self, Self::Unallocated) {
-            builder
-                .with_unallocated_storage(type_builders::make_i32_type(), &[8])
-                .with_fill_value(-7_i32);
-        } else {
-            builder.with_i32_data(&self.initial());
-        }
-        match self {
-            Self::Extensible(_) | Self::Pending | Self::Unallocated => {
-                builder
-                    .with_chunks(&[4])
-                    .with_maxshape(&[MaxExtent::Unlimited]);
-            }
-            Self::Fixed(_) => {
-                builder.with_chunks(&[4]);
-            }
-            Self::FixedSparse => {
-                builder
-                    .with_chunks(&[4])
-                    .with_maxshape(&[MaxExtent::Fixed(320)]);
-            }
-            Self::Rotated(maximum) => {
-                builder
-                    .with_shape(&[2, 2])
-                    .with_chunks(&[1, 1])
-                    .with_maxshape(&[MaxExtent::Fixed(maximum), MaxExtent::Unlimited]);
-            }
-        }
-        if filtered {
-            builder.with_deflate(DeflateLevel::Six);
-        }
-    }
-
-    pub(in crate::edit) fn expected(self) -> Vec<i32> {
-        if matches!(self, Self::Pending) {
-            return (1..=8).collect();
-        }
-        self.initial()
-    }
-
-    pub(in crate::edit) fn coordinates(self) -> Vec<Vec<u64>> {
-        match self {
-            Self::Extensible(count) | Self::Fixed(count) => (0..count)
-                .map(|index| vec![u64::try_from(index * 4).unwrap()])
-                .collect(),
-            Self::FixedSparse => (0..40).map(|index| vec![index * 4]).collect(),
-            Self::Pending => vec![vec![0], vec![4]],
-            Self::Unallocated => Vec::new(),
-            Self::Rotated(_) => vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]],
-        }
-    }
-
-    fn initial(self) -> Vec<i32> {
-        match self {
-            Self::Extensible(count) | Self::Fixed(count) => (0..count * 4)
-                .map(|index| i32::try_from(index / 16 % 7).unwrap())
-                .collect(),
-            Self::FixedSparse => Self::Fixed(40).initial(),
-            Self::Pending => (1..=4).collect(),
-            Self::Unallocated => vec![-7; 8],
-            Self::Rotated(_) => vec![11, 12, 13, 14],
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(in crate::edit) enum CreationAccess {
-    Bounded,
-    Mirrored,
-    Userblock,
-}
-
-impl CreationAccess {
-    pub(in crate::edit) fn base(self) -> u64 {
-        match self {
-            Self::Bounded | Self::Mirrored => 0,
-            Self::Userblock => 8_192,
-        }
-    }
-
-    pub(in crate::edit) fn strategy(self) -> MemoryStrategy {
-        match self {
-            Self::Bounded => MemoryStrategy::Bounded,
-            Self::Mirrored | Self::Userblock => MemoryStrategy::Mirrored,
-        }
-    }
 }
 
 #[rstest]

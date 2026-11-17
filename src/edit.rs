@@ -3260,21 +3260,7 @@ impl WriteEngine {
         if self.vl_overwrite_heaps.is_empty() {
             return;
         }
-        let aliasing_edit = !staged.copies().is_empty()
-            || !staged.cross_copies().is_empty()
-            // A dataset staged with element bytes of its own (`with_raw_data`)
-            // rather than staging its strings here, whether it is being created
-            // or overwritten.
-            || staged.datasets()
-                .iter()
-                .any(|(_, fd)| {
-                    fd.storage.vl_string_staging().is_none()
-                        && datatype::datatype_holds_file_address(&fd.dt)
-                })
-            || staged.writes().iter().any(|(_, values)| {
-                values.vl_string_staging().is_none() && datatype::datatype_holds_file_address(&values.dt)
-            });
-        if aliasing_edit {
+        if staged.shares_heap_references() {
             self.vl_overwrite_heaps.clear();
             return;
         }

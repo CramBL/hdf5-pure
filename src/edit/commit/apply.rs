@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::{FreeClass, PageType};
 
-use super::plan::inventory::dispositions::ReconstructionDispositions;
+use super::plan::inventory::dispositions::PlacementCorrespondence;
 use super::plan::{
     self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, InPlaceWrite, Node,
     OverwritePayloads, PreparedCommit, PreparedGroup, PreparedReference, PreparedTree,
@@ -105,21 +105,31 @@ impl WriteEngine {
     /// Records each event after successful placement. The caller reconciles the events against
     /// the returned tree after all placements and value writes succeed.
     ///
-    /// Consumes captured reclamation spans when supplied. The caller passes spans collected
-    /// from this tree's original inputs. Otherwise, collects them before placement.
+    /// Consumes the supplied reclamation result from this tree's original inputs. Uses an empty
+    /// batch for a captured [`Error::EditUnsupported`]. With no supplied result, collects
+    /// reclamation before placement. With a captured batch, defers newly generated heap retirement
+    /// to captured parent decisions and preserves requests inherited before placement.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::apply_tree`], including [`FormatError::Internal`] if a
-    /// superseded group has no successful placement.
+    /// Returns a captured reclamation error other than [`Error::EditUnsupported`] before
+    /// application validation or I/O. Otherwise, returns the errors of [`Self::apply_tree`].
     pub(super) fn apply_tree_recording(
         &mut self,
         overwrites: &mut OverwritePayloads,
         tree: PreparedTree,
         staged: StagedApply,
-        mut dispositions: Option<&mut ReconstructionDispositions>,
-        reclamation: Option<Vec<(FileRange, FreeClass)>>,
+        mut placements: Option<&mut PlacementCorrespondence>,
+        reclamation: Option<Result<Vec<(FileRange, FreeClass)>, Error>>,
     ) -> Result<AppliedTree, Error> {
+        let reclamation = match reclamation {
+            Some(Ok(reclamation)) => Some(reclamation),
+            Some(Err(Error::EditUnsupported(_))) => Some(Vec::new()),
+            Some(Err(error)) => return Err(error),
+            None => None,
+        };
+        let captured = reclamation.is_some();
+        let inherited_heaps = self.superseded_heaps.len();
         let PreparedTree {
             counts,
             mut groups,
@@ -271,8 +281,8 @@ impl WriteEngine {
                 let new_header = self.write_moving(overwrites, write)?;
                 tail_allocations.extend(tail_allocation);
                 patches.patch_next(base.relative(new_header.header_address())?)?;
-                if let Some(dispositions) = dispositions.as_mut() {
-                    dispositions.record(&key.join(&link), Some(old_header), new_header);
+                if let Some(placements) = placements.as_mut() {
+                    placements.record(&key.join(&link), Some(old_header), new_header);
                 }
                 relocations.insert(old_header, new_header);
             }
@@ -297,8 +307,8 @@ impl WriteEngine {
 
             let oh = object_header::build_v2_object_header(&region)?;
             let addr = self.place_object_header(&oh)?;
-            if let Some(dispositions) = dispositions.as_mut() {
-                dispositions.record(key, replaces.as_ref().map(ReplacedHeader::object), addr);
+            if let Some(placements) = placements.as_mut() {
+                placements.record(key, replaces.as_ref().map(ReplacedHeader::object), addr);
             }
             path_addr.insert(key.clone(), addr);
         }
@@ -316,7 +326,6 @@ impl WriteEngine {
             Some(PreparedTreeCounts::Complete {
                 protected,
                 retained_roots,
-                ..
             }) => (Some(protected), retained_roots),
             Some(PreparedTreeCounts::Unavailable) | None => (None, Vec::new()),
         };
@@ -331,6 +340,9 @@ impl WriteEngine {
                     .map(|object| relocations.get(&object).copied().unwrap_or(object)),
             )
         });
+        if captured {
+            self.superseded_heaps.truncate(inherited_heaps);
+        }
         to_free.extend(
             self.superseded_heaps
                 .drain(..)

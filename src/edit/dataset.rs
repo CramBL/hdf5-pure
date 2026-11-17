@@ -82,6 +82,9 @@ use crate::file_writer::DenseAttrCreationOrder;
 use super::{AppendBuilder, LOSSY_TAIL_REFUSAL, OhRegion, UNDEF, WriteEngine};
 
 #[cfg(test)]
+pub(in crate::edit) mod test_util;
+
+#[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
 }
@@ -2693,4 +2696,4 @@ impl ChunkProvider for PreparedChunkProvider<'_> {
 }
 
 #[cfg(test)]
-pub(in crate::edit) mod tests;
+mod tests;

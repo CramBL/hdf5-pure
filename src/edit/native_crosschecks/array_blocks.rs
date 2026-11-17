@@ -23,8 +23,8 @@ use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::edit::WriteEngine;
-use crate::edit::dataset::tests::Creation;
-use crate::edit::dataset::tests::CreationAccess;
+use crate::edit::dataset::test_util::Creation;
+use crate::edit::dataset::test_util::CreationAccess;
 use crate::edit::test_util;
 use crate::object_graph::ObjectId;
 

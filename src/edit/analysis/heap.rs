@@ -41,7 +41,7 @@ impl AnalysisPhase<'_> {
         ReachableHeapReferences {
             collections,
             objects,
-            outcome,
+            complete: matches!(outcome, Ok(true)),
         }
     }
 
@@ -85,6 +85,9 @@ impl AnalysisPhase<'_> {
 
     /// Parses collection framing once and reuses its ranges, members, or failure in this phase.
     ///
+    /// Retains a parsed header's allocation range separately if later member or source-extent
+    /// checks fail. The caller checks bounds, ownership, and retirement permission separately.
+    ///
     /// # Errors
     ///
     /// Returns the errors of [`CollectionContents::read`].
@@ -92,12 +95,20 @@ impl AnalysisPhase<'_> {
         &mut self,
         address: PhysicalAddress,
     ) -> Result<&CollectionContents, FormatError> {
+        let envelopes = &mut self.collection_envelopes;
         self.allocations
             .entry(address)
             .or_insert_with(|| {
-                #[cfg(test)]
-                super::COLLECTION_ALLOCATIONS.with(|count| count.set(count.get() + 1));
-                CollectionContents::read(self.engine, address)
+                let mut envelope = None;
+                let contents = CollectionContents::read(self.engine, address, |range| {
+                    envelope = Some(range);
+                });
+                if contents.is_err()
+                    && let Some(range) = envelope
+                {
+                    envelopes.insert(address, range);
+                }
+                contents
             })
             .as_ref()
             .map_err(Clone::clone)
@@ -122,14 +133,14 @@ impl AnalysisPhase<'_> {
     }
 }
 
-/// Decoded global heap references and the outcome of traversal from a supplied root set.
+/// Decoded global heap references and the completeness of traversal and interpretation.
 ///
 /// The caller checks [`Self::is_complete`] before using absent identities. Collection framing,
 /// allocation ownership, and retirement permission require separate evidence.
 pub(in crate::edit) struct ReachableHeapReferences {
     collections: BTreeSet<u64>,
     objects: BTreeSet<GlobalHeapId>,
-    outcome: Result<bool, Error>,
+    complete: bool,
 }
 
 impl ReachableHeapReferences {
@@ -145,15 +156,7 @@ impl ReachableHeapReferences {
 
     /// Returns `true` if bounded traversal and reference interpretation completed without an error.
     pub(in crate::edit) fn is_complete(&self) -> bool {
-        matches!(self.outcome, Ok(true))
-    }
-
-    /// Borrows the parsing or source-read failure, if any.
-    ///
-    /// Unsupported content and traversal limits can make the result incomplete without a
-    /// recorded error.
-    pub(in crate::edit) fn error(&self) -> Option<&Error> {
-        self.outcome.as_ref().err()
+        self.complete
     }
 }
 
@@ -225,13 +228,23 @@ pub(in crate::edit) struct CollectionContents {
 impl CollectionContents {
     /// Parses every object header and records allocated members with the parent range.
     ///
+    /// Calls `observe` with parsed header geometry before source-extent and member checks.
+    ///
     /// # Errors
     ///
     /// Returns the errors of [`global_heap::collect_members`], including its source-extent check
     /// for the complete allocation.
-    fn read(engine: &WriteEngine, address: PhysicalAddress) -> Result<Self, FormatError> {
-        let framing =
-            global_heap::collect_members(engine.image(), engine.widths().lengths, address)?;
+    fn read(
+        engine: &WriteEngine,
+        address: PhysicalAddress,
+        observe: impl FnOnce(FileRange),
+    ) -> Result<Self, FormatError> {
+        let framing = global_heap::collect_members(
+            engine.image(),
+            engine.widths().lengths,
+            address,
+            observe,
+        )?;
         Ok(Self { framing })
     }
 
@@ -275,6 +288,3 @@ impl HeapReferenceSink for BTreeSet<u64> {
         self.insert(id.collection.get());
     }
 }
-
-#[cfg(test)]
-mod tests;

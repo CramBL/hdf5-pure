@@ -4,11 +4,16 @@ use std::sync::Arc;
 
 use super::{CountStorage, NetCountPlan};
 use crate::edit::WriteEngine;
+use crate::edit::analysis::CountInventory;
+use crate::edit::analysis::CountPreflight;
+use crate::edit::analysis::CountPreflightError;
+use crate::edit::analysis::ProtectedCounts;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::deletions::counts::ownership::CountHandoffError;
-use crate::edit::analysis::deletions::counts::ownership::inventory::CountInventory;
 use crate::edit::analysis::physical::claims::PhysicalClaims;
 use crate::edit::analysis::physical::claims::domain::SupportedOwnerDomain;
+use crate::edit::commit::CountProjectionError;
+use crate::edit::commit::CountProjectionProof;
 use crate::object_graph::ObjectId;
 
 impl NetCountPlan<'_, '_> {
@@ -61,6 +66,31 @@ impl OriginalOwnerFacts {
             eligible_owners,
         } = self;
         (counts, storage, eligible_owners)
+    }
+
+    /// Checks count protection and reconstruction decisions while retaining the joint owner facts.
+    ///
+    /// Moves the same storage and eligible-owner buffers through the count preflight. Source
+    /// freshness, owner qualification, retirement, and publication require separate evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`CountInventory::preflight`].
+    pub(in crate::edit) fn preflight<'origin>(
+        self,
+        engine: &WriteEngine,
+        reconstructed: impl IntoIterator<Item = &'origin ReconstructionSource>,
+    ) -> Result<OriginalOwnerPreflight, CountPreflightError> {
+        let Self {
+            counts,
+            storage,
+            eligible_owners,
+        } = self;
+        Ok(OriginalOwnerPreflight {
+            counts: counts.preflight(engine, reconstructed)?,
+            storage,
+            eligible_owners,
+        })
     }
 
     /// Associates the joint facts with a matching source and supported object-header domain.
@@ -127,6 +157,51 @@ impl OriginalOwnerFacts {
     /// the supplied addition and removal inventories.
     pub(in crate::edit) fn eligible_owners(&self) -> &[ObjectId] {
         &self.eligible_owners
+    }
+}
+
+/// Joint owner facts with checked count protection and local reconstruction decisions.
+///
+/// Retains supported storage and eligible owners while the caller projects local count changes.
+/// Recovering the facts and protected source updates requires a matching local completion proof.
+/// Source freshness, owner qualification, retirement, and publication remain separate conditions.
+pub(in crate::edit) struct OriginalOwnerPreflight {
+    counts: CountPreflight,
+    storage: CountStorage,
+    eligible_owners: Vec<ObjectId>,
+}
+
+impl OriginalOwnerPreflight {
+    /// Borrows the checked count preflight used for local projection.
+    pub(in crate::edit) fn counts(&self) -> &CountPreflight {
+        &self.counts
+    }
+
+    /// Recovers the original facts and protected source updates after matching local completion.
+    ///
+    /// Preserves the original count, storage, and eligible-owner buffers without reanalysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CountProjectionError::Preflight`] for a proof from a different changed preflight.
+    pub(in crate::edit) fn into_parts(
+        self,
+        proof: CountProjectionProof,
+    ) -> Result<(OriginalOwnerFacts, ProtectedCounts), CountProjectionError> {
+        let Self {
+            counts,
+            storage,
+            eligible_owners,
+        } = self;
+        let (counts, protected) = counts.into_parts(proof)?;
+        Ok((
+            OriginalOwnerFacts {
+                counts,
+                storage,
+                eligible_owners,
+            },
+            protected,
+        ))
     }
 }
 

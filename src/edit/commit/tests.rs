@@ -1,18 +1,23 @@
 use std::path::Path;
 
 use rstest::rstest;
+use test_util::__private::durability::FaultSchedule;
 use test_util::datatype;
 use test_util::disk_log::{self, DiskOp, FailurePoint};
-use test_util::global_heap::Object;
+use test_util::global_heap::{self, Object};
 use test_util::object_header::v2::Header;
 use test_util::object_header::{Message, MessageFlags, MessageType};
+use test_util::widths::Widths;
+use test_util_hdf5::global_heap_fixture::members::ParentImage;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
-use crate::edit::test_util as edit_test_util;
-use crate::edit::{SyncPolicy, WriteEngine};
-use crate::image::WriteBuffering;
-use crate::object_path::ObjectPathBuf;
-use crate::{DatasetBuilder, Error, File};
+use crate::edit::test_util::durability;
+use crate::{AttrValue, File, FileAccessProperties, FileLocking, SyncPolicy};
+
+mod count_edges;
+mod public_failures;
+mod public_outcomes;
+mod published_counts;
 
 #[rstest]
 #[case::increase(2, false, false, 3)]
@@ -28,215 +33,256 @@ fn committed_type_updates_follow_reference_publication_order(
     let path = test_util::temp::temp_path("ordered-source-counts.h5");
     let original = if extra_alias { 3 } else { 2 };
     let target = fixture(&path, extra_alias);
-    let mut engine = edit_test_util::open_engine(&path);
-    engine
-        .set_write_buffering(WriteBuffering::Unbuffered)
-        .unwrap();
-    stage(&mut engine, copies, remove_source);
-    if extra_alias {
-        engine.delete(&ObjectPathBuf::parse("alias")).unwrap();
-    }
+    let original_bytes = std::fs::read(&path).unwrap();
+    let parent = global_heap::collection_ranges(&original_bytes, Widths::EIGHT)[0].start;
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Disabled)
+            .with_page_buffer_size(0),
+    )
+    .unwrap();
+    stage(&file, copies, remove_source, extra_alias);
     disk_log::start();
-    engine.commit().unwrap();
+    file.commit().unwrap();
     let writes = disk_log::take();
     let publication = writes
         .iter()
         .position(|write| matches!(write, DiskOp::Write { offset: 0, .. }))
         .unwrap();
-    let update = writes.iter().position(|write| {
-        matches!(write, DiskOp::Write { offset, bytes }
-            if *offset == target + 12 && bytes == &count.to_le_bytes())
+    let update = writes.iter().position(|write| match write {
+        DiskOp::Write { offset, bytes } => {
+            target
+                .checked_add(12)
+                .and_then(|field| field.checked_sub(*offset))
+                .and_then(|relative| usize::try_from(relative).ok())
+                .and_then(|relative| bytes.get(relative..relative + 4))
+                == Some(count.to_le_bytes().as_slice())
+        }
+        DiskOp::SetLen(_) => false,
     });
     assert_eq!(update.is_some(), count != original);
     if let Some(update) = update {
         assert_eq!(update < publication, count > original);
     }
+    let bytes = std::fs::read(&path).unwrap();
     let expected = type_header(count);
+    ParentImage::read(&original_bytes, parent).assert_unchanged(&bytes);
     assert_eq!(
-        engine
-            .image()
-            .read_exact_at(target, expected.len())
-            .unwrap(),
+        &bytes[target as usize..target as usize + expected.len()],
         expected
     );
-    drop(engine);
+    file.close().unwrap();
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("copy0").unwrap().read_f64().unwrap(), [17.0]);
+    assert_eq!(
+        file.dataset("keep").unwrap().read_string().unwrap(),
+        ["retained"]
+    );
+    assert_eq!(
+        file.dataset("heap").unwrap().attrs().unwrap()["a"],
+        AttrValue::I64(9)
+    );
     if !remove_source {
         assert_eq!(file.dataset("value").unwrap().read_f64().unwrap(), [31.0]);
     }
+    file.close().unwrap();
 }
 
 #[rstest]
-#[case::content_barrier(false)]
-#[case::attempted_root(true)]
-fn count_bearing_failures_preserve_the_commit_journal_boundary(#[case] publication: bool) {
-    let path = test_util::temp::temp_path("count-journal-boundary.h5");
-    let target = fixture(&path, false);
-    let before = std::fs::read(&path).unwrap();
-    let control = test_util::temp::temp_path("count-journal-control.h5");
-    std::fs::write(&control, &before).unwrap();
-    let mut reference = edit_test_util::open_engine(&control);
-    reference
-        .set_write_buffering(WriteBuffering::Unbuffered)
-        .unwrap();
-    stage(&mut reference, 2, false);
+#[case::rollback(CountFailure::BeforePublication)]
+#[case::uncertain(CountFailure::Publication)]
+fn count_bearing_heap_failures_preserve_the_commit_journal_boundary(
+    #[case] fault: CountFailure,
+    #[values(false, true)] decrease: bool,
+) {
+    let path = test_util::temp::temp_path("count-heap-boundary.h5");
+    let target = fixture(&path, decrease);
+    let original = std::fs::read(&path).unwrap();
+    let parent = global_heap::collection_ranges(&original, Widths::EIGHT)[0].start;
+    let control = test_util::temp::temp_path("count-heap-control.h5");
+    std::fs::write(&control, &original).unwrap();
+    let properties = FileAccessProperties::new()
+        .with_locking(FileLocking::Disabled)
+        .with_page_buffer_size(0)
+        .with_sync_policy(SyncPolicy::Always);
+    let reference = File::open_rw_with_options(&control, properties).unwrap();
+    stage(&reference, if decrease { 1 } else { 2 }, false, decrease);
     disk_log::start();
     reference.commit().unwrap();
-    let writes = disk_log::take();
-    let root = writes
+    let recording = disk_log::finish();
+    let publication = recording
+        .events
         .iter()
-        .filter_map(|operation| match operation {
-            DiskOp::Write { offset, .. } => Some(*offset),
-            DiskOp::SetLen(_) => None,
-        })
-        .position(|offset| offset == 0)
+        .position(|event| matches!(event, disk_log::IoEvent::Write { offset: 0, .. }))
         .unwrap();
-    drop(reference);
-    let mut engine = edit_test_util::open_engine(&path);
-    engine
-        .set_write_buffering(WriteBuffering::Unbuffered)
-        .unwrap();
-    engine.set_sync_policy(SyncPolicy::Always);
-    let free = engine
-        .space
-        .admitted_snapshot()
-        .sections()
-        .collect::<Vec<_>>();
-    stage(&mut engine, 2, false);
-    if publication {
-        disk_log::fail_write_after(root, 0);
-    } else {
-        disk_log::fail_sync_after(0, FailurePoint::Before);
-    }
-    let error = engine.commit().unwrap_err();
-    disk_log::clear_failures();
-    let Error::Io(error) = error else {
-        panic!("expected injected I/O failure, got {error:?}");
+    let schedule = match fault {
+        CountFailure::BeforePublication => {
+            let barrier = recording.events[..publication]
+                .iter()
+                .rposition(|event| matches!(event, disk_log::IoEvent::Synchronize { .. }))
+                .unwrap();
+            FaultSchedule::synchronize(&recording, barrier, FailurePoint::Before)
+        }
+        CountFailure::Publication => FaultSchedule::write(&recording, publication, 0),
     };
-    assert_eq!(error.kind(), std::io::ErrorKind::Other);
-    assert_eq!(
-        error.to_string(),
-        if publication {
-            "injected disk write failure"
-        } else {
+    reference.close().unwrap();
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    stage(&file, if decrease { 1 } else { 2 }, false, decrease);
+    disk_log::start();
+    schedule.inject();
+    let error = file.commit().unwrap_err();
+    disk_log::clear_failures();
+    let failed = disk_log::finish();
+    schedule.assert_failed(&failed);
+    durability::assert_io(
+        error,
+        if matches!(fault, CountFailure::BeforePublication) {
             "injected disk synchronization failure"
+        } else {
+            "injected disk write failure"
+        },
+    );
+    assert!(!file.has_staged_edits());
+    let after = std::fs::read(&path).unwrap();
+    let expected_count = match fault {
+        CountFailure::BeforePublication => {
+            if decrease {
+                3
+            } else {
+                2
+            }
+        }
+        CountFailure::Publication => 3,
+    };
+    let expected = type_header(expected_count);
+    assert_eq!(
+        &after[target as usize..target as usize + expected.len()],
+        expected
+    );
+    ParentImage::read(&original, parent).assert_unchanged(&after);
+    if matches!(fault, CountFailure::BeforePublication) {
+        assert_eq!(&after[..original.len()], original);
+        stage(&file, if decrease { 1 } else { 2 }, false, decrease);
+        file.commit().unwrap();
+        file.close().unwrap();
+    } else if matches!(fault, CountFailure::Publication) {
+        durability::assert_uncertain(file.commit().unwrap_err());
+        drop(file);
+        File::clear_status_flags(&path).unwrap();
+    }
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("keep").unwrap().read_string().unwrap(),
+        ["retained"]
+    );
+    assert_eq!(file.dataset("value").unwrap().read_f64().unwrap(), [31.0]);
+    let mut names = file.root().datasets().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        if matches!(fault, CountFailure::Publication) {
+            vec!["dead", "heap", "keep", "source", "value"]
+        } else if decrease {
+            vec!["copy0", "heap", "keep", "source", "value"]
+        } else {
+            vec!["copy0", "copy1", "heap", "keep", "source", "value"]
         }
     );
     assert_eq!(
-        engine
-            .space
-            .admitted_snapshot()
-            .sections()
-            .collect::<Vec<_>>(),
-        free
+        file.dataset("heap").unwrap().attrs().unwrap()["a"],
+        if matches!(fault, CountFailure::Publication) {
+            AttrValue::VarLenAsciiStringArray(vec!["removed".into()])
+        } else {
+            AttrValue::I64(9)
+        }
     );
-    assert!(engine.staged.is_empty());
-    assert_eq!(engine.publication.attempted(), publication);
-    let expected = type_header(if publication { 3 } else { 2 });
-    assert_eq!(
-        engine
-            .image()
-            .read_exact_at(target, expected.len())
-            .unwrap(),
-        expected
-    );
-    if publication {
-        let error = engine.commit().unwrap_err();
-        assert!(
-            matches!(error, Error::AllocationPublicationUncertain),
-            "{error:?}"
-        );
-    } else {
-        assert_eq!(&engine.disk_bytes().unwrap()[..before.len()], before);
-        stage(&mut engine, 2, false);
-        engine.commit().unwrap();
-    }
-    drop(engine);
-    let file = File::open(&path).unwrap();
-    assert_eq!(file.dataset("value").unwrap().read_f64().unwrap(), [31.0]);
+    file.close().unwrap();
 }
 
-#[test]
-fn detached_retained_owners_preserve_shared_heap_collections() {
-    let path = test_util::temp::temp_path("retained-count-owner.h5");
-    let mut fixture = Fixture::new();
-    let parent = fixture.collection(&[Object::new(7, b"value")]);
-    let mut kept = Form::CompactDataset.messages(
-        &mut fixture,
-        &global_heap_fixture::vlen_string(),
-        &global_heap_fixture::reference(5, parent, 7),
-    );
-    kept.push(Message::reference_count(2));
-    fixture.object("retained", kept.clone());
-    kept.pop();
-    fixture.object("deleted", kept);
-    fixture.write(&path);
-    let before = std::fs::read(&path).unwrap();
-    let mut engine = edit_test_util::open_engine(&path);
-    engine.delete(&ObjectPathBuf::parse("retained")).unwrap();
-    engine.delete(&ObjectPathBuf::parse("deleted")).unwrap();
-    engine.commit().unwrap();
-    let start = usize::try_from(parent).unwrap();
-    assert_eq!(
-        engine.image().read_exact_at(parent, 4_096).unwrap(),
-        before[start..start + 4_096]
-    );
-    assert!(
-        engine
-            .space
-            .admitted_snapshot()
-            .sections()
-            .all(|(extent, _)| {
-                let start = engine.addresses().resolve(extent.start()).unwrap().get();
-                start + extent.len().get() <= parent || start >= parent + 4_096
-            })
-    );
+#[derive(Clone, Copy, Debug)]
+enum CountFailure {
+    BeforePublication,
+    Publication,
 }
 
-fn stage(engine: &mut WriteEngine, copies: usize, remove_source: bool) {
+fn stage(file: &File, copies: usize, remove_source: bool, extra_alias: bool) {
     for index in 0..copies {
-        engine
-            .copy(
-                &ObjectPathBuf::parse("source"),
-                &ObjectPathBuf::parse(&format!("copy{index}")),
-            )
-            .unwrap();
+        file.copy("source", &format!("copy{index}")).unwrap();
     }
-    engine.delete(&ObjectPathBuf::parse("type")).unwrap();
-    engine.delete(&ObjectPathBuf::parse("dead")).unwrap();
+    file.root().delete("type").unwrap();
+    file.root().delete("dead").unwrap();
+    if extra_alias {
+        file.root().delete("alias").unwrap();
+    }
+    file.dataset("heap")
+        .unwrap()
+        .set_attr("a", AttrValue::I64(9))
+        .unwrap();
     if remove_source {
-        engine.delete(&ObjectPathBuf::parse("source")).unwrap();
+        file.root().delete("source").unwrap();
     } else {
-        let mut replacement = DatasetBuilder::new("");
-        replacement.with_f64_data(&[31.0]);
-        engine
-            .stage_dataset_write(&ObjectPathBuf::parse("value"), replacement)
+        file.dataset("value")
+            .unwrap()
+            .write_staged(|builder| {
+                builder.with_f64_data(&[31.0]);
+            })
             .unwrap();
     }
 }
 
 fn fixture(path: &Path, extra_alias: bool) -> u64 {
+    fixture_counts(
+        path,
+        extra_alias,
+        published_counts::Version::Two,
+        1,
+        if extra_alias { 3 } else { 2 },
+    )[0]
+}
+
+fn fixture_counts(
+    path: &Path,
+    extra_alias: bool,
+    version: published_counts::Version,
+    targets: usize,
+    original: u32,
+) -> Vec<u64> {
     let mut fixture = Fixture::new();
-    let target = fixture.append_header(vec![
-        Message::reference_count(if extra_alias { 3 } else { 2 }),
-        Message::new(MessageType::DATATYPE, &datatype::f64_le()),
-    ]);
-    fixture.link("type", target);
-    if extra_alias {
-        fixture.link("alias", target);
+    let parent = fixture.collection(&[Object::new(7, b"removed"), Object::new(91, b"retained")]);
+    let mut addresses = Vec::new();
+    for index in 0..targets {
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            index.to_string()
+        };
+        let header = version.header(original);
+        let target = if index == 0 {
+            fixture.image.append(&header)
+        } else {
+            fixture.image.append_aligned(&header, 4096)
+        } as u64;
+        addresses.push(target);
+        fixture.link(&format!("type{suffix}"), target);
+        if extra_alias {
+            fixture.link(&format!("alias{suffix}"), target);
+        }
+        let mut records = Form::CompactDataset.messages(
+            &mut fixture,
+            &crate::make_f64_type(),
+            &17_f64.to_le_bytes(),
+        );
+        *records
+            .iter_mut()
+            .find(|message| message.msg_type == MessageType::DATATYPE)
+            .unwrap() = Message::new(
+            MessageType::DATATYPE,
+            &datatype::committed_reference(target),
+        )
+        .with_flags(MessageFlags::SHARED);
+        fixture.object(&format!("source{suffix}"), records);
     }
-    let mut records =
-        Form::CompactDataset.messages(&mut fixture, &crate::make_f64_type(), &17_f64.to_le_bytes());
-    *records
-        .iter_mut()
-        .find(|message| message.msg_type == MessageType::DATATYPE)
-        .unwrap() = Message::new(
-        MessageType::DATATYPE,
-        &datatype::committed_reference(target),
-    )
-    .with_flags(MessageFlags::SHARED);
-    fixture.object("source", records);
     let records = Form::ContiguousDataset.messages(
         &mut fixture,
         &crate::make_f64_type(),
@@ -249,8 +295,23 @@ fn fixture(path: &Path, extra_alias: bool) -> u64 {
         &vec![7_i32.to_le_bytes(); 1_024].concat(),
     );
     fixture.object("dead", records);
+
+    let mut records =
+        Form::CompactDataset.messages(&mut fixture, &crate::make_i32_type(), &17_i32.to_le_bytes());
+    records.extend(Form::CompactAttribute.messages(
+        &mut fixture,
+        &global_heap_fixture::vlen_string(),
+        &global_heap_fixture::reference(7, parent, 7),
+    ));
+    fixture.object("heap", records);
+    let records = Form::CompactDataset.messages(
+        &mut fixture,
+        &global_heap_fixture::vlen_string(),
+        &global_heap_fixture::reference(8, parent, 91),
+    );
+    fixture.object("keep", records);
     fixture.write(path);
-    target
+    addresses
 }
 
 fn type_header(count: u32) -> Vec<u8> {

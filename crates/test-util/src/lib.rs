@@ -4,6 +4,7 @@
 #![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 use std::path::{Path, PathBuf};
 
+pub mod __private;
 pub mod allocation;
 pub mod allocation_oracle;
 pub mod attribute;

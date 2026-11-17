@@ -1,4 +1,3 @@
-use core::num::NonZeroUsize;
 use std::io::ErrorKind;
 
 use hdf5_pure_core::__private::ByteLength;
@@ -10,8 +9,6 @@ use test_util::disk_log;
 use test_util::disk_log::IoEvent;
 use test_util::disk_log::IoOutcome;
 
-use super::super::FlatDataset;
-use super::Creation;
 use crate::File;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
@@ -25,17 +22,17 @@ use crate::address::StoredAddressExt;
 use crate::chunked_write;
 use crate::chunked_write::ChunkedDataResult;
 use crate::chunked_write::ChunkedHeader;
-use crate::chunked_write::CompressedChunkSet;
-use crate::dataset_request::PreparedFill;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::edit::WriteEngine;
+use crate::edit::dataset::test_util as dataset_test_util;
+use crate::edit::dataset::test_util::Creation;
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
-use crate::file_writer;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::fill_value::FillPattern;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::filters::ChunkContext;
 use crate::image::WriteBuffering;
-use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
@@ -72,7 +69,7 @@ fn creation_preserves_consecutive_bytes_and_complete_placement(
     builder.create_dataset("kept").with_i32_data(&[31; 32]);
     builder.write(&path).unwrap();
     std::fs::copy(&path, &reference).unwrap();
-    let set = prepared(creation, filtered);
+    let set = dataset_test_util::prepared(creation, filtered);
     let mut direct = edit_test_util::open_engine(&path);
     let mut assembled = edit_test_util::open_engine(&reference);
     direct
@@ -419,41 +416,4 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
         writes.len(),
         raw.len()
     );
-}
-
-pub(super) fn prepared(creation: Creation, filtered: bool) -> CompressedChunkSet {
-    let mut builder = DatasetBuilder::new("d");
-    creation.configure(&mut builder, filtered);
-    let FlatDataset {
-        name: _,
-        dt,
-        ds,
-        storage,
-        extent: _,
-        attrs: _,
-        chunk_options,
-        maxshape,
-        vl_attrs: _,
-        dense_attrs: _,
-        fill,
-        fill_time,
-        #[cfg(feature = "provenance")]
-            provenance: _,
-    } = super::super::flatten_dataset(file_writer::WIDTHS, builder, LinkNameBuf::new("d").unwrap())
-        .unwrap();
-    let dimensions = chunk_options.resolve_chunk_dims(&ds.dimensions);
-    let context = ChunkContext::from_datatype(&dimensions, &dt).unwrap();
-    let element = NonZeroUsize::new(usize::try_from(context.element_size.get()).unwrap()).unwrap();
-    chunked_write::compress_chunks(
-        file_writer::WIDTHS,
-        storage.raw(),
-        &ds.dimensions,
-        context,
-        &chunk_options,
-        maxshape.as_deref(),
-        FillPattern::from_value(fill.as_ref().map(PreparedFill::as_bytes), element),
-        fill_time,
-        storage.allocation(),
-    )
-    .unwrap()
 }

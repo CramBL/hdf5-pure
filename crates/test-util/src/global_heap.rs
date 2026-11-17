@@ -15,7 +15,7 @@ use crate::widths::Widths;
 /// The collection is 4096 bytes, the minimum collection size, or the size its objects and the free
 /// space object header need where that is larger.
 pub fn collection(objects: &[Object<'_>], widths: Widths) -> Vec<u8> {
-    let used = HEADER + objects.iter().map(Object::len).sum::<usize>() + HEADER;
+    let used = HEADER_SIZE + objects.iter().map(Object::len).sum::<usize>() + HEADER_SIZE;
     collection_of_size(objects, widths, used.max(MIN_COLLECTION_SIZE))
 }
 
@@ -29,11 +29,29 @@ pub fn collection(objects: &[Object<'_>], widths: Widths) -> Vec<u8> {
 /// Panics if the objects do not fit in `size` bytes, or if `size` or the size of an object does
 /// not fit a field `widths.length` bytes wide.
 pub fn collection_of_size(objects: &[Object<'_>], widths: Widths, size: usize) -> Vec<u8> {
+    collection_of_size_with_padding(objects, widths, size, 0)
+}
+
+/// Returns a collection with `padding` between each object's payload and its next boundary.
+///
+/// Writes `objects` in slice order. The collection has `size` bytes, with a free-space
+/// object in the remaining space when its header fits. Other unused bytes are zero.
+///
+/// # Panics
+///
+/// Panics if the objects do not fit in `size` bytes, or a size does not fit a
+/// `widths.length`-byte field or `widths.length` is outside 1 through 8.
+pub fn collection_of_size_with_padding(
+    objects: &[Object<'_>],
+    widths: Widths,
+    size: usize,
+    padding: u8,
+) -> Vec<u8> {
     let mut heap = SIGNATURE.to_vec();
     heap.push(VERSION);
     heap.extend_from_slice(&[0; COLLECTION_RESERVED]);
     bytes::push_uint(&mut heap, size as u64, widths.length);
-    heap.resize(HEADER, 0);
+    heap.resize(HEADER_SIZE, 0);
     for object in objects {
         push_object_header(
             &mut heap,
@@ -43,7 +61,7 @@ pub fn collection_of_size(objects: &[Object<'_>], widths: Widths, size: usize) -
             widths,
         );
         heap.extend_from_slice(object.data);
-        heap.resize(heap.len().next_multiple_of(ALIGNMENT), 0);
+        heap.resize(heap.len().next_multiple_of(ALIGNMENT), padding);
     }
     assert!(
         heap.len() <= size,
@@ -51,11 +69,25 @@ pub fn collection_of_size(objects: &[Object<'_>], widths: Widths, size: usize) -
         heap.len()
     );
     let free_space = size - heap.len();
-    if free_space >= HEADER {
+    if free_space >= HEADER_SIZE {
         push_object_header(&mut heap, FREE_SPACE_INDEX, 0, free_space as u64, widths);
     }
     heap.resize(size, 0);
     heap
+}
+
+/// Returns a free-space object header with index zero and total size `size`.
+///
+/// The returned bytes contain the header and its padding, without the remaining free bytes.
+///
+/// # Panics
+///
+/// Panics if `size` does not fit a `widths.length`-byte field or `widths.length` is outside
+/// 1 through 8.
+pub fn free_space_header(size: u64, widths: Widths) -> Vec<u8> {
+    let mut header = Vec::new();
+    push_object_header(&mut header, FREE_SPACE_INDEX, 0, size, widths);
+    header
 }
 
 /// Appends an object header to `heap`, padded to 16 bytes, with a size field `widths.length` bytes
@@ -72,7 +104,7 @@ fn push_object_header(
     heap.extend_from_slice(&reference_count.to_le_bytes());
     heap.extend_from_slice(&[0; OBJECT_RESERVED]);
     bytes::push_uint(heap, size, widths.length);
-    heap.resize(start + HEADER, 0);
+    heap.resize(start + HEADER_SIZE, 0);
 }
 
 /// One object in a collection, addressed by the collection's address and this
@@ -97,7 +129,7 @@ impl<'d> Object<'d> {
     /// Returns the number of bytes the object spans, its header and the padding of its data
     /// included.
     fn len(&self) -> usize {
-        HEADER + self.data.len().next_multiple_of(ALIGNMENT)
+        HEADER_SIZE + self.data.len().next_multiple_of(ALIGNMENT)
     }
 }
 
@@ -142,12 +174,13 @@ pub const VERSION_OFFSET: usize = SIGNATURE.len();
 /// The offset of the collection size in a collection header.
 pub const SIZE_OFFSET: usize = VERSION_OFFSET + 1 + COLLECTION_RESERVED;
 
+/// The size in bytes of each collection header and object header in these fixtures.
 // libhdf5 pads the collection header and each object header to 16 bytes at every length
 // width, in `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` (`H5HGpkg.h`, HDF5 1.8.23 to 2.2.0).
-const HEADER: usize = 16;
+pub const HEADER_SIZE: usize = 16;
 
 /// Every object begins on an eight-byte boundary within its collection.
-const ALIGNMENT: usize = 8;
+pub const ALIGNMENT: usize = 8;
 
 /// The number of reserved bytes between the version and the collection size of a collection
 /// header.

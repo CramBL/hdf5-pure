@@ -1,6 +1,9 @@
+use core::num::NonZeroU32;
 use std::path::Path;
 
-use hdf5_pure::{Datatype, Error, File, FileAccessProperties, FixedPointType, MemoryStrategy};
+use hdf5_pure::{
+    Datatype, Error, File, FileAccessProperties, FileLocking, FixedPointType, MemoryStrategy,
+};
 use rstest::rstest;
 use test_util::datatype;
 use test_util::global_heap::Object;
@@ -256,4 +259,81 @@ fn aliases(path: &Path, count: u32, ambiguous: bool) -> (u64, u64, usize) {
     fixture.object("survivor", survivor);
     fixture.write(path);
     (raw, header, length)
+}
+
+#[rstest]
+#[case::last_self_link(2, 1, 1)]
+#[case::all_self_links(3, 2, 2)]
+#[case::surviving_self_link(3, 2, 1)]
+#[case::unknown_reference(3, 1, 1)]
+#[case::original_contradiction(1, 1, 1)]
+fn public_root_replacement_requires_complete_link_removal(
+    #[case] original: u32,
+    #[case] links: u32,
+    #[case] removed: u32,
+) {
+    let path = test_util::temp::temp_path("public-root-replacement-counts.h5");
+    let mut fixture = Fixture::new().with_root_reference_count(NonZeroU32::new(original).unwrap());
+    let parent = fixture.collection(&[Object::new(7, b"retained")]);
+    let records = Form::CompactDataset.messages(
+        &mut fixture,
+        &global_heap_fixture::vlen_string(),
+        &global_heap_fixture::reference(8, parent, 7),
+    );
+    fixture.object("value", records);
+    for index in 0..links {
+        fixture.link(&format!("self{index}"), Fixture::ROOT);
+    }
+    fixture.write(&path);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_locking(FileLocking::Disabled),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let free = file.reusable_free_sections().unwrap();
+    for index in 0..removed {
+        file.root().delete(&format!("self{index}")).unwrap();
+    }
+    if original < links + 1 {
+        let error = file.commit().unwrap_err();
+        assert!(
+            matches!(error, Error::InconsistentReferenceCount { address, observed, minimum }
+                if (address, observed, minimum) == (Fixture::ROOT, original, u64::from(links + 1))),
+            "{error:?}"
+        );
+        assert!(file.has_staged_edits());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(file.reusable_free_sections().unwrap(), free);
+    } else if original != removed + 1 {
+        let error = file.commit().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::EditUnsupported("original predecessor replacement cannot be established")
+            ),
+            "{error:?}"
+        );
+        assert!(!file.has_staged_edits());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(file.reusable_free_sections().unwrap(), free);
+    } else {
+        file.commit().unwrap();
+        assert!(!file.has_staged_edits());
+        assert!(file.root().groups().unwrap().is_empty());
+        let after = std::fs::read(&path).unwrap();
+        test_util_hdf5::global_heap_fixture::members::ParentImage::read(&before, parent)
+            .assert_unchanged(&after);
+    }
+    assert_eq!(
+        file.dataset("value").unwrap().read_string().unwrap(),
+        ["retained"]
+    );
+    drop(file);
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("value").unwrap().read_string().unwrap(),
+        ["retained"]
+    );
+    file.close().unwrap();
 }

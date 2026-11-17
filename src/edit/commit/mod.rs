@@ -7,14 +7,16 @@
 
 use hdf5_pure_space::__private::ReturnedExtents;
 
+use self::heap::{HeapMutationFailure, HeapMutationState};
 pub(in crate::edit) use self::plan::CountProjectionError;
 pub(in crate::edit) use self::plan::CountProjectionProof;
+use self::plan::inventory::PreparedEditInventory;
 pub(in crate::edit) use self::plan::inventory::storage::{
     OriginalStorage, SpaceClaim, StorageConflict,
 };
-use self::plan::{CommitPreparation, PreparedCommit};
 pub(in crate::edit) use self::publish::PublicationError;
 pub(super) use self::publish::PublishedTree;
+use self::rollback::FreeSnapshot;
 pub(super) use self::rollback::scoped::JournalScope;
 use super::WriteEngine;
 use super::staging::StagedEdits;
@@ -23,13 +25,6 @@ use crate::edit::SyncPolicy;
 use crate::error::Error;
 
 mod apply;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "heap execution is not selected by commit planning"
-    )
-)]
 pub(in crate::edit) mod heap;
 pub(super) mod plan;
 mod publish;
@@ -66,7 +61,7 @@ impl PublicationState {
     }
 }
 
-/// Distinguishes a rejected plan's staged inputs from consumed application inputs.
+/// A rejected plan, consumed application inputs, or confirmed publication with a compaction result.
 #[allow(
     clippy::large_enum_variant,
     reason = "the rejected staged set returns to the engine without a heap allocation"
@@ -74,6 +69,8 @@ impl PublicationState {
 enum CommitOutcome {
     /// Application consumed the staged inputs, or the staged set was empty.
     Applied(Result<(), Error>),
+    /// Protected tree publication completed, with an independent collection-compaction result.
+    Published(Result<(), HeapMutationFailure>),
     /// Planning failed while the staged inputs remained available for retry.
     Rejected { staged: StagedEdits, error: Error },
 }
@@ -143,6 +140,7 @@ impl WriteEngine {
     /// With no staged edits, finalizes pending manager changes from immediate tail retirement.
     /// Hard-link deletions and same-file copies use checked count planning. The editor writes
     /// source reference count increases before publication and decreases after publication.
+    /// Qualified heap-member compaction follows completed protected tree publication.
     ///
     /// Rejection during preflight preserves the staged set for retry. Once application
     /// consumes the staged set, a failed attempt discards that work. Writes into reusable
@@ -156,8 +154,10 @@ impl WriteEngine {
     /// After publication, reference patching, source reference count decreases, or optional
     /// root-header reclamation can fail.
     /// The committed tree retains the batch's values, including its in-place overwrites.
-    /// Outside recoverable nonpersistent PAGE publication, the editor discards queued writes and
-    /// marks the session uncertain if an operation fails after attempted publication.
+    /// A checked compaction failure with confirmed restoration preserves publication when
+    /// allocation permission remains available. Other failures after attempted publication mark
+    /// the session uncertain and discard queued writes, except for recoverable nonpersistent PAGE
+    /// publication.
     ///
     /// # Errors
     ///
@@ -167,6 +167,8 @@ impl WriteEngine {
     /// errors propagate from planning, writing, or synchronizing the file.
     /// Returns [`Error::CommitPartiallyApplied`] if restoring prior
     /// values from the undo journal fails, with both the original failure and the restore error.
+    /// Returns [`Error::HeapCompactionFailed`] for a post-publication collection failure, with
+    /// completed progress, restoration and allocation state, and the original cause.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
     /// is uncertain.
     /// Returns [`crate::FormatError::Internal`] if an allocation batch remains provisional.
@@ -182,6 +184,37 @@ impl WriteEngine {
         self.inplace_undo.clear();
         let staged = std::mem::take(&mut self.staged);
         let outcome = self.commit_inner(staged);
+        self.finish_commit(snapshot, outcome)
+    }
+
+    /// Finalizes an attempt according to its publication outcome and current allocation state.
+    ///
+    /// Stores rejected staging in the engine and rolls back consumed failures before publication.
+    /// Consumed staged inputs remain unavailable for retry after confirmed publication. Preserves
+    /// published values after a collection failure. Keeps aggregate and PAGE publication confirmed
+    /// for a checked [`CommitOutcome::Published`] with successful or restored compaction
+    /// and available allocation publication. Marks allocation state uncertain for other failures
+    /// after attempted publication, except for recoverable nonpersistent PAGE publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operation or allocation-publication error. Returns
+    /// [`Error::HeapCompactionFailed`] for a failed collection operation, with uncertain state if
+    /// allocation permission is unavailable. Returns [`Error::CommitPartiallyApplied`] if
+    /// pre-publication rollback fails.
+    fn finish_commit(
+        &mut self,
+        snapshot: FreeSnapshot,
+        outcome: CommitOutcome,
+    ) -> Result<(), Error> {
+        let completed = matches!(
+            &outcome,
+            CommitOutcome::Published(Ok(()))
+                | CommitOutcome::Published(Err(HeapMutationFailure {
+                    state: HeapMutationState::Restored,
+                    ..
+                }))
+        ) && self.context.allocations.available().is_ok();
         let result = match outcome {
             CommitOutcome::Rejected { staged, error } => {
                 Err(self.rollback_commit(snapshot, staged, error))
@@ -193,15 +226,36 @@ impl WriteEngine {
                 self.staged_generation += 1;
                 result
             }
+            CommitOutcome::Published(mut result) => {
+                let permission = self.context.allocations.available();
+                if permission.is_err() {
+                    if let Err(failure) = &mut result {
+                        failure.state = HeapMutationState::Uncertain;
+                    }
+                }
+                if permission.is_err()
+                    || matches!(
+                        &result,
+                        Err(HeapMutationFailure {
+                            state: HeapMutationState::Uncertain,
+                            ..
+                        })
+                    )
+                {
+                    self.make_allocation_uncertain();
+                }
+                self.staged_generation += 1;
+                result.map_err(Error::from).and(permission)
+            }
         };
         if self.publication.attempted()
             && let Some(aggregation) = &mut self.aggregation
         {
-            aggregation.publication_confirmed = result.is_ok();
+            aggregation.publication_confirmed = result.is_ok() || completed;
         }
         self.inplace_undo.clear();
         if self.fresh_page_boundary.is_some() && self.publication.attempted() {
-            if result.is_ok() {
+            if result.is_ok() || completed {
                 self.publication = PublicationState::Ready;
             } else {
                 // A failed barrier can leave the new root on disk. Pending writes and uncertain
@@ -209,7 +263,11 @@ impl WriteEngine {
                 self.recover_page_publication().ok();
             }
         }
-        if result.is_err() && self.publication.attempted() && self.fresh_page_boundary.is_none() {
+        if result.is_err()
+            && !completed
+            && self.publication.attempted()
+            && self.fresh_page_boundary.is_none()
+        {
             self.make_allocation_uncertain();
         }
         result
@@ -248,19 +306,7 @@ impl WriteEngine {
             });
         }
         self.begin_commit(&staged);
-        let prepared = if staged.deletes().is_empty() && staged.copies().is_empty() {
-            PreparedCommit::prepare(self, staged)
-        } else {
-            PreparedCommit::prepare_counted(self, staged)
-        };
-        match prepared {
-            CommitPreparation::Prepared(prepared) => {
-                CommitOutcome::Applied(self.apply_commit(prepared))
-            }
-            CommitPreparation::Rejected { staged, error } => {
-                CommitOutcome::Rejected { staged, error }
-            }
-        }
+        PreparedEditInventory::prepare(self, staged).apply(self)
     }
 
     /// Clears attempt state and cached append geometry.

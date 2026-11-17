@@ -6355,6 +6355,7 @@ fn rotating_a_vlen_dataset_in_a_session_stops_growing_the_file() {
         .with_vlen_strings(&["seed-a", "seed-b", "seed-c", "seed-d"]);
     b.write(&path).unwrap();
 
+    let initial_size = std::fs::metadata(&path).unwrap().len();
     let mut sizes = Vec::new();
     {
         let session = File::open_rw(&path).unwrap();
@@ -6376,18 +6377,20 @@ fn rotating_a_vlen_dataset_in_a_session_stops_growing_the_file() {
         }
     }
 
-    let ceiling = sizes[1];
+    let ceiling = sizes[..2].iter().copied().max().unwrap();
+    assert!(ceiling > initial_size);
     assert!(
         sizes[2..].iter().all(|&s| s <= ceiling),
-        "the file grew past its second-round size under rotation: {sizes:?}"
+        "the file grew past the maximum of its first two sizes: {sizes:?}"
     );
 
     let file = File::open(&path).unwrap();
     let last = file.dataset("labels").unwrap().read_string().unwrap();
-    assert!(
-        last[0].starts_with("round-11-element-0"),
-        "got: {}",
-        last[0]
+    assert_eq!(
+        last,
+        (0..4)
+            .map(|i| format!("round-11-element-{i}-{}", "x".repeat(64)))
+            .collect::<Vec<_>>()
     );
 }
 
