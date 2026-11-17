@@ -1,8 +1,8 @@
-//! Variable-length data reading (VL strings & VL sequences).
+//! Variable-length strings and sequences stored in the global heap.
 //!
-//! VL data elements in HDF5 store their values in the global heap.
-//! The raw data for each element contains a global heap ID:
-//! `sequence_length(4 LE) + collection_address(offset_size LE) + object_index(4 LE)`.
+//! Each stored descriptor holds a base-element count and a global heap ID. [`VlElement::parse`]
+//! reads its fields through [`VariableLengthDescriptor`], and [`VlElement::heap_id`] resolves
+//! its member identity.
 
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
@@ -11,6 +11,7 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::ElementCount;
 use hdf5_pure_core::__private::ElementSize;
+use hdf5_pure_format::__private::VariableLengthDescriptor;
 
 #[cfg(test)]
 use crate::FixedPointType;
@@ -21,8 +22,8 @@ use crate::address::BaseAddress;
 #[cfg(test)]
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
+#[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::bytes;
 use crate::convert::Narrow;
 use crate::datatype::{CharacterSet, Datatype};
 use crate::error::FormatError;
@@ -76,25 +77,28 @@ impl VlenStringReadOptions {
     }
 }
 
-/// A parsed variable-length element reference (global heap ID).
+/// A parsed base-element count and stored global heap ID.
 #[derive(Debug, Clone)]
 pub struct VlElement {
-    /// Length of the VL data.
+    /// The number of base elements, independent of their payload byte length.
     pub length: u32,
-    /// Address of the global heap collection containing the data.
+    /// The stored base-relative collection address, including zero and undefined values.
     pub collection_address: StoredAddress,
-    /// Index of the object within the collection.
+    /// The full four-byte object index before conversion to a nonzero member index.
     pub object_index: u32,
 }
 
 impl VlElement {
+    /// Returns eight bytes plus the file's address width.
     pub(crate) fn serialized_size(offset_width: OffsetWidth) -> usize {
-        SEQUENCE_LENGTH_BYTES + usize::from(offset_width.get()) + HEAP_INDEX_BYTES
+        VariableLengthDescriptor::serialized_size(offset_width)
     }
 
-    /// Parses the variable-length element at the start of `raw`: a 4-byte length, then the global
-    /// heap ID of its data, a collection address of `offset_width.get()` bytes and a 4-byte object
-    /// index.
+    /// Parses one complete stored descriptor from the start of `raw`.
+    ///
+    /// Retains the base-element count, stored collection address, and full object index through
+    /// [`VariableLengthDescriptor`]. Trailing bytes remain unexamined. The caller uses
+    /// [`Self::heap_id`] to interpret null references and resolve a member identity.
     ///
     /// The global heap ID is defined in "Global Heap" of the [format specification, version
     /// 4.0][spec].
@@ -106,26 +110,18 @@ impl VlElement {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
     pub(crate) fn parse(raw: &[u8], offset_width: OffsetWidth) -> Result<Self, FormatError> {
-        let index_at = SEQUENCE_LENGTH_BYTES + usize::from(offset_width.get());
-        bytes::ensure_len(raw, 0, Self::serialized_size(offset_width))?;
+        let (descriptor, _) = VariableLengthDescriptor::parse(offset_width, raw)?;
         Ok(Self {
-            length: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-            collection_address: StoredAddress::new(bytes::read_offset_width(
-                raw,
-                SEQUENCE_LENGTH_BYTES,
-                offset_width,
-            )?),
-            object_index: u32::from_le_bytes([
-                raw[index_at],
-                raw[index_at + 1],
-                raw[index_at + 2],
-                raw[index_at + 3],
-            ]),
+            length: descriptor.element_count(),
+            collection_address: descriptor.collection_address(),
+            object_index: descriptor.object_index(),
         })
     }
 
     /// Returns the ID of the global heap object the element refers to, or `None` for a null
     /// element, one of length 0 whose collection address is undefined or 0.
+    ///
+    /// Resolves a defined, nonzero collection address even when `length` is zero.
     ///
     /// # Errors
     ///
@@ -279,7 +275,7 @@ pub(crate) fn embedded_vlen_slots_with_offset_width(
     offset_width: OffsetWidth,
 ) -> Result<Option<Vec<EmbeddedVlSlot>>, FormatError> {
     let element_size = crate::datatype::stored_type_size(datatype, offset_width)?.to_usize()?;
-    let reference_size = SEQUENCE_LENGTH_BYTES + usize::from(offset_width.get()) + HEAP_INDEX_BYTES;
+    let reference_size = VlElement::serialized_size(offset_width);
     let capacity = element_size / reference_size;
     let mut slots = Vec::new();
     if !collect_vlen_slots(datatype, offset_width, 0, capacity, &mut slots)? {
@@ -300,12 +296,6 @@ pub(crate) fn embedded_vlen_slots_with_offset_width(
 /// Reference stride for test fixtures with eight-byte heap addresses.
 #[cfg(test)]
 const VL_REF_BYTES: usize = 16;
-
-// H5T__vlen_disk_write writes the sequence length as a u32 in H5Tvlen.c, HDF5 2.2.0.
-const SEQUENCE_LENGTH_BYTES: usize = 4;
-
-// The object index occupies four bytes: section `subsec_fmt4_infra_globalheap`, version 4.0.
-const HEAP_INDEX_BYTES: usize = 4;
 
 /// Appends reference slots while checking address arithmetic and output capacity.
 ///

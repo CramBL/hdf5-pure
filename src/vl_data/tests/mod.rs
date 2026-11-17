@@ -13,6 +13,7 @@ use crate::source::ReadSeekSource;
 use crate::source::ValidatedSource;
 use crate::width::LengthWidth;
 
+mod descriptors;
 mod embedded_slots;
 
 const FORMAT_WIDTHS: FormatWidths = FormatWidths {
