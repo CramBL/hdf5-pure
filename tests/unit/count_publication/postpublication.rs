@@ -48,7 +48,7 @@ fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
     let recording = disk_log::finish();
     let published = std::fs::read(&control_path).unwrap();
     fixture.assert_publication(&before_control, &recording.operations, &published, 2);
-    let control = Control::new(&recording, &fixture);
+    let control = Control::new(&recording, fixture.target);
     reference.close().unwrap();
 
     let file = File::open_rw_with_options(&path, properties).unwrap();
@@ -128,7 +128,7 @@ fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
 }
 
 #[derive(Clone, Copy)]
-enum Fault {
+pub(super) enum Fault {
     Barrier(FailurePoint),
     Count(Part, Prefix),
     RestoreBarrier(FailurePoint),
@@ -136,7 +136,7 @@ enum Fault {
 }
 
 impl Fault {
-    fn assert_error(self, error: &Error) {
+    pub(super) fn assert_error(self, error: &Error) {
         match (self, error) {
             (Self::RestoreBarrier(_), Error::CommitPartiallyApplied { refusal, restore }) => {
                 assert_io(refusal, "injected disk write failure");
@@ -162,7 +162,7 @@ impl Fault {
 }
 
 #[derive(Clone, Copy)]
-enum RestorePrefix {
+pub(super) enum RestorePrefix {
     Complete,
     Zero,
 }
@@ -176,26 +176,26 @@ impl RestorePrefix {
     }
 }
 
-struct Control<'a> {
+pub(super) struct Control<'a> {
     recording: &'a Recording,
-    publication: usize,
+    pub(super) publication: usize,
     count: FieldWrite,
     checksum: FieldWrite,
     barrier: usize,
 }
 
 impl<'a> Control<'a> {
-    fn new(recording: &'a Recording, fixture: &CountFile) -> Self {
+    pub(super) fn new(recording: &'a Recording, target: u64) -> Self {
         let publication = recording
             .events
             .iter()
             .position(|event| matches!(event, IoEvent::Write { offset: 0, .. }))
             .unwrap();
-        let count = FieldWrite::find(recording, publication, fixture.target + 12);
+        let count = FieldWrite::find(recording, publication, target + 12);
         let checksum = FieldWrite::find(
             recording,
             publication,
-            fixture.target + type_header(3).len() as u64 - 4,
+            target + type_header(3).len() as u64 - 4,
         );
         assert_eq!(count.event, checksum.event);
         let Some(DiskOp::Write { bytes, .. }) = recording.events[count.event]
@@ -220,7 +220,7 @@ impl<'a> Control<'a> {
         }
     }
 
-    fn inject(&self, fault: Fault) -> usize {
+    pub(super) fn inject(&self, fault: Fault) -> usize {
         match fault {
             Fault::Count(part, prefix) => {
                 let write = match part {
@@ -267,7 +267,7 @@ impl<'a> Control<'a> {
         );
     }
 
-    fn assert_failed(&self, fault: Fault, event: usize, failed: &Recording) {
+    pub(super) fn assert_failed(&self, fault: Fault, event: usize, failed: &Recording) {
         assert!(event > self.publication);
         assert_eq!(&failed.events[..event], &self.recording.events[..event]);
         assert_eq!(

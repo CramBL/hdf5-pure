@@ -12,6 +12,7 @@ use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 use crate::{File, FileAccessProperties, FileLocking, MemoryStrategy};
 
 mod batch;
+mod page;
 mod postpublication;
 mod prepublication;
 
@@ -142,35 +143,7 @@ fn write_count_users(
     let mut fixture = Fixture::new();
     let mut targets = Vec::new();
     for (index, header) in headers.iter().enumerate() {
-        let target = if index == 0 {
-            fixture.image.append(header)
-        } else {
-            fixture.image.append_aligned(header, 4_096)
-        } as u64;
-        targets.push(target);
-        let suffix = if index == 0 {
-            String::new()
-        } else {
-            index.to_string()
-        };
-        fixture.link(&format!("type{suffix}"), target);
-        if extra_alias {
-            fixture.link(&format!("alias{suffix}"), target);
-        }
-        let mut messages = Form::CompactDataset.messages(
-            &mut fixture,
-            &crate::make_f64_type(),
-            &17_f64.to_le_bytes(),
-        );
-        *messages
-            .iter_mut()
-            .find(|message| message.msg_type == MessageType::DATATYPE)
-            .unwrap() = Message::new(
-            MessageType::DATATYPE,
-            &datatype::committed_reference(target),
-        )
-        .with_flags(MessageFlags::SHARED);
-        fixture.object(&format!("source{suffix}"), messages);
+        targets.push(append_count_user(&mut fixture, header, index, extra_alias));
     }
     let messages = Form::ContiguousDataset.messages(
         &mut fixture,
@@ -187,6 +160,35 @@ fn write_count_users(
     fixture.object("dead", messages);
     fixture.write(path);
     (targets, removed..removed + 4_096)
+}
+
+fn append_count_user(fixture: &mut Fixture, header: &[u8], index: usize, extra_alias: bool) -> u64 {
+    let target = if index == 0 {
+        fixture.image.append(header)
+    } else {
+        fixture.image.append_aligned(header, 4_096)
+    } as u64;
+    let suffix = if index == 0 {
+        String::new()
+    } else {
+        index.to_string()
+    };
+    fixture.link(&format!("type{suffix}"), target);
+    if extra_alias {
+        fixture.link(&format!("alias{suffix}"), target);
+    }
+    let mut messages =
+        Form::CompactDataset.messages(fixture, &crate::make_f64_type(), &17_f64.to_le_bytes());
+    *messages
+        .iter_mut()
+        .find(|message| message.msg_type == MessageType::DATATYPE)
+        .unwrap() = Message::new(
+        MessageType::DATATYPE,
+        &datatype::committed_reference(target),
+    )
+    .with_flags(MessageFlags::SHARED);
+    fixture.object(&format!("source{suffix}"), messages);
+    target
 }
 
 fn stage(file: &File, copies: usize, extra_alias: bool, remove_source: bool) {
