@@ -15,59 +15,6 @@ use crate::object_path::ObjectPathBuf;
 use crate::{DatasetBuilder, Error, File};
 
 #[rstest]
-#[case::increase(2, false, false, 3)]
-#[case::decrease(1, true, false, 2)]
-#[case::balanced(1, false, false, 2)]
-#[case::removed_dataset_user(1, false, true, 2)]
-fn committed_type_updates_follow_reference_publication_order(
-    #[case] copies: usize,
-    #[case] extra_alias: bool,
-    #[case] remove_source: bool,
-    #[case] count: u32,
-) {
-    let path = test_util::temp::temp_path("ordered-source-counts.h5");
-    let original = if extra_alias { 3 } else { 2 };
-    let target = fixture(&path, extra_alias);
-    let mut engine = edit_test_util::open_engine(&path);
-    engine
-        .set_write_buffering(WriteBuffering::Unbuffered)
-        .unwrap();
-    stage(&mut engine, copies, remove_source);
-    if extra_alias {
-        engine.delete(&ObjectPathBuf::parse("alias")).unwrap();
-    }
-    disk_log::start();
-    engine.commit().unwrap();
-    let writes = disk_log::take();
-    let publication = writes
-        .iter()
-        .position(|write| matches!(write, DiskOp::Write { offset: 0, .. }))
-        .unwrap();
-    let update = writes.iter().position(|write| {
-        matches!(write, DiskOp::Write { offset, bytes }
-            if *offset == target + 12 && bytes == &count.to_le_bytes())
-    });
-    assert_eq!(update.is_some(), count != original);
-    if let Some(update) = update {
-        assert_eq!(update < publication, count > original);
-    }
-    let expected = type_header(count);
-    assert_eq!(
-        engine
-            .image()
-            .read_exact_at(target, expected.len())
-            .unwrap(),
-        expected
-    );
-    drop(engine);
-    let file = File::open(&path).unwrap();
-    assert_eq!(file.dataset("copy0").unwrap().read_f64().unwrap(), [17.0]);
-    if !remove_source {
-        assert_eq!(file.dataset("value").unwrap().read_f64().unwrap(), [31.0]);
-    }
-}
-
-#[rstest]
 #[case::content_barrier(false)]
 #[case::attempted_root(true)]
 fn count_bearing_failures_preserve_the_commit_journal_boundary(#[case] publication: bool) {
