@@ -486,12 +486,16 @@ fn completion_keeps_borrowed_facts_without_reading_source_bytes(
     let path = test_util::temp::temp_path("count-completion-cost.h5");
     protection_tests::fixture_with_base(&path, UserblockSize::NONE);
     let (mut engine, calls) = protection_tests::engine_with_read_call_counter(&path);
-    let mut control = bounds(&mut engine, vec![], &["a"]);
+    let control = bounds(&mut engine, vec![], &["a"]);
     calls.store(0, Ordering::Relaxed);
     let (prepared, measured) = allocation::measure("count-completion-read-control", || {
-        control.prepare_counts().unwrap()
+        control
+            .phase
+            .counts
+            .current_updates(control.phase.engine, None)
+            .unwrap()
     });
-    assert_eq!(prepared.updates().len(), 1);
+    assert_eq!(prepared.len(), 1);
     assert!(measured.blocks > 0 && measured.live_bytes > 0, "{measured}");
     assert!(calls.load(Ordering::Relaxed) > 0);
     drop(prepared);

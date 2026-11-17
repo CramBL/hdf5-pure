@@ -25,8 +25,6 @@ use test_util_hdf5::global_heap_fixture::Fixture;
 use super::super::super::tests as protection_tests;
 use super::super::CountPreparationError;
 use super::super::CountPublicationBounds;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use super::super::CurrentCountUpdates;
 use super::super::test_util as count_test_util;
 use super::super::test_util::Form;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -60,7 +58,7 @@ fn preparation_uses_current_values_and_preserves_complete_predecessor_ownership(
     let fixture =
         count_test_util::fixture(&path, form, base, NonZeroU32::new(count).unwrap(), c"old");
     let mut engine = edit_test_util::open_engine(&path);
-    let mut bounds = publication_bounds(&mut engine, &fixture.retired, &["a"]);
+    let bounds = publication_bounds(&mut engine, &fixture.retired, &["a"]);
     let root = bounds.original_root();
     let old_field = bounds.updates()[0].field();
     let current = form.chunk(count, c"new");
@@ -74,8 +72,13 @@ fn preparation_uses_current_values_and_preserves_complete_predecessor_ownership(
         .write_at(fixture.allocation.start().get(), &current)
         .unwrap();
     let before = bounds.phase.engine.disk_bytes().unwrap();
-    let prepared = bounds.prepare_counts().unwrap();
-    let (original, update) = prepared.updates().next().unwrap();
+    let prepared = bounds
+        .phase
+        .counts
+        .current_updates(bounds.phase.engine, None)
+        .unwrap();
+    let original = &bounds.updates()[0];
+    let update = &prepared[0];
     assert_eq!(original.object(), fixture.object);
     assert_eq!(original.field(), old_field);
     assert_eq!(original.count().get(), count - 1);
@@ -92,8 +95,7 @@ fn preparation_uses_current_values_and_preserves_complete_predecessor_ownership(
         update.writes().count(),
         if matches!(form, Form::Version1) { 1 } else { 2 }
     );
-    assert_eq!(prepared.counts.root(), root);
-    assert_eq!(prepared.engine.disk_bytes().unwrap(), before);
+    assert_eq!(bounds.phase.engine.disk_bytes().unwrap(), before);
     drop(prepared);
     assert_eq!(bounds.original_root(), root);
     assert_eq!(bounds.phase.retirement.batch.entries(), fixture.retired);
@@ -116,7 +118,7 @@ fn preparation_rejects_changed_framing_and_counts(#[case] change: Change) {
         c"oldx",
     );
     let mut engine = edit_test_util::open_engine(&path);
-    let mut bounds = publication_bounds(&mut engine, &fixture.retired, &["a"]);
+    let bounds = publication_bounds(&mut engine, &fixture.retired, &["a"]);
     let expected = bounds.updates()[0].field();
     let count = Message::reference_count(2);
     let comment = Message::new(MessageType::OBJECT_COMMENT, c"oldx".to_bytes_with_nul());
@@ -141,7 +143,11 @@ fn preparation_rejects_changed_framing_and_counts(#[case] change: Change) {
         .write_at(fixture.allocation.start().get(), &current)
         .unwrap();
     let before = bounds.phase.engine.disk_bytes().unwrap();
-    let Err(error) = bounds.prepare_counts() else {
+    let Err(error) = bounds
+        .phase
+        .counts
+        .current_updates(bounds.phase.engine, None)
+    else {
         panic!("expected changed count evidence")
     };
     match (change, error) {
@@ -319,7 +325,7 @@ fn preparation_preserves_read_checksum_policy_and_emits_valid_checksums(#[case] 
     let path = test_util::temp::temp_path("current-count-checksum.h5");
     let fixture = count_test_util::fixture(&path, form, 0, NonZeroU32::new(2).unwrap(), c"old");
     let mut engine = edit_test_util::open_engine(&path);
-    let mut bounds = publication_bounds(&mut engine, &fixture.retired, &["a"]);
+    let bounds = publication_bounds(&mut engine, &fixture.retired, &["a"]);
     let mut current = form.chunk(2, c"new");
     let footer = current.len() - test_util::checksum::CHECKSUM;
     let computed = test_util::checksum::lookup3(&current[..footer]);
@@ -331,14 +337,22 @@ fn preparation_preserves_read_checksum_policy_and_emits_valid_checksums(#[case] 
         .write_at(fixture.allocation.start().get(), &current)
         .unwrap();
     if cfg!(feature = "checksum") {
-        let Err(CountPreparationError::Parse { object, error }) = bounds.prepare_counts() else {
+        let Err(CountPreparationError::Parse { object, error }) = bounds
+            .phase
+            .counts
+            .current_updates(bounds.phase.engine, None)
+        else {
             panic!("expected read checksum error")
         };
         assert_eq!(object, fixture.object);
         assert_eq!(error, FormatError::ChecksumMismatch { expected, computed });
     } else {
-        let prepared = bounds.prepare_counts().unwrap();
-        for (range, bytes) in prepared.updates().next().unwrap().1.writes() {
+        let prepared = bounds
+            .phase
+            .counts
+            .current_updates(bounds.phase.engine, None)
+            .unwrap();
+        for (range, bytes) in prepared[0].writes() {
             current[convert::slice_range(
                 range.start().get() - fixture.allocation.start().get(),
                 range.length(),
@@ -375,15 +389,21 @@ fn preparation_skips_empty_work_and_retains_only_compact_updates(
     fixture.write(&path);
     let names = names.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut engine, calls) = protection_tests::engine_with_read_call_counter(&path);
-    let mut bounds = publication_bounds(&mut engine, &retired, &names);
+    let bounds = publication_bounds(&mut engine, &retired, &names);
     assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
     calls.store(0, std::sync::atomic::Ordering::Relaxed);
     DISCOVERY_WORK.with(|work| work.set((0, 0)));
     let (prepared, measured) = allocation::measure(
         &format!("prepare-current-count-control-{objects}-{body}"),
-        || bounds.prepare_counts().unwrap(),
+        || {
+            bounds
+                .phase
+                .counts
+                .current_updates(bounds.phase.engine, None)
+                .unwrap()
+        },
     );
-    assert_eq!(prepared.updates().len(), objects);
+    assert_eq!(prepared.len(), objects);
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::Relaxed),
         u64::try_from(objects).unwrap()
@@ -405,13 +425,19 @@ fn preparation_skips_empty_work_and_retains_only_compact_updates(
     DISCOVERY_WORK.with(|work| assert_eq!(work.get(), (0, 0)));
     drop(prepared);
     drop(bounds);
-    let mut empty = publication_bounds(&mut engine, &retired, &["a0", "b0"]);
+    let empty = publication_bounds(&mut engine, &retired, &["a0", "b0"]);
     calls.store(0, std::sync::atomic::Ordering::Relaxed);
     let (prepared, measured) = allocation::measure(
         &format!("prepare-current-count-empty-{objects}-{body}"),
-        || empty.prepare_counts().unwrap(),
+        || {
+            empty
+                .phase
+                .counts
+                .current_updates(empty.phase.engine, None)
+                .unwrap()
+        },
     );
-    assert_eq!(prepared.updates().len(), 0);
+    assert_eq!(prepared.len(), 0);
     assert_eq!(measured.blocks, 0, "{measured}");
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     drop(prepared);
@@ -443,7 +469,7 @@ fn preparation_rejects_new_overlapping_chunk_allocations() {
         .build();
     assert_eq!(current.len(), original.len());
     let mut engine = edit_test_util::open_engine(&path);
-    let mut bounds = publication_bounds(&mut engine, &[], &["a"]);
+    let bounds = publication_bounds(&mut engine, &[], &["a"]);
     let expected = bounds.updates()[0].allocation().range();
     let field = bounds.updates()[0].field();
     bounds
@@ -455,7 +481,10 @@ fn preparation_rejects_new_overlapping_chunk_allocations() {
         object,
         expected: actual_expected,
         actual,
-    }) = bounds.prepare_counts()
+    }) = bounds
+        .phase
+        .counts
+        .current_updates(bounds.phase.engine, None)
     else {
         panic!("expected overlapping chunk allocations")
     };
@@ -523,7 +552,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 #[case::replacement_root(Association::ReplacementRoot)]
 #[case::other_session(Association::OtherSession)]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association: Association) {
+fn preparation_preserves_source_facts_and_rejects_other_sessions(#[case] association: Association) {
     let path = test_util::temp::temp_path("count-preparation-loan.h5");
     let other_path = test_util::temp::temp_path("count-preparation-other-loan.h5");
     let fixture = count_test_util::fixture(
@@ -567,8 +596,8 @@ fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association
     calls.store(0, std::sync::atomic::Ordering::Relaxed);
     DISCOVERY_WORK.with(|work| work.set((0, 0)));
     let (result, measured) =
-        allocation::measure(&format!("prepare-count-loan-{association:?}"), || {
-            CurrentCountUpdates::new(receiver, &counts)
+        allocation::measure(&format!("prepare-count-session-{association:?}"), || {
+            counts.current_updates(receiver, None)
         });
     if matches!(association, Association::OtherSession) {
         let Err(error) = result else {
@@ -579,9 +608,8 @@ fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     } else {
         let prepared = result.unwrap();
-        assert!(std::ptr::eq(prepared.counts, &counts));
-        assert_eq!(prepared.counts.root(), Some(original_root));
-        let (original, update) = prepared.updates().next().unwrap();
+        let original = &counts.updates()[0];
+        let update = &prepared[0];
         assert_eq!(original.object(), fixture.object);
         assert_eq!(original.allocation().range(), fixture.allocation);
         assert_eq!(original.field().value(), 2);
@@ -598,7 +626,7 @@ fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association
         assert_eq!(patched, Form::Version2.chunk(1, c"old"));
         let reads = calls.load(std::sync::atomic::Ordering::Relaxed);
         assert!(reads > 0);
-        assert_eq!(prepared.updates().len(), 1);
+        assert_eq!(prepared.len(), 1);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), reads);
         assert!(measured.blocks > 0 && measured.live_bytes > 0, "{measured}");
         assert!(
@@ -606,7 +634,6 @@ fn preparation_preserves_source_facts_across_the_engine_loan(#[case] association
                 <= u64::try_from(core::mem::size_of::<ObjectReferenceCountUpdate>()).unwrap(),
             "{measured}"
         );
-        assert_eq!(prepared.engine.disk_bytes().unwrap(), before);
     }
     assert_eq!(receiver.disk_bytes().unwrap(), before);
     assert_eq!(counts.root(), Some(original_root));
