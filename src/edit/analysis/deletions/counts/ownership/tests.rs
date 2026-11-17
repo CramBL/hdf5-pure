@@ -153,10 +153,10 @@ fn protection_rejects_inapplicable_or_incomplete_facts_without_writes(#[case] fa
     let object = ObjectId::new(PhysicalAddress::new(a));
     match (failure, error) {
         (Failure::Phase, CountProtectionError::Phase { object: actual })
-        | (Failure::Repeated, CountProtectionError::Repeated { object: actual })
-        | (Failure::Allocation, CountProtectionError::Allocation { object: actual }) => {
+        | (Failure::Repeated, CountProtectionError::Repeated { object: actual }) => {
             assert_eq!(actual, object)
         }
+        (Failure::Allocation, CountProtectionError::Allocation) => {}
         (Failure::Root, CountProtectionError::Root { expected, actual }) => {
             assert_eq!(expected, ObjectId::new(PhysicalAddress::new(Fixture::ROOT)));
             assert_eq!(actual, object);
@@ -233,14 +233,12 @@ fn protection_excludes_every_reusable_class_from_complete_allocations(
     let result = batch.protect(&engine, []);
     if conflict || generic {
         let Err(CountProtectionError::Reusable {
-            object,
             allocation: actual,
             reusable: free,
         }) = result
         else {
             panic!("expected complete-allocation reuse conflict")
         };
-        assert_eq!(object, ObjectId::new(PhysicalAddress::new(a)));
         assert_eq!(actual, allocation);
         assert_eq!(free, reusable);
     } else {
@@ -309,24 +307,17 @@ fn protection_excludes_retained_claims_without_inferring_page_ownership(
     let result = batch.protect(&engine, []);
     if conflict {
         let Err(CountProtectionError::Retained {
-            object,
             allocation: actual,
             retained,
-            kind: actual_kind,
         }) = result
         else {
             panic!("expected a retained-allocation conflict")
         };
-        assert_eq!(
-            object,
-            ObjectId::new(PhysicalAddress::new(a + userblock.get()))
-        );
         assert_eq!(actual, allocation);
         assert_eq!(
             retained,
             FileRange::new(PhysicalAddress::new(start + userblock.get()), 1).unwrap()
         );
-        assert_eq!(actual_kind, kind);
     } else {
         let protected = result.unwrap();
         assert_eq!(protected.updates().len(), 1);
@@ -370,14 +361,12 @@ fn protection_excludes_aggregate_spare_without_combining_free_lists(
     let result = batch.protect(&engine, []);
     if conflict {
         let Err(CountProtectionError::Aggregate {
-            object,
             allocation: actual,
             spare: unused,
         }) = result
         else {
             panic!("expected an aggregate-spare conflict")
         };
-        assert_eq!(object, ObjectId::new(PhysicalAddress::new(a)));
         assert_eq!(actual, allocation);
         assert_eq!(
             unused,
@@ -409,12 +398,7 @@ fn unordered_retained_exclusion_visits_each_claim_once(#[case] count: u64) {
     );
     let ranges = (0..count)
         .rev()
-        .map(|index| {
-            Ok((
-                FileRange::new(PhysicalAddress::new(index * 2), 1).unwrap(),
-                RetainedKind::Dead,
-            ))
-        })
+        .map(|index| Ok(FileRange::new(PhysicalAddress::new(index * 2), 1).unwrap()))
         .inspect(|_| visits.set(visits.get() + 1));
     protected.exclude_retained(ranges).unwrap();
     assert_eq!(visits.get(), count);
@@ -461,13 +445,7 @@ fn protection_rejects_distinct_objects_sharing_a_continuation_allocation() {
     else {
         panic!("expected overlapping object allocations")
     };
-    assert_eq!(
-        [a, b],
-        [
-            (ObjectId::new(PhysicalAddress::new(first)), range),
-            (ObjectId::new(PhysicalAddress::new(second)), range)
-        ]
-    );
+    assert_eq!([a, b], [range, range]);
 }
 
 #[rstest]

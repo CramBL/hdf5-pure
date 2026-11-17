@@ -122,13 +122,10 @@ impl<'source> DeferredCountState<'source> {
         let next_graph = graph.checked_sub(1).ok_or_else(|| {
             FormatError::Internal("removed links exceed their target's incoming count".into())
         })?;
-        if let Some(DeferredDeclaredCount { evidence, balance }) = declared {
+        if let Some(DeferredDeclaredCount { balance, .. }) = declared {
             balance
                 .remove(NonZeroU32::MIN)
-                .map_err(|error| AddedCountError::Arithmetic {
-                    object: evidence.bound().object(),
-                    error,
-                })?;
+                .map_err(AddedCountError::Arithmetic)?;
         }
         *graph = next_graph;
         Ok(*graph == 0
@@ -146,13 +143,7 @@ impl<'source> DeferredCountState<'source> {
         let Self { graph, declared } = self;
         let (evidence, declared) = match declared {
             Some(DeferredDeclaredCount { evidence, balance }) => {
-                let remaining =
-                    balance
-                        .remaining()
-                        .map_err(|error| AddedCountError::Arithmetic {
-                            object: evidence.bound().object(),
-                            error,
-                        })?;
+                let remaining = balance.remaining().map_err(AddedCountError::Arithmetic)?;
                 (Some(evidence), Some(remaining))
             }
             None => (None, None),
@@ -174,13 +165,8 @@ struct DeferredDeclaredCount<'source> {
 /// An original-count evidence error or failed net-count arithmetic.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum AddedCountError {
-    /// A checked count-arithmetic failure for a physical target.
-    Arithmetic {
-        /// The physical object-header identity of the affected count.
-        object: ObjectId,
-        /// The arithmetic failure and its original operands.
-        error: CountArithmeticError,
-    },
+    /// An original-count underflow or final net-count overflow.
+    Arithmetic(CountArithmeticError),
     /// A count-query failure, original contradiction, or inconsistent removal topology.
     Evidence(CountEvidenceError),
 }

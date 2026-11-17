@@ -253,14 +253,7 @@ fn net_count_errors_describe_original_counts_before_prospective_additions(
                 minimum: 2,
             }))
         } else {
-            NetCountError::Arithmetic {
-                object: target,
-                error: CountArithmeticError::Overflow {
-                    original: u32::MAX,
-                    added: 1,
-                    removed: 0,
-                },
-            }
+            NetCountError::Arithmetic(CountArithmeticError::Overflow)
         }
     );
 }

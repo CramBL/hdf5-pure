@@ -7,7 +7,6 @@ use std::sync::Arc;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 use hdf5_pure_space::__private::Extent;
-use hdf5_pure_space::__private::RetainedKind;
 
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
@@ -250,7 +249,7 @@ impl ProtectedCounts {
                     count,
                     allocation,
                 } = update;
-                let allocation = allocation.ok_or(CountProtectionError::Allocation { object })?;
+                let allocation = allocation.ok_or(CountProtectionError::Allocation)?;
                 Ok(ProtectedCount {
                     object,
                     field,
@@ -272,8 +271,8 @@ impl ProtectedCounts {
                 .overlaps(pair[1].allocation.range())
             {
                 return Err(CountProtectionError::Overlap {
-                    first: (pair[0].object, pair[0].allocation.range()),
-                    second: (pair[1].object, pair[1].allocation.range()),
+                    first: pair[0].allocation.range(),
+                    second: pair[1].allocation.range(),
                 });
             }
         }
@@ -323,7 +322,7 @@ impl ProtectedCounts {
             engine
                 .space
                 .retained_extents()
-                .map(|entry| resolve(entry.extent()).map(|range| (range, entry.kind()))),
+                .map(|entry| resolve(entry.extent())),
         )?;
         for extent in engine
             .aggregation
@@ -333,7 +332,6 @@ impl ProtectedCounts {
             let spare = resolve(extent).map_err(CountProtectionError::Source)?;
             if let Some(update) = self.overlapping(spare) {
                 return Err(CountProtectionError::Aggregate {
-                    object: update.object,
                     allocation: update.allocation.range(),
                     spare,
                 });
@@ -350,19 +348,17 @@ impl ProtectedCounts {
     /// [`CountProtectionError::Source`] for a supplied range error.
     fn exclude_retained(
         &self,
-        retained: impl Iterator<Item = Result<(FileRange, RetainedKind), FormatError>>,
+        retained: impl Iterator<Item = Result<FileRange, FormatError>>,
     ) -> Result<(), CountProtectionError> {
         if self.updates.is_empty() {
             return Ok(());
         }
         for entry in retained {
-            let (retained, kind) = entry.map_err(CountProtectionError::Source)?;
+            let retained = entry.map_err(CountProtectionError::Source)?;
             if let Some(update) = self.overlapping(retained) {
                 return Err(CountProtectionError::Retained {
-                    object: update.object,
                     allocation: update.allocation.range(),
                     retained,
-                    kind,
                 });
             }
         }
@@ -408,7 +404,6 @@ impl ProtectedCounts {
                 }
                 if range.overlaps(allocation) {
                     return Err(CountProtectionError::Reusable {
-                        object: update.object,
                         allocation,
                         reusable: range,
                     });
@@ -528,24 +523,19 @@ impl CountSource {
 pub(in crate::edit) enum CountProtectionError {
     /// Aggregate spare intersecting a complete original allocation.
     Aggregate {
-        /// The physical identity of the source object.
-        object: ObjectId,
         /// The complete original header allocation.
         allocation: FileRange,
         /// The allocator's unconsumed aggregate range.
         spare: FileRange,
     },
     /// Missing complete allocation geometry for an original count field.
-    Allocation {
-        /// The physical identity of the source object.
-        object: ObjectId,
-    },
+    Allocation,
     /// Intersecting complete allocations associated with distinct source objects.
     Overlap {
-        /// The first physical object and its complete allocation range.
-        first: (ObjectId, FileRange),
-        /// The second physical object and its complete allocation range.
-        second: (ObjectId, FileRange),
+        /// The first complete original allocation.
+        first: FileRange,
+        /// The second complete original allocation.
+        second: FileRange,
     },
     /// A reconstruction identity from a different source phase.
     Phase {
@@ -561,19 +551,13 @@ pub(in crate::edit) enum CountProtectionError {
     },
     /// An exact retained PAGE claim intersecting a complete original allocation.
     Retained {
-        /// The physical identity of the source object.
-        object: ObjectId,
         /// The complete original header allocation.
         allocation: FileRange,
         /// The exact recorded retained PAGE range.
         retained: FileRange,
-        /// The allocator's recorded category for the intersecting range.
-        kind: RetainedKind,
     },
     /// A reusable range intersecting a complete original allocation.
     Reusable {
-        /// The physical identity of the source object.
-        object: ObjectId,
         /// The complete original header allocation.
         allocation: FileRange,
         /// The intersecting reusable range.

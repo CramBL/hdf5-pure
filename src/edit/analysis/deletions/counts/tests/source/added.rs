@@ -105,7 +105,7 @@ fn additions_are_applied_after_unique_original_edge_removals(
 #[case::overflow(u32::MAX, 2)]
 #[case::wide_overflow(2, u64::MAX)]
 #[case::original_contradiction(1, 1)]
-fn added_count_errors_preserve_original_operands_and_consistency(
+fn added_count_errors_distinguish_original_contradictions_and_final_overflow(
     #[case] original: u32,
     #[case] added: u64,
 ) {
@@ -143,14 +143,7 @@ fn added_count_errors_preserve_original_operands_and_consistency(
                 minimum: 2,
             }))
         } else {
-            AddedCountError::Arithmetic {
-                object: super::id(target),
-                error: CountArithmeticError::Overflow {
-                    original,
-                    added,
-                    removed: 1,
-                },
-            }
+            AddedCountError::Arithmetic(CountArithmeticError::Overflow)
         }
     );
     assert_eq!(additions.get(), usize::from(original != 1));

@@ -301,14 +301,10 @@ fn add_users(
 ) -> Result<(), CopyUsersError> {
     match users.entry(object) {
         Entry::Occupied(mut entry) => {
-            let current = *entry.get();
-            let next = current
+            let next = entry
+                .get()
                 .checked_add(count.get())
-                .ok_or(CopyUsersError::Overflow {
-                    object,
-                    current,
-                    added: count,
-                })?;
+                .ok_or(CopyUsersError::Overflow)?;
             entry.insert(next);
         }
         Entry::Vacant(entry) => {
@@ -326,11 +322,7 @@ pub(in crate::edit) enum CopyUsersError {
     /// A nonempty inventory belongs to another engine.
     Engine,
     /// An accumulated target count exceeds `u64`.
-    Overflow {
-        object: ObjectId,
-        current: NonZeroU64,
-        added: NonZeroU64,
-    },
+    Overflow,
     /// A nonempty inventory belongs to another analysis phase.
     Phase,
     /// A nonempty inventory is associated with another root.

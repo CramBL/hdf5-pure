@@ -10,7 +10,6 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
-use hdf5_pure_space::__private::RetainedKind;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -371,12 +370,10 @@ fn publication_rechecks_mutable_allocator_and_session_facts(#[case] mutation: Mu
         (
             Mutation::Reusable,
             Err(CountPublicationError::Protection(CountProtectionError::Reusable {
-                object: actual,
                 allocation: owned,
                 reusable,
             })),
         ) => {
-            assert_eq!(actual, object);
             assert_eq!(owned, allocation);
             assert_eq!(reusable.start(), allocation.start());
             assert_eq!(reusable.length(), 1);
@@ -384,27 +381,21 @@ fn publication_rechecks_mutable_allocator_and_session_facts(#[case] mutation: Mu
         (
             Mutation::Retained,
             Err(CountPublicationError::Protection(CountProtectionError::Retained {
-                object: actual,
                 allocation: owned,
                 retained,
-                kind,
             })),
         ) => {
-            assert_eq!(actual, object);
             assert_eq!(owned, allocation);
             assert_eq!(retained.start(), allocation.start());
             assert_eq!(retained.length(), 1);
-            assert_eq!(kind, RetainedKind::Unclassified);
         }
         (
             Mutation::Aggregate,
             Err(CountPublicationError::Protection(CountProtectionError::Aggregate {
-                object: actual,
                 allocation: owned,
                 spare,
             })),
         ) => {
-            assert_eq!(actual, object);
             assert_eq!(owned, allocation);
             assert_eq!(spare.start(), allocation.start());
             assert_eq!(spare.length(), 2_047);

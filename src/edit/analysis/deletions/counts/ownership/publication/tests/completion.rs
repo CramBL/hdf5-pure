@@ -384,7 +384,6 @@ fn ownership_changes_after_the_original_bounds_cannot_grant_a_write_scope(#[case
     protection_tests::fixture_with_base(&path, UserblockSize::NONE);
     let mut engine = edit_test_util::open_engine(&path);
     let bounds = bounds(&mut engine, vec![], &["a"]);
-    let object = bounds.updates()[0].object();
     let allocation = bounds.updates()[0].allocation().range();
     let reusable = FileRange::new(allocation.start(), 1).unwrap();
     let error = with_unchecked_carrier(bounds, |engine, pending, complete| {
@@ -422,13 +421,11 @@ fn ownership_changes_after_the_original_bounds_cannot_grant_a_write_scope(#[case
             Claim::Reusable,
             CountCompletionError::Protection(CountPublicationError::Protection(
                 CountProtectionError::Reusable {
-                    object: actual_object,
                     allocation: actual_allocation,
                     reusable: actual_reusable,
                 },
             )),
         ) => {
-            assert_eq!(actual_object, object);
             assert_eq!(actual_allocation, allocation);
             assert_eq!(actual_reusable, reusable);
         }

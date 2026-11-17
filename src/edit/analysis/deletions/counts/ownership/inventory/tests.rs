@@ -214,9 +214,9 @@ fn preflight_rejects_unsupported_counts_and_inapplicable_source_facts_before_wri
         ) => assert_eq!((object, original, remaining), (target, 1, 2)),
         (
             Rejection::Allocation,
-            CountPreflightError::Protection(CountProtectionError::Allocation { object }),
-        )
-        | (
+            CountPreflightError::Protection(CountProtectionError::Allocation),
+        ) => {}
+        (
             Rejection::Phase,
             CountPreflightError::Protection(CountProtectionError::Phase { object }),
         )

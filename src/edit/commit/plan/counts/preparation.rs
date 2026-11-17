@@ -126,8 +126,8 @@ impl PreparedTreeCounts {
             EditInputError::Counts(NetCountError::Evidence(
                 CountEvidenceError::Source(error) | CountEvidenceError::Topology(error),
             )) => error.into(),
-            EditInputError::Counts(NetCountError::Arithmetic { .. })
-            | EditInputError::Users(CopyUsersError::Overflow { .. }) => {
+            EditInputError::Counts(NetCountError::Arithmetic(_))
+            | EditInputError::Users(CopyUsersError::Overflow) => {
                 Error::EditUnsupported("the planned reference count does not fit its stored field")
             }
             EditInputError::IncompleteCopy => {
