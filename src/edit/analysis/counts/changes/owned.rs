@@ -1,12 +1,11 @@
 //! Owned original count facts, planned values, and count dispositions.
 
 use core::num::NonZeroU32;
-use core::num::NonZeroU64;
 
 use hdf5_pure_format::__private::ObjectReferenceCountField;
 
 use super::{CountChange, OriginalCount};
-use crate::edit::analysis::counts::{CountEvidence, HeaderCountAllocation, OrdinaryCountSubject};
+use crate::edit::analysis::counts::{CountEvidence, HeaderCountAllocation};
 use crate::object_graph::ObjectId;
 
 impl CountChange<'_, '_> {
@@ -24,8 +23,6 @@ impl CountChange<'_, '_> {
                 observed.object(),
                 OwnedOriginalCount::Referenced {
                     original: observed.original(),
-                    incoming: observed.incoming(),
-                    minimum: observed.minimum(),
                 },
                 observed.field(),
                 observed.header_allocation(),
@@ -33,10 +30,8 @@ impl CountChange<'_, '_> {
             OriginalCount::Topology(evidence) => {
                 let bound = evidence.bound();
                 let original = match evidence {
-                    CountEvidence::Ordinary(ordinary) => OwnedOriginalCount::Ordinary {
+                    CountEvidence::Ordinary(_) => OwnedOriginalCount::Ordinary {
                         original: bound.original,
-                        incoming: bound.incoming(),
-                        subject: ordinary.subject(),
                     },
                     CountEvidence::Retained(_) => OwnedOriginalCount::Retained {
                         original: bound.original,
@@ -146,21 +141,11 @@ pub(in crate::edit) enum OwnedOriginalCount {
     Ordinary {
         /// The original positive declared count, including an implicit one.
         original: NonZeroU32,
-        /// The visible hard-link count in the original topology.
-        incoming: u32,
-        /// The recognized dataset or group message shape.
-        subject: OrdinaryCountSubject,
     },
-    /// A referenced-target count with any independently established original-reference facts.
+    /// A referenced-target count that satisfies its known original-reference minimum.
     Referenced {
         /// The original declared count, including an implicit one or an unproven zero.
         original: u32,
-        /// The visible hard-link count, or `None` without complete topology.
-        ///
-        /// `Some(0)` records a known absence of visible links.
-        incoming: Option<u32>,
-        /// The proven positive original-reference minimum, if known.
-        minimum: Option<NonZeroU64>,
     },
     /// A positive topology-bound count for the root or an unrecognized header shape.
     Retained {

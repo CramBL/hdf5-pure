@@ -49,9 +49,9 @@ impl<'source> AnalysisPhase<'source> {
 ///
 /// All observations in a nonempty batch share an engine, original root, and phase. Empty batches
 /// have no association. The caller establishes completeness and same-file applicability of the
-/// actual emission inventory. Original-reference minima and count-containing allocation geometry
-/// remain optional in each [`ReferencedCount`]. Source freshness, allocation ownership, retirement
-/// eligibility, and count-write permission require separate evidence.
+/// actual emission inventory. Each [`ReferencedCount`] satisfies its known original-reference
+/// minimum and retains optional count-allocation geometry. Source freshness, allocation ownership,
+/// retirement eligibility, and count-write permission require separate evidence.
 pub(in crate::edit) struct ReferencedCounts<'source> {
     targets: BTreeMap<ObjectId, ReferencedTarget<'source>>,
 }
@@ -63,23 +63,6 @@ impl<'source> ReferencedCounts<'source> {
     ) -> impl Iterator<Item = (ObjectId, ReferencedTarget<'source>)> {
         let Self { targets } = self;
         targets.into_iter()
-    }
-
-    /// Returns whether the batch is empty or its observations match `phase`.
-    ///
-    /// Uses [`ReferencedCount::matches`] for nonempty batches. Association equality is separate
-    /// from source-content validity.
-    pub(in crate::edit) fn matches(&self, phase: &AnalysisPhase<'_>) -> bool {
-        self.targets
-            .first_key_value()
-            .is_none_or(|(_, target)| target.count.matches(phase))
-    }
-
-    /// Returns the associated original physical root, or `None` for an empty batch.
-    pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
-        self.targets
-            .first_key_value()
-            .map(|(_, target)| target.count.root())
     }
 
     /// Borrows the original observation and prospective multiplicity for a listed `object`.
@@ -107,7 +90,7 @@ pub(in crate::edit) struct ReferencedTarget<'source> {
 }
 
 impl<'source> ReferencedTarget<'source> {
-    /// Borrows the original count observation and its optional reference and allocation facts.
+    /// Borrows the checked original count and its optional field and allocation facts.
     pub(in crate::edit) fn count(&self) -> &ReferencedCount<'source> {
         &self.count
     }

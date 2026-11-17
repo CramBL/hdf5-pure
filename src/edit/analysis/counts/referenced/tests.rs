@@ -1,4 +1,3 @@
-use core::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,15 +54,8 @@ fn referenced_observations_preserve_counts_without_original_user_minima(
     let added = added(&mut phase, &tree);
     calls.store(0, Ordering::Relaxed);
     let fact = phase.referenced_count(&added, object).unwrap().unwrap();
-    assert!(fact.matches(&phase));
     assert_eq!(fact.object(), object);
-    assert_eq!(
-        fact.root(),
-        ObjectId::new(PhysicalAddress::new(Fixture::ROOT))
-    );
     assert_eq!(fact.original(), original.unwrap_or(1));
-    assert_eq!(fact.incoming(), topology.then_some(0));
-    assert_eq!(fact.minimum(), None);
     assert_eq!(fact.field().map(|field| field.value()), original);
     assert_eq!(fact.header_allocation().is_some(), original.is_some());
     assert!(calls.load(Ordering::Relaxed) > 0 && bytes.load(Ordering::Relaxed) > 0);
@@ -94,8 +86,6 @@ fn discovering_original_links_refines_consistency_without_rereading_the_count() 
     let mut phase = AnalysisPhase::new(&engine);
     let added = added(&mut phase, &tree);
     let before = phase.referenced_count(&added, object).unwrap().unwrap();
-    assert_eq!(before.incoming(), None);
-    assert_eq!(before.minimum(), None);
     assert!(phase.topology().is_some());
     calls.store(0, Ordering::Relaxed);
     let Err(error) = phase.referenced_count(&added, object) else {
@@ -145,8 +135,6 @@ fn referenced_root_counts_include_only_proven_original_references(#[case] topolo
     } else {
         let fact = result.unwrap().unwrap();
         assert_eq!(fact.original(), 1);
-        assert_eq!(fact.incoming(), None);
-        assert_eq!(fact.minimum(), Some(NonZeroU64::MIN));
         assert!(phase.topology.is_none());
     }
 }

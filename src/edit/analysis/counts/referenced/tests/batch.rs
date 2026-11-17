@@ -44,12 +44,6 @@ fn referenced_batches_retain_ordered_original_counts_and_added_multiplicity(#[ca
     }
     let added = union.finish();
     let batch = phase.referenced_counts(&added).unwrap().unwrap();
-    assert!(batch.matches(&phase));
-    assert!(!batch.matches(&AnalysisPhase::new(&engine)));
-    assert_eq!(
-        batch.root(),
-        Some(ObjectId::new(PhysicalAddress::new(Fixture::ROOT)))
-    );
     assert_eq!(
         batch
             .targets()
@@ -60,8 +54,6 @@ fn referenced_batches_retain_ordered_original_counts_and_added_multiplicity(#[ca
     for (index, (object, target)) in batch.targets().enumerate() {
         assert_eq!(target.count().object(), object);
         assert_eq!(target.count().original(), u32::try_from(index).unwrap() + 7);
-        assert_eq!(target.count().incoming(), None);
-        assert_eq!(target.count().minimum(), None);
         let field = target.count().field().unwrap();
         assert_eq!(field.value(), target.count().original());
         assert_eq!(
@@ -159,7 +151,6 @@ fn batch_enrichment_reuses_cached_counts_and_preserves_original_observations() {
     let tree = super::tree(object);
     let added = super::added(&mut phase, &tree);
     let before = phase.referenced_counts(&added).unwrap().unwrap();
-    assert_eq!(before.get(object).unwrap().count().minimum(), None);
     assert!(phase.topology().is_some());
     calls.store(0, Ordering::Relaxed);
     let Err(error) = phase.referenced_counts(&added) else {
@@ -202,14 +193,11 @@ fn batch_enrichment_preserves_counts_fields_and_optional_allocations(#[case] par
     let tree = super::tree(object);
     let added = super::added(&mut phase, &tree);
     let before = phase.referenced_counts(&added).unwrap().unwrap();
-    assert_eq!(before.get(object).unwrap().count().incoming(), None);
     assert!(phase.topology().is_some());
     calls.store(0, Ordering::Relaxed);
     let after = phase.referenced_counts(&added).unwrap().unwrap();
     let fact = after.get(object).unwrap().count();
     assert_eq!(fact.original(), 7);
-    assert_eq!(fact.incoming(), Some(0));
-    assert_eq!(fact.minimum(), None);
     assert_eq!(fact.field(), before.get(object).unwrap().count().field());
     assert_eq!(fact.header_allocation().is_none(), partial);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -270,8 +258,6 @@ fn empty_batches_allocate_and_read_nothing() {
     });
     let batch = batch.unwrap().unwrap();
     assert_eq!(batch.targets().count(), 0);
-    assert_eq!(batch.root(), None);
-    assert!(batch.matches(&phase));
     assert!(phase.topology.is_none() && phase.identity.is_none() && phase.counts.is_empty());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     let object = ObjectId::new(PhysicalAddress::new(Fixture::ROOT));

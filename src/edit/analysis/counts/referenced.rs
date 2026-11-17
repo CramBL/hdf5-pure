@@ -3,6 +3,7 @@
 //! Complete topology is optional. Source freshness, original-user completeness, allocation
 //! ownership, retirement eligibility, and count-write permission require separate evidence.
 
+use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -53,7 +54,7 @@ impl<'source> AnalysisPhase<'source> {
         };
         let engine = self.engine;
         let topology = self.topology.as_ref().and_then(Option::as_ref);
-        let OriginalReferences { incoming, minimum } =
+        let OriginalReferences { minimum } =
             OriginalReferences::new(engine, &origin, topology, object)?;
         let mut queries = CountQueries::new(engine, &mut self.counts, topology);
         let observation = queries
@@ -81,82 +82,38 @@ impl<'source> AnalysisPhase<'source> {
             ));
         }
         Ok(Some(ReferencedCount {
-            engine,
-            origin,
+            source: PhantomData,
             object,
             original,
-            incoming,
-            minimum,
             field,
             allocation,
         }))
     }
 }
 
-/// An original declared count and optional original-reference facts in one analysis phase.
+/// An original declared count checked against the reference minimum known at construction.
 ///
-/// The observed count satisfies each positive minimum known at construction. A zero count is
-/// retained when no positive minimum is known. The original field and independent complete header
-/// allocation geometry are optional. The engine, root, and phase are retained for association
-/// checks. Source freshness, copy-source applicability, allocation ownership, retirement
+/// A zero count is retained when no positive minimum is known. The result borrows the source
+/// engine's lifetime. The original field and independent complete header allocation geometry are
+/// optional. Source freshness, copy-source applicability, allocation ownership, retirement
 /// eligibility, and count-write permission require separate evidence.
 pub(in crate::edit) struct ReferencedCount<'source> {
-    engine: &'source WriteEngine,
-    origin: ReconstructionSource,
+    source: PhantomData<&'source WriteEngine>,
     object: ObjectId,
     original: u32,
-    incoming: Option<u32>,
-    minimum: Option<NonZeroU64>,
     field: Option<ObjectReferenceCountField>,
     allocation: Option<HeaderCountAllocation>,
 }
 
 impl ReferencedCount<'_> {
-    /// Returns whether the engine, phase identity, and any explicit phase root match.
-    ///
-    /// Association equality is separate from source-content validity.
-    pub(in crate::edit) fn matches(&self, phase: &AnalysisPhase<'_>) -> bool {
-        let ReconstructionSource {
-            identity,
-            object: root,
-        } = &self.origin;
-        core::ptr::eq(self.engine, phase.engine)
-            && phase
-                .identity
-                .as_ref()
-                .is_some_and(|other| Arc::ptr_eq(identity, other))
-            && phase.root.is_none_or(|other| other == *root)
-    }
-
     /// Returns the physical object-header identity of the observed target.
     pub(in crate::edit) fn object(&self) -> ObjectId {
         self.object
     }
 
-    /// Returns the original physical root associated with this observation.
-    pub(in crate::edit) fn root(&self) -> ObjectId {
-        self.origin.object()
-    }
-
     /// Returns the original declared count, including an implicit one or an unproven zero.
     pub(in crate::edit) fn original(&self) -> u32 {
         self.original
-    }
-
-    /// Returns the visible incoming count from complete original topology, when available.
-    ///
-    /// `Some(0)` indicates a known absence of visible links, including targets outside the
-    /// discovered topology. `None` indicates unavailable complete topology. The root's superblock
-    /// reference is excluded from this count.
-    pub(in crate::edit) fn incoming(&self) -> Option<u32> {
-        self.incoming
-    }
-
-    /// Returns the proven positive original-reference minimum, when known.
-    ///
-    /// Includes the root's superblock reference even when complete topology is unavailable.
-    pub(in crate::edit) fn minimum(&self) -> Option<NonZeroU64> {
-        self.minimum
     }
 
     /// Returns the original physical count field, or `None` for an implicit one.
@@ -172,9 +129,8 @@ impl ReferencedCount<'_> {
     }
 }
 
-/// Visible original links and their positive declared-count minimum, when known.
+/// The positive minimum established from original references, when known.
 struct OriginalReferences {
-    incoming: Option<u32>,
     minimum: Option<NonZeroU64>,
 }
 
@@ -233,7 +189,7 @@ impl OriginalReferences {
                     0
                 },
         );
-        Ok(Self { incoming, minimum })
+        Ok(Self { minimum })
     }
 }
 

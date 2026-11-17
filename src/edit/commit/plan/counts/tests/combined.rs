@@ -132,7 +132,6 @@ fn combined_projection_retains_original_facts_and_exact_dispositions(
             assert_eq!(actual.object(), target);
             assert_eq!(actual.original(), original.unwrap_or(1));
             assert_eq!(actual.field().map(|field| field.value()), original);
-            assert_eq!(actual.minimum(), None);
             assert_eq!(actual.header_allocation().is_none(), original.is_none());
         }
         _ => panic!("original count evidence changed class"),

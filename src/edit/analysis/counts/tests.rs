@@ -43,24 +43,23 @@ use super::CountEvidenceError;
 use super::CountQueries;
 use super::HeaderCountAllocation;
 use super::IncomingLinks;
-use super::OrdinaryCountSubject;
 use super::ROOT_REFERENCE_COUNT;
 
 #[rstest]
-#[case::implicit_dataset(Subject::Dataset, None, 1, Some(OrdinaryCountSubject::Dataset))]
-#[case::aliased_dataset(Subject::Dataset, Some(2), 2, Some(OrdinaryCountSubject::Dataset))]
-#[case::excess_dataset(Subject::Dataset, Some(7), 2, Some(OrdinaryCountSubject::Dataset))]
-#[case::aliased_group(Subject::Group, Some(2), 2, Some(OrdinaryCountSubject::Group))]
-#[case::excess_group(Subject::Group, Some(u32::MAX), 1, Some(OrdinaryCountSubject::Group))]
-#[case::unclassified(Subject::Unclassified, Some(3), 1, None)]
-#[case::conflicting(Subject::Conflicting, Some(2), 1, None)]
-#[case::missing_dataset_message(Subject::MissingDatasetMessage, Some(2), 1, None)]
-#[case::repeated_dataset_message(Subject::RepeatedDatasetMessage, Some(2), 1, None)]
+#[case::implicit_dataset(Subject::Dataset, None, 1, true)]
+#[case::aliased_dataset(Subject::Dataset, Some(2), 2, true)]
+#[case::excess_dataset(Subject::Dataset, Some(7), 2, true)]
+#[case::aliased_group(Subject::Group, Some(2), 2, true)]
+#[case::excess_group(Subject::Group, Some(u32::MAX), 1, true)]
+#[case::unclassified(Subject::Unclassified, Some(3), 1, false)]
+#[case::conflicting(Subject::Conflicting, Some(2), 1, false)]
+#[case::missing_dataset_message(Subject::MissingDatasetMessage, Some(2), 1, false)]
+#[case::repeated_dataset_message(Subject::RepeatedDatasetMessage, Some(2), 1, false)]
 fn source_count_evidence_preserves_original_bounds_and_supported_subjects(
     #[case] subject: Subject,
     #[case] count: Option<u32>,
     #[case] aliases: u32,
-    #[case] expected_subject: Option<OrdinaryCountSubject>,
+    #[case] ordinary: bool,
 ) {
     let path = test_util::temp::temp_path("count-evidence.h5");
     let address = write_fixture(&path, subject, count, aliases);
@@ -74,13 +73,7 @@ fn source_count_evidence_preserves_original_bounds_and_supported_subjects(
     assert_eq!(bound.incoming(), aliases);
     assert_eq!(bound.field().map(|field| field.value()), count);
     assert!(bound.matches(phase.topology().unwrap()));
-    assert_eq!(
-        match evidence {
-            CountEvidence::Ordinary(ordinary) => Some(ordinary.subject()),
-            CountEvidence::Retained(_) => None,
-        },
-        expected_subject
-    );
+    assert_eq!(matches!(evidence, CountEvidence::Ordinary(_)), ordinary);
     assert_eq!(phase.counts.len(), 1);
     assert_eq!(
         phase
