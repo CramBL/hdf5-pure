@@ -9,6 +9,7 @@ use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArraySuperBlockRef;
 use rstest::rstest;
+use test_util::__private::durability::FaultSchedule;
 use test_util::disk_log;
 use test_util::disk_log::DiskOp;
 use test_util::disk_log::FailurePoint;
@@ -209,12 +210,10 @@ fn page_initialization_errors_prevent_later_references_and_reuse(
     fs::write(&path, &observed.base).unwrap();
     let mut engine = super::open(&path, MemoryStrategy::Bounded, policy, buffering);
     disk_log::start();
-    match fault {
-        Fault::Write(prefix) => disk_log::fail_write_after(
-            observed.trace.events[..target]
-                .iter()
-                .filter(|event| matches!(event, IoEvent::Write { .. }))
-                .count(),
+    let schedule = match fault {
+        Fault::Write(prefix) => FaultSchedule::write(
+            &observed.trace,
+            target,
             match prefix {
                 WriteFailure::Before => 0,
                 WriteFailure::After => usize::MAX,
@@ -226,14 +225,9 @@ fn page_initialization_errors_prevent_later_references_and_reuse(
                 }
             },
         ),
-        Fault::Sync(point) => disk_log::fail_sync_after(
-            observed.trace.events[..target]
-                .iter()
-                .filter(|event| matches!(event, IoEvent::Synchronize { .. }))
-                .count(),
-            point,
-        ),
-    }
+        Fault::Sync(point) => FaultSchedule::synchronize(&observed.trace, target, point),
+    };
+    schedule.inject();
     let mut append = AppendBuilder::new();
     append.append_i32(&(fixture.start..fixture.start + 4).collect::<Vec<_>>());
     let error = engine
@@ -252,6 +246,7 @@ fn page_initialization_errors_prevent_later_references_and_reuse(
     );
     disk_log::clear_failures();
     let failed = disk_log::finish();
+    schedule.assert_failed(&failed);
     assert_eq!(
         failed.events[target].outcome(),
         IoOutcome::Failed(ErrorKind::Other)

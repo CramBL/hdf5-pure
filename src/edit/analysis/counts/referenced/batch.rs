@@ -65,35 +65,9 @@ impl<'source> ReferencedCounts<'source> {
         targets.into_iter()
     }
 
-    /// Returns whether the batch is empty or its observations match `phase`.
-    ///
-    /// Uses [`ReferencedCount::matches`] for nonempty batches. Association equality is separate
-    /// from source-content validity.
-    pub(in crate::edit) fn matches(&self, phase: &AnalysisPhase<'_>) -> bool {
-        self.targets
-            .first_key_value()
-            .is_none_or(|(_, target)| target.count.matches(phase))
-    }
-
-    /// Returns the associated original physical root, or `None` for an empty batch.
-    pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
-        self.targets
-            .first_key_value()
-            .map(|(_, target)| target.count.root())
-    }
-
     /// Borrows the original observation and prospective multiplicity for a listed `object`.
     pub(in crate::edit) fn get(&self, object: ObjectId) -> Option<&ReferencedTarget<'source>> {
         self.targets.get(&object)
-    }
-
-    /// Borrows targets in physical object-header address order.
-    pub(in crate::edit) fn targets(
-        &self,
-    ) -> impl Iterator<Item = (ObjectId, &ReferencedTarget<'source>)> {
-        self.targets
-            .iter()
-            .map(|(&object, target)| (object, target))
     }
 }
 

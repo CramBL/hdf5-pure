@@ -1,9 +1,6 @@
 //! Editing fixtures and storage-ownership assertions for private tests.
 
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::AtomicU64;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
@@ -45,8 +42,6 @@ use crate::error::FormatError;
 use crate::file_writer::OFFSET_WIDTH;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::free_space_manager;
-use crate::image::CountingImage;
-use crate::image::HandleImage;
 use crate::image::WriteBuffering;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
@@ -63,6 +58,8 @@ use crate::source::SourceMetadata;
 use crate::superblock;
 use crate::type_builders::DatasetBuilder;
 use crate::width::FormatWidths;
+
+pub(in crate::edit) mod durability;
 
 /// Creates, appends, and reopens finite datasets beside variable-length datasets and attributes.
 ///
@@ -262,70 +259,6 @@ pub(super) fn open_engine(path: &Path) -> WriteEngine {
         MemoryStrategy::Auto,
         PersistedFreeSpacePolicy::Tolerant,
     )
-    .unwrap()
-}
-
-/// Opens an engine without metadata caching and counts image reads.
-pub(in crate::edit) fn open_counted_engine(path: &Path) -> (WriteEngine, Arc<AtomicU64>) {
-    open_counted_engine_with_bytes(path, Arc::default())
-}
-
-/// Opens a fixture with read-byte accounting and requests [`FileLocking::Enabled`].
-///
-/// Adds requested image-read lengths to `bytes`, including failed requests. Returns the engine
-/// and its shared read-call counter. Disables metadata caching and counts reads during opening.
-///
-/// # Panics
-///
-/// Panics if the fixture cannot be opened for editing.
-pub(in crate::edit) fn open_counted_engine_with_bytes(
-    path: &Path,
-    bytes: Arc<AtomicU64>,
-) -> (WriteEngine, Arc<AtomicU64>) {
-    let calls = Arc::new(AtomicU64::new(0));
-    let engine = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
-        Ok(Box::new(
-            CountingImage::new(
-                Box::new(HandleImage::new(
-                    handle,
-                    len,
-                    MetadataCacheConfig::disabled(),
-                )),
-                bytes,
-                Arc::default(),
-            )
-            .with_read_calls(Arc::clone(&calls)),
-        ))
-    })
-    .unwrap();
-    (engine, calls)
-}
-
-/// Opens a fixture without metadata caching and records requested image-read ranges.
-///
-/// Records reads during opening and requests [`FileLocking::Enabled`].
-///
-/// # Panics
-///
-/// Panics if the fixture cannot be opened for editing.
-pub(in crate::edit) fn open_observed_engine(
-    path: &Path,
-    reads: Arc<Mutex<Vec<FileRange>>>,
-) -> WriteEngine {
-    WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
-        Ok(Box::new(
-            CountingImage::new(
-                Box::new(HandleImage::new(
-                    handle,
-                    len,
-                    MetadataCacheConfig::disabled(),
-                )),
-                Arc::default(),
-                Arc::default(),
-            )
-            .with_read_ranges(reads),
-        ))
-    })
     .unwrap()
 }
 

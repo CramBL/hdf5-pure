@@ -4,6 +4,8 @@
 //! [`one_message`] embeds a caller-supplied body at selected file widths. Both use version 2
 //! superblocks and object headers, with a fractal heap and version 2 B-tree name index.
 
+use std::ops::Range;
+
 use crate::attribute;
 use crate::attribute::Attribute;
 use crate::btree::v2 as btree_v2;
@@ -37,6 +39,33 @@ pub enum Fixture {
 impl Fixture {
     /// Encodes the hierarchy and its dense attributes as an independent file image.
     pub fn build(self) -> Vec<u8> {
+        self.build_with_heap_manager(None).bytes
+    }
+
+    /// Encodes the hierarchy with complete allocation ranges and used lengths.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use test_util::dense_attributes::Fixture;
+    ///
+    /// for fixture in [Fixture::Dataset, Fixture::Root] {
+    ///     let source = fixture.build_with_layout();
+    ///     assert_eq!(source.storage.direct.len(), 4096);
+    ///     assert_eq!(source.storage.leaf.len(), 1024);
+    ///     for (range, used) in [
+    ///         (&source.storage.direct, source.storage.direct_used),
+    ///         (&source.storage.leaf, source.storage.leaf_used),
+    ///     ] {
+    ///         assert!(used > 0 && used < range.len());
+    ///         assert!(source.bytes[range.start + used..range.end].iter().all(|byte| *byte == 0));
+    ///     }
+    ///     assert_eq!(source.data.end, source.dataset.start);
+    ///     assert_eq!(source.dataset.end, source.root.start);
+    ///     assert_eq!(source.root.end, source.bytes.len());
+    /// }
+    /// ```
+    pub fn build_with_layout(self) -> Source {
         self.build_with_heap_manager(None)
     }
 
@@ -56,12 +85,15 @@ impl Fixture {
         })
     }
 
-    /// Encodes the hierarchy with the supplied heap-manager address, or undefined for `None`.
-    fn build_with_heap_manager(self, manager: Option<u64>) -> Vec<u8> {
+    /// Encodes the hierarchy and layout with the supplied heap-manager address.
+    ///
+    /// Uses an undefined address for [`None`].
+    fn build_with_heap_manager(self, manager: Option<u64>) -> Source {
         let mut image = Image::starting_with(&[0; SUPERBLOCK_SIZE]);
+        let (attributes, storage) = dense_storage(&mut image, self, manager);
         let (dataset_attributes, root_attributes) = match self {
-            Fixture::Dataset => (Some(dense_storage(&mut image, self, manager)), None),
-            Fixture::Root => (None, Some(dense_storage(&mut image, self, manager))),
+            Fixture::Dataset => (Some(attributes), None),
+            Fixture::Root => (None, Some(attributes)),
         };
         let (link_name, datatype, raw) = match self {
             Fixture::Dataset => (
@@ -87,7 +119,8 @@ impl Fixture {
                 )
             }
         };
-        let address = image.append(&raw) as u64;
+        let raw_at = image.append(&raw);
+        let data = raw_at..raw_at + raw.len();
         let dataset = v2::Header::new()
             .messages([
                 Message::new(
@@ -97,11 +130,15 @@ impl Fixture {
                 Message::new(MessageType::DATATYPE, &datatype),
                 Message::new(
                     MessageType::DATA_LAYOUT,
-                    &data_layout::contiguous(address, raw.len() as u64),
+                    &data_layout::contiguous(u64::try_from(raw_at).unwrap(), raw.len() as u64),
                 ),
             ])
-            .messages(dataset_attributes);
-        let dataset = image.append(&dataset.build()) as u64;
+            .messages(dataset_attributes)
+            .build();
+        let dataset_at = image.append(&dataset);
+        let dataset_end = dataset_at + dataset.len();
+        drop(dataset);
+        let dataset = dataset_at..dataset_end;
         let mut link_info = vec![LINK_INFO_VERSION, NO_FLAGS];
         link_info.extend_from_slice(&u64::MAX.to_le_bytes());
         link_info.extend_from_slice(&u64::MAX.to_le_bytes());
@@ -111,20 +148,67 @@ impl Fixture {
                 Message::new(MessageType::GROUP_INFO, &[GROUP_INFO_VERSION, NO_FLAGS]),
                 Message::new(
                     MessageType::LINK,
-                    &HardLink::new(link_name, dataset).build(Widths::EIGHT),
+                    &HardLink::new(link_name, u64::try_from(dataset_at).unwrap())
+                        .build(Widths::EIGHT),
                 ),
             ])
-            .messages(root_attributes);
-        let root = image.append(&root.build()) as u64;
+            .messages(root_attributes)
+            .build();
+        let root_at = image.append(&root);
+        let root_end = root_at + root.len();
+        drop(root);
+        let root = root_at..root_end;
         image.place(
             0,
             &Superblock::new(Widths::EIGHT)
-                .root_header_address(root)
+                .root_header_address(u64::try_from(root_at).unwrap())
                 .eof_address(image.as_bytes().len() as u64)
                 .build(),
         );
-        image.build()
+        Source {
+            bytes: image.build(),
+            storage,
+            data,
+            dataset,
+            root,
+        }
     }
+}
+
+/// An independent file image and its constructed physical layout.
+///
+/// Returned by [`Fixture::build_with_layout`]. All range bounds are byte offsets in
+/// [`Self::bytes`].
+pub struct Source {
+    /// The complete encoded file image.
+    pub bytes: Vec<u8>,
+    /// The dense-attribute heap and name-index allocations.
+    pub storage: Storage,
+    /// The complete contiguous dataset payload.
+    pub data: Range<usize>,
+    /// The complete dataset object header.
+    pub dataset: Range<usize>,
+    /// The complete root-group object header.
+    pub root: Range<usize>,
+}
+
+/// Complete dense-attribute heap and name-index ranges with used byte counts.
+///
+/// The ranges index [`Source::bytes`]. The direct block and leaf include zero padding
+/// after their serialized bytes.
+pub struct Storage {
+    /// The complete fractal heap header.
+    pub heap: Range<usize>,
+    /// The complete 4096-byte managed direct block.
+    pub direct: Range<usize>,
+    /// The serialized length within [`Self::direct`], in bytes.
+    pub direct_used: usize,
+    /// The complete 1024-byte name-index leaf.
+    pub leaf: Range<usize>,
+    /// The serialized length within [`Self::leaf`], in bytes.
+    pub leaf_used: usize,
+    /// The complete name-index B-tree header.
+    pub index: Range<usize>,
 }
 
 /// Builds `data = [1.0, 2.0, 3.0]` as [`f64`] values with fifty dense attributes.
@@ -217,7 +301,9 @@ pub fn one_message(message: &[u8], widths: Widths) -> Vec<u8> {
 /// the referenced manager requires bytes beyond the end of the image.
 pub fn dense_attrs_with_unavailable_heap_manager() -> Vec<u8> {
     let length = Fixture::Dataset.build().len();
-    let bytes = Fixture::Dataset.build_with_heap_manager(Some(u64::try_from(length).unwrap()));
+    let bytes = Fixture::Dataset
+        .build_with_heap_manager(Some(u64::try_from(length).unwrap()))
+        .bytes;
     assert_eq!(bytes.len(), length);
     bytes
 }
@@ -281,7 +367,8 @@ pub enum ChecksumUpdate {
     Recompute,
 }
 
-fn dense_storage(image: &mut Image, fixture: Fixture, manager: Option<u64>) -> Message {
+/// Appends the selected owner's dense attributes and returns their Attribute Info message and layout.
+fn dense_storage(image: &mut Image, fixture: Fixture, manager: Option<u64>) -> (Message, Storage) {
     let datatype = datatype::f64_le();
     let dataspace = dataspace::scalar();
     let mut objects = Vec::new();
@@ -307,40 +394,64 @@ fn dense_storage(image: &mut Image, fixture: Fixture, manager: Option<u64>) -> M
         })
         .collect();
     records.sort_by_key(|record| bytes::u32_at(record, HASH_AT));
-    let heap_at = image.append(&heap_header(
-        0,
-        objects.len(),
-        fixture.attribute_count(),
-        manager,
-    ));
+    let heap = heap_header(0, objects.len(), fixture.attribute_count(), manager);
+    let heap_at = image.append(&heap);
+    let heap_end = heap_at + heap.len();
+    drop(heap);
+    let heap = heap_at..heap_end;
     let mut block = fractal_heap::DIRECT_BLOCK_SIGNATURE.to_vec();
     block.push(HEAP_VERSION);
     block.extend_from_slice(&(heap_at as u64).to_le_bytes());
     block.extend_from_slice(&[0; HEAP_OFFSET_WIDTH]);
     block.extend_from_slice(&objects);
     assert!(block.len() <= DIRECT_BLOCK_SIZE);
+    let direct_used = block.len();
     block.resize(DIRECT_BLOCK_SIZE, 0);
-    let block = image.append(&block) as u64;
+    let block = image.append(&block);
+    let direct = block..block + DIRECT_BLOCK_SIZE;
     image.place(
         heap_at,
-        &heap_header(block, objects.len(), fixture.attribute_count(), manager),
+        &heap_header(
+            u64::try_from(block).unwrap(),
+            objects.len(),
+            fixture.attribute_count(),
+            manager,
+        ),
     );
     let mut leaf = btree_v2::leaf(ATTRIBUTE_NAME_INDEX, &records);
+    let leaf_used = leaf.len();
     leaf.resize(BTREE_NODE_SIZE, 0);
-    let leaf = image.append(&leaf) as u64;
-    let index = image.append(
-        &btree_v2::Header::new(
-            ATTRIBUTE_NAME_INDEX,
-            ATTRIBUTE_RECORD_SIZE,
+    let leaf_at = image.append(&leaf);
+    let leaf = leaf_at..leaf_at + BTREE_NODE_SIZE;
+    let header = btree_v2::Header::new(
+        ATTRIBUTE_NAME_INDEX,
+        ATTRIBUTE_RECORD_SIZE,
+        u64::try_from(leaf_at).unwrap(),
+        fixture.attribute_count(),
+    )
+    .node_size(BTREE_NODE_SIZE as u32)
+    .build(Widths::EIGHT);
+    let index_at = image.append(&header);
+    let index_end = index_at + header.len();
+    drop(header);
+    let index = index_at..index_end;
+    (
+        Message::new(
+            MessageType::ATTRIBUTE_INFO,
+            &attribute::info(
+                Some(heap_at as u64),
+                Some(u64::try_from(index_at).unwrap()),
+                Widths::EIGHT,
+            ),
+        ),
+        Storage {
+            heap,
+            direct,
+            direct_used,
             leaf,
-            fixture.attribute_count(),
-        )
-        .node_size(BTREE_NODE_SIZE as u32)
-        .build(Widths::EIGHT),
-    ) as u64;
-    Message::new(
-        MessageType::ATTRIBUTE_INFO,
-        &attribute::info(Some(heap_at as u64), Some(index), Widths::EIGHT),
+            leaf_used,
+            index,
+        },
     )
 }
 

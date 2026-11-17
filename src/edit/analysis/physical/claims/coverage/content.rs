@@ -1,7 +1,6 @@
 //! Byte observations over a source phase's physical residual intervals.
 //!
-//! Zero prefixes, nonzero witnesses, and read failures are recorded independently of allocation
-//! ownership and permission to reuse storage.
+//! Examination outcomes are independent of allocation ownership and permission to reuse storage.
 
 use core::num::NonZeroU8;
 
@@ -51,8 +50,8 @@ impl AnalysisPhase<'_> {
 
 /// Content observations for the original residual intervals of one source phase.
 ///
-/// Original ranges, zero prefixes, and terminal outcomes are recorded per interval. Allocation
-/// ownership and reuse permission require separate evidence.
+/// Original physical ranges and terminal outcomes are recorded per interval. Allocation ownership
+/// and reuse permission require separate evidence.
 pub(in crate::edit) struct ResidualContents {
     intervals: Vec<ResidualContent>,
 }
@@ -90,24 +89,19 @@ impl ResidualContents {
     }
 }
 
-/// An original physical interval with its verified zero prefix and examination outcome.
+/// An original physical interval with its examination outcome.
 ///
-/// Examination stops at the first nonzero byte or failed read. The remaining suffix can include
-/// bytes fetched in the final read but left unexamined. Source request counts include failed
-/// attempts. OS and device transfers require separate measurement.
+/// Examination stops at the first nonzero byte or failed read.
 pub(in crate::edit) struct ResidualContent {
     range: FileRange,
-    zero_prefix: FileRange,
-    unexamined: FileRange,
+
     outcome: ResidualOutcome,
-    read_calls: u64,
-    requested_bytes: u64,
 }
 
 impl ResidualContent {
     /// Examines `range` through its first nonzero byte or failed read.
     ///
-    /// After a read failure, records only the zero prefix established by completed reads.
+    /// Examines a buffer only after its read succeeds.
     ///
     /// # Errors
     ///
@@ -119,24 +113,18 @@ impl ResidualContent {
         scratch: &mut [u8; READ_BUFFER_LEN],
     ) -> Result<Self, FormatError> {
         let mut cursor = range.start();
-        let mut read_calls = 0;
-        let mut requested_bytes = 0;
-        while cursor < range.end() {
+
+        let outcome = loop {
+            if cursor >= range.end() {
+                break ResidualOutcome::AllZero;
+            }
             let length = (range.end().get() - cursor.get())
                 .min(scratch.len().to_u64())
                 .to_usize()?;
             let buffer = &mut scratch[..length];
-            read_calls += 1;
-            requested_bytes += length.to_u64();
+
             if let Err(error) = source.read_at(cursor, buffer) {
-                return Self::finish(
-                    range,
-                    cursor,
-                    cursor,
-                    ResidualOutcome::ReadFailed(error),
-                    read_calls,
-                    requested_bytes,
-                );
+                break ResidualOutcome::ReadFailed(error);
             }
             if let Some((index, value)) = buffer
                 .iter()
@@ -144,48 +132,11 @@ impl ResidualContent {
                 .find_map(|(index, &byte)| NonZeroU8::new(byte).map(|value| (index, value)))
             {
                 let address = cursor.checked_add(index.to_u64())?;
-                return Self::finish(
-                    range,
-                    address,
-                    address.checked_add(1)?,
-                    ResidualOutcome::NonZero { address, value },
-                    read_calls,
-                    requested_bytes,
-                );
+                break ResidualOutcome::NonZero { address, value };
             }
             cursor = cursor.checked_add(length.to_u64())?;
-        }
-        Self::finish(
-            range,
-            cursor,
-            cursor,
-            ResidualOutcome::AllZero,
-            read_calls,
-            requested_bytes,
-        )
-    }
-
-    /// Records the zero prefix and unexamined suffix within `range`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::OffsetOverflow`] if an interval end exceeds [`u64::MAX`].
-    fn finish(
-        range: FileRange,
-        zero_end: PhysicalAddress,
-        remaining: PhysicalAddress,
-        outcome: ResidualOutcome,
-        read_calls: u64,
-        requested_bytes: u64,
-    ) -> Result<Self, FormatError> {
-        Ok(Self {
-            range,
-            zero_prefix: FileRange::new(range.start(), zero_end.get() - range.start().get())?,
-            unexamined: FileRange::new(remaining, range.end().get() - remaining.get())?,
-            outcome,
-            read_calls,
-            requested_bytes,
-        })
+        };
+        Ok(Self { range, outcome })
     }
 
     /// Returns the original physical interval.
@@ -193,31 +144,9 @@ impl ResidualContent {
         self.range
     }
 
-    /// Returns the prefix established as zero by successful reads.
-    pub(in crate::edit) fn zero_prefix(&self) -> FileRange {
-        self.zero_prefix
-    }
-
-    /// Returns the suffix excluded from the zero prefix and nonzero witness.
-    ///
-    /// Bytes in this suffix can have been fetched in the final read.
-    pub(in crate::edit) fn unexamined(&self) -> FileRange {
-        self.unexamined
-    }
-
     /// Borrows the reason examination ended for this interval.
     pub(in crate::edit) fn outcome(&self) -> &ResidualOutcome {
         &self.outcome
-    }
-
-    /// Returns the number of source read requests, including failed attempts.
-    pub(in crate::edit) fn read_calls(&self) -> u64 {
-        self.read_calls
-    }
-
-    /// Returns the total buffer length requested from the source, including failed attempts.
-    pub(in crate::edit) fn requested_bytes(&self) -> u64 {
-        self.requested_bytes
     }
 }
 

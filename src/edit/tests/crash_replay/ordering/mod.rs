@@ -7,6 +7,7 @@ use std::path::Path;
 
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use rstest::rstest;
+use test_util::__private::durability::FaultSchedule;
 use test_util::disk_log;
 use test_util::disk_log::DiskOp;
 use test_util::disk_log::FailurePoint;
@@ -292,35 +293,27 @@ fn actual_io_failure_prevents_dependent_reference_publication(
     fs::write(&path, &observed.base).unwrap();
     let mut engine = open(&path, MemoryStrategy::Bounded, policy, Buffering::Session);
     disk_log::start();
-    match failure {
+    let schedule = match failure {
         Failure::Content(point) | Failure::Publication(point) => {
-            let completed = observed.trace.events[..target]
-                .iter()
-                .filter(|event| matches!(event, IoEvent::Synchronize { .. }))
-                .count();
-            disk_log::fail_sync_after(completed, point);
+            FaultSchedule::synchronize(&observed.trace, target, point)
         }
-        Failure::Write(prefix) => {
-            let completed = observed.trace.events[..target]
-                .iter()
-                .filter(|event| matches!(event, IoEvent::Write { .. }))
-                .count();
-            disk_log::fail_write_after(
-                completed,
-                match prefix {
-                    WriteFailure::After => usize::MAX,
-                    WriteFailure::Before => 0,
-                    WriteFailure::Partial => {
-                        let IoEvent::Write { requested, .. } = observed.trace.events[target] else {
-                            panic!("the publication target is a write")
-                        };
-                        assert!(requested > 1);
-                        requested / 2
-                    }
-                },
-            );
-        }
-    }
+        Failure::Write(prefix) => FaultSchedule::write(
+            &observed.trace,
+            target,
+            match prefix {
+                WriteFailure::After => usize::MAX,
+                WriteFailure::Before => 0,
+                WriteFailure::Partial => {
+                    let IoEvent::Write { requested, .. } = observed.trace.events[target] else {
+                        panic!("the publication target is a write")
+                    };
+                    assert!(requested > 1);
+                    requested / 2
+                }
+            },
+        ),
+    };
+    schedule.inject();
     let values: Vec<_> = if deferred {
         (0..4).collect()
     } else {
@@ -346,6 +339,7 @@ fn actual_io_failure_prevents_dependent_reference_publication(
         }
     );
     let trace = disk_log::finish();
+    schedule.assert_failed(&trace);
     disk_log::clear_failures();
     assert_eq!(
         trace.events.get(target).map(IoEvent::outcome),

@@ -51,6 +51,7 @@ use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
 use crate::edit::attributes::DenseAttrSet;
+use crate::edit::attributes::test_util as attribute_test_util;
 use crate::edit::commit::plan::ReferenceTarget;
 use crate::edit::copy;
 use crate::edit::copy::CopyLink;
@@ -1253,7 +1254,7 @@ fn a_truncated_prefix_with_optional_blocks_is_rejected(#[case] cut: usize) {
 #[test]
 fn a_new_compact_attribute_takes_the_next_creation_index() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1)], 2);
-    let out = edit::attributes::edit_compact_region(
+    let out = attribute_test_util::edit_compact_region(
         &region,
         &[edit::attributes::AttrOp::Set {
             name: "gamma".into(),
@@ -1350,7 +1351,7 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
         props,
     );
 
-    let out = edit::attributes::edit_compact_region(
+    let out = attribute_test_util::edit_compact_region(
         &source,
         &[edit::attributes::AttrOp::Set {
             name: "beta".into(),
@@ -1380,10 +1381,10 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
 fn an_overwritten_compact_attribute_keeps_its_creation_index() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1)], 2);
     assert_eq!(
-        edit::attributes::attr_creation_index(&region, "alpha").unwrap(),
+        attribute_test_util::attr_creation_index(&region, "alpha").unwrap(),
         Some(0)
     );
-    let out = edit::attributes::edit_compact_region(
+    let out = attribute_test_util::edit_compact_region(
         &region,
         &[edit::attributes::AttrOp::Set {
             name: "alpha".into(),
@@ -1411,7 +1412,7 @@ fn an_overwritten_compact_attribute_keeps_its_creation_index() {
 #[test]
 fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1), ("gamma", 2)], 3);
-    let after = edit::attributes::edit_compact_region(
+    let after = attribute_test_util::edit_compact_region(
         &region,
         &[edit::attributes::AttrOp::Remove {
             name: "gamma".into(),
@@ -1431,7 +1432,7 @@ fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
         "the highest index still in use is 1, but the counter is 3"
     );
 
-    let out = edit::attributes::edit_compact_region(
+    let out = attribute_test_util::edit_compact_region(
         &after,
         &[edit::attributes::AttrOp::Set {
             name: "delta".into(),
@@ -1440,7 +1441,7 @@ fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
     )
     .unwrap();
     assert_eq!(
-        edit::attributes::attr_creation_index(&out, "delta").unwrap(),
+        attribute_test_util::attr_creation_index(&out, "delta").unwrap(),
         Some(3)
     );
 }

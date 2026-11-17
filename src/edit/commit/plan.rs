@@ -3,6 +3,7 @@
 //! Planning reads the current file and borrows the staged inputs. The prepared operations
 //! contain the structural decisions needed during placement, where allocation and I/O can fail.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
 use std::vec;
@@ -39,25 +40,13 @@ use crate::type_builders::ObjectRefTarget;
 
 pub(in crate::edit) use counts::CountProjectionError;
 pub(in crate::edit) use counts::CountProjectionProof;
+use counts::CountedPreparation;
 pub(super) use counts::PreparedTreeCounts;
+use counts::TreeCountInputs;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "count projections are exercised by private owner tests"
-    )
-)]
 mod counts;
 
-#[expect(
-    dead_code,
-    reason = "prepared edit inventories have no retirement consumer"
-)]
 pub(super) mod inventory;
-
-#[cfg(test)]
-mod tests;
 
 /// A commit plan paired with owned application inputs from the same staged set.
 ///
@@ -70,30 +59,6 @@ pub(super) struct PreparedCommit {
 }
 
 impl PreparedCommit {
-    /// Plans edits with count-eligible retirement and checked replacement count records.
-    ///
-    /// Returns [`CommitPreparation::Rejected`] with the original staged inputs on failure.
-    /// In-place-only plans skip count discovery. Tree plans retain original count outcomes and
-    /// protected source updates.
-    pub(super) fn prepare_counted(
-        engine: &mut WriteEngine,
-        staged: StagedEdits,
-    ) -> CommitPreparation {
-        let plan = engine
-            .plan_commit_inner(&staged, false, true)
-            .map(|(plan, _)| plan);
-        Self::from_plan(plan, staged)
-    }
-
-    /// Plans a commit, returning the original staged inputs on rejection.
-    ///
-    /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs
-    /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
-    /// and the preparation error.
-    pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
-        Self::from_plan(engine.plan_commit(&staged), staged)
-    }
-
     /// Returns the plan with the application inputs used to prepare it.
     pub(super) fn into_parts(self) -> (CommitPlan, StagedApply, OverwritePayloads) {
         let Self {
@@ -103,34 +68,6 @@ impl PreparedCommit {
         } = self;
         (plan, staged, overwrites)
     }
-
-    fn from_plan(plan: Result<CommitPlan, Error>, staged: StagedEdits) -> CommitPreparation {
-        match plan {
-            Ok(mut plan) => {
-                let (staged, writes) = staged.into_apply();
-                let mut overwrites = OverwritePayloads { writes };
-                plan.release_chunk_inputs(&mut overwrites);
-                CommitPreparation::Prepared(Self {
-                    plan,
-                    staged,
-                    overwrites,
-                })
-            }
-            Err(error) => CommitPreparation::Rejected { staged, error },
-        }
-    }
-}
-
-/// The result of commit preflight, with ownership for application or retry.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "returning rejected staging to the engine requires no heap allocation"
-)]
-pub(super) enum CommitPreparation {
-    /// A plan paired with the owned inputs needed for application.
-    Prepared(PreparedCommit),
-    /// The original staged inputs and the error that prevented preparation.
-    Rejected { staged: StagedEdits, error: Error },
 }
 
 /// Stores prepared writes before application consumes the staged inputs.
@@ -192,7 +129,7 @@ struct DatasetEdits {
     inplace_writes: Vec<InPlaceWrite>,
     moving_writes: Vec<DatasetRelocation>,
     write_targets: Vec<ObjectPathBuf>,
-    /// Collection candidates from original dataset attributes.
+    /// Collection candidates from original dataset attributes and overwritten values.
     collections: CollectionCandidates,
 }
 
@@ -226,11 +163,51 @@ pub(super) struct GroupHeaders {
     pub(super) children: BTreeMap<ObjectPathBuf, Vec<ChildLink>>,
 }
 
+impl GroupHeaders {
+    /// Copies group paths in key order with empty superseded-header and child-link collections.
+    fn new(nodes: &BTreeMap<ObjectPathBuf, Node>) -> Self {
+        Self {
+            keys: nodes.keys().cloned().collect(),
+            superseded_addrs: Vec::new(),
+            children: BTreeMap::new(),
+        }
+    }
+
+    /// Records each child's link under its parent in path order.
+    ///
+    /// Uses [`ChildLink::Insert`] for new groups and [`ChildLink::Replace`] for existing groups.
+    /// The root has no parent link.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if [`Self::children`] is nonempty.
+    fn collect_children(&mut self, nodes: &BTreeMap<ObjectPathBuf, Node>) {
+        debug_assert!(self.children.is_empty());
+        for (key, node) in nodes {
+            if let Some((parent, leaf)) = key.split_leaf() {
+                let child = if node.is_new {
+                    ChildLink::Insert {
+                        path: key.clone(),
+                        leaf,
+                    }
+                } else {
+                    ChildLink::Replace {
+                        path: key.clone(),
+                        leaf,
+                    }
+                };
+                self.children.entry(parent).or_default().push(child);
+            }
+        }
+    }
+}
+
 /// Stores checked tree edits and reclamation records before object placement.
 ///
 /// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
-    /// Original count outcomes and checked source updates, absent for ordinary preparation.
+    /// Application count updates and direct-plan reference roots for deletions or same-file copies.
+    /// Absent for tree plans without either operation.
     pub(super) counts: Option<PreparedTreeCounts>,
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
@@ -238,7 +215,7 @@ pub(super) struct PreparedTree {
     pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
     pub(super) deleted_free: Vec<(FileRange, FreeClass)>,
-    /// Attribute and deletion candidates awaiting reference analysis from the replacement root.
+    /// Attribute, overwrite, and deletion candidates awaiting replacement-root reference analysis.
     pub(super) collection_candidates: CollectionCandidates,
     /// Prepared element-reference patches, indexed by the containing dataset's path.
     pub(super) references: BTreeMap<ObjectPathBuf, Vec<PreparedReference>>,
@@ -422,51 +399,28 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Prepares edits while retaining the staged inputs for retry on rejection.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] if an edit cannot
-    /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
-    /// error if the current file or a staged operation cannot be inspected.
-    fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
-        self.plan_commit_with_inventory(staged, false)
-            .map(|(plan, _)| plan)
-    }
-
     /// Prepares edits with optional original observations from the same source phase.
     ///
-    /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
-    /// passes false. Count and ownership outcomes are retained in [`inventory::OriginalEdits`],
-    /// and predecessor outcomes in [`inventory::dispositions::ReconstructionDispositions`].
-    /// Captures original storage exclusions and reclamation spans with the same tree inputs.
+    /// Prepares counts for deletions or same-file copies before selecting original observations.
+    /// Returns numeric in-place plans before count or original-observation discovery. Returns
+    /// count-preparation errors before capturing original observations.
+    ///
+    /// Merges candidates from overwritten values, replaced or removed attributes, and all
+    /// physical deletion targets independently of count-eligible retirement. Collects original
+    /// observations for tree plans when [`CollectionCandidates::is_empty`] returns `false`.
+    /// Retains additional count and ownership qualification outcomes in
+    /// [`inventory::OriginalEdits`] and predecessor outcomes in
+    /// [`inventory::dispositions::ReconstructionDispositions`]. Captures original storage
+    /// exclusions and reclamation spans with the same tree inputs.
     ///
     /// # Errors
     ///
-    /// Returns the planning errors described by [`Self::plan_commit`].
+    /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] for unsupported or
+    /// conflicting edits, and count-preparation errors from [`CountedPreparation::prepare`].
+    /// Other read, parsing, preparation, candidate-discovery, and merge errors propagate.
     fn plan_commit_with_inventory(
         &mut self,
         staged: &StagedEdits,
-        capture: bool,
-    ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
-        self.plan_commit_inner(staged, capture, false)
-    }
-
-    /// Prepares edits with independent choices for original observations and count projections.
-    ///
-    /// With `counted`, applies local tree-count projections and uses eligible deletion allocations
-    /// for reference screening and retirement. Incomplete count evidence withholds deletion
-    /// allocations and collection candidates. With `capture`, retains original observations from
-    /// the same source phase. In-place-only plans skip both operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Self::plan_commit`] and [`PreparedTreeCounts::prepare`].
-    fn plan_commit_inner(
-        &mut self,
-        staged: &StagedEdits,
-        capture: bool,
-        counted: bool,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         self.preflight_narrow_references()?;
@@ -480,13 +434,19 @@ impl WriteEngine {
         self.prepare_value_writes(staged, &mut edits, &mut analysis)?;
         self.prepare_appends(staged, &mut edits, &mut analysis)?;
         self.prepare_dataset_attributes(staged, &mut edits, &mut analysis)?;
+        edits
+            .collections
+            .extend(analysis.overwrite_collections(staged)?)?;
         let DatasetEdits {
             inplace_writes,
             moving_writes,
             write_targets,
             mut collections,
         } = edits;
-        if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
+        if moving_writes.is_empty()
+            && staged.scope() == StagedScope::Datasets
+            && collections.is_empty()
+        {
             return Ok((CommitPlan::InPlace(inplace_writes), None));
         }
         let mut moved_headers = moving_writes
@@ -506,8 +466,9 @@ impl WriteEngine {
                 .iter()
                 .map(|&(_, address)| address.header_address()),
         );
-        let mut counts = counted
-            .then(|| PreparedTreeCounts::prepare(self, &mut analysis, &mut nodes, staged))
+        let counted = !staged.deletes().is_empty() || !staged.copies().is_empty();
+        let counts = counted
+            .then(|| CountedPreparation::prepare(self, &mut analysis, &mut nodes, staged))
             .transpose()?;
         let TreeReferences {
             deleted_free,
@@ -521,17 +482,30 @@ impl WriteEngine {
             &write_targets,
             &headers,
             moved_headers,
-            counts.as_mut(),
+            counts.as_ref(),
             &mut analysis,
         )?;
         collections.extend(deleted_collections)?;
-        if matches!(counts, Some(PreparedTreeCounts::Unavailable)) {
-            collections = CollectionCandidates::default();
-        }
+        let targets = analysis
+            .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
+            .targets();
+        collections.extend(analysis.deleted_collections(&targets))?;
+        let capture = !collections.is_empty();
         let mut headers = headers;
         headers
             .keys
             .sort_by_key(|path| std::cmp::Reverse(path.len()));
+        let (counts, original_counts, deleted_free) = match counts {
+            Some(counts) => {
+                let TreeCountInputs {
+                    counts,
+                    original,
+                    retirement,
+                } = counts.into_tree(capture);
+                (Some(counts), original, retirement)
+            }
+            None => (None, None, deleted_free),
+        };
         let mut tree = PreparedTree {
             counts,
             groups: nodes,
@@ -543,7 +517,13 @@ impl WriteEngine {
             references,
         };
         let inventory = capture.then(|| {
-            inventory::OriginalPreparation::collect(self, &mut analysis, &mut tree, staged)
+            inventory::OriginalPreparation::collect(
+                self,
+                &mut analysis,
+                &mut tree,
+                staged,
+                original_counts,
+            )
         });
         if invalidates_reference_proof {
             self.proved_free_of_references = false;
@@ -942,8 +922,7 @@ impl WriteEngine {
         analysis: &mut AnalysisPhase<'_>,
         collections: &mut CollectionCandidates,
     ) -> Result<GroupHeaders, Error> {
-        let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
-        let mut superseded_addrs: Vec<(ObjectPathBuf, ObjectId)> = Vec::new();
+        let mut headers = GroupHeaders::new(nodes);
         for (key, node) in nodes.iter_mut() {
             if node.is_new {
                 node.prepared.region = group::fresh_group_region(self.context.widths())?;
@@ -978,15 +957,7 @@ impl WriteEngine {
                         }
                     }
                 }
-                let inspected = self.inspect_group(addr)?;
-                node.prepared.dense_links = inspected.links.info().fractal_heap_address.is_some();
-                let (region, link_names) = inspected.into_compact()?;
-                superseded_addrs.push((key.clone(), addr));
-                node.prepared.region = region;
-                node.prepared.replaces = Some(ReplacedHeader::Header(
-                    analysis.reconstruction_source(self, addr)?,
-                ));
-                node.existing_links = link_names;
+                node.capture_original(self, analysis, &mut headers, key, addr)?;
             }
         }
 
@@ -1017,29 +988,8 @@ impl WriteEngine {
             }
         }
 
-        let mut children: BTreeMap<ObjectPathBuf, Vec<ChildLink>> = BTreeMap::new();
-        for key in &keys {
-            if let Some((parent, leaf)) = key.split_leaf() {
-                let child = if nodes[key].is_new {
-                    ChildLink::Insert {
-                        path: key.clone(),
-                        leaf,
-                    }
-                } else {
-                    ChildLink::Replace {
-                        path: key.clone(),
-                        leaf,
-                    }
-                };
-                children.entry(parent).or_default().push(child);
-            }
-        }
-
-        Ok(GroupHeaders {
-            keys,
-            superseded_addrs,
-            children,
-        })
+        headers.collect_children(nodes);
+        Ok(headers)
     }
     fn prepare_tree_references(
         &self,
@@ -1049,7 +999,7 @@ impl WriteEngine {
         write_targets: &[ObjectPathBuf],
         headers: &GroupHeaders,
         moved_headers: Vec<PhysicalAddress>,
-        counts: Option<&mut PreparedTreeCounts>,
+        counts: Option<&CountedPreparation>,
         analysis: &mut AnalysisPhase<'_>,
     ) -> Result<TreeReferences, Error> {
         let GroupHeaders {
@@ -1066,21 +1016,22 @@ impl WriteEngine {
         self.check_group_additions(nodes, keys, children, &datasets_by_group)?;
         let delete_targets = staged.deletes();
         let (deleted_free, deleted_collections) = match counts {
-            Some(PreparedTreeCounts::Complete {
-                retirement,
-                eligible_owners,
-                ..
-            }) => (
-                std::mem::take(retirement),
-                analysis.deleted_collections(eligible_owners),
+            Some(CountedPreparation::Complete { original, .. }) => (
+                Cow::Borrowed(original.storage().allocations()),
+                analysis.deleted_collections(original.eligible_owners()),
             ),
-            Some(PreparedTreeCounts::Unavailable) => (Vec::new(), CollectionCandidates::default()),
+            Some(CountedPreparation::Unavailable) => {
+                (Cow::Borrowed(&[][..]), CollectionCandidates::default())
+            }
             None => {
                 let mut deleted_free = Vec::new();
                 let deleted_targets = analysis
                     .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
                     .collect_free_spans(&mut deleted_free);
-                (deleted_free, analysis.deleted_collections(&deleted_targets))
+                (
+                    Cow::Owned(deleted_free),
+                    analysis.deleted_collections(&deleted_targets),
+                )
             }
         };
         let for_copied = InvalidatedAddresses {
@@ -1154,7 +1105,10 @@ impl WriteEngine {
         }
 
         Ok(TreeReferences {
-            deleted_free,
+            deleted_free: match deleted_free {
+                Cow::Borrowed(_) => Vec::new(),
+                Cow::Owned(retirement) => retirement,
+            },
             deleted_collections,
             references,
             invalidates_reference_proof,
@@ -1471,6 +1425,41 @@ impl Node {
             prepared,
         } = self;
         prepared
+    }
+
+    /// Reads the original group and binds its header replacement to `phase`.
+    ///
+    /// Records the link-storage form, compact message region, superseded identity at `path`,
+    /// and existing link names. Preserves staged deletes, copies, writes, and attributes.
+    /// The caller checks incoming links separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`WriteEngine::inspect_group`], [`group::GroupInfo::into_compact`],
+    /// or [`AnalysisPhase::reconstruction_source`]. Retains assignments completed before an error.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the node already has a predecessor.
+    fn capture_original(
+        &mut self,
+        engine: &WriteEngine,
+        phase: &mut AnalysisPhase<'_>,
+        headers: &mut GroupHeaders,
+        path: &ObjectPathBuf,
+        object: ObjectId,
+    ) -> Result<(), Error> {
+        debug_assert!(self.prepared.replaces.is_none());
+        let inspected = engine.inspect_group(object)?;
+        self.prepared.dense_links = inspected.links.info().fractal_heap_address.is_some();
+        let (region, link_names) = inspected.into_compact()?;
+        headers.superseded_addrs.push((path.clone(), object));
+        self.prepared.region = region;
+        self.prepared.replaces = Some(ReplacedHeader::Header(
+            phase.reconstruction_source(engine, object)?,
+        ));
+        self.existing_links = link_names;
+        Ok(())
     }
 }
 

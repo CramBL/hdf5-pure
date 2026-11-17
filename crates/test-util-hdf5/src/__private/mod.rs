@@ -9,12 +9,28 @@ use hdf5_pure_format::__private::ObjectHeader;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
 
+pub use crate::global_heap_fixture::allocator::AllocatorSource;
+#[cfg(feature = "__hdf5-1.10")]
+pub use crate::global_heap_fixture::anonymous_count::AnonymousCountSource;
+pub use crate::global_heap_fixture::committed_type::CommittedTypeTarget;
+pub use crate::global_heap_fixture::durability::FailureSource;
+#[cfg(feature = "__hdf5-1.10")]
+pub use crate::global_heap_fixture::durability::native::write_source as write_heap_failure_source;
+pub use crate::global_heap_fixture::numeric_owner::NumericOwnerSource;
+pub use crate::global_heap_fixture::residual::ResidualGroupSource;
+pub use crate::global_heap_fixture::retained_continuation::RetainedContinuationSource;
+
+pub use crate::global_heap_fixture::envelope::Damage as EnvelopeDamage;
+pub use crate::global_heap_fixture::envelope::EnvelopeSource;
+pub use crate::global_heap_fixture::envelope::OPAQUE_BYTES as ENVELOPE_OPAQUE_BYTES;
+
 #[cfg(feature = "__hdf5-1.10")]
 pub mod array_index;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod c_object;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod creation_holes;
+pub mod fragmented_creation;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod heap_members;
 #[cfg(feature = "__hdf5-1.10")]

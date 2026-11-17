@@ -11,8 +11,6 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
 use hdf5_pure_space::__private as free_space;
-#[cfg(test)]
-use hdf5_pure_space::__private::ReservationWork;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;
 use hdf5_pure_space::__private::{
@@ -31,8 +29,6 @@ use crate::edit::analysis::ProtectedCounts;
 use crate::edit::context::SuperblockPublication;
 use crate::edit::free_snapshot::{FlatProjection, FlatTailLayout};
 use crate::edit::object_header;
-#[cfg(test)]
-use crate::edit::observations;
 use crate::edit::retirement::{PendingRootFrees, RootRetirement};
 use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, WriteEngine};
 use crate::edit::{PersistState, paged_persistence};
@@ -110,7 +106,7 @@ impl WriteEngine {
                     .before_publication(self, pending)
                     .map_err(Error::from)?
                     .at_end(end)
-                    .map_err(|failure| Error::from(failure.error))?
+                    .map_err(Error::from)?
                     .with_ordered_counts(relocations, complete)
             }
             None => self.publish_pending_tree_with_completion(pending, relocations, complete),
@@ -837,12 +833,6 @@ impl WriteEngine {
         }
         let new_old_blocks = vec![region];
 
-        #[cfg(test)]
-        observations::record_width_reservations(
-            1,
-            ReservationWork::default(),
-            final_eof.get().saturating_sub(self.image.len()),
-        );
         // The extension and manager blocks remain unreferenced until superblock publication.
         self.write_tail_block(region, ext_addr, &ext_oh)?;
         for block in plan.encode(region.end())? {
@@ -962,8 +952,6 @@ impl WriteEngine {
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
-            #[cfg(test)]
-            observations::record_allocation_probe();
             let allocation = if let Some(limit) = limit {
                 self.space
                     .allocate_flat_below(ByteLength::new(proposed), limit)
@@ -1191,19 +1179,10 @@ impl WriteEngine {
         }
 
         if reused {
-            #[cfg(test)]
             let reserved = {
                 let mut batch = self.space.reservation_batch(1);
-                observations::record_allocation_probe();
-                let reserved = batch.reserve(tail.reservation_request());
-                observations::record_width_reservations(1, batch.work(), 0);
-                reserved
+                batch.reserve(tail.reservation_request())
             };
-            #[cfg(not(test))]
-            let reserved = self
-                .space
-                .reservation_batch(1)
-                .reserve(tail.reservation_request());
             if reserved.as_ref().map(|reservation| reservation.extent()) != Some(tail.allocation) {
                 return Err(FormatError::Internal(
                     "a PAGE tail reservation differs from its pure plan".into(),
@@ -1211,12 +1190,6 @@ impl WriteEngine {
                 .into());
             }
         } else {
-            #[cfg(test)]
-            observations::record_width_reservations(
-                1,
-                ReservationWork::default(),
-                final_eof.get().saturating_sub(self.image.len()),
-            );
             self.begin_page(PageType::Meta)?;
         }
         // Retain complete owned blocks for reclamation, excluding admitted free gaps.
@@ -1505,9 +1478,6 @@ mod tests {
     use crate::address::{StoredAddress, StoredAddressExt};
     use crate::free_space_manager;
     use crate::width::FormatWidths;
-
-    mod completion;
-    mod storage;
 
     #[rstest]
     #[case::empty(1000, 0, 8, PublicationPurpose::Allocation, None)]

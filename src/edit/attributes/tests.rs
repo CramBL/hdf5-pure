@@ -8,6 +8,7 @@ use super::{AttrOp, EditedAttrs};
 use crate::attribute::AttributeMessage;
 #[cfg(feature = "checksum")]
 use crate::edit::WriteEngine;
+use crate::edit::attributes::test_util as attribute_test_util;
 use crate::edit::object_header::OhRegion;
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
@@ -86,12 +87,12 @@ fn compact_overwrite_preserves_storage_above_the_stored_maximum() {
     );
     region.push(
         MessageType::ATTRIBUTE,
-        &super::encode_attr_body("kept", &AttrValue::I64(2)).unwrap(),
+        &attribute_test_util::encode_attr_body("kept", &AttrValue::I64(2)).unwrap(),
     );
     let kept = region.to_vec();
     region.push(
         MessageType::ATTRIBUTE,
-        &super::encode_attr_body("changed", &AttrValue::I64(3)).unwrap(),
+        &attribute_test_util::encode_attr_body("changed", &AttrValue::I64(3)).unwrap(),
     );
     let operation = AttrOp::Set {
         name: "changed".to_string(),

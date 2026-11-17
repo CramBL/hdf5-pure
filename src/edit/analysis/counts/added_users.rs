@@ -47,37 +47,6 @@ impl<'source> AnalysisPhase<'source> {
         Ok(Some(PhaseCopyUsers { source, users }))
     }
 
-    /// Counts users across the supplied actual copy emissions in this phase.
-    ///
-    /// The caller includes every emission once. Repeating a bound inventory counts another
-    /// emission of that copy. These multiplicities are separate from distinct original users.
-    /// Returns `None` at the first incomplete inventory and drops the accumulated prefix.
-    /// Empty inventories are neutral, including inventories interpreted in another phase.
-    ///
-    /// Retains one ordered map of physical targets. Each consumed inventory entry requires a
-    /// checked address conversion and an ordered-map lookup. Inventory parsing and copy-model
-    /// storage have separate costs. Processing stops at the first incomplete inventory or error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`CopyUsersUnion::add`]. The accumulated prefix is dropped on error.
-    pub(in crate::edit) fn added_copy_users<'copy>(
-        &self,
-        copies: impl IntoIterator<Item = Option<&'copy PhaseCopyUsers<'copy, 'source>>>,
-    ) -> Result<Option<AddedCopyUsers<'source>>, CopyUsersError>
-    where
-        'source: 'copy,
-    {
-        let mut union = CopyUsersUnion::new();
-        for copy in copies {
-            let Some(next) = union.add(self, copy)? else {
-                return Ok(None);
-            };
-            union = next;
-        }
-        Ok(Some(union.finish()))
-    }
-
     fn copy_user_root(&self) -> Result<ObjectId, FormatError> {
         self.root.map_or_else(
             || {
@@ -209,11 +178,6 @@ impl AddedCopyUsers<'_> {
         }))
     }
 
-    /// Returns the associated physical root, or `None` for empty counts.
-    pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
-        self.source.as_ref().map(|source| source.root)
-    }
-
     /// Returns positive multiplicities in physical object-header address order.
     pub(in crate::edit) fn users(&self) -> impl Iterator<Item = (ObjectId, NonZeroU64)> + '_ {
         self.users.iter().map(|(&object, &count)| (object, count))
@@ -339,6 +303,3 @@ pub(in crate::edit) enum CopyUsersError {
         actual: ObjectId,
     },
 }
-
-#[cfg(test)]
-mod tests;

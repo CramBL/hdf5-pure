@@ -5,6 +5,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use rstest::rstest;
+use test_util::__private::durability::FaultSchedule;
 use test_util::allocation_oracle::AllocationKind;
 use test_util::allocation_oracle::Coverage;
 use test_util::disk_log;
@@ -128,7 +129,8 @@ pub(super) fn failure_on(
         .map(|value| i32::try_from(value).unwrap())
         .collect::<Vec<_>>();
     disk_log::start();
-    fault.install(&workload.events, event);
+    let schedule = fault.schedule(&workload.events, event);
+    schedule.inject();
     let result = action.run(&file, &values, fault.known_unpublished());
     if action.drops() {
         result.unwrap();
@@ -138,9 +140,8 @@ pub(super) fn failure_on(
     disk_log::clear_failures();
     let recording = disk_log::finish();
     assert_failed(
-        &workload.events,
         &recording,
-        event,
+        &schedule,
         fault,
         u64::try_from(workload.base.len()).unwrap(),
     );
@@ -442,24 +443,19 @@ impl Fault {
         matches!(self, Self::Content(_) | Self::ContentSync(_))
     }
 
-    fn install(self, events: &[IoEvent], event: usize) {
+    /// Selects this fault's write prefix or synchronization failure point.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `event` is absent or the event kind does not match this fault.
+    fn schedule(self, events: &[IoEvent], event: usize) -> FaultSchedule<'_> {
         match self {
             Self::ContentSync(point) | Self::OwnershipSync(point) | Self::FinalSync(point) => {
-                disk_log::fail_sync_after(
-                    events[..event]
-                        .iter()
-                        .filter(|event| matches!(event, IoEvent::Synchronize { .. }))
-                        .count(),
-                    point,
-                )
+                FaultSchedule::synchronize_events(events, event, point)
             }
-            Self::Content(_) | Self::Ownership(_) => disk_log::fail_write_after(
-                events[..event]
-                    .iter()
-                    .filter(|event| matches!(event, IoEvent::Write { .. }))
-                    .count(),
-                self.prefix(&events[event]),
-            ),
+            Self::Content(_) | Self::Ownership(_) => {
+                FaultSchedule::write_events(events, event, self.prefix(&events[event]))
+            }
         }
     }
 
@@ -516,48 +512,26 @@ fn reconstruct(base: &[u8], recording: &Recording, expected: &[u8]) {
     assert_eq!(image, expected);
 }
 
+/// Checks the scheduled failure and permitted cleanup attempts.
+///
+/// Allows successful resizes to `original_length` after a failure before ownership publication.
+/// Otherwise requires the failed event to be the final attempt.
+///
+/// # Panics
+///
+/// Panics if the scheduled failure or subsequent attempts differ from these requirements.
 fn assert_failed(
-    events: &[IoEvent],
     failed: &Recording,
-    event: usize,
+    schedule: &FaultSchedule<'_>,
     fault: Fault,
     original_length: u64,
 ) {
-    assert_eq!(&failed.events[..event], &events[..event]);
-    assert_eq!(
-        failed.events[event].outcome(),
-        IoOutcome::Failed(ErrorKind::Other)
-    );
+    schedule.assert_failed(failed);
+    let event = schedule.event();
     if fault.known_unpublished() {
         assert!(failed.events[event + 1..].iter().all(|event| matches!(event, IoEvent::Resize { length, outcome: IoOutcome::Succeeded, .. } if *length == original_length)));
     } else {
         assert_eq!(failed.events.len(), event + 1);
-    }
-    match (&failed.events[event], &events[event]) {
-        (
-            IoEvent::Write {
-                offset,
-                requested,
-                written,
-                ..
-            },
-            IoEvent::Write {
-                offset: expected_offset,
-                requested: expected_length,
-                ..
-            },
-        ) => {
-            assert_eq!((offset, requested), (expected_offset, expected_length));
-            assert_eq!(*written, fault.prefix(&events[event]));
-        }
-        (
-            IoEvent::Synchronize { kind, .. },
-            IoEvent::Synchronize {
-                kind: expected_kind,
-                ..
-            },
-        ) => assert_eq!(kind, expected_kind),
-        _ => panic!("control and failed operations differ"),
     }
 }
 
@@ -692,14 +666,14 @@ fn terminal_failure(operation: Terminal, policy: SyncPolicy, fault: Fault, clean
     let dataset = file.dataset("d").unwrap();
     let layout = dataset.data_layout().unwrap();
     disk_log::start();
-    fault.install(&workload.events, event);
+    let schedule = fault.schedule(&workload.events, event);
+    schedule.inject();
     assert_io(operation.run(&file).unwrap_err(), fault.synchronizes());
     disk_log::clear_failures();
     let recording = disk_log::finish();
     assert_failed(
-        &workload.events,
         &recording,
-        event,
+        &schedule,
         fault,
         u64::try_from(workload.base.len()).unwrap(),
     );
@@ -880,13 +854,8 @@ fn actual_truncation_failure_preserves_published_source_bounds(
     let mut writer = open_engine(&path, policy);
     writer.delete(&ObjectPathBuf::parse("tail")).unwrap();
     disk_log::start();
-    disk_log::fail_resize_after(
-        control.events[..event]
-            .iter()
-            .filter(|event| matches!(event, IoEvent::Resize { .. }))
-            .count(),
-        point,
-    );
+    let schedule = FaultSchedule::resize(&control, event, point);
+    schedule.inject();
     let error = writer
         .commit()
         .and_then(|()| writer.finalize_persist())
@@ -898,6 +867,7 @@ fn actual_truncation_failure_preserves_published_source_bounds(
     assert_eq!(error.to_string(), "injected disk resize failure");
     disk_log::clear_failures();
     let failed = disk_log::finish();
+    schedule.assert_failed(&failed);
     assert_eq!(&failed.events[..event], &control.events[..event]);
     assert_eq!(failed.events.len(), event + 1);
     assert_eq!(

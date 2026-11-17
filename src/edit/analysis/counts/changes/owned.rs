@@ -91,11 +91,6 @@ impl OwnedCountChange {
         self.remaining
     }
 
-    /// Returns the original physical count field, or `None` for an implicit count.
-    pub(in crate::edit) fn field(&self) -> Option<ObjectReferenceCountField> {
-        self.field
-    }
-
     /// Returns the independently checked complete allocation containing the field, if known.
     pub(in crate::edit) fn header_allocation(&self) -> Option<HeaderCountAllocation> {
         self.allocation
@@ -116,10 +111,10 @@ impl OwnedCountChange {
             allocation: _,
         } = self;
         if original.value() == *remaining {
-            return CountDisposition::Unchanged(self);
+            return CountDisposition::Unchanged;
         }
         if *remaining == 0 && !matches!(original, OwnedOriginalCount::Ordinary { .. }) {
-            return CountDisposition::Retain(self);
+            return CountDisposition::Retain;
         }
         match (NonZeroU32::new(*remaining), field.as_ref()) {
             (None, _) => CountDisposition::Unresolved {
@@ -183,12 +178,12 @@ impl OwnedOriginalCount {
 
 /// A borrowed classification of a planned count and its original observation class.
 ///
-/// Every variant retains the original entry. Allocation ownership, source freshness, and write or
+/// Changed positive and unresolved variants borrow the original entry. Source freshness and write or
 /// retirement permissions require separate evidence, including for positive explicit counts.
 #[derive(Debug)]
 pub(in crate::edit) enum CountDisposition<'a> {
     /// A changed zero count outside [`OwnedOriginalCount::Ordinary`].
-    Retain(&'a OwnedCountChange),
+    Retain,
     /// A changed positive count with an original explicit field.
     Surviving {
         change: &'a OwnedCountChange,
@@ -196,7 +191,7 @@ pub(in crate::edit) enum CountDisposition<'a> {
         count: NonZeroU32,
     },
     /// A planned count equal to the original value, including zero or implicit counts.
-    Unchanged(&'a OwnedCountChange),
+    Unchanged,
     /// A changed count excluded from positive explicit preparation, with its reason.
     Unresolved {
         change: &'a OwnedCountChange,

@@ -360,7 +360,10 @@ fn metadata_only_page_space_keeps_one_compound_payload_request() {
         [(Some(ManagerKind::PagedSmallMetadata), extent)],
     )
     .unwrap();
-    let set = super::contiguous::prepared(super::Creation::Fixed(40), true);
+    let set = crate::edit::dataset::test_util::prepared(
+        crate::edit::dataset::test_util::Creation::Fixed(40),
+        true,
+    );
     let length = ByteLength::new(
         set.chunks()
             .iter()

@@ -3,7 +3,7 @@
 //! The caller establishes source freshness, permission to remove the selected members, and
 //! protection of each collection's full allocation from reuse. Plans must describe distinct
 //! collections in the engine's current image. [`after_publication`] requires association with
-//! the completed publication. [`rootless`] preserves undo for the enclosing commit.
+//! the completed publication.
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::GlobalHeapCompaction;
@@ -12,6 +12,7 @@ use crate::convert::Narrow;
 use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::error::HeapCompactionState;
 
 use super::JournalScope;
 use super::PublishedTree;
@@ -22,28 +23,34 @@ use super::PublishedTree;
 /// recording undo entries, issues pending writes in every buffering mode, applies the engine's
 /// synchronization policy, and releases that collection's undo entries on success. Earlier
 /// journal entries remain available.
-/// After a failure, completed collections remain compacted and subsequent plans are unattempted.
+/// The executor processes borrowed plans in iterator order. After a failure, completed collections
+/// remain compacted and subsequent plans are unattempted.
 ///
 /// # Errors
 ///
 /// Returns [`HeapMutationFailure`] with the completed prefix length, allocation state, and
 /// bounds, read, write, completion, or restoration error. Failed restoration or uncertain
 /// allocation permission prevents further allocation through the engine.
-pub(in crate::edit) fn after_publication(
+pub(in crate::edit) fn after_publication<'plan>(
     published: PublishedTree<'_>,
-    plans: &[GlobalHeapCompaction],
+    plans: impl IntoIterator<Item = &'plan GlobalHeapCompaction>,
 ) -> Result<(), HeapMutationFailure> {
     let end = published.end().get();
     let engine = published.into_engine();
     published_batch(engine, plans, end)
 }
 
-fn published_batch(
+/// Executes borrowed plans in iterator order against the published end.
+///
+/// # Errors
+///
+/// Returns the first [`HeapMutationFailure`] with the completed prefix and restoration state.
+fn published_batch<'plan>(
     engine: &mut WriteEngine,
-    plans: &[GlobalHeapCompaction],
+    plans: impl IntoIterator<Item = &'plan GlobalHeapCompaction>,
     end: u64,
 ) -> Result<(), HeapMutationFailure> {
-    for (completed, plan) in plans.iter().enumerate() {
+    for (completed, plan) in plans.into_iter().enumerate() {
         let result = match engine.context.allocations.before_reference() {
             Ok(()) => {
                 if plan.range().end().get() > end {
@@ -78,38 +85,6 @@ fn published_batch(
     Ok(())
 }
 
-/// Applies all collection plans while retaining undo for the enclosing unpublished commit.
-///
-/// With a nonempty journal, issues pending writes in every buffering mode and applies the
-/// engine's synchronization policy on success. The enclosing commit retains all prior descriptor
-/// and collection undo entries until its own completion. If applying the plans or completing
-/// their writes fails, attempts to restore the whole journal in reverse write order, including
-/// entries recorded before this call.
-///
-/// Copies records through a 4096-byte scratch buffer. Retained undo includes every overwritten
-/// destination byte and free space header, in addition to the earlier journal. Repeated writes
-/// retain separate prior-byte copies. Journal capacity, plans, image buffering, and any mirror
-/// require additional memory.
-///
-/// # Errors
-///
-/// Returns [`Error::AllocationPublicationUncertain`] if allocation permission is uncertain,
-/// or [`FormatError::Internal`] if allocations are provisional or publication was attempted.
-/// Returns bounds, read, write, or completion errors. Returns [`Error::CommitPartiallyApplied`]
-/// with both errors if restoration fails, and marks allocation state uncertain.
-pub(in crate::edit) fn rootless(
-    engine: &mut WriteEngine,
-    plans: &[GlobalHeapCompaction],
-) -> Result<(), Error> {
-    engine.context.allocations.before_reference()?;
-    JournalScope::run_rootless(engine, |journal| {
-        for plan in plans {
-            apply(journal, plan)?;
-        }
-        Ok(())
-    })
-}
-
 /// Records the completed prefix and the failure of the next collection operation.
 #[derive(Debug)]
 pub(in crate::edit) struct HeapMutationFailure {
@@ -119,6 +94,25 @@ pub(in crate::edit) struct HeapMutationFailure {
     pub(in crate::edit) state: HeapMutationState,
     /// The operation error, including a restoration error if restoration failed.
     pub(in crate::edit) error: Error,
+}
+
+/// Constructs [`Error::HeapCompactionFailed`] with the original progress, state, and cause.
+impl From<HeapMutationFailure> for Error {
+    fn from(failure: HeapMutationFailure) -> Self {
+        let HeapMutationFailure {
+            completed,
+            state,
+            error,
+        } = failure;
+        Self::HeapCompactionFailed {
+            completed,
+            state: match state {
+                HeapMutationState::Restored => HeapCompactionState::Restored,
+                HeapMutationState::Uncertain => HeapCompactionState::Uncertain,
+            },
+            source: Box::new(error),
+        }
+    }
 }
 
 /// Records allocation availability after a collection operation fails.

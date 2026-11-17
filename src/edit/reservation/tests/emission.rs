@@ -1,4 +1,5 @@
 use hdf5_pure_core::__private::ByteLength;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use hdf5_pure_core::__private::MetadataBytesExt;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::AllocationClass;

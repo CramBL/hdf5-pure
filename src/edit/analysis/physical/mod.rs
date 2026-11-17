@@ -13,7 +13,7 @@ use hdf5_pure_space::__private::{AllocationClass, Extent, FreeClass, RetainedKin
 use super::AnalysisPhase;
 use super::ReconstructionSource;
 use crate::access_mode::AccessMode;
-use crate::address::StoredAddress;
+
 use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -124,10 +124,7 @@ impl PhysicalStorage {
         let (located, range) = match superblock::read_with_range(&engine.image()) {
             Ok(parsed) => parsed,
             Err(error) => {
-                self.problems.push(StorageProblem::Framing {
-                    kind: FileStorageKind::Superblock,
-                    error,
-                });
+                self.problems.push(StorageProblem::Framing { error });
                 return;
             }
         };
@@ -165,8 +162,7 @@ impl PhysicalStorage {
         .flatten()
         {
             if !address.is_undefined(engine.widths().offsets) {
-                self.problems
-                    .push(StorageProblem::LegacyAllocation(address));
+                self.problems.push(StorageProblem::LegacyAllocation);
             }
         }
         let Some(extension) = current
@@ -200,18 +196,14 @@ impl PhysicalStorage {
         let header = match parsed {
             Ok(header) => header,
             Err(error) => {
-                self.problems.push(StorageProblem::Framing {
-                    kind: FileStorageKind::Extension,
-                    error,
-                });
+                self.problems.push(StorageProblem::Framing { error });
                 return;
             }
         };
         let mut info = None;
         for message in header.messages {
             if message.flags.is_shared() {
-                self.problems
-                    .push(StorageProblem::ExtensionMessage(message.msg_type));
+                self.problems.push(StorageProblem::ExtensionMessage);
                 continue;
             }
             match message.msg_type {
@@ -224,16 +216,13 @@ impl PhysicalStorage {
                 MessageType::NIL
                 | MessageType::OBJECT_HEADER_CONTINUATION
                 | MessageType::B_TREE_K_VALUES => {}
-                kind => self.problems.push(StorageProblem::ExtensionMessage(kind)),
+                _kind => self.problems.push(StorageProblem::ExtensionMessage),
             }
         }
         if let Some(info) = info {
             match info {
                 Ok(info) => self.read_managers(engine, info),
-                Err(error) => self.problems.push(StorageProblem::Framing {
-                    kind: FileStorageKind::Extension,
-                    error,
-                }),
+                Err(error) => self.problems.push(StorageProblem::Framing { error }),
             }
         }
     }
@@ -255,10 +244,7 @@ impl PhysicalStorage {
                     range,
                     kind: FileStorageKind::Manager,
                 })),
-            Err(error) => self.problems.push(StorageProblem::Framing {
-                kind: FileStorageKind::Manager,
-                error,
-            }),
+            Err(error) => self.problems.push(StorageProblem::Framing { error }),
         }
     }
 
@@ -382,23 +368,21 @@ pub(in crate::edit) enum CapacityKind {
 
 /// A failed or unsupported local storage observation.
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "the state retains original observations for failure and qualification diagnostics"
+)]
 pub(in crate::edit) enum StorageProblem {
     /// A failure in address conversion or range arithmetic.
     Address(FormatError),
     /// A parsed superblock inconsistent with the session's source context.
     Context,
     /// A shared or unsupported extension message, including a repeated File Space Info message.
-    ExtensionMessage(MessageType),
+    ExtensionMessage,
     /// A failure in reading or parsing one kind of file storage.
-    Framing {
-        kind: FileStorageKind,
-        error: FormatError,
-    },
+    Framing { error: FormatError },
     /// A legacy free-space or driver-info address without collected allocation geometry.
-    LegacyAllocation(StoredAddress),
+    LegacyAllocation,
     /// An unavailable allocation-publication state.
     Publication(Error),
 }
-
-#[cfg(test)]
-mod tests;

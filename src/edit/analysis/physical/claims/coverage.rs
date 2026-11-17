@@ -1,6 +1,6 @@
 //! Coverage and overlap observations for a source phase's physical claims.
 //!
-//! Normalized intervals describe the union of recorded claims. Source completeness, allocation
+//! Residual intervals describe bytes outside recorded claims. Source completeness, allocation
 //! ownership, and permission to reuse storage require separate evidence.
 
 use core::cmp::Reverse;
@@ -50,31 +50,31 @@ impl AnalysisPhase<'_> {
     }
 }
 
-/// Normalized claim intervals, source gaps, and independent bounds observations.
+/// Source gaps, an overlap conflict, and independent bounds observations for physical claims.
 ///
-/// Intervals are ordered and disjoint. Adjacent claims share one covered interval. Claim ends
-/// beyond the physical source remain in the covered intervals. Residual intervals lie within the
-/// physical source and describe bytes outside every recorded claim, regardless of support problems.
-/// A residual interval is not evidence that its bytes are free.
+/// Residual intervals are ordered and disjoint within the physical source. They describe bytes
+/// outside every recorded claim, regardless of support problems. A residual interval is not
+/// evidence that its bytes are free.
 pub(in crate::edit) struct PhysicalCoverage {
-    covered: Vec<FileRange>,
     residuals: Vec<FileRange>,
     /// One pair of conflicting indices into the original claim slice.
     conflict: Option<[usize; 2]>,
-    /// Original claim indices whose ends exceed the physical source length.
-    beyond_source: Vec<usize>,
-    /// Original claim indices whose ends exceed the recorded end of allocation.
-    beyond_eoa: Vec<usize>,
+    /// First original claim index in sweep order whose end exceeds the physical source length.
+    beyond_source: Option<usize>,
+    /// First original claim index in sweep order whose end exceeds the recorded end of allocation.
+    beyond_eoa: Option<usize>,
     /// Byte observations collected lazily over the residual intervals.
     content: Option<ResidualContents>,
 }
 
 impl PhysicalCoverage {
-    /// Normalizes intervals and records one conflicting pair of claim indices.
+    /// Computes source gaps and records conflict and bounds observations.
     ///
     /// Permits extension or manager observations contained in a recorded metadata capacity.
     /// Overlapping observations of other kinds, including duplicate manager observations, conflict.
-    /// Sorts claim indices and sweeps the intervals with linear scratch space.
+    /// Sorts claim indices by start, descending end, origin category, and original index. Uses
+    /// linear scratch space for the sweep and includes zero-length claims in the bounds
+    /// observations.
     ///
     /// # Errors
     ///
@@ -85,11 +85,10 @@ impl PhysicalCoverage {
         logical_eoa: u64,
     ) -> Result<Self, FormatError> {
         let mut coverage = Self {
-            covered: Vec::new(),
             residuals: Vec::new(),
             conflict: None,
-            beyond_source: Vec::new(),
-            beyond_eoa: Vec::new(),
+            beyond_source: None,
+            beyond_eoa: None,
             content: None,
         };
         let mut ordered = (0..claims.len()).collect::<Vec<_>>();
@@ -103,14 +102,15 @@ impl PhysicalCoverage {
             )
         });
         let mut furthest: [Option<usize>; 3] = [None; 3];
+        let mut cursor = 0;
         for index in ordered {
             let claim = claims[index];
             let range = claim.range();
             if range.end().get() > physical_size {
-                coverage.beyond_source.push(index);
+                coverage.beyond_source.get_or_insert(index);
             }
             if range.end().get() > logical_eoa {
-                coverage.beyond_eoa.push(index);
+                coverage.beyond_eoa.get_or_insert(index);
             }
             if range.length() == 0 {
                 continue;
@@ -128,19 +128,7 @@ impl PhysicalCoverage {
             if slot.is_none_or(|previous| claims[previous].range().end() < range.end()) {
                 *slot = Some(index);
             }
-            if let Some(previous) = coverage.covered.last_mut()
-                && range.start() <= previous.end()
-            {
-                *previous = FileRange::new(
-                    previous.start(),
-                    previous.end().max(range.end()).get() - previous.start().get(),
-                )?;
-            } else {
-                coverage.covered.push(range);
-            }
-        }
-        let mut cursor = 0;
-        for range in &coverage.covered {
+
             let start = range.start().get().min(physical_size);
             if cursor < start {
                 coverage.residuals.push(FileRange::new(
@@ -148,7 +136,7 @@ impl PhysicalCoverage {
                     start - cursor,
                 )?);
             }
-            cursor = range.end().get().min(physical_size);
+            cursor = cursor.max(range.end().get().min(physical_size));
         }
         if cursor < physical_size {
             coverage.residuals.push(FileRange::new(
@@ -157,11 +145,6 @@ impl PhysicalCoverage {
             )?);
         }
         Ok(coverage)
-    }
-
-    /// Borrows the ordered union of nonempty recorded ranges, including out-of-source claims.
-    pub(in crate::edit) fn covered(&self) -> &[FileRange] {
-        &self.covered
     }
 
     /// Borrows physical-source intervals outside the recorded union.
@@ -177,14 +160,18 @@ impl PhysicalCoverage {
         self.conflict
     }
 
-    /// Borrows original claim indices whose ends exceed the physical source length.
-    pub(in crate::edit) fn beyond_source(&self) -> &[usize] {
-        &self.beyond_source
+    /// Returns the original index of the first claim ending beyond the source in sweep order.
+    ///
+    /// Uses the order of [`Self::new`], including zero-length claims.
+    pub(in crate::edit) fn first_beyond_source(&self) -> Option<usize> {
+        self.beyond_source
     }
 
-    /// Borrows original claim indices whose ends exceed the recorded end of allocation.
-    pub(in crate::edit) fn beyond_eoa(&self) -> &[usize] {
-        &self.beyond_eoa
+    /// Returns the original index of the first claim ending beyond EOA in sweep order.
+    ///
+    /// Uses the order of [`Self::new`], including zero-length claims.
+    pub(in crate::edit) fn first_beyond_eoa(&self) -> Option<usize> {
+        self.beyond_eoa
     }
 }
 

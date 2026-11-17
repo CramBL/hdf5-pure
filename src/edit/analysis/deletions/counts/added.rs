@@ -5,10 +5,14 @@ use core::num::NonZeroU32;
 use crate::edit::analysis::counts::CountEvidence;
 use crate::edit::analysis::counts::CountEvidenceError;
 use crate::edit::analysis::counts::balance::{CountArithmeticError, CountBalance};
+use crate::edit::analysis::deletions::RemovedLinks;
 use crate::error::FormatError;
 use crate::object_graph::{ObjectId, ObjectIndex};
 
-use super::{CompleteTopology, LinkRemovalPlan, RemovedLinks, SourceCountState, SourceRemovalPlan};
+use super::CompleteTopology;
+use super::LinkRemovalPlan;
+use super::SourceCountState;
+use super::SourceRemovalPlan;
 
 impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
     /// Plans declared net counts through the shared original-edge removal traversal.
@@ -54,8 +58,6 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
             topology,
             remaining,
             zero,
-            #[cfg(test)]
-            work,
         } = plan;
         let remaining = remaining
             .into_iter()
@@ -66,8 +68,6 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
                 topology,
                 remaining,
                 zero,
-                #[cfg(test)]
-                work,
             },
         }))
     }

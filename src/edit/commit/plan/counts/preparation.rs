@@ -7,11 +7,13 @@ use hdf5_pure_space::__private::FreeClass;
 
 use super::PreparedCounts;
 use crate::edit::WriteEngine;
+use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::CountPreflightError;
+use crate::edit::analysis::CountProtectionError;
+use crate::edit::analysis::NetCountError;
+use crate::edit::analysis::OriginalOwnerFacts;
+use crate::edit::analysis::ProtectedCounts;
 use crate::edit::analysis::counts::{CopyUsersError, CountEvidenceError};
-use crate::edit::analysis::{
-    AnalysisPhase, CountHandoffError, CountInventory, CountPreflightError, CountProtectionError,
-    NetCountError, ProtectedCounts,
-};
 use crate::edit::commit::plan::Node;
 use crate::edit::commit::plan::inventory::{EditInputError, OriginalEdits};
 use crate::edit::staging::StagedEdits;
@@ -19,35 +21,27 @@ use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
 
-/// Original count outcomes and storage inputs for a prepared tree.
-///
-/// The editor applies local count projections before constructing a complete result. Original
-/// source fields remain unchanged. Source freshness and publication permission are separate
-/// requirements.
-pub(in crate::edit::commit) enum PreparedTreeCounts {
-    /// Complete numeric count planning with local projections applied.
+/// Stores joint owner facts and source updates, or incomplete count evidence.
+pub(in crate::edit::commit::plan) enum CountedPreparation {
+    /// Complete count preparation with checked local projections applied.
     Complete {
-        /// Original count changes retained after local projection.
-        inventory: CountInventory,
-        /// Checked updates to count fields outside reconstructed objects.
+        /// Original count, storage, and eligible-owner facts from the same checked plan.
+        original: OriginalOwnerFacts,
+        /// Protected count updates for objects outside the reconstruction set.
         protected: ProtectedCounts,
-        /// Original objects retained for collection-reference analysis.
-        retained_roots: Vec<ObjectId>,
-        /// Ordinary non-root objects with zero graph and declared count remainders.
-        eligible_owners: Vec<ObjectId>,
-        /// Supported original allocations, moved into the tree before reference screening.
-        retirement: Vec<(FileRange, FreeClass)>,
     },
-    /// Incomplete count evidence, with deletion allocations and collection candidates withheld.
+    /// Incomplete count evidence, with count-derived deletion allocations withheld.
     Unavailable,
 }
 
-impl PreparedTreeCounts {
-    /// Derives original retirement eligibility and updates checked replacement count records.
+impl CountedPreparation {
+    /// Prepares joint owner facts and local projections, or records incomplete count evidence.
     ///
-    /// Retains protected source updates and reference roots independently of supported allocation
-    /// coverage. Returns [`Self::Unavailable`] for incomplete count evidence. Leaves original source
-    /// fields unchanged.
+    /// For complete count inputs, uses one count and storage input set for retirement screening
+    /// and captured qualification. Checks completion of local count projection against its
+    /// originating preflight and retains source updates and reference roots independently of
+    /// supported allocation coverage. Returns [`Self::Unavailable`] for incomplete count evidence.
+    /// Leaves original fields unchanged.
     ///
     /// # Errors
     ///
@@ -62,11 +56,14 @@ impl PreparedTreeCounts {
     ) -> Result<Self, Error> {
         let facts = match OriginalEdits::count_inputs(engine, phase, groups, staged) {
             Ok(facts) => facts,
-            Err(EditInputError::IncompleteCounts) => return Ok(Self::Unavailable),
-            Err(error) => return Err(Self::input_error(error)),
+            Err(EditInputError::IncompleteCounts) => {
+                let prepared = Self::Unavailable;
+
+                return Ok(prepared);
+            }
+            Err(error) => return Err(PreparedTreeCounts::input_error(error)),
         };
-        let (counts, storage, eligible_owners) = facts.into_parts();
-        let preflight = counts
+        let preflight = facts
             .preflight(
                 engine,
                 groups.values().flat_map(|node| {
@@ -86,8 +83,8 @@ impl PreparedTreeCounts {
                     "the original reference-count updates cannot be protected",
                 ),
             })?;
-        let (_, proof) = PreparedCounts::owned(
-            &preflight,
+        let proof = PreparedCounts::owned(
+            preflight.counts(),
             groups.values_mut().map(|node| &mut node.prepared),
         )
         .map_err(|error| {
@@ -95,24 +92,93 @@ impl PreparedTreeCounts {
         })?
         .apply()
         .map_err(|error| FormatError::Internal(format!("invalid local count update: {error:?}")))?;
-        let (inventory, protected) = preflight.into_parts(proof).map_err(|error| {
+        let (original, protected) = preflight.into_parts(proof).map_err(|error| {
             FormatError::Internal(format!("invalid count projection proof: {error:?}"))
         })?;
-        let (retirement, retained_roots) = storage.into_parts();
-        Ok(Self::Complete {
-            inventory,
+        let prepared = Self::Complete {
+            original,
             protected,
-            retained_roots,
-            eligible_owners,
-            retirement,
-        })
+        };
+
+        Ok(prepared)
     }
 
-    fn input_error(error: EditInputError) -> Error {
+    /// Separates application, original-capture, and reclamation inputs for the selected tree route.
+    ///
+    /// For [`Self::Complete`], retains the joint facts and copies their allocation spans for
+    /// reclamation if `capture` is true. If it is false, moves storage spans to reclamation and
+    /// reference roots to direct application.
+    ///
+    /// For [`Self::Unavailable`], withholds count-derived retirement and records
+    /// [`EditInputError::IncompleteCounts`] when capture is requested.
+    pub(in crate::edit::commit::plan) fn into_tree(self, capture: bool) -> TreeCountInputs {
+        match self {
+            Self::Complete {
+                original,
+                protected,
+            } => {
+                let (original, retirement, retained_roots) = if capture {
+                    let retirement = original.storage().allocations().to_vec();
+                    (Some(Ok(original)), retirement, Vec::new())
+                } else {
+                    let (_, storage, _) = original.into_parts();
+                    let (retirement, retained_roots) = storage.into_parts();
+                    (None, retirement, retained_roots)
+                };
+                TreeCountInputs {
+                    counts: PreparedTreeCounts::Complete {
+                        protected,
+                        retained_roots,
+                    },
+                    original,
+                    retirement,
+                }
+            }
+            Self::Unavailable => TreeCountInputs {
+                counts: PreparedTreeCounts::Unavailable,
+                original: capture.then_some(Err(EditInputError::IncompleteCounts)),
+                retirement: Vec::new(),
+            },
+        }
+    }
+}
+
+/// Stores application, capture, and reclamation inputs from one counted preparation.
+pub(in crate::edit::commit::plan) struct TreeCountInputs {
+    /// The count application outcome, including any direct-plan reference roots.
+    pub(in crate::edit::commit::plan) counts: PreparedTreeCounts,
+    /// Captured original facts or incomplete evidence, absent for direct plans.
+    pub(in crate::edit::commit::plan) original: Option<Result<OriginalOwnerFacts, EditInputError>>,
+    /// Supported original allocation spans and free-space classes for reclamation.
+    pub(in crate::edit::commit::plan) retirement: Vec<(FileRange, FreeClass)>,
+}
+
+/// Stores source count updates and direct-plan reference roots for tree application.
+///
+/// Local projections have been checked and applied for [`Self::Complete`]. Complete captured
+/// preparations retain original reference roots with their joint owner facts. Source freshness
+/// and publication permission require separate evidence.
+pub(in crate::edit::commit) enum PreparedTreeCounts {
+    /// Complete count preparation with original source fields unchanged.
+    Complete {
+        /// Checked source count updates outside reconstructed objects.
+        protected: ProtectedCounts,
+        /// Original reference roots for direct application, empty for captured inventories.
+        retained_roots: Vec<ObjectId>,
+    },
+    /// Unavailable source count updates and retained reference roots.
+    Unavailable,
+}
+
+impl PreparedTreeCounts {
+    /// Converts count-input failures with their original source errors and contradiction fields.
+    ///
+    /// Reports count overflow and incomplete copy users as [`Error::EditUnsupported`], and
+    /// incompatible inputs as [`FormatError::Internal`].
+    pub(in crate::edit::commit) fn input_error(error: EditInputError) -> Error {
         match error {
             EditInputError::Copy(error) => error,
-            EditInputError::Handoff(CountHandoffError::Source(error))
-            | EditInputError::Users(CopyUsersError::Address(error))
+            EditInputError::Users(CopyUsersError::Address(error))
             | EditInputError::Counts(NetCountError::Association(CopyUsersError::Address(error))) => {
                 error.into()
             }
@@ -139,6 +205,3 @@ impl PreparedTreeCounts {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

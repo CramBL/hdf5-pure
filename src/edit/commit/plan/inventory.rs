@@ -16,8 +16,8 @@ use crate::edit::analysis::counts::{CopyUsersError, CopyUsersUnion};
 use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{
-    AnalysisPhase, CountHandoffError, NetCountError, OriginalOwnerError, OriginalOwnerFacts,
-    OriginalOwnerInventory, ReconstructionSource,
+    AnalysisPhase, CountHandoffError, NetCountError, OriginalOwnerFacts, OriginalOwnerInventory,
+    ReconstructionSource,
 };
 use crate::edit::commit::publish::AppliedTree;
 use crate::edit::staging::StagedEdits;
@@ -27,7 +27,9 @@ use crate::object_path::ObjectPathBuf;
 
 pub(in crate::edit::commit) mod dispositions;
 pub(in crate::edit::commit) mod members;
+mod outcomes;
 pub(in crate::edit::commit) mod prospective;
+mod session;
 pub(in crate::edit::commit) mod storage;
 
 /// Owns tree edits and their original count, ownership, and collection observations.
@@ -47,16 +49,17 @@ pub(in crate::edit::commit) struct PreparedEditInventory {
 }
 
 impl PreparedEditInventory {
-    /// Prepares staged edits and collects their original observations before placement.
+    /// Prepares staged edits and captures original observations when heap candidates are present.
     ///
-    /// Returns the original staged set on planning failure. In-place-only plans are returned
-    /// without an inventory. Count or ownership qualification failures are retained in
-    /// [`OriginalEdits`] independently of successful tree preparation.
+    /// Returns the original staged set on planning or count-preparation failure. Returns
+    /// candidate-free tree and in-place plans without an inventory. The planner prepares counts
+    /// for deletions and same-file copies. Retains additional count or ownership qualification
+    /// outcomes in [`OriginalEdits`].
     pub(in crate::edit::commit) fn prepare(
         engine: &mut WriteEngine,
         staged: StagedEdits,
     ) -> InventoryPreparation {
-        match engine.plan_commit_with_inventory(&staged, true) {
+        match engine.plan_commit_with_inventory(&staged) {
             Ok((mut plan, original)) => {
                 let (staged, writes) = staged.into_apply();
                 let mut overwrites = OverwritePayloads { writes };
@@ -82,7 +85,7 @@ impl PreparedEditInventory {
                         reclamation,
                         session: engine.context.allocations.session(),
                     }),
-                    None => InventoryPreparation::InPlace(prepared),
+                    None => InventoryPreparation::Direct(prepared),
                 }
             }
             Err(error) => InventoryPreparation::Rejected { staged, error },
@@ -95,11 +98,14 @@ impl PreparedEditInventory {
     /// after a failure and publication after success. Predecessor classifications and placement
     /// reconciliation outcomes are retained independently of count and ownership qualification.
     /// Consumes captured reclamation spans without repeating their original collection.
+    /// Uses an empty reclamation batch for a captured [`Error::EditUnsupported`].
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] before placement if the allocation session differs
-    /// or the prepared plan is not a tree. Returns the errors of [`WriteEngine::apply_tree`].
+    /// or the prepared plan is not a tree. Returns captured reclamation errors other than
+    /// [`Error::EditUnsupported`] before placement. Returns the errors of
+    /// [`WriteEngine::apply_tree`].
     pub(in crate::edit::commit) fn apply(
         self,
         engine: &mut WriteEngine,
@@ -133,32 +139,18 @@ impl PreparedEditInventory {
             &mut overwrites,
             tree,
             staged,
-            Some(&mut dispositions),
-            Some(reclamation?),
+            Some(dispositions.placements()),
+            Some(reclamation),
         )?;
         let dispositions = dispositions.finish(&tree);
         Ok(AppliedEditInventory {
+            session,
             tree,
             original,
             dispositions,
             storage,
             collections,
         })
-    }
-
-    /// Borrows every original predecessor's classification before placement.
-    pub(in crate::edit::commit) fn dispositions(&self) -> &ReconstructionDispositions {
-        &self.dispositions
-    }
-
-    /// Borrows original candidates, qualification, and framing collected before placement.
-    pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
-        &self.collections
-    }
-
-    /// Borrows the original observations collected from these prepared inputs.
-    pub(in crate::edit::commit) fn original(&self) -> &OriginalEdits {
-        &self.original
     }
 }
 
@@ -168,8 +160,8 @@ impl PreparedEditInventory {
     reason = "preparation returns its owned inputs without an additional allocation"
 )]
 pub(in crate::edit::commit) enum InventoryPreparation {
-    /// Prepared value writes without a replacement root or original-owner inventory.
-    InPlace(PreparedCommit),
+    /// Prepared in-place or tree edits without captured original-owner inventory.
+    Direct(PreparedCommit),
     /// The original staged set and the planning error.
     Rejected { staged: StagedEdits, error: Error },
     /// Prepared tree edits paired with their original observations.
@@ -182,38 +174,13 @@ pub(in crate::edit::commit) enum InventoryPreparation {
 /// storage reuse, and publication require separate permission. Original storage exclusions
 /// remain paired with the placed tree.
 pub(in crate::edit::commit) struct AppliedEditInventory {
+    /// The preparation session checked before placement.
+    session: AllocationSession,
     tree: AppliedTree,
     original: OriginalEdits,
     dispositions: AppliedDispositions,
     storage: storage::OriginalStorage,
     collections: OriginalCollections,
-}
-
-impl AppliedEditInventory {
-    /// Borrows original candidates, qualification, and framing retained through application.
-    pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
-        &self.collections
-    }
-
-    /// Borrows original predecessor classifications and the placement reconciliation outcome.
-    pub(in crate::edit::commit) fn dispositions(&self) -> &AppliedDispositions {
-        &self.dispositions
-    }
-
-    /// Borrows the placed root, relocations, and retirement inputs before publication.
-    pub(in crate::edit::commit) fn tree(&self) -> &AppliedTree {
-        &self.tree
-    }
-
-    /// Borrows the original observations retained through successful application.
-    pub(in crate::edit::commit) fn original(&self) -> &OriginalEdits {
-        &self.original
-    }
-
-    /// Returns the placed tree, dropping its paired observations, dispositions, and storage evidence.
-    pub(in crate::edit::commit) fn into_tree(self) -> AppliedTree {
-        self.tree
-    }
 }
 
 /// Original observations, storage exclusions, and reclamation spans for one tree plan.
@@ -228,31 +195,47 @@ pub(super) struct OriginalPreparation {
 impl OriginalPreparation {
     /// Collects original observations and reclamation spans for the prepared tree.
     ///
+    /// Uses the supplied count outcome, deriving count inputs only when none were supplied.
     /// Moves deletion spans out of the tree into the captured reclamation input. Storage
     /// exclusions are derived from these same observations and reclamation spans. Moves collection
-    /// candidates and cached framing into the inventory after storage collection.
+    /// candidates and cached framing into the inventory after storage collection. Retains source,
+    /// qualification, framing, and reclamation failures as independent outcomes.
+    /// When owner qualification is unavailable, withholds generated retirements through
+    /// [`storage::OriginalStorage::withhold_unqualified_reclamation`].
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         tree: &mut PreparedTree,
         staged: &StagedEdits,
+        counts: Option<Result<OriginalOwnerFacts, EditInputError>>,
     ) -> Self {
-        let original = OriginalEdits::collect(engine, phase, tree, staged);
-        let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
-        let reclamation =
+        let counts = counts
+            .unwrap_or_else(|| OriginalEdits::count_inputs(engine, phase, &tree.groups, staged));
+        let original = OriginalEdits::collect(engine, phase, counts);
+        let mut dispositions = ReconstructionDispositions::collect(
+            engine,
+            phase,
+            &tree.groups,
+            &tree.headers.children,
+            original.facts(),
+        );
+        let mut reclamation =
             engine.prepare_reclamation(&tree.groups, std::mem::take(&mut tree.deleted_free));
         let storage = storage::OriginalStorage::collect(
             engine,
             phase,
-            tree,
+            &tree.groups,
+            &tree.collection_candidates,
             &original,
             &dispositions,
             &reclamation,
         );
+        storage.withhold_unqualified_reclamation(&original, &mut reclamation);
         let collections = phase.capture_collections(
             dispositions.source().as_ref().ok(),
             std::mem::take(&mut tree.collection_candidates),
         );
+        dispositions.capture_session_parents(engine, phase, staged, &collections, &storage);
         Self {
             original,
             dispositions,
@@ -274,7 +257,7 @@ impl OriginalPreparation {
 )]
 pub(in crate::edit::commit) enum OriginalEdits {
     /// An incompatible association encountered while qualifying the count facts.
-    Association(OriginalOwnerError),
+    Association,
     /// Count and storage facts associated with a supported source object-header domain.
     Complete(OriginalOwnerInventory),
     /// Independent observations retained when complete qualification is unavailable.
@@ -291,17 +274,15 @@ pub(in crate::edit::commit) enum OriginalEdits {
 }
 
 impl OriginalEdits {
-    /// Collects original observations using the tree plan's source phase.
+    /// Qualifies supplied original-owner facts using the tree plan's source phase.
     ///
     /// Qualifies successful count facts against the original root and physical claims when
     /// the owner domain is supported. Retains independent outcomes on incomplete qualification.
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
-        tree: &PreparedTree,
-        staged: &StagedEdits,
+        counts: Result<OriginalOwnerFacts, EditInputError>,
     ) -> Self {
-        let counts = Self::count_inputs(engine, phase, &tree.groups, staged);
         let source = ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address)
             .map_err(Error::from)
             .and_then(|root| {
@@ -318,7 +299,7 @@ impl OriginalEdits {
                 match phase.physical_claims(&source) {
                     Ok(claims) => match counts.qualify(engine, &source, claims, domain) {
                         Ok(inventory) => Self::Complete(inventory),
-                        Err(error) => Self::Association(error),
+                        Err(_error) => Self::Association,
                     },
                     Err(error) => Self::Unavailable {
                         counts: Ok(counts),
@@ -374,11 +355,23 @@ impl OriginalEdits {
             .map_err(EditInputError::Handoff)
     }
 
+    /// Borrows a resolved original source independently of count and domain outcomes.
+    ///
+    /// Returns [`None`] if source resolution failed or qualification found an incompatible
+    /// association.
+    pub(in crate::edit::commit) fn source(&self) -> Option<&ReconstructionSource> {
+        match self {
+            Self::Complete(owners) => Some(owners.source()),
+            Self::Unavailable { source, .. } => source.as_ref().ok(),
+            Self::Association => None,
+        }
+    }
+
     /// Borrows fully qualified facts, or returns [`None`] when qualification failed.
     pub(in crate::edit::commit) fn owners(&self) -> Option<&OriginalOwnerInventory> {
         match self {
             Self::Complete(owners) => Some(owners),
-            Self::Association(_) | Self::Unavailable { .. } => None,
+            Self::Association | Self::Unavailable { .. } => None,
         }
     }
 
@@ -389,7 +382,7 @@ impl OriginalEdits {
         match self {
             Self::Complete(owners) => Some(owners.facts()),
             Self::Unavailable { counts, .. } => counts.as_ref().ok(),
-            Self::Association(_) => None,
+            Self::Association => None,
         }
     }
 }
@@ -410,6 +403,3 @@ pub(in crate::edit::commit) enum EditInputError {
     /// Copy-user aggregation failed.
     Users(CopyUsersError),
 }
-
-#[cfg(test)]
-mod tests;

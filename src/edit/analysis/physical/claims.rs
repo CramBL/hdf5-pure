@@ -76,6 +76,10 @@ pub(in crate::edit) struct PhysicalClaims {
     problems: Vec<ClaimProblem>,
     /// Coverage derived lazily from the original claims and recorded bounds.
     coverage: Option<PhysicalCoverage>,
+    /// Cached residual-group interpretation or its independent qualification restriction.
+    residual_groups: Option<
+        Arc<Result<domain::residual::ResidualGroups, domain::residual::ResidualUnavailable>>,
+    >,
 }
 
 impl PhysicalClaims {
@@ -83,6 +87,7 @@ impl PhysicalClaims {
     ///
     /// Retains original ranges and origins. Uses a temporary object-identity list and a distinct
     /// collection-address set. Member and reference summaries remain in their existing caches.
+    /// Retains header-derived collection ranges alongside later framing or source-extent errors.
     ///
     /// # Errors
     ///
@@ -107,6 +112,7 @@ impl PhysicalClaims {
             claims: Vec::new(),
             problems: Vec::new(),
             coverage: None,
+            residual_groups: None,
         };
         let physical = phase.physical_storage(source)?;
         claims
@@ -196,9 +202,17 @@ impl PhysicalClaims {
                     range: contents.range(),
                     origin: ClaimOrigin::Heap(address),
                 }),
-                Err(error) => claims
-                    .problems
-                    .push(ClaimProblem::Collection { address, error }),
+                Err(error) => {
+                    if let Some(&range) = phase.collection_envelopes.get(&address) {
+                        claims.claims.push(PhysicalClaim {
+                            range,
+                            origin: ClaimOrigin::Heap(address),
+                        });
+                    }
+                    claims
+                        .problems
+                        .push(ClaimProblem::collection(address, error));
+                }
             }
         }
         Ok(claims)
@@ -268,7 +282,7 @@ pub(in crate::edit) enum ClaimOrigin {
         index: usize,
         kind: FileStorageKind,
     },
-    /// A complete global heap parent, identified by its physical collection address.
+    /// A parsed collection's allocation range, identified by its physical collection address.
     Heap(PhysicalAddress),
     /// Capacity indexed in [`super::PhysicalStorage::metadata_capacity`].
     ///
@@ -291,10 +305,7 @@ pub(in crate::edit) enum ClaimOrigin {
 #[derive(Debug)]
 pub(in crate::edit) enum ClaimProblem {
     /// A failure while collecting a referenced collection's complete framing.
-    Collection {
-        address: PhysicalAddress,
-        error: FormatError,
-    },
+    Collection { address: PhysicalAddress },
     /// The index of a problem in [`super::PhysicalStorage::problems`].
     File(usize),
     /// Incomplete local allocation discovery for this object.
@@ -305,5 +316,8 @@ pub(in crate::edit) enum ClaimProblem {
     Topology,
 }
 
-#[cfg(test)]
-mod tests;
+impl ClaimProblem {
+    fn collection(address: PhysicalAddress, _error: FormatError) -> Self {
+        Self::Collection { address }
+    }
+}
