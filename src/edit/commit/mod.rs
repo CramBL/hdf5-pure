@@ -276,4 +276,8 @@ impl WriteEngine {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/count_publication/mod.rs"]
+mod public_counts;
+
+#[cfg(test)]
 mod tests;
