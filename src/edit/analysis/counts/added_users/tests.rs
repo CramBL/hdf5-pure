@@ -202,11 +202,7 @@ fn added_user_overflow_keeps_the_original_multiplicity() {
     let mut users = BTreeMap::from([(object, NonZeroU64::MAX)]);
     assert_eq!(
         super::add_users(&mut users, object, NonZeroU64::MIN).unwrap_err(),
-        CopyUsersError::Overflow {
-            object,
-            current: NonZeroU64::MAX,
-            added: NonZeroU64::MIN
-        }
+        CopyUsersError::Overflow
     );
     assert_eq!(users, BTreeMap::from([(object, NonZeroU64::MAX)]));
 }

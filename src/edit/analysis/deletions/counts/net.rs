@@ -116,7 +116,7 @@ impl<'source> AnalysisPhase<'source> {
             }
             let count = CountBalance::new(target.count().original(), target.added().get())
                 .remaining()
-                .map_err(|error| NetCountError::Arithmetic { object, error })?;
+                .map_err(NetCountError::Arithmetic)?;
             remaining.insert(object, ReferencedChange { target, count });
         }
         Ok(Some(NetCountPlan {
@@ -337,13 +337,8 @@ impl NetCountChange {
 /// A count-arithmetic failure, incompatible source association, or original-evidence error.
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::edit) enum NetCountError {
-    /// A checked count-arithmetic failure for a physical target.
-    Arithmetic {
-        /// The physical object-header identity of the affected count.
-        object: ObjectId,
-        /// The arithmetic failure and its original operands.
-        error: CountArithmeticError,
-    },
+    /// An original-count underflow or final net-count overflow.
+    Arithmetic(CountArithmeticError),
     /// A mismatched engine, phase, or root, or failed root-address resolution.
     Association(CopyUsersError),
     /// A source-count failure, original contradiction, or inconsistent deletion or count evidence.
@@ -354,7 +349,7 @@ impl From<AddedCountError> for NetCountError {
     /// Preserves a removal-traversal arithmetic or evidence error.
     fn from(error: AddedCountError) -> Self {
         match error {
-            AddedCountError::Arithmetic { object, error } => Self::Arithmetic { object, error },
+            AddedCountError::Arithmetic(error) => Self::Arithmetic(error),
             AddedCountError::Evidence(error) => Self::Evidence(error),
         }
     }

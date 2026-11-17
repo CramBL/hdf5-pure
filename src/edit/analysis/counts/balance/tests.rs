@@ -42,7 +42,7 @@ fn count_balances_check_the_completed_net_count(
 #[case::wide_addition(0, u64::from(u32::MAX) + 1, 0)]
 #[case::maximum_addition(0, u64::MAX, 0)]
 #[case::wide_sum(u32::MAX, u64::MAX, 1)]
-fn count_balance_overflows_report_the_complete_original_operands(
+fn count_balances_reject_final_counts_above_the_stored_width(
     #[case] original: u32,
     #[case] added: u64,
     #[case] removed: u32,
@@ -54,11 +54,7 @@ fn count_balance_overflows_report_the_complete_original_operands(
     assert!(!balance.is_zero());
     assert_eq!(
         balance.remaining().unwrap_err(),
-        CountArithmeticError::Overflow {
-            original,
-            added,
-            removed: u64::from(removed),
-        }
+        CountArithmeticError::Overflow
     );
 }
 
@@ -75,25 +71,14 @@ fn excess_original_removals_return_underflow(#[case] original: u32, #[case] adde
     }
     assert_eq!(
         balance.remove(NonZeroU32::MIN).unwrap_err(),
-        CountArithmeticError::Underflow {
-            original,
-            added,
-            removed: u64::from(original) + 1,
-        }
+        CountArithmeticError::Underflow
     );
     assert_eq!(balance.is_zero(), added == 0);
     let remaining = balance.remaining();
     if let Ok(added) = u32::try_from(added) {
         assert_eq!(remaining.unwrap(), added);
     } else {
-        assert_eq!(
-            remaining.unwrap_err(),
-            CountArithmeticError::Overflow {
-                original,
-                added,
-                removed: u64::from(original),
-            }
-        );
+        assert_eq!(remaining.unwrap_err(), CountArithmeticError::Overflow);
     }
 }
 
@@ -103,11 +88,7 @@ fn failed_removal_preserves_the_successful_prefix() {
     balance.remove(NonZeroU32::new(3).unwrap()).unwrap();
     assert_eq!(
         balance.remove(NonZeroU32::new(5).unwrap()).unwrap_err(),
-        CountArithmeticError::Underflow {
-            original: 7,
-            added: 10,
-            removed: 8,
-        }
+        CountArithmeticError::Underflow
     );
     assert!(!balance.is_zero());
     assert_eq!(balance.remaining().unwrap(), 14);
