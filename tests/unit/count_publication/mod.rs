@@ -11,6 +11,7 @@ use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
 use crate::{File, FileAccessProperties, FileLocking, MemoryStrategy};
 
+mod batch;
 mod postpublication;
 mod prepublication;
 
@@ -72,44 +73,11 @@ struct CountFile {
 
 impl CountFile {
     fn write(path: &Path, original: u32, extra_alias: bool) -> Self {
-        let mut fixture = Fixture::new();
-        let target = fixture.image.append(&type_header(original)) as u64;
-        fixture.link("type", target);
-        if extra_alias {
-            fixture.link("alias", target);
-        }
-        let mut messages = Form::CompactDataset.messages(
-            &mut fixture,
-            &crate::make_f64_type(),
-            &17_f64.to_le_bytes(),
-        );
-        *messages
-            .iter_mut()
-            .find(|message| message.msg_type == MessageType::DATATYPE)
-            .unwrap() = Message::new(
-            MessageType::DATATYPE,
-            &datatype::committed_reference(target),
-        )
-        .with_flags(MessageFlags::SHARED);
-        fixture.object("source", messages);
-        let messages = Form::ContiguousDataset.messages(
-            &mut fixture,
-            &crate::make_f64_type(),
-            &17_f64.to_le_bytes(),
-        );
-        fixture.object("value", messages);
-        let removed = fixture.image.as_bytes().len() as u64;
-        let messages = Form::ContiguousDataset.messages(
-            &mut fixture,
-            &crate::make_i32_type(),
-            &vec![7_i32.to_le_bytes(); 1_024].concat(),
-        );
-        fixture.object("dead", messages);
-        fixture.write(path);
+        let (targets, removed) = write_count_users(path, &[type_header(original)], extra_alias);
         Self {
-            target,
+            target: targets[0],
             original,
-            removed: removed..removed + 4_096,
+            removed,
         }
     }
 
@@ -164,6 +132,61 @@ impl CountFile {
         self.assert_header(&replay, count);
         assert_eq!(replay, after);
     }
+}
+
+fn write_count_users(
+    path: &Path,
+    headers: &[Vec<u8>],
+    extra_alias: bool,
+) -> (Vec<u64>, Range<u64>) {
+    let mut fixture = Fixture::new();
+    let mut targets = Vec::new();
+    for (index, header) in headers.iter().enumerate() {
+        let target = if index == 0 {
+            fixture.image.append(header)
+        } else {
+            fixture.image.append_aligned(header, 4_096)
+        } as u64;
+        targets.push(target);
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            index.to_string()
+        };
+        fixture.link(&format!("type{suffix}"), target);
+        if extra_alias {
+            fixture.link(&format!("alias{suffix}"), target);
+        }
+        let mut messages = Form::CompactDataset.messages(
+            &mut fixture,
+            &crate::make_f64_type(),
+            &17_f64.to_le_bytes(),
+        );
+        *messages
+            .iter_mut()
+            .find(|message| message.msg_type == MessageType::DATATYPE)
+            .unwrap() = Message::new(
+            MessageType::DATATYPE,
+            &datatype::committed_reference(target),
+        )
+        .with_flags(MessageFlags::SHARED);
+        fixture.object(&format!("source{suffix}"), messages);
+    }
+    let messages = Form::ContiguousDataset.messages(
+        &mut fixture,
+        &crate::make_f64_type(),
+        &17_f64.to_le_bytes(),
+    );
+    fixture.object("value", messages);
+    let removed = fixture.image.as_bytes().len() as u64;
+    let messages = Form::ContiguousDataset.messages(
+        &mut fixture,
+        &crate::make_i32_type(),
+        &vec![7_i32.to_le_bytes(); 1_024].concat(),
+    );
+    fixture.object("dead", messages);
+    fixture.write(path);
+    (targets, removed..removed + 4_096)
 }
 
 fn stage(file: &File, copies: usize, extra_alias: bool, remove_source: bool) {

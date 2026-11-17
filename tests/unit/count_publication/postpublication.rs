@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::io::ErrorKind;
 use std::ops::Range;
+use std::path::Path;
 
 use rstest::rstest;
 use test_util::bytes;
@@ -118,22 +119,7 @@ fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
         }));
     }
     assert_values(&file, 1, false);
-    file.root()
-        .create_dataset("after", |builder| {
-            builder.with_i32_data(&[1]);
-        })
-        .unwrap();
-    assert!(file.has_staged_edits());
-    disk_log::start();
-    for error in [file.commit().unwrap_err(), file.sync().unwrap_err()] {
-        assert!(
-            matches!(error, Error::AllocationPublicationUncertain),
-            "{error:?}"
-        );
-    }
-    assert!(file.has_staged_edits());
-    assert!(disk_log::finish().events.is_empty());
-    assert_eq!(std::fs::read(&path).unwrap(), after);
+    assert_quarantined(&file, &path, &after);
     drop(file);
     File::clear_status_flags(&path).unwrap();
     let reopened = File::open(&path).unwrap();
@@ -383,13 +369,13 @@ impl<'a> Control<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct FieldWrite {
-    event: usize,
-    before: usize,
+pub(super) struct FieldWrite {
+    pub(super) event: usize,
+    pub(super) before: usize,
 }
 
 impl FieldWrite {
-    fn find(recording: &Recording, publication: usize, field: u64) -> Self {
+    pub(super) fn find(recording: &Recording, publication: usize, field: u64) -> Self {
         recording.events[publication + 1..]
             .iter()
             .enumerate()
@@ -410,7 +396,7 @@ impl FieldWrite {
     }
 }
 
-fn root_range(image: &[u8]) -> Range<usize> {
+pub(super) fn root_range(image: &[u8]) -> Range<usize> {
     let root = usize::try_from(superblock::root_header_address(image, 0)).unwrap();
     assert_eq!(&image[root..root + 4], b"OHDR");
     let flags = HeaderFlags(image[root + 5]);
@@ -420,6 +406,25 @@ fn root_range(image: &[u8]) -> Range<usize> {
     let size = flags.chunk_size_width();
     let length = usize::try_from(bytes::uint_at(image, root + prefix, size)).unwrap();
     root..root + prefix + size + length + 4
+}
+
+pub(super) fn assert_quarantined(file: &File, path: &Path, after: &[u8]) {
+    file.root()
+        .create_dataset("after", |builder| {
+            builder.with_i32_data(&[1]);
+        })
+        .unwrap();
+    assert!(file.has_staged_edits());
+    disk_log::start();
+    for error in [file.commit().unwrap_err(), file.sync().unwrap_err()] {
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
+    }
+    assert!(file.has_staged_edits());
+    assert!(disk_log::finish().events.is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), after);
 }
 
 fn assert_io(error: &Error, message: &str) {
