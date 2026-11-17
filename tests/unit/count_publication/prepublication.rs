@@ -208,20 +208,20 @@ impl Direction {
 }
 
 #[derive(Clone, Copy)]
-enum Part {
+pub(super) enum Part {
     Checksum,
     Count,
 }
 
 #[derive(Clone, Copy)]
-enum Prefix {
+pub(super) enum Prefix {
     Complete,
     Half,
     Zero,
 }
 
 impl Prefix {
-    fn bytes(self) -> usize {
+    pub(super) fn bytes(self) -> usize {
         match self {
             Self::Complete => 4,
             Self::Half => 2,

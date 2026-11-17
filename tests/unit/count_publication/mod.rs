@@ -11,6 +11,7 @@ use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 
 use crate::{File, FileAccessProperties, FileLocking, MemoryStrategy};
 
+mod postpublication;
 mod prepublication;
 
 #[rstest]
