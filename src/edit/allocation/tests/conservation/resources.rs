@@ -89,72 +89,115 @@ fn append_reads_and_publication_state_remain_bounded_as_the_session_grows(
 #[rstest]
 #[case::bounded(MemoryStrategy::Bounded)]
 #[case::mirrored(MemoryStrategy::Mirrored)]
-fn interrupted_reopens_release_each_sessions_publication_identity(
+fn repeated_interrupted_reopens_bound_resources_and_protect_reachable_storage(
     #[case] backing: MemoryStrategy,
     #[values(false, true)] paged: bool,
     #[values(false, true)] deferred: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reopen.h5");
-    super::pure_fixture(&path, paged, deferred, false);
+    let hole = super::pure_fixture(&path, paged, deferred, false);
     let initial = if deferred { 0 } else { CHUNK };
-    let values = std::array::from_fn::<_, CHUNK, _>(|i| i32::try_from(initial + i).unwrap());
+    let reopen = || recover_interrupted_sessions(&path, &hole, initial, backing);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        use test_util::allocation;
+        let region = format!("interrupted_append_{backing:?}_{paged}_{deferred}");
+        let ((), measured) = allocation::measure(&region, reopen);
+        assert!(measured.live_bytes < 256, "{measured}");
+        let (retained, control) =
+            allocation::measure(&format!("{region}_control"), || fs::read(&path).unwrap());
+        assert!(control.live_bytes >= retained.len() as u64, "{control}");
+        assert!(control.live_bytes >= CHUNK as u64 * 4, "{control}");
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    reopen();
+
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(backing),
+    )
+    .unwrap();
+    let expected: Vec<i32> = (0..i32::try_from(initial + CHUNK).unwrap()).collect();
+    file.dataset("d")
+        .unwrap()
+        .append(&expected[initial..])
+        .unwrap();
+    file.close().unwrap();
+    let observation = Observation::read(&fs::read(&path).unwrap());
+    assert_eq!(observation.values, expected);
+    assert!(
+        observation
+            .free
+            .intersection(&observation.reachable())
+            .is_empty()
+    );
+}
+
+fn recover_interrupted_sessions(
+    path: &Path,
+    hole: &Coverage,
+    initial: usize,
+    backing: MemoryStrategy,
+) {
+    let root = File::open(path).unwrap().superblock().root_group_address;
+    let expected: Vec<i32> = (0..i32::try_from(initial).unwrap()).collect();
+    let mut history = Vec::new();
     for cycle in 0..32 {
         let reads = Arc::new(AtomicU64::new(0));
         let calls = Arc::new(AtomicU64::new(0));
-        let mut engine = open(&path, backing, Arc::clone(&reads), Arc::clone(&calls));
-        let identity = Arc::downgrade(&engine.context.allocations.session);
-        let writes = engine.image.issued_writes();
-        engine.append_inplace_i32_phased("d", &values, 2).unwrap();
-        assert!(engine.image.issued_writes() > writes);
-        assert!(engine.context.allocations.sequence > 0);
-        assert!(engine.append_allocator.pending.is_none());
-        assert!(matches!(
-            engine.context.allocations.state,
-            State::Confirmed(_)
-        ));
-        assert_eq!(Arc::strong_count(&engine.context.allocations.session), 1);
-        assert!(engine.located.is_empty());
-        assert!(engine.resolved.len() <= 1);
-        assert!(
-            (256..64 * 1024).contains(&reads.load(Ordering::Relaxed)),
-            "cycle {cycle}"
-        );
-        assert!(
-            (8..256).contains(&calls.load(Ordering::Relaxed)),
-            "cycle {cycle}"
-        );
-        drop(engine);
-        assert!(
-            identity.upgrade().is_none(),
-            "cycle {cycle} retained its session"
-        );
-        let observation = Observation::read(&fs::read(&path).unwrap());
-        assert_eq!(
-            observation.values,
-            (0..initial)
-                .map(|i| i32::try_from(i).unwrap())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            observation
-                .free
-                .intersection(&observation.reachable())
-                .is_empty()
-        );
+        let workload = super::Workload::record_with(path, 1, |values| {
+            let mut engine = open(path, backing, Arc::clone(&reads), Arc::clone(&calls));
+            engine
+                .set_write_buffering(WriteBuffering::Session {
+                    page_size: 4096,
+                    max_bytes: 65_536,
+                })
+                .unwrap();
+            let file = File::from_test_edit_session(
+                engine,
+                FileAccessProperties::new()
+                    .with_metadata_cache(MetadataCacheConfig::disabled())
+                    .with_sync_policy(SyncPolicy::OnClose)
+                    .with_memory_strategy(backing),
+            )
+            .unwrap();
+            file.dataset("d").unwrap().append(values).unwrap();
+            let bytes = reads.load(Ordering::Relaxed);
+            let requests = calls.load(Ordering::Relaxed);
+            assert!(
+                (256..64 * 1024).contains(&bytes),
+                "cycle {cycle} read {bytes} bytes"
+            );
+            assert!(
+                (8..256).contains(&requests),
+                "cycle {cycle} issued {requests} reads"
+            );
+            file.close().unwrap();
+        });
+        let (point, observation) = workload
+            .snapshots
+            .iter()
+            .enumerate()
+            .find(|(point, snapshot)| {
+                *point != 0
+                    && snapshot.values.len() == initial
+                    && snapshot
+                        .chunks
+                        .iter()
+                        .any(|chunk| chunk.0 == [initial as u64])
+            })
+            .expect("the new chunk is referenced before the dimension is published");
+        let image = workload.prefix(point);
+        fs::write(path, &image).unwrap();
+        history = workload.retained_history(point, &history);
+        observation.inspect("interrupted reopen", cycle, hole, &mut history);
+        let file = File::open(path).unwrap();
+        assert_eq!(file.superblock().root_group_address, root);
+        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), expected);
+        file.close().unwrap();
+        assert_eq!(fs::read(path).unwrap(), image);
     }
-    let mut engine = open(&path, backing, Arc::default(), Arc::default());
-    engine.append_inplace_i32_phased("d", &values, 4).unwrap();
-    assert_session_state(&engine);
-    engine.finalize_persist().unwrap();
-    drop(engine);
-    let observation = Observation::read(&fs::read(&path).unwrap());
-    assert_eq!(
-        observation.values,
-        (0..initial + CHUNK)
-            .map(|i| i32::try_from(i).unwrap())
-            .collect::<Vec<_>>()
-    );
 }
 
 /// Measures fixed-batch reads after index initialization and dataset growth.
