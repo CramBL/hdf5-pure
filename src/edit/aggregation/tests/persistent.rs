@@ -198,11 +198,7 @@ fn persistent_staged_edits_and_immediate_appends_survive_reopen(
     let mut batch = AppendBuilder::new();
     batch.append_u8(&vec![11; end - chunk]);
     engine
-        .append_inplace_gathered(
-            AppendTarget::Path(&ObjectPathBuf::parse("values")),
-            &batch,
-            4,
-        )
+        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("values")), &batch)
         .unwrap();
     stage_dataset(&mut engine, "last", 43);
     engine.commit().unwrap();

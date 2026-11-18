@@ -237,7 +237,7 @@ fn page_initialization_errors_prevent_later_references_and_reuse(
     let mut append = AppendBuilder::new();
     append.append_i32(&(fixture.start..fixture.start + 4).collect::<Vec<_>>());
     let error = engine
-        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
         .unwrap_err();
     let Error::Io(error) = error else {
         panic!("expected the injected storage error, got {error:?}")
@@ -314,7 +314,7 @@ fn page_initialization_errors_prevent_later_references_and_reuse(
     file.persisted_free_sections().unwrap();
     disk_log::start();
     for result in [
-        engine.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4),
+        engine.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append),
         engine.commit(),
         engine.finalize_persist(),
         engine.force_sync(),

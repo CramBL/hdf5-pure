@@ -878,7 +878,6 @@ fn bounded_multi_batch_append_commits_every_batch() {
             .append_inplace_gathered(
                 AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
                 &b,
-                4,
             )
             .unwrap();
     }

@@ -329,7 +329,7 @@ fn actual_io_failure_prevents_dependent_reference_publication(
     let mut append = AppendBuilder::new();
     append.append_i32(&values);
     let error = engine
-        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
         .unwrap_err();
     let Error::Io(error) = error else {
         panic!(
@@ -384,7 +384,7 @@ fn actual_io_failure_prevents_dependent_reference_publication(
     disk_log::start();
     if matches!(failure, Failure::Content(_)) {
         engine
-            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
             .unwrap();
         let retry = disk_log::finish();
         let final_bytes = engine.disk_bytes().unwrap();
@@ -408,7 +408,7 @@ fn actual_io_failure_prevents_dependent_reference_publication(
         retry.assert_complete(&path);
     } else {
         let error = engine
-            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
             .unwrap_err();
         assert!(
             matches!(error, Error::AllocationPublicationUncertain),
