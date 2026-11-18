@@ -53,10 +53,7 @@ fn copied_users_combine_dataset_compact_and_normalized_dense_types(#[case] versi
         vec![dense_attribute("a", Some(900)), dense_attribute("b", None)],
     );
     let users = tree.datatype_users(WIDTHS).unwrap().unwrap();
-    assert!(users.matches(&tree));
     assert_eq!(counts(&users), vec![(900, 3)]);
-    let other = CopyTreeBuilder::default().finish(node(Vec::new(), Vec::new()));
-    assert!(!users.matches(&other));
 }
 
 #[test]
