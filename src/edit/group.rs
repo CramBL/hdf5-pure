@@ -44,7 +44,6 @@ use super::block::{BlockRequest, EncodingDependency};
 use super::group_links;
 use super::object_header::reference_count::HeaderCountError;
 use super::object_header::{self, OhRegion};
-use super::reservation::ReservationFailure;
 
 mod hard_link;
 mod link_patches;
@@ -363,9 +362,7 @@ impl WriteEngine {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let base = self.context.addresses();
-            let mut reservations = self
-                .plan_blocks(&requests)
-                .map_err(ReservationFailure::into_error)?;
+            let mut reservations = self.plan_blocks(&requests)?;
             let addresses = reservations
                 .reservations()
                 .iter()

@@ -36,7 +36,6 @@ use super::WriteEngine;
 use super::block::{BlockRequest, EncodingDependency};
 use super::object_header;
 use super::object_header::OhRegion;
-use super::reservation::ReservationFailure;
 use super::staging::StagedOp;
 
 #[cfg(test)]
@@ -208,9 +207,7 @@ impl WriteEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let base = self.context.addresses();
-        let mut reservations = self
-            .plan_blocks(&requests)
-            .map_err(ReservationFailure::into_error)?;
+        let mut reservations = self.plan_blocks(&requests)?;
         let addresses = reservations
             .reservations()
             .iter()

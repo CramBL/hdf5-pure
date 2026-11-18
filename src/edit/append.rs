@@ -50,7 +50,6 @@ use super::array::ArrayIndexPlanRef;
 use super::dataset;
 use super::staging::StagedOp;
 
-use super::reservation::ReservationFailure;
 use super::{SyncPolicy, WriteEngine};
 
 /// Options for immediate, staged, or buffered appends.
@@ -944,10 +943,7 @@ impl EditStore<'_> {
         let result = (|| {
             let array = ArrayIndexPlanRef::Extensible(initialization.plan());
             let requests = array.requests()?;
-            let mut reservations = self
-                .engine
-                .plan_immediate_blocks(&requests)
-                .map_err(ReservationFailure::into_error)?;
+            let mut reservations = self.engine.plan_immediate_blocks(&requests)?;
             let [header, index] = reservations.reservations() else {
                 return Err(FormatError::Internal(
                     "empty extensible array requires two complete blocks".into(),
@@ -988,10 +984,7 @@ impl EditStore<'_> {
             let requests = requests
                 .get(usize::from(header.is_some())..)
                 .ok_or(FormatError::InvalidFixedArrayGeometry)?;
-            let mut reservations = self
-                .engine
-                .plan_immediate_blocks(requests)
-                .map_err(ReservationFailure::into_error)?;
+            let mut reservations = self.engine.plan_immediate_blocks(requests)?;
             let addresses = reservations.addresses();
             let (header_range, block_range) = match reservations.reservations() {
                 [block] if header.is_some() => (None, block.range()),
@@ -1096,10 +1089,7 @@ impl EditStore<'_> {
             AllocationClass::Metadata => ReservationRequest::new(size, class).for_block(),
             AllocationClass::Raw => ReservationRequest::new(size, class),
         };
-        let mut plan = self
-            .engine
-            .plan_immediate_reservation(request)
-            .map_err(ReservationFailure::into_error)?;
+        let mut plan = self.engine.plan_immediate_reservation(request)?;
         let address = plan.reservations()[0].range().start();
         let bytes = Self::prepare_allocation_bytes(length, address, prepare)?;
         plan.write_next(bytes.as_ref()).map(PhysicalAddress::get)
@@ -1316,10 +1306,7 @@ impl Store for EditStore<'_> {
                 AllocationClass::Metadata => ReservationRequest::new(length, class).for_block(),
                 AllocationClass::Raw => ReservationRequest::new(length, class),
             };
-            let mut plan = self
-                .engine
-                .plan_immediate_reservation(request)
-                .map_err(ReservationFailure::into_error)?;
+            let mut plan = self.engine.plan_immediate_reservation(request)?;
             let address = plan.reservations()[0].range().start();
             let address =
                 plan.write_next_with(|writer| emit(address, &mut |bytes| writer.write(bytes)))?;
