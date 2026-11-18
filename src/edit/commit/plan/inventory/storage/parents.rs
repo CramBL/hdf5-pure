@@ -179,12 +179,9 @@ impl<'a> ParentRelease<'a> {
             .map_err(ParentPreparationError::Storage)?;
         if let Ok(parents) = &storage.parents {
             for (&address, parent) in parents {
-                for range in [
-                    parent.framing.as_ref().ok().copied(),
-                    parent.original.map(|(range, _)| range),
-                ]
-                .into_iter()
-                .flatten()
+                for range in [parent.framing, parent.original.map(|(range, _)| range)]
+                    .into_iter()
+                    .flatten()
                 {
                     if matches!(
                         decisions.dispositions().get(&address),

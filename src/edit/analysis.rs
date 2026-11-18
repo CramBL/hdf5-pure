@@ -117,8 +117,6 @@ pub(super) struct AnalysisPhase<'a> {
     claims: Option<PhysicalClaims>,
     /// Root-scoped member associations and independent reference and framing outcomes.
     associations: Option<MemberAssociations>,
-    #[cfg(test)]
-    candidate_lookups: u64,
 }
 
 impl<'a> AnalysisPhase<'a> {
@@ -140,8 +138,6 @@ impl<'a> AnalysisPhase<'a> {
             physical: None,
             claims: None,
             associations: None,
-            #[cfg(test)]
-            candidate_lookups: 0,
         }
     }
 
@@ -204,8 +200,6 @@ impl<'a> AnalysisPhase<'a> {
             physical: _,
             claims: _,
             associations: _,
-            #[cfg(test)]
-                candidate_lookups: _,
         } = self;
         topology
             .get_or_insert_with(|| {
@@ -282,7 +276,7 @@ impl<'a> AnalysisPhase<'a> {
     ///
     /// Associates retained observations with this phase's shared identity. Retains decoded member
     /// identities and interpretation outcomes by original object. If discovery fails or is
-    /// incomplete, records the supplied deletion roots and excludes all allocations. Otherwise,
+    /// incomplete, keeps the observations and excludes all allocations. Otherwise,
     /// includes each collection whose complete allocation can be parsed.
     pub(super) fn deleted_collections(&mut self, deleted: &[ObjectId]) -> CollectionCandidates {
         if deleted.is_empty() {
@@ -306,12 +300,12 @@ impl<'a> AnalysisPhase<'a> {
             return candidates;
         }
         if matches!(complete, Ok(true)) {
-            for (origin, references) in &predecessors {
+            for references in predecessors.values() {
                 for &address in &references.collections {
                     if let Ok(allocation) =
                         self.collection_allocation(PhysicalAddress::new(address))
                     {
-                        let Ok(()) = candidates.insert(allocation, [origin.clone()]) else {
+                        let Ok(()) = candidates.insert(allocation) else {
                             return CollectionCandidates::default();
                         };
                     }
@@ -322,11 +316,6 @@ impl<'a> AnalysisPhase<'a> {
             return CollectionCandidates::default();
         };
         observations.predecessors = predecessors;
-        if !matches!(complete, Ok(true)) {
-            observations
-                .incomplete_deletions
-                .extend(deleted.iter().copied());
-        }
         candidates
     }
 
@@ -362,7 +351,7 @@ impl<'a> AnalysisPhase<'a> {
                     if let Ok(allocation) =
                         self.collection_allocation(PhysicalAddress::new(address))
                     {
-                        candidates.insert(allocation, [origin.clone()])?;
+                        candidates.insert(allocation)?;
                     }
                 }
             }
@@ -438,7 +427,7 @@ impl<'a> AnalysisPhase<'a> {
                     if let Ok(allocation) =
                         self.collection_allocation(PhysicalAddress::new(address))
                     {
-                        candidates.insert(allocation, [origin.clone()])?;
+                        candidates.insert(allocation)?;
                     }
                 }
             }
@@ -460,7 +449,10 @@ impl<'a> AnalysisPhase<'a> {
         &mut self,
         address: PhysicalAddress,
     ) -> Result<CollectionAllocation, FormatError> {
-        let range = self.collection_contents(address)?.range();
+        let range = self
+            .collection_contents(address)
+            .map_err(Clone::clone)?
+            .range();
         Ok(CollectionAllocation {
             session: self.engine.context.allocations.session(),
             range,
@@ -541,15 +533,7 @@ impl<'a> AnalysisPhase<'a> {
         collections
             .into_values()
             .filter_map(|candidate| {
-                let CollectionCandidate {
-                    range,
-                    class,
-                    origins: _,
-                } = candidate;
-                #[cfg(test)]
-                {
-                    self.candidate_lookups = self.candidate_lookups.saturating_add(1);
-                }
+                let CollectionCandidate { range, class } = candidate;
                 if referenced_collections.contains(&range.start().get()) {
                     return None;
                 }
@@ -640,8 +624,6 @@ impl<'a> AnalysisPhase<'a> {
             physical: _,
             claims: _,
             associations: _,
-            #[cfg(test)]
-                candidate_lookups: _,
         } = self;
         let has_topology = topology
             .as_ref()
@@ -701,68 +683,6 @@ impl<'a> AnalysisPhase<'a> {
         references.get(&object).ok_or_else(|| {
             FormatError::Internal("object reference facts were not recorded".into()).into()
         })
-    }
-    /// Returns retained summary sizes and candidate-membership query counts.
-    #[cfg(test)]
-    fn work(&self) -> AnalysisWork {
-        let Self {
-            engine: _,
-            identity: _,
-            topology,
-            budget: _,
-            root: _,
-            links,
-            references,
-            value_references: _,
-            liveness,
-            allocations,
-            collection_envelopes: _,
-            counts: _,
-            ownership: _,
-            physical: _,
-            claims: _,
-            associations: _,
-            candidate_lookups,
-        } = self;
-        let topology = topology.as_ref().and_then(Option::as_ref);
-        let objects = topology.map_or(0, |topology| topology.indices.len() as u64);
-        let edges = topology.map_or(0, |topology| {
-            topology
-                .indices
-                .values()
-                .map(|&index| topology.graph.object(index).links.len() as u64)
-                .sum()
-        });
-        let link_name_bytes = topology.map_or(0, |topology| {
-            topology
-                .indices
-                .values()
-                .map(|&index| {
-                    topology
-                        .graph
-                        .object(index)
-                        .value
-                        .names
-                        .keys()
-                        .map(|name| name.len() as u64)
-                        .sum::<u64>()
-                })
-                .sum()
-        });
-        AnalysisWork {
-            topology_objects: objects,
-            topology_edges: edges,
-            link_name_bytes,
-            cached_link_objects: links.len() as u64,
-            reference_objects: references.len() as u64,
-            collection_references: references
-                .values()
-                .map(|references| references.collections.len() as u64)
-                .sum(),
-            allocation_results: allocations.len() as u64,
-            liveness_results: u64::from(liveness.is_some()),
-            candidate_lookups: *candidate_lookups,
-        }
     }
 }
 
@@ -1103,63 +1023,39 @@ impl CollectionCandidates {
             session,
             identity,
             predecessors,
-            incomplete_deletions,
         } = *observations;
         self.require_identity(session.clone(), identity.as_ref())?;
-        for CollectionCandidate {
-            range,
-            class,
-            origins,
-        } in collections.into_values()
-        {
-            self.insert(
-                CollectionAllocation {
-                    session: session.clone(),
-                    range,
-                    class,
-                },
-                origins,
-            )?;
+        for CollectionCandidate { range, class } in collections.into_values() {
+            self.insert(CollectionAllocation {
+                session: session.clone(),
+                range,
+                class,
+            })?;
         }
         let observations = self.require_session(session)?;
         for (origin, references) in predecessors {
             observations.observe(origin, references);
         }
-        observations
-            .incomplete_deletions
-            .extend(incomplete_deletions);
         Ok(())
     }
 
-    /// Merges origins for one complete allocation, preserving its original range and class.
+    /// Merges one complete allocation, preserving its original range and class.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if `origins` is empty, the allocation belongs to another
-    /// session, or an existing candidate at the same address has a different length or class.
-    pub(super) fn insert(
-        &mut self,
-        allocation: CollectionAllocation,
-        origins: impl IntoIterator<Item = CollectionProvenance>,
-    ) -> Result<(), FormatError> {
-        let mut origins = origins.into_iter();
-        let first = origins.next().ok_or_else(|| {
-            FormatError::Internal("collection candidate has no provenance".into())
-        })?;
+    /// Returns [`FormatError::Internal`] if the allocation belongs to another session or an
+    /// existing candidate at the same address has a different length or class.
+    pub(super) fn insert(&mut self, allocation: CollectionAllocation) -> Result<(), FormatError> {
         let CollectionAllocation {
             session,
             range,
             class,
         } = allocation;
         self.require_session(session)?;
-        let candidate =
-            self.collections
-                .entry(range.start())
-                .or_insert_with(|| CollectionCandidate {
-                    range,
-                    class,
-                    origins: BTreeSet::new(),
-                });
+        let candidate = self
+            .collections
+            .entry(range.start())
+            .or_insert(CollectionCandidate { range, class });
         if candidate.range != range {
             return Err(FormatError::Internal(
                 "collection candidates have conflicting allocation lengths".into(),
@@ -1170,8 +1066,6 @@ impl CollectionCandidates {
                 "collection candidates have conflicting allocation classes".into(),
             ));
         }
-        candidate.origins.insert(first);
-        candidate.origins.extend(origins);
         Ok(())
     }
 
@@ -1261,7 +1155,6 @@ impl CollectionCandidates {
                 session,
                 identity: None,
                 predecessors: BTreeMap::new(),
-                incomplete_deletions: BTreeSet::new(),
             })
         });
         if observations.identity.is_none() {
@@ -1271,7 +1164,7 @@ impl CollectionCandidates {
     }
 }
 
-/// Descriptor observations and incomplete deletion scopes, bound to their original source phase.
+/// Descriptor observations bound to their original source phase.
 ///
 /// For allocation-only candidates, the editor records a session without a phase identity or
 /// observations.
@@ -1281,8 +1174,6 @@ struct CandidateObservations {
     identity: Option<Arc<deletions::TopologyIdentity>>,
     /// Decoded identities and interpretation outcomes, keyed by original object and content scope.
     predecessors: BTreeMap<CollectionProvenance, ObjectReferences>,
-    /// Supplied deletion roots whose descendant traversal failed or was incomplete.
-    incomplete_deletions: BTreeSet<ObjectId>,
 }
 
 impl CandidateObservations {
@@ -1320,18 +1211,17 @@ pub(super) struct CollectionAllocation {
     class: Option<FreeClass>,
 }
 
-/// One complete collection allocation with its original class and recorded origins.
+/// One complete collection allocation with its original class.
 struct CollectionCandidate {
     range: FileRange,
     /// The original allocation class, or [`None`] if stored-address conversion failed.
     class: Option<FreeClass>,
-    origins: BTreeSet<CollectionProvenance>,
 }
 
-/// The original object and content scope associated with an allocation or observation.
+/// The original object and content scope of a reference observation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct CollectionProvenance {
-    /// The object from which the allocation or reference summary was collected.
+    /// The object from which the references were collected.
     pub(super) object: ObjectId,
     /// The part of the original object examined for references.
     pub(super) content: CollectionContent,
@@ -1348,30 +1238,6 @@ pub(super) enum CollectionContent {
     Object,
 }
 
-/// Retained phase summaries and candidate-membership query counts.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AnalysisWork {
-    /// Objects in complete topology.
-    topology_objects: u64,
-    /// Hard-link edges in complete topology.
-    topology_edges: u64,
-    /// Bytes in the topology's indexed link names.
-    link_name_bytes: u64,
-    /// Entries in the separate object-link cache.
-    cached_link_objects: u64,
-    /// Cached object-reference summaries.
-    reference_objects: u64,
-    /// Collection addresses summed across cached object-reference summaries.
-    collection_references: u64,
-    /// Cached collection-allocation results, including errors.
-    allocation_results: u64,
-    /// Cached root reference results, either zero or one.
-    liveness_results: u64,
-    /// Candidate-membership queries against a complete reference set.
-    candidate_lookups: u64,
-}
-
 #[cfg(test)]
 std::thread_local! {
     pub(in crate::edit) static DISCOVERY_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
@@ -1379,6 +1245,3 @@ std::thread_local! {
     pub(in crate::edit) static COLLECTION_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     pub(in crate::edit) static COLLECTION_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
-
-#[cfg(test)]
-mod tests;

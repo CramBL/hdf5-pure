@@ -4,6 +4,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use rstest::rstest;
+use test_util_hdf5::__private::ownership_append;
 use test_util_hdf5::attr;
 use test_util_hdf5::dataset;
 use test_util_hdf5::dataset::AppendMode;
@@ -373,4 +374,159 @@ fn native_reads_preserved_variable_length_append_siblings(
     file_space_oracle::assert_persisted_sections(&path);
     file_space_oracle::assert_manager_metadata_bytes(&path);
     directory.close().unwrap();
+}
+
+#[test]
+fn immediate_append_reuse_survives_heap_attribute_removal() {
+    let path = test_util::temp::temp_path("heap-edit-reused-append.h5");
+    let file = open_heap_edit_append(&path, AppendTail::FullChunk);
+    let free = file.reusable_free_sections().unwrap();
+    let values = vec![0x5a; 8_192];
+    let mut dataset = file.dataset("d").unwrap();
+    dataset.append(&values).unwrap();
+
+    let chunks = dataset.chunks().unwrap();
+    assert!(
+        chunks
+            .iter()
+            .filter(|chunk| chunk.offset[0] >= 8_192)
+            .any(|chunk| {
+                free.sections().iter().any(|section| {
+                    section.address().get() <= chunk.address
+                        && chunk.address + chunk.storage_size <= section.end_address().get()
+                })
+            })
+    );
+    drop(dataset);
+    remove_heap_attribute_and_close(file);
+
+    assert_native_append(&path, AppendTail::FullChunk, &values);
+}
+
+#[test]
+fn immediate_append_growth_survives_heap_attribute_removal() {
+    let path = test_util::temp::temp_path("heap-edit-grown-append.h5");
+    let file = open_heap_edit_append(&path, AppendTail::FullChunk);
+    let before = file.file_size();
+    let values = vec![0x5a; 81_920];
+    let mut dataset = file.dataset("d").unwrap();
+    dataset.append(&values).unwrap();
+
+    assert!(file.file_size() > before);
+    assert!(
+        dataset
+            .chunks()
+            .unwrap()
+            .iter()
+            .filter(|chunk| chunk.offset[0] >= 8_192)
+            .any(|chunk| chunk.address >= before)
+    );
+    drop(dataset);
+    remove_heap_attribute_and_close(file);
+
+    assert_native_append(&path, AppendTail::FullChunk, &values);
+}
+
+#[rstest]
+#[case::full_chunk(AppendTail::FullChunk)]
+#[case::partial_tail(AppendTail::Partial)]
+fn staged_append_publishes_with_heap_attribute_removal(#[case] tail: AppendTail) {
+    let path = test_util::temp::temp_path("heap-edit-staged-append.h5");
+    let file = open_heap_edit_append(&path, tail);
+    let before = file.file_size();
+    let values = vec![0x5a; 8_192];
+    file.dataset("d")
+        .unwrap()
+        .append_staged(|append| {
+            append.append_u8(&values);
+        })
+        .unwrap();
+
+    assert_eq!(file.file_size(), before);
+    remove_heap_attribute_and_close(file);
+
+    assert_native_append(&path, tail, &values);
+}
+
+#[test]
+fn pending_dataset_append_publishes_with_heap_attribute_removal() {
+    let path = test_util::temp::temp_path("heap-edit-pending-append.h5");
+    let file = open_heap_edit_append(&path, AppendTail::FullChunk);
+    let before = file.file_size();
+    let values = vec![0x5a; 8_192];
+    file.root()
+        .create_dataset("pending", |builder| {
+            builder.with_u8_data(&[11]);
+        })
+        .unwrap()
+        .append_staged(|append| {
+            append.append_u8(&values);
+        })
+        .unwrap();
+
+    assert_eq!(file.file_size(), before);
+    remove_heap_attribute_and_close(file);
+
+    let native = file::libhdf5_open(&path);
+    assert_eq!(
+        native.dataset("pending").unwrap().read_raw::<u8>().unwrap(),
+        [&[11], values.as_slice()].concat()
+    );
+    native.close().unwrap();
+    assert_native_heap_edit(&path, &vec![0; AppendTail::FullChunk.len()]);
+}
+
+#[derive(Clone, Copy)]
+enum AppendTail {
+    FullChunk,
+    Partial,
+}
+
+impl AppendTail {
+    fn len(self) -> usize {
+        match self {
+            Self::FullChunk => 8_192,
+            Self::Partial => 8_191,
+        }
+    }
+}
+
+fn open_heap_edit_append(path: &Path, tail: AppendTail) -> File {
+    ownership_append::Fixture::write(path, false, false, false);
+    let native = file::libhdf5_open_rw(path);
+    attr::write_unicode_array(&native, "labels", &["predecessor"]);
+    if matches!(tail, AppendTail::Partial) {
+        native.dataset("d").unwrap().resize([tail.len()]).unwrap();
+    }
+    native.close().unwrap();
+    File::open_rw(path).unwrap()
+}
+
+fn remove_heap_attribute_and_close(file: File) {
+    file.root().remove_attr("labels").unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+}
+
+fn assert_native_append(path: &Path, tail: AppendTail, values: &[u8]) {
+    let mut expected = vec![0; tail.len()];
+    expected.extend_from_slice(values);
+    assert_native_heap_edit(path, &expected);
+}
+
+fn assert_native_heap_edit(path: &Path, expected: &[u8]) {
+    let native = file::libhdf5_open(path);
+    assert_eq!(
+        native.dataset("d").unwrap().read_raw::<u8>().unwrap(),
+        expected
+    );
+    assert!(
+        !native
+            .attr_names()
+            .unwrap()
+            .iter()
+            .any(|name| name == "labels")
+    );
+    native.close().unwrap();
+    file_space_oracle::assert_persisted_sections(path);
 }

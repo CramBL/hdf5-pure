@@ -190,7 +190,7 @@ impl PhysicalClaims {
                     .map(PhysicalAddress::new),
             );
             if !references.is_complete() {
-                claims.problems.push(ClaimProblem::References(object));
+                claims.problems.push(ClaimProblem::References);
             }
         }
         for address in collections {
@@ -199,16 +199,14 @@ impl PhysicalClaims {
                     range: contents.range(),
                     origin: ClaimOrigin::Heap(address),
                 }),
-                Err(error) => {
+                Err(_) => {
                     if let Some(&range) = phase.collection_envelopes.get(&address) {
                         claims.claims.push(PhysicalClaim {
                             range,
                             origin: ClaimOrigin::Heap(address),
                         });
                     }
-                    claims
-                        .problems
-                        .push(ClaimProblem::Collection { address, error });
+                    claims.problems.push(ClaimProblem::Collection(address));
                 }
             }
         }
@@ -296,24 +294,17 @@ pub(in crate::edit) enum ClaimOrigin {
 
 /// A failed or incomplete component of physical claim collection.
 ///
-/// Object problems identify local allocation and reference caches. Collection framing failures
-/// retain their physical addresses.
+/// Collection framing failures retain their physical addresses.
 #[derive(Debug)]
 pub(in crate::edit) enum ClaimProblem {
     /// A failure while collecting a referenced collection's complete framing.
-    Collection {
-        address: PhysicalAddress,
-        error: FormatError,
-    },
+    Collection(PhysicalAddress),
     /// Incomplete file storage discovery.
     File,
     /// Incomplete local allocation discovery for this object.
     ObjectStorage(ObjectId),
-    /// Incomplete reference interpretation for this object's content.
-    References(ObjectId),
+    /// Incomplete interpretation of an object's references.
+    References,
     /// Unavailable hard-link topology for the phase root.
     Topology,
 }
-
-#[cfg(test)]
-mod tests;

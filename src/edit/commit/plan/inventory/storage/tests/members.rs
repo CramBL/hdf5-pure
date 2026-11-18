@@ -16,9 +16,7 @@ use super::super::PendingEditInventory;
 use crate::AttrValue;
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationPublication;
-use crate::edit::analysis::heap::qualification::{
-    MemberUnavailable, OriginalQualification, ParentUnavailable,
-};
+use crate::edit::analysis::heap::qualification::OriginalQualification;
 use crate::edit::analysis::{COLLECTION_WORK, CollectionContent, CollectionProvenance};
 use crate::edit::commit::heap::HeapMutationState;
 use crate::edit::commit::plan::inventory::members::MemberDecision;
@@ -76,12 +74,9 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
     let decisions = pending.member_decisions();
     assert_eq!(
         decisions.members().values().copied().collect::<Vec<_>>(),
-        [Ok(MemberDecision::Remove), Ok(MemberDecision::Remove)]
+        [Some(MemberDecision::Remove), Some(MemberDecision::Remove)]
     );
-    assert_eq!(
-        decisions.parents()[&PhysicalAddress::new(parent)],
-        Err(ParentUnavailable::Unmatched)
-    );
+    assert_eq!(decisions.parents()[&PhysicalAddress::new(parent)], None);
     let mut plans = decisions.plans();
     let plan = plans.next().unwrap();
     assert_eq!(plan.retained(), 2);
@@ -93,10 +88,7 @@ fn checked_completion_preserves_live_and_unobserved_members(#[case] form: Form) 
     else {
         panic!("expected retained original qualification");
     };
-    assert_eq!(
-        qualification.whole_parent(PhysicalAddress::new(parent)),
-        Err(ParentUnavailable::Unmatched)
-    );
+    assert!(!qualification.whole_parent(PhysicalAddress::new(parent)));
     assert!(completion.prospective.is_complete());
     assert_eq!(completion.decisions.planning().len(), 1);
     completion.decisions.planning()[&PhysicalAddress::new(parent)]
@@ -188,7 +180,7 @@ fn prospective_references_preserve_observed_members(#[case] retained: bool) {
     let decisions = pending.member_decisions();
     assert_eq!(
         decisions.members().values().copied().collect::<Vec<_>>(),
-        [Ok(MemberDecision::Live)]
+        [Some(MemberDecision::Live)]
     );
     assert!(decisions.plans().next().is_none());
     let completion = pending.publish_compacting_members().unwrap();
@@ -236,7 +228,7 @@ fn translated_retained_roots_preserve_their_observed_members(#[case] aliased: bo
     let decisions = pending.member_decisions();
     assert_eq!(
         decisions.members().values().copied().collect::<Vec<_>>(),
-        [Ok(MemberDecision::Live)]
+        [Some(MemberDecision::Live)]
     );
     assert!(decisions.plans().next().is_none());
     pending
@@ -301,9 +293,9 @@ fn original_and_prospective_restrictions_withhold_compaction(#[case] missing: bo
     assert_eq!(
         outcome,
         if missing {
-            Err(MemberUnavailable::Missing)
+            None
         } else {
-            Ok(MemberDecision::Prospective)
+            Some(MemberDecision::Prospective)
         }
     );
     assert!(decisions.plans().next().is_none());
@@ -356,7 +348,7 @@ fn incomplete_prospective_interpretation_preserves_a_qualified_parent() {
     let decisions = pending.member_decisions();
     assert_eq!(
         decisions.members().values().copied().collect::<Vec<_>>(),
-        [Ok(MemberDecision::Prospective)]
+        [Some(MemberDecision::Prospective)]
     );
     assert!(decisions.plans().next().is_none());
     let completion = pending.publish_compacting_members().ok().unwrap();
@@ -419,7 +411,7 @@ fn multiple_parent_plans_begin_after_publication(#[case] outcome: Completion) {
             .values()
             .copied()
             .collect::<Vec<_>>(),
-        [Ok(MemberDecision::Live), Ok(MemberDecision::Live)]
+        [Some(MemberDecision::Live), Some(MemberDecision::Live)]
     );
     assert_retained_member(&engine, first, b"keep one");
     assert_retained_member(&engine, second, b"keep two");

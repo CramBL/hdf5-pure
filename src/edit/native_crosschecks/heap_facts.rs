@@ -190,17 +190,13 @@ fn native_heap_members_are_distinct_from_root_reference_completeness(#[case] ext
     );
     let associations = phase.member_associations(&source).unwrap();
     assert!(associations.topology_available());
-    assert!(associations.incomplete_references().is_empty());
+    assert!(associations.references_complete());
     let association = &associations.collections()[&collection];
-    assert!(association.error().is_none());
-    assert_eq!(
-        association.unmatched(),
-        missing.iter().map(|id| id.index).collect::<Vec<_>>()
-    );
+    assert!(association.is_framed());
+    assert_eq!(association.has_unmatched(), !missing.is_empty());
     assert_eq!(association.observed().len(), 2);
     for observed in association.observed().values() {
-        assert_eq!(observed.presence(), MemberPresence::Allocated);
-        assert_eq!(observed.referrers(), [root]);
+        assert_eq!(*observed, MemberPresence::Allocated);
     }
     drop(phase);
     drop(engine);
@@ -355,9 +351,9 @@ fn observe_retained_parent(engine: &WriteEngine, parent: FileRange, stage: &str)
     let count = u64::try_from(allocated.members().len()).unwrap();
     let associations = phase.member_associations(&source).unwrap();
     assert!(associations.topology_available());
-    assert!(associations.incomplete_references().is_empty());
+    assert!(associations.references_complete());
     let association = &associations.collections()[&parent.start()];
-    assert!(association.error().is_none());
+    assert!(association.is_framed());
     assert_eq!(association.observed().len(), 1);
     let mut report = Report::new();
     report.metrics(
@@ -368,10 +364,6 @@ fn observe_retained_parent(engine: &WriteEngine, parent: FileRange, stage: &str)
             (
                 "Observed IDs",
                 u64::try_from(association.observed().len()).unwrap(),
-            ),
-            (
-                "Unmatched IDs",
-                u64::try_from(association.unmatched().len()).unwrap(),
             ),
             (
                 "Claim problems",

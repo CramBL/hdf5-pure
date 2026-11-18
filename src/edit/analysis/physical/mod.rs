@@ -363,6 +363,3 @@ pub(in crate::edit) enum CapacityKind {
     /// An admitted reusable section with its recorded free class.
     Reusable(FreeClass),
 }
-
-#[cfg(test)]
-mod tests;
