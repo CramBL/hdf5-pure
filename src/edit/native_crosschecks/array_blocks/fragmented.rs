@@ -20,7 +20,7 @@ use crate::PartialEdgeFiltering;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::dataspace::MaxExtent;
-use crate::edit::dataset::tests::lifecycle;
+use crate::edit::dataset::test_util::lifecycle;
 use crate::edit::test_util;
 
 #[rstest]
