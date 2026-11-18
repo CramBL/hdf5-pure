@@ -20,8 +20,8 @@ use crate::edit::analysis::counts::changes::OriginalCount;
 use crate::edit::analysis::counts::changes::owned::{
     CountDisposition as OwnedCountDisposition, OwnedOriginalCount, UnresolvedCount,
 };
-use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
+use crate::edit::attributes::test_util::edit_compact_region;
 use crate::edit::commit::plan::inventory::{InventoryPreparation, PreparedEditInventory};
 use crate::edit::group;
 use crate::edit::test_util as edit_test_util;
@@ -80,7 +80,7 @@ fn native_group_counts_project_after_link_and_attribute_transformations(#[case] 
                 .unwrap(),
         )
         .unwrap();
-    region = attributes::edit_compact_region(
+    region = edit_compact_region(
         &region,
         &[AttrOp::Set {
             name: "value".into(),
@@ -363,7 +363,7 @@ fn native_root_self_link_projections_preserve_the_superblock_reference(#[case] e
     let region = engine.inspect_group(root).unwrap().region;
     let region =
         group::remove_links_from_region(&region, [&LinkNameBuf::new("self").unwrap()]).unwrap();
-    let region = attributes::edit_compact_region(
+    let region = edit_compact_region(
         &region,
         &[AttrOp::Set {
             name: "value".into(),
