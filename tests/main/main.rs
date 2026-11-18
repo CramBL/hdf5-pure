@@ -43,6 +43,7 @@ mod edit_global_heap_dense;
 mod edit_global_heap_members;
 mod edit_global_heap_neighbors;
 mod edit_global_heap_reclaim;
+mod edit_global_heap_residual;
 mod edit_global_heap_retention;
 mod edit_in_place;
 mod edit_link_size;
