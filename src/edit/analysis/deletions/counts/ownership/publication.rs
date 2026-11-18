@@ -5,7 +5,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
-use core::fmt;
 use std::collections::BTreeMap;
 
 use hdf5_pure_core::__private::FileRange;
@@ -15,10 +14,7 @@ use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::MetadataSource;
 use hdf5_pure_format::__private::ObjectReferenceCount;
-use hdf5_pure_format::__private::ObjectReferenceCountField;
 use hdf5_pure_format::__private::ObjectReferenceCountUpdate;
-use hdf5_pure_format::__private::ObjectReferenceCountUpdateError;
-use hdf5_pure_space::__private::FreeClass;
 
 use crate::address::BaseAddress;
 use crate::convert;
@@ -41,9 +37,6 @@ use super::CountProtectionError;
 use super::ProtectedCount;
 use super::ProtectedCounts;
 
-#[cfg(test)]
-mod test_util;
-
 impl ProtectedCounts {
     /// Checks pending retirements against complete original count allocations.
     ///
@@ -55,35 +48,29 @@ impl ProtectedCounts {
     ///
     /// # Errors
     ///
-    /// Returns [`CountPublicationError::Protection`] for an inapplicable session or root,
-    /// unavailable publication, conflicting allocator claims, or address-conversion errors.
-    /// Returns [`CountPublicationError::Retirement`] if a pending retirement intersects a
+    /// Propagates source and allocation-publication errors. Returns [`Error::EditUnsupported`]
+    /// if the session or root differs or if allocator claims or pending retirements intersect a
     /// protected allocation.
-    ///
     /// # Performance
-    ///
     /// Borrows allocator lists and uses the existing count-allocation index. Uses retained metadata
     /// without source reads or topology discovery.
     pub(in crate::edit) fn before_publication<'a>(
         self,
         engine: &'a mut WriteEngine,
         retirement: PendingRootFrees,
-    ) -> Result<CountPublicationPhase<'a>, CountPublicationError> {
+    ) -> Result<CountPublicationPhase<'a>, Error> {
         if let Some(source) = &self.source {
             source
                 .reconstructions(engine, [])
-                .map_err(CountPublicationError::Protection)?;
-            self.exclude_space(engine)
-                .map_err(CountPublicationError::Protection)?;
-            for &(range, class) in retirement.batch.entries() {
-                if let Some(update) = self.overlapping(range) {
-                    return Err(CountPublicationError::Retirement {
-                        object: update.object(),
-                        allocation: update.allocation().range(),
-                        retired: range,
-                        class,
-                    });
-                }
+                .map_err(protection_error)?;
+            self.exclude_space(engine).map_err(protection_error)?;
+            if retirement
+                .batch
+                .entries()
+                .iter()
+                .any(|&(range, _)| self.overlapping(range).is_some())
+            {
+                return Err(allocation_conflict());
             }
         }
         Ok(CountPublicationPhase {
@@ -96,9 +83,8 @@ impl ProtectedCounts {
 
 /// Protected count allocations checked against the engine and pending retirements.
 ///
-/// The engine is exclusively borrowed, and the original retirement batch is retained. The caller
-/// can propose another EOA while retaining those associations. Dropping the phase leaves
-/// allocator state unchanged. Source freshness and write permission require separate evidence.
+/// Borrows the engine exclusively and retains the original retirement batch. Source freshness
+/// and write permission require separate evidence.
 pub(in crate::edit) struct CountPublicationPhase<'a> {
     engine: &'a mut WriteEngine,
     counts: ProtectedCounts,
@@ -110,80 +96,33 @@ impl<'a> CountPublicationPhase<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`CountEndFailure`] with [`CountPublicationError::Truncation`] if `end` precedes
-    /// a protected allocation's end. The caller can recover the phase and propose another EOA.
-    ///
+    /// Returns [`Error::EditUnsupported`] if `end` precedes a protected allocation's end.
     /// # Performance
-    ///
-    /// Checks the maximal allocation end in constant time. On success, retains the existing phase
-    /// without allocating or repeating allocator and retirement checks. On failure, boxes the
-    /// phase and error.
+    /// Checks the maximal allocation end in constant time without repeating allocator or
+    /// retirement checks.
     pub(in crate::edit) fn at_end(
         self,
         end: PhysicalAddress,
-    ) -> Result<CountPublicationBounds<'a>, Box<CountEndFailure<'a>>> {
-        if let Err(error) = CountAllocationEnd::new(&self.counts, end) {
-            return Err(Box::new(CountEndFailure { phase: self, error }));
-        }
-        Ok(CountPublicationBounds { phase: self, end })
+    ) -> Result<CountPublicationBounds<'a>, Error> {
+        self.counts.require_allocation_end(end)?;
+        Ok(CountPublicationBounds { phase: self })
     }
 }
 
-/// A physical EOA at or beyond every complete protected count allocation.
+/// A publication phase with a physical EOA at or beyond every protected count allocation.
 ///
-/// The engine borrow and original retirement batch are retained through [`CountPublicationPhase`].
-/// The predecessor source root and prospective publication root remain distinct.
-/// The editor consumes the original retirement batch in [`Self::with_publication`] or
-/// [`Self::with_ordered_counts`].
+/// Retains the exclusive engine loan and original retirement batch. The predecessor root and
+/// the proposed root remain distinct.
 pub(in crate::edit) struct CountPublicationBounds<'a> {
     phase: CountPublicationPhase<'a>,
-    end: PhysicalAddress,
 }
 
-impl<'a> CountPublicationBounds<'a> {
-    /// Publishes the associated tree with its original retirements before calling `complete`.
-    ///
-    /// Calls `complete` after stored-reference updates, root reclamation, and requested truncation
-    /// succeed. Checks the root passed to the publisher and the confirmed EOA. For a nonempty
-    /// count batch, also checks the allocation session, publication availability, and allocator
-    /// claims. The callback borrows the engine and protected counts with the final adopted root
-    /// and EOA.
-    /// Source freshness requires separate evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns the publication, reference-update, root-reclamation, or address-resolution error
-    /// before calling `complete`. Passes a [`CountCompletionError`] to `complete` if the
-    /// post-publication checks fail. Returns the error from `complete` if completion fails.
-    pub(in crate::edit) fn with_publication<T>(
-        self,
-        relocations: BTreeMap<ObjectId, ObjectId>,
-        complete: impl for<'engine, 'counts> FnOnce(
-            Result<CountWriteScope<'engine, 'counts>, CountCompletionError>,
-        ) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        let Self { phase, end } = self;
-        let CountPublicationPhase {
-            engine,
-            counts,
-            retirement,
-        } = phase;
-        let request = CountCompletion {
-            counts: &counts,
-            root: retirement.root,
-            proposed_end: end,
-        };
-        engine.publish_pending_tree_with_completion(retirement, relocations, |published| {
-            complete(request.into_write_scope(published))
-        })
-    }
-
+impl CountPublicationBounds<'_> {
     /// Publishes the tree between source reference count increases and decreases.
     ///
     /// Writes increases through the commit journal before publication. Protects every original
     /// header allocation containing an updated count during publication, then reads current headers
-    /// and journals decreases before calling `complete`. An empty count batch uses
-    /// [`WriteEngine::publish_pending_tree_with_completion`]. The caller handles whole-commit
+    /// and journals decreases before calling `complete`. The caller handles whole-commit
     /// rollback according to publication state.
     ///
     /// # Errors
@@ -202,9 +141,7 @@ impl<'a> CountPublicationBounds<'a> {
         })
         .map_err(|error| match error {
             PublicationError::Write(error) => error,
-            PublicationError::Storage(_) => {
-                Error::EditUnsupported("publication conflicts with an original count allocation")
-            }
+            PublicationError::Storage(_) => allocation_conflict(),
         })
     }
 
@@ -219,7 +156,7 @@ impl<'a> CountPublicationBounds<'a> {
         storage: &mut OriginalStorage,
         complete: impl FnOnce(PublishedTree<'_>, &OriginalStorage) -> Result<T, Error>,
     ) -> Result<T, PublicationError> {
-        let Self { phase, end } = self;
+        let Self { phase } = self;
         let CountPublicationPhase {
             engine,
             counts,
@@ -234,34 +171,17 @@ impl<'a> CountPublicationBounds<'a> {
                 |published| complete(published, storage).map_err(Into::into),
             );
         }
-        let increases = counts
-            .current_updates(engine, Some(Ordering::Greater))
-            .map_err(Error::from)?;
+        let increases = counts.current_updates(engine, Ordering::Greater)?;
         for update in &increases {
             for (range, bytes) in update.writes() {
                 engine.write_inplace_journaled(range.start(), bytes)?;
             }
         }
-        let request = CountCompletion {
-            counts: &counts,
-            root: retirement.root,
-            proposed_end: end,
-        };
+        let root = retirement.root;
         engine.publish_pending_tree_excluding(retirement, relocations, Some(storage), |published| {
             let requested = published.requested_root();
-            let scope = request
-                .into_write_scope(published)
-                .map_err(|error| match error {
-                    CountCompletionError::Protection(error) => Error::from(error),
-                    CountCompletionError::Root { .. } => FormatError::Internal(
-                        "count updates belong to another published tree".into(),
-                    )
-                    .into(),
-                })?;
-            let decreases = scope
-                .counts
-                .current_updates(scope.engine, Some(Ordering::Less))
-                .map_err(Error::from)?;
+            let scope = CountWriteScope::after_publication(published, root, &counts)?;
+            let decreases = scope.counts.current_updates(scope.engine, Ordering::Less)?;
             let result = JournalScope::run(scope.engine, |journal| {
                 for update in &decreases {
                     for (range, bytes) in update.writes() {
@@ -277,152 +197,60 @@ impl<'a> CountPublicationBounds<'a> {
             complete(PublishedTree::new(scope.engine, requested)?, storage).map_err(Into::into)
         })
     }
-
-    /// Recovers the checked phase for another EOA proposal.
-    pub(in crate::edit) fn into_phase(self) -> CountPublicationPhase<'a> {
-        self.phase
-    }
-
-    /// Returns the predecessor topology root, or `None` for an empty count batch.
-    pub(in crate::edit) fn original_root(&self) -> Option<ObjectId> {
-        self.phase.counts.root()
-    }
-
-    /// Returns the prospective root associated with the pending retirements.
-    pub(in crate::edit) fn root(&self) -> PhysicalAddress {
-        self.phase.retirement.root
-    }
-
-    /// Returns the checked physical EOA.
-    pub(in crate::edit) fn end(&self) -> PhysicalAddress {
-        self.end
-    }
-
-    /// Borrows original count fields and positive remainders in allocation-address order.
-    pub(in crate::edit) fn updates(&self) -> &[ProtectedCount] {
-        self.phase.counts.updates()
-    }
 }
 
-/// A physical EOA at or beyond every complete protected count allocation.
-struct CountAllocationEnd(PhysicalAddress);
-
-impl CountAllocationEnd {
-    /// Checks the maximal end of the disjoint, address-ordered protected allocations.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CountPublicationError::Truncation`] if `end` precedes that allocation end.
-    fn new(counts: &ProtectedCounts, end: PhysicalAddress) -> Result<Self, CountPublicationError> {
-        if let Some(update) = counts.updates().last()
-            && end < update.allocation().range().end()
-        {
-            return Err(CountPublicationError::Truncation {
-                object: update.object(),
-                allocation: update.allocation().range(),
-                end,
-            });
-        }
-        Ok(Self(end))
-    }
-
-    fn address(self) -> PhysicalAddress {
-        self.0
-    }
+fn allocation_conflict() -> Error {
+    Error::EditUnsupported("publication conflicts with an original count allocation")
 }
 
-/// A rejected EOA with its unchanged publication phase.
-pub(in crate::edit) struct CountEndFailure<'a> {
-    /// The original phase, available for another EOA proposal.
-    pub(in crate::edit) phase: CountPublicationPhase<'a>,
-    /// The reason the proposed EOA was rejected.
-    pub(in crate::edit) error: CountPublicationError,
-}
-
-/// An inapplicable source, intersecting retirement, or truncated count allocation.
-#[derive(Debug)]
-pub(in crate::edit) enum CountPublicationError {
-    /// An unsuccessful source, publication, or allocator-claim check.
-    Protection(CountProtectionError),
-    /// A pending retirement intersecting a complete original count allocation.
-    Retirement {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The complete original count allocation.
-        allocation: FileRange,
-        /// The complete retirement range.
-        retired: FileRange,
-        /// The retirement allocation's original free-space class.
-        class: FreeClass,
-    },
-    /// A proposed EOA below the end of a complete original count allocation.
-    Truncation {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The complete original count allocation.
-        allocation: FileRange,
-        /// The proposed physical EOA.
-        end: PhysicalAddress,
-    },
-}
-
-impl From<CountPublicationError> for Error {
-    fn from(error: CountPublicationError) -> Self {
-        match error {
-            CountPublicationError::Protection(CountProtectionError::Source(error)) => error.into(),
-            CountPublicationError::Protection(CountProtectionError::Publication(error)) => error,
-            _ => Self::EditUnsupported("publication conflicts with an original count allocation"),
-        }
+fn protection_error(error: CountProtectionError) -> Error {
+    match error {
+        CountProtectionError::Source(error) => error.into(),
+        CountProtectionError::Publication(error) => error,
+        _ => allocation_conflict(),
     }
 }
 
 impl ProtectedCounts {
-    /// Prepares current count and checksum writes selected by their direction of change.
+    /// Checks the maximal end of the disjoint protected allocations.
+    fn require_allocation_end(&self, end: PhysicalAddress) -> Result<(), Error> {
+        if self
+            .updates()
+            .last()
+            .is_some_and(|update| end < update.allocation().range().end())
+        {
+            return Err(allocation_conflict());
+        }
+        Ok(())
+    }
+
+    /// Prepares current count and checksum writes selected by direction of change.
     ///
-    /// Compares planned remainders with original scalars. `None` selects every update. Returns
-    /// encoded writes in allocation-address order without retaining acquired metadata bytes.
-    /// Preparation leaves the source and protected counts unchanged.
-    ///
-    /// Checks the allocation session before allocating or reading a nonempty batch. Checks each
-    /// field's physical range, containing chunk, flags, and complete allocation against the
-    /// original observation. Checks the original scalar before preparing the positive remainder
-    /// and checksum with [`ObjectReferenceCountField::update`]. Unrelated current chunk bytes
-    /// are included in the checksum calculation.
-    ///
-    /// Preserves the source association when the engine has a different root. Source freshness,
-    /// current allocation ownership, retirement exclusions, and publication require separate
-    /// evidence. The caller keeps dependent contents stable until applying the returned writes.
-    ///
+    /// Checks the allocation session before acquiring headers. Compares the planned remainder
+    /// with the original count and prepares selected writes in allocation-address order.
+    /// Releases each acquisition before reading the next header. The caller keeps the source
+    /// contents stable until applying the writes.
     /// # Errors
-    ///
-    /// Returns [`CountPreparationError::Session`] if the allocation session differs. Returns
-    /// [`CountPreparationError::Read`] if acquiring a protected allocation fails, or
-    /// [`CountPreparationError::Range`] for metadata associated with another range. Returns
-    /// [`CountPreparationError::Parse`] for parsing or observation errors,
-    /// [`CountPreparationError::Field`] for changed count classification or field geometry,
-    /// [`CountPreparationError::Allocation`] for changed complete allocation geometry, or
-    /// [`CountPreparationError::Update`] for a changed scalar or count-encoding error.
-    ///
-    /// # Performance
-    ///
-    /// Reads selected complete headers without topology discovery, releasing each acquired range
-    /// before reading the next object. An empty batch requires no allocation or source reads.
+    /// Returns [`Error::EditUnsupported`] if the session differs, or the errors from
+    /// [`ProtectedCount::prepare_source`].
     fn current_updates(
         &self,
         engine: &WriteEngine,
-        order: Option<Ordering>,
-    ) -> Result<Vec<ObjectReferenceCountUpdate>, CountPreparationError> {
+        order: Ordering,
+    ) -> Result<Vec<ObjectReferenceCountUpdate>, Error> {
         if self
             .source
             .as_ref()
             .is_some_and(|source| !source.session.same(&engine.context.allocations.session()))
         {
-            return Err(CountPreparationError::Session);
+            return Err(changed_count_field());
         }
         let mut updates = Vec::with_capacity(self.updates().len());
-        for original in self.updates().iter().filter(|update| {
-            order.is_none_or(|order| update.count().get().cmp(&update.field().value()) == order)
-        }) {
+        for original in self
+            .updates()
+            .iter()
+            .filter(|update| update.count().get().cmp(&update.field().value()) == order)
+        {
             updates.push(original.prepare_source(
                 engine.image(),
                 engine.widths(),
@@ -436,361 +264,82 @@ impl ProtectedCounts {
 impl ProtectedCount {
     /// Checks current framing and prepares the original field's positive remainder.
     ///
+    /// Reads the complete protected allocation and checks the count field and allocation geometry.
+    /// The checksum includes all current bytes in the containing chunk.
     /// # Errors
-    ///
-    /// Returns the errors described by [`ProtectedCounts::current_updates`].
+    /// Propagates acquisition and parse errors. Returns [`Error::EditUnsupported`] for metadata
+    /// associated with a different range, changed count fields or allocations, or failed encoding.
     fn prepare_source(
         &self,
         source: &(impl Source + ?Sized),
         widths: FormatWidths,
         base: BaseAddress,
-    ) -> Result<ObjectReferenceCountUpdate, CountPreparationError> {
-        let object = self.object();
+    ) -> Result<ObjectReferenceCountUpdate, Error> {
         let expected = self.field();
         let current =
             CurrentMetadata::new(source, self.allocation().range()).map_err(
                 |error| match error {
-                    CurrentMetadataError::Range { expected, provided } => {
-                        CountPreparationError::Range {
-                            object,
-                            expected,
-                            provided,
-                        }
-                    }
-                    CurrentMetadataError::Read(error) => {
-                        CountPreparationError::Read { object, error }
-                    }
+                    CurrentMetadataError::Range => changed_count_field(),
+                    CurrentMetadataError::Read(error) => error.into(),
                 },
             )?;
-        let (observed, allocation) = CountObservation::read_source(&current, object, widths, base)
-            .map_err(|error| CountPreparationError::Parse { object, error })?
-            .into_parts();
+        let (observed, allocation) =
+            CountObservation::read_source(&current, self.object(), widths, base)?.into_parts();
         match observed {
             ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field)
                 if field.range() == expected.range()
                     && field.chunk() == expected.chunk()
                     && field.flags() == expected.flags() => {}
-            actual => {
-                return Err(CountPreparationError::Field {
-                    object,
-                    expected,
-                    actual,
-                });
-            }
-        };
+            _ => return Err(changed_count_field()),
+        }
         if allocation != Some(self.allocation()) {
-            return Err(CountPreparationError::Allocation {
-                object,
-                expected: self.allocation().range(),
-                actual: allocation.map(|allocation| allocation.range()),
-            });
+            return Err(changed_count_field());
         }
         expected
             .update(current.region(), self.count().get())
-            .map_err(|error| CountPreparationError::Update { object, error })
+            .map_err(|_error| changed_count_field())
     }
 }
 
-/// A source, framing, or encoding failure while preparing a protected count update.
-#[derive(Debug)]
-pub(in crate::edit) enum CountPreparationError {
-    /// Missing, changed, or invalid complete allocation geometry after parsing the current header.
-    Allocation {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The original complete protected allocation.
-        expected: FileRange,
-        /// The current complete allocation, or `None` if its geometry is invalid.
-        actual: Option<FileRange>,
-    },
-    /// A changed count classification, physical field range, containing chunk, or header flags.
-    Field {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The original count field.
-        expected: ObjectReferenceCountField,
-        /// The current count classification.
-        actual: ObjectReferenceCount,
-    },
-    /// A header parsing or count observation error.
-    Parse {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The header parsing or count observation error.
-        error: FormatError,
-    },
-    /// Acquired metadata associated with a different physical range.
-    Range {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The physical range requested from the source.
-        expected: FileRange,
-        /// The physical range associated with the acquired metadata.
-        provided: FileRange,
-    },
-    /// An extent, length conversion, or source-read error while acquiring the protected allocation.
-    Read {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The allocation acquisition error.
-        error: FormatError,
-    },
-    /// An engine from a different allocation session.
-    Session,
-    /// A changed scalar or an error from [`ObjectReferenceCountField::update`].
-    Update {
-        /// The physical identity of the source object.
-        object: ObjectId,
-        /// The count or checksum preparation error.
-        error: ObjectReferenceCountUpdateError,
-    },
+fn changed_count_field() -> Error {
+    Error::EditUnsupported("an original count field changed during commit")
 }
 
-impl From<CountPreparationError> for Error {
-    fn from(error: CountPreparationError) -> Self {
-        match error {
-            CountPreparationError::Parse { error, .. }
-            | CountPreparationError::Read { error, .. } => error.into(),
-            _ => Self::EditUnsupported("an original count field changed during commit"),
-        }
-    }
-}
-
-/// Borrowed count facts and the root and EOA proposed before publication.
-struct CountCompletion<'counts> {
+/// An exclusive engine loan with protected count facts checked after tree publication.
+struct CountWriteScope<'engine, 'counts> {
+    engine: &'engine mut WriteEngine,
     counts: &'counts ProtectedCounts,
-    root: PhysicalAddress,
-    proposed_end: PhysicalAddress,
 }
 
-impl<'counts> CountCompletion<'counts> {
-    /// Checks the publication's requested root and the protected allocations in the adopted state.
-    ///
-    /// For a nonempty count batch, checks the allocation session, publication availability, and
-    /// reusable, retained, and aggregate-spare ranges. Checks the confirmed EOA for every batch.
-    /// Source freshness requires separate evidence.
-    ///
+impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
+    /// Checks the publisher's requested root, the allocation session and claims, and the adopted
+    /// EOA. Source freshness requires separate evidence.
     /// # Errors
-    ///
-    /// Returns [`CountCompletionError::Root`] if the publisher was called with another root.
-    /// Returns [`CountCompletionError::Protection`] for an inapplicable session, unavailable
-    /// publication, conflicting allocator claims, address-conversion errors, or an EOA below a
-    /// protected allocation's end.
-    ///
-    /// # Performance
-    ///
-    /// On success, borrows the protected facts and allocator lists without allocating.
-    /// Uses retained metadata without source reads or topology discovery.
-    fn into_write_scope<'engine>(
-        self,
+    /// Returns [`FormatError::Internal`] if publication was requested for a different root and
+    /// [`Error::EditUnsupported`] for a different session, conflicting claims, or an EOA below any
+    /// protected allocation. Propagates source and allocation-publication errors.
+    fn after_publication(
         published: PublishedTree<'engine>,
-    ) -> Result<CountWriteScope<'engine, 'counts>, CountCompletionError> {
-        let Self {
-            counts,
-            root: expected,
-            proposed_end,
-        } = self;
-        let actual = published.requested_root();
-        if actual != expected {
-            return Err(CountCompletionError::Root { expected, actual });
+        root: PhysicalAddress,
+        counts: &'counts ProtectedCounts,
+    ) -> Result<Self, Error> {
+        if published.requested_root() != root {
+            return Err(FormatError::Internal(
+                "count updates belong to another published tree".into(),
+            )
+            .into());
         }
-        let root = published.root();
         let end = published.end();
         let engine = published.into_engine();
         if let Some(source) = &counts.source {
             if !source.session.same(&engine.context.allocations.session()) {
-                return Err(CountCompletionError::Protection(
-                    CountPublicationError::Protection(CountProtectionError::Session),
-                ));
+                return Err(allocation_conflict());
             }
-            engine
-                .context
-                .allocations
-                .before_reference()
-                .map_err(CountProtectionError::Publication)
-                .map_err(CountPublicationError::Protection)
-                .map_err(CountCompletionError::Protection)?;
-            counts
-                .exclude_space(engine)
-                .map_err(CountPublicationError::Protection)
-                .map_err(CountCompletionError::Protection)?;
+            engine.context.allocations.before_reference()?;
+            counts.exclude_space(engine).map_err(protection_error)?;
         }
-        let end = CountAllocationEnd::new(counts, end)
-            .map_err(CountCompletionError::Protection)?
-            .address();
-        Ok(CountWriteScope {
-            engine,
-            counts,
-            root,
-            end,
-            proposed_end,
-        })
-    }
-}
-
-/// An exclusive engine loan with protected count facts checked after tree publication.
-///
-/// The publisher consumed the original retirement batch before creating this scope.
-/// The producer checks the root passed to the publisher and the confirmed EOA. For a nonempty
-/// count batch, it also checks the allocation session, publication availability, and allocator
-/// claims. Source freshness requires separate evidence.
-pub(in crate::edit) struct CountWriteScope<'engine, 'counts> {
-    engine: &'engine mut WriteEngine,
-    counts: &'counts ProtectedCounts,
-    /// The final adopted physical root, including any root reclamation.
-    root: PhysicalAddress,
-    /// The confirmed physical EOA after publication and requested truncation.
-    end: PhysicalAddress,
-    /// The physical EOA checked before publication.
-    proposed_end: PhysicalAddress,
-}
-
-impl<'engine, 'counts> CountWriteScope<'engine, 'counts> {
-    /// Prepares and journals count updates after the associated tree publication.
-    ///
-    /// Reads current headers and writes each count before its checksum. Uses the existing
-    /// journal's completion and restoration barriers. Earlier journal entries and the
-    /// published root, EOA, and adopted free-space state remain unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CountWriteFailure::Preparation`] with this scope if current-header preparation
-    /// fails. Returns [`CountWriteFailure::Restored`] with prepared updates if dependent bytes
-    /// are unchanged or successfully restored and ordered after a journal or barrier error.
-    /// Returns [`CountWriteFailure::Uncertain`] and marks allocation publication uncertain if
-    /// publication permission is unavailable or restoration fails.
-    ///
-    /// # Performance
-    ///
-    /// An empty batch requires no allocation or source reads. Retains compact encoded updates
-    /// and releases acquired header buffers during preparation. Journal storage and image
-    /// buffering are separate costs.
-    pub(in crate::edit) fn write_counts(
-        self,
-    ) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
-        if self.counts.updates().is_empty() {
-            return Ok(());
-        }
-        if let Err(error) = self.engine.context.allocations.before_reference() {
-            self.engine.make_allocation_uncertain();
-            return Err(Box::new(CountWriteFailure::Uncertain { error }));
-        }
-        let updates = match self.counts.current_updates(self.engine, None) {
-            Ok(updates) => updates,
-            Err(error) => {
-                return Err(Box::new(CountWriteFailure::Preparation {
-                    scope: self,
-                    error,
-                }));
-            }
-        };
-        PreparedCountWrites {
-            scope: self,
-            updates,
-        }
-        .apply()
-    }
-}
-
-/// An incompatible publication root or failed post-publication allocation check.
-#[derive(Debug)]
-pub(in crate::edit) enum CountCompletionError {
-    /// An inapplicable session, unavailable publication, conflicting claim, or truncated allocation.
-    Protection(CountPublicationError),
-    /// A requested root different from the original retirement batch's root.
-    Root {
-        /// The root associated with the original retirement batch.
-        expected: PhysicalAddress,
-        /// The root requested in the completed publication call.
-        actual: PhysicalAddress,
-    },
-}
-
-/// Encoded count updates with an exclusive engine loan for application or retry.
-///
-/// The caller retains the loan through preparation, application, and any retry. After a failed
-/// attempt, retry requires unchanged dependent bytes or successful, ordered restoration.
-/// Acquired header buffers are not retained.
-pub(in crate::edit) struct PreparedCountWrites<'engine, 'counts> {
-    scope: CountWriteScope<'engine, 'counts>,
-    updates: Vec<ObjectReferenceCountUpdate>,
-}
-
-impl<'engine, 'counts> PreparedCountWrites<'engine, 'counts> {
-    /// Writes encoded updates through the undo journal.
-    ///
-    /// Checks publication permission before writing. Journal reads acquire the prior field
-    /// and checksum bytes, and image buffering may require additional reads.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CountWriteFailure::Restored`] with these updates if dependent bytes are unchanged
-    /// or successfully restored and ordered after an operation error. Returns
-    /// [`CountWriteFailure::Uncertain`] and marks allocation publication uncertain if permission
-    /// is unavailable or restoration fails. Failed restoration retains both errors in
-    /// [`Error::CommitPartiallyApplied`].
-    pub(in crate::edit) fn apply(self) -> Result<(), Box<CountWriteFailure<'engine, 'counts>>> {
-        let Self { scope, updates } = self;
-        if let Err(error) = scope.engine.context.allocations.before_reference() {
-            scope.engine.make_allocation_uncertain();
-            return Err(Box::new(CountWriteFailure::Uncertain { error }));
-        }
-        let result = JournalScope::run(scope.engine, |journal| {
-            for update in &updates {
-                for (range, bytes) in update.writes() {
-                    journal.write(range.start(), bytes)?;
-                }
-            }
-            Ok(())
-        });
-        match result {
-            Ok(()) => Ok(()),
-            Err(error @ Error::CommitPartiallyApplied { .. }) => {
-                scope.engine.make_allocation_uncertain();
-                Err(Box::new(CountWriteFailure::Uncertain { error }))
-            }
-            Err(error) => Err(Box::new(CountWriteFailure::Restored {
-                writes: Self { scope, updates },
-                error,
-            })),
-        }
-    }
-}
-
-/// A failed count update with its remaining application or retry permission.
-pub(in crate::edit) enum CountWriteFailure<'engine, 'counts> {
-    /// A preparation failure before count writes.
-    Preparation {
-        /// The original scope, with file bytes unchanged by count preparation.
-        scope: CountWriteScope<'engine, 'counts>,
-        /// The current-header acquisition, framing, or encoding error.
-        error: CountPreparationError,
-    },
-    /// An operation failure with dependent bytes unchanged or restored and ordered.
-    Restored {
-        /// The encoded updates and exclusive scope available for retry.
-        writes: PreparedCountWrites<'engine, 'counts>,
-        /// The original journal read, write, or completion-barrier error.
-        error: Error,
-    },
-    /// Unavailable publication permission or failed restoration, with retry prohibited.
-    Uncertain {
-        /// The permission error, or both the operation and restoration errors.
-        error: Error,
-    },
-}
-
-impl fmt::Debug for CountWriteFailure<'_, '_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (variant, error): (&str, &dyn fmt::Debug) = match self {
-            Self::Preparation { scope: _, error } => ("Preparation", error),
-            Self::Restored { writes: _, error } => ("Restored", error),
-            Self::Uncertain { error } => ("Uncertain", error),
-        };
-        formatter
-            .debug_struct(variant)
-            .field("error", error)
-            .finish_non_exhaustive()
+        counts.require_allocation_end(end)?;
+        Ok(Self { engine, counts })
     }
 }
 
@@ -838,10 +387,7 @@ impl<'a, S: Source + ?Sized> CurrentMetadata<'a, S> {
             )
             .map_err(CurrentMetadataError::Read)?;
         if bytes.range() != range {
-            return Err(CurrentMetadataError::Range {
-                expected: range,
-                provided: bytes.range(),
-            });
+            return Err(CurrentMetadataError::Range);
         }
         Ok(Self {
             source,
@@ -853,14 +399,6 @@ impl<'a, S: Source + ?Sized> CurrentMetadata<'a, S> {
     /// Borrows the acquired bytes with their physical range.
     fn region(&self) -> FileRegion<'_> {
         self.bytes.region()
-    }
-
-    /// Returns the capacity of the acquired owner's backing allocation, or zero for borrowed bytes.
-    ///
-    /// Includes capacity outside the acquired range and excludes ownership bookkeeping and
-    /// allocations retained separately by the source.
-    fn retained_bytes(&self) -> usize {
-        self.bytes.retained_bytes()
     }
 
     fn external(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError> {
@@ -985,12 +523,7 @@ impl ReadParts {
 #[derive(Debug)]
 enum CurrentMetadataError {
     /// The source returned metadata for a different physical range.
-    Range {
-        /// The physical range passed by the caller.
-        expected: FileRange,
-        /// The physical range of the returned metadata.
-        provided: FileRange,
-    },
+    Range,
     /// An extent, local-length conversion, or source-read error.
     Read(FormatError),
 }

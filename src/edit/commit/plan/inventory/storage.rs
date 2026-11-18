@@ -623,16 +623,7 @@ impl<'a> PendingEditInventory<'a> {
                     .end_of_allocation()
                     .and_then(|end| engine.addresses().resolve(end))
                     .map_err(Error::from);
-                match end.and_then(|end| {
-                    counts
-                        .before_publication(engine, pending)
-                        .map_err(Error::from)
-                        .and_then(|phase| {
-                            phase
-                                .at_end(end)
-                                .map_err(|failure| Error::from(failure.error))
-                        })
-                }) {
+                match end.and_then(|end| counts.before_publication(engine, pending)?.at_end(end)) {
                     Ok(bounds) => {
                         bounds.with_ordered_counts_excluding(relocations, &mut storage, completion)
                     }
