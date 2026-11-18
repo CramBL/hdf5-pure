@@ -33,7 +33,7 @@ use crate::source::Source;
 use crate::width::OffsetWidth;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
 
-use super::{AppendCursor, ReservationFailure, ReservationPlan};
+use super::{AppendCursor, ReservationPlan};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 
 mod emission;
@@ -175,41 +175,30 @@ fn deferred_reservations_keep_owned_ranges_disjoint_before_emission(
 }
 
 #[test]
-fn later_reservation_failure_retains_the_successful_prefix() {
+fn failed_plan_keeps_reserved_ranges_unavailable_without_writes() {
     let (_directory, mut engine) = engine(FileSpaceStrategy::FsmAggr, 0);
     engine.aggregation = None;
     let start = engine.append(&[0; 512]).unwrap();
     let end = engine.image.len();
     engine.space = flat(&[(start, 128), (start + 256, 128)]);
     let requests = [request(64, PageType::Raw), request(u64::MAX, PageType::Raw)];
-    let Err(failure) = engine.plan_reservations(&requests) else {
+    let Err(error) = engine.plan_reservations(&requests) else {
         panic!("expected an overflowing second request");
     };
-    let ReservationFailure { mut plan, error } = *failure;
     assert!(
         matches!(error, Error::Format(FormatError::OffsetOverflow { offset, length }) if offset == end && length == u64::MAX),
         "{error:?}"
     );
-    assert_eq!(
-        plan.reservations()
-            .iter()
-            .map(|entry| entry.range())
-            .collect::<Vec<_>>(),
-        [FileRange::new(PhysicalAddress::new(start), 64).unwrap()]
-    );
-    assert!(plan.unresolved().is_none());
-    assert_eq!(plan.end(), PhysicalAddress::new(end));
-    plan.write_next(&[17; 64]).unwrap();
-    plan.finish().unwrap();
+    assert_eq!(engine.image.len(), end);
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         [extent(start + 64, 64), extent(start + 256, 128)]
     );
-    assert_eq!(engine.image().read_exact_at(start, 64).unwrap(), [17; 64]);
+    assert_eq!(engine.image().read_exact_at(start, 64).unwrap(), [0; 64]);
 }
 
 #[test]
-fn failed_physical_resolution_retains_the_unresolved_stored_allocation() {
+fn failed_physical_resolution_keeps_the_stored_allocation_unavailable() {
     let (_directory, mut engine) = engine(FileSpaceStrategy::FsmAggr, 512);
     engine.aggregation = None;
     let start = engine.append(&[0; 64]).unwrap();
@@ -217,24 +206,15 @@ fn failed_physical_resolution_retains_the_unresolved_stored_allocation() {
     let invalid = u64::MAX - 31;
     engine.space = flat(&[(stored, 16), (invalid, 8)]);
     let requests = [request(16, PageType::Raw), request(8, PageType::Raw)];
-    let Err(failure) = engine.plan_reservations(&requests) else {
+    let Err(error) = engine.plan_reservations(&requests) else {
         panic!("expected physical address overflow");
     };
-    let ReservationFailure { plan, error } = *failure;
-    assert_eq!(
-        plan.reservations()
-            .iter()
-            .map(|entry| entry.range())
-            .collect::<Vec<_>>(),
-        [FileRange::new(PhysicalAddress::new(start), 16).unwrap()]
-    );
-    assert_eq!(plan.unresolved().unwrap().extent(), extent(invalid, 8));
     assert!(
         matches!(error, Error::Format(FormatError::OffsetOverflow { offset, length }) if offset == invalid && length == 512),
         "{error:?}"
     );
-    drop(plan);
     assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
+    assert_eq!(engine.image().read_exact_at(start, 64).unwrap(), [0; 64]);
 }
 
 #[test]
@@ -362,16 +342,13 @@ fn uncertain_publication_rejects_reservation_without_changing_free_space() {
     engine.space = flat(&[(start, 64), (start + 128, 64)]);
     engine.context.allocations.make_uncertain();
     let requests = [request(64, PageType::Raw), request(64, PageType::Raw)];
-    let Err(failure) = engine.plan_reservations(&requests) else {
+    let Err(error) = engine.plan_reservations(&requests) else {
         panic!("expected uncertain publication rejection");
     };
     assert!(
-        matches!(failure.error, Error::AllocationPublicationUncertain),
-        "{:?}",
-        failure.error
+        matches!(error, Error::AllocationPublicationUncertain),
+        "{error:?}"
     );
-    assert_eq!(failure.plan.reservations().len(), 0);
-    drop(failure);
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         [extent(start, 64), extent(start + 128, 64)]
@@ -498,7 +475,7 @@ fn streamed_reservations_keep_complete_capacity_and_following_blocks(
     ];
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     let ranges: Vec<_> = plan
         .reservations()
         .iter()
@@ -855,7 +832,7 @@ fn block_reservations_keep_capacity_separate_from_encoding(#[case] reused: bool)
     ];
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("block reservation failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("block reservation failed: {error:?}"));
     assert_eq!(
         plan.reservations()[0].range(),
         FileRange::new(PhysicalAddress::new(start), 64).unwrap()
@@ -964,7 +941,7 @@ fn large_appended_capacity_remains_owned_after_bounded_zero_emission() {
     observations::reset_zeros();
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     assert_eq!(
         plan.reservations()[0].range(),
         FileRange::new(PhysicalAddress::new(start), capacity).unwrap()
@@ -1027,7 +1004,7 @@ fn partial_zero_emission_blocks_later_reservations_and_retains_owned_capacity(
     ];
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     plan.write_next(&[17; 16]).unwrap();
     disk_log::fail_write_after(if capacity { 2 } else { 1 }, 7);
     let error = plan.write_next(&[23; 32]).unwrap_err();
@@ -1121,7 +1098,7 @@ fn single_block_plans_preserve_complete_geometry_and_ordered_gaps(
     let second = physical + if reused { 4000 } else { 4096 + capacity };
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("block reservation failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("block reservation failed: {error:?}"));
     assert_eq!(
         plan.reservations()[0].range(),
         FileRange::new(PhysicalAddress::new(physical + 4096), capacity).unwrap()
@@ -1215,7 +1192,7 @@ fn planned<'a>(
 ) -> ReservationPlan<'a> {
     engine
         .plan_reservations(requests)
-        .unwrap_or_else(|failure| panic!("reservation failed: {:?}", failure.error))
+        .unwrap_or_else(|error| panic!("reservation failed: {error:?}"))
 }
 
 fn request(length: u64, page_type: PageType) -> ReservationRequest {

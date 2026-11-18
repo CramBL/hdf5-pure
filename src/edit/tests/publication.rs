@@ -45,6 +45,105 @@ use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
 
 #[rstest]
+fn failed_chunk_reservations_preserve_the_published_tree_and_reusable_space(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    use crate::{FileAccessProperties, OffsetWidth};
+    use test_util::disk_log::{self, IoEvent};
+
+    let path = test_util::temp::temp_path("chunk-reservation-limit.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .with_offset_width(OffsetWidth::Two)
+        .with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_threshold(1)
+                .with_page_size(FileSpacePageSize::try_from(512).unwrap()),
+        );
+    builder.create_dataset("hole").with_u8_data(&[7; 1_024]);
+    builder.create_dataset("kept").with_u8_data(&[11, 13]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Disabled)
+            .with_memory_strategy(memory),
+    )
+    .unwrap();
+    let Layout::Contiguous {
+        address: Some(hole),
+        size,
+    } = file.dataset("hole").unwrap().layout().unwrap()
+    else {
+        panic!("expected an allocated hole");
+    };
+    file.root().delete("hole").unwrap();
+    file.commit().unwrap();
+    file.sync().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let free = file.reusable_free_sections().unwrap();
+    let reusable = |start, length| {
+        free.sections().iter().any(|section| {
+            section.address().get() <= start && start + length <= section.end_address().get()
+        })
+    };
+    assert!(
+        reusable(hole, size),
+        "deleted allocation is absent from {free:?}"
+    );
+
+    file.root()
+        .create_dataset("too_large", |dataset| {
+            dataset.with_u8_data(&vec![17; 65_536]).with_chunks(&[512]);
+        })
+        .unwrap();
+    disk_log::start();
+    let error = file.commit().unwrap_err();
+    let failed = disk_log::finish();
+    let Error::Format(error) = error else {
+        panic!("unexpected error: {error:?}")
+    };
+    assert_eq!(
+        error,
+        FormatError::AddressTooLarge {
+            address: 65_536,
+            offset_size: 2
+        }
+    );
+    let issued_write = failed
+        .events
+        .iter()
+        .any(|event| matches!(event, IoEvent::Write { .. }));
+    assert!(!issued_write);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(file.reusable_free_sections().unwrap(), free);
+    assert!(!file.has_staged_edits());
+    assert_eq!(file.root().datasets().unwrap(), ["kept"]);
+    assert_eq!(file.dataset("kept").unwrap().read_u8().unwrap(), [11, 13]);
+
+    file.root()
+        .create_dataset("fit", |dataset| {
+            dataset.with_u8_data(&[19; 512]).with_chunks(&[512]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let chunks = file.dataset("fit").unwrap().chunks().unwrap();
+    assert_eq!(chunks.len(), 1);
+    let chunk = &chunks[0];
+    assert!(
+        reusable(chunk.address, chunk.storage_size),
+        "{chunk:?} did not reuse {free:?}"
+    );
+    file.close().unwrap();
+    let reopened = File::open(&path).unwrap();
+    let fit = reopened.dataset("fit").unwrap().read_u8().unwrap();
+    let kept = reopened.dataset("kept").unwrap().read_u8().unwrap();
+    assert_eq!(fit, [19; 512]);
+    assert_eq!(kept, [11, 13]);
+}
+
+#[rstest]
 #[case::before_publication(false)]
 #[case::after_publication(true)]
 fn failed_mixed_overwrites_restore_old_values_before_publication_and_keep_new_values_after(

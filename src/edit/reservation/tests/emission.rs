@@ -36,7 +36,7 @@ fn streamed_blocks_preserve_complete_capacity_and_neighbors(
     .unwrap()];
     let mut plan = engine
         .plan_blocks(&blocks)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     let allocation = plan.reservations()[0].range();
     let start = allocation.start();
     assert_eq!(allocation.length(), 64);
@@ -186,7 +186,7 @@ fn streamed_padding_failures_prevent_plan_completion(#[case] strategy: FileSpace
     .unwrap()];
     let mut plan = engine
         .plan_blocks(&blocks)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     let start = plan.reservations()[0].range().start();
     let error = emit(&mut plan, |address, write| {
         assert_eq!(address, start);
@@ -381,7 +381,7 @@ fn empty_encodings_preserve_complete_reserved_capacity(#[case] reused: bool) {
     .unwrap()];
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     assert_eq!(
         emit(&mut plan, |address, write| {
             assert_eq!(address.get(), start);

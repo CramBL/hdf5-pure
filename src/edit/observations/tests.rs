@@ -91,7 +91,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
     let addresses = engine.addresses();
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     let end = plan.end().get();
     let placements: Vec<_> = plan
         .reservations()
