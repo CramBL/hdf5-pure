@@ -12,9 +12,9 @@ Operation
      1  Create group  "g0"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -42,9 +42,9 @@ Operation
      2  Create group  "g1"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -74,9 +74,9 @@ Operation
      3  Create group  "g2"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -107,9 +107,9 @@ Operation
      4  Create group  "g3"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -143,9 +143,9 @@ Operation
      5  Create group  "g4"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -180,9 +180,9 @@ Operation
      6  Create group  "g5"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length

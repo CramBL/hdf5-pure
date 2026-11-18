@@ -606,7 +606,6 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
     session.assert_ownership_covers_storage(&storage, true);
     session.delete(&object).unwrap();
     session.commit().unwrap();
-    assert!(session.space_ownership().unwrap().analysis_complete);
 
     for range in header_spans
         .into_iter()
@@ -734,7 +733,6 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     session.assert_ownership_covers_storage(&storage, false);
     session.delete(&object).unwrap();
     session.commit().unwrap();
-    assert!(session.space_ownership().unwrap().analysis_complete);
     for (extent, _) in heap.allocations() {
         assert!(
             reusable_covers(

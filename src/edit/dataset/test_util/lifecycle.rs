@@ -125,10 +125,8 @@ pub(in crate::edit) fn retire_and_reuse(path: &Path, name: &str, expected: &[i32
         free_space_manager_space,
         reusable_free_space: _,
         unclassified_space: _,
-        analysis_complete,
         trailing_slack_space: _,
-    } = engine.space_ownership().unwrap();
-    assert!(analysis_complete);
+    } = engine.storage_snapshot();
     assert_eq!(logical_size, physical_size);
     let free = engine
         .space

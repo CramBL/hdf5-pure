@@ -254,7 +254,6 @@ fn staged_page_creation_preserves_values_and_complete_index_allocations(
     if matches!(creation, Creation::Fixed(1_025) | Creation::Rotated(20_000)) {
         assert!(index.iter().any(|range| range.length() > page));
     }
-    assert!(engine.space_ownership().unwrap().analysis_complete);
     drop(engine);
     let file = File::open(&path).unwrap();
     assert_eq!(

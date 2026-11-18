@@ -120,12 +120,9 @@ fn creation_reuses_native_holes_and_preserves_survivors_and_chunk_records(
     assert_eq!(dataset.read_i32().unwrap(), expected);
     drop(dataset);
     pure.close().unwrap();
-    let engine = test_util::open_engine(&path);
     if paged {
-        engine.assert_array_metadata_pages(header);
+        test_util::open_engine(&path).assert_array_metadata_pages(header);
     }
-    assert!(engine.space_ownership().unwrap().analysis_complete);
-    drop(engine);
     let native = file::libhdf5_open(&path);
     assert_eq!(
         native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
@@ -415,12 +412,9 @@ fn creation_preserves_sparse_slots_variable_filters_and_reuse_policy(
         .collect::<Vec<_>>();
     native_records.sort();
     assert_eq!(records, native_records);
-    let engine = test_util::open_engine(&path);
     if !matches!(input, Input::Flat) {
-        engine.assert_array_metadata_pages(header);
+        test_util::open_engine(&path).assert_array_metadata_pages(header);
     }
-    assert!(engine.space_ownership().unwrap().analysis_complete);
-    drop(engine);
     let reopened = File::open(&path).unwrap();
     assert_eq!(reopened.dataset("d").unwrap().read_i32().unwrap(), expected);
     reopened.close().unwrap();

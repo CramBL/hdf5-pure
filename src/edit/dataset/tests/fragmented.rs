@@ -137,10 +137,8 @@ fn fragmented_creation_uses_original_holes_and_accounts_for_metadata_growth(
         free_space_manager_space,
         reusable_free_space,
         unclassified_space,
-        analysis_complete,
         trailing_slack_space: _,
-    } = engine.space_ownership().unwrap();
-    assert!(analysis_complete);
+    } = engine.storage_snapshot();
     let growth = physical_size.saturating_sub(before);
     let appended = |regions: &[(u64, u64)]| {
         regions

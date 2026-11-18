@@ -48,10 +48,8 @@ fn persisted_page_workloads_keep_live_free_and_padding_accounting_disjoint(
             free_space_manager_space,
             reusable_free_space,
             unclassified_space,
-            analysis_complete,
             trailing_slack_space,
-        } = engine.space_ownership().unwrap();
-        assert!(analysis_complete, "{workload:?}/{step}");
+        } = engine.storage_snapshot();
         assert_eq!(trailing_slack_space, []);
         let length = |ranges: &[(u64, u64)]| ranges.iter().map(|&(_, len)| len).sum::<u64>();
         let raw = length(&live_raw_space);

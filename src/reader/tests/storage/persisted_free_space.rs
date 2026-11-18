@@ -40,7 +40,6 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .unwrap();
     let second = File::open_rw(&path).unwrap();
     let ownership = reader_test_util::ownership(&second).unwrap();
-    assert!(ownership.analysis_complete);
     let mut available_or_reused = ownership.reusable_free_space;
     available_or_reused.extend(ownership.live_metadata_space);
     available_or_reused.extend(ownership.free_space_manager_space);

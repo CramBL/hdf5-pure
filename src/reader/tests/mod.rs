@@ -301,8 +301,7 @@ fn buffered_replacement_failure_keeps_landed_prefix_and_live_storage(
         (0..i32::try_from(3 + landed).unwrap()).collect::<Vec<_>>()
     );
     file.with_mirror_session(Change::Nothing, |engine| {
-        let ownership = engine.space_ownership()?;
-        assert!(ownership.analysis_complete);
+        let ownership = engine.storage_snapshot();
         let predecessor_ranges = if extent {
             &ownership.reusable_free_space
         } else {

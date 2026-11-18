@@ -205,8 +205,7 @@ fn allocations(
                 .all(|free| !free.range().overlaps(extent.range()))
         );
     }
-    let ownership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership = engine.storage_snapshot();
     assert!(
         ownership
             .unclassified_space

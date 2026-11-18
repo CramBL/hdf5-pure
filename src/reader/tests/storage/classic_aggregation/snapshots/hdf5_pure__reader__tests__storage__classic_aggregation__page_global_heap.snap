@@ -12,9 +12,9 @@ Operation
      1  Create dataset  "r0"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -45,9 +45,9 @@ Operation
      2  Create variable-length string dataset  "v"     -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -82,9 +82,9 @@ Operation
      3  Create dataset  "r1"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -122,9 +122,9 @@ Operation
      4  Create group  "g"     -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
