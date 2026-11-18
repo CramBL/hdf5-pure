@@ -1564,6 +1564,9 @@ impl FileImage for HandleImage {
     // No `as_slice`: withholding the whole-file slice is what this image is for.
 }
 
+#[cfg(test)]
+type ReadFault = dyn Fn(FileRange) -> Result<(), FormatError> + Send + Sync;
+
 /// Counts requested read bytes and synchronization calls through a wrapped image.
 ///
 /// The reader uses the default [`Source`] metadata methods, which call [`Source::read_at`].
@@ -1584,6 +1587,7 @@ pub(crate) struct CountingImage {
     syncs: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Optional requested read ranges, recorded before the inner read.
     reads: Option<Arc<Mutex<Vec<FileRange>>>>,
+    read_fault: Option<Box<ReadFault>>,
 }
 
 #[cfg(test)]
@@ -1600,6 +1604,7 @@ impl CountingImage {
             read_peak: None,
             syncs,
             reads: None,
+            read_fault: None,
         }
     }
 
@@ -1625,6 +1630,15 @@ impl CountingImage {
     /// Records ranges before the inner read, including failed and empty reads.
     pub(crate) fn with_read_ranges(mut self, reads: Arc<Mutex<Vec<FileRange>>>) -> Self {
         self.reads = Some(reads);
+        self
+    }
+
+    /// Checks a requested range before reading through the wrapped image.
+    pub(crate) fn with_read_fault(
+        mut self,
+        fault: impl Fn(FileRange) -> Result<(), FormatError> + Send + Sync + 'static,
+    ) -> Self {
+        self.read_fault = Some(Box::new(fault));
         self
     }
 
@@ -1654,6 +1668,12 @@ impl Source for CountingImage {
             .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
         if let Some(read_calls) = &self.read_calls {
             read_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(fault) = &self.read_fault {
+            fault(FileRange::new(
+                PhysicalAddress::new(offset),
+                buf.len().to_u64(),
+            )?)?;
         }
         self.inner.read_at(offset, buf)
     }

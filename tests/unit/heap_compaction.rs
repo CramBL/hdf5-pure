@@ -2,27 +2,86 @@ use std::fs;
 use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use hdf5_pure_core::__private::FileRange;
 use rstest::rstest;
-use test_util::disk_log::{self, FailurePoint, IoEvent, IoOutcome, Recording};
+use test_util::disk_log::{self, DiskOp, FailurePoint, IoEvent, IoOutcome, Recording};
 use test_util::global_heap::{self, Object};
 use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
-use crate::{AttrValue, Error, File, FileAccessProperties, FileLocking, HeapCompactionState};
+use crate::edit::WriteEngine;
+use crate::image::{CountingImage, FileImage, WriteBuffering};
+use crate::{
+    AttrValue, Error, File, FileAccessProperties, FileLocking, FormatError, HeapCompactionState,
+};
 use crate::{MemoryStrategy, SyncPolicy};
 
 const HEADER: usize = 16;
 const RECORD: usize = 24;
 const PARTIAL: usize = 2;
 
+#[derive(Clone, Copy)]
+enum HeapWrite {
+    Move,
+    FreeHeader,
+    Gathered,
+}
+
+impl HeapWrite {
+    fn offset(self, parent: u64) -> u64 {
+        parent
+            + match self {
+                Self::Move | Self::Gathered => HEADER as u64,
+                Self::FreeHeader => (HEADER + RECORD) as u64,
+            }
+    }
+
+    fn length(self) -> usize {
+        match self {
+            Self::Move => RECORD,
+            Self::FreeHeader => HEADER,
+            Self::Gathered => RECORD + HEADER,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Prefix {
+    Zero,
+    Partial,
+    Full,
+}
+
+impl Prefix {
+    fn bytes(self, length: usize) -> usize {
+        match self {
+            Self::Zero => 0,
+            Self::Partial => PARTIAL,
+            Self::Full => length,
+        }
+    }
+}
+
 #[rstest]
-#[case::first_parent(0)]
-#[case::later_parent(1)]
-fn restored_heap_compaction_failure_allows_another_edit(#[case] parent: usize) {
+#[case::move_unwritten(0, HeapWrite::Move, Prefix::Zero)]
+#[case::move_partial(0, HeapWrite::Move, Prefix::Partial)]
+#[case::move_complete(0, HeapWrite::Move, Prefix::Full)]
+#[case::free_header_unwritten(0, HeapWrite::FreeHeader, Prefix::Zero)]
+#[case::free_header_partial(0, HeapWrite::FreeHeader, Prefix::Partial)]
+#[case::free_header_complete(0, HeapWrite::FreeHeader, Prefix::Full)]
+#[case::gathered_move_partial(0, HeapWrite::Gathered, Prefix::Partial)]
+#[case::later_parent(1, HeapWrite::Gathered, Prefix::Partial)]
+fn restored_heap_compaction_failure_allows_another_edit(
+    #[case] parent: usize,
+    #[case] write: HeapWrite,
+    #[case] prefix: Prefix,
+) {
     let directory = tempfile::tempdir().unwrap();
-    let commit = FaultCommit::prepare(directory.path(), parent);
-    commit.fail_write();
+    let commit = FaultCommit::prepare(directory.path(), parent, write);
+    let written = prefix.bytes(write.length());
+    commit.fail_write(written);
     let error = commit.file.commit().unwrap_err();
     disk_log::clear_failures();
     let failed = disk_log::finish();
@@ -30,7 +89,7 @@ fn restored_heap_compaction_failure_allows_another_edit(#[case] parent: usize) {
     assert_eq!(state, HeapCompactionState::Restored);
     assert_io(source, "injected disk write failure");
 
-    commit.assert_published(&failed);
+    commit.assert_published(&failed, written);
     assert_allocated(&commit.file, &commit.parents);
     commit
         .file
@@ -56,8 +115,8 @@ fn restored_heap_compaction_failure_allows_another_edit(#[case] parent: usize) {
 #[test]
 fn unconfirmed_heap_compaction_restoration_quarantines_the_editor() {
     let directory = tempfile::tempdir().unwrap();
-    let commit = FaultCommit::prepare(directory.path(), 0);
-    commit.fail_write();
+    let commit = FaultCommit::prepare(directory.path(), 0, HeapWrite::Gathered);
+    commit.fail_write(PARTIAL);
     disk_log::fail_sync_after(
         commit.recording.events[..commit.event]
             .iter()
@@ -83,7 +142,7 @@ fn unconfirmed_heap_compaction_restoration_quarantines_the_editor() {
         })
     ));
 
-    let after = commit.assert_published(&failed);
+    let after = commit.assert_published(&failed, PARTIAL);
     commit
         .file
         .root()
@@ -119,37 +178,19 @@ struct FaultCommit {
 }
 
 impl FaultCommit {
-    fn prepare(directory: &Path, parent: usize) -> Self {
+    fn prepare(directory: &Path, parent: usize, write: HeapWrite) -> Self {
         let path = directory.join("failure.h5");
         let control_path = directory.join("control.h5");
         let parents = write_source(&path);
         fs::copy(&path, &control_path).unwrap();
 
-        let control = open_editor(&control_path);
-        let original = fs::read(&control_path).unwrap();
-        stage(&control);
-        disk_log::start();
-        control.commit().unwrap();
-        let recording = disk_log::finish();
-        let published = fs::read(&control_path).unwrap();
-        assert_published_values(&control);
-        assert_parents(&parents, &original, &published, parents.len());
-        assert_allocated(&control, &parents);
-        let event = movement(&recording, parents[parent]);
-        control.close().unwrap();
+        let (original, published, recording) = successful_commit(&control_path, &parents, write);
+        let event = heap_write(&recording, parents[parent], write);
 
-        let file = open_editor(&path);
+        let file = open_editor(&path, write);
         let before = fs::read(&path).unwrap();
         assert_eq!(before, original);
-        assert_eq!(file.dataset("numbers").unwrap().read_i32().unwrap(), [17]);
-        let attr = file.dataset("value").unwrap().attrs().unwrap();
-        assert_eq!(
-            attr.get("a"),
-            Some(&AttrValue::VarLenAsciiStringArray(vec![
-                "removed".into();
-                3
-            ]))
-        );
+        assert_original_values(&file);
         stage(&file);
         Self {
             path,
@@ -163,7 +204,7 @@ impl FaultCommit {
         }
     }
 
-    fn fail_write(&self) {
+    fn fail_write(&self, written: usize) {
         disk_log::start();
         let prefix = &self.recording.events[..self.event];
         disk_log::fail_write_after(
@@ -171,53 +212,31 @@ impl FaultCommit {
                 .iter()
                 .filter(|event| matches!(event, IoEvent::Write { .. }))
                 .count(),
-            PARTIAL,
+            written,
         );
     }
 
-    fn assert_published(&self, failed: &Recording) -> Vec<u8> {
-        let Self {
-            path,
-            file,
-            parents,
-            original,
-            published,
-            event,
-            parent,
-            ..
-        } = self;
-        let event = *event;
-        let parent = *parent;
-        let before = original;
-        assert!(matches!(
-            failed.events[event],
-            IoEvent::Write { offset, written: PARTIAL, outcome: IoOutcome::Failed(ErrorKind::Other), .. }
-                if offset == parents[parent] + HEADER as u64
-        ));
+    fn assert_published(&self, failed: &Recording, written: usize) -> Vec<u8> {
+        assert_failed_write(
+            &self.recording,
+            failed,
+            self.event,
+            written,
+            &self.original,
+            parent_range(self.parents[self.parent]),
+        );
 
-        let range = parent_range(parents[parent]);
-        let mut issued = before.to_vec();
-        for operation in failed.events[..=event]
-            .iter()
-            .filter_map(IoEvent::operation)
-        {
-            failed.operations[operation].apply(&mut issued);
-        }
-        let changed_index = range.start + HEADER..range.start + HEADER + PARTIAL;
-        assert_eq!(issued[changed_index.clone()], 91_u16.to_le_bytes());
-        assert_ne!(issued[changed_index.clone()], original[changed_index]);
-
-        let after = fs::read(path).unwrap();
+        let after = fs::read(&self.path).unwrap();
         assert_eq!(
             after[..Fixture::ROOT as usize],
-            published[..Fixture::ROOT as usize]
+            self.published[..Fixture::ROOT as usize]
         );
-        assert_parents(parents, original, &after, parent);
-        assert_published_values(file);
+        assert_parents(&self.parents, &self.original, &after, self.parent);
+        assert_published_values(&self.file);
         let stored = File::from_bytes(after.clone()).unwrap();
         assert_published_values(&stored);
         stored.close().unwrap();
-        assert!(!file.has_staged_edits());
+        assert!(!self.file.has_staged_edits());
         after
     }
 }
@@ -233,6 +252,245 @@ fn compaction_failure(error: Error, parent: usize) -> (HeapCompactionState, Erro
     };
     assert_eq!(completed, parent);
     (state, *source)
+}
+
+fn assert_failed_write(
+    control: &Recording,
+    failed: &Recording,
+    event: usize,
+    written: usize,
+    original: &[u8],
+    parent: Range<usize>,
+) {
+    let DiskOp::Write { offset, bytes } =
+        &control.operations[control.events[event].operation().unwrap()]
+    else {
+        panic!("expected the control write");
+    };
+    let IoEvent::Write {
+        offset: failed_at,
+        requested,
+        written: completed,
+        outcome,
+        operation,
+    } = failed.events[event]
+    else {
+        panic!("expected the failed write, got {:?}", failed.events[event]);
+    };
+    assert_eq!(failed_at, *offset);
+    assert_eq!(requested, bytes.len());
+    assert_eq!(completed, written);
+    assert_eq!(outcome, IoOutcome::Failed(ErrorKind::Other));
+    if written == 0 {
+        assert_eq!(operation, None);
+    } else {
+        assert_eq!(
+            failed.operations[operation.unwrap()],
+            DiskOp::Write {
+                offset: *offset,
+                bytes: bytes[..written].to_vec(),
+            }
+        );
+    }
+
+    let mut expected = replay_prefix(control, original, event);
+    let start = usize::try_from(*offset).unwrap();
+    let range = start..start + written;
+    if written != 0 {
+        assert_ne!(expected[range.clone()], bytes[..written]);
+    }
+    expected[range].copy_from_slice(&bytes[..written]);
+    assert_eq!(
+        replay_prefix(failed, original, event + 1)[parent.clone()],
+        expected[parent]
+    );
+}
+
+fn replay_prefix(recording: &Recording, original: &[u8], end: usize) -> Vec<u8> {
+    let mut image = original.to_vec();
+    for operation in recording.events[..end]
+        .iter()
+        .filter_map(IoEvent::operation)
+    {
+        recording.operations[operation].apply(&mut image);
+    }
+    image
+}
+
+const READ_FAILURE: &str = "injected commit source read failure";
+
+#[test]
+fn preflight_heap_read_failure_preserves_staging_for_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = HeapReadSource::prepare(directory.path());
+    let (file, armed) = source.open_with_fault(|read, _| {
+        !disk_log::has_written_at(0) && read.start().get() == Fixture::ROOT
+    });
+    let original_free = file.reusable_free_sections().unwrap();
+
+    let (error, failed) = fail_commit_read(&file, &armed);
+    assert_read_error(error);
+    assert!(failed.events.is_empty());
+    assert_eq!(fs::read(&source.path).unwrap(), source.original);
+    assert_eq!(file.reusable_free_sections().unwrap(), original_free);
+    assert!(file.has_staged_edits());
+    assert_original_values(&file);
+
+    file.commit().unwrap();
+    source.assert_closed_and_reopened(file, source.parents.len());
+}
+
+#[rstest]
+#[case::move_source(HeapWrite::Move)]
+#[case::free_header_undo(HeapWrite::FreeHeader)]
+fn postpublication_heap_read_failure_restores_the_parent(#[case] write: HeapWrite) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = HeapReadSource::prepare(directory.path());
+    let (file, armed) = source.open_with_fault(move |read, parent| {
+        disk_log::has_written_at(0)
+            && read.start().get() == HeapWrite::FreeHeader.offset(parent)
+            && read.length() == write.length() as u64
+            && disk_log::has_written_at(HeapWrite::Move.offset(parent))
+                == matches!(write, HeapWrite::FreeHeader)
+    });
+    let first = source.parents[0];
+
+    let (error, failed) = fail_commit_read(&file, &armed);
+    let (state, error) = compaction_failure(error, 0);
+    assert_eq!(state, HeapCompactionState::Restored);
+    assert_read_error(error);
+
+    let next = heap_write(&source.recording, first, write);
+    assert_eq!(failed.events[..next], source.recording.events[..next]);
+    if matches!(write, HeapWrite::Move) {
+        assert_eq!(failed.events.len(), next);
+    } else {
+        let record_start = parent_range(first).start + HEADER;
+        let record = &source.original[record_start..record_start + RECORD];
+        let operation = failed.events[next].operation().unwrap();
+        assert_eq!(
+            failed.operations[operation],
+            DiskOp::Write {
+                offset: HeapWrite::Move.offset(first),
+                bytes: record.to_vec(),
+            }
+        );
+    }
+    let after = fs::read(&source.path).unwrap();
+    assert_eq!(
+        after[..Fixture::ROOT as usize],
+        source.published[..Fixture::ROOT as usize]
+    );
+    assert_parents(&source.parents, &source.original, &after, 0);
+    source.assert_closed_and_reopened(file, 0);
+}
+
+struct HeapReadSource {
+    path: PathBuf,
+    parents: [u64; 3],
+    original: Vec<u8>,
+    published: Vec<u8>,
+    recording: Recording,
+}
+
+impl HeapReadSource {
+    fn prepare(directory: &Path) -> Self {
+        let path = directory.join("failure.h5");
+        let control_path = directory.join("control.h5");
+        let parents = write_source(&path);
+        fs::copy(&path, &control_path).unwrap();
+        let (original, published, recording) =
+            successful_commit(&control_path, &parents, HeapWrite::Move);
+        Self {
+            path,
+            parents,
+            original,
+            published,
+            recording,
+        }
+    }
+
+    fn open_with_fault(
+        &self,
+        matches: impl Fn(FileRange, u64) -> bool + Send + Sync + 'static,
+    ) -> (File, Arc<Mutex<bool>>) {
+        let armed = Arc::new(Mutex::new(false));
+        let fault = Arc::clone(&armed);
+        let first = self.parents[0];
+        let file = open_read_fault(&self.path, move |read| {
+            let mut fault = fault.lock().unwrap();
+            if *fault && matches(read, first) {
+                *fault = false;
+                return Err(FormatError::Source(READ_FAILURE.into()));
+            }
+            Ok(())
+        });
+        assert_eq!(fs::read(&self.path).unwrap(), self.original);
+        assert_original_values(&file);
+        (file, armed)
+    }
+
+    fn assert_closed_and_reopened(&self, file: File, completed: usize) {
+        assert!(!file.has_staged_edits());
+        assert_published_values(&file);
+        assert_allocated(&file, &self.parents);
+        file.close().unwrap();
+        let after = fs::read(&self.path).unwrap();
+        assert_parents(&self.parents, &self.original, &after, completed);
+        let reopened = File::open(&self.path).unwrap();
+        assert_published_values(&reopened);
+        reopened.close().unwrap();
+    }
+}
+
+fn fail_commit_read(file: &File, armed: &Mutex<bool>) -> (Error, Recording) {
+    stage(file);
+    assert!(file.has_staged_edits());
+    *armed.lock().unwrap() = true;
+    disk_log::start();
+    let error = file.commit().unwrap_err();
+    let failed = disk_log::finish();
+    assert!(!*armed.lock().unwrap());
+    (error, failed)
+}
+
+fn assert_read_error(error: Error) {
+    let Error::Format(error) = error else {
+        panic!("expected a source read failure, got {error:?}");
+    };
+    assert_eq!(error, FormatError::Source(READ_FAILURE.into()));
+}
+
+fn open_read_fault(
+    path: &Path,
+    fault: impl Fn(FileRange) -> Result<(), FormatError> + Send + Sync + 'static,
+) -> File {
+    open_unbuffered(path, |handle| {
+        let image = WriteEngine::read_mirror(handle)?;
+        Ok(Box::new(
+            CountingImage::new(Box::new(image), Arc::default(), Arc::default())
+                .with_read_fault(fault),
+        ))
+    })
+}
+
+fn successful_commit(
+    path: &Path,
+    parents: &[u64],
+    target: HeapWrite,
+) -> (Vec<u8>, Vec<u8>, Recording) {
+    let file = open_editor(path, target);
+    let original = fs::read(path).unwrap();
+    stage(&file);
+    disk_log::start();
+    file.commit().unwrap();
+    let recording = disk_log::finish();
+    let published = fs::read(path).unwrap();
+    assert_published_values(&file);
+    assert_parents(parents, &original, &published, parents.len());
+    assert_allocated(&file, parents);
+    file.close().unwrap();
+    (original, published, recording)
 }
 
 fn write_source(path: &Path) -> [u64; 3] {
@@ -272,16 +530,35 @@ fn write_source(path: &Path) -> [u64; 3] {
     parents
 }
 
-fn open_editor(path: &Path) -> File {
-    File::open_rw_with_options(
-        path,
-        FileAccessProperties::new()
-            .with_locking(FileLocking::Disabled)
-            .with_memory_strategy(MemoryStrategy::Mirrored)
-            .with_page_buffer_size(0)
-            .with_sync_policy(SyncPolicy::Always),
-    )
-    .unwrap()
+fn open_editor(path: &Path, target: HeapWrite) -> File {
+    if matches!(target, HeapWrite::Gathered) {
+        File::open_rw_with_options(path, editor_options()).unwrap()
+    } else {
+        open_unbuffered(path, |handle| {
+            Ok(Box::new(WriteEngine::read_mirror(handle)?))
+        })
+    }
+}
+
+fn open_unbuffered(
+    path: &Path,
+    build: impl FnOnce(fs::File) -> Result<Box<dyn FileImage>, Error>,
+) -> File {
+    let mut engine =
+        WriteEngine::open_imaged(path, Some(FileLocking::Disabled), |handle, _| build(handle))
+            .unwrap();
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    File::from_test_edit_session(engine, editor_options()).unwrap()
+}
+
+fn editor_options() -> FileAccessProperties {
+    FileAccessProperties::new()
+        .with_locking(FileLocking::Disabled)
+        .with_memory_strategy(MemoryStrategy::Mirrored)
+        .with_page_buffer_size(0)
+        .with_sync_policy(SyncPolicy::Always)
 }
 
 fn stage(file: &File) {
@@ -308,19 +585,36 @@ fn assert_published_values(file: &File) {
     assert_eq!(value.attrs().unwrap().get("a"), Some(&AttrValue::I64(9)));
 }
 
-fn movement(recording: &Recording, parent: u64) -> usize {
+fn assert_original_values(file: &File) {
+    assert_eq!(file.dataset("numbers").unwrap().read_i32().unwrap(), [17]);
+    assert_eq!(
+        file.dataset("keep").unwrap().read_string().unwrap(),
+        ["retained"; 3]
+    );
+    let value = file.dataset("value").unwrap();
+    assert_eq!(value.read_i32().unwrap(), [17]);
+    assert_eq!(
+        value.attrs().unwrap().get("a"),
+        Some(&AttrValue::VarLenAsciiStringArray(vec![
+            "removed".into();
+            3
+        ]))
+    );
+}
+
+fn heap_write(recording: &Recording, parent: u64, target: HeapWrite) -> usize {
     let publication = recording
         .events
         .iter()
         .position(|event| matches!(event, IoEvent::Write { offset: 0, .. }))
         .unwrap();
-    let movement = recording.events.iter().position(|event| matches!(
+    let write = recording.events.iter().position(|event| matches!(
         event,
         IoEvent::Write { offset, requested, written, outcome: IoOutcome::Succeeded, .. }
-            if *offset == parent + HEADER as u64 && *requested >= RECORD && written == requested
+            if *offset == target.offset(parent) && *requested == target.length() && written == requested
     )).unwrap_or_else(|| panic!("no compaction write for heap at {parent}: {:?}", recording.events));
-    assert!(publication < movement);
-    movement
+    assert!(publication < write);
+    write
 }
 
 fn parent_range(address: u64) -> Range<usize> {
