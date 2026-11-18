@@ -9,6 +9,7 @@ use hdf5_pure_format::__private::{AccessMode, ObjectHeader, ObjectHeaderPrefix};
 use rstest::rstest;
 use test_util::bytes;
 use test_util::object_header::{Message, MessageType, v2};
+use test_util_hdf5::__private::c_object;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
@@ -138,6 +139,137 @@ fn public_copy_and_delete_commits_preserve_native_count_owners(
         );
     }
     reopened.close().unwrap();
+}
+
+#[rstest]
+#[case::version_1(true)]
+#[case::version_2(false)]
+fn deleting_a_group_alias_updates_only_the_original_count_and_checksum(#[case] version_1: bool) {
+    let path = test_util::temp::temp_path("native-group-alias-count.h5");
+    let native = if version_1 {
+        file::libhdf5_create_earliest(&path)
+    } else {
+        file::libhdf5_create_v110(&path)
+    };
+    let group = native.create_group("g").unwrap();
+    group
+        .new_attr::<i64>()
+        .create("value")
+        .unwrap()
+        .write_scalar(&7)
+        .unwrap();
+    drop(group);
+    native.link_hard("g", "alias").unwrap();
+    let info = native.loc_info_by_name("g").unwrap();
+    assert_eq!(info.num_links, 2);
+    assert_eq!(native.loc_info_by_name("alias").unwrap().token, info.token);
+    let address = usize::try_from(c_object::header_address(&native, "g")).unwrap();
+    native.close().unwrap();
+
+    let mut expected = std::fs::read(&path).unwrap();
+    let end = if version_1 {
+        const COUNT_OFFSET: usize = 4;
+        const CHUNK_SIZE_OFFSET: usize = 8;
+        const PREFIX_LEN: usize = 16;
+        let count = address + COUNT_OFFSET;
+        let size = address + CHUNK_SIZE_OFFSET;
+        assert_eq!(expected[address], 1);
+        assert_eq!(&expected[count..count + 4], &2_u32.to_le_bytes());
+        let chunk_size = u32::from_le_bytes(expected[size..size + 4].try_into().unwrap());
+        expected[count..count + 4].copy_from_slice(&1_u32.to_le_bytes());
+        address + PREFIX_LEN + usize::try_from(chunk_size).unwrap()
+    } else {
+        let prefix = ObjectHeaderPrefix::parse(&expected[address..]).unwrap();
+        let end = address + prefix.len + usize::try_from(prefix.chunk0_size).unwrap() + 4;
+        v2::replace_message(
+            &mut expected,
+            address,
+            MessageType::OBJECT_REFERENCE_COUNT,
+            &Message::reference_count(1).data,
+        );
+        end
+    };
+
+    let pure = File::open_rw(&path).unwrap();
+    pure.root().delete("alias").unwrap();
+    pure.commit().unwrap();
+    pure.close().unwrap();
+
+    let stored = std::fs::read(&path).unwrap();
+    assert_eq!(&stored[address..end], &expected[address..end]);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(native.member_names().unwrap(), ["g"]);
+    let remaining = native.loc_info_by_name("g").unwrap();
+    assert_eq!(remaining.num_links, 1);
+    assert_eq!(remaining.token, info.token);
+    assert_eq!(
+        native
+            .group("g")
+            .unwrap()
+            .attr("value")
+            .unwrap()
+            .read_scalar::<i64>()
+            .unwrap(),
+        7
+    );
+    native.close().unwrap();
+}
+
+#[rstest]
+#[case::compact(false)]
+#[case::dense(true)]
+fn copying_group_attributes_preserves_their_native_committed_datatype(#[case] dense: bool) {
+    let attrs = if dense { 9 } else { 1 };
+    let path = test_util::temp::temp_path("native-copied-committed-attributes.h5");
+    let native = file::libhdf5_create_v18(&path);
+    let datatype = ByteOrder::LittleEndian.i32_datatype();
+    native.commit_datatype("mytype", &datatype).unwrap();
+    let group = native.create_group("source").unwrap();
+    for index in 0..attrs {
+        group
+            .new_attr_builder()
+            .empty_as(&datatype)
+            .shape([1])
+            .create(format!("attr{index}").as_str())
+            .unwrap()
+            .write(&[i32::try_from(index).unwrap()])
+            .unwrap();
+    }
+    let info = native.loc_info_by_name("mytype").unwrap();
+    assert_eq!(info.num_links, attrs + 1);
+    drop(group);
+    drop(datatype);
+    native.close().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    assert_eq!(test_util::fractal_heap::has_fractal_heap(&original), dense);
+
+    let pure = File::open_rw(&path).unwrap();
+    pure.copy("source", "copy").unwrap();
+    pure.root().delete("mytype").unwrap();
+    pure.commit().unwrap();
+    pure.close().unwrap();
+
+    let native = file::libhdf5_open(&path);
+    let mut names = native.member_names().unwrap();
+    names.sort();
+    assert_eq!(names, ["copy", "source"]);
+    for name in ["source", "copy"] {
+        let group = native.group(name).unwrap();
+        assert_eq!(group.attr_names().unwrap().len(), attrs);
+        for index in 0..attrs {
+            let attr = group.attr(&format!("attr{index}")).unwrap();
+            assert_eq!(
+                attr.read_raw::<i32>().unwrap(),
+                [i32::try_from(index).unwrap()]
+            );
+            let datatype = attr.dtype().unwrap();
+            assert!(datatype.is_committed());
+            let remaining = datatype.as_location().unwrap().loc_info().unwrap();
+            assert_eq!(remaining.token, info.token);
+            assert_eq!(remaining.num_links, 2 * attrs);
+        }
+    }
+    native.close().unwrap();
 }
 
 #[derive(Clone, Copy)]

@@ -43,13 +43,6 @@ pub(in crate::edit) use counts::CountProjectionProof;
 pub(super) use counts::PreparedTreeCounts;
 use counts::{CountedPreparation, TreeCountInputs};
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "count projections are exercised by private owner tests"
-    )
-)]
 mod counts;
 
 #[expect(
@@ -72,22 +65,6 @@ pub(super) struct PreparedCommit {
 }
 
 impl PreparedCommit {
-    /// Plans edits with count-eligible retirement and checked replacement count records.
-    ///
-    /// Returns [`CommitPreparation::Rejected`] with the original staged inputs on failure.
-    /// In-place-only plans skip count discovery. Tree plans retain original count outcomes and
-    /// protected source updates.
-    #[cfg(test)]
-    pub(super) fn prepare_counted(
-        engine: &mut WriteEngine,
-        staged: StagedEdits,
-    ) -> CommitPreparation {
-        let plan = engine
-            .plan_commit_inner(&staged, false, true, false)
-            .map(|(plan, _)| plan);
-        Self::from_plan(plan, staged)
-    }
-
     /// Plans a commit, returning the original staged inputs on rejection.
     ///
     /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs

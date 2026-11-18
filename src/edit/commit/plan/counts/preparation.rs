@@ -5,14 +5,12 @@ use std::collections::BTreeMap;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_space::__private::FreeClass;
 
-use super::PreparedCounts;
+use super::OwnedCountProjection;
 use crate::edit::WriteEngine;
-#[cfg(test)]
-use crate::edit::analysis::CountInventory;
 use crate::edit::analysis::counts::{CopyUsersError, CountEvidenceError};
 use crate::edit::analysis::{
-    AnalysisPhase, CountHandoffError, CountPreflightError, CountProtectionError, NetCountError,
-    OriginalOwnerFacts, ProtectedCounts,
+    AnalysisPhase, CountPreflightError, CountProtectionError, NetCountError, OriginalOwnerFacts,
+    ProtectedCounts,
 };
 use crate::edit::commit::plan::Node;
 use crate::edit::commit::plan::inventory::{EditInputError, OriginalEdits};
@@ -29,19 +27,10 @@ use crate::object_path::ObjectPathBuf;
 pub(in crate::edit::commit) enum PreparedTreeCounts {
     /// Complete numeric count planning with local projections applied.
     Complete {
-        /// Original count changes retained after local projection.
-        #[cfg(test)]
-        inventory: CountInventory,
         /// Checked updates to count fields outside reconstructed objects.
         protected: ProtectedCounts,
         /// Original objects retained for collection-reference analysis.
         retained_roots: Vec<ObjectId>,
-        /// Ordinary non-root objects with zero graph and declared count remainders.
-        #[cfg(test)]
-        eligible_owners: Vec<ObjectId>,
-        /// Supported original allocations, moved into the tree before reference screening.
-        #[cfg(test)]
-        retirement: Vec<(FileRange, FreeClass)>,
     },
     /// Checked updates paired with original facts retained by captured application.
     Captured(ProtectedCounts),
@@ -53,8 +42,7 @@ impl PreparedTreeCounts {
     pub(in crate::edit::commit) fn input_error(error: EditInputError) -> Error {
         match error {
             EditInputError::Copy(error) => error,
-            EditInputError::Handoff(CountHandoffError::Source(error))
-            | EditInputError::Users(CopyUsersError::Address(error))
+            EditInputError::Users(CopyUsersError::Address(error))
             | EditInputError::Counts(NetCountError::Association(CopyUsersError::Address(error))) => {
                 error.into()
             }
@@ -130,7 +118,7 @@ impl CountedPreparation {
                     "the original reference-count updates cannot be protected",
                 ),
             })?;
-        let (_, proof) = PreparedCounts::owned(
+        let proof = OwnedCountProjection::prepare(
             preflight.counts(),
             groups.values_mut().map(|node| &mut node.prepared),
         )
@@ -166,18 +154,12 @@ impl CountedPreparation {
                 original,
                 protected,
             } => {
-                let (_inventory, storage, _eligible_owners) = original.into_parts();
+                let storage = original.into_storage();
                 let (retirement, retained_roots) = storage.into_parts();
                 TreeCountInputs {
                     counts: PreparedTreeCounts::Complete {
-                        #[cfg(test)]
-                        inventory: _inventory,
                         protected,
                         retained_roots,
-                        #[cfg(test)]
-                        eligible_owners: _eligible_owners,
-                        #[cfg(test)]
-                        retirement: Vec::new(),
                     },
                     original: None,
                     retirement,
@@ -198,6 +180,3 @@ pub(in crate::edit::commit::plan) struct TreeCountInputs {
     pub(in crate::edit::commit::plan) original: Option<Result<OriginalOwnerFacts, EditInputError>>,
     pub(in crate::edit::commit::plan) retirement: Vec<(FileRange, FreeClass)>,
 }
-
-#[cfg(test)]
-mod tests;

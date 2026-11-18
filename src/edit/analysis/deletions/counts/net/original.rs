@@ -58,14 +58,9 @@ pub(in crate::edit) struct OriginalOwnerFacts {
 }
 
 impl OriginalOwnerFacts {
-    /// Separates original count, allocation, and owner evidence without reanalysis.
-    pub(in crate::edit) fn into_parts(self) -> (CountInventory, CountStorage, Vec<ObjectId>) {
-        let Self {
-            counts,
-            storage,
-            eligible_owners,
-        } = self;
-        (counts, storage, eligible_owners)
+    /// Consumes the original facts to use only their storage on the direct path.
+    pub(in crate::edit) fn into_storage(self) -> CountStorage {
+        self.storage
     }
 
     /// Checks source-count protection while retaining storage and owner facts from the same plan.
