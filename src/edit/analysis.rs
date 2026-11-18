@@ -9,9 +9,6 @@ use std::sync::Arc;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
-use hdf5_pure_format::__private::ObjectReferenceCount;
-#[cfg(doc)]
-use hdf5_pure_format::__private::ObjectReferenceCountObserver;
 use hdf5_pure_space::__private::FreeClass;
 
 use crate::access_mode::AccessMode;
@@ -28,7 +25,6 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::SourceMetadata;
 
 use self::counts::CountObservation;
-use self::counts::CountQueries;
 use self::counts::OrdinaryCountSubject;
 use self::heap::CollectionContents;
 use self::heap::HeapReferenceError;
@@ -44,27 +40,16 @@ use super::reclaim::{self, MAX_LINK_WALK_DEPTH};
 use super::staging::StagedEdits;
 use super::{MAX_LINK_GRAPH_NODES, WriteEngine};
 
-#[cfg(test)]
-pub(super) use deletions::CountInventory;
 pub(super) use deletions::CountPreflight;
 pub(super) use deletions::CountProjectionIdentity;
 pub(super) use deletions::{CountPreflightError, CountProtectionError, ProtectedCounts};
 
-pub(super) use deletions::DeclaredCountChange;
 pub(super) use deletions::PlannedDeletion;
-pub(super) use deletions::SourceRemovalPlan;
 pub(super) use deletions::{
     CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
     OriginalOwnerInventory,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "source-count evidence does not authorize allocation retirement"
-    )
-)]
 pub(super) mod counts;
 mod deletions;
 #[cfg_attr(
@@ -220,33 +205,6 @@ impl<'a> AnalysisPhase<'a> {
                 CompleteTopology::discover_cached(engine, root, *budget, links, identity).ok()
             })
             .as_ref()
-    }
-
-    /// Returns a cached count observation at the object's physical header address.
-    ///
-    /// Parses the complete header on the first query, retaining no message bodies. Caches
-    /// successful classifications and failures for subsequent queries in this source phase.
-    /// Produces a count observation only after the parser and all chunk observations succeed.
-    /// Topology, reference completeness, and allocation facts remain independent. The caller
-    /// establishes count authority separately before retirement.
-    ///
-    /// # Errors
-    ///
-    /// Returns parsing and source-read errors from
-    /// [`ObjectHeader::parse_from_source_with_chunk_observer`], or observation errors from
-    /// [`ObjectReferenceCountObserver::observe`] and [`ObjectReferenceCountObserver::finish`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "count observations do not authorize allocation retirement"
-        )
-    )]
-    pub(super) fn object_reference_count(
-        &mut self,
-        object: ObjectId,
-    ) -> Result<ObjectReferenceCount, FormatError> {
-        CountQueries::new(self.engine, &mut self.counts, None).observation(object)
     }
 
     /// Returns collection references reachable from the objects identified by `roots`.
