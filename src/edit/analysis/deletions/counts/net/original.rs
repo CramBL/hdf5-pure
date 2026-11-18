@@ -95,26 +95,21 @@ impl OriginalOwnerFacts {
     /// or topology discovery. For an empty plan without a phase origin, checks the supplied source
     /// against the claims and domain. The caller establishes source freshness.
     ///
-    /// # Errors
-    ///
-    /// Returns [`OriginalOwnerError::Session`] for a different allocation session,
-    /// [`OriginalOwnerError::Phase`] for a mismatched source or claims phase,
-    /// [`OriginalOwnerError::Root`] for a mismatched physical root, or
-    /// [`OriginalOwnerError::Domain`] for an incompatible supported domain.
+    /// Returns [`None`] if the session, source phase, root, or domain differs.
     pub(in crate::edit) fn qualify(
         self,
         engine: &WriteEngine,
         source: &ReconstructionSource,
         claims: &PhysicalClaims,
         domain: SupportedOwnerDomain,
-    ) -> Result<OriginalOwnerInventory, OriginalOwnerError> {
+    ) -> Option<OriginalOwnerInventory> {
         if !self.counts.same_session(engine) {
-            return Err(OriginalOwnerError::Session);
+            return None;
         }
         if !claims.matches_phase(source)
             || (self.counts.root().is_some() && !self.counts.shares_phase(source))
         {
-            return Err(OriginalOwnerError::Phase);
+            return None;
         }
         if claims.root() != Some(source.object())
             || self
@@ -122,12 +117,12 @@ impl OriginalOwnerFacts {
                 .root()
                 .is_some_and(|root| root != source.object())
         {
-            return Err(OriginalOwnerError::Root);
+            return None;
         }
         if !domain.matches(engine, claims) {
-            return Err(OriginalOwnerError::Domain);
+            return None;
         }
-        Ok(OriginalOwnerInventory {
+        Some(OriginalOwnerInventory {
             facts: self,
             source: ReconstructionSource {
                 identity: Arc::clone(&source.identity),
@@ -228,17 +223,4 @@ impl OriginalOwnerInventory {
     pub(in crate::edit) fn matches(&self, engine: &WriteEngine, claims: &PhysicalClaims) -> bool {
         self.domain.matches(engine, claims)
     }
-}
-
-/// An incompatible association during original-owner qualification.
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::edit) enum OriginalOwnerError {
-    /// A supported domain with a different session, phase, root, or recorded bounds.
-    Domain,
-    /// A source phase different from the claims or nonempty plan's phase.
-    Phase,
-    /// A physical source root different from the claims or nonempty plan's root.
-    Root,
-    /// An engine from a different allocation session.
-    Session,
 }

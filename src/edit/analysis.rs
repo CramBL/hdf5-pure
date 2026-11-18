@@ -46,8 +46,7 @@ pub(super) use deletions::{CountPreflightError, CountProtectionError, ProtectedC
 
 pub(super) use deletions::PlannedDeletion;
 pub(super) use deletions::{
-    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
-    OriginalOwnerInventory,
+    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerFacts, OriginalOwnerInventory,
 };
 
 pub(super) mod counts;
@@ -604,11 +603,6 @@ impl<'a> AnalysisPhase<'a> {
                         links.insert(object, ObjectLinks::read(engine, &header)?);
                     }
                     if let Entry::Vacant(entry) = references.entry(object) {
-                        #[cfg(test)]
-                        COLLECTION_WORK.with(|work| {
-                            let (links, references) = work.get();
-                            work.set((links, references + 1));
-                        });
                         let mut facts = ObjectReferences::default();
                         let mut values = value_references.remove(&object);
                         let outcome = engine.collect_cached_object_collections(
@@ -730,18 +724,8 @@ impl<'a> CompleteTopology<'a> {
         cached: &mut BTreeMap<ObjectId, ObjectLinks>,
         identity: Arc<deletions::TopologyIdentity>,
     ) -> Result<Self, Error> {
-        #[cfg(test)]
-        DISCOVERY_WORK.with(|work| {
-            let (passes, objects) = work.get();
-            work.set((passes + 1, objects));
-        });
         let mut incoming = HashMap::new();
         let (graph, indices) = ObjectGraph::discover_indexed(budget, root, |id| {
-            #[cfg(test)]
-            DISCOVERY_WORK.with(|work| {
-                let (passes, objects) = work.get();
-                work.set((passes, objects + 1));
-            });
             let ObjectLinks {
                 links,
                 topology_error,
@@ -866,11 +850,6 @@ struct ObjectLinks {
 
 impl ObjectLinks {
     fn read(engine: &WriteEngine, header: &ObjectHeader) -> Result<Self, Error> {
-        #[cfg(test)]
-        COLLECTION_WORK.with(|work| {
-            let (links, references) = work.get();
-            work.set((links + 1, references));
-        });
         let mut links = Vec::new();
         let mut topology_error = None;
         if group_v2::is_group(header) {
@@ -1198,8 +1177,5 @@ pub(super) enum CollectionContent {
 
 #[cfg(test)]
 std::thread_local! {
-    pub(in crate::edit) static DISCOVERY_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     pub(in crate::edit) static RECONSTRUCTION_WORK: Cell<usize> = const { Cell::new(0) };
-    pub(in crate::edit) static COLLECTION_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    pub(in crate::edit) static COLLECTION_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }

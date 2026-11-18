@@ -10,8 +10,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_space::__private::{Extent, FreeClass, RetainedKind};
 
 use self::capture::{ClaimReleases, ResidualRelease, StorageIntegrityError};
-use super::dispositions::{AppliedDispositions, Disposition, ReconstructionDispositions};
-use super::members::MemberDecisions;
+use super::dispositions::{AppliedDispositions, ReconstructionDispositions};
 use super::prospective::ProspectiveCollections;
 use super::{AppliedEditInventory, OriginalEdits, PreparedEditInventory};
 use crate::edit::WriteEngine;
@@ -44,7 +43,7 @@ pub(in crate::edit) struct OriginalStorage {
     allocations: Vec<StorageAllocation>,
     parents: Result<BTreeMap<PhysicalAddress, ParentStorage>, Error>,
     integrity: Result<(), StorageIntegrityError>,
-    unavailable: Option<StorageUnavailable>,
+    source_error: Option<Error>,
 }
 
 impl OriginalStorage {
@@ -69,14 +68,14 @@ impl OriginalStorage {
                 .collect(),
             parents: Ok(BTreeMap::new()),
             integrity: Ok(()),
-            unavailable: None,
+            source_error: None,
         }
     }
 
     /// Collects original storage exclusions from the prepared observations and reclamation input.
     ///
-    /// Superseded allocations remain protected unless associated evidence rules out references
-    /// from residual storage.
+    /// Retains predecessor allocations when residual storage cannot be qualified. Replacement
+    /// does not establish whether an unavailable residual group still references the old owner.
     pub(super) fn collect(
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
@@ -91,10 +90,9 @@ impl OriginalStorage {
             allocations: Vec::new(),
             parents: Ok(BTreeMap::new()),
             integrity: Ok(()),
-            unavailable: None,
+            source_error: None,
         };
         let Some(source) = dispositions.source().as_ref().ok() else {
-            result.unavailable = Some(StorageUnavailable::Source);
             result.integrity = Err(StorageIntegrityError::Unavailable);
             return result;
         };
@@ -103,7 +101,7 @@ impl OriginalStorage {
             match phase.residual_group_domain(source) {
                 Ok(groups) => Some(groups),
                 Err(error) => {
-                    result.unavailable = Some(StorageUnavailable::Coverage(error));
+                    result.source_error = Some(error);
                     result.integrity = Err(StorageIntegrityError::Unavailable);
                     result.capture_parents();
                     return result;
@@ -115,7 +113,7 @@ impl OriginalStorage {
         let claims = match phase.physical_claims(source) {
             Ok(claims) => claims,
             Err(error) => {
-                result.unavailable = Some(StorageUnavailable::Claims(error));
+                result.source_error = Some(error);
                 result.integrity = Err(StorageIntegrityError::Unavailable);
                 result.capture_parents();
                 return result;
@@ -124,9 +122,6 @@ impl OriginalStorage {
         let qualified_owners = original
             .owners()
             .is_some_and(|owners| owners.source() == source && owners.matches(engine, claims));
-        if !qualified_owners {
-            result.unavailable = Some(StorageUnavailable::Owners);
-        }
         let residual = match groups.as_deref().and_then(Option::as_ref) {
             Some(groups) => ResidualRelease::Complete(groups),
             None if qualified_owners
@@ -142,25 +137,11 @@ impl OriginalStorage {
             }
             None => ResidualRelease::Unavailable,
         };
-        if dispositions
-            .predecessors()
-            .values()
-            .any(|old| old.disposition != Disposition::Supersede)
-        {
-            result
-                .unavailable
-                .get_or_insert(StorageUnavailable::Dispositions);
-        }
-        if reclamation.is_err() {
-            result
-                .unavailable
-                .get_or_insert(StorageUnavailable::Reclamation);
-        }
         let releases =
             ClaimReleases::new(&tree.groups, original, dispositions, reclamation, residual);
         result.capture_claims(claims, &releases);
         result.capture_parents();
-        result.capture_integrity(engine, phase, source);
+        result.capture_integrity(engine, phase, source, !qualified_owners);
 
         result
     }
@@ -181,7 +162,7 @@ impl OriginalStorage {
                 .collect(),
             parents: Ok(BTreeMap::new()),
             integrity: Ok(()),
-            unavailable: None,
+            source_error: None,
         }
     }
 
@@ -313,22 +294,6 @@ impl OriginalStorage {
         &self.allocations
     }
 
-    /// Borrows the first qualification failure, independently of recorded ranges.
-    pub(in crate::edit::commit) fn unavailable(&self) -> Option<&StorageUnavailable> {
-        self.unavailable.as_ref()
-    }
-
-    /// Borrows independent parent observations keyed by physical collection address.
-    ///
-    /// # Errors
-    ///
-    /// Returns the recorded error of [`AnalysisPhase::collection_storage`].
-    pub(in crate::edit::commit) fn parents(
-        &self,
-    ) -> Result<&BTreeMap<PhysicalAddress, ParentStorage>, &Error> {
-        self.parents.as_ref()
-    }
-
     /// Checks reusable sections, retained extents, and unused aggregate capacity.
     ///
     /// # Errors
@@ -421,16 +386,11 @@ impl OriginalStorage {
 }
 
 impl PreparedEditInventory {
-    /// Borrows original storage evidence associated with these prepared inputs.
-    pub(in crate::edit::commit) fn storage(&self) -> &OriginalStorage {
-        &self.storage
-    }
-
     /// Checks original storage exclusions before placement and records pending retirement.
     ///
     /// Checks the source-phase, root, and allocation-session associations before application.
-    /// On success, retains the allocator and pending-retirement exclusion outcome in
-    /// [`PendingEditInventory::exclusion`]. The caller handles rollback after application failure.
+    /// On success, retains the allocator and pending-retirement exclusion outcome. The caller
+    /// handles rollback after application failure.
     ///
     /// # Errors
     ///
@@ -486,7 +446,6 @@ pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     engine: &'a mut WriteEngine,
     session: AllocationSession,
     counts: Option<ProtectedCounts>,
-    original: OriginalEdits,
     dispositions: AppliedDispositions,
     storage: OriginalStorage,
     collections: OriginalCollections,
@@ -530,7 +489,6 @@ impl<'a> PendingEditInventory<'a> {
             engine,
             session,
             counts,
-            original,
             dispositions,
             storage,
             collections,
@@ -541,55 +499,24 @@ impl<'a> PendingEditInventory<'a> {
         }
     }
 
-    /// Publishes the pending tree and borrows its retained observations for completion.
+    /// Publishes the pending tree and runs completion after storage checks.
     ///
-    /// Checks placement reconciliation and current allocator claims before consuming the pending
-    /// batch. Calls `complete` after publication, reference updates, root reclamation, truncation,
-    /// and final storage checks succeed. The callback receives the original observations, applied
-    /// dispositions, storage exclusions, and original collection qualification and framing
-    /// associated with these inputs, together with prospective observations collected after
-    /// application.
+    /// Rechecks placement reconciliation and current allocator claims before publication.
+    /// Completion runs after reference updates, root reclamation, truncation, and final checks.
     ///
     /// # Errors
     ///
-    /// Returns placement-reconciliation, exclusion, publication, or completion errors. The caller
-    /// handles rollback according to publication state.
+    /// Returns placement, exclusion, publication, or completion errors. The caller handles
+    /// rollback according to publication state.
     pub(in crate::edit::commit) fn publish_with_completion<T>(
-        self,
-        complete: impl FnOnce(
-            PublishedTree<'_>,
-            &OriginalEdits,
-            &AppliedDispositions,
-            &OriginalStorage,
-            &OriginalCollections,
-            &ProspectiveCollections,
-        ) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        self.publish_with_observations(complete)
-            .map(|(value, _, _)| value)
-    }
-
-    /// Retains owned collection observations after successful publication and completion.
-    ///
-    /// Uses the publication and error contract of [`Self::publish_with_completion`].
-    ///
-    /// # Errors
-    ///
-    /// Returns placement-reconciliation, exclusion, publication, or completion errors.
-    fn publish_with_observations<T>(
         mut self,
-        complete: impl FnOnce(
-            PublishedTree<'_>,
-            &OriginalEdits,
-            &AppliedDispositions,
-            &OriginalStorage,
-            &OriginalCollections,
-            &ProspectiveCollections,
-        ) -> Result<T, Error>,
-    ) -> Result<(T, OriginalCollections, ProspectiveCollections), Error> {
-        self.dispositions.replacements().map_err(|_error| {
-            Error::EditUnsupported("original predecessor replacement cannot be established")
-        })?;
+        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.dispositions
+            .replacements()
+            .ok_or(Error::EditUnsupported(
+                "original predecessor replacement cannot be established",
+            ))?;
         if self.exclusion.is_ok() {
             self.exclusion = self.storage.exclude_space(self.engine);
         }
@@ -598,25 +525,14 @@ impl<'a> PendingEditInventory<'a> {
             engine,
             session: _,
             counts,
-            original,
-            dispositions,
+            dispositions: _,
             mut storage,
-            collections,
-            prospective,
+            collections: _,
+            prospective: _,
             pending,
             relocations,
             exclusion: _,
         } = self;
-        let completion = |published: PublishedTree<'_>, storage: &OriginalStorage| {
-            complete(
-                published,
-                &original,
-                &dispositions,
-                storage,
-                &collections,
-                &prospective,
-            )
-        };
         let result = match counts {
             Some(counts) => {
                 let end = engine
@@ -624,9 +540,11 @@ impl<'a> PendingEditInventory<'a> {
                     .and_then(|end| engine.addresses().resolve(end))
                     .map_err(Error::from);
                 match end.and_then(|end| counts.before_publication(engine, pending)?.at_end(end)) {
-                    Ok(bounds) => {
-                        bounds.with_ordered_counts_excluding(relocations, &mut storage, completion)
-                    }
+                    Ok(bounds) => bounds.with_ordered_counts_excluding(
+                        relocations,
+                        &mut storage,
+                        |published, _| complete(published),
+                    ),
                     Err(error) => Err(PublicationError::Write(error)),
                 }
             }
@@ -634,21 +552,21 @@ impl<'a> PendingEditInventory<'a> {
                 pending,
                 relocations,
                 Some(&storage),
-                |published| completion(published, &storage).map_err(Into::into),
+                |published| complete(published).map_err(Into::into),
             ),
         };
-        match result {
-            Ok(value) => Ok((value, collections, prospective)),
-            Err(error) => Err(match error {
-                PublicationError::Write(error) => error,
-                PublicationError::Storage(error) => error.into(),
-            }),
-        }
+        result.map_err(|error| match error {
+            PublicationError::Write(error) => error,
+            PublicationError::Storage(error) => error.into(),
+        })
     }
 
-    /// Derives qualified removals from the owned original and fresh prospective observations.
-    pub(in crate::edit::commit) fn member_decisions(&self) -> MemberDecisions {
-        MemberDecisions::collect(&self.collections, &self.prospective, &self.storage)
+    #[cfg(test)]
+    test_util_hdf5::hdf5_1_10_tests! {
+        /// Derives qualified removals from the owned original and fresh prospective observations.
+        pub(in crate::edit::commit) fn member_decisions(&self) -> super::members::MemberDecisions {
+            super::members::MemberDecisions::collect(&self.collections, &self.prospective, &self.storage)
+        }
     }
 
     /// Publishes the protected tree before compacting qualified global heap members.
@@ -657,111 +575,37 @@ impl<'a> PendingEditInventory<'a> {
     /// and prospective root associations against the pending root. The writer preserves each
     /// parent allocation and applies the plans through [`heap::after_publication`].
     ///
-    /// Returns the final adopted root and EOA with the observations and decisions. A heap
-    /// mutation failure is recorded in [`MemberCompletion::mutation`] after publication.
+    /// Returns the heap mutation result after publishing the tree.
     ///
     /// # Errors
     ///
     /// Returns parent-preparation, placement, exclusion, publication, or root-association errors.
     pub(in crate::edit::commit) fn publish_compacting_members(
         mut self,
-    ) -> Result<MemberCompletion, Error> {
-        let decisions = match self.prepare_parents() {
-            Ok(decisions) => decisions,
-            Err(error) => return Err(outcomes::parent_error(error)),
-        };
+    ) -> Result<Result<(), HeapMutationFailure>, Error> {
+        let decisions = self.prepare_parents().map_err(outcomes::parent_error)?;
         let requested_root = self.pending.root;
-        let ((_root, _end, mutation), _collections, _prospective) = self
-            .publish_with_observations(|published, _, _, _, _, prospective| {
-                if published.requested_root() != requested_root
-                    || prospective
-                        .root()
-                        .is_some_and(|root| root != requested_root)
-                {
-                    return Err(FormatError::Internal(
-                        "heap decisions belong to another published tree".into(),
-                    )
-                    .into());
-                }
-                let root = published.root();
-                let end = published.end();
-                Ok((
-                    root,
-                    end,
-                    heap::after_publication(published, decisions.plans()),
-                ))
-            })?;
-        Ok(MemberCompletion {
-            #[cfg(test)]
-            collections: _collections,
-            #[cfg(test)]
-            prospective: _prospective,
-            #[cfg(test)]
-            decisions,
-            #[cfg(test)]
-            root: _root,
-            #[cfg(test)]
-            end: _end,
-            mutation,
+        let prospective_root = self.prospective.root();
+        self.publish_with_completion(|published| {
+            if published.requested_root() != requested_root
+                || prospective_root.is_some_and(|root| root != requested_root)
+            {
+                return Err(FormatError::Internal(
+                    "heap decisions belong to another published tree".into(),
+                )
+                .into());
+            }
+            Ok(heap::after_publication(published, decisions.plans()))
         })
     }
 
-    /// Borrows heap references and root-applicability outcomes collected after application.
-    pub(in crate::edit::commit) fn prospective(&self) -> &ProspectiveCollections {
-        &self.prospective
-    }
-
-    /// Borrows original candidates, qualification, and framing retained until completion.
-    pub(in crate::edit::commit) fn collections(&self) -> &OriginalCollections {
-        &self.collections
-    }
-
-    /// Returns the recorded allocator and pending-retirement exclusion outcome.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first recorded [`StorageConflict`].
-    pub(in crate::edit::commit) fn exclusion(&self) -> Result<(), &StorageConflict> {
-        self.exclusion.as_ref().copied()
-    }
-
-    /// Returns the greatest protected range end, or physical address zero for an empty inventory.
-    pub(in crate::edit::commit) fn maximum_end(&self) -> PhysicalAddress {
-        self.storage.maximum_end()
-    }
-
-    /// Checks whether a proposed end preserves every recorded original allocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageConflict::End`] if `end` is below [`Self::maximum_end`].
-    pub(in crate::edit::commit) fn check_end(
-        &self,
-        end: PhysicalAddress,
-    ) -> Result<(), StorageConflict> {
-        self.storage.check_end(end)
-    }
-}
-
-/// The collection-completion result after protected tree publication succeeds.
-pub(in crate::edit::commit) struct MemberCompletion {
-    /// Original qualification and collection framing used for member decisions.
     #[cfg(test)]
-    pub(in crate::edit::commit) collections: OriginalCollections,
-    /// Fresh reference observations used to determine removal eligibility.
-    #[cfg(test)]
-    pub(in crate::edit::commit) prospective: ProspectiveCollections,
-    /// Member, parent, and planning outcomes used for this completion.
-    #[cfg(test)]
-    pub(in crate::edit::commit) decisions: MemberDecisions,
-    /// The final adopted root after tree publication.
-    #[cfg(test)]
-    pub(in crate::edit::commit) root: PhysicalAddress,
-    /// The final published EOA.
-    #[cfg(test)]
-    pub(in crate::edit::commit) end: PhysicalAddress,
-    /// The compaction result, including the completed prefix and allocation state on failure.
-    pub(in crate::edit::commit) mutation: Result<(), HeapMutationFailure>,
+    test_util_hdf5::hdf5_1_10_tests! {
+        /// Borrows heap references and root-applicability outcomes collected after application.
+        pub(in crate::edit::commit) fn prospective(&self) -> &ProspectiveCollections {
+            &self.prospective
+        }
+    }
 }
 
 /// A protected physical range with its original owner or parent collection.
@@ -786,29 +630,6 @@ pub(in crate::edit::commit) enum StorageOrigin {
         address: PhysicalAddress,
         class: Option<FreeClass>,
     },
-}
-
-/// An unmet prerequisite for complete original storage exclusions.
-#[derive(Debug)]
-pub(in crate::edit::commit) enum StorageUnavailable {
-    /// Physical-claims collection failed.
-    Claims(Error),
-    /// A predecessor is excluded from complete replacement.
-    Dispositions,
-    /// The physical storage of an original object is incomplete.
-    Object,
-    /// Original owner qualification is absent or has incompatible associations.
-    Owners,
-    /// A parent has an unavailable framing, candidate-range, or allocation-class prerequisite.
-    Parent,
-    /// Parent storage collection failed.
-    Parents,
-    /// Conservative protection or coverage collection failed.
-    Coverage(Error),
-    /// Original reclamation collection failed.
-    Reclamation,
-    /// The original source association is unavailable.
-    Source,
 }
 
 /// A protected allocation overlaps a space claim or extends past a proposed end.
@@ -853,6 +674,3 @@ pub(in crate::edit) enum SpaceClaim {
     /// A complete reserved root-header allocation proposed as the copy target.
     RootCopy,
 }
-
-#[cfg(test)]
-mod tests;

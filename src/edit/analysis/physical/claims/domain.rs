@@ -267,7 +267,7 @@ pub(in crate::edit) enum DomainUnavailable {
     /// A recorded end address beyond the source image length.
     MissingSource,
     /// An object with incomplete local allocation discovery.
-    ObjectStorage(ObjectId),
+    ObjectStorage,
     /// An allocation-publication failure that prevents qualification.
     Publication,
     /// An object with incomplete reference interpretation.
@@ -285,7 +285,7 @@ impl From<&ClaimProblem> for DomainUnavailable {
         match problem {
             ClaimProblem::Collection(_) => Self::Collection,
             ClaimProblem::File => Self::File,
-            ClaimProblem::ObjectStorage(object) => Self::ObjectStorage(*object),
+            ClaimProblem::ObjectStorage(_) => Self::ObjectStorage,
             ClaimProblem::References => Self::References,
             ClaimProblem::Topology => Self::Topology,
         }

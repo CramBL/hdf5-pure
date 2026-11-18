@@ -314,7 +314,7 @@ impl WriteEngine {
             }
             InventoryPreparation::Tree(prepared) => match prepared.apply_excluding(self) {
                 Ok(pending) => match pending.publish_compacting_members() {
-                    Ok(completion) => CommitOutcome::Published(completion.mutation),
+                    Ok(mutation) => CommitOutcome::Published(mutation),
                     Err(error) => CommitOutcome::Applied(Err(error)),
                 },
                 Err(error) => CommitOutcome::Applied(Err(error)),

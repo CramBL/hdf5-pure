@@ -45,10 +45,6 @@ use counts::{CountedPreparation, TreeCountInputs};
 
 mod counts;
 
-#[expect(
-    dead_code,
-    reason = "owner-local tests inspect independent inventory outcomes"
-)]
 pub(super) mod inventory;
 
 #[cfg(test)]
