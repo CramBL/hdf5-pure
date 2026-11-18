@@ -3,9 +3,9 @@
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
+use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
-use hdf5_pure_format::__private::{ChunkedGeometry, DenseAttrPlan};
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
@@ -45,13 +45,6 @@ use super::object_header::reference_count::HeaderCountError;
 use super::staging::StagedOp;
 use super::{InvalidatedAddresses, WriteEngine};
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "copied datatype users describe references without authorizing count writes"
-    )
-)]
 pub(super) mod datatype_users;
 
 #[cfg(test)]
@@ -379,83 +372,6 @@ impl WriteEngine {
     }
 }
 
-/// Placement operations for the shared copy emitter.
-///
-/// The emitter supplies retained chunk geometry and finalized dense-attribute plans.
-/// Implementations place their bytes and return stored addresses or replacement message bodies.
-trait CopyOutput {
-    /// Returns the destination widths used to check each retained header.
-    fn output_widths(&self) -> FormatWidths;
-    /// Places contiguous values and returns their stored starting address.
-    ///
-    /// # Errors
-    ///
-    /// Returns implementation-specific reservation, address-conversion, or write errors.
-    fn place_data(&mut self, data: &[u8]) -> Result<StoredAddress, Error>;
-    /// Places stored chunks and their index and returns the replacement Data Layout body.
-    ///
-    /// # Errors
-    ///
-    /// Returns implementation-specific planning, provider, reservation, or write errors.
-    fn place_chunks(
-        &mut self,
-        geometry: &ChunkGeometry,
-        flags: ChunkedLayoutFlags,
-        pipeline: Option<&[u8]>,
-        meta: &[ChunkMeta],
-        chunks: &dyn ChunkProvider,
-    ) -> Result<Vec<u8>, Error>;
-    /// Places finalized dense attributes and returns their Attribute Info body.
-    ///
-    /// # Errors
-    ///
-    /// Returns implementation-specific allocation, encoding, or write errors.
-    fn place_attributes(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error>;
-    /// Places a complete encoded header and returns its stored starting address.
-    ///
-    /// # Errors
-    ///
-    /// Returns implementation-specific reservation, address-conversion, or write errors.
-    fn place_header(&mut self, header: &[u8]) -> Result<StoredAddress, Error>;
-}
-
-impl CopyOutput for WriteEngine {
-    fn output_widths(&self) -> FormatWidths {
-        self.context.widths()
-    }
-
-    fn place_data(&mut self, data: &[u8]) -> Result<StoredAddress, Error> {
-        let address = self.alloc_or_append_typed(data, AllocationClass::Raw)?;
-        Ok(self
-            .context
-            .addresses()
-            .relative(PhysicalAddress::new(address))?)
-    }
-
-    fn place_chunks(
-        &mut self,
-        geometry: &ChunkGeometry,
-        flags: ChunkedLayoutFlags,
-        pipeline: Option<&[u8]>,
-        meta: &[ChunkMeta],
-        chunks: &dyn ChunkProvider,
-    ) -> Result<Vec<u8>, Error> {
-        self.place_verbatim_chunks(geometry, flags, pipeline, meta, chunks)
-    }
-
-    fn place_attributes(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error> {
-        self.place_dense_attrs(plan)
-    }
-
-    fn place_header(&mut self, header: &[u8]) -> Result<StoredAddress, Error> {
-        let address = self.place_object_header(header)?;
-        Ok(self
-            .context
-            .addresses()
-            .relative(address.header_address())?)
-    }
-}
-
 /// A source object's retained header records, child links, and storage locations.
 ///
 /// Dense attributes are parsed into a separate owned set. Their Attribute Info and inline
@@ -615,14 +531,14 @@ impl CopyTree {
     ///
     /// Returns [`FormatError::Internal`] for invalid destination topology, or errors from
     /// [`CopyNode::emit`]. Earlier nodes may have been placed before an error.
-    fn emit(&self, output: &mut impl CopyOutput) -> Result<StoredAddress, Error> {
+    fn emit(&self, engine: &mut WriteEngine) -> Result<StoredAddress, Error> {
         let counts = self.fresh_counts()?;
         let mut written = Vec::with_capacity(self.descendants.len());
         for (node, count) in self.descendants.iter().zip(counts) {
-            written.push(node.emit(output, &written, count)?);
+            written.push(node.emit(engine, &written, count)?);
         }
         self.root
-            .emit(output, &written, FreshCopyCount(NonZeroU32::MIN))
+            .emit(engine, &written, FreshCopyCount(NonZeroU32::MIN))
     }
 
     /// Counts hard links within the copy for every descendant in stored order.
@@ -810,11 +726,11 @@ impl CopyNode {
     /// encoding, dense attribute planning, and placement.
     fn emit(
         &self,
-        output: &mut impl CopyOutput,
+        engine: &mut WriteEngine,
         written: &[StoredAddress],
         count: FreshCopyCount,
     ) -> Result<StoredAddress, Error> {
-        let widths = output.output_widths();
+        let widths = engine.context.widths();
         require_copy_widths(widths, self.region().widths())?;
         let mut region = match self {
             Self::DatasetContiguous {
@@ -823,7 +739,11 @@ impl CopyNode {
                 ..
             } => {
                 let mut region = self.region().clone();
-                let address = output.place_data(data)?;
+                let physical = engine.alloc_or_append_typed(data, AllocationClass::Raw)?;
+                let address = engine
+                    .context
+                    .addresses()
+                    .relative(PhysicalAddress::new(physical))?;
                 hdf5_pure_format::__private::write_stored_address_at(
                     region.bytes_mut(),
                     *addr_off,
@@ -840,7 +760,7 @@ impl CopyNode {
                 chunk_bytes,
                 ..
             } => {
-                let layout = output.place_chunks(
+                let layout = engine.place_verbatim_chunks(
                     geometry,
                     *flags,
                     pipeline_message.as_deref(),
@@ -872,9 +792,17 @@ impl CopyNode {
         };
         count.apply(&mut region)?;
         if let Some(plan) = self.dense_attrs().clone().into_plan()? {
-            region.push(MessageType::ATTRIBUTE_INFO, &output.place_attributes(plan)?);
+            region.push(
+                MessageType::ATTRIBUTE_INFO,
+                &engine.place_dense_attrs(plan)?,
+            );
         }
-        output.place_header(&super::object_header::build_v2_object_header(&region)?)
+        let header = super::object_header::build_v2_object_header(&region)?;
+        let address = engine.place_object_header(&header)?;
+        Ok(engine
+            .context
+            .addresses()
+            .relative(address.header_address())?)
     }
 
     /// Returns the header records the copy keeps, without the Attribute Info and Attribute
