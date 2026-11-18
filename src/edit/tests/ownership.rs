@@ -1,6 +1,4 @@
 use std::ops::Range;
-use std::panic;
-use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use hdf5_pure_format::__private as format;
@@ -55,8 +53,7 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let ownership: SpaceOwnership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership: SpaceOwnership = engine.storage_snapshot();
     assert!(ownership.unclassified_space.is_empty());
     assert_eq!(ownership.userblock_space, userblock_space);
     ownership.assert_exact();
@@ -85,14 +82,13 @@ fn default_creation_leaves_only_unused_metadata_spare_unclassified(
     assert_eq!(reader.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3]);
     reader.close().unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let ownership = engine.space_ownership().unwrap();
+    let ownership = engine.storage_snapshot();
     let metadata_end = ownership
         .live_metadata_space
         .iter()
         .map(|&(start, len)| start + len)
         .max()
         .unwrap();
-    assert!(ownership.analysis_complete);
     assert_eq!(ownership.live_raw_space, [(data.start, 12)]);
     assert_eq!(ownership.free_space_manager_space, []);
     assert_eq!(ownership.reusable_free_space, []);
@@ -153,8 +149,8 @@ fn variable_length_collections_are_live_raw_space(
     expected.sort_unstable();
     let engine = edit_test_util::open_engine(&path);
 
-    engine.space_ownership().unwrap().assert_exact();
-    let mut live_raw_space = engine.space_ownership().unwrap().live_raw_space;
+    engine.storage_snapshot().assert_exact();
+    let mut live_raw_space = engine.storage_snapshot().live_raw_space;
     live_raw_space.sort_unstable();
     assert_eq!(live_raw_space, expected);
     drop(engine);
@@ -176,7 +172,7 @@ fn a_malformed_live_collection_is_an_error() {
     std::fs::write(&path, bytes).unwrap();
     let engine = edit_test_util::open_engine(&path);
 
-    let error = engine.space_ownership().unwrap_err();
+    let error = engine.check_space_ownership().unwrap_err();
     assert!(
         matches!(
             error,
@@ -202,23 +198,11 @@ fn a_malformed_live_collection_is_an_error() {
     )
     .build(),
 )])]
-fn unaccounted_reachable_metadata_is_incomplete_even_without_unclassified_bytes(
-    #[case] leaf: Vec<Message>,
-) {
+fn unaccounted_reachable_metadata_withholds_exclusive_reuse(#[case] leaf: Vec<Message>) {
     let path = temp::temp_path("unknown_ownership.h5");
     std::fs::write(&path, ownership_chain(2, &leaf)).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let ownership = engine.space_ownership().unwrap();
-    assert!(!ownership.analysis_complete);
-    assert!(ownership.unclassified_space.is_empty());
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| {
-        engine.space_ownership().unwrap().assert_exact()
-    }))
-    .unwrap_err();
-    assert_eq!(
-        *panic.downcast_ref::<&str>().unwrap(),
-        "ownership analysis must be complete"
-    );
+    assert_incomplete_reuse(&engine);
     drop(engine);
 }
 
@@ -232,9 +216,11 @@ fn ownership_is_complete_only_below_the_traversal_depth_limit(
     let path = temp::temp_path("depth_ownership.h5");
     std::fs::write(&path, ownership_chain(depth, &[])).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let ownership = engine.space_ownership().unwrap();
-    assert_eq!(ownership.analysis_complete, complete);
-    assert_eq!(ownership.unclassified_space.is_empty(), complete);
+    if complete {
+        drop(engine.exclusive_chunk_owners().unwrap());
+    } else {
+        assert_incomplete_reuse(&engine);
+    }
     drop(engine);
 }
 
@@ -269,7 +255,7 @@ fn reachable_metadata_failures_are_returned(
     )
     .unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let error = engine.space_ownership().unwrap_err();
+    let error = engine.check_space_ownership().unwrap_err();
     let Error::Format(error) = error else {
         panic!("expected format error, got {error:?}")
     };
@@ -296,7 +282,7 @@ fn invalid_owned_extents_report_their_geometry(#[case] address: u64, #[case] len
     let logical_size = bytes.len() as u64;
     std::fs::write(&path, bytes).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let error = engine.space_ownership().unwrap_err();
+    let error = engine.check_space_ownership().unwrap_err();
     let Error::InvalidSpaceOwnershipExtent {
         address: actual_address,
         length: actual_length,
@@ -355,7 +341,7 @@ fn inconsistent_heap_ownership_is_returned_as_a_typed_error() {
     );
     std::fs::write(&path, image.build()).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let error = engine.space_ownership().unwrap_err();
+    let error = engine.check_space_ownership().unwrap_err();
     let Error::InvalidFractalHeapStorage { address } = error else {
         panic!("expected InvalidFractalHeapStorage, got {error:?}")
     };
@@ -382,9 +368,7 @@ fn a_version_one_header_has_incomplete_ownership() {
     );
     std::fs::write(&path, image.build()).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let ownership = engine.space_ownership().unwrap();
-    assert!(!ownership.analysis_complete);
-    assert!(!ownership.unclassified_space.is_empty());
+    assert_incomplete_reuse(&engine);
     drop(engine);
 }
 
@@ -403,7 +387,7 @@ fn incomplete_coverage_still_returns_later_parser_errors(#[case] unsupported: Me
     );
     std::fs::write(&path, bytes).unwrap();
     let engine = edit_test_util::open_engine(&path);
-    let error = engine.space_ownership().unwrap_err();
+    let error = engine.check_space_ownership().unwrap_err();
     assert!(
         matches!(
             error,
@@ -412,6 +396,19 @@ fn incomplete_coverage_still_returns_later_parser_errors(#[case] unsupported: Me
         "{error:?}"
     );
     drop(engine);
+}
+
+fn assert_incomplete_reuse(engine: &crate::edit::WriteEngine) {
+    let Err(error) = engine.exclusive_chunk_owners() else {
+        panic!("expected exclusive reuse refusal");
+    };
+    assert!(
+        matches!(
+            error,
+            Error::AppendUnsupported("chunk storage ownership analysis is incomplete")
+        ),
+        "{error:?}"
+    );
 }
 
 fn contiguous_extent(path: &Path, dataset: &str) -> Range<u64> {

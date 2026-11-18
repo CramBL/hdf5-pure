@@ -843,8 +843,7 @@ impl WriteEngine {
                 assert!(last / page < raw_start / page || raw_last / page < start / page);
             }
         }
-        let ownership = self.space_ownership().unwrap();
-        assert!(ownership.analysis_complete);
+        let ownership = self.storage_snapshot();
         for allocation in index {
             assert!(
                 ownership

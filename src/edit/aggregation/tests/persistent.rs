@@ -206,8 +206,7 @@ fn persistent_staged_edits_and_immediate_appends_survive_reopen(
         .unwrap();
     stage_dataset(&mut engine, "last", 43);
     engine.commit().unwrap();
-    let ownership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership = engine.storage_snapshot();
     assert_eq!(ownership.logical_size, ownership.physical_size);
     assert_eq!(ownership.unclassified_space, []);
     assert!(!ownership.free_space_manager_space.is_empty());
@@ -458,7 +457,6 @@ fn releasing_spare_for_a_deletion_preserves_ownership_on_failure(
     engine.commit().unwrap();
     let before = engine.aggregation;
     assert_eq!(before.unwrap().unused().count(), 2);
-    assert!(engine.space_ownership().unwrap().analysis_complete);
     engine.delete(&ObjectPathBuf::parse("first")).unwrap();
     armed.store(true, Ordering::Relaxed);
     let error = engine.commit().unwrap_err();
@@ -630,7 +628,7 @@ impl Source for FailingImage {
 }
 
 fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
-    let owned = engine.space_ownership().unwrap();
+    let owned = engine.storage_snapshot();
     for extent in spare {
         let start = engine
             .context

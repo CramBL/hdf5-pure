@@ -83,8 +83,7 @@ fn native_generic_large_reclamation_keeps_partial_tails_unavailable() {
 
 impl WriteEngine {
     fn assert_generic_large_tails(&self, tail: Extent, padding: Extent) {
-        let owned = self.space_ownership().unwrap();
-        assert!(owned.analysis_complete);
+        let owned = self.storage_snapshot();
         for extent in [tail, padding] {
             assert_eq!(
                 test_util::range::covered_len(

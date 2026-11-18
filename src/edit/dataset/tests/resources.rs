@@ -213,7 +213,6 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
         .work();
     assert!(manager.sections <= available.len() as u64 + 64);
     assert!(manager.section_capacity <= (available.len() as u64 + 64) * 4);
-    assert!(engine.space_ownership().unwrap().analysis_complete);
     assert!(engine.image.len().saturating_sub(initial_size) < metadata_budget + 65_536);
     eprintln!(
         "count={count} budget={budget} paged={paged} backend={backing:?} raw_input={payload} image_read_bytes={read_bytes} image_read_calls={read_calls} syncs={syncs} initial_mirror={before:?} final_mirror_and_io={after:?} observation={observed:?} manager={manager:?} growth={} heap={measured} positive_control={assembled}",
@@ -360,7 +359,6 @@ fn fragmented_creation_cycles_bound_work_and_publish_once_per_commit(
             1
         );
         assert!(engine.image.len().saturating_sub(initial_size) <= 32_768);
-        assert!(engine.space_ownership().unwrap().analysis_complete);
         assert_eq!(
             engine.space.reusable_bytes().unwrap(),
             ByteLength::new(
@@ -396,7 +394,6 @@ fn fragmented_creation_cycles_bound_work_and_publish_once_per_commit(
                 .count(),
             1
         );
-        assert!(engine.space_ownership().unwrap().analysis_complete);
         drop(engine);
         expected.extend_from_slice(&added);
         let reopened = File::open(&path).unwrap();

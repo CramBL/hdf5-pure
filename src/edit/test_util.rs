@@ -171,8 +171,7 @@ pub(in crate::edit) fn append_with_variable_length_siblings(
         let live = engine.global_heap_liveness().unwrap();
         assert!(live.analysis_complete);
         assert_eq!(live.referenced_collections, expected_collections);
-        let reusable = engine.space_ownership().unwrap();
-        assert!(reusable.analysis_complete);
+        let reusable = engine.storage_snapshot();
         for free in reusable.reusable_free_space {
             assert!(
                 heap_ranges
@@ -214,10 +213,8 @@ impl SpaceOwnership {
             free_space_manager_space,
             reusable_free_space,
             unclassified_space,
-            analysis_complete,
             trailing_slack_space,
         } = self;
-        assert!(*analysis_complete, "ownership analysis must be complete");
         assert_eq!(unclassified_space, expected_unclassified);
         assert_eq!(trailing_slack_space, &[]);
         assert_eq!(physical_size, logical_size);
@@ -494,8 +491,7 @@ impl WriteEngine {
         storage: &[(FileRange, FreeClass)],
         metadata: bool,
     ) {
-        let owned = self.space_ownership().unwrap();
-        assert!(owned.analysis_complete);
+        let owned = self.storage_snapshot();
         for &(range, _) in storage {
             let at = range.start().get();
             let len = range.length();
@@ -726,8 +722,7 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByte
             .map(|&range| (range, FreeClass::Page(PageType::Meta)))
             .collect::<Vec<_>>()
     );
-    let ownership = s.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership = s.storage_snapshot();
     for range in &index_spans {
         assert!(
             ownership

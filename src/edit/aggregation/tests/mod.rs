@@ -475,8 +475,7 @@ fn immediate_growth_keeps_previous_reserves_disjoint() {
         .create_group(&ObjectPathBuf::parse("/second"))
         .unwrap();
     engine.commit().unwrap();
-    let ownership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership = engine.storage_snapshot();
     assert_eq!(ownership.physical_size, ownership.logical_size);
     engine.finalize_persist().unwrap();
     drop(engine);

@@ -96,7 +96,6 @@ fn isolated_deletion_classifies_exactly_the_bytes_admitted_by_the_threshold(
     file.root().delete("hole").unwrap();
     file.commit().unwrap();
     let owned = reader_test_util::ownership(&file).unwrap();
-    assert!(owned.analysis_complete);
     let accounted = [
         &owned.reusable_free_space,
         &owned.live_metadata_space,
@@ -352,7 +351,6 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
 
     let session = File::open_rw(&path).unwrap();
     let original = reader_test_util::ownership(&session).unwrap();
-    assert!(original.analysis_complete);
     let incompressible: Vec<i32> = (0..64)
         .map(|i: i32| i.wrapping_mul(0x9E37_79B1u32 as i32))
         .collect();
