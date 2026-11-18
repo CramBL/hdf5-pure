@@ -50,8 +50,6 @@ impl ArrayIndexPlan {
         widths: FormatWidths,
         filtered: bool,
     ) -> Result<Self, FormatError> {
-        #[cfg(test)]
-        super::observations::record_array_plan();
         Ok(match kind {
             ChunkArrayKind::ExtensibleArray => Self::Extensible(ExtensibleArrayPlan::new(
                 ExtensibleArrayCreationParameters::canonical(),
@@ -181,10 +179,7 @@ impl ArrayIndexPlanRef<'_> {
                 for block in encoding.blocks() {
                     block.encode_into(&mut bytes)?;
                     #[cfg(test)]
-                    {
-                        super::observations::record_index(bytes.len(), bytes.capacity());
-                        super::observations::record_array_encoding(bytes.len());
-                    }
+                    super::observations::record_index(bytes.len(), bytes.capacity());
                     reservations.write_next(&bytes)?;
                 }
             }
@@ -197,10 +192,7 @@ impl ArrayIndexPlanRef<'_> {
                 };
                 for (_, bytes) in plan.place(*header, *data)?.serialize_blocks(slots)? {
                     #[cfg(test)]
-                    {
-                        super::observations::record_index(bytes.len(), bytes.capacity());
-                        super::observations::record_array_encoding(bytes.len());
-                    }
+                    super::observations::record_index(bytes.len(), bytes.capacity());
                     reservations.write_next(&bytes)?;
                 }
             }
