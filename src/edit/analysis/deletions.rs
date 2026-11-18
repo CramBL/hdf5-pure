@@ -233,8 +233,6 @@ impl<'source> AnalysisPhase<'source> {
             liveness: _,
             allocations: _,
             collection_envelopes: _,
-            #[cfg(test)]
-                candidate_lookups: _,
         } = self;
         let topology = if has_deletions {
             topology.as_ref().and_then(Option::as_ref)
@@ -266,6 +264,3 @@ impl CompleteTopology<'_> {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;

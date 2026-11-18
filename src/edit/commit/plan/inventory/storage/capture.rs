@@ -86,7 +86,7 @@ impl OriginalStorage {
             return;
         };
         for (&address, parent) in parents {
-            if parent.allocation.is_err() {
+            if !parent.allocation_matches {
                 unavailable.get_or_insert(StorageUnavailable::Parent);
             }
             let range = match Self::parent_range(parent) {
@@ -296,7 +296,7 @@ impl OriginalStorage {
     ///
     /// Returns the range-construction errors of [`FileRange::new`].
     fn parent_range(parent: &ParentStorage) -> Result<Option<FileRange>, FormatError> {
-        let framing = parent.framing.as_ref().ok().copied();
+        let framing = parent.framing;
         match (framing, parent.original) {
             (Some(framing), Some((original, _))) => {
                 let start = framing.start().min(original.start());

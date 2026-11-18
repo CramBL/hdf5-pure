@@ -66,18 +66,14 @@ fn native_attribute_edits_retire_complete_original_collections(
     let source = phase.reconstruction_source(&engine, root).unwrap();
     let associations = phase.member_associations(&source).unwrap();
     assert!(associations.topology_available());
-    assert!(associations.incomplete_references().is_empty());
+    assert!(associations.references_complete());
     assert_eq!(associations.collections().len(), 1);
     let association = &associations.collections()[&PhysicalAddress::new(collection.start)];
-    assert!(association.error().is_none());
-    assert!(association.unmatched().is_empty());
+    assert!(association.is_framed());
+    assert!(!association.has_unmatched());
     assert_eq!(association.observed().len(), 1);
     let observed = association.observed().values().next().unwrap();
-    assert_eq!(observed.presence(), MemberPresence::Allocated);
-    assert_eq!(
-        observed.referrers(),
-        [ObjectId::new(PhysicalAddress::new(address))]
-    );
+    assert_eq!(*observed, MemberPresence::Allocated);
     let claims = phase.physical_claims(&source).unwrap();
     assert!(claims.problems().is_empty(), "{:?}", claims.problems());
     let coverage = phase.physical_coverage(&source).unwrap();

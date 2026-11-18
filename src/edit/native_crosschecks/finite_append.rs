@@ -4,6 +4,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use rstest::rstest;
+use test_util_hdf5::__private::ownership_append;
 use test_util_hdf5::attr;
 use test_util_hdf5::dataset;
 use test_util_hdf5::dataset::AppendMode;
@@ -373,4 +374,108 @@ fn native_reads_preserved_variable_length_append_siblings(
     file_space_oracle::assert_persisted_sections(&path);
     file_space_oracle::assert_manager_metadata_bytes(&path);
     directory.close().unwrap();
+}
+
+#[rstest]
+#[case::immediate_reuse(HeapEditAppend::Reuse)]
+#[case::immediate_growth(HeapEditAppend::Growth)]
+#[case::staged(HeapEditAppend::Staged)]
+#[case::staged_partial_tail(HeapEditAppend::PartialTail)]
+#[case::pending_creation(HeapEditAppend::Creation)]
+fn native_append_allocations_survive_a_heap_attribute_removal(#[case] mode: HeapEditAppend) {
+    let path = test_util::temp::temp_path("heap-edit-append.h5");
+    ownership_append::Fixture::write(&path, false, false, false);
+    let native = file::libhdf5_open_rw(&path);
+    attr::write_unicode_array(&native, "labels", &["predecessor"]);
+    let initial = if matches!(mode, HeapEditAppend::PartialTail) {
+        native.dataset("d").unwrap().resize([8_191]).unwrap();
+        8_191
+    } else {
+        8_192
+    };
+    native.close().unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let free = file.reusable_free_sections().unwrap();
+    let before = file.file_size();
+    let count = if matches!(mode, HeapEditAppend::Growth) {
+        81_920
+    } else {
+        8_192
+    };
+    let values = vec![0x5a; count];
+    let mut dataset = file.dataset("d").unwrap();
+    match mode {
+        HeapEditAppend::Reuse | HeapEditAppend::Growth => {
+            dataset.append(&values).unwrap();
+            let chunks = dataset.chunks().unwrap();
+            let mut appended = chunks.iter().filter(|chunk| chunk.offset[0] >= 8_192);
+            if matches!(mode, HeapEditAppend::Reuse) {
+                assert!(appended.any(|chunk| free.sections().iter().any(|section| {
+                    section.address().get() <= chunk.address
+                        && chunk.address + chunk.storage_size <= section.end_address().get()
+                })));
+            } else {
+                assert!(file.file_size() > before);
+                assert!(appended.any(|chunk| chunk.address >= before));
+            }
+        }
+        HeapEditAppend::Staged | HeapEditAppend::PartialTail => {
+            dataset
+                .append_staged(|append| {
+                    append.append_u8(&values);
+                })
+                .unwrap();
+        }
+        HeapEditAppend::Creation => {
+            file.root()
+                .create_dataset("pending", |builder| {
+                    builder.with_u8_data(&[11]);
+                })
+                .unwrap()
+                .append_staged(|append| {
+                    append.append_u8(&values);
+                })
+                .unwrap();
+        }
+    }
+    if !matches!(mode, HeapEditAppend::Reuse | HeapEditAppend::Growth) {
+        assert_eq!(file.file_size(), before);
+    }
+    file.root().remove_attr("labels").unwrap();
+    file.commit().unwrap();
+    drop(dataset);
+    file.close().unwrap();
+
+    let native = file::libhdf5_open(&path);
+    let mut expected = vec![0; initial];
+    if matches!(mode, HeapEditAppend::Creation) {
+        assert_eq!(
+            native.dataset("pending").unwrap().read_raw::<u8>().unwrap(),
+            [&[11], values.as_slice()].concat()
+        );
+    } else {
+        expected.extend(values);
+    }
+    assert_eq!(
+        native.dataset("d").unwrap().read_raw::<u8>().unwrap(),
+        expected
+    );
+    assert!(
+        !native
+            .attr_names()
+            .unwrap()
+            .iter()
+            .any(|name| name == "labels")
+    );
+    native.close().unwrap();
+    file_space_oracle::assert_persisted_sections(&path);
+}
+
+#[derive(Clone, Copy)]
+enum HeapEditAppend {
+    Reuse,
+    Growth,
+    Staged,
+    PartialTail,
+    Creation,
 }

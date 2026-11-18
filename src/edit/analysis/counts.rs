@@ -78,8 +78,6 @@ impl<'source> AnalysisPhase<'source> {
             liveness: _,
             allocations: _,
             collection_envelopes: _,
-            #[cfg(test)]
-                candidate_lookups: _,
         } = self;
         CountQueries::new(engine, counts, topology.as_ref().and_then(Option::as_ref))
             .evidence(object)

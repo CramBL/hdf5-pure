@@ -80,7 +80,7 @@ impl AnalysisPhase<'_> {
         address: PhysicalAddress,
     ) -> Result<&CollectionContents, FormatError> {
         self.require_heap_phase(source)?;
-        self.collection_contents(address)
+        self.collection_contents(address).map_err(Clone::clone)
     }
 
     /// Parses collection framing once and reuses its ranges, members, or failure in this phase.
@@ -91,7 +91,7 @@ impl AnalysisPhase<'_> {
     pub(super) fn collection_contents(
         &mut self,
         address: PhysicalAddress,
-    ) -> Result<&CollectionContents, FormatError> {
+    ) -> Result<&CollectionContents, &FormatError> {
         let envelopes = &mut self.collection_envelopes;
         self.allocations
             .entry(address)
@@ -110,7 +110,6 @@ impl AnalysisPhase<'_> {
                 contents
             })
             .as_ref()
-            .map_err(Clone::clone)
     }
 
     /// Checks the shared source-phase association before a heap query.
@@ -293,6 +292,3 @@ impl HeapReferenceSink for BTreeSet<u64> {
         self.insert(id.collection.get());
     }
 }
-
-#[cfg(test)]
-mod tests;

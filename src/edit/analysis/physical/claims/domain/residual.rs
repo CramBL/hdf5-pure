@@ -44,7 +44,7 @@ impl AnalysisPhase<'_> {
             None => {
                 let groups = if matches!(
                     self.supported_owner_domain(source)?,
-                    OwnerDomain::Unavailable(DomainUnavailable::Residual(_))
+                    OwnerDomain::Unavailable(DomainUnavailable::Residual)
                 ) {
                     self.inspect_residual_groups(source)
                 } else {
