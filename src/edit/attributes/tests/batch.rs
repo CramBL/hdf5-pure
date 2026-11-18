@@ -5,6 +5,7 @@ use rstest::rstest;
 use test_util::object_header::v2::HeaderFlags;
 
 use super::super::AttrOp;
+use super::super::test_util::encode_attr_body;
 use crate::attribute::AttributeMessage;
 use crate::edit::object_header::OhRegion;
 use crate::error::Error;
@@ -158,7 +159,7 @@ fn compact_batch_checks_creation_exhaustion_only_for_new_names(#[case] new_name:
         MessageType::ATTRIBUTE,
         MessageFlags::NONE,
         u16::MAX,
-        &super::super::encode_attr_body("existing", &AttrValue::I64(1)).unwrap(),
+        &encode_attr_body("existing", &AttrValue::I64(1)).unwrap(),
     ));
     let operation = AttrOp::Set {
         name: if new_name { "new" } else { "existing" }.into(),
