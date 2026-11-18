@@ -146,26 +146,6 @@ impl OriginalStorage {
         result
     }
 
-    #[cfg(test)]
-    pub(in crate::edit::commit) fn from_test_ranges(ranges: &[FileRange]) -> Self {
-        Self {
-            source: None,
-            allocations: ranges
-                .iter()
-                .map(|&range| StorageAllocation {
-                    range,
-                    origin: StorageOrigin::Owner {
-                        object: ObjectId::new(range.start()),
-                        kind: AllocationKind::Data,
-                    },
-                })
-                .collect(),
-            parents: Ok(BTreeMap::new()),
-            integrity: Ok(()),
-            source_error: None,
-        }
-    }
-
     /// Withholds retirement of protected original owners and unobserved storage.
     ///
     /// Consumes deferred tail candidates after their geometry has been used to derive
@@ -499,19 +479,34 @@ impl<'a> PendingEditInventory<'a> {
         }
     }
 
-    /// Publishes the pending tree and runs completion after storage checks.
+    /// Publishes the protected tree before compacting qualified global heap members.
     ///
-    /// Rechecks placement reconciliation and current allocator claims before publication.
-    /// Completion runs after reference updates, root reclamation, truncation, and final checks.
+    /// Derives plans from the owned original and prospective observations and checks publication
+    /// and prospective root associations against the pending root. The writer preserves each
+    /// parent allocation and applies the plans through [`heap::after_publication`].
+    ///
+    /// Returns the heap mutation result after publishing the tree.
     ///
     /// # Errors
     ///
-    /// Returns placement, exclusion, publication, or completion errors. The caller handles
-    /// rollback according to publication state.
-    pub(in crate::edit::commit) fn publish_with_completion<T>(
+    /// Returns parent-preparation, placement, exclusion, publication, or root-association errors.
+    pub(in crate::edit::commit) fn publish_compacting_members(
         mut self,
-        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<Result<(), HeapMutationFailure>, Error> {
+        let decisions = self.prepare_parents().map_err(outcomes::parent_error)?;
+        let requested_root = self.pending.root;
+        let prospective_root = self.prospective.root();
+        let complete = |published: PublishedTree<'_>| {
+            if published.requested_root() != requested_root
+                || prospective_root.is_some_and(|root| root != requested_root)
+            {
+                return Err(FormatError::Internal(
+                    "heap decisions belong to another published tree".into(),
+                )
+                .into());
+            }
+            Ok(heap::after_publication(published, decisions.plans()))
+        };
         self.dispositions
             .replacements()
             .ok_or(Error::EditUnsupported(
@@ -540,11 +535,9 @@ impl<'a> PendingEditInventory<'a> {
                     .and_then(|end| engine.addresses().resolve(end))
                     .map_err(Error::from);
                 match end.and_then(|end| counts.before_publication(engine, pending)?.at_end(end)) {
-                    Ok(bounds) => bounds.with_ordered_counts_excluding(
-                        relocations,
-                        &mut storage,
-                        |published, _| complete(published),
-                    ),
+                    Ok(bounds) => {
+                        bounds.with_ordered_counts_excluding(relocations, &mut storage, complete)
+                    }
                     Err(error) => Err(PublicationError::Write(error)),
                 }
             }
@@ -559,52 +552,6 @@ impl<'a> PendingEditInventory<'a> {
             PublicationError::Write(error) => error,
             PublicationError::Storage(error) => error.into(),
         })
-    }
-
-    #[cfg(test)]
-    test_util_hdf5::hdf5_1_10_tests! {
-        /// Derives qualified removals from the owned original and fresh prospective observations.
-        pub(in crate::edit::commit) fn member_decisions(&self) -> super::members::MemberDecisions {
-            super::members::MemberDecisions::collect(&self.collections, &self.prospective, &self.storage)
-        }
-    }
-
-    /// Publishes the protected tree before compacting qualified global heap members.
-    ///
-    /// Derives plans from the owned original and prospective observations and checks publication
-    /// and prospective root associations against the pending root. The writer preserves each
-    /// parent allocation and applies the plans through [`heap::after_publication`].
-    ///
-    /// Returns the heap mutation result after publishing the tree.
-    ///
-    /// # Errors
-    ///
-    /// Returns parent-preparation, placement, exclusion, publication, or root-association errors.
-    pub(in crate::edit::commit) fn publish_compacting_members(
-        mut self,
-    ) -> Result<Result<(), HeapMutationFailure>, Error> {
-        let decisions = self.prepare_parents().map_err(outcomes::parent_error)?;
-        let requested_root = self.pending.root;
-        let prospective_root = self.prospective.root();
-        self.publish_with_completion(|published| {
-            if published.requested_root() != requested_root
-                || prospective_root.is_some_and(|root| root != requested_root)
-            {
-                return Err(FormatError::Internal(
-                    "heap decisions belong to another published tree".into(),
-                )
-                .into());
-            }
-            Ok(heap::after_publication(published, decisions.plans()))
-        })
-    }
-
-    #[cfg(test)]
-    test_util_hdf5::hdf5_1_10_tests! {
-        /// Borrows heap references and root-applicability outcomes collected after application.
-        pub(in crate::edit::commit) fn prospective(&self) -> &ProspectiveCollections {
-            &self.prospective
-        }
     }
 }
 

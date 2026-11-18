@@ -1,10 +1,15 @@
 #![cfg(feature = "__libhdf5-1.10")]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5_pure::{AttrValue, EditBacking, File, FileAccessProperties, FileSpaceStrategy};
+use hdf5_pure::{
+    AttrValue, EditBacking, File, FileAccessProperties, FileSpaceStrategy, FreeSections, Layout,
+    MemoryStrategy, PhysicalAddress, SyncPolicy,
+};
+use hdf5_pure_core::__private::FileRange;
 use libhdf5::file::LibraryVersion;
 use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use libhdf5::types::VarLenAscii;
@@ -14,9 +19,10 @@ use test_util::dataspace;
 use test_util::global_heap::{self, Object};
 use test_util::object_header::{Message, MessageType};
 use test_util::widths::Widths;
-use test_util_hdf5::file;
+use test_util_hdf5::__private::heap_members;
 use test_util_hdf5::global_heap::attributes;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
+use test_util_hdf5::{file, file_space_oracle};
 
 #[rstest]
 #[case::explicit(Tail::Explicit)]
@@ -262,6 +268,269 @@ fn write_sparse_source(path: &Path, objects: &[Object<'_>; 4]) {
     fixture.write(path);
 }
 
+#[rstest]
+#[case::ordinary(false)]
+#[case::external_region_token(true)]
+fn native_compaction_preserves_members_without_an_in_file_reference(
+    #[case] external_token: bool,
+    #[values(0, 1_000_000)] buffer_size: usize,
+) {
+    let path = test_util::temp::temp_path("native-unreferenced-heap-member.h5");
+    let token = heap_members::write(&path, external_token);
+    assert_eq!(token.is_some(), external_token);
+    let original = fs::read(&path).unwrap();
+    let parent = Parent::read(&original);
+    assert_eq!(parent.members.len(), if external_token { 3 } else { 2 });
+    assert_eq!(parent.members[0].object.data, b"left");
+    assert_eq!(parent.members[1].object.data, b"right");
+    if let Some(token) = &token {
+        let address = u64::from_le_bytes(token.bytes()[..8].try_into().unwrap());
+        let index = u32::from_le_bytes(token.bytes()[8..12].try_into().unwrap());
+        assert_eq!(address, parent.range.start);
+        assert_eq!(index, u32::from(parent.members[2].object.index));
+        assert!(!parent.members[2].object.data.is_empty());
+    }
+    let pure = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_sync_policy(SyncPolicy::OnClose)
+            .with_page_buffer_size(buffer_size),
+    )
+    .unwrap();
+    pure.root().remove_attr("first").unwrap();
+    pure.commit().unwrap();
+    parent.assert_protected(&pure);
+    pure.close().unwrap();
+
+    parent.assert_compacted(&fs::read(&path).unwrap(), &parent.members[1..]);
+    let native = file::libhdf5_open(&path);
+    assert_eq!(native.attr_names().unwrap(), ["second"]);
+    assert_eq!(
+        attributes::ascii_values(&native.attr("second").unwrap()),
+        ["right"]
+    );
+    assert_eq!(
+        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        NUMBERS
+    );
+    if let Some(token) = &token {
+        token.assert_region(&native);
+    }
+    native.close().unwrap();
+}
+
+#[rstest]
+#[case::removed_bounded(None, MemoryStrategy::Bounded)]
+#[case::replaced_mirrored(Some("after"), MemoryStrategy::Mirrored)]
+fn distinct_heap_members_remain_reclaimable_after_partial_edit_and_reopen(
+    #[case] replacement: Option<&str>,
+    #[case] memory: MemoryStrategy,
+) {
+    let path = test_util::temp::temp_path("partial-heap-member-lifecycle.h5");
+    heap_members::write_persisted(&path);
+    assert_lifecycle_values(&path, &[("first", "left"), ("second", "right")], None);
+    let original = std::fs::read(&path).unwrap();
+    let original_parent = Parent::read(&original);
+    assert_eq!(
+        original_parent
+            .members
+            .iter()
+            .map(|member| member.object.data)
+            .collect::<Vec<_>>(),
+        [b"left".as_slice(), b"right"]
+    );
+    let parent = FileRange::new(
+        PhysicalAddress::new(original_parent.range.start),
+        original_parent.range.end - original_parent.range.start,
+    )
+    .unwrap();
+    let open = || {
+        File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_memory_strategy(memory),
+        )
+        .unwrap()
+    };
+    let pure = open();
+    match replacement {
+        Some(value) => pure
+            .root()
+            .set_attr("first", AttrValue::VarLenAsciiString(value.into()))
+            .unwrap(),
+        None => pure.root().remove_attr("first").unwrap(),
+    }
+    pure.commit().unwrap();
+    original_parent.assert_protected(&pure);
+    pure.close().unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let remaining = Parent::read_at(&bytes, original_parent.range.clone());
+    assert_eq!(remaining.bytes.len(), original_parent.bytes.len());
+    assert!(
+        remaining
+            .objects()
+            .contains(&original_parent.members[1].object)
+    );
+    let mut expected = replacement
+        .map(|value| vec![("first", value)])
+        .unwrap_or_default();
+    expected.push(("second", "right"));
+    assert_lifecycle_values(&path, &expected, None);
+    let pure = open();
+    original_parent.assert_protected(&pure);
+    pure.root().remove_attr("second").unwrap();
+    pure.commit().unwrap();
+    pure.close().unwrap();
+    expected.pop();
+    assert_lifecycle_values(&path, &expected, None);
+    let reopened = open();
+    let free = reopened.reusable_free_sections().unwrap();
+    let end = PhysicalAddress::new(reopened.superblock().eof_address);
+    reopened.close().unwrap();
+    let capacity = assert_retired_parent(&path, parent, &free, end);
+    let payload = vec![0xa5; usize::try_from(capacity).unwrap()];
+    let pure = open();
+    pure.root()
+        .create_dataset("reuse", |dataset| {
+            dataset.with_u8_data(&payload);
+        })
+        .unwrap();
+    pure.commit().unwrap();
+    let free_after_reuse = pure.reusable_free_sections().unwrap();
+    pure.close().unwrap();
+    assert_lifecycle_values(&path, &expected, Some(&payload));
+    let file = File::open(&path).unwrap();
+    let Layout::Contiguous {
+        address: Some(address),
+        size,
+    } = file.dataset("reuse").unwrap().layout().unwrap()
+    else {
+        panic!("reused payload is not allocated contiguous storage");
+    };
+    assert_eq!(size, capacity);
+    let reused = FileRange::new(PhysicalAddress::new(address), size).unwrap();
+    assert!(
+        reused.start() < parent.end() && parent.start() < reused.end(),
+        "{reused:?} did not reuse {parent:?}"
+    );
+    drop(file);
+    assert!(
+        free_after_reuse
+            .sections()
+            .iter()
+            .all(|section| section.end_address() <= reused.start()
+                || reused.end() <= section.address())
+    );
+}
+
+/// Checks complete parent coverage and returns its largest reusable intersection.
+///
+/// Accounts separately for free bytes, manager and extension allocations, and truncation.
+fn assert_retired_parent(
+    path: &Path,
+    parent: FileRange,
+    free: &FreeSections<PhysicalAddress>,
+    end: PhysicalAddress,
+) -> u64 {
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(u64::try_from(bytes.len()).unwrap(), end.get());
+    let file = File::open(path).unwrap();
+    assert_eq!(file.superblock().eof_address, end.get());
+    drop(file);
+    let metadata = heap_members::persistence_allocations(path);
+    let mut pieces = free
+        .sections()
+        .iter()
+        .map(|section| (section.address(), section.end_address(), "Reusable"))
+        .chain(
+            metadata
+                .iter()
+                .map(|range| (range.start(), range.end(), "Manager or extension")),
+        )
+        .filter_map(|(start, stop, kind)| {
+            let start = start.max(parent.start());
+            let stop = stop.min(parent.end());
+            (start < stop).then_some((start, stop, kind))
+        })
+        .collect::<Vec<_>>();
+    let capacity = free
+        .sections()
+        .iter()
+        .filter_map(|section| {
+            let start = section.address().max(parent.start());
+            let stop = section.end_address().min(parent.end());
+            (start < stop).then(|| stop.get() - start.get())
+        })
+        .max()
+        .expect("fixture retains reusable capacity in the original parent");
+    if end < parent.end() {
+        pieces.push((end.max(parent.start()), parent.end(), "Truncated"));
+    }
+    pieces.sort_unstable();
+    let mut cursor = parent.start();
+    for &(start, stop, _) in &pieces {
+        assert_eq!(
+            start, cursor,
+            "original parent {parent:?} has overlapping or unaccounted pieces: {pieces:?}"
+        );
+        cursor = stop;
+    }
+    assert_eq!(cursor, parent.end());
+    capacity
+}
+
+/// Checks fixture values and persistent free-space metadata through both readers.
+fn assert_lifecycle_values(path: &Path, expected: &[(&str, &str)], reused: Option<&[u8]>) {
+    let pure = File::open(path).unwrap();
+    let settings = pure.file_space_settings().unwrap().unwrap();
+    assert_eq!(settings.strategy(), FileSpaceStrategy::FsmAggr);
+    assert!(settings.persist());
+    assert_eq!(settings.threshold(), 1);
+    assert_eq!(
+        pure.dataset("data").unwrap().read_i32().unwrap(),
+        [7, 11, 13, 17]
+    );
+    assert_eq!(
+        pure.root()
+            .attrs()
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        expected
+            .iter()
+            .map(|&(name, value)| (name.to_owned(), AttrValue::VarLenAsciiString(value.into())))
+            .collect()
+    );
+    if let Some(payload) = reused {
+        assert_eq!(pure.dataset("reuse").unwrap().read_u8().unwrap(), payload);
+    }
+    drop(pure);
+    let native = file::libhdf5_open(path);
+    assert_eq!(
+        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        [7, 11, 13, 17]
+    );
+    let mut names = native.attr_names().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        expected.iter().map(|&(name, _)| name).collect::<Vec<_>>()
+    );
+    for &(name, value) in expected {
+        assert_eq!(
+            attributes::ascii_values(&native.attr(name).unwrap()),
+            [value]
+        );
+    }
+    if let Some(payload) = reused {
+        assert_eq!(
+            native.dataset("reuse").unwrap().read_raw::<u8>().unwrap(),
+            payload
+        );
+    }
+    native.close().unwrap();
+    file_space_oracle::assert_persisted_sections(path);
+}
+
 struct Parent<'a> {
     range: Range<u64>,
     bytes: &'a [u8],
@@ -281,6 +550,10 @@ impl<'a> Parent<'a> {
         let [range] = ranges.as_slice() else {
             panic!("expected one heap collection, got {ranges:?}");
         };
+        Self::read_at(image, range.clone())
+    }
+
+    fn read_at(image: &'a [u8], range: Range<u64>) -> Self {
         let start = usize::try_from(range.start).unwrap();
         let end = usize::try_from(range.end).unwrap();
         let bytes = &image[start..end];

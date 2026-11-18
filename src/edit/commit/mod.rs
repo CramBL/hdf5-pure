@@ -305,11 +305,11 @@ impl WriteEngine {
             });
         }
         self.begin_commit(&staged);
-        match PreparedEditInventory::prepare_public(self, staged) {
+        match PreparedEditInventory::prepare(self, staged) {
             InventoryPreparation::Rejected { staged, error } => {
                 CommitOutcome::Rejected { staged, error }
             }
-            InventoryPreparation::InPlace(prepared) => {
+            InventoryPreparation::Direct(prepared) => {
                 CommitOutcome::Applied(self.apply_commit(prepared))
             }
             InventoryPreparation::Tree(prepared) => match prepared.apply_excluding(self) {

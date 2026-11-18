@@ -48,29 +48,12 @@ pub(in crate::edit::commit) struct PreparedEditInventory {
 }
 
 impl PreparedEditInventory {
-    #[cfg(test)]
-    test_util_hdf5::hdf5_1_10_tests! {
-        /// Prepares staged edits and collects their original observations before placement.
-        ///
-        /// Returns the original staged set on planning failure. In-place-only plans are returned
-        /// without an inventory. Count or ownership qualification failures are retained in
-        /// [`OriginalEdits`] independently of successful tree preparation.
-        pub(in crate::edit::commit) fn prepare(
-            engine: &mut WriteEngine,
-            staged: StagedEdits,
-        ) -> InventoryPreparation {
-            let plan = engine.plan_commit_with_inventory(&staged, true);
-            Self::from_plan(engine, staged, plan)
-        }
-    }
-
     /// Prepares counts and captures original storage only when heap candidates require it.
-    pub(in crate::edit::commit) fn prepare_public(
+    pub(in crate::edit::commit) fn prepare(
         engine: &mut WriteEngine,
         staged: StagedEdits,
     ) -> InventoryPreparation {
-        let counted = !staged.deletes().is_empty() || !staged.copies().is_empty();
-        let plan = engine.plan_commit_inner(&staged, false, counted, true);
+        let plan = engine.plan_commit(&staged);
         Self::from_plan(engine, staged, plan)
     }
 
@@ -105,7 +88,7 @@ impl PreparedEditInventory {
                         reclamation,
                         session: engine.context.allocations.session(),
                     }),
-                    None => InventoryPreparation::InPlace(prepared),
+                    None => InventoryPreparation::Direct(prepared),
                 }
             }
             Err(error) => InventoryPreparation::Rejected { staged, error },
@@ -180,8 +163,8 @@ impl PreparedEditInventory {
     reason = "preparation returns its owned inputs without an additional allocation"
 )]
 pub(in crate::edit::commit) enum InventoryPreparation {
-    /// Prepared value writes without a replacement root or original-owner inventory.
-    InPlace(PreparedCommit),
+    /// Prepared edits that do not need captured storage evidence.
+    Direct(PreparedCommit),
     /// The original staged set and the planning error.
     Rejected { staged: StagedEdits, error: Error },
     /// Prepared tree edits paired with their original observations.

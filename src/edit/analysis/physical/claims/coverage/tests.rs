@@ -15,59 +15,59 @@ use crate::object_graph::ObjectId;
 use crate::{FileBuilder, UserblockSize};
 
 #[rstest]
-#[case::empty(&[], &[], &[(0, 100)], None)]
-#[case::adjacent(&[(10, 20, LIVE), (30, 10, FREE)], &[(10, 30)], &[(0, 10), (40, 60)], None)]
-#[case::separate(&[(40, 10, FREE), (10, 20, LIVE)], &[(10, 20), (40, 10)], &[(0, 10), (30, 10), (50, 50)], None)]
-#[case::equal(&[(10, 20, LIVE), (10, 20, HEAP)], &[(10, 20)], &[(0, 10), (30, 70)], Some([0, 1]))]
-#[case::nested(&[(10, 30, LIVE), (20, 10, HEAP)], &[(10, 30)], &[(0, 10), (40, 60)], Some([0, 1]))]
-#[case::crossing(&[(10, 20, FREE), (20, 20, LIVE)], &[(10, 30)], &[(0, 10), (40, 60)], Some([0, 1]))]
-#[case::parent(&[(10, 40, CAPACITY), (10, 10, EXTENSION), (20, 20, MANAGER)], &[(10, 40)], &[(0, 10), (50, 50)], None)]
-#[case::equal_parent(&[(10, 20, MANAGER), (10, 20, CAPACITY)], &[(10, 20)], &[(0, 10), (30, 70)], None)]
-#[case::crossing_parent(&[(10, 20, CAPACITY), (20, 20, MANAGER)], &[(10, 30)], &[(0, 10), (40, 60)], Some([0, 1]))]
-#[case::inverted_parent(&[(10, 20, MANAGER), (20, 10, CAPACITY)], &[(10, 20)], &[(0, 10), (30, 70)], Some([0, 1]))]
-#[case::duplicate_manager(&[(10, 40, CAPACITY), (20, 10, MANAGER), (20, 10, SECOND_MANAGER)], &[(10, 40)], &[(0, 10), (50, 50)], Some([1, 2]))]
-#[case::duplicate_capacity(&[(10, 20, CAPACITY), (10, 20, ClaimOrigin::MetadataCapacity(1))], &[(10, 20)], &[(0, 10), (30, 70)], Some([0, 1]))]
-#[case::unrelated_parent(&[(10, 40, CAPACITY), (20, 10, LIVE)], &[(10, 40)], &[(0, 10), (50, 50)], Some([0, 1]))]
-#[case::empty_claim(&[(10, 0, LIVE)], &[], &[(0, 100)], None)]
+#[case::empty(&[], &[(0, 100)], None)]
+#[case::adjacent(&[(10, 20, LIVE), (30, 10, FREE)], &[(0, 10), (40, 60)], None)]
+#[case::separate(&[(40, 10, FREE), (10, 20, LIVE)], &[(0, 10), (30, 10), (50, 50)], None)]
+#[case::equal(&[(10, 20, LIVE), (10, 20, HEAP)], &[(0, 10), (30, 70)], Some([0, 1]))]
+#[case::nested(&[(10, 30, LIVE), (20, 10, HEAP)], &[(0, 10), (40, 60)], Some([0, 1]))]
+#[case::crossing(&[(10, 20, FREE), (20, 20, LIVE)], &[(0, 10), (40, 60)], Some([0, 1]))]
+#[case::parent(&[(10, 40, CAPACITY), (10, 10, EXTENSION), (20, 20, MANAGER)], &[(0, 10), (50, 50)], None)]
+#[case::equal_parent(&[(10, 20, MANAGER), (10, 20, CAPACITY)], &[(0, 10), (30, 70)], None)]
+#[case::crossing_parent(&[(10, 20, CAPACITY), (20, 20, MANAGER)], &[(0, 10), (40, 60)], Some([0, 1]))]
+#[case::inverted_parent(&[(10, 20, MANAGER), (20, 10, CAPACITY)], &[(0, 10), (30, 70)], Some([0, 1]))]
+#[case::duplicate_manager(&[(10, 40, CAPACITY), (20, 10, MANAGER), (20, 10, SECOND_MANAGER)], &[(0, 10), (50, 50)], Some([1, 2]))]
+#[case::duplicate_capacity(&[(10, 20, CAPACITY), (10, 20, ClaimOrigin::MetadataCapacity(1))], &[(0, 10), (30, 70)], Some([0, 1]))]
+#[case::unrelated_parent(&[(10, 40, CAPACITY), (20, 10, LIVE)], &[(0, 10), (50, 50)], Some([0, 1]))]
+#[case::empty_claim(&[(10, 0, LIVE)], &[(0, 100)], None)]
 fn coverage_preserves_claims_and_reports_intervals(
     #[case] input: &[(u64, u64, ClaimOrigin)],
-    #[case] covered: &[(u64, u64)],
     #[case] residuals: &[(u64, u64)],
     #[case] conflict: Option<[usize; 2]>,
 ) {
     let claims = input.iter().copied().map(claim).collect::<Vec<_>>();
     let original = claims.clone();
     let coverage = PhysicalCoverage::new(&claims, 100, 100).unwrap();
-    assert_eq!(tuples(coverage.covered()), covered);
     assert_eq!(tuples(coverage.residuals()), residuals);
     assert_eq!(coverage.conflict(), conflict);
-    assert!(coverage.beyond_source().is_empty());
-    assert!(coverage.beyond_eoa().is_empty());
+    assert!(coverage.beyond_source().is_none());
+    assert!(coverage.beyond_eoa().is_none());
     assert_eq!(claims, original);
 }
 
 #[rstest]
-#[case::source_shorter(100, 110, &[(90, 20, FREE)], &[0], &[], &[(0, 90)])]
-#[case::logical_shorter(110, 100, &[(90, 20, CAPACITY)], &[], &[0], &[(0, 90)])]
-#[case::outside(100, 100, &[(120, 20, CAPACITY)], &[0], &[0], &[(0, 100)])]
-#[case::limit(u64::MAX, u64::MAX - 1, &[(u64::MAX - 1, 1, LIVE)], &[], &[0], &[(0, u64::MAX - 1)])]
+#[case::source_shorter(100, 110, &[(90, 20, FREE)], Some(0), None, &[(0, 90)])]
+#[case::logical_shorter(110, 100, &[(90, 20, CAPACITY)], None, Some(0), &[(0, 90)])]
+#[case::outside(100, 100, &[(120, 20, CAPACITY)], Some(0), Some(0), &[(0, 100)])]
+#[case::limit(u64::MAX, u64::MAX - 1, &[(u64::MAX - 1, 1, LIVE)], None, Some(0), &[(0, u64::MAX - 1)])]
+#[case::first_in_sweep_order(
+    160, 100,
+    &[(190, 5, FREE), (165, 5, FREE), (90, 20, LIVE), (30, 10, HEAP), (145, 20, CAPACITY), (120, 4, LIVE)],
+    Some(4), Some(2),
+    &[(0, 30), (40, 50), (110, 10), (124, 21)],
+)]
+#[case::capacity_precedes_matching_manager(
+    100, 100, &[(90, 20, MANAGER), (90, 20, CAPACITY)], Some(1), Some(1), &[(0, 90)]
+)]
 fn coverage_keeps_physical_and_recorded_bounds_separate(
     #[case] physical: u64,
     #[case] logical: u64,
     #[case] input: &[(u64, u64, ClaimOrigin)],
-    #[case] beyond_source: &[usize],
-    #[case] beyond_eoa: &[usize],
+    #[case] beyond_source: Option<usize>,
+    #[case] beyond_eoa: Option<usize>,
     #[case] residuals: &[(u64, u64)],
 ) {
     let claims = input.iter().copied().map(claim).collect::<Vec<_>>();
     let coverage = PhysicalCoverage::new(&claims, physical, logical).unwrap();
-    assert_eq!(
-        tuples(coverage.covered()),
-        input
-            .iter()
-            .map(|&(start, len, _)| (start, len))
-            .collect::<Vec<_>>()
-    );
     assert_eq!(tuples(coverage.residuals()), residuals);
     assert_eq!(coverage.beyond_source(), beyond_source);
     assert_eq!(coverage.beyond_eoa(), beyond_eoa);
@@ -89,7 +89,6 @@ fn cold_open_coverage_retains_unexplained_metadata_spare(#[case] base: u64) {
         ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
     let source = phase.reconstruction_source(&engine, root).unwrap();
     let claims = phase.physical_claims(&source).unwrap();
-    assert!(claims.coverage.is_none());
     assert!(claims.problems().is_empty(), "{:?}", claims.problems());
     let data = claims
         .claims()
@@ -127,13 +126,11 @@ fn cold_open_coverage_retains_unexplained_metadata_spare(#[case] base: u64) {
         [(metadata_end, data.start().get() - metadata_end)]
     );
     assert_eq!(coverage.conflict(), None);
-    assert!(coverage.beyond_source().is_empty());
-    assert!(coverage.beyond_eoa().is_empty());
-    assert_eq!(coverage.covered().first().unwrap().start().get(), 0);
-    let pointer = core::ptr::from_ref(coverage);
+    assert!(coverage.beyond_source().is_none());
+    assert!(coverage.beyond_eoa().is_none());
     assert_eq!(
-        core::ptr::from_ref(phase.physical_coverage(&source).unwrap()),
-        pointer
+        tuples(phase.physical_coverage(&source).unwrap().residuals()),
+        [(metadata_end, data.start().get() - metadata_end)]
     );
     assert_eq!(calls.load(Ordering::Relaxed), before);
     let mut foreign = AnalysisPhase::new(&engine);
@@ -164,10 +161,10 @@ fn coverage_scratch_and_witnesses_scale_with_claim_count(#[case] count: usize) {
     let claims = (0..count)
         .map(|_| claim((0, 4_096_000_000, FREE)))
         .collect::<Vec<_>>();
-    let (coverage, measured) = allocation::measure("physical_coverage_scratch", || {
+    let name = format!("physical_coverage_scratch_{count}");
+    let (coverage, measured) = allocation::measure(&name, || {
         PhysicalCoverage::new(&claims, 4_096_000_000, 4_096_000_000).unwrap()
     });
-    assert_eq!(tuples(coverage.covered()), [(0, 4_096_000_000)]);
     assert_eq!(coverage.residuals(), []);
     assert_eq!(coverage.conflict(), (count > 1).then_some([0, 1]));
     assert!(
@@ -177,8 +174,8 @@ fn coverage_scratch_and_witnesses_scale_with_claim_count(#[case] count: usize) {
             && measured.peak_bytes < u64::try_from(count).unwrap() * 32 + 1_024,
         "{measured}"
     );
-    let (positive, control) =
-        allocation::measure("physical_coverage_control", || vec![0_u8; 1_048_576]);
+    let name = format!("physical_coverage_control_{count}");
+    let (positive, control) = allocation::measure(&name, || vec![0_u8; 1_048_576]);
     assert_eq!(positive.len(), 1_048_576);
     assert!(control.bytes >= 1_048_576);
 }
