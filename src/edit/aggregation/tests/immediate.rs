@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 use std::ops::Range;
@@ -5,10 +6,12 @@ use std::path::Path;
 
 use hdf5_pure_core::__private::ByteLength;
 use rstest::rstest;
+use test_util::disk_log::{self, FailurePoint, IoEvent, IoOutcome};
 
 use crate::AddressRange;
 use crate::DeflateLevel;
 use crate::File;
+use crate::FileAccessProperties;
 use crate::FileBuilder;
 use crate::FileLocking;
 use crate::FileSpaceSettings;
@@ -16,6 +19,8 @@ use crate::FileSpaceStrategy;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
+use crate::PhysicalAddress;
+use crate::SyncPolicy;
 use crate::chunk_index_inplace::alloc_probe;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
@@ -119,68 +124,123 @@ fn staged_and_immediate_edits_share_aggregate_windows(
 }
 
 #[rstest]
-#[case::allocation(1)]
-#[case::index(2)]
-#[case::header(3)]
-#[case::dimension(4)]
-fn immediate_phase_stops_keep_reservations_consumed(
-    #[case] phase: u8,
+fn reopened_aggregate_appends_keep_published_chunk_allocations_excluded(
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
     #[values(false, true)] filtered: bool,
     #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::FsmAggr)] strategy: FileSpaceStrategy,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("phase.h5");
+    let path = directory.path().join("aggregate.h5");
     write_appendable(&path, 6, 4, filtered, strategy);
-    let mut engine = open_engine(&path, backing);
-    engine
-        .append_inplace_i32_phased("values", &(6..29).collect::<Vec<_>>(), phase)
-        .unwrap();
-    let consumed = engine.aggregation.unwrap();
-    assert!(consumed.policy.unused(AllocationClass::Raw).is_some());
-    let reusable = engine.reusable_free_sections().unwrap();
-    let spare = consumed.policy.unused(AllocationClass::Raw).unwrap();
-    let end = if phase == 4 { 29 } else { 6 };
-    engine
-        .append_inplace_i32_phased("values", &[97, 98], 4)
-        .unwrap();
-    let address = engine
-        .append_prepare(AppendTarget::Path(&ObjectPathBuf::parse("values")))
-        .unwrap();
-    let state = engine.located.remove(&address).unwrap();
-    let record = state
-        .index
-        .allocated()
+    let fixture = fs::read(&path).unwrap();
+    let open = || {
+        File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new()
+                .with_locking(FileLocking::Disabled)
+                .with_memory_strategy(backing)
+                .with_sync_policy(SyncPolicy::Always),
+        )
         .unwrap()
-        .read_element(&engine.store(), u64::try_from(end).unwrap() / 4)
-        .unwrap()
-        .unwrap();
-    let start = engine.addresses().resolve(record.addr).unwrap().get();
-    let length = if filtered {
-        record.stored_size
-    } else {
-        u64::try_from(state.index.chunk_bytes()).unwrap()
     };
-    let finish = start + length;
-    assert!(
-        reusable.sections().iter().any(
-            |section| section.address().get() <= start && finish <= section.end_address().get()
-        ) || (spare
-            .range()
-            .contains(AddressRange::new(record.addr, length).unwrap()))
-            || consumed.eoa <= record.addr
-    );
-    engine.located.insert(address, state);
-    assert_eq!(engine.context.superblock().eof_address, engine.image.len());
-    engine.finalize_persist().unwrap();
-    drop(engine);
-    let file = File::open(&path).unwrap();
-    let mut expected = (0..end).collect::<Vec<_>>();
-    expected.extend_from_slice(&[97, 98]);
-    assert_eq!(
-        file.dataset("values").unwrap().read_i32().unwrap(),
-        expected
-    );
+    let file = open();
+    let base = fs::read(&path).unwrap();
+    let root = file.superblock().root_group_address;
+    let tail = file.dataset("values").unwrap().chunks().unwrap()[1].address;
+    let appended: Vec<i32> = (6..29).collect();
+    disk_log::start();
+    file.dataset("values").unwrap().append(&appended).unwrap();
+    let trace = disk_log::finish();
+    let completed = fs::read(&path).unwrap();
+    file.close().unwrap();
+
+    let mut image = base.clone();
+    let mut syncs = 0;
+    let mut saw_replacement = false;
+    let mut saw_completed = false;
+    for event in trace.events {
+        if let Some(index) = event.operation() {
+            trace.operations[index].apply(&mut image);
+        }
+        if !matches!(event, IoEvent::Synchronize { .. }) {
+            continue;
+        }
+        assert_eq!(event.outcome(), IoOutcome::Succeeded);
+        let snapshot = File::from_bytes(image.clone()).unwrap();
+        assert_eq!(snapshot.superblock().root_group_address, root);
+        let dataset = snapshot.dataset("values").unwrap();
+        let mut expected = dataset.read_i32().unwrap();
+        let end = i32::try_from(expected.len()).unwrap();
+        assert!(end == 6 || end == 29, "{expected:?}");
+        assert_eq!(expected, (0..end).collect::<Vec<_>>());
+        let live = dataset.chunks().unwrap();
+        saw_replacement |= end == 6 && live[1].address != tail;
+        saw_completed |= end == 29;
+
+        fs::write(&path, &fixture).unwrap();
+        let failed = open();
+        assert_eq!(fs::read(&path).unwrap(), base);
+        disk_log::start();
+        disk_log::fail_sync_after(syncs, FailurePoint::Before);
+        let error = failed
+            .dataset("values")
+            .unwrap()
+            .append(&appended)
+            .unwrap_err();
+        let failure = disk_log::finish();
+        disk_log::clear_failures();
+        let Error::Io(error) = error else {
+            panic!("expected a synchronization error, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk synchronization failure");
+        assert_eq!(
+            failure.events.last().unwrap().outcome(),
+            IoOutcome::Failed(ErrorKind::Other)
+        );
+        assert_eq!(fs::read(&path).unwrap(), image);
+        drop(failed);
+        assert_eq!(fs::read(&path).unwrap(), image);
+
+        let retry = open();
+        let reusable = retry.reusable_free_sections().unwrap();
+        let live: Vec<_> = live.iter().map(chunk_range).collect();
+        assert!(
+            reusable
+                .sections()
+                .iter()
+                .all(|section| { live.iter().all(|chunk| !section.range().overlaps(*chunk)) })
+        );
+        let mut dataset = retry.dataset("values").unwrap();
+        assert_eq!(dataset.read_i32().unwrap(), expected);
+        dataset.append(&[97_i32, 98]).unwrap();
+        let chunks = dataset.chunks().unwrap();
+        let result = chunk_range(chunks.last().unwrap());
+        assert!(live.iter().all(|range| !range.overlaps(result)));
+        assert!(
+            result.start().get() >= snapshot.superblock().eof_address
+                || reusable
+                    .sections()
+                    .iter()
+                    .any(|section| section.range().contains(result))
+        );
+        drop(dataset);
+        retry.close().unwrap();
+        expected.extend_from_slice(&[97, 98]);
+        let reopened = File::open(&path).unwrap();
+        assert_eq!(
+            reopened.dataset("values").unwrap().read_i32().unwrap(),
+            expected
+        );
+        reopened.close().unwrap();
+        syncs += 1;
+    }
+    assert_eq!(image, completed);
+    assert!(saw_replacement && saw_completed);
+}
+
+fn chunk_range(chunk: &crate::Chunk) -> AddressRange<PhysicalAddress> {
+    AddressRange::new(PhysicalAddress::new(chunk.address), chunk.storage_size).unwrap()
 }
 
 #[rstest]
