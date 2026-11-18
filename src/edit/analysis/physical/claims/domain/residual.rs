@@ -121,12 +121,14 @@ impl AnalysisPhase<'_> {
         let roots = groups.keys().copied().collect::<BTreeSet<_>>();
         let mut objects = roots.clone();
         let mut pending = Vec::new();
+        // Every parsed group contributes its links, so only original targets need traversal.
         for group in groups.values() {
             for link in &group.links {
-                if !topology.indices.contains_key(&link.target) {
+                if topology.indices.contains_key(&link.target) {
+                    pending.push(link.target);
+                } else if !roots.contains(&link.target) {
                     return None;
                 }
-                pending.push(link.target);
             }
         }
         while let Some(object) = pending.pop() {
@@ -163,7 +165,8 @@ impl AnalysisPhase<'_> {
 /// Complete bounded interpretation of residual zero bytes and compact group headers.
 ///
 /// Each group occupies one header chunk containing only unshared link, link-information, or
-/// group-information records. Its hard links target objects reachable from the original root.
+/// group-information records. Its hard links target objects reachable from the original root
+/// or the start of another parsed residual group, including the group itself.
 /// Retains the source, allocation session, and bounds for association checks.
 /// Source freshness and storage reuse require separate evidence.
 pub(in crate::edit) struct ResidualGroups {
