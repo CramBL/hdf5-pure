@@ -14,7 +14,7 @@ use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
 };
 use crate::edit::block::{BlockRequest, EncodingDependency};
-use crate::edit::reservation::{ReservationChoice, ReservationFailure};
+use crate::edit::reservation::ReservationChoice;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
 use crate::width::OffsetWidth;
@@ -43,15 +43,12 @@ fn preferred_reuse_checks_complete_narrow_capacity_and_retains_ownership(
     let mut batch = space.reservation_batch(1);
     let reservation = batch.reserve(request.reservation()).unwrap();
     batch.finish();
-    let mut unresolved = None;
-    let result =
-        super::ReservationPlan::reused(addresses, offsets, reservation, request, &mut unresolved);
+    let result = super::ReservationPlan::reused(addresses, offsets, reservation, request);
     if beyond == 0 {
         let planned = result.unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(planned.range().start().get(), base + stored);
         assert_eq!(planned.range().end().get(), end);
         assert_eq!(planned.block.encoding().length(), 16);
-        assert!(unresolved.is_none());
     } else {
         let Err(Error::Format(error)) = result else {
             panic!("expected a narrow-capacity format error")
@@ -70,21 +67,6 @@ fn preferred_reuse_checks_complete_narrow_capacity_and_retains_ownership(
                 }
             }
         );
-        assert_eq!(
-            unresolved.as_ref().map(|reservation| reservation.extent()),
-            Some(super::extent(stored, 64))
-        );
-        let planned = super::ReservationPlan::reused(
-            addresses,
-            OffsetWidth::Eight,
-            unresolved.take().unwrap(),
-            request,
-            &mut unresolved,
-        )
-        .unwrap_or_else(|error| panic!("{error:?}"));
-        assert_eq!(planned.range().start().get(), base + stored);
-        assert_eq!(planned.range().end().get(), end);
-        assert!(unresolved.is_none());
     }
     assert_eq!(space.reusable_sections().collect::<Vec<_>>(), []);
 }
@@ -123,7 +105,7 @@ fn preferred_reuse_preserves_ties_and_builds_only_the_needed_batch(
             calls.set(calls.get() + 1);
             Ok(vec![block(16), block(32), block(16)])
         })
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(choice, expected_choice);
     assert_eq!(calls.get(), u8::from(choice == ReservationChoice::Fallback));
     assert_eq!(plan.end(), PhysicalAddress::new(end));
@@ -188,7 +170,7 @@ fn preferred_reuse_preserves_ties_and_builds_only_the_needed_batch(
 #[case::bridge(false, false)]
 #[case::suffix(true, false)]
 #[case::fallback(false, true)]
-fn preferred_failures_retain_checked_and_unresolved_ownership(
+fn preferred_failures_keep_reserved_ranges_unavailable(
     #[case] suffix: bool,
     #[case] fallback: bool,
 ) {
@@ -212,7 +194,7 @@ fn preferred_failures_retain_checked_and_unresolved_ownership(
     } else {
         Vec::new()
     };
-    let Err(failure) = engine.plan_blocks_with_fallback(
+    let Err(error) = engine.plan_blocks_with_fallback(
         block(if fallback { 32 } else { 16 }),
         &suffix_requests,
         || {
@@ -224,7 +206,6 @@ fn preferred_failures_retain_checked_and_unresolved_ownership(
     ) else {
         panic!("expected a reservation failure")
     };
-    let ReservationFailure { plan, error } = *failure;
     assert_eq!(calls.get(), u8::from(fallback));
     if fallback {
         assert!(
@@ -242,19 +223,6 @@ fn preferred_failures_retain_checked_and_unresolved_ownership(
             "{error:?}"
         );
     }
-    assert_eq!(plan.reservations().len(), usize::from(suffix));
-    assert_eq!(
-        plan.unresolved().map(|reservation| reservation.extent()),
-        if suffix || fallback {
-            None
-        } else {
-            Some(extent)
-        }
-    );
-    if suffix {
-        assert_eq!(plan.reservations()[0].range().start().get(), start);
-    }
-    drop(plan);
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         if fallback { vec![extent] } else { Vec::new() }
@@ -285,12 +253,11 @@ fn preferred_reuse_preserves_session_eligibility(#[case] fresh: bool) {
             assert_eq!(plan.reservations()[0].range().start().get(), start + 128);
             drop(plan);
         }
-        Err(failure) => {
+        Err(error) => {
             assert!(!fresh);
             assert!(
-                matches!(failure.error, Error::AllocationPublicationUncertain),
-                "{:?}",
-                failure.error
+                matches!(error, Error::AllocationPublicationUncertain),
+                "{error:?}"
             );
         }
     }
@@ -325,7 +292,7 @@ fn preferred_scalar_paths_avoid_batch_storage(#[case] reuse: bool, #[case] appen
                 .plan_blocks_with_fallback(block(64), &[], || {
                     Ok(if append { vec![block(64)] } else { Vec::new() })
                 })
-                .unwrap_or_else(|failure| panic!("{:?}", failure.error))
+                .unwrap_or_else(|error| panic!("{error:?}"))
         });
     assert_eq!(
         choice,
@@ -367,7 +334,7 @@ fn preferred_prefix_and_suffix_retain_complete_ownership(#[case] fail: bool) {
         .plan_blocks_with_fallback(block(64), &[metadata, metadata], || {
             panic!("a preferred hit must not prepare fallback requests")
         })
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(choice, ReservationChoice::Preferred);
     assert_eq!(
         plan.reservations()
