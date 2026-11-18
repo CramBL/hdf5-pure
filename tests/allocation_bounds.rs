@@ -72,6 +72,8 @@ use test_util_hdf5::reader::ReadBackend;
 
 #[path = "allocation_bounds/commit.rs"]
 mod commit;
+#[path = "allocation_bounds/copy.rs"]
+mod copy;
 #[path = "allocation_bounds/datatype_metadata.rs"]
 mod datatype_metadata;
 #[path = "allocation_bounds/extensible_array.rs"]
