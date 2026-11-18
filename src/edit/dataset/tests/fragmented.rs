@@ -7,6 +7,7 @@ use test_util::disk_log;
 use test_util_hdf5::file_space::chunk_holes;
 use test_util_hdf5::file_space::persisted::PersistedStrategy;
 
+use super::super::test_util::{Creation, prepared};
 use crate::Datatype;
 use crate::DeflateLevel;
 use crate::File;
@@ -360,7 +361,7 @@ fn metadata_only_page_space_keeps_one_compound_payload_request() {
         [(Some(ManagerKind::PagedSmallMetadata), extent)],
     )
     .unwrap();
-    let set = super::contiguous::prepared(super::Creation::Fixed(40), true);
+    let set = prepared(Creation::Fixed(40), true);
     let length = ByteLength::new(
         set.chunks()
             .iter()
