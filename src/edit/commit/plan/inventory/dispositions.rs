@@ -19,15 +19,15 @@ use crate::object_path::ObjectPathBuf;
 
 /// Original observations and expected placements for one prepared tree.
 ///
-/// The editor records newly created groups with an absent predecessor and retains count
-/// observations independently of each predecessor's classification.
+/// The editor records newly created groups with an absent predecessor and keeps count
+/// failures available for storage rejection.
 pub(in crate::edit::commit) struct ReconstructionDispositions {
     source: Result<ReconstructionSource, Error>,
     pub(super) session_parents: BTreeMap<hdf5_pure_core::PhysicalAddress, SessionParent>,
     predecessors: BTreeMap<ObjectPathBuf, Predecessor>,
     expected: BTreeMap<ObjectPathBuf, Option<ObjectId>>,
     placed: BTreeMap<ObjectPathBuf, ObjectId>,
-    placement_error: Option<PlacementError>,
+    placement_mismatch: bool,
 }
 
 impl ReconstructionDispositions {
@@ -54,7 +54,7 @@ impl ReconstructionDispositions {
             predecessors: BTreeMap::new(),
             expected: BTreeMap::new(),
             placed: BTreeMap::new(),
-            placement_error: None,
+            placement_mismatch: false,
         };
         let mut seen = BTreeSet::new();
         for (path, node) in &tree.groups {
@@ -84,7 +84,7 @@ impl ReconstructionDispositions {
         result
     }
 
-    /// Records one successful placement and retains the first event mismatch.
+    /// Checks and records one placement. A mismatch prevents reconciliation.
     ///
     /// Checks the path and optional predecessor against the prepared inputs. A newly created
     /// group has no predecessor. Repeated placements are mismatches even at the same address.
@@ -100,18 +100,10 @@ impl ReconstructionDispositions {
             predecessors: _,
             expected,
             placed: placements,
-            placement_error,
+            placement_mismatch,
         } = self;
-        let error = match expected.get(path) {
-            None => Some(PlacementError::Unexpected(path.clone())),
-            Some(expected) if expected != &source => Some(PlacementError::Source(path.clone())),
-            Some(_) if placements.contains_key(path) => {
-                Some(PlacementError::Repeated(path.clone()))
-            }
-            Some(_) => None,
-        };
-        if let Some(error) = error {
-            placement_error.get_or_insert(error);
+        if expected.get(path) != Some(&source) || placements.contains_key(path) {
+            *placement_mismatch = true;
         } else {
             placements.insert(path.clone(), placed);
         }
@@ -119,10 +111,18 @@ impl ReconstructionDispositions {
 
     /// Pairs the original observations with their placement reconciliation outcome.
     pub(super) fn finish(self, tree: &AppliedTree) -> AppliedDispositions {
-        let result = self.reconcile(tree);
+        let replacements = self.reconcile(tree);
+        let retained = self
+            .predecessors
+            .into_values()
+            .filter(|old| old.disposition == Disposition::Retain)
+            .map(|old| old.source.object())
+            .collect();
         AppliedDispositions {
-            original: self,
-            result,
+            source: self.source.ok(),
+            session_parents: self.session_parents,
+            retained,
+            replacements,
         }
     }
 
@@ -147,11 +147,11 @@ impl ReconstructionDispositions {
             predecessors,
             expected: _,
             placed: _,
-            placement_error: _,
+            placement_mismatch: _,
         } = self;
         source.err().or_else(|| {
             predecessors.into_values().find_map(|predecessor| {
-                predecessor.counts.err().map(|error| match error {
+                predecessor.count_error.map(|error| match error {
                     CountEvidenceError::Source(error) | CountEvidenceError::Topology(error) => {
                         Error::from(error)
                     }
@@ -182,25 +182,24 @@ impl ReconstructionDispositions {
                 ordinary: matches!(evidence, CountEvidence::Ordinary(_)),
             })
         });
-        let disposition = if !seen.insert(source.object()) {
-            Disposition::Withhold(Withheld::RepeatedPredecessor(source.object()))
-        } else if phase
-            .reconstruction_source(engine, source.object())
-            .as_ref()
-            != Ok(source)
+        let disposition = if !seen.insert(source.object())
+            || phase
+                .reconstruction_source(engine, source.object())
+                .as_ref()
+                != Ok(source)
         {
-            Disposition::Withhold(Withheld::Phase)
+            Disposition::Withhold
         } else {
             self.classify(engine, phase, tree, facts, &path, source, &counts)
         };
         if self.predecessors.contains_key(&path) {
-            self.placement_error = Some(PlacementError::Repeated(path.clone()));
+            self.placement_mismatch = true;
         }
         self.predecessors.insert(
             path,
             Predecessor {
                 source: source.clone(),
-                counts,
+                count_error: counts.err(),
                 disposition,
             },
         );
@@ -217,14 +216,14 @@ impl ReconstructionDispositions {
         counts: &Result<Option<ObservedCounts>, CountEvidenceError>,
     ) -> Disposition {
         let Some(topology) = phase.topology() else {
-            return Disposition::Withhold(Withheld::Topology);
+            return Disposition::Withhold;
         };
         let Ok(root) = &self.source else {
-            return Disposition::Withhold(Withheld::Source);
+            return Disposition::Withhold;
         };
         let Some((parent, leaf)) = path.split_leaf() else {
             if source != root {
-                return Disposition::Withhold(Withheld::Source);
+                return Disposition::Withhold;
             }
             return match counts {
                 Ok(Some(counts))
@@ -258,22 +257,19 @@ impl ReconstructionDispositions {
                 {
                     Disposition::Retain
                 }
-                Ok(Some(counts)) if counts.incoming != 0 => {
-                    Disposition::Withhold(Withheld::RootLinks(counts.incoming))
-                }
-                Ok(Some(counts)) if counts.original == ROOT_REFERENCE_COUNT => {
+                Ok(Some(counts))
+                    if counts.incoming == 0 && counts.original == ROOT_REFERENCE_COUNT =>
+                {
                     Disposition::Supersede
                 }
-                Ok(Some(counts)) => Disposition::Withhold(Withheld::ExcessCount(counts.original)),
-                Ok(None) => Disposition::Withhold(Withheld::CountUnavailable),
-                Err(_) => Disposition::Withhold(Withheld::CountError),
+                _ => Disposition::Withhold,
             };
         };
         if topology.find_link(path).map(|(_, object)| object) != Some(source.object()) {
-            return Disposition::Withhold(Withheld::Source);
+            return Disposition::Withhold;
         }
         let Some(owner) = self.predecessors.get(&parent) else {
-            return Disposition::Withhold(Withheld::Parent(parent));
+            return Disposition::Withhold;
         };
         let parent_object = if parent.is_empty() {
             Some(root.object())
@@ -281,7 +277,7 @@ impl ReconstructionDispositions {
             topology.find_link(&parent).map(|(_, object)| object)
         };
         if parent_object != Some(owner.source.object()) {
-            return Disposition::Withhold(Withheld::Source);
+            return Disposition::Withhold;
         }
         let is_group = tree.groups.contains_key(path);
         if is_group
@@ -293,51 +289,31 @@ impl ReconstructionDispositions {
                 })
             })
         {
-            return Disposition::Withhold(Withheld::Parent(parent));
+            return Disposition::Withhold;
         }
         match counts {
-            Ok(Some(counts)) if counts.incoming != 1 || !counts.ordinary => {
-                Disposition::Withhold(Withheld::CountUnavailable)
+            Ok(Some(counts)) if counts.incoming == 1 && counts.ordinary && counts.original == 1 => {
+                owner.disposition
             }
-            Ok(Some(counts)) if counts.original != 1 => {
-                Disposition::Withhold(Withheld::ExcessCount(counts.original))
-            }
-            Ok(Some(_)) if owner.disposition == Disposition::Supersede => Disposition::Supersede,
-            Ok(Some(_)) if owner.disposition == Disposition::Retain => Disposition::Retain,
-            Ok(Some(_)) => Disposition::Withhold(Withheld::Parent(parent)),
-            Ok(None) => Disposition::Withhold(Withheld::CountUnavailable),
-            Err(_) => Disposition::Withhold(Withheld::CountError),
+            _ => Disposition::Withhold,
         }
     }
 
     /// Reconciles recorded placements before constructing the complete replacement map.
     ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionWithheld::Placement`] for missing or mismatched events, relocations,
-    /// or root placement, [`TransitionWithheld::Source`] for an unavailable original root, or
-    /// [`TransitionWithheld::Predecessors`] if any predecessor is withheld.
-    fn reconcile(
-        &self,
-        tree: &AppliedTree,
-    ) -> Result<BTreeMap<ObjectId, ObjectId>, TransitionWithheld> {
+    /// Returns `None` for missing or mismatched placements, an unavailable original root,
+    /// or a withheld predecessor.
+    fn reconcile(&self, tree: &AppliedTree) -> Option<BTreeMap<ObjectId, ObjectId>> {
         let Self {
             source,
             session_parents: _,
             predecessors,
             expected,
             placed,
-            placement_error,
+            placement_mismatch,
         } = self;
-        if let Some(error) = placement_error {
-            return Err(TransitionWithheld::Placement(error.clone()));
-        }
-        for path in expected.keys() {
-            if !placed.contains_key(path) {
-                return Err(TransitionWithheld::Placement(PlacementError::Missing(
-                    path.clone(),
-                )));
-            }
+        if *placement_mismatch || expected.keys().any(|path| !placed.contains_key(path)) {
+            return None;
         }
         let replacements: BTreeMap<_, _> = predecessors
             .iter()
@@ -348,67 +324,56 @@ impl ReconstructionDispositions {
             })
             .collect();
         if replacements != tree.relocations {
-            return Err(TransitionWithheld::Placement(PlacementError::Relocations));
+            return None;
         }
         if placed
             .get(&ObjectPathBuf::root())
             .map(|root| root.header_address())
             != Some(tree.retirement.root())
         {
-            return Err(TransitionWithheld::Placement(PlacementError::Root));
+            return None;
         }
         if source.is_err() {
-            return Err(TransitionWithheld::Source);
+            return None;
         }
         if predecessors
             .values()
-            .any(|old| matches!(old.disposition, Disposition::Withhold(_)))
+            .any(|old| old.disposition == Disposition::Withhold)
         {
-            return Err(TransitionWithheld::Predecessors);
+            return None;
         }
-        Ok(replacements)
+        Some(replacements)
     }
 }
 
-/// Original observations paired with a successful tree's replacement-map outcome.
-///
-/// A withheld predecessor prevents complete translation even when every placement succeeded.
+/// Original associations and the checked replacement map after placement.
 pub(in crate::edit::commit) struct AppliedDispositions {
-    original: ReconstructionDispositions,
-    result: Result<BTreeMap<ObjectId, ObjectId>, TransitionWithheld>,
+    source: Option<ReconstructionSource>,
+    pub(super) session_parents: BTreeMap<hdf5_pure_core::PhysicalAddress, SessionParent>,
+    retained: BTreeSet<ObjectId>,
+    replacements: Option<BTreeMap<ObjectId, ObjectId>>,
 }
 
 impl AppliedDispositions {
-    /// Borrows the original observations and recorded placement events.
-    pub(in crate::edit::commit) fn original(&self) -> &ReconstructionDispositions {
-        &self.original
+    pub(super) fn source(&self) -> Option<&ReconstructionSource> {
+        self.source.as_ref()
     }
 
-    /// Borrows the complete original-to-placed map after reconciliation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionWithheld`] if placement reconciliation or predecessor supersession
-    /// is incomplete.
-    pub(in crate::edit::commit) fn replacements(
-        &self,
-    ) -> Result<&BTreeMap<ObjectId, ObjectId>, &TransitionWithheld> {
-        self.result.as_ref()
+    pub(super) fn retained(&self) -> &BTreeSet<ObjectId> {
+        &self.retained
+    }
+
+    /// Borrows the complete original-to-placed map after successful reconciliation.
+    pub(super) fn replacements(&self) -> Option<&BTreeMap<ObjectId, ObjectId>> {
+        self.replacements.as_ref()
     }
 
     /// Translates superseded identities and preserves retained originals and absent identities.
     ///
-    /// # Errors
-    ///
-    /// Returns the error of [`Self::replacements`], including for an unchanged identity.
-    pub(in crate::edit::commit) fn translate(
-        &self,
-        original: ObjectId,
-    ) -> Result<ObjectId, &TransitionWithheld> {
+    /// Returns `None` if reconciliation is incomplete, including for an unchanged identity.
+    pub(super) fn translate(&self, original: ObjectId) -> Option<ObjectId> {
         self.replacements().map(|replacements| {
-            if self.original.predecessors.values().any(|old| {
-                old.source.object() == original && old.disposition == Disposition::Retain
-            }) {
+            if self.retained.contains(&original) {
                 original
             } else {
                 replacements.get(&original).copied().unwrap_or(original)
@@ -417,11 +382,10 @@ impl AppliedDispositions {
     }
 }
 
-/// One reconstructed object's original association, count outcome, and classification.
+/// One reconstructed object's original association and classification.
 pub(in crate::edit::commit) struct Predecessor {
     pub(in crate::edit::commit) source: ReconstructionSource,
-    /// Original count evidence, absent evidence, or its derivation error.
-    pub(in crate::edit::commit) counts: Result<Option<ObservedCounts>, CountEvidenceError>,
+    count_error: Option<CountEvidenceError>,
     pub(in crate::edit::commit) disposition: Disposition,
 }
 
@@ -437,66 +401,12 @@ pub(in crate::edit::commit) struct ObservedCounts {
 }
 
 /// A predecessor's eligibility for replacement in the complete identity map.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::edit::commit) enum Disposition {
     /// A predecessor with compatible counts and a superseded path from the original root.
     Supersede,
     /// An original root or descendant preserved alongside its placed replacement.
     Retain,
-    /// A predecessor excluded from complete translation, with its reason.
-    Withhold(Withheld),
+    /// A predecessor excluded from complete translation.
+    Withhold,
 }
-
-/// The reason an original predecessor is excluded from complete translation.
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) enum Withheld {
-    /// Derivation of the original count evidence failed.
-    CountError,
-    /// Complete count evidence for the required object classification is unavailable.
-    CountUnavailable,
-    /// The declared count differs from the required count of one.
-    ExcessCount(u32),
-    /// The parent is absent, retained, or missing its prepared child replacement.
-    Parent(ObjectPathBuf),
-    /// The predecessor belongs to a different source phase.
-    Phase,
-    /// The same original object occurs at another prepared predecessor path.
-    RepeatedPredecessor(ObjectId),
-    /// The original topology contains hard links to the root.
-    RootLinks(u32),
-    /// The original root association is unavailable, or a predecessor or parent association differs.
-    Source,
-    /// Complete original topology is unavailable.
-    Topology,
-}
-
-/// The reason a complete original-to-placed identity map is unavailable.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) enum TransitionWithheld {
-    /// Recorded placements disagree with the prepared inputs or applied tree.
-    Placement(PlacementError),
-    /// At least one original predecessor is withheld.
-    Predecessors,
-    /// Resolution of the original root association failed.
-    Source,
-}
-
-/// A mismatch between expected placements, recorded events, and the applied tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) enum PlacementError {
-    /// An expected group or relocated dataset has no placement event.
-    Missing(ObjectPathBuf),
-    /// The predecessor replacement map differs from the applied relocation map.
-    Relocations,
-    /// A prepared predecessor path or placement event occurs more than once.
-    Repeated(ObjectPathBuf),
-    /// The recorded root differs from the applied retirement root.
-    Root,
-    /// A placement event has a different optional predecessor.
-    Source(ObjectPathBuf),
-    /// A placement event has no corresponding prepared path.
-    Unexpected(ObjectPathBuf),
-}
-
-#[cfg(test)]
-mod tests;

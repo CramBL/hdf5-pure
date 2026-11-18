@@ -13,7 +13,6 @@ use super::super::dispositions::ReconstructionDispositions;
 use super::OriginalStorage;
 use super::StorageAllocation;
 use super::StorageOrigin;
-use super::StorageUnavailable;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::AnalysisPhase;
 use crate::edit::analysis::OriginalOwnerInventory;
@@ -34,8 +33,7 @@ impl OriginalStorage {
     /// Protects observed heap collections and retained object claims in claim order.
     ///
     /// Uses [`ClaimReleases`] for object-claim retention. Records heap claims with an unknown
-    /// allocation class and object claims with their observed owner and kind. Records the first
-    /// incomplete object-storage outcome if no unavailability reason is recorded.
+    /// allocation class and object claims with their observed owner and kind.
     pub(super) fn capture_claims(&mut self, claims: &PhysicalClaims, releases: &ClaimReleases<'_>) {
         for claim in claims.claims() {
             let (object, kind) = match claim.origin() {
@@ -59,42 +57,30 @@ impl OriginalStorage {
                 });
             }
         }
-        if claims
-            .problems()
-            .iter()
-            .any(|problem| matches!(problem, ClaimProblem::ObjectStorage(_)))
-        {
-            self.unavailable.get_or_insert(StorageUnavailable::Object);
-        }
     }
 
     /// Protects the enclosing range of each parent's original allocation and parsed framing.
     ///
-    /// Records qualification failures independently of known ranges. Retains one allocation per
-    /// parent address and sorts all protected ranges by physical start address.
+    /// Retains one allocation per parent address and sorts protected ranges by physical address.
     pub(super) fn capture_parents(&mut self) {
         let Self {
             source: _,
             allocations,
             parents,
             integrity,
-            unavailable,
+            source_error,
         } = self;
         allocations.sort_unstable_by_key(|allocation| allocation.range.start());
         let Ok(parents) = parents else {
-            unavailable.get_or_insert(StorageUnavailable::Parents);
             return;
         };
         for (&address, parent) in parents {
-            if !parent.allocation_matches {
-                unavailable.get_or_insert(StorageUnavailable::Parent);
-            }
             let range = match Self::parent_range(parent) {
                 Ok(Some(range)) => range,
                 Ok(None) => continue,
                 Err(error) => {
                     *integrity = Err(StorageIntegrityError::Unavailable);
-                    *unavailable = Some(StorageUnavailable::Coverage(error.into()));
+                    *source_error = Some(error.into());
                     continue;
                 }
             };
@@ -119,11 +105,12 @@ impl OriginalStorage {
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         source: &ReconstructionSource,
+        retain_unobserved: bool,
     ) {
         if self.integrity.is_err() {
             return;
         }
-        match self.source_integrity(engine, phase, source) {
+        match self.source_integrity(engine, phase, source, retain_unobserved) {
             Ok((residuals, end)) => {
                 if self.integrity.is_err() {
                     return;
@@ -132,16 +119,16 @@ impl OriginalStorage {
                 if self.integrity.is_err() {
                     return;
                 }
-                if matches!(self.unavailable, Some(StorageUnavailable::Owners)) {
+                if retain_unobserved {
                     if let Err(error) = self.capture_unobserved(&residuals) {
                         self.integrity = Err(StorageIntegrityError::Unavailable);
-                        self.unavailable = Some(StorageUnavailable::Coverage(error.into()));
+                        self.source_error = Some(error.into());
                     }
                 }
             }
             Err(error) => {
                 self.integrity = Err(StorageIntegrityError::Unavailable);
-                self.unavailable = Some(StorageUnavailable::Coverage(error));
+                self.source_error = Some(error);
             }
         }
     }
@@ -160,12 +147,13 @@ impl OriginalStorage {
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         source: &ReconstructionSource,
+        retain_unobserved: bool,
     ) -> Result<(Vec<FileRange>, PhysicalAddress), Error> {
         let coverage = phase.physical_coverage(source)?;
         let conflict = coverage.conflict();
         let beyond_source = coverage.beyond_source().first().copied();
         let beyond_allocation = coverage.beyond_eoa().first().copied();
-        let residuals = if matches!(self.unavailable, Some(StorageUnavailable::Owners)) {
+        let residuals = if retain_unobserved {
             coverage.residuals().to_vec()
         } else {
             Vec::new()

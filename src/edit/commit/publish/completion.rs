@@ -9,18 +9,17 @@ use crate::error::FormatError;
 /// A mutable loan of the engine after a successful tree publication.
 ///
 /// The publisher creates this loan after stored-reference updates, root reclamation, and
-/// requested truncation succeed. Records the replacement root passed to the publisher separately
-/// from the final adopted physical root and EOA. Root reclamation may relocate the root.
+/// requested truncation succeed. Records the replacement root passed to the publisher and the
+/// final adopted EOA.
 /// The caller must establish source freshness and allocation ownership separately.
 pub(in crate::edit) struct PublishedTree<'engine> {
     engine: &'engine mut WriteEngine,
     requested_root: PhysicalAddress,
-    root: PhysicalAddress,
     end: PhysicalAddress,
 }
 
 impl<'engine> PublishedTree<'engine> {
-    /// Borrows the engine and records its adopted root and EOA alongside `requested_root`.
+    /// Borrows the engine, resolves its adopted root, and records its final EOA.
     ///
     /// The caller completes publication before constructing this loan and passes its requested
     /// physical root.
@@ -33,7 +32,7 @@ impl<'engine> PublishedTree<'engine> {
         engine: &'engine mut WriteEngine,
         requested_root: PhysicalAddress,
     ) -> Result<Self, FormatError> {
-        let root = engine
+        engine
             .context
             .addresses()
             .resolve(engine.context.superblock().root_group_address)?;
@@ -41,7 +40,6 @@ impl<'engine> PublishedTree<'engine> {
         Ok(Self {
             engine,
             requested_root,
-            root,
             end,
         })
     }
@@ -51,7 +49,6 @@ impl<'engine> PublishedTree<'engine> {
         let Self {
             engine,
             requested_root: _,
-            root: _,
             end: _,
         } = self;
         engine
@@ -62,9 +59,13 @@ impl<'engine> PublishedTree<'engine> {
         self.requested_root
     }
 
-    /// Returns the physical root adopted before the completion callback.
+    #[cfg(test)]
     pub(in crate::edit) fn root(&self) -> PhysicalAddress {
-        self.root
+        self.engine
+            .context
+            .addresses()
+            .resolve(self.engine.context.superblock().root_group_address)
+            .unwrap()
     }
 
     /// Returns the physical EOA adopted before the completion callback.

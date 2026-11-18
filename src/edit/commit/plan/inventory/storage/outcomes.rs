@@ -3,9 +3,9 @@
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{EditStorageConflict, PhysicalAddress};
 
+use super::StorageConflict;
 use super::capture::StorageIntegrityError;
 use super::parents::ParentPreparationError;
-use super::{StorageConflict, StorageUnavailable};
 use crate::edit::analysis::CountProtectionError;
 use crate::edit::retirement::RetirementMergeError;
 use crate::error::{Error, FormatError};
@@ -15,9 +15,9 @@ pub(super) fn integrity_error(
     error: StorageIntegrityError,
 ) -> Error {
     match error {
-        StorageIntegrityError::Unavailable => match prepared.storage.unavailable {
-            Some(StorageUnavailable::Claims(error) | StorageUnavailable::Coverage(error)) => error,
-            _ => prepared
+        StorageIntegrityError::Unavailable => match prepared.storage.source_error {
+            Some(error) => error,
+            None => prepared
                 .dispositions
                 .into_source_error()
                 .or_else(|| prepared.original.into_source_error())

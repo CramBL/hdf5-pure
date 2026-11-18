@@ -25,8 +25,7 @@ pub(in crate::edit) use counts::CountProjectionIdentity;
 pub(in crate::edit) use counts::{CountPreflightError, CountProtectionError, ProtectedCounts};
 
 pub(in crate::edit) use counts::{
-    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
-    OriginalOwnerInventory,
+    CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerFacts, OriginalOwnerInventory,
 };
 
 mod counts;
