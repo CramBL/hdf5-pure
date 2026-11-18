@@ -59,15 +59,6 @@ impl<'engine> PublishedTree<'engine> {
         self.requested_root
     }
 
-    #[cfg(test)]
-    pub(in crate::edit) fn root(&self) -> PhysicalAddress {
-        self.engine
-            .context
-            .addresses()
-            .resolve(self.engine.context.superblock().root_group_address)
-            .unwrap()
-    }
-
     /// Returns the physical EOA adopted before the completion callback.
     pub(in crate::edit) fn end(&self) -> PhysicalAddress {
         self.end

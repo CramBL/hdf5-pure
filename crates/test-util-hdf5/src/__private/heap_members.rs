@@ -54,7 +54,7 @@ impl RegionToken {
     ///
     /// Panics if the native call fails, the dataspace cannot be opened, or its shape or selection
     /// size differs.
-    fn assert_region(&self, native: &hdf5::File) {
+    pub fn assert_region(&self, native: &hdf5::File) {
         let region = hdf5::sync::sync(|| {
             // SAFETY: The lock serializes native access, the file is open, and the token has
             // the complete legacy dataset-region reference representation returned by H5Rcreate.
@@ -264,34 +264,6 @@ pub fn persistence_allocations(path: &Path) -> Vec<FileRange> {
         .into_iter()
         .map(|range| FileRange::new(range.start(), range.length()).unwrap())
         .collect()
-}
-
-/// Checks the contents written by [`write()`] and the optional token's dataspace.
-///
-/// Checks shape `[4]` and selection size 2 when `token` is present. Closes the native file before
-/// returning.
-///
-/// # Panics
-///
-/// Panics if a native operation fails or a value, shape, or selection size differs.
-pub fn assert_values(path: &Path, token: Option<&RegionToken>) {
-    let native = file::libhdf5_open(path);
-    assert_eq!(
-        native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
-        [7, 11, 13, 17]
-    );
-    assert_eq!(
-        attributes::ascii_values(&native.attr("first").unwrap()),
-        ["left"]
-    );
-    assert_eq!(
-        attributes::ascii_values(&native.attr("second").unwrap()),
-        ["right"]
-    );
-    if let Some(token) = token {
-        token.assert_region(&native);
-    }
-    native.close().unwrap();
 }
 
 /// Writes the shared fixture values and closes the native file.

@@ -116,10 +116,10 @@ impl AnalysisPhase<'_> {
         if coverage.conflict().is_some() {
             return Ok(Some(DomainUnavailable::Conflict));
         }
-        if !coverage.beyond_source().is_empty() {
+        if coverage.beyond_source().is_some() {
             return Ok(Some(DomainUnavailable::BeyondSource));
         }
-        if !coverage.beyond_eoa().is_empty() {
+        if coverage.beyond_eoa().is_some() {
             return Ok(Some(DomainUnavailable::BeyondEoa));
         }
         let claims = self.physical_claims(source)?;
