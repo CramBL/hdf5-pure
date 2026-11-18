@@ -45,6 +45,7 @@ use self::publication_cost::PublicationCost;
 use self::publication_cost::WriteCostError;
 use self::publication_cost::WriteCoverage;
 
+mod append;
 mod ordering;
 mod ordering_facts;
 mod publication_cost;
