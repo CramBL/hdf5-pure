@@ -80,7 +80,6 @@ fn measure(entries: u64, chunks: u32) -> Measured {
             AppendOptions::new(),
             None,
             &raw,
-            4,
         )
     });
     result.unwrap();
@@ -100,7 +99,6 @@ fn measure(entries: u64, chunks: u32) -> Measured {
             AppendOptions::new(),
             None,
             &raw,
-            4,
         )
         .unwrap();
     let recording = disk_log::finish();

@@ -2430,14 +2430,11 @@ pub(crate) fn initialize_ea_index(
 
 /// Publishes a planned append with synchronization barriers between its storage updates.
 ///
-/// Writes each child before publishing its address, with synchronization barriers between
-/// phases. Runs phase 1, then continues through `max_phase`, up to phase 4. Production callers
-/// pass 4. Tests stop at a phase boundary to simulate interruption.
-///
-/// Caches allocation statistics after phase 3's header publication barrier. Updates
-/// [`Located::current_dim`] and [`Located::num_chunks`] after phase 4's dimension publication
-/// barrier. If a raw tail becomes complete under a lossy pipeline, publishes its filtered
-/// replacement after that barrier. An interruption can leave the completed chunk unfiltered.
+/// Writes each child before publishing its address. Caches allocation statistics after the
+/// header publication barrier and updates [`Located::current_dim`] and [`Located::num_chunks`]
+/// after the extent publication barrier. If a raw tail becomes complete under a lossy
+/// pipeline, publishes its filtered replacement after the extent barrier. An interruption can
+/// leave the completed chunk unfiltered.
 ///
 /// Transfers predecessor ownership to [`Store::retire`] after confirmed index publication. The
 /// original tail and any intermediate raw completion have separate publication barriers. The
@@ -2464,7 +2461,6 @@ pub(crate) fn apply_ea_append<F: Store>(
         new_num_chunks,
         stats,
     }: AppendPlan,
-    max_phase: u8,
 ) -> Result<(), Error> {
     fields.require_widths(file.widths())?;
     // Phase 1: write payloads and confirm their publication before index updates. A replacement
@@ -2489,9 +2485,6 @@ pub(crate) fn apply_ea_append<F: Store>(
                 })
         })
         .transpose()?;
-    if max_phase < 2 {
-        return Ok(());
-    }
 
     // Phase 2: insert new chunk records and repoint the trailing chunk's record.
     // Each new child block is published before its parent pointer is written.
@@ -2518,17 +2511,11 @@ pub(crate) fn apply_ea_append<F: Store>(
         }
         file.sync()?;
     }
-    if max_phase < 3 {
-        return Ok(());
-    }
 
     // Phase 3: publish the EA header element count.
     loc.publish_statistics(file, &fields.statistics[..fields.statistics_len])?;
     file.sync()?;
     loc.allocation_stats = Some(stats);
-    if max_phase < 4 {
-        return Ok(());
-    }
 
     // Phase 4: publish the dataspace dimension before publishing a filtered tail.
     loc.dimension.publish(
@@ -3156,7 +3143,7 @@ mod tests {
             .unwrap();
         let field = dataspace.data_off.to_usize().unwrap();
         let prefix = store.data[field..field + test_util::dataspace::V1_HEADER_LEN].to_vec();
-        append_state(&mut store, &mut state, &[3, 4], 4).unwrap();
+        append_state(&mut store, &mut state, &[3, 4]).unwrap();
         assert_eq!(
             &store.data[field..field + test_util::dataspace::V1_HEADER_LEN],
             prefix
@@ -3274,7 +3261,7 @@ mod tests {
         store.reset_counters();
         store.widths = widths;
         let error =
-            apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap_err();
+            apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -3595,7 +3582,7 @@ mod tests {
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
         store.reset_counters();
         store.fail_sync = Some(4);
-        let error = append_state(&mut store, &mut state, &[4], 4).unwrap_err();
+        let error = append_state(&mut store, &mut state, &[4]).unwrap_err();
         let Error::Io(error) = error else {
             panic!("expected the injected I/O failure, got {error:?}");
         };
@@ -3603,14 +3590,14 @@ mod tests {
         assert_eq!(error.to_string(), "injected synchronization failure");
         assert!(state.index.allocated().unwrap().allocation_stats.is_none());
         store.fail_sync = None;
-        let error = append_state(&mut store, &mut state, &[4], 4).unwrap_err();
+        let error = append_state(&mut store, &mut state, &[4]).unwrap_err();
         assert!(
             matches!(error, Error::AllocationPublicationUncertain),
             "{error:?}"
         );
         let mut store = WindowProbeStore::open(store.data);
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        append_state(&mut store, &mut state, &[4], 4).unwrap();
+        append_state(&mut store, &mut state, &[4]).unwrap();
         assert_eq!(
             stored_stats(&store, state.index.allocated().unwrap()),
             [
@@ -3649,7 +3636,7 @@ mod tests {
         let before = store.data.clone();
         let plan = state_plan(&store, &state, &[4]).unwrap();
         assert_eq!(store.data, before);
-        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
+        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan).unwrap();
         assert_eq!(
             stored_stats(&store, state.index.allocated().unwrap()),
             [0, 0, 1, 150, 5, 20]
@@ -3660,7 +3647,7 @@ mod tests {
     fn successful_append_planning_reuses_the_allocation_snapshot() {
         let mut store = allocation_store(50_000, false);
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        append_state(&mut store, &mut state, &[50_000], 4).unwrap();
+        append_state(&mut store, &mut state, &[50_000]).unwrap();
         let located = state.index.allocated().unwrap();
         let array = metadata_io::read_header(&store, located.ea_addr).unwrap();
         let bytes = IndexBlockBytes::read(&store, &array).unwrap();
@@ -3715,7 +3702,7 @@ mod tests {
             .filter(|&(offset, _)| range.start().get() <= offset && offset < range.end().get())
             .collect::<Vec<_>>();
         assert_ne!(secondary_reads, expected);
-        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
+        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan).unwrap();
         let file = crate::File::from_bytes(store.data).unwrap();
         assert_eq!(
             file.dataset("d").unwrap().read_i32().unwrap(),
@@ -3741,10 +3728,9 @@ mod tests {
         store: &mut WindowProbeStore,
         state: &mut LocatedState,
         values: &[i32],
-        phase: u8,
     ) -> Result<(), Error> {
         let plan = state_plan(store, state, values)?;
-        apply_ea_append(store, state.index.allocated_mut().unwrap(), plan, phase)
+        apply_ea_append(store, state.index.allocated_mut().unwrap(), plan)
     }
 
     fn state_plan(
@@ -4365,7 +4351,7 @@ mod tests {
             FillPattern::ZERO,
         )
         .unwrap();
-        apply_ea_append(store, loc, plan, 4).unwrap();
+        apply_ea_append(store, loc, plan).unwrap();
     }
 
     /// Returns the bytes of the file from a fresh data block of `dblk_nelmts`
@@ -5295,23 +5281,31 @@ mod tests {
         let confirmed;
         let error = match change {
             ReferenceChange::PublishExtent | ReferenceChange::PublishIndex => {
-                let first = lossy_completion_plan(&store, &state);
-                let phase = if matches!(change, ReferenceChange::PublishIndex) {
-                    2
+                if matches!(change, ReferenceChange::PublishIndex) {
+                    let raw: Vec<_> = [1.46_f64, 1.56, 1.0, 2.0]
+                        .into_iter()
+                        .flat_map(f64::to_le_bytes)
+                        .collect();
+                    let allocation = store.allocate(&raw, AllocationClass::Raw).unwrap();
+                    let publication = store.publish_allocations().unwrap();
+                    let record = ConfirmedChunk {
+                        allocation: publication.confirm(allocation).unwrap(),
+                        filter_mask: 1,
+                    };
+                    let located = state.index.allocated_mut().unwrap();
+                    UnpublishedChunkReference::read(&mut store, located, 0)
+                        .unwrap()
+                        .publish(record, [])
+                        .unwrap();
+                    assert_eq!(store.retired.len(), 1);
                 } else {
-                    4
-                };
-                apply_ea_append(
-                    &mut store,
-                    state.index.allocated_mut().unwrap(),
-                    first,
-                    phase,
-                )
-                .unwrap();
+                    let first = lossy_completion_plan(&store, &state);
+                    apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), first)
+                        .unwrap();
+                    assert_eq!(store.retired.len(), 2);
+                }
                 confirmed = store.retired.clone();
-                assert_eq!(confirmed.len(), if phase == 2 { 1 } else { 2 });
-                apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4)
-                    .unwrap_err()
+                apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan).unwrap_err()
             }
             ReferenceChange::UseOtherDataset => {
                 let address = group_v2::resolve_path_any(
@@ -5328,8 +5322,7 @@ mod tests {
                 )
                 .unwrap();
                 confirmed = Vec::new();
-                apply_ea_append(&mut store, other.index.allocated_mut().unwrap(), plan, 4)
-                    .unwrap_err()
+                apply_ea_append(&mut store, other.index.allocated_mut().unwrap(), plan).unwrap_err()
             }
         };
         let Error::AppendUnsupported(reason) = error else {
@@ -5418,7 +5411,7 @@ mod tests {
                 state.fill.pattern(state.element_size),
             )
             .unwrap();
-            apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
+            apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan).unwrap();
             assert_eq!(store.retired.pop(), Some(range));
             assert!(store.retired.is_empty());
             let replacement = state

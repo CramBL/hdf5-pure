@@ -1651,15 +1651,11 @@ fn append_from(engine: &mut WriteEngine, start: usize) -> Result<(), Error> {
     if start == 0 {
         let mut append = AppendBuilder::new();
         append.append_i32(&values()[..CHUNK]);
-        engine.append_inplace_gathered(
-            AppendTarget::Path(&ObjectPathBuf::parse("d")),
-            &append,
-            4,
-        )?;
+        engine.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)?;
     }
     let mut append = AppendBuilder::new();
     append.append_i32(&values()[start.max(CHUNK)..]);
-    engine.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+    engine.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
 }
 
 fn values() -> Vec<i32> {

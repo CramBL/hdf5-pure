@@ -165,11 +165,7 @@ fn manager_publication_preserves_unrelated_staged_edits(#[case] strategy: Persis
     let mut values = AppendBuilder::new();
     values.append_i32(&[4, 5, 6, 7]);
     engine
-        .append_inplace_gathered(
-            AppendTarget::Path(&ObjectPathBuf::parse("values")),
-            &values,
-            4,
-        )
+        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("values")), &values)
         .unwrap();
     assert!(engine.has_staged_edits());
     let snapshot = File::from_bytes(engine.disk_bytes().unwrap()).unwrap();

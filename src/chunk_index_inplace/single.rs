@@ -257,22 +257,16 @@ impl SingleIndex {
         })
     }
 
-    /// Publishes a prepared replacement before its new extent, then retires confirmed storage.
+    /// Publishes a prepared replacement before the new extent.
     ///
-    /// Checks plan identity and current metadata before allocation. When `max_phase` is below 2,
-    /// stops after allocation confirmation. Below 4, stops after reference publication. At phase 4,
-    /// also publishes the extent and any final filtered replacement.
+    /// Checks plan identity and current metadata before allocation. Retires each predecessor after
+    /// its reference barrier. Publishes any final filtered replacement after the new extent.
     ///
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] for changed widths, base, index identity, reference,
     /// or extent. Propagates allocation, encoding, publication, range, and synchronization errors.
-    pub(crate) fn apply(
-        &mut self,
-        file: &mut impl Store,
-        plan: SingleAppend,
-        max_phase: u8,
-    ) -> Result<(), Error> {
+    pub(crate) fn apply(&mut self, file: &mut impl Store, plan: SingleAppend) -> Result<(), Error> {
         let SingleAppend {
             widths,
             reference,
@@ -322,13 +316,7 @@ impl SingleIndex {
                     })
             })
             .transpose()?;
-        if max_phase < 2 {
-            return Ok(());
-        }
         self.replace(file, &replacement, predecessor)?;
-        if max_phase < 4 {
-            return Ok(());
-        }
         self.geometry
             .dimension
             .publish(file, &dimension[..usize::from(widths.lengths.get())])?;

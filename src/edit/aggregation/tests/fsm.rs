@@ -341,11 +341,7 @@ fn large_chunk_appends_retain_only_metadata_spare() {
     batch.append_f64(&[1.0; 512]);
     for _ in 0..16 {
         engine
-            .append_inplace_gathered(
-                AppendTarget::Path(&ObjectPathBuf::parse("values")),
-                &batch,
-                4,
-            )
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("values")), &batch)
             .unwrap();
     }
     let state = engine.aggregation.unwrap();

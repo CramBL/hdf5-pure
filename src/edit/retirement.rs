@@ -733,7 +733,7 @@ mod tests {
         let mut append = AppendBuilder::new();
         append.append_i32(&[value]);
         engine
-            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
             .unwrap();
     }
 

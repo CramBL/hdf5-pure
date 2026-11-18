@@ -225,10 +225,9 @@ fn run(
     );
     let first = read_bytes.load(Ordering::Relaxed);
     engine
-        .append_inplace_i32_phased(
+        .append_inplace_i32(
             "d",
             &std::array::from_fn::<_, CHUNK, _>(|i| i32::try_from(next + i).unwrap()),
-            4,
         )
         .unwrap();
     let first = read_bytes.load(Ordering::Relaxed) - first;
@@ -242,7 +241,7 @@ fn run(
         .map(|i| i32::try_from(i).unwrap())
         .collect::<Vec<_>>();
     next += retained.len();
-    engine.append_inplace_i32_phased("d", &retained, 4).unwrap();
+    engine.append_inplace_i32("d", &retained).unwrap();
     drop(retained);
     assert_session_state(&engine);
     let sections = engine.reusable_free_sections().unwrap().section_count();
@@ -261,10 +260,9 @@ fn run(
         let before = read_bytes.load(Ordering::Relaxed);
         let calls = read_calls.load(Ordering::Relaxed);
         engine
-            .append_inplace_i32_phased(
+            .append_inplace_i32(
                 "d",
                 &std::array::from_fn::<_, CHUNK, _>(|i| i32::try_from(next + i).unwrap()),
-                4,
             )
             .unwrap();
         next += CHUNK;
@@ -289,10 +287,9 @@ fn run(
     let before = read_bytes.load(Ordering::Relaxed);
     let calls = read_calls.load(Ordering::Relaxed);
     engine
-        .append_inplace_i32_phased(
+        .append_inplace_i32(
             "d",
             &std::array::from_fn::<_, CHUNK, _>(|i| i32::try_from(next + i).unwrap()),
-            4,
         )
         .unwrap();
     reads.cold = read_bytes.load(Ordering::Relaxed) - before;

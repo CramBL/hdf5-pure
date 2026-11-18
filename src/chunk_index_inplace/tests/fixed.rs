@@ -100,7 +100,7 @@ fn fixed_array_initializes_page_bits_in_one_bounded_batch(#[case] pages: usize) 
             state.fill.pattern(state.element_size),
         )
         .unwrap();
-    index.apply(&mut store, plan, 4).unwrap();
+    index.apply(&mut store, plan).unwrap();
     let bitmap_reads = store
         .reads
         .borrow()
@@ -260,7 +260,7 @@ fn fixed_array_barrier_failures_preserve_live_allocations(#[case] barrier: usize
         .unwrap();
     store.reset_counters();
     store.fail_sync = Some(barrier);
-    let error = index.apply(&mut store, plan, 4).unwrap_err();
+    let error = index.apply(&mut store, plan).unwrap_err();
     let Error::Io(error) = error else {
         panic!("expected an I/O error, got {error:?}")
     };
@@ -320,7 +320,7 @@ fn fixed_array_plans_reject_a_different_session_before_io() {
     };
     let before = other.data.clone();
     other.reset_counters();
-    let error = other_index.apply(&mut other, plan, 4).unwrap_err();
+    let error = other_index.apply(&mut other, plan).unwrap_err();
     assert!(
         matches!(
             error,
@@ -603,7 +603,7 @@ fn fixed_array_plans_reject_changed_source_fields(#[case] stale: Stale) {
     };
     let before = store.data.clone();
     store.reset_counters();
-    let error = index.apply(&mut store, plan, 4).unwrap_err();
+    let error = index.apply(&mut store, plan).unwrap_err();
     assert!(
         matches!(error, Error::AppendUnsupported(actual) if actual == expected),
         "{error:?}"
@@ -746,7 +746,7 @@ fn fixed_array_address_overflow_preserves_published_storage() {
         .unwrap();
     let before = store.data.clone();
     store.reset_counters();
-    let error = index.apply(&mut store, plan, 4).unwrap_err();
+    let error = index.apply(&mut store, plan).unwrap_err();
     assert!(
         matches!(
             error,
@@ -790,7 +790,7 @@ fn append(store: &mut WindowProbeStore, state: &mut LocatedState, values: &[i32]
             state.fill.pattern(state.element_size),
         )
         .unwrap();
-    index.apply(store, plan, 4).unwrap();
+    index.apply(store, plan).unwrap();
 }
 
 pub(super) fn fixture(

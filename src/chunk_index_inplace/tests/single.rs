@@ -173,7 +173,7 @@ fn single_chunk_plans_reject_changed_fields_before_allocating(#[case] stale: Sta
     }
     let before = store.data.clone();
     store.reset_counters();
-    let error = index.apply(&mut store, plan, 4).unwrap_err();
+    let error = index.apply(&mut store, plan).unwrap_err();
     let expected = match stale {
         Stale::Reference => "chunk reference changed after append planning",
         Stale::Dimension => "dataspace extent changed after append planning",
@@ -274,7 +274,7 @@ fn single_chunk_barrier_failures_keep_unconfirmed_extents_unavailable(
         .unwrap();
     store.reset_counters();
     store.fail_sync = Some(synchronization);
-    let error = index.apply(&mut store, plan, 4).unwrap_err();
+    let error = index.apply(&mut store, plan).unwrap_err();
     let Error::Io(error) = error else {
         panic!("expected synchronization error, got {error:?}")
     };
@@ -565,7 +565,7 @@ fn single_chunk_address_overflow_preserves_the_previous_reference() {
         .unwrap();
     let before = store.data.clone();
     store.reset_counters();
-    let error = index.apply(&mut store, plan, 4).unwrap_err();
+    let error = index.apply(&mut store, plan).unwrap_err();
     assert!(
         matches!(
             error,
@@ -658,7 +658,7 @@ fn single_chunk_planning_retains_one_logical_chunk(
     );
     assert_eq!(store.max_read.get(), chunk_bytes);
     assert_eq!(*store.allocations.borrow(), []);
-    index.apply(&mut store, plan, 4).unwrap();
+    index.apply(&mut store, plan).unwrap();
     let file = File::from_bytes(store.data).unwrap();
     assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [0, 1]);
     file.close().unwrap();
@@ -709,7 +709,7 @@ fn single_chunk_plans_reject_a_different_dataset_before_allocating() {
     };
     let before = store.data.clone();
     store.reset_counters();
-    let error = second.apply(&mut store, plan, 4).unwrap_err();
+    let error = second.apply(&mut store, plan).unwrap_err();
     assert!(
         matches!(&error,Error::AppendUnsupported(reason) if *reason=="append plan refers to a different chunk index"),
         "{error:?}"

@@ -64,7 +64,7 @@ fn staged_and_immediate_edits_share_aggregate_windows(
     let fsm_hit = engine.space.largest(AllocationClass::Raw) >= ByteLength::new(16);
     alloc_probe::take();
     engine
-        .append_inplace_i32_phased("values", &(initial..end).collect::<Vec<_>>(), 4)
+        .append_inplace_i32("values", &(initial..end).collect::<Vec<_>>())
         .unwrap();
     let (data_blocks, super_blocks) = alloc_probe::take();
     let after = engine.aggregation.unwrap();
@@ -254,10 +254,10 @@ fn bounded_immediate_batches_share_aggregate_state(
     let mut engine = open_engine(&path, MemoryStrategy::Bounded);
     let end = 600_000;
     engine
-        .append_inplace_i32_phased("values", &(6..end).collect::<Vec<_>>(), 4)
+        .append_inplace_i32("values", &(6..end).collect::<Vec<_>>())
         .unwrap();
     engine
-        .append_inplace_i32_phased("values", &[end, end + 1], 4)
+        .append_inplace_i32("values", &[end, end + 1])
         .unwrap();
     let ownership = engine.storage_snapshot();
     assert_eq!(ownership.physical_size, ownership.logical_size);
@@ -322,7 +322,7 @@ fn failed_immediate_append_preserves_consumed_space(
         .set_write_buffering(WriteBuffering::Unbuffered)
         .unwrap();
     let error = engine
-        .append_inplace_i32_phased("values", &(4..12).collect::<Vec<_>>(), 4)
+        .append_inplace_i32("values", &(4..12).collect::<Vec<_>>())
         .unwrap_err();
     let Error::Io(error) = error else {
         panic!("expected injected immediate write failure, got {error:?}");
@@ -354,9 +354,7 @@ fn failed_immediate_append_preserves_consumed_space(
         );
     }
     if !matches!(next, Continuation::Drop) {
-        let error = engine
-            .append_inplace_i32_phased("values", &[97, 98], 4)
-            .unwrap_err();
+        let error = engine.append_inplace_i32("values", &[97, 98]).unwrap_err();
         assert!(
             matches!(error, Error::AllocationPublicationUncertain),
             "{error:?}"
@@ -370,9 +368,7 @@ fn failed_immediate_append_preserves_consumed_space(
             engine.create_group(&ObjectPathBuf::parse("after")).unwrap();
             engine.commit().unwrap();
         }
-        engine
-            .append_inplace_i32_phased("values", &[97, 98], 4)
-            .unwrap();
+        engine.append_inplace_i32("values", &[97, 98]).unwrap();
         engine.finalize_persist().unwrap();
         drop(engine);
     }
