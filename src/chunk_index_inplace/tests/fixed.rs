@@ -49,8 +49,8 @@ fn fixed_array_appends_preserve_finite_values_and_widths(
     let mut store = WindowProbeStore::open(builder.finish().unwrap());
     let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
     let values = (i32::try_from(initial.len()).unwrap()..6).collect::<Vec<_>>();
-    append(&mut store, &mut state, &values, 4);
-    append(&mut store, &mut state, &[6, 7, 8], 4);
+    append(&mut store, &mut state, &values);
+    append(&mut store, &mut state, &[6, 7, 8]);
     let file = File::from_bytes(store.data).unwrap();
     assert_eq!(
         file.dataset("d").unwrap().read_i32().unwrap(),
@@ -213,47 +213,19 @@ fn fixed_array_interruptions_preserve_visible_values_and_retirement(
     )]
     source: FixedSource,
     #[values(false, true)] filtered: bool,
-    #[values(1, 2, 3, 4)] phase: u8,
 ) {
-    let mut store = fixture(FormatWidths { offsets, lengths }, filtered, source);
-    let initial = match source {
-        FixedSource::Allocated => vec![0],
-        FixedSource::SparsePages => vec![0; 3],
-        _ => Vec::new(),
+    let widths = FormatWidths { offsets, lengths };
+    let (bytes, initial, end) = match source {
+        FixedSource::Allocated => (
+            super::finite_interruptions::allocated(widths, 12, filtered),
+            &[0][..],
+            9,
+        ),
+        FixedSource::Unallocated => (fixture(widths, filtered, source).data, &[][..], 9),
+        FixedSource::HeaderOnly => (fixture(widths, filtered, source).data, &[][..], 21),
+        FixedSource::SparsePages => (fixture(widths, filtered, source).data, &[0, 0, 0][..], 21),
     };
-    let end = if matches!(source, FixedSource::HeaderOnly | FixedSource::SparsePages) {
-        21
-    } else {
-        9
-    };
-    let values = (i32::try_from(initial.len()).unwrap()..end).collect::<Vec<_>>();
-    let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-    append(&mut store, &mut state, &values, phase);
-    let expected = if phase == 4 {
-        initial
-            .iter()
-            .copied()
-            .chain(values.iter().copied())
-            .collect::<Vec<_>>()
-    } else {
-        initial
-    };
-    let file = File::from_bytes(store.data.clone()).unwrap();
-    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), expected);
-    file.close().unwrap();
-    assert_eq!(
-        store.retired.len(),
-        usize::from(phase >= 2 && matches!(source, FixedSource::Allocated))
-    );
-    let mut store = WindowProbeStore::open(store.data);
-    let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-    append(&mut store, &mut state, &[99], 4);
-    let file = File::from_bytes(store.data).unwrap();
-    assert_eq!(
-        file.dataset("d").unwrap().read_i32().unwrap(),
-        expected.into_iter().chain([99]).collect::<Vec<_>>()
-    );
-    file.close().unwrap();
+    super::finite_interruptions::check(&bytes, widths, crate::ChunkIndex::FixedArray, initial, end);
 }
 
 #[rstest]
@@ -802,7 +774,7 @@ enum Stale {
     Width,
 }
 
-fn append(store: &mut WindowProbeStore, state: &mut LocatedState, values: &[i32], phase: u8) {
+fn append(store: &mut WindowProbeStore, state: &mut LocatedState, values: &[i32]) {
     let AppendIndex::Fixed(index) = &mut state.index else {
         panic!("expected a Fixed Array index")
     };
@@ -818,7 +790,7 @@ fn append(store: &mut WindowProbeStore, state: &mut LocatedState, values: &[i32]
             state.fill.pattern(state.element_size),
         )
         .unwrap();
-    index.apply(store, plan, phase).unwrap();
+    index.apply(store, plan, 4).unwrap();
 }
 
 pub(super) fn fixture(
