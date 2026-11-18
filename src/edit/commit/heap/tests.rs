@@ -25,6 +25,19 @@ use crate::writer::FileBuilder;
 
 use super::*;
 
+/// Applies all collection plans while retaining undo for the enclosing unpublished commit.
+///
+/// The unpublished fixture shares the prior descriptor entries with these moves.
+fn rootless(engine: &mut WriteEngine, plans: &[GlobalHeapCompaction]) -> Result<(), Error> {
+    engine.context.allocations.before_reference()?;
+    JournalScope::run_rootless(engine, |journal| {
+        for plan in plans {
+            apply(journal, plan)?;
+        }
+        Ok(())
+    })
+}
+
 #[rstest]
 #[case::unchanged(&[])]
 #[case::first(&[1])]
