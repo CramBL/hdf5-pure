@@ -113,59 +113,11 @@ fn unallocated_finite_chunks_are_bounded_before_materialization(
 fn single_chunk_interruptions_preserve_the_published_prefix(
     #[case] offsets: OffsetWidth,
     #[case] lengths: LengthWidth,
-    #[values(1, 2, 3, 4)] phase: u8,
     #[values(false, true)] filtered: bool,
 ) {
-    let mut store = fixture(FormatWidths { offsets, lengths }, filtered);
-    let address = dataset_address(&store);
-    let mut state = edit::locate_dataset_state(&store, address).unwrap();
-    let AppendIndex::Single(index) = &mut state.index else {
-        panic!("expected a Single Chunk index")
-    };
-    let plan = index
-        .plan(
-            &store,
-            &state.datatype,
-            &state.spatial,
-            state.pipeline.as_ref(),
-            LossyTailReencoding::Reject,
-            &i32_bytes(&[1]),
-            NonZeroU64::new(1).unwrap(),
-            state.fill.pattern(state.element_size),
-        )
-        .unwrap();
-    index.apply(&mut store, plan, phase).unwrap();
-    let expected = if phase == 4 { vec![0, 1] } else { vec![0] };
-    let file = File::from_bytes(store.data.clone()).unwrap();
-    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), expected);
-    file.close().unwrap();
-    assert_eq!(store.retired.len(), usize::from(phase >= 2));
-    let mut store = WindowProbeStore::open(store.data);
-    let mut state = edit::locate_dataset_state(&store, address).unwrap();
-    assert_eq!(state.index.current_dim(), expected.len().to_u64());
-    let AppendIndex::Single(index) = &mut state.index else {
-        panic!("expected a Single Chunk index")
-    };
-    let value = i32::try_from(expected.len()).unwrap();
-    let plan = index
-        .plan(
-            &store,
-            &state.datatype,
-            &state.spatial,
-            state.pipeline.as_ref(),
-            LossyTailReencoding::Reject,
-            &i32_bytes(&[value]),
-            NonZeroU64::new(1).unwrap(),
-            state.fill.pattern(state.element_size),
-        )
-        .unwrap();
-    index.apply(&mut store, plan, 4).unwrap();
-    let file = File::from_bytes(store.data).unwrap();
-    assert_eq!(
-        file.dataset("d").unwrap().read_i32().unwrap(),
-        (0..=value).collect::<Vec<_>>()
-    );
-    file.close().unwrap();
+    let widths = FormatWidths { offsets, lengths };
+    let bytes = super::finite_interruptions::allocated(widths, 4, filtered);
+    super::finite_interruptions::check(&bytes, widths, crate::ChunkIndex::SingleChunk, &[0], 2);
 }
 
 #[rstest]

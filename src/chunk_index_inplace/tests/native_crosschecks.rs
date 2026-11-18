@@ -813,16 +813,21 @@ fn single_chunk_appends_preserve_native_values_and_widths(
 }
 
 #[rstest]
-#[case::before_extent(2)]
-#[case::after_extent(4)]
 fn finite_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(
-    #[case] phase: u8,
     #[values(FiniteChunkIndex::Fixed, FiniteChunkIndex::Single)] kind: FiniteChunkIndex,
 ) {
+    use super::finite_interruptions::{chunk_bytes, chunk_storage, storage_settings};
+    use test_util::disk_log;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lossy.h5");
+    let replay = directory.path().join("lossy-replay.h5");
+    let expected = [1.234_f32, 2.345, 3.456, 4.567];
     let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(storage_settings());
     builder
         .create_dataset("d")
-        .with_f32_data(&[1.234])
+        .with_f32_data(&expected[..1])
         .with_maxshape(&[MaxExtent::Fixed(kind.maximum())])
         .with_create_properties(
             crate::DatasetCreateProperties::new()
@@ -830,81 +835,98 @@ fn finite_chunk_lossy_completion_preserves_raw_prefix_until_extent_publication(
                 .with_scale_offset(crate::ScaleOffset::FloatDScale(2))
                 .with_partial_edge_filtering(crate::PartialEdgeFiltering::Skip),
         );
-    let mut store = WindowProbeStore::open(builder.finish().unwrap());
-    let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-    let raw = [2.345_f32, 3.456, 4.567]
+    builder.write(&path).unwrap();
+    let file = super::append_records::open(&path);
+    let mut image = fs::read(&path).unwrap();
+    let mut target = file.dataset("d").unwrap();
+    let index = match kind {
+        FiniteChunkIndex::Fixed => crate::ChunkIndex::FixedArray,
+        FiniteChunkIndex::Single => crate::ChunkIndex::SingleChunk,
+    };
+    assert_eq!(target.chunk_index().unwrap(), Some(index));
+    let predecessor = chunk_storage(&target.chunks().unwrap()[0]);
+    disk_log::start();
+    target.append(&expected[1..]).unwrap();
+    let operations = disk_log::take();
+    drop(target);
+    let free = file.reusable_free_sections().unwrap();
+    let completed = fs::read(&path).unwrap();
+    file.close().unwrap();
+
+    let raw_bytes = expected
         .into_iter()
         .flat_map(f32::to_le_bytes)
         .collect::<Vec<_>>();
-    match &mut state.index {
-        AppendIndex::Single(index) => {
-            let plan = index
-                .plan(
-                    &store,
-                    &state.datatype,
-                    &state.spatial,
-                    state.pipeline.as_ref(),
-                    LossyTailReencoding::Reject,
-                    &raw,
-                    NonZeroU64::new(3).unwrap(),
-                    state.fill.pattern(state.element_size),
-                )
-                .unwrap();
-            index.apply(&mut store, plan, phase).unwrap();
+    let mut states = Vec::new();
+    let mut intermediate = None;
+    for operation in operations {
+        operation.apply(&mut image);
+        let file = PureFile::from_bytes(image.clone()).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        let chunks = dataset.chunks().unwrap();
+        let [chunk] = chunks.as_slice() else {
+            panic!("expected one chunk");
+        };
+        let values = dataset.read_f32().unwrap();
+        let state = (values.len(), chunk.filter_mask().raw_bits());
+        let storage = chunk_storage(chunk);
+        match state {
+            (1, 0) => assert_eq!(storage, predecessor),
+            (1 | 4, 1) => {
+                assert_ne!(storage, predecessor);
+                assert_eq!(chunk_bytes(&image, chunk), raw_bytes);
+                assert_eq!(*intermediate.get_or_insert(storage), storage);
+            }
+            (4, 0) => {
+                assert_ne!(storage, predecessor);
+                assert_ne!(Some(storage), intermediate);
+                assert!(
+                    free.sections()
+                        .iter()
+                        .all(|section| !section.range().overlaps(storage))
+                );
+            }
+            _ => panic!("unexpected extent and mask {state:?}"),
         }
-        AppendIndex::Fixed(index) => {
-            let plan = index
-                .plan(
-                    &store,
-                    &state.datatype,
-                    &state.spatial,
-                    state.pipeline.as_ref(),
-                    LossyTailReencoding::Reject,
-                    &raw,
-                    NonZeroU64::new(3).unwrap(),
-                    state.fill.pattern(state.element_size),
-                )
-                .unwrap();
-            index.apply(&mut store, plan, phase).unwrap();
+        assert_lossy_completion_values(&values, &expected, state);
+        if states.last() != Some(&state) {
+            states.push(state);
+            fs::write(&replay, &image).unwrap();
+            let native = file::libhdf5_open(&replay);
+            let values = native.dataset("d").unwrap().read_raw::<f32>().unwrap();
+            assert_lossy_completion_values(&values, &expected, state);
+            native.close().unwrap();
         }
-        _ => panic!("expected a finite chunk index"),
     }
-    assert_eq!(store.retired.len(), if phase == 4 { 2 } else { 1 });
-    assert_eq!(
-        *store.allocations.borrow(),
-        [AllocationClass::Raw, AllocationClass::Raw]
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("lossy-single.h5");
-    fs::write(&path, &store.data).unwrap();
-    let native = file::libhdf5_open(&path);
-    let native_values = native.dataset("d").unwrap().read_raw::<f32>().unwrap();
-    native.close().unwrap();
-    let file = crate::File::from_bytes(store.data).unwrap();
-    let actual = file.dataset("d").unwrap().read_f32().unwrap();
-    if phase == 4 {
-        assert_eq!(native_values.len(), 4);
+    assert_eq!(states, [(1, 0), (1, 1), (4, 1), (4, 0)]);
+    assert_eq!(image, completed);
+    for retired in [predecessor, intermediate.unwrap()] {
         assert!(
-            native_values
+            free.sections()
                 .iter()
-                .zip([1.234_f32, 2.345, 3.456, 4.567])
-                .all(|(actual, expected)| (actual - expected).abs() < 0.011),
-            "{native_values:?}"
+                .any(|section| section.range().contains(retired))
         );
-        assert_eq!(actual.len(), 4);
+    }
+    let native = file::libhdf5_open(&path);
+    let values = native.dataset("d").unwrap().read_raw::<f32>().unwrap();
+    assert_lossy_completion_values(&values, &expected, (4, 0));
+    native.close().unwrap();
+}
+
+fn assert_lossy_completion_values(values: &[f32], expected: &[f32; 4], state: (usize, u32)) {
+    let (len, mask) = state;
+    assert_eq!(values.len(), len);
+    if state == (4, 0) {
         assert!(
-            actual
+            values
                 .iter()
-                .zip([1.234_f32, 2.345, 3.456, 4.567])
+                .zip(expected)
                 .all(|(actual, expected)| (actual - expected).abs() < 0.011),
-            "{actual:?}"
+            "{values:?}"
         );
     } else {
-        assert_eq!(actual, [1.234]);
-        assert_eq!(native_values, [1.234]);
+        assert_eq!(values, &expected[..len], "filter mask {mask}");
     }
-    file.close().unwrap();
-    directory.close().unwrap();
 }
 
 #[derive(Clone, Copy)]
