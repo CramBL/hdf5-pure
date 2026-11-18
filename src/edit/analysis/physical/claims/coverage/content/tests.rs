@@ -1,5 +1,4 @@
 use core::cell::Cell;
-use core::num::NonZeroU8;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,7 +28,7 @@ use crate::{File, FileBuilder, UserblockSize};
 #[case::buffer_start(511, 16_385, Some(8_192))]
 #[case::last(1, 16_385, Some(16_384))]
 #[case::address_limit(u64::MAX - 8_193, 8_193, None)]
-fn content_observations_keep_zero_prefixes_and_unexamined_suffixes(
+fn residual_scan_stops_at_the_first_nonzero_batch(
     #[case] start: u64,
     #[case] length: u64,
     #[case] nonzero: Option<u64>,
@@ -42,57 +41,30 @@ fn content_observations_keep_zero_prefixes_and_unexamined_suffixes(
     };
     assert_eq!(observed.range(), domain);
     let expected_calls = nonzero.map_or(length.div_ceil(8_192), |at| at / 8_192 + 1);
-    assert_eq!(
-        (observed.read_calls(), observed.requested_bytes()),
-        (expected_calls, (expected_calls * 8_192).min(length))
-    );
-    match nonzero {
-        None => {
-            assert_eq!(observed.outcome(), &ResidualOutcome::AllZero);
-            assert_eq!(observed.zero_prefix(), domain);
-            assert_eq!(observed.unexamined(), range(start + length, 0));
-        }
-        Some(at) => {
-            assert_eq!(
-                observed.outcome(),
-                &ResidualOutcome::NonZero {
-                    address: PhysicalAddress::new(start + at),
-                    value: NonZeroU8::new(0x5a).unwrap()
-                }
-            );
-            assert_eq!(observed.zero_prefix(), range(start, at));
-            assert_eq!(
-                observed.unexamined(),
-                range(start + at + 1, length - at - 1)
-            );
-        }
-    }
     let (calls, bytes, peak) = source.work.get();
     assert_eq!(
         (calls, bytes),
-        (observed.read_calls(), observed.requested_bytes())
+        (expected_calls, (expected_calls * 8_192).min(length))
     );
+    let outcome = if nonzero.is_some() {
+        ResidualOutcome::NonZero
+    } else {
+        ResidualOutcome::AllZero
+    };
+    assert_eq!(observed.outcome(), &outcome);
     assert!(peak <= READ_BUFFER_LEN);
 }
 
 #[test]
-fn read_failures_keep_completed_prefixes_and_other_intervals() {
+fn failed_reads_leave_later_intervals_independent() {
     let source = SyntheticSource::new(20_003, None, Some(8_192));
     let contents =
         ResidualContents::read(&physical(&source), &[range(0, 16_387), range(20_000, 3)]).unwrap();
     let [failed, complete] = contents.intervals() else {
         panic!("expected two residual intervals");
     };
-    assert_eq!(
-        failed.outcome(),
-        &ResidualOutcome::ReadFailed(FormatError::Source("injected residual read failure".into()))
-    );
-    assert_eq!(failed.zero_prefix(), range(0, 8_192));
-    assert_eq!(failed.unexamined(), range(8_192, 8_195));
-    assert_eq!((failed.read_calls(), failed.requested_bytes()), (2, 16_384));
+    assert_eq!(failed.outcome(), &ResidualOutcome::ReadFailed);
     assert_eq!(complete.outcome(), &ResidualOutcome::AllZero);
-    assert_eq!(complete.zero_prefix(), range(20_000, 3));
-    assert_eq!(complete.unexamined(), range(20_003, 0));
     assert_eq!(source.work.get(), (3, 16_387, 8_192));
 }
 
@@ -111,14 +83,7 @@ fn supported_headers_at_unaligned_and_buffer_boundaries_remain_nonzero(
     let source = BytesSource::new(&bytes);
     let contents =
         ResidualContents::read(&physical(&source), &[range(0, bytes.len() as u64)]).unwrap();
-    assert_eq!(contents.intervals()[0].zero_prefix(), range(0, at as u64));
-    assert_eq!(
-        contents.intervals()[0].outcome(),
-        &ResidualOutcome::NonZero {
-            address: PhysicalAddress::new(at as u64),
-            value: NonZeroU8::new(header[0]).unwrap()
-        }
-    );
+    assert_eq!(contents.intervals()[0].outcome(), &ResidualOutcome::NonZero);
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -129,7 +94,8 @@ fn residual_reads_bound_scratch_and_retained_state(#[case] length: u64) {
     use test_util::allocation;
 
     let source = SyntheticSource::new(length, None, None);
-    let (contents, measured) = allocation::measure("residual_content_scan", || {
+    let name = format!("residual_content_scan_{length}");
+    let (contents, measured) = allocation::measure(&name, || {
         ResidualContents::read(&physical(&source), &[range(0, length)]).unwrap()
     });
     assert_eq!(contents.intervals()[0].outcome(), &ResidualOutcome::AllZero);
@@ -145,8 +111,8 @@ fn residual_reads_bound_scratch_and_retained_state(#[case] length: u64) {
             && measured.live_bytes < 4_096,
         "{measured}"
     );
-    let (control, positive) =
-        allocation::measure("residual_content_control", || vec![0_u8; 1_048_576]);
+    let name = format!("residual_content_control_{length}");
+    let (control, positive) = allocation::measure(&name, || vec![0_u8; 1_048_576]);
     assert_eq!(control.len(), 1_048_576);
     assert!(positive.bytes >= 1_048_576);
 }
@@ -170,7 +136,6 @@ fn phase_content_queries_skip_numeric_payloads_and_reexamine_changed_bytes(#[cas
         ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address).unwrap();
     let source = phase.reconstruction_source(&engine, root).unwrap();
     let coverage = phase.physical_coverage(&source).unwrap();
-    assert!(coverage.content.is_none());
     let ranges = coverage.residuals().to_vec();
     assert_eq!(ranges.len(), 1);
     calls.store(0, Ordering::Relaxed);
@@ -191,22 +156,24 @@ fn phase_content_queries_skip_numeric_payloads_and_reexamine_changed_bytes(#[cas
         ranges[0].length().div_ceil(8_192)
     );
     assert!(requested_bytes.load(Ordering::Relaxed) < 4_096);
-    let pointer = core::ptr::from_ref(contents);
-    assert_eq!(
-        core::ptr::from_ref(phase.residual_content(&source).unwrap()),
-        pointer
-    );
+    let assert_cached_content = |contents: &ResidualContents| {
+        let [entry] = contents.intervals() else {
+            panic!("expected one residual interval");
+        };
+        assert_eq!(entry.range(), ranges[0]);
+        assert_eq!(entry.outcome(), &ResidualOutcome::AllZero);
+    };
+    let before = calls.load(Ordering::Relaxed);
+    assert_cached_content(phase.residual_content(&source).unwrap());
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let ((), cached) = test_util::allocation::measure("residual_content_cached", || {
-            assert_eq!(
-                core::ptr::from_ref(phase.residual_content(&source).unwrap()),
-                pointer
-            );
+        let name = format!("residual_content_cached_{base}");
+        let ((), cached) = test_util::allocation::measure(&name, || {
+            assert_cached_content(phase.residual_content(&source).unwrap());
         });
         assert_eq!((cached.blocks, cached.bytes), (0, 0));
     }
-    let before = calls.load(Ordering::Relaxed);
+    assert_eq!(calls.load(Ordering::Relaxed), before);
     let mut foreign = AnalysisPhase::new(&engine);
     let foreign_source = foreign.reconstruction_source(&engine, root).unwrap();
     let Error::Format(error) = phase.residual_content(&foreign_source).err().unwrap() else {
@@ -233,13 +200,7 @@ fn phase_content_queries_skip_numeric_payloads_and_reexamine_changed_bytes(#[cas
         "{error:?}"
     );
     let contents = changed.residual_content(&fresh).unwrap();
-    assert_eq!(
-        contents.intervals()[0].outcome(),
-        &ResidualOutcome::NonZero {
-            address: ranges[0].start(),
-            value: NonZeroU8::new(0x5a).unwrap()
-        }
-    );
+    assert_eq!(contents.intervals()[0].outcome(), &ResidualOutcome::NonZero);
     drop(changed);
     engine
         .image

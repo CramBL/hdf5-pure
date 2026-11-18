@@ -151,8 +151,8 @@ impl OriginalStorage {
     ) -> Result<(Vec<FileRange>, PhysicalAddress), Error> {
         let coverage = phase.physical_coverage(source)?;
         let conflict = coverage.conflict();
-        let beyond_source = coverage.beyond_source().first().copied();
-        let beyond_allocation = coverage.beyond_eoa().first().copied();
+        let beyond_source = coverage.beyond_source();
+        let beyond_allocation = coverage.beyond_eoa();
         let residuals = if retain_unobserved {
             coverage.residuals().to_vec()
         } else {

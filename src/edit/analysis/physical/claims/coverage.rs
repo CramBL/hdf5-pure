@@ -50,27 +50,24 @@ impl AnalysisPhase<'_> {
     }
 }
 
-/// Normalized claim intervals, source gaps, and independent bounds observations.
+/// Disjoint residual intervals and witnesses of conflicting or out-of-bounds claims.
 ///
-/// Intervals are ordered and disjoint. Adjacent claims share one covered interval. Claim ends
-/// beyond the physical source remain in the covered intervals. Residual intervals lie within the
-/// physical source and describe bytes outside every recorded claim, regardless of support problems.
-/// A residual interval is not evidence that its bytes are free.
+/// Residual intervals lie within the physical source and describe bytes outside every
+/// recorded claim. Reuse requires independent evidence.
 pub(in crate::edit) struct PhysicalCoverage {
-    covered: Vec<FileRange>,
     residuals: Vec<FileRange>,
     /// One pair of conflicting indices into the original claim slice.
     conflict: Option<[usize; 2]>,
-    /// Original claim indices whose ends exceed the physical source length.
-    beyond_source: Vec<usize>,
-    /// Original claim indices whose ends exceed the recorded end of allocation.
-    beyond_eoa: Vec<usize>,
+    /// First original claim index in sweep order beyond the physical source.
+    beyond_source: Option<usize>,
+    /// First original claim index in sweep order beyond the recorded end of allocation.
+    beyond_eoa: Option<usize>,
     /// Byte observations collected lazily over the residual intervals.
     content: Option<ResidualContents>,
 }
 
 impl PhysicalCoverage {
-    /// Normalizes intervals and records one conflicting pair of claim indices.
+    /// Normalizes intervals and records the first witnesses of overlap and bounds violations.
     ///
     /// Permits extension or manager observations contained in a recorded metadata capacity.
     /// Overlapping observations of other kinds, including duplicate manager observations, conflict.
@@ -85,11 +82,10 @@ impl PhysicalCoverage {
         logical_eoa: u64,
     ) -> Result<Self, FormatError> {
         let mut coverage = Self {
-            covered: Vec::new(),
             residuals: Vec::new(),
             conflict: None,
-            beyond_source: Vec::new(),
-            beyond_eoa: Vec::new(),
+            beyond_source: None,
+            beyond_eoa: None,
             content: None,
         };
         let mut ordered = (0..claims.len()).collect::<Vec<_>>();
@@ -103,14 +99,15 @@ impl PhysicalCoverage {
             )
         });
         let mut furthest: [Option<usize>; 3] = [None; 3];
+        let mut covered: Vec<FileRange> = Vec::new();
         for index in ordered {
             let claim = claims[index];
             let range = claim.range();
             if range.end().get() > physical_size {
-                coverage.beyond_source.push(index);
+                coverage.beyond_source.get_or_insert(index);
             }
             if range.end().get() > logical_eoa {
-                coverage.beyond_eoa.push(index);
+                coverage.beyond_eoa.get_or_insert(index);
             }
             if range.length() == 0 {
                 continue;
@@ -128,7 +125,7 @@ impl PhysicalCoverage {
             if slot.is_none_or(|previous| claims[previous].range().end() < range.end()) {
                 *slot = Some(index);
             }
-            if let Some(previous) = coverage.covered.last_mut()
+            if let Some(previous) = covered.last_mut()
                 && range.start() <= previous.end()
             {
                 *previous = FileRange::new(
@@ -136,11 +133,11 @@ impl PhysicalCoverage {
                     previous.end().max(range.end()).get() - previous.start().get(),
                 )?;
             } else {
-                coverage.covered.push(range);
+                covered.push(range);
             }
         }
         let mut cursor = 0;
-        for range in &coverage.covered {
+        for range in &covered {
             let start = range.start().get().min(physical_size);
             if cursor < start {
                 coverage.residuals.push(FileRange::new(
@@ -159,11 +156,6 @@ impl PhysicalCoverage {
         Ok(coverage)
     }
 
-    /// Borrows the ordered union of nonempty recorded ranges, including out-of-source claims.
-    pub(in crate::edit) fn covered(&self) -> &[FileRange] {
-        &self.covered
-    }
-
     /// Borrows physical-source intervals outside the recorded union.
     pub(in crate::edit) fn residuals(&self) -> &[FileRange] {
         &self.residuals
@@ -177,14 +169,14 @@ impl PhysicalCoverage {
         self.conflict
     }
 
-    /// Borrows original claim indices whose ends exceed the physical source length.
-    pub(in crate::edit) fn beyond_source(&self) -> &[usize] {
-        &self.beyond_source
+    /// Returns the first original claim index in sweep order beyond the physical source.
+    pub(in crate::edit) fn beyond_source(&self) -> Option<usize> {
+        self.beyond_source
     }
 
-    /// Borrows original claim indices whose ends exceed the recorded end of allocation.
-    pub(in crate::edit) fn beyond_eoa(&self) -> &[usize] {
-        &self.beyond_eoa
+    /// Returns the first original claim index in sweep order beyond the recorded allocation end.
+    pub(in crate::edit) fn beyond_eoa(&self) -> Option<usize> {
+        self.beyond_eoa
     }
 }
 

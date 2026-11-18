@@ -47,9 +47,6 @@ mod counts;
 
 pub(super) mod inventory;
 
-#[cfg(test)]
-mod tests;
-
 /// A commit plan paired with owned application inputs from the same staged set.
 ///
 /// The editor borrows the staged edits during preflight. After success, original replacement
@@ -61,16 +58,6 @@ pub(super) struct PreparedCommit {
 }
 
 impl PreparedCommit {
-    /// Plans a commit, returning the original staged inputs on rejection.
-    ///
-    /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs
-    /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
-    /// and the preparation error.
-    #[cfg(test)]
-    pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
-        Self::from_plan(engine.plan_commit(&staged), staged)
-    }
-
     /// Returns the plan with the application inputs used to prepare it.
     pub(super) fn into_parts(self) -> (CommitPlan, StagedApply, OverwritePayloads) {
         let Self {
@@ -80,36 +67,6 @@ impl PreparedCommit {
         } = self;
         (plan, staged, overwrites)
     }
-
-    #[cfg(test)]
-    fn from_plan(plan: Result<CommitPlan, Error>, staged: StagedEdits) -> CommitPreparation {
-        match plan {
-            Ok(mut plan) => {
-                let (staged, writes) = staged.into_apply();
-                let mut overwrites = OverwritePayloads { writes };
-                plan.release_chunk_inputs(&mut overwrites);
-                CommitPreparation::Prepared(Self {
-                    plan,
-                    staged,
-                    overwrites,
-                })
-            }
-            Err(error) => CommitPreparation::Rejected { staged, error },
-        }
-    }
-}
-
-/// The result of commit preflight, with ownership for application or retry.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "returning rejected staging to the engine requires no heap allocation"
-)]
-#[cfg(test)]
-pub(super) enum CommitPreparation {
-    /// A plan paired with the owned inputs needed for application.
-    Prepared(PreparedCommit),
-    /// The original staged inputs and the error that prevented preparation.
-    Rejected { staged: StagedEdits, error: Error },
 }
 
 /// Stores prepared writes before application consumes the staged inputs.
@@ -401,55 +358,19 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Prepares edits while retaining the staged inputs for retry on rejection.
+    /// Prepares edits and collects original storage evidence when heap parents are known.
     ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] if an edit cannot
-    /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
-    /// error if the current file or a staged operation cannot be inspected.
-    #[cfg(test)]
-    fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
-        self.plan_commit_with_inventory(staged, false)
-            .map(|(plan, _)| plan)
-    }
-
-    /// Prepares edits with optional original observations from the same source phase.
-    ///
-    /// Collects observations only for tree plans when `capture` is true. Ordinary preparation
-    /// passes false. Count and ownership outcomes are retained in [`inventory::OriginalEdits`],
-    /// and predecessor outcomes in [`inventory::dispositions::ReconstructionDispositions`].
-    /// Captures original storage exclusions and reclamation spans with the same tree inputs.
-    ///
-    /// # Errors
-    ///
-    /// Returns the planning errors described by [`Self::plan_commit`].
-    #[cfg(test)]
-    fn plan_commit_with_inventory(
-        &mut self,
-        staged: &StagedEdits,
-        capture: bool,
-    ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
-        self.plan_commit_inner(staged, capture, false, false)
-    }
-
-    /// Prepares edits with independent choices for original observations and count projections.
-    ///
-    /// With `counted`, applies local tree-count projections and uses eligible deletion allocations
-    /// for reference screening and retirement. Incomplete count evidence withholds deletion
-    /// allocations and collection candidates. With `capture`, retains original observations from
-    /// the same source phase. In-place-only plans skip both operations.
+    /// Copy and deletion plans project local counts and check original retirement constraints.
+    /// In-place-only edits skip tree preparation.
     ///
     /// # Errors
     ///
     /// Returns planning, source-read, and [`CountedPreparation::prepare`] errors.
-    fn plan_commit_inner(
+    fn plan_commit(
         &mut self,
         staged: &StagedEdits,
-        capture: bool,
-        counted: bool,
-        automatic_capture: bool,
     ) -> Result<(CommitPlan, Option<inventory::OriginalPreparation>), Error> {
+        let counted = !staged.deletes().is_empty() || !staged.copies().is_empty();
         self.check_libver_admits(staged.datasets().iter().map(|(_, dataset)| dataset))?;
         self.preflight_narrow_references()?;
         let mut analysis = AnalysisPhase::new(self);
@@ -512,7 +433,7 @@ impl WriteEngine {
             .removed_links(nodes.values().flat_map(|node| &node.prepared.deletes))?
             .targets();
         collections.extend(analysis.deleted_collections(&targets))?;
-        let capture = capture || (automatic_capture && collections.has_known_parents());
+        let capture = collections.has_known_parents();
         let mut headers = headers;
         headers
             .keys

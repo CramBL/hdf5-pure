@@ -18,17 +18,57 @@ use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
+use test_util::global_heap;
 use test_util::snapshot::text::Report;
 use test_util::snapshot::text::Value;
+use test_util::widths::Widths;
 use test_util_hdf5::file_space::persisted::PersistedStrategy;
 use test_util_hdf5::file_space_oracle;
 use test_util_hdf5::global_heap::attributes as fixture;
+use test_util_hdf5::global_heap::attributes::Edit;
 use test_util_hdf5::global_heap::attributes::Label;
 use test_util_hdf5::global_heap::attributes::Owner;
 use test_util_hdf5::global_heap::attributes::Storage;
 use test_util_hdf5::storage;
 
 use crate::test_util::file_space;
+
+#[rstest]
+#[case::compact(Storage::Compact)]
+#[case::dense(Storage::Dense)]
+fn native_attribute_edits_retire_complete_original_collections(
+    #[case] storage: Storage,
+    #[values(Owner::Dataset, Owner::Group, Owner::Root)] owner: Owner,
+    #[values(Edit::Numeric, Edit::Remove, Edit::Variable)] edit: Edit,
+) {
+    let path = test_util::temp::temp_path("native-attribute-collection.h5");
+    fixture::write(&path, owner, storage);
+    let original = std::fs::read(&path).unwrap();
+    let ranges = global_heap::collection_ranges(&original, Widths::EIGHT);
+    let [collection] = ranges.as_slice() else {
+        panic!("expected one original collection: {ranges:?}");
+    };
+    assert!(collection.end < u64::try_from(original.len()).unwrap());
+    assert_storage(&path, owner, storage);
+    let file = File::open_rw(&path).unwrap();
+    match edit {
+        Edit::Numeric => set(&file, owner, AttrValue::I64(19)),
+        Edit::Remove => remove(&file, owner),
+        Edit::Variable => set(&file, owner, AttrValue::VarLenAsciiString("after".into())),
+    }
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    let free = file.reusable_free_sections().unwrap();
+    assert!(
+        free.sections().iter().any(|section| {
+            section.address().get() <= collection.start
+                && collection.end <= section.end_address().get()
+        }),
+        "original collection {collection:?} is not reusable in {free:?}"
+    );
+    file.close().unwrap();
+    fixture::assert_values(&path, owner, storage, edit);
+}
 
 #[rstest]
 fn attribute_collection_cycles_reuse_storage_through_persistent_reopen(
