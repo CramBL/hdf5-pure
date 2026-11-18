@@ -79,7 +79,20 @@ pub fn libhdf5_create_page(
     userblock: UserblockSize,
     persist: bool,
 ) -> libhdf5::File {
-    libhdf5::File::with_options()
+    libhdf5_page_builder(page, userblock, persist)
+        .create(path)
+        .unwrap_or_else(|error| panic!("create {path:?}: {error}"))
+}
+
+/// Configures a native PAGE file builder with a 1.10 lower format bound and threshold 1.
+#[cfg(feature = "__libhdf5-1.10")]
+pub fn libhdf5_page_builder(
+    page: FileSpacePageSize,
+    userblock: UserblockSize,
+    persist: bool,
+) -> libhdf5::FileBuilder {
+    let mut builder = libhdf5::File::with_options();
+    builder
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties
@@ -90,9 +103,8 @@ pub fn libhdf5_create_page(
                     persist,
                     threshold: 1,
                 })
-        })
-        .create(path)
-        .unwrap_or_else(|error| panic!("create {path:?}: {error}"))
+        });
+    builder
 }
 
 /// Opens an existing file for native read and write observations.
