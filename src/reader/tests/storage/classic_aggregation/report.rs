@@ -49,21 +49,12 @@ pub(super) fn write_page_step(
         free_space_manager_space,
         reusable_free_space,
         unclassified_space,
-        analysis_complete,
         trailing_slack_space,
     } = ownership;
     tables.table(
         "Allocation summary (bytes)",
-        ["Physical size", "Logical size", "Analysis"],
-        [[
-            Value::Number(physical_size),
-            Value::Number(logical_size),
-            Value::text(if analysis_complete {
-                "complete"
-            } else {
-                "incomplete"
-            }),
-        ]],
+        ["Physical size", "Logical size"],
+        [[Value::Number(physical_size), Value::Number(logical_size)]],
     );
     let mut empty = Vec::new();
     tables.table(

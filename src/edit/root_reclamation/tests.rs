@@ -25,7 +25,6 @@ use crate::image::ImageWork;
 use crate::image::MirrorImage;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
-use crate::reader::test_util as reader_test_util;
 use crate::source::Source;
 use crate::type_builders::DatasetBuilder;
 
@@ -81,8 +80,6 @@ fn fixed_width_root_updates_reach_stable_physical_length(
             AttrValue::I64(generation)
         );
         lengths.push(fs::metadata(&path).unwrap().len());
-        let ownership = reader_test_util::ownership(&file).unwrap();
-        assert!(ownership.analysis_complete);
         let sections = file.reusable_free_sections().unwrap();
         let root_addr =
             file.superblock().base_address.get() + file.superblock().root_group_address.get();
@@ -397,11 +394,8 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
     );
     drop(file);
     let file = File::open_rw(&path).unwrap();
-    assert!(
-        reader_test_util::ownership(&file)
-            .unwrap()
-            .analysis_complete
-    );
+    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 8_192]);
+    file.close().unwrap();
 }
 
 #[test]

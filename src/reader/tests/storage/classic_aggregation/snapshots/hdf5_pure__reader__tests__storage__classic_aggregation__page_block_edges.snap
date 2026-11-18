@@ -12,9 +12,9 @@ Operation
      1  Create dataset  "s0"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -45,9 +45,9 @@ Operation
      2  Create dataset  "huge"         1,000
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -81,9 +81,9 @@ Operation
      3  Create dataset  "s1"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -121,9 +121,9 @@ Operation
      4  Create dataset  "m0"             100
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -163,9 +163,9 @@ Operation
      5  Create dataset  "m1"             100
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -207,9 +207,9 @@ Operation
      6  Create dataset  "m2"             100
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -253,9 +253,9 @@ Operation
      7  Create dataset  "m3"             100
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category             Start     End  Length
@@ -301,9 +301,9 @@ Operation
      8  Create dataset  "m4"             100
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-         12,288        12,288  complete
+  Physical size  Logical size
+  -------------  ------------
+         12,288        12,288
 
 Allocation extents (bytes, exclusive end)
   Category              Start     End  Length

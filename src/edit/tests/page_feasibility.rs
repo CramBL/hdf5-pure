@@ -387,7 +387,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
         hdf5_pure_format::__private::serialize_superblock(engine.context.superblock())
             .unwrap()
             .len();
-    let owned = engine.space_ownership().unwrap();
+    let owned = engine.storage_snapshot();
     let boundary = original.len() as u64 - userblock;
     let raw_pages = owned
         .live_raw_space
@@ -408,7 +408,6 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     let index_spans = engine
         .chunked_index_spans(ObjectId::new(PhysicalAddress::new(chunks_addr)))
         .unwrap();
-    assert!(owned.analysis_complete);
     assert_eq!(index_spans.len(), 2);
     let metadata_pages = owned
         .live_metadata_space
@@ -1273,9 +1272,7 @@ fn invalid_page_eoa_is_rejected_before_mutation(#[case] eoa: u64) {
     let encoded = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
     bytes[..encoded.len()].copy_from_slice(&encoded);
     fs::write(&path, &bytes).unwrap();
-    let error = WriteEngine::open_with_locking(&path, FileLocking::Enabled)
-        .err()
-        .unwrap();
+    let error = File::open_rw(&path).unwrap_err();
     if eoa == 1 {
         assert!(
             matches!(

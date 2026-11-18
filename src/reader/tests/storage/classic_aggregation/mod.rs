@@ -48,7 +48,6 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     drop(file);
     let file = File::open_rw(&path).unwrap();
     let before = reader_test_util::ownership(&file).unwrap();
-    assert!(before.analysis_complete);
     assert_eq!(before.physical_size, before.logical_size);
     assert_eq!(before.trailing_slack_space, []);
     assert_eq!(!before.free_space_manager_space.is_empty(), has_manager);
@@ -76,11 +75,6 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
                     && extent.end <= section.end_address().get())
         );
     }
-    assert!(
-        reader_test_util::ownership(&file)
-            .unwrap()
-            .analysis_complete
-    );
     file.close().unwrap();
     let file = File::open_rw_with_options(&path, properties).unwrap();
     file.root()
@@ -98,7 +92,6 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     assert_eq!(file.dataset("added").unwrap().read_i32().unwrap(), [23; 16]);
     assert_eq!(file.dataset("third").unwrap().read_i32().unwrap(), [29; 16]);
     let after = reader_test_util::ownership(&file).unwrap();
-    assert!(after.analysis_complete);
     assert_eq!(after.physical_size, after.logical_size);
     assert_eq!(after.trailing_slack_space, []);
 }
@@ -255,7 +248,6 @@ fn staged_aggr_allocations_reuse_session_windows(
     file.commit().unwrap();
     let first = reader_test_util::contiguous_extent(&file, "first");
     let ownership = reader_test_util::ownership(&file).unwrap();
-    assert!(ownership.analysis_complete);
     assert_eq!(ownership.physical_size, ownership.logical_size);
     assert_eq!(ownership.free_space_manager_space, []);
     assert_eq!(ownership.trailing_slack_space, []);
