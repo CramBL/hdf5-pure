@@ -2696,4 +2696,4 @@ impl ChunkProvider for PreparedChunkProvider<'_> {
 }
 
 #[cfg(test)]
-pub(in crate::edit) mod tests;
+mod tests;

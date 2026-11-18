@@ -67,7 +67,7 @@ use crate::writer::FileBuilder;
 
 mod contiguous;
 mod fragmented;
-pub(in crate::edit) mod lifecycle;
+mod lifecycle;
 mod providers;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod resources;
