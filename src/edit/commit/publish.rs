@@ -103,10 +103,8 @@ impl WriteEngine {
             Some(counts) => {
                 let end = PhysicalAddress::new(self.image.len());
                 counts
-                    .before_publication(self, pending)
-                    .map_err(Error::from)?
-                    .at_end(end)
-                    .map_err(|failure| Error::from(failure.error))?
+                    .before_publication(self, pending)?
+                    .at_end(end)?
                     .with_ordered_counts(relocations, complete)
             }
             None => self.publish_pending_tree_with_completion(pending, relocations, complete),

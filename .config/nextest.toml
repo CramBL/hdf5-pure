@@ -149,9 +149,8 @@ package(hdf5-pure-crosscheck) & (
     test(/^width_workload::/)
 ) | (package(hdf5-pure) & (
     test(/^edit::native_crosschecks::/) |
-    test(/^edit::analysis::deletions::counts::ownership::publication::tests::write::native_crosschecks::/) |
-    test(/^edit::analysis::deletions::counts::ownership::publication::tests::prepare::native_crosschecks::/) |
     test(/^edit::commit::heap::tests::native_crosschecks::/) |
+    test(/^edit::commit::public_counts::native_crosschecks::/) |
     test(/^edit::commit::public_heap_compaction::native_crosschecks::/) |
     test(/^edit::commit::plan::counts::tests::native_crosschecks::/) |
     test(/^edit::observations::tests::widths::native_crosschecks::/) |

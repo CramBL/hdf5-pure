@@ -12,6 +12,10 @@ use test_util_hdf5::global_heap_fixture::{Fixture, Form};
 use crate::{AttrValue, File, FileAccessProperties, FileLocking, MemoryStrategy};
 
 mod batch;
+mod continuation;
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
 mod page;
 mod postpublication;
 mod prepublication;
