@@ -54,8 +54,6 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
             topology,
             remaining,
             zero,
-            #[cfg(test)]
-            work,
         } = plan;
         let remaining = remaining
             .into_iter()
@@ -66,8 +64,6 @@ impl<'topology, 'source> SourceRemovalPlan<'topology, 'source> {
                 topology,
                 remaining,
                 zero,
-                #[cfg(test)]
-                work,
             },
         }))
     }

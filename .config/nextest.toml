@@ -152,7 +152,6 @@ package(hdf5-pure-crosscheck) & (
     test(/^edit::commit::heap::tests::native_crosschecks::/) |
     test(/^edit::commit::public_counts::native_crosschecks::/) |
     test(/^edit::commit::public_heap_compaction::native_crosschecks::/) |
-    test(/^edit::commit::plan::counts::tests::native_crosschecks::/) |
     test(/^edit::observations::tests::widths::native_crosschecks::/) |
     test(/^edit::attributes::native_crosschecks::/) |
     test(/^edit::dataset::native_crosschecks::/) |

@@ -69,15 +69,6 @@ impl<'source> ReferencedCounts<'source> {
     pub(in crate::edit) fn get(&self, object: ObjectId) -> Option<&ReferencedTarget<'source>> {
         self.targets.get(&object)
     }
-
-    /// Borrows targets in physical object-header address order.
-    pub(in crate::edit) fn targets(
-        &self,
-    ) -> impl Iterator<Item = (ObjectId, &ReferencedTarget<'source>)> {
-        self.targets
-            .iter()
-            .map(|(&object, target)| (object, target))
-    }
 }
 
 /// An original count observation paired with a positive prospective multiplicity.
