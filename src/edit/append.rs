@@ -347,8 +347,6 @@ impl WriteEngine {
     /// index block before linking the header from the layout message. Empty appends leave that
     /// storage unallocated.
     ///
-    /// Production callers pass 4 for `max_phase`. Crash tests stop at an earlier phase boundary.
-    ///
     /// # Errors
     ///
     /// Returns [`Error::AppendInPlaceUnsupported`] for conflicting element types, incompatible
@@ -361,7 +359,6 @@ impl WriteEngine {
         &mut self,
         target: AppendTarget<'_>,
         b: &AppendBuilder,
-        max_phase: u8,
     ) -> Result<(), Error> {
         self.context.allocations.available()?;
         if b.dt_conflict() {
@@ -369,7 +366,7 @@ impl WriteEngine {
                 "append mixes element types in one call; use one element type per append",
             ));
         }
-        self.append_inplace_bytes(target, b.options(), b.elem_dt(), b.raw(), max_phase)
+        self.append_inplace_bytes(target, b.options(), b.elem_dt(), b.raw())
     }
 
     /// Writes append batches from `raw` without accumulating an [`AppendBuilder`].
@@ -392,7 +389,6 @@ impl WriteEngine {
         options: AppendOptions,
         datatype: Option<&Datatype>,
         raw: &[u8],
-        max_phase: u8,
     ) -> Result<(), Error> {
         self.context.allocations.available()?;
         let oh_addr = self.append_prepare(target)?;
@@ -568,7 +564,7 @@ impl WriteEngine {
                             )
                             .into());
                         };
-                        index.apply(&mut store, plan, max_phase)
+                        index.apply(&mut store, plan)
                     }
                     ImmediatePlan::Single(plan) => {
                         let AppendIndex::Single(index) = &mut state.index else {
@@ -577,13 +573,12 @@ impl WriteEngine {
                             )
                             .into());
                         };
-                        index.apply(&mut store, plan, max_phase)
+                        index.apply(&mut store, plan)
                     }
                     ImmediatePlan::Extensible(plan) => chunk_index_inplace::apply_ea_append(
                         &mut store,
                         state.index.allocated_mut().map_err(as_inplace_error)?,
                         plan,
-                        max_phase,
                     ),
                 }
             })();
@@ -595,11 +590,6 @@ impl WriteEngine {
                 aggregation.publication_confirmed = false;
             }
             result.map_err(as_inplace_error)?;
-            if max_phase < 4 {
-                self.located.remove(&oh_addr);
-                // Each completed phase has issued its writes under either sync policy.
-                return Ok(());
-            }
             done += take;
         }
         Ok(())
@@ -623,25 +613,20 @@ impl WriteEngine {
         chunk_index_inplace::initialize_ea_index(&mut self.store(), oh_addr, index, initialization)
     }
 
-    /// Stops an immediate append at a durability phase boundary for crash tests.
+    /// Appends `i32` values to a named dataset.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`append_inplace_gathered`](Self::append_inplace_gathered).
     #[cfg(test)]
-    pub(super) fn append_inplace_i32_phased(
+    pub(super) fn append_inplace_i32(
         &mut self,
         dataset: &str,
         values: &[i32],
-        max_phase: u8,
     ) -> Result<(), Error> {
         let mut b = AppendBuilder::new();
         b.append_i32(values);
-        self.append_inplace_gathered(
-            AppendTarget::Path(&ObjectPathBuf::parse(dataset)),
-            &b,
-            max_phase,
-        )
+        self.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse(dataset)), &b)
     }
 
     /// Resolves an eligible append target and caches its metadata.

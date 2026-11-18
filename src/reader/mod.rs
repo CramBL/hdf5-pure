@@ -6322,7 +6322,7 @@ impl Dataset {
             let (bytes, datatype) = encoded?;
             let target = self.append_target()?;
             return self.file.with_engine_mut(Change::InPlace, |engine| {
-                engine.append_inplace_bytes(target, options, Some(&datatype), bytes, 4)
+                engine.append_inplace_bytes(target, options, Some(&datatype), bytes)
             });
         }
         self.append_batches(g, options, data.len() as u64, |b, r| {
@@ -6533,7 +6533,7 @@ impl Dataset {
     pub(crate) fn append_prebuilt(&mut self, b: &AppendBuilder) -> Result<(), Error> {
         let target = self.append_target()?;
         self.file.with_engine_mut(Change::InPlace, |engine| {
-            engine.append_inplace_gathered(target, b, 4)
+            engine.append_inplace_gathered(target, b)
         })
     }
 
@@ -6605,7 +6605,7 @@ impl Dataset {
                 return Err(error.into());
             }
             self.file.with_engine_mut(Change::InPlace, |engine| {
-                engine.append_inplace_gathered(target, &b, 4)
+                engine.append_inplace_gathered(target, &b)
             })?;
             dim += take;
             done += take;

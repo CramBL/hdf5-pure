@@ -339,11 +339,7 @@ fn page_buffered_index_creation_preserves_complete_extents(#[case] paged: bool) 
         let mut append = AppendBuilder::new();
         append.append_i32(data);
         engine
-            .append_inplace_gathered(
-                AppendTarget::Path(&ObjectPathBuf::parse("d")),
-                &append,
-                u8::MAX,
-            )
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append)
             .unwrap();
         let before = engine.disk_bytes().unwrap();
         drop(engine);

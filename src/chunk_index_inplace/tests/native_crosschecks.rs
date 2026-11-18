@@ -87,7 +87,7 @@ fn ea_publication_preserves_native_values_and_recorded_widths(
                 plan
             }
         };
-        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
+        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan).unwrap();
         let index = state.index.allocated().unwrap();
         assert_eq!(index.current_dim, u64::try_from(end).unwrap());
         assert_eq!(
@@ -525,7 +525,7 @@ fn append_fixed_until(store: &mut WindowProbeStore, expected: &mut Vec<i32>, end
             state.fill.pattern(state.element_size),
         )
         .unwrap();
-    index.apply(store, plan, 4).unwrap();
+    index.apply(store, plan).unwrap();
     expected.extend_from_slice(&values);
 }
 
@@ -756,7 +756,7 @@ fn single_chunk_appends_preserve_native_values_and_widths(
                 state.fill.pattern(state.element_size),
             )
             .unwrap();
-        index.apply(&mut store, plan, 4).unwrap();
+        index.apply(&mut store, plan).unwrap();
         expected.push(value);
         assert_eq!(state.index.current_dim(), expected.len().to_u64());
         assert_eq!(store.superblock.eof_address, store.data.len().to_u64());

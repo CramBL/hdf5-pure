@@ -324,19 +324,13 @@ impl FixedIndex {
     ///
     /// Rejects stale or foreign plans before allocation. Initializes missing index storage through
     /// the store's placement policy and confirms every allocation before linking references.
-    /// A `max_phase` below 2 stops after allocation confirmation. Below 4, stops after index
-    /// publication. At phase 4, also publishes the extent and any lossy completion replacement.
+    /// Publishes any final filtered replacement after the new extent.
     ///
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] for changed session, widths, base, fields, or source
     /// metadata. Propagates allocation, encoding, publication, and synchronization errors.
-    pub(crate) fn apply(
-        &mut self,
-        file: &mut impl Store,
-        plan: FixedAppend,
-        max_phase: u8,
-    ) -> Result<(), Error> {
+    pub(crate) fn apply(&mut self, file: &mut impl Store, plan: FixedAppend) -> Result<(), Error> {
         let FixedAppend {
             session,
             widths,
@@ -405,9 +399,6 @@ impl FixedIndex {
             .zip(completed.as_ref())
             .map(|(allocation, chunk)| confirmed_record(file, &publication, allocation, chunk))
             .transpose()?;
-        if max_phase < 2 {
-            return Ok(());
-        }
         if let Some(initialization) = initialization {
             self.publish_initialization(file, &publication, initialization)?;
         }
@@ -424,9 +415,6 @@ impl FixedIndex {
             }
         };
         publish_patches(file, patches, first_slot, &records)?;
-        if max_phase < 4 {
-            return Ok(());
-        }
         self.geometry
             .dimension
             .publish(file, &dimension[..usize::from(widths.lengths.get())])?;
