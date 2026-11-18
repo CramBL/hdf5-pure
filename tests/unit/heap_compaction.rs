@@ -18,10 +18,17 @@ use crate::{
 };
 use crate::{MemoryStrategy, SyncPolicy};
 
+#[path = "heap_compaction/buffering.rs"]
+mod buffering;
 #[path = "heap_compaction/progress.rs"]
 mod progress;
 #[path = "heap_compaction/restoration.rs"]
 mod restoration;
+
+test_util_hdf5::hdf5_1_10_tests! {
+    #[path = "heap_compaction/native_crosschecks.rs"]
+    mod native_crosschecks;
+}
 
 const HEADER: usize = 16;
 const RECORD: usize = 24;
@@ -486,7 +493,14 @@ fn successful_commit(
 }
 
 fn write_source(path: &Path) -> [u64; 3] {
+    write_source_with_gap(path, 0)
+}
+
+fn write_source_with_gap(path: &Path, first_parent: usize) -> [u64; 3] {
     let mut fixture = Fixture::new();
+    if first_parent != 0 {
+        fixture.image.place(first_parent - 1, &[0]);
+    }
     let parents = std::array::from_fn(|_| {
         fixture.collection(&[Object::new(7, b"removed"), Object::new(91, b"retained")])
     });
