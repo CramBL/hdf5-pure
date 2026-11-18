@@ -14,6 +14,8 @@ use crate::object_path::LinkNameBuf;
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
 
+pub(in crate::edit) mod lifecycle;
+
 #[derive(Clone, Copy)]
 pub(in crate::edit) enum Creation {
     Extensible(usize),
