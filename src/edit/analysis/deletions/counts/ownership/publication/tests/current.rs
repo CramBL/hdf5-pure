@@ -74,7 +74,7 @@ fn reads_reuse_the_acquired_range_and_delegate_only_uncovered_bytes(
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        view.retained_bytes(),
+        view.bytes.retained_bytes(),
         match backing {
             Backing::Borrowed => 0,
             Backing::Owned => 4,
@@ -178,13 +178,10 @@ fn acquisition_preserves_source_errors_and_rejects_mislocated_metadata() {
     };
     assert_eq!(error, FormatError::Source("injected read".into()));
     let source = MislocatedSource;
-    let Err(CurrentMetadataError::Range { expected, provided }) =
-        CurrentMetadata::new(&source, range(4, 4))
-    else {
-        panic!("expected physical-range mismatch")
-    };
-    assert_eq!(expected, range(4, 4));
-    assert_eq!(provided, range(5, 4));
+    assert!(matches!(
+        CurrentMetadata::new(&source, range(4, 4)),
+        Err(CurrentMetadataError::Range)
+    ));
 }
 
 #[rstest]
@@ -237,7 +234,7 @@ fn contained_views_and_buffered_reads_add_no_payload_allocations(#[case] backing
     assert_eq!(bytes.as_ref(), &DATA[5..7]);
     assert_eq!(bytes.as_ptr(), view.region().bytes()[1..].as_ptr());
     assert_eq!(measured.blocks, 0, "{measured}");
-    assert_eq!(bytes.retained_bytes(), view.retained_bytes());
+    assert_eq!(bytes.retained_bytes(), view.bytes.retained_bytes());
     assert!(source.calls.borrow().is_empty());
     let mut buffer = [0; 8];
     let name = format!("current-metadata-buffer-{backing:?}");
