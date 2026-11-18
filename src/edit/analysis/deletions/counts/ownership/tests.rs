@@ -615,67 +615,9 @@ fn fixture(path: &Path) -> (u64, u64) {
 }
 
 pub(super) fn fixture_with_base(path: &Path, userblock: UserblockSize) -> (u64, u64) {
-    fixture_with_storage(path, userblock, CountStorage::Header)
-}
-
-/// Writes counted objects and returns their stored header offsets.
-pub(super) fn fixture_with_storage(
-    path: &Path,
-    userblock: UserblockSize,
-    storage: CountStorage,
-) -> (u64, u64) {
-    write_count_fixture(Fixture::new(), path, userblock, storage)
-}
-
-/// Writes adjacent retirement allocations before the counted object storage.
-pub(super) fn fixture_with_retirements(
-    path: &Path,
-    userblock: UserblockSize,
-    storage: CountStorage,
-) -> RetirementFixture {
     let mut fixture = Fixture::new();
-    let retired = append_retirements(&mut fixture, userblock);
-    RetirementFixture {
-        objects: write_count_fixture(fixture, path, userblock, storage),
-        retired,
-    }
-}
-
-/// Appends metadata and raw retirement bytes and returns their physical ranges and classes.
-pub(super) fn append_retirements(
-    fixture: &mut Fixture,
-    userblock: UserblockSize,
-) -> [(FileRange, FreeClass); 2] {
-    let first = u64::try_from(fixture.image.append(&[7; 16])).unwrap();
-    let second = u64::try_from(fixture.image.append(&[11; 24])).unwrap();
-    [
-        (
-            FileRange::new(PhysicalAddress::new(first + userblock.get()), 16).unwrap(),
-            FreeClass::Page(PageType::Meta),
-        ),
-        (
-            FileRange::new(PhysicalAddress::new(second + userblock.get()), 24).unwrap(),
-            FreeClass::Page(PageType::Raw),
-        ),
-    ]
-}
-
-/// Counted objects and adjacent original retirements in one byte fixture.
-pub(super) struct RetirementFixture {
-    /// The stored header offsets of the objects named `a` and `c`.
-    pub(super) objects: (u64, u64),
-    /// The original physical allocation ranges and their free-space classes.
-    pub(super) retired: [(FileRange, FreeClass); 2],
-}
-
-fn write_count_fixture(
-    mut fixture: Fixture,
-    path: &Path,
-    userblock: UserblockSize,
-    storage: CountStorage,
-) -> (u64, u64) {
-    let c = append_count_header(&mut fixture, storage);
-    let a = append_count_header(&mut fixture, storage);
+    let c = fixture.append_header(vec![Message::reference_count(2)]);
+    let a = fixture.append_header(vec![Message::reference_count(2)]);
     fixture.link("a", a);
     fixture.link("b", a);
     fixture.link("c", c);
@@ -738,28 +680,6 @@ pub(super) fn engine_with_read_call_counter(path: &Path) -> (WriteEngine, Arc<At
     })
     .unwrap();
     (engine, calls)
-}
-
-fn append_count_header(fixture: &mut Fixture, storage: CountStorage) -> u64 {
-    match storage {
-        CountStorage::Header => fixture.append_header(vec![Message::reference_count(2)]),
-        CountStorage::Continuation => {
-            let child =
-                v2::continuation_chunk(&[Message::reference_count(2)], v2::HeaderFlags::default());
-            let at = fixture.image.append(&child);
-            let header = v2::Header::new()
-                .continuation(at, &child, Widths::EIGHT)
-                .build();
-            u64::try_from(fixture.image.append(&header)).unwrap()
-        }
-    }
-}
-
-/// The object-header chunk containing a fixture count message.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum CountStorage {
-    Continuation,
-    Header,
 }
 
 #[derive(Clone, Copy)]

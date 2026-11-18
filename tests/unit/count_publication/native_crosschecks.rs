@@ -1,12 +1,9 @@
-use std::collections::BTreeMap;
-
 use rstest::rstest;
 use test_util_hdf5::file;
 use test_util_hdf5::native_fixtures::Fixture;
 use test_util_hdf5::numeric::ByteOrder;
 
-use super::completion_tests;
-use crate::edit::test_util as edit_test_util;
+use crate::File;
 
 #[rstest]
 #[case::version_1(Fixture::CommittedDatatypeV1, "mytype", "first", 2)]
@@ -27,14 +24,10 @@ fn native_readers_observe_the_published_count_and_surviving_values(
             ByteOrder::LittleEndian
         },
     );
-    let mut engine = edit_test_util::open_engine(&path);
-    completion_tests::bounds(&mut engine, vec![], &[removed])
-        .with_publication(BTreeMap::new(), |scope| {
-            scope.unwrap().write_counts().unwrap();
-            Ok(())
-        })
-        .unwrap();
-    drop(engine);
+    let file = File::open_rw(&path).unwrap();
+    file.root().delete(removed).unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
     let native = file::libhdf5_open(&path);
     {
         let dataset = native.dataset(surviving).unwrap();
