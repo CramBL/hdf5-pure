@@ -19,9 +19,7 @@ use crate::object_graph::ObjectIndex;
 
 use super::{CompleteTopology, PlannedDeletion, RemovedLinks};
 
-pub(in crate::edit) use net::original::{
-    OriginalOwnerError, OriginalOwnerFacts, OriginalOwnerInventory,
-};
+pub(in crate::edit) use net::original::{OriginalOwnerFacts, OriginalOwnerInventory};
 pub(in crate::edit) use net::{NetCountError, NetCountPlan};
 pub(in crate::edit) use ownership::inventory::CountPreflight;
 pub(in crate::edit) use ownership::inventory::CountPreflightError;

@@ -87,14 +87,7 @@ impl AnalysisPhase<'_> {
                             .get(&address)
                             .map(|&range| (range, None))
                     });
-                (
-                    address,
-                    ParentStorage {
-                        framing,
-                        original,
-                        allocation_matches: matching_allocation(framing, original),
-                    },
-                )
+                (address, ParentStorage { framing, original })
             })
             .collect())
     }
@@ -352,8 +345,6 @@ pub(in crate::edit) struct ParentStorage {
     pub(in crate::edit) framing: Option<FileRange>,
     /// The candidate range and its allocation class, if recorded.
     pub(in crate::edit) original: Option<(FileRange, Option<FreeClass>)>,
-    /// Whether the framing and original allocation agree and the allocation class is known.
-    pub(in crate::edit) allocation_matches: bool,
 }
 
 /// Owned predecessor observations and member and parent outcomes for one source phase.
@@ -394,17 +385,6 @@ impl CollectionQualification {
             .observations
             .as_ref()
             .map(|facts| &facts.predecessors)
-    }
-
-    /// Returns the original candidate range and allocation class, if recorded.
-    pub(in crate::edit) fn original_allocation(
-        &self,
-        address: PhysicalAddress,
-    ) -> Option<(FileRange, Option<FreeClass>)> {
-        self.candidates
-            .collections
-            .get(&address)
-            .map(|candidate| (candidate.range, candidate.class))
     }
 
     /// Returns whether `id` has complete predecessor references and matched allocation evidence.

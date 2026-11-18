@@ -34,14 +34,17 @@ impl AnalysisPhase<'_> {
     ) -> ReachableHeapReferences {
         let mut collections = BTreeSet::new();
         let mut objects = BTreeSet::new();
-        let outcome = self.scan_collections(roots, |_, references| {
-            collections.extend(references.collections.iter().copied());
-            objects.extend(references.objects.iter().copied());
-        });
+        let complete = matches!(
+            self.scan_collections(roots, |_, references| {
+                collections.extend(references.collections.iter().copied());
+                objects.extend(references.objects.iter().copied());
+            }),
+            Ok(true)
+        );
         ReachableHeapReferences {
             collections,
             objects,
-            outcome,
+            complete,
         }
     }
 
@@ -96,8 +99,6 @@ impl AnalysisPhase<'_> {
         self.allocations
             .entry(address)
             .or_insert_with(|| {
-                #[cfg(test)]
-                super::COLLECTION_ALLOCATIONS.with(|count| count.set(count.get() + 1));
                 let mut envelope = None;
                 let contents = CollectionContents::read(self.engine, address, |range| {
                     envelope = Some(range);
@@ -138,7 +139,7 @@ impl AnalysisPhase<'_> {
 pub(in crate::edit) struct ReachableHeapReferences {
     collections: BTreeSet<u64>,
     objects: BTreeSet<GlobalHeapId>,
-    outcome: Result<bool, Error>,
+    complete: bool,
 }
 
 impl ReachableHeapReferences {
@@ -154,15 +155,7 @@ impl ReachableHeapReferences {
 
     /// Returns `true` if bounded traversal and reference interpretation completed without an error.
     pub(in crate::edit) fn is_complete(&self) -> bool {
-        matches!(self.outcome, Ok(true))
-    }
-
-    /// Borrows the parsing or source-read failure, if any.
-    ///
-    /// Unsupported content and traversal limits can make the result incomplete without a
-    /// recorded error.
-    pub(in crate::edit) fn error(&self) -> Option<&Error> {
-        self.outcome.as_ref().err()
+        self.complete
     }
 }
 

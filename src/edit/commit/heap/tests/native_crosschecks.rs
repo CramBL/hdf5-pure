@@ -48,7 +48,7 @@ fn native_readers_observe_preserved_records_after_protected_compaction(#[case] s
         .apply_excluding(&mut engine)
         .ok()
         .unwrap()
-        .publish_with_completion(|_, _, _, _, _, _| Ok(()))
+        .publish_with_completion(|_| Ok(()))
         .ok()
         .unwrap();
     drop(engine);
@@ -88,7 +88,8 @@ fn native_source_members_compact_through_checked_publication(#[case] session: bo
     let original = std::fs::read(&path).unwrap();
     let ranges = global_heap::collection_ranges(&original, Widths::EIGHT);
     assert_eq!(ranges.len(), 1);
-    let parent = PhysicalAddress::new(ranges[0].start);
+    let range = usize::try_from(ranges[0].start).unwrap()..usize::try_from(ranges[0].end).unwrap();
+    let parent = &original[range.clone()];
     let mut engine = edit_test_util::open_engine(&path);
     engine.set_sync_policy(SyncPolicy::OnClose);
     engine
@@ -112,14 +113,25 @@ fn native_source_members_compact_through_checked_publication(#[case] session: bo
     let pending = prepared.apply_excluding(&mut engine).ok().unwrap();
     assert!(pending.prospective().is_complete());
     assert_eq!(pending.member_decisions().plans().count(), 1);
-    let completion = pending.publish_compacting_members().ok().unwrap();
-    completion.mutation.unwrap();
-    let mut plans = completion.decisions.plans();
-    let plan = plans.next().unwrap();
-    assert_eq!(plan.range().start(), parent);
-    assert_eq!(plan.retained(), 1);
-    assert!(plans.next().is_none());
+    pending.publish_compacting_members().unwrap().unwrap();
     drop(engine);
+
+    let compacted = std::fs::read(&path).unwrap();
+    let compacted = &compacted[range];
+    const HEADER_LEN: usize = 16;
+    const RECORD_LEN: usize = 24;
+    let free = HEADER_LEN + RECORD_LEN;
+    assert_eq!(&compacted[..HEADER_LEN], &parent[..HEADER_LEN]);
+    assert_eq!(
+        &compacted[HEADER_LEN..free],
+        &parent[free..free + RECORD_LEN]
+    );
+    assert_eq!(&compacted[free..free + 8], &[0; 8]);
+    assert_eq!(
+        &compacted[free + 8..free + HEADER_LEN],
+        &u64::try_from(compacted.len() - free).unwrap().to_le_bytes()
+    );
+
     let native = file::libhdf5_open(&path);
     assert_eq!(native.attr_names().unwrap(), ["second"]);
     assert_eq!(

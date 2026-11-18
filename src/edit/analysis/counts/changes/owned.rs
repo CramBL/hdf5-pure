@@ -86,11 +86,6 @@ impl OwnedCountChange {
         self.remaining
     }
 
-    #[cfg(test)]
-    pub(in crate::edit) fn field(&self) -> Option<ObjectReferenceCountField> {
-        self.field
-    }
-
     /// Returns the independently checked complete allocation containing the field, if known.
     pub(in crate::edit) fn header_allocation(&self) -> Option<HeaderCountAllocation> {
         self.allocation
