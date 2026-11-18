@@ -294,7 +294,7 @@ fn later_parent_failure_preserves_a_published_prefix_and_the_prior_journal() {
         .unwrap();
     let pending = RootRetirement::new(root, Vec::new()).into_pending_frees(Vec::new(), end);
     let failure = engine
-        .publish_pending_tree_with_completion(pending, BTreeMap::new(), |published| {
+        .publish_pending_tree_excluding(pending, BTreeMap::new(), None, |published| {
             Ok(after_publication(published, &[plan, invalid]).unwrap_err())
         })
         .unwrap();
@@ -478,8 +478,4 @@ enum Failure {
     RestoreBarrier,
     RestoreIssue,
     Write,
-}
-
-test_util_hdf5::hdf5_1_10_tests! {
-    mod native_crosschecks;
 }

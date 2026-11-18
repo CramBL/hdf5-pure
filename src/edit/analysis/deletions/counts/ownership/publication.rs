@@ -122,27 +122,24 @@ impl CountPublicationBounds<'_> {
     ///
     /// Writes increases through the commit journal before publication. Protects every original
     /// header allocation containing an updated count during publication, then reads current headers
-    /// and journals decreases before calling `complete`. The caller handles whole-commit
+    /// and journals decreases. The caller handles whole-commit
     /// rollback according to publication state.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] for changed count fields or conflicting original
     /// allocations. Returns [`Error::CommitPartiallyApplied`] if restoring count writes fails.
-    /// Other count-preparation, publication, protection, journal, and completion errors propagate.
-    pub(in crate::edit) fn with_ordered_counts<T>(
+    /// Other count-preparation, publication, protection, and journal errors propagate.
+    pub(in crate::edit) fn with_ordered_counts(
         self,
         relocations: BTreeMap<ObjectId, ObjectId>,
-        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<(), Error> {
         let mut storage = OriginalStorage::from_counts(&self.phase.counts);
-        self.with_ordered_counts_excluding(relocations, &mut storage, |published, _| {
-            complete(published)
-        })
-        .map_err(|error| match error {
-            PublicationError::Write(error) => error,
-            PublicationError::Storage(_) => allocation_conflict(),
-        })
+        self.with_ordered_counts_excluding(relocations, &mut storage, |_| Ok(()))
+            .map_err(|error| match error {
+                PublicationError::Write(error) => error,
+                PublicationError::Storage(_) => allocation_conflict(),
+            })
     }
 
     /// Publishes between count increases and decreases with combined storage exclusions and rollback.
@@ -154,7 +151,7 @@ impl CountPublicationBounds<'_> {
         self,
         relocations: BTreeMap<ObjectId, ObjectId>,
         storage: &mut OriginalStorage,
-        complete: impl FnOnce(PublishedTree<'_>, &OriginalStorage) -> Result<T, Error>,
+        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
     ) -> Result<T, PublicationError> {
         let Self { phase } = self;
         let CountPublicationPhase {
@@ -168,7 +165,7 @@ impl CountPublicationBounds<'_> {
                 retirement,
                 relocations,
                 Some(storage),
-                |published| complete(published, storage).map_err(Into::into),
+                |published| complete(published).map_err(Into::into),
             );
         }
         let increases = counts.current_updates(engine, Ordering::Greater)?;
@@ -194,7 +191,7 @@ impl CountPublicationBounds<'_> {
                 scope.engine.make_allocation_uncertain();
             }
             result?;
-            complete(PublishedTree::new(scope.engine, requested)?, storage).map_err(Into::into)
+            complete(PublishedTree::new(scope.engine, requested)?).map_err(Into::into)
         })
     }
 }

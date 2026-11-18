@@ -71,27 +71,6 @@ impl WriteEngine {
     /// Returns the count-preparation, count-write, publication, reference-update, or
     /// root-reclamation error. Errors after publication leave rollback disabled.
     pub(super) fn publish_tree(&mut self, tree: AppliedTree) -> Result<(), Error> {
-        self.publish_tree_with_completion(tree, |_| Ok(()))
-    }
-
-    /// Publishes a written tree and calls `complete` after all publication work succeeds.
-    ///
-    /// Uses the publication path of [`Self::publish_tree`]. Calls `complete` after any
-    /// stored-reference updates, root reclamation, requested truncation, and source reference count
-    /// decreases succeed. The completion callback borrows the engine through [`PublishedTree`] and
-    /// returns an owned result.
-    ///
-    /// # Errors
-    ///
-    /// Returns the count-preparation, count-write, publication, reference-update, root-reclamation,
-    /// or address-resolution error before calling `complete`. Returns the error from `complete`
-    /// if completion fails.
-    /// Errors after publication leave rollback disabled.
-    pub(super) fn publish_tree_with_completion<T>(
-        &mut self,
-        tree: AppliedTree,
-        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
         let AppliedTree {
             counts,
             retirement,
@@ -105,40 +84,17 @@ impl WriteEngine {
                 counts
                     .before_publication(self, pending)?
                     .at_end(end)?
-                    .with_ordered_counts(relocations, complete)
+                    .with_ordered_counts(relocations)
             }
-            None => self.publish_pending_tree_with_completion(pending, relocations, complete),
+            None => self
+                .publish_pending_tree_excluding(pending, relocations, None, |_| Ok(()))
+                .map_err(PublicationError::without_storage),
         }
-    }
-
-    /// Publishes a written tree using the supplied retirement batch before calling `complete`.
-    ///
-    /// Consumes `pending` without rebuilding its physical retirement ranges or classes.
-    /// Uses the publication path of [`Self::publish_tree`]. The callback receives the root from
-    /// `pending` and final adopted root and EOA through [`PublishedTree`] after stored-reference
-    /// updates, root reclamation, and requested truncation succeed.
-    ///
-    /// # Errors
-    ///
-    /// Returns the address-conversion, publication, reference-update, or root-reclamation error
-    /// before calling `complete`. Returns the error from `complete` if completion fails.
-    /// Errors after publication leave rollback disabled.
-    pub(in crate::edit) fn publish_pending_tree_with_completion<T>(
-        &mut self,
-        pending: PendingRootFrees,
-        relocations: BTreeMap<ObjectId, ObjectId>,
-        complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        self.publish_pending_tree_excluding(pending, relocations, None, |published| {
-            complete(published).map_err(PublicationError::from)
-        })
-        .map_err(PublicationError::without_storage)
     }
 
     /// Publishes a pending tree with optional storage exclusions through completion.
     ///
-    /// Preserves the retirement batch and publication order of
-    /// [`Self::publish_pending_tree_with_completion`]. With `storage`, checks publication inputs
+    /// With `storage`, checks publication inputs
     /// and passes the same exclusions through aggregate release, tail recycling, and root
     /// reclamation. Checks final allocator ranges, adopted EOA, and physical file length before
     /// calling `complete`. The caller establishes source qualification separately.
@@ -1476,9 +1432,6 @@ mod tests {
     use crate::address::{StoredAddress, StoredAddressExt};
     use crate::free_space_manager;
     use crate::width::FormatWidths;
-
-    mod completion;
-    mod storage;
 
     #[rstest]
     #[case::empty(1000, 0, 8, PublicationPurpose::Allocation, None)]

@@ -2,7 +2,6 @@
 
 mod append_inspection;
 mod array_blocks;
-mod attribute_collections;
 mod attribute_storage;
 mod edit_dense_links;
 mod edit_tracked_dense_links;

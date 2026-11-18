@@ -1,7 +1,5 @@
 //! Phase-scoped topology, object counts, collection references, and allocation facts.
 
-#[cfg(test)]
-use core::cell::Cell;
 use core::iter;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -51,20 +49,9 @@ pub(super) use deletions::{
 
 pub(super) mod counts;
 mod deletions;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "heap member facts do not authorize retirement")
-)]
 pub(in crate::edit) mod heap;
 pub(in crate::edit) mod ownership;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "physical storage facts do not authorize retirement"
-    )
-)]
 pub(in crate::edit) mod physical;
 
 /// Lazy topology, object-count, reference, and storage queries for one source phase.
@@ -152,8 +139,6 @@ impl<'a> AnalysisPhase<'a> {
                 "a reconstructed header belongs to another source engine".into(),
             ));
         }
-        #[cfg(test)]
-        RECONSTRUCTION_WORK.with(|work| work.set(work.get() + 1));
         Ok(ReconstructionSource {
             identity: Arc::clone(
                 self.identity
@@ -1173,9 +1158,4 @@ pub(super) enum CollectionContent {
     DatasetValues,
     /// All supported object content, including attributes and fill values.
     Object,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    pub(in crate::edit) static RECONSTRUCTION_WORK: Cell<usize> = const { Cell::new(0) };
 }

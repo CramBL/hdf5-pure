@@ -81,8 +81,8 @@ impl AnalysisPhase<'_> {
             .iter()
             .filter_map(|interval| match interval.outcome() {
                 ResidualOutcome::AllZero => None,
-                ResidualOutcome::NonZero { .. } => Some(Some(interval.range())),
-                ResidualOutcome::ReadFailed(_) => Some(None),
+                ResidualOutcome::NonZero => Some(Some(interval.range())),
+                ResidualOutcome::ReadFailed => Some(None),
             })
             .collect::<Option<Vec<_>>>()?;
         let mut remaining = MAX_RESIDUAL_BYTES;
